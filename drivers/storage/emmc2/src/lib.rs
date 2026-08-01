@@ -51,6 +51,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
@@ -1108,6 +1109,14 @@ impl<H: SdhciHost> Emmc2<H> {
 }
 
 impl<H: SdhciHost> Block for Emmc2<H> {
+    /// An SD card in a slot: flash-quick when healthy, but pullable at any
+    /// moment and prone to the controller resets its bring-up already
+    /// handles, so it is served the removable envelope rather than a
+    /// solid-state device's shorter patience.
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Removable
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }

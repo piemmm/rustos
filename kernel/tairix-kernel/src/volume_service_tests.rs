@@ -209,6 +209,7 @@ fn serve(
                                 block_size: geometry.block_size,
                                 block_count: geometry.block_count,
                                 flags: 0,
+                                class: device.block.device_class(),
                             }
                             .encode(&mut reply)
                             .unwrap()

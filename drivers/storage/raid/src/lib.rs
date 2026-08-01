@@ -210,19 +210,33 @@
 //! rather than fabricating success. The *operation* fails; the *system*
 //! keeps running.
 //!
-//! # Device health (`AGENTS.md` §26.5)
+//! # Device-level answers: health and class (`AGENTS.md` §26.5)
 //!
 //! Because every composition is itself a
-//! [`Block`](tairix_abi::driver::block::Block), a consumer that schedules a
-//! scrub from a device's `SMART` / `NVMe` telemetry queries the *array*, so all
-//! the compositions override
-//! [`device_health`](tairix_abi::driver::block::Block::device_health) to
-//! aggregate their live members' telemetry through one shared definition
-//! (`health::aggregate_device_health`) rather than inherit the trait default
-//! and hide every member's health. Independent integrity counters sum
-//! (saturating), shared conditions take the worst member, a faulted/absent slot
-//! or a member with no telemetry contributes nothing, and the array reports
-//! `Unavailable` only when no live member exposes telemetry.
+//! [`Block`](tairix_abi::driver::block::Block), a consumer queries the *array*
+//! for what it would ask a bare disk, so all the compositions answer from
+//! their live members through one shared fold per property (the `health`
+//! module) rather than inherit a trait default that hides them. Both folds
+//! select members with the same participation predicate, so an array can never
+//! report one property from one set of members and another from a different
+//! set.
+//!
+//! A consumer that schedules a scrub from a device's `SMART` / `NVMe`
+//! telemetry reads
+//! [`device_health`](tairix_abi::driver::block::Block::device_health):
+//! independent integrity counters sum (saturating), shared conditions take the
+//! worst member, a faulted/absent slot or a member with no telemetry
+//! contributes nothing, and the array reports `Unavailable` only when no live
+//! member exposes telemetry.
+//!
+//! A consumer that derives its per-request deadline, reissue budget, and
+//! recovery grace window from a device's class reads
+//! [`device_class`](tairix_abi::driver::block::Block::device_class): the array
+//! declares the *most patient* of its live members' classes, because it can
+//! only answer as fast as the member it is waiting on — a mirror of an SSD and
+//! a spinning disk must be given the spinning disk's spin-up budget. An array
+//! with no live member declares the bounded unclassified envelope, so its
+//! callers fail closed sooner rather than waiting out disks that are gone.
 //!
 //! # On-disk metadata and reassembly ([`ArraySuperblock`], [`ArrayIdentity`])
 //!

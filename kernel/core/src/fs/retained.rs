@@ -56,6 +56,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
@@ -475,6 +476,13 @@ impl<B: Block> JournaledBlock<B> {
 }
 
 impl<B: Block> Block for JournaledBlock<B> {
+    /// The journalled device's own class: retaining writes changes what is
+    /// remembered on a fault, never what the hardware is, so the real
+    /// device's I/O budget survives this layer.
+    fn device_class(&self) -> BlkDeviceClass {
+        self.device.device_class()
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         self.device.geometry()
     }

@@ -42,13 +42,22 @@ const MAX_BLOCK_SIZE: u32 = 4096;
 /// this seam adds no authority.
 pub trait BlkCall {
     /// Send `request`, receive the completion into `reply`, and return the
-    /// reply length.
+    /// reply length. `deadline_ns` bounds the wait: a device that has not
+    /// answered within it fails this exchange closed rather than parking the
+    /// caller forever. The caller derives it from the device's own
+    /// [`IoBudget`], so the transport holds no deadline policy of its own.
     ///
     /// # Errors
     ///
-    /// The transport's [`Errno`] (e.g. a vanished endpoint).
-    fn call(&mut self, request: &[u8], reply: &mut [u8], window: &mut [u8])
-        -> Result<usize, Errno>;
+    /// The transport's [`Errno`] (e.g. a vanished endpoint, or a device that
+    /// consumed the whole deadline without answering).
+    fn call(
+        &mut self,
+        request: &[u8],
+        reply: &mut [u8],
+        window: &mut [u8],
+        deadline_ns: u64,
+    ) -> Result<usize, Errno>;
 }
 
 /// A read-only [`Block`] view of one served logical unit.
@@ -62,10 +71,15 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// The shared per-device I/O budget, whose retry count bounds how many
     /// times a *reissuable* completion is reissued before failing closed —
     /// the same policy the kernel filesystem client obeys, so the two
-    /// consumers cannot drift apart. The probe cannot yet discover the
-    /// device's class, so it uses the most generous class budget
-    /// ([`BlkDeviceClass::Rotational`]), exactly as the kernel client does.
+    /// consumers cannot drift apart. It is derived from the class the device
+    /// itself declares in its geometry completion, so a removable unit riding
+    /// out a bus reset and a paravirtual device that has simply wedged are
+    /// each given their own class's patience rather than one assumed envelope.
     budget: IoBudget,
+    /// The class the device declared, kept so a composition layered over this
+    /// client reports the real hardware's envelope rather than the
+    /// unclassified default.
+    class: BlkDeviceClass,
 }
 
 impl<'w, C: BlkCall> RemoteBlock<'w, C> {
@@ -87,7 +101,11 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
                 block_count: 0,
             },
             read_only: false,
-            budget: BlkDeviceClass::Rotational.budget(),
+            // Until the device answers there is nothing to classify it by, so
+            // the geometry query itself runs on the bounded unclassified
+            // envelope; the device's own class is adopted below.
+            class: BlkDeviceClass::Virtual,
+            budget: BlkDeviceClass::Virtual.budget(),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -115,6 +133,8 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             block_count: completion.block_count,
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
+        client.class = completion.class;
+        client.budget = completion.class.budget();
         Ok(client)
     }
 
@@ -153,7 +173,12 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         let mut frame = [0u8; BLK_REQUEST_LEN];
         let len = request.encode(&mut frame)?;
         let mut reply = [0u8; BLK_COMPLETION_LEN];
-        let got = self.call.call(&frame[..len], &mut reply, self.window)?;
+        let got = self.call.call(
+            &frame[..len],
+            &mut reply,
+            self.window,
+            self.budget.deadline_ns,
+        )?;
         Ok(decode_outcome(reply.get(..got).ok_or(Errno::BadMagic)?))
     }
 
@@ -166,6 +191,12 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
 }
 
 impl<C: BlkCall> Block for RemoteBlock<'_, C> {
+    /// The class the served device declared, so a composition layered over
+    /// this client inherits the real hardware's envelope.
+    fn device_class(&self) -> BlkDeviceClass {
+        self.class
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -232,8 +263,18 @@ mod tests {
         block_size: u32,
         block_count: u64,
         flags: u32,
+        class: BlkDeviceClass,
         calls: Vec<BlkRequest>,
+        /// The per-request deadline each exchange was given, so a test can
+        /// prove the wait bound follows the device's own class rather than a
+        /// fixed value the transport chose for itself.
+        deadlines: Vec<u64>,
     }
+
+    /// The class the scripted device declares. Deliberately not the
+    /// unclassified default, so a test asserting the client's budget proves
+    /// the device was asked rather than assumed.
+    const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
 
     fn fill(buf: &mut [u8], byte_base: u64) {
         for (i, out) in buf.iter_mut().enumerate() {
@@ -250,14 +291,17 @@ mod tests {
             request: &[u8],
             reply: &mut [u8],
             window: &mut [u8],
+            deadline_ns: u64,
         ) -> Result<usize, Errno> {
             let decoded = BlkRequest::decode(request)?;
             self.calls.push(decoded);
+            self.deadlines.push(deadline_ns);
             match decoded.op {
                 BlkOp::Geometry => BlkCompletion {
                     block_size: self.block_size,
                     block_count: self.block_count,
                     flags: self.flags,
+                    class: self.class,
                 }
                 .encode(reply),
                 BlkOp::Read => {
@@ -284,8 +328,50 @@ mod tests {
             block_size,
             block_count,
             flags,
+            class: DEVICE_CLASS,
             calls: Vec::new(),
+            deadlines: Vec::new(),
         }
+    }
+
+    #[test]
+    fn connect_adopts_the_devices_declared_class_and_budget() {
+        // The probe serves each device the patience its own class earns,
+        // never one assumed envelope: a removable unit's budget here, and
+        // the same class re-reported so a composition above inherits it.
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let client = RemoteBlock::connect(device(512, 64, 0), &mut window).expect("connects");
+        assert_eq!(client.device_class(), DEVICE_CLASS);
+        assert_eq!(client.budget, DEVICE_CLASS.budget());
+        assert_ne!(DEVICE_CLASS.budget(), BlkDeviceClass::Virtual.budget());
+    }
+
+    #[test]
+    fn every_request_after_connect_waits_the_devices_own_deadline() {
+        // The wait bound is the *device's*, not a value the transport picked:
+        // the geometry probe necessarily runs on the bounded unclassified
+        // envelope (nothing has classified the device yet), and every request
+        // after it waits exactly this class's deadline.
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let mut client = RemoteBlock::connect(device(512, 64, 0), &mut window).expect("connects");
+        let mut buf = vec![0u8; 512];
+        client.read_blocks(0, &mut buf).expect("read");
+
+        let deadlines = &client.call.deadlines;
+        assert_eq!(
+            deadlines.first().copied(),
+            Some(BlkDeviceClass::Virtual.budget().deadline_ns),
+            "the geometry probe runs on the bounded unclassified envelope"
+        );
+        assert!(deadlines.len() > 1, "the read reached the wire");
+        for deadline in &deadlines[1..] {
+            assert_eq!(*deadline, DEVICE_CLASS.budget().deadline_ns);
+        }
+        assert_ne!(
+            DEVICE_CLASS.budget().deadline_ns,
+            BlkDeviceClass::Virtual.budget().deadline_ns,
+            "the class must actually change the deadline for this to prove anything"
+        );
     }
 
     #[test]
@@ -415,12 +501,14 @@ mod tests {
                 request: &[u8],
                 reply: &mut [u8],
                 _window: &mut [u8],
+                _deadline_ns: u64,
             ) -> Result<usize, Errno> {
                 if BlkRequest::decode(request)?.op == BlkOp::Geometry {
                     BlkCompletion {
                         block_size: 512,
                         block_count: 8,
                         flags: 0,
+                        class: DEVICE_CLASS,
                     }
                     .encode(reply)
                 } else {
@@ -447,12 +535,14 @@ mod tests {
                 request: &[u8],
                 reply: &mut [u8],
                 _window: &mut [u8],
+                _deadline_ns: u64,
             ) -> Result<usize, Errno> {
                 if BlkRequest::decode(request)?.op == BlkOp::Geometry {
                     BlkCompletion {
                         block_size: 512,
                         block_count: 8,
                         flags: 0,
+                        class: DEVICE_CLASS,
                     }
                     .encode(reply)
                 } else {
@@ -482,12 +572,14 @@ mod tests {
             request: &[u8],
             reply: &mut [u8],
             _window: &mut [u8],
+            _deadline_ns: u64,
         ) -> Result<usize, Errno> {
             if BlkRequest::decode(request)?.op == BlkOp::Geometry {
                 BlkCompletion {
                     block_size: 512,
                     block_count: 64,
                     flags: 0,
+                    class: DEVICE_CLASS,
                 }
                 .encode(reply)
             } else {
@@ -571,6 +663,7 @@ mod tests {
             request: &[u8],
             reply: &mut [u8],
             window: &mut [u8],
+            deadline_ns: u64,
         ) -> Result<usize, Errno> {
             let decoded = BlkRequest::decode(request)?;
             if decoded.op != BlkOp::Geometry && self.faults > 0 {
@@ -578,7 +671,7 @@ mod tests {
                 return BlkCompletion::default()
                     .encode_status(tairix_abi::blkio::BlkStatus::Reset, reply);
             }
-            self.inner.call(request, reply, window)
+            self.inner.call(request, reply, window, deadline_ns)
         }
     }
 

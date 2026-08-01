@@ -45,6 +45,7 @@
 //! every port shares this one definition and the per-device bring-up
 //! (virtio-blk, EMMC2, …) wraps its brought-up device in it.
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
@@ -69,6 +70,11 @@ pub struct SharedBlock<B: Block> {
     /// The device geometry, queried once at construction. Immutable for the
     /// life of a disk, so it is served lock-free.
     geometry: BlockGeometry,
+    /// The device's declared class, read once at construction. A pure
+    /// property of the hardware, so it is served lock-free like the
+    /// geometry, and forwarded rather than defaulted so a consumer above
+    /// this sharing boundary still derives the real device's I/O budget.
+    class: BlkDeviceClass,
 }
 
 impl<B: Block> SharedBlock<B> {
@@ -81,9 +87,11 @@ impl<B: Block> SharedBlock<B> {
     /// no handle can be handed out for an unusable device (fail closed).
     pub fn new(device: B) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
+        let class = device.device_class();
         Ok(Self {
             device: SleepLock::new(device),
             geometry,
+            class,
         })
     }
 
@@ -111,12 +119,13 @@ impl<B: Block> SharedBlock<B> {
 // pointers into the device's MMIO register window and DMA region. Asserting
 // `Send + Sync` here is sound because:
 //   1. **Exclusive access.** Every byte-moving operation on the contained
-//      device goes through `self.device.lock()` (the cached `geometry` is the
-//      only lock-free field and is an immutable `Copy` value), so `B` is never
-//      touched by two tasks at once — there is no data race on `B`'s interior,
-//      including any non-atomic bookkeeping it keeps. The `SleepLock` grants
-//      exclusive ownership for the whole operation, even one held across a
-//      completion-IRQ park, parking a second contender rather than spinning.
+//      device goes through `self.device.lock()` (the cached `geometry` and
+//      `class` are the only lock-free fields, and both are immutable `Copy`
+//      values), so `B` is never touched by two tasks at once — there is no
+//      data race on `B`'s interior, including any non-atomic bookkeeping it
+//      keeps. The `SleepLock` grants exclusive ownership for the whole
+//      operation, even one held across a completion-IRQ park, parking a
+//      second contender rather than spinning.
 //   2. **Location-independent backing.** `B`'s `!Send` parts are raw pointers
 //      into globally-valid device memory: an MMIO register window and a DMA
 //      slab, both reachable from any CPU/task through the kernel's identity
@@ -147,6 +156,13 @@ pub struct SharedBlockHandle<'a, B: Block> {
 }
 
 impl<B: Block> Block for SharedBlockHandle<'_, B> {
+    /// The shared device's own class, so a consumer reached through this
+    /// window serves the real hardware's I/O budget rather than the
+    /// unclassified default. Served from the cache, like the geometry.
+    fn device_class(&self) -> BlkDeviceClass {
+        self.shared.class
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         // Served from the cache: immutable for the life of the disk, so no
         // lock and no device round-trip.

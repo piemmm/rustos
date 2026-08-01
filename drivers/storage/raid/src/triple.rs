@@ -54,6 +54,7 @@
 use crate::gf256;
 use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
 use crate::superblock::RaidLevel;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -1650,9 +1651,23 @@ impl<B: Block> TripleParityArray<'_, B> {
             }
         }
     }
+
+    /// The devices of the members that speak for the array in its
+    /// device-level answers (health, class), selected by the one shared
+    /// participation predicate.
+    fn live_devices(&self) -> impl Iterator<Item = &B> {
+        self.members
+            .iter()
+            .filter(|m| crate::health::member_participates(m.state))
+            .filter_map(|m| m.device.as_ref())
+    }
 }
 
 impl<B: Block> Block for TripleParityArray<'_, B> {
+    fn device_class(&self) -> BlkDeviceClass {
+        crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -1717,11 +1732,7 @@ impl<B: Block> Block for TripleParityArray<'_, B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(crate::health::aggregate_device_health(
-            self.members
-                .iter()
-                .filter(|m| matches!(m.state, MemberState::InSync | MemberState::Resyncing))
-                .filter_map(|m| m.device.as_ref())
-                .map(Block::device_health),
+            self.live_devices().map(Block::device_health),
         ))
     }
 }

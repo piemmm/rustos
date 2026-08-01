@@ -13,6 +13,7 @@
 //! `MODE SENSE(10)`, USB Mass Storage UFI 1.0). [`CommandSet`] carries that
 //! per-device spelling so the logic exists once.
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{DriverError, Errno};
@@ -640,6 +641,13 @@ impl<'a, T: ScsiTransport> LunBlock<'a, T> {
 }
 
 impl<T: ScsiTransport> Block for LunBlock<'_, T> {
+    /// A USB logical unit is a removable device: it tolerates the bus
+    /// glitches and resets its transport is prone to, but must fail closed
+    /// promptly once genuinely unplugged.
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Removable
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.state.geometry)
     }

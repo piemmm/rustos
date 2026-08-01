@@ -667,6 +667,29 @@ of the members that can be read (`AGENTS.md` §26.5). The array reports
 `Unavailable` only when no participating member exposes telemetry, so an
 absence of data is never mistaken for a perfectly-healthy array.
 
+## Device class (`device_class`)
+
+An array is also a device in the eyes of the consumer that derives its I/O
+budget — the per-request deadline, reissue count, and recovery grace window —
+from a device's declared `BlkDeviceClass` (see [block drivers](./block.md)).
+An array answers only as fast as the member it is waiting on, so it declares
+the **most patient** of its live members' classes
+(`BlkDeviceClass::most_patient`): a mirror pairing an SSD with a spinning disk
+must be given the spinning disk's spin-up budget, or a consumer would time out
+a perfectly healthy array whenever the slow copy served a read. The fold is
+commutative, so member order cannot change the answer, and it is derived from
+the budgets themselves rather than a second hand-written ordering that could
+drift from them.
+
+The class fold sits beside the health fold as one shared definition
+(`aggregate_device_class`, `AGENTS.md` §2.2) and selects members through the
+*same* participation predicate, so an array can never report its health from
+one set of members and its class from another. A member that faults out stops
+buying the array its patience — the array is no longer waiting on it — and an
+array with no live member left declares the bounded unclassified envelope
+rather than the widest one, so its callers fail closed sooner instead of
+waiting out disks that are not there.
+
 ## Composed-device dispatch (`RaidArray`)
 
 The six compositions above are siblings over the same block seam (`AGENTS.md`
@@ -676,11 +699,11 @@ layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
 composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
 per-personality dispatch: it is an enum over the six engines that forwards
-both the `Block` I/O path (`geometry`/`read`/`write`/`flush`/the class-aware
-and discard/health surface) and the level-agnostic observation, maintenance,
-and reconfiguration operations, so neither the autoloaded serve process nor the
-ARXFS-native composition re-derives the level → engine mapping (`AGENTS.md`
-§2.2).
+both the `Block` I/O path (`geometry`/`device_class`/`read`/`write`/`flush`/
+the class-aware and discard/health surface) and the level-agnostic observation,
+maintenance, and reconfiguration operations, so neither the autoloaded serve
+process nor the ARXFS-native composition re-derives the level → engine mapping
+(`AGENTS.md` §2.2).
 
 The wrapper is a thin, allocation-free dispatch layer: it borrows the concrete
 engine (which in turn borrows its caller-owned member slice, so there is no

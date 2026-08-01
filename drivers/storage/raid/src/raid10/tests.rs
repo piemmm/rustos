@@ -4,6 +4,7 @@
 use super::{Raid10Array, Raid10Error};
 use crate::mirror::{ArrayHealth, MemberState, MirrorMember};
 use core::cell::Cell;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -24,6 +25,7 @@ struct FaultBlock {
     read_fault: Cell<Option<DriverError>>,
     write_fault: Cell<Option<DriverError>>,
     health: Cell<DeviceHealth>,
+    class: Cell<BlkDeviceClass>,
 }
 
 impl FaultBlock {
@@ -38,7 +40,14 @@ impl FaultBlock {
             read_fault: Cell::new(None),
             write_fault: Cell::new(None),
             health: Cell::new(DeviceHealth::Unavailable),
+            class: Cell::new(BlkDeviceClass::SolidState),
         }
+    }
+
+    /// A device declaring `class` as its performance/behaviour envelope.
+    fn with_class(self, class: BlkDeviceClass) -> Self {
+        self.class.set(class);
+        self
     }
 
     fn with_media_errors(self, media_errors: u64) -> Self {
@@ -115,6 +124,10 @@ impl Block for FaultBlock {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    fn device_class(&self) -> BlkDeviceClass {
+        self.class.get()
     }
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
@@ -538,6 +551,60 @@ fn device_health_aggregates_live_members() {
     };
     // Independent integrity faults sum across every live member.
     assert_eq!(snap.media_errors, 2 + 3 + 5 + 7);
+}
+
+#[test]
+fn a_dropped_member_no_longer_speaks_for_the_array() {
+    // A member the array has faulted out is no longer a device the array is
+    // driving, so its telemetry must stop counting — exactly as in every
+    // sibling composition, which all select through the one shared
+    // participation predicate.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(2)),
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(3)),
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(5)),
+        MirrorMember::new(FaultBlock::new(0).with_media_errors(7)),
+    ];
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles");
+    write_all(&mut array);
+    // Drop copy 0 of pair 0 through a whole-device read fault.
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    let mut buf = block(0);
+    array.read_blocks(0, &mut buf).expect("survivor serves");
+    assert_eq!(array.member_state(0), Some(MemberState::Faulted));
+
+    let DeviceHealth::Available(snap) = array.device_health().expect("health") else {
+        panic!("expected aggregated telemetry");
+    };
+    assert_eq!(snap.media_errors, 3 + 5 + 7);
+}
+
+#[test]
+fn device_class_declares_the_most_patient_live_member() {
+    // The array can only answer as fast as the member it waits on, so one
+    // spinning disk earns the whole array a spinning disk's patience.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles");
+    assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
+
+    // Once that member is dropped, the array is no longer waiting on it and
+    // stops claiming its patience. A write fans out to both copies, so a
+    // write fault drops the slow copy while its mirror still commits.
+    dev(&array, 1)
+        .write_fault
+        .set(Some(DriverError::DeviceOffline));
+    array
+        .write_blocks(0, &block(pat(0)))
+        .expect("the surviving copy commits");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    assert_eq!(array.device_class(), BlkDeviceClass::SolidState);
 }
 
 #[test]

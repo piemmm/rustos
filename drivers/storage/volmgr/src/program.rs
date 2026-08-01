@@ -76,11 +76,13 @@ fn errno_from(neg: i64) -> Errno {
 
 /// The production blkio transport: the bounded, capability-checked async
 /// submit/reap seam on the granted block-service endpoint (`plans/FIX-IO.md`
-/// IO1). Each request is `call_post`ed with a per-request deadline, the reply
-/// awaited on a `CallReply` wait-set, and reaped with `call_reap`, so a wedged
-/// device fails this transfer closed at its deadline instead of parking the
-/// probe forever. The serving driver fills the shared window during the call,
-/// so the window parameter is untouched here.
+/// IO1). Each request is `call_post`ed with the caller's per-request deadline,
+/// the reply awaited on a `CallReply` wait-set, and reaped with `call_reap`,
+/// so a wedged device fails this transfer closed at its deadline instead of
+/// parking the probe forever. The deadline is the caller's, derived from the
+/// device's own declared class, so this transport carries no deadline policy.
+/// The serving driver fills the shared window during the call, so the window
+/// parameter is untouched here.
 struct RtBlkCall {
     endpoint: u64,
     /// The wait-set multiplexing this device's reply completions, created
@@ -88,12 +90,6 @@ struct RtBlkCall {
     /// member, but using the wait-set seam even here keeps the single
     /// transport shape the multi-device consumer (IO2) also uses.
     waitset: u64,
-    /// Per-request deadline (ns). The probe cannot yet discover the device's
-    /// class, so it uses the most generous class budget
-    /// ([`BlkDeviceClass::Rotational`] — a spinning disk's spin-up/reset
-    /// envelope), bounding a genuinely dead device without prematurely failing
-    /// a slow but healthy one.
-    deadline_ns: u64,
 }
 
 impl RtBlkCall {
@@ -103,7 +99,6 @@ impl RtBlkCall {
         Self {
             endpoint,
             waitset: 0,
-            deadline_ns: BlkDeviceClass::Rotational.budget().deadline_ns,
         }
     }
 
@@ -139,10 +134,11 @@ impl BlkCall for RtBlkCall {
         request: &[u8],
         reply: &mut [u8],
         _window: &mut [u8],
+        deadline_ns: u64,
     ) -> Result<usize, Errno> {
         let set = self.ensure_waitset()?;
         let ticket =
-            tairix_rt::call_post(self.endpoint, request, self.deadline_ns).map_err(errno_from)?;
+            tairix_rt::call_post(self.endpoint, request, deadline_ns).map_err(errno_from)?;
         loop {
             match tairix_rt::call_reap(self.endpoint, ticket, reply) {
                 Ok(len) => return Ok(len),
@@ -155,7 +151,7 @@ impl BlkCall for RtBlkCall {
                     // vanished endpoint — fails closed.
                     if err == Errno::WouldBlock {
                         let mut token = 0u64;
-                        let _ = tairix_rt::waitset_wait(set, self.deadline_ns, &mut token);
+                        let _ = tairix_rt::waitset_wait(set, deadline_ns, &mut token);
                         continue;
                     }
                     return Err(err);

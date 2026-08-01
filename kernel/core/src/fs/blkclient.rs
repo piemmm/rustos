@@ -153,14 +153,20 @@ pub struct BlkClient {
     /// forever) and the number of times a driver-framed *reissuable* failure
     /// may be reissued before it fails closed. It is the single shared policy
     /// both the serving driver and this consumer read, so the deadline and
-    /// retry count can never diverge between them. The kernel-side client
-    /// cannot yet discover the device's class, so it uses the most generous
-    /// class budget ([`BlkDeviceClass::Rotational`] — a spinning disk's
-    /// spin-up/reset envelope), which never prematurely fails a slow but
-    /// healthy device while still bounding a genuinely dead one; a
-    /// class-specific budget threads through with the health state machine
-    /// (`plans/FIX-IO.md` IO3).
+    /// retry count can never diverge between them.
+    ///
+    /// It is derived from the device's own declared [`BlkDeviceClass`],
+    /// reported in the geometry completion at [`connect`](Self::connect) —
+    /// never one envelope assumed for every device, which would either fail a
+    /// spinning disk that is merely spinning up or let a wedged paravirtual
+    /// device stall this mount's callers three times longer than its class
+    /// allows.
     budget: IoBudget,
+    /// The device's declared class, as reported at
+    /// [`connect`](Self::connect). Kept so a consumer layered over this
+    /// client (a RAID composition, a cache) reports the real hardware's
+    /// envelope rather than hiding it behind the unclassified default.
+    class: BlkDeviceClass,
     /// The volume-availability overlay this device's reported health drives,
     /// shared by [`Arc`] with the mount registry so the mount snapshot can
     /// show a live-but-unwell device as `Degraded`/`Recovering` rather than
@@ -233,7 +239,12 @@ impl BlkClient {
                 block_count: 0,
             },
             read_only: false,
-            budget: BlkDeviceClass::Rotational.budget(),
+            // Until the device answers, it is served the unclassified
+            // envelope: the geometry query below is itself deadlined, so an
+            // endpoint that never answers fails closed promptly rather than
+            // being granted a spinning disk's patience on nothing but hope.
+            class: BlkDeviceClass::Virtual,
+            budget: BlkDeviceClass::Virtual.budget(),
             health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
             counters: Arc::new(BlkHealthCountersAtomic::default()),
         };
@@ -255,6 +266,13 @@ impl BlkClient {
             block_count: completion.block_count,
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
+        // Adopt the device's declared class for every subsequent request, so
+        // this mount's deadline, reissue count, and the driver's grace window
+        // all derive from one policy for this device rather than a single
+        // assumed envelope. The class is decoded fail-safe to the bounded
+        // unclassified envelope, so an unrecognised claim cannot buy patience.
+        client.class = completion.class;
+        client.budget = completion.class.budget();
         Ok(client)
     }
 
@@ -517,6 +535,14 @@ impl BlkClient {
 }
 
 impl Block for BlkClient {
+    /// The class the served device declared at [`BlkClient::connect`], from
+    /// which this client's [`IoBudget`] is derived. Reported rather than
+    /// defaulted so a composition layered over this client (a RAID array, a
+    /// cache) inherits the real hardware's envelope.
+    fn device_class(&self) -> BlkDeviceClass {
+        self.class
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -606,6 +632,14 @@ mod tests {
     const BLOCK_SIZE: usize = 512;
     /// `BLOCK_SIZE` as the wire-width type the geometry carries.
     const BLOCK_SIZE_U32: u32 = 512;
+    /// The class the in-memory double declares. Deliberately neither the
+    /// trait default nor the pre-connect placeholder, so a test asserting
+    /// the client's budget proves it adopted the *device's* class rather
+    /// than keeping an assumed envelope.
+    const MEM_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
+    /// The class the scripted double declares: a spinning disk, whose
+    /// reissue budget the bounded-reissue tests are written against.
+    const SCRIPTED_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Rotational;
 
     /// Mint distinct endpoint ids per test so the global registry never
     /// clashes across the parallel test threads.
@@ -671,6 +705,7 @@ mod tests {
         flushes: usize,
         read_only: bool,
         reported_block_size: u32,
+        reported_class: BlkDeviceClass,
     }
 
     impl MemDevice {
@@ -680,6 +715,7 @@ mod tests {
                 flushes: 0,
                 read_only: false,
                 reported_block_size: BLOCK_SIZE_U32,
+                reported_class: MEM_DEVICE_CLASS,
             }
         }
 
@@ -722,6 +758,7 @@ mod tests {
                                 } else {
                                     0
                                 },
+                                class: device.reported_class,
                             }
                             .encode(&mut reply)
                             .unwrap(),
@@ -797,6 +834,23 @@ mod tests {
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let client = BlkClient::connect(id, hold, &SINK).expect("connect");
         (client, device, server)
+    }
+
+    #[test]
+    fn connect_adopts_the_devices_declared_class_and_budget() {
+        // The device tells the client what it is, and the client serves it
+        // with that class's patience — not the placeholder envelope it used
+        // to reach the geometry probe, and not one envelope assumed for
+        // every device.
+        let (client, _device, server) = connected(64, 1);
+        assert_eq!(client.device_class(), MEM_DEVICE_CLASS);
+        assert_eq!(client.budget, MEM_DEVICE_CLASS.budget());
+        assert_ne!(MEM_DEVICE_CLASS, BlkDeviceClass::Virtual);
+        assert_ne!(
+            MEM_DEVICE_CLASS.budget().deadline_ns,
+            BlkDeviceClass::Virtual.budget().deadline_ns
+        );
+        server.join().unwrap();
     }
 
     #[test]
@@ -986,6 +1040,7 @@ mod tests {
                             block_size: BLOCK_SIZE_U32,
                             block_count: 8,
                             flags: 0,
+                            class: SCRIPTED_DEVICE_CLASS,
                         }
                         .encode(&mut reply)
                         .unwrap(),
@@ -1018,20 +1073,23 @@ mod tests {
         (client, server)
     }
 
+    /// The reissue budget the scripted device's declared class earns, as the
+    /// count of attempts the tests script. Read from the shared policy so
+    /// they cannot drift from it.
+    fn scripted_retry_budget() -> usize {
+        usize::try_from(SCRIPTED_DEVICE_CLASS.budget().max_retries).expect("budget fits")
+    }
+
     #[test]
     fn a_transient_fault_is_reissued_and_then_succeeds() {
-        // Geometry, then two reissuable resets, then a good read: within the
-        // rotational class's retry budget, so the read succeeds rather than
-        // surfacing a spurious I/O error for a device that was merely
-        // recovering.
-        let (mut client, server) = connect_scripted(
-            vec![
-                Some(Errno::EndpointStalled),
-                Some(Errno::EndpointStalled),
-                None,
-            ],
-            4,
-        );
+        // Geometry, then reissuable resets up to one short of the budget,
+        // then a good read: within the declared class's retry budget, so the
+        // read succeeds rather than surfacing a spurious I/O error for a
+        // device that was merely recovering.
+        let retries = scripted_retry_budget();
+        let mut script = vec![Some(Errno::EndpointStalled); retries - 1];
+        script.push(None);
+        let (mut client, server) = connect_scripted(script, 1 + retries);
         let mut buf = [0u8; BLOCK_SIZE];
         client.read_blocks(0, &mut buf).expect("read after reissue");
         server.join().unwrap();
@@ -1039,10 +1097,12 @@ mod tests {
 
     #[test]
     fn a_device_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
-        // One initial attempt plus the rotational budget of three reissues,
-        // all reissuable resets: the client stops and fails closed rather
-        // than retrying forever.
-        let (mut client, server) = connect_scripted(vec![Some(Errno::EndpointStalled); 4], 5);
+        // One initial attempt plus the declared class's whole reissue
+        // budget, all reissuable resets: the client stops and fails closed
+        // rather than retrying forever.
+        let attempts = 1 + scripted_retry_budget();
+        let (mut client, server) =
+            connect_scripted(vec![Some(Errno::EndpointStalled); attempts], 1 + attempts);
         let mut buf = [0u8; BLOCK_SIZE];
         assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
         server.join().unwrap();

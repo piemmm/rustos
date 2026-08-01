@@ -3,6 +3,7 @@
 use super::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 use crate::SlotDisposition;
 use core::cell::Cell;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -24,6 +25,7 @@ struct FaultBlock {
     flush_fault: Cell<bool>,
     health: Cell<DeviceHealth>,
     health_fault: Cell<bool>,
+    class: Cell<BlkDeviceClass>,
     reads: Cell<u32>,
     writes: Cell<u32>,
 }
@@ -42,9 +44,16 @@ impl FaultBlock {
             flush_fault: Cell::new(false),
             health: Cell::new(DeviceHealth::Unavailable),
             health_fault: Cell::new(false),
+            class: Cell::new(BlkDeviceClass::SolidState),
             reads: Cell::new(0),
             writes: Cell::new(0),
         }
+    }
+
+    /// A device declaring `class` as its performance/behaviour envelope.
+    fn with_class(self, class: BlkDeviceClass) -> Self {
+        self.class.set(class);
+        self
     }
 
     /// A device reporting `media_errors` integrity faults through its
@@ -142,6 +151,10 @@ impl Block for FaultBlock {
         } else {
             Ok(self.health.get())
         }
+    }
+
+    fn device_class(&self) -> BlkDeviceClass {
+        self.class.get()
     }
 }
 
@@ -1280,4 +1293,71 @@ fn device_health_is_unavailable_when_no_member_reports_and_skips_an_errored_memb
         panic!("expected the readable member's telemetry");
     };
     assert_eq!(h.media_errors, 7);
+}
+
+#[test]
+fn device_class_is_the_most_patient_live_member() {
+    // A mirror answers only as fast as the copy it is waiting on, so an
+    // array pairing an SSD with a spinning disk must be served the spinning
+    // disk's spin-up budget — reporting the SSD's would have a consumer time
+    // out a perfectly healthy array whenever the slow copy answered.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::SolidState)),
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+    ];
+    let array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
+
+    // Member order cannot change the answer.
+    let mut reversed = [
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::SolidState)),
+    ];
+    let array = MirrorArray::assemble(&mut reversed).expect("assembles");
+    assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
+}
+
+#[test]
+fn a_dropped_member_no_longer_speaks_for_the_arrays_class() {
+    // The slow copy faults out: the array is no longer waiting on it, so it
+    // stops buying its patience and reports the surviving SSD's envelope.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::SolidState)),
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
+
+    dev(&array, 1)
+        .write_fault
+        .set(Some(DriverError::DeviceFault));
+    array
+        .write_blocks(0, &block(0x5A))
+        .expect("still durable on the surviving copy");
+    assert_eq!(array.member_state(1), Some(MemberState::Faulted));
+    assert_eq!(array.device_class(), BlkDeviceClass::SolidState);
+}
+
+#[test]
+fn an_array_with_no_live_member_declares_the_bounded_envelope() {
+    // Every copy gone: the array can serve nothing, so it declares the
+    // bounded unclassified envelope rather than the widest one — its callers
+    // fail closed sooner instead of waiting out disks that are not there.
+    let mut members = [
+        MirrorMember::<FaultBlock>::absent(),
+        MirrorMember::<FaultBlock>::absent(),
+    ];
+    assert!(MirrorArray::assemble(&mut members).is_err());
+
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+        MirrorMember::<FaultBlock>::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+    dev(&array, 0)
+        .write_fault
+        .set(Some(DriverError::DeviceFault));
+    assert!(array.write_blocks(0, &block(0x5A)).is_err());
+    assert_eq!(array.member_state(0), Some(MemberState::Faulted));
+    assert_eq!(array.device_class(), BlkDeviceClass::Virtual);
 }

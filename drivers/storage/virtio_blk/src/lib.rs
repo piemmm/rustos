@@ -50,6 +50,7 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
@@ -626,6 +627,12 @@ impl Payload<'_> {
 }
 
 impl<T: Transport> Block for VirtioBlk<'_, T> {
+    /// A paravirtual device: fast, but bounded, so a wedged host backend
+    /// never stalls a consumer for a spinning disk's spin-up budget.
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Virtual
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
             block_size: self.block_size,

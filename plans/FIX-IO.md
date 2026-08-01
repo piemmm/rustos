@@ -130,7 +130,20 @@ callee fails closed rather than parking forever. `BlkCompletion` leads with a
 `MediumError`/`Offline`/`Removed`/`Fatal`) decoded fail-closed to `Fatal`;
 `DriverError` gained `MediumError`/`DeviceOffline` and `Errno` gained
 `MediumError`(39)/`DeviceOffline`(40); `BlkDeviceClass::budget()` is the single
-per-class deadline/retry/queue-depth policy. Consumers rewritten in place: the
+per-class deadline/retry/grace/queue-depth policy, and a consumer *discovers*
+which class to apply rather than assuming one: the driver that binds the
+hardware declares it (`Block::device_class`; `Removable` for a USB LUN and the
+SD host, `Virtual` for virtio-blk, default `Virtual` = the bounded
+unclassified envelope), it travels in the geometry completion
+(`BlkCompletion::class`, decoded fail-safe to `Virtual` on an unrecognised
+word), and both consumers adopt it at connect for every later request. The
+class is patience policy, not authority, so an untrusted driver cannot buy
+itself more than the widest class budget. Every wrapping layer forwards its
+inner device's class (partition window, block cache, `SharedBlock`, the
+retained-writes journal, both remote clients) and a composition folds its live
+members with `BlkDeviceClass::most_patient` (the six RAID engines +
+`RaidArray`, through the shared `aggregate_device_class`), so the real
+hardware's envelope survives every layer. Consumers rewritten in place: the
 kernel `blkclient` (deadlined, `TimedOut`→fail closed) and volmgr's `RtBlkCall`
 (now `call_post`+`CallReply` wait-set+`call_reap`). `lib/rt` gained the three
 wrappers; the C header and syscall-table hash regenerate through the drift
@@ -209,10 +222,13 @@ Deliverables:
   medium/offline → surface as I/O error). No status collapses to a generic
   `DeviceFault` (root cause #3).
 - **Per-device bounds are policy, not a global `const`** (§24.1 vs §24.4): the
-  deadline, retry count, and queue depth are derived from the device's
-  discovered class (a rotational SATA disk ≠ an NVMe namespace) and fail closed
-  under pressure (§26.1). The class → budget mapping lives in one place both
-  the serving driver and the consumer read, never a copied literal (§2.2).
+  deadline, retry count, grace window, and queue depth are derived from the
+  device's *declared* class (a rotational SATA disk ≠ an NVMe namespace) and
+  fail closed under pressure (§26.1). The class → budget mapping lives in one
+  place both the serving driver and the consumer read, never a copied literal
+  (§2.2), and the class itself is declared by the driver that binds the
+  hardware and carried to the consumer in the geometry completion, so no layer
+  guesses it.
 
 Consumers rewritten in place (no shim, §2.13): the kernel-side block client
 (`kernel/core/src/fs/blkclient.rs`), the volume manager's `RemoteBlock`

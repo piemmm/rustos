@@ -4,6 +4,8 @@
 //! first driver is `virtio_blk`; the trait carries only the minimum
 //! the filesystem layer needs.
 
+use crate::blkio::BlkDeviceClass;
+
 use super::{BufferClass, DriverError};
 
 /// Geometry of a block device.
@@ -375,6 +377,41 @@ pub trait Block {
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(DeviceHealth::Unavailable)
     }
+
+    /// The device's broad performance/behaviour class, from which its
+    /// per-request deadline, reissue budget, and recovery grace window are
+    /// derived ([`BlkDeviceClass::budget`]).
+    ///
+    /// A spinning disk that is merely spinning up, an `NVMe` namespace, a
+    /// removable unit whose bus is mid-reset, and a paravirtual device have
+    /// genuinely different latency envelopes, so the patience they are owed
+    /// is a property of the device, declared here by the one component that
+    /// knows it: the driver that binds the hardware. A consumer that assumed
+    /// a single envelope for every device would either fail a slow but
+    /// healthy disk early or let a wedged fast device stall its callers for
+    /// far longer than policy intends.
+    ///
+    /// The default is [`BlkDeviceClass::Virtual`] — the declared class of an
+    /// unclassified device: bounded rather than maximally patient, so a
+    /// device whose driver says nothing about itself still fails closed
+    /// promptly when it wedges.
+    ///
+    /// A device that *wraps* another (a partition window, a cache, a RAID
+    /// composition, a remote client over the block-service seam) reports the
+    /// class of what it wraps rather than its own default, so the envelope of
+    /// the real hardware survives every layer above it.
+    ///
+    /// Reporting the class is a pure observation: it touches no hardware and
+    /// cannot fail.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Virtual
+    }
 }
 
 /// A `&mut B` is itself a [`Block`], forwarding every method to the
@@ -431,6 +468,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         (**self).device_health()
+    }
+
+    fn device_class(&self) -> BlkDeviceClass {
+        (**self).device_class()
     }
 }
 

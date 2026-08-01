@@ -1,4 +1,14 @@
-//! Aggregating member device-health telemetry into one array-level snapshot.
+//! Aggregating member device properties into one array-level answer.
+//!
+//! A composed array is itself a device, so it must answer a consumer's
+//! questions about *itself* from what its members report rather than inherit
+//! a trait default that hides them. This module is the *one* definition of
+//! how each such property folds, shared by every composition
+//! (`AGENTS.md` §2.2) so they cannot answer differently: health telemetry
+//! ([`aggregate_device_health`]) and the device class the consumer derives
+//! its I/O budget from ([`aggregate_device_class`]).
+//!
+//! # Health telemetry
 //!
 //! Every RAID composition ([`MirrorArray`](crate::MirrorArray),
 //! [`StripeArray`](crate::StripeArray), [`ParityArray`](crate::ParityArray),
@@ -52,8 +62,23 @@
 //! absence of data is never mistaken for a perfectly-healthy array (the ABI's
 //! "recorded, not failed" contract).
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::DriverError;
+
+use crate::mirror::MemberState;
+
+/// Whether a redundant array member contributes to the array-level answers
+/// this module folds.
+///
+/// An in-sync copy and a resyncing one are real devices the array is driving,
+/// so both speak for it; a faulted-and-dropped slot and an empty (absent) one
+/// are not devices at all and contribute nothing. Every composition and every
+/// folded property share this one predicate, so an array can never report its
+/// health from one set of members and its class from another.
+pub(crate) fn member_participates(state: MemberState) -> bool {
+    matches!(state, MemberState::InSync | MemberState::Resyncing)
+}
 
 /// Fold the [`device_health`](tairix_abi::driver::block::Block::device_health)
 /// results of an array's live members into one array-level [`DeviceHealth`].
@@ -83,6 +108,32 @@ where
         Some(snapshot) => DeviceHealth::Available(snapshot),
         None => DeviceHealth::Unavailable,
     }
+}
+
+/// Fold the [`device_class`](tairix_abi::driver::block::Block::device_class)
+/// of an array's live members into the one class the array declares.
+///
+/// An array answers only as fast as the slowest member it is waiting on, so
+/// it declares the *most patient* member's class
+/// ([`BlkDeviceClass::most_patient`]): a mirror of an SSD and a spinning disk
+/// must be given the spinning disk's spin-up budget, or a consumer would time
+/// out a perfectly healthy array whenever the slow member answered a read.
+/// The fold is commutative, so member order cannot change the answer.
+///
+/// The iterator yields one class per *participating* member (the array
+/// selects those, exactly as for the health fold). An array with no live
+/// member declares the bounded unclassified envelope
+/// ([`BlkDeviceClass::Virtual`]) rather than the widest one: such an array
+/// can serve nothing anyway, and the bounded budget fails its callers closed
+/// sooner instead of making them wait out a disk that is not there.
+pub(crate) fn aggregate_device_class<I>(members: I) -> BlkDeviceClass
+where
+    I: IntoIterator<Item = BlkDeviceClass>,
+{
+    members
+        .into_iter()
+        .reduce(BlkDeviceClass::most_patient)
+        .unwrap_or(BlkDeviceClass::Virtual)
 }
 
 /// Merge one more member `snapshot` into the running array-level `acc`,
@@ -223,5 +274,54 @@ mod tests {
             panic!("expected an aggregated snapshot");
         };
         assert_eq!(got.media_errors, u64::MAX);
+    }
+
+    #[test]
+    fn only_in_sync_and_resyncing_members_participate() {
+        // Both are real devices the array is driving; a dropped or empty
+        // slot is not a device at all.
+        assert!(member_participates(MemberState::InSync));
+        assert!(member_participates(MemberState::Resyncing));
+        assert!(!member_participates(MemberState::Faulted));
+        assert!(!member_participates(MemberState::Absent));
+    }
+
+    #[test]
+    fn no_members_declares_the_bounded_unclassified_envelope() {
+        // An array that can serve nothing fails its callers closed sooner
+        // rather than making them wait out the widest budget.
+        assert_eq!(
+            aggregate_device_class(core::iter::empty()),
+            BlkDeviceClass::Virtual
+        );
+    }
+
+    #[test]
+    fn the_array_declares_its_most_patient_member() {
+        // The array answers only as fast as the slowest member it waits on.
+        assert_eq!(
+            aggregate_device_class([BlkDeviceClass::SolidState, BlkDeviceClass::Rotational]),
+            BlkDeviceClass::Rotational
+        );
+        // Commutative: member order cannot change the array's class.
+        assert_eq!(
+            aggregate_device_class([BlkDeviceClass::Rotational, BlkDeviceClass::SolidState]),
+            BlkDeviceClass::Rotational
+        );
+        // A lone member speaks for the whole array.
+        assert_eq!(
+            aggregate_device_class([BlkDeviceClass::Removable]),
+            BlkDeviceClass::Removable
+        );
+        // The fold is over the whole set, not just the first pair.
+        assert_eq!(
+            aggregate_device_class([
+                BlkDeviceClass::SolidState,
+                BlkDeviceClass::Virtual,
+                BlkDeviceClass::Removable,
+                BlkDeviceClass::SolidState,
+            ]),
+            BlkDeviceClass::Removable
+        );
     }
 }

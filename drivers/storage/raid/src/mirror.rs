@@ -7,7 +7,7 @@
 //! ceiling and holds only a borrow.
 
 use crate::superblock::SlotDisposition;
-use tairix_abi::blkio::BlkStatus;
+use tairix_abi::blkio::{BlkDeviceClass, BlkStatus};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::sysinfo::MountAvailability;
@@ -1025,6 +1025,16 @@ impl<'a, B: Block> MirrorArray<'a, B> {
         }
     }
 
+    /// The devices of the members that speak for the array in its
+    /// device-level answers (health, class), selected by the one shared
+    /// participation predicate.
+    fn live_devices(&self) -> impl Iterator<Item = &B> {
+        self.members
+            .iter()
+            .filter(|m| crate::health::member_participates(m.state))
+            .filter_map(|m| m.device.as_ref())
+    }
+
     /// The index of the first in-sync member, if any.
     fn first_in_sync(&self) -> Option<usize> {
         self.members
@@ -1034,6 +1044,10 @@ impl<'a, B: Block> MirrorArray<'a, B> {
 }
 
 impl<B: Block> Block for MirrorArray<'_, B> {
+    fn device_class(&self) -> BlkDeviceClass {
+        crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -1111,11 +1125,7 @@ impl<B: Block> Block for MirrorArray<'_, B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(crate::health::aggregate_device_health(
-            self.members
-                .iter()
-                .filter(|m| matches!(m.state, MemberState::InSync | MemberState::Resyncing))
-                .filter_map(|m| m.device.as_ref())
-                .map(Block::device_health),
+            self.live_devices().map(Block::device_health),
         ))
     }
 }

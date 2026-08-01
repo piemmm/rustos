@@ -8,11 +8,12 @@ loaded as user-space drivers unless their manifest declares
 
 ## Class trait
 
-`Block` exposes three method families:
+`Block` exposes these core method families:
 
 | Method                         | Purpose                                       | Capability gate                |
 |--------------------------------|-----------------------------------------------|--------------------------------|
 | `geometry`                     | report `BlockGeometry { block_size, block_count }` | `DriverHandle` ownership |
+| `device_class`                 | report the `BlkDeviceClass` the I/O budget derives from | `DriverHandle` ownership |
 | `read_blocks` / `write_blocks` | bulk transfer (multiple of `block_size`)      | `DriverHandle` ownership       |
 | `read_blocks_with_class` / `write_blocks_with_class` | classed transfer (see below) | `DriverHandle` ownership |
 
@@ -35,6 +36,48 @@ unclassified failure) fails closed as `DriverError::DeviceFault`. Because the
 mapping is per-consumer-agnostic, a fault on one device surfaces only to that
 device's callers while every other mount keeps running (`plans/FIX-IO.md`
 IO1/IO2).
+
+## The declared device class
+
+How patient a consumer should be with a device is a property of the *device*: a
+spinning disk may legitimately take tens of seconds to spin up or finish an
+internal reset, while a paravirtual device that has not answered in seconds is
+wedged rather than busy. A consumer that assumed one envelope for every device
+would either fail a slow-but-healthy disk early or let a wedged fast device
+stall its callers far longer than policy intends, so the one component that
+knows what the hardware is — the driver that binds it — declares it:
+
+- `Block::device_class` reports the device's `blkio::BlkDeviceClass`
+  (`Rotational`, `SolidState`, `Removable`, `Virtual`). Reporting it is a pure
+  observation: it touches no hardware and cannot fail. The trait default is
+  `Virtual`, the *unclassified* envelope — bounded rather than maximally
+  patient, so a device whose driver says nothing about itself still fails
+  closed promptly when it wedges.
+- The class travels to the consumer in the **geometry completion**
+  (`BlkCompletion::class`), alongside the device's size and write policy, and
+  the consumer adopts it for every subsequent request: its per-request
+  deadline, reissue budget, and the driver's grace window all derive from that
+  one shared `BlkDeviceClass::budget` policy for *this* device (`AGENTS.md`
+  §2.2, §24.1). Until the device answers, the geometry probe itself runs on the
+  bounded unclassified envelope, so an endpoint that never answers fails closed
+  promptly rather than being granted a spinning disk's patience on nothing but
+  hope.
+- The serving driver is untrusted, and this field needs no trust: the class
+  selects only how patient the consumer is with this one device, grants no
+  authority, and is bounded by the widest class budget either way. A driver
+  that overstates its patience only delays its own deadline; one that
+  understates it only fails itself sooner. An unrecognised class word on the
+  wire decodes to the bounded unclassified envelope rather than being trusted
+  with a wider one — and never discards an otherwise well-formed completion.
+- **A device that wraps another reports what it wraps.** A partition window, a
+  block cache, the kernel's disk-sharing boundary, the retained-writes
+  journal, and the remote block clients all forward their inner device's
+  class, so the real hardware's envelope survives every layer above it rather
+  than being flattened to the default. A device *composed* of several others (a
+  RAID array) declares the **most patient** of its live members
+  (`BlkDeviceClass::most_patient`): the array can only answer as fast as the
+  member it is waiting on, so a mirror of an SSD and a spinning disk is served
+  the spinning disk's spin-up budget.
 
 ## Health state machine and the recovery grace window
 

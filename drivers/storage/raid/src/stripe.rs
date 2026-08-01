@@ -51,6 +51,7 @@
 
 use crate::mirror::{member_faulting, ArrayHealth};
 use crate::superblock::RaidLevel;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -282,6 +283,17 @@ impl<'a, B: Block> StripeArray<'a, B> {
         (member, member_lba, run)
     }
 
+    /// The devices of the members that speak for the array in its
+    /// device-level answers (health, class). A stripe has no redundancy, so
+    /// every member that has not been dropped by a whole-device fault
+    /// participates.
+    fn live_devices(&self) -> impl Iterator<Item = &B> {
+        self.members
+            .iter()
+            .filter(|m| !m.faulted())
+            .map(StripeMember::device)
+    }
+
     /// Drive one striped transfer, splitting `buf` at chunk boundaries and
     /// dispatching each contiguous run to the member that holds it through
     /// `io`. A whole-device fault on a member fails the array closed for good;
@@ -363,6 +375,10 @@ impl<'a, B: Block> StripeArray<'a, B> {
 }
 
 impl<B: Block> Block for StripeArray<'_, B> {
+    fn device_class(&self) -> BlkDeviceClass {
+        crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -417,10 +433,7 @@ impl<B: Block> Block for StripeArray<'_, B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(crate::health::aggregate_device_health(
-            self.members
-                .iter()
-                .filter(|m| !m.faulted())
-                .map(|m| m.device().device_health()),
+            self.live_devices().map(Block::device_health),
         ))
     }
 }

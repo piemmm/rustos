@@ -48,6 +48,7 @@
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
 use crate::stripe::StripeArray;
 use crate::superblock::RaidLevel;
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -522,9 +523,25 @@ impl<'a, B: Block> Raid10Array<'a, B> {
             .replace_member(local, device)
             .map_err(Raid10Error::from)
     }
+
+    /// The devices of the members that speak for the array in its
+    /// device-level answers (health, class), selected by the one shared
+    /// participation predicate — the same set the mirrored pairs beneath
+    /// this array answer from, so a RAID10 and its component mirrors can
+    /// never disagree about which copies count.
+    fn live_devices(&self) -> impl Iterator<Item = &B> {
+        self.members
+            .iter()
+            .filter(|m| crate::health::member_participates(m.state()))
+            .filter_map(MirrorMember::device)
+    }
 }
 
 impl<B: Block> Block for Raid10Array<'_, B> {
+    fn device_class(&self) -> BlkDeviceClass {
+        crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geometry)
     }
@@ -565,10 +582,7 @@ impl<B: Block> Block for Raid10Array<'_, B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         Ok(crate::health::aggregate_device_health(
-            self.members.iter().map(|m| match m.device() {
-                Some(device) => device.device_health(),
-                None => Ok(DeviceHealth::Unavailable),
-            }),
+            self.live_devices().map(Block::device_health),
         ))
     }
 }

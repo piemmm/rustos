@@ -21,6 +21,7 @@
 //! [`RaidError::NotRedundant`] rather than pretending, exactly as the stripe
 //! engine reports only [`ArrayHealth::Optimal`] / [`ArrayHealth::Failed`].
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -454,6 +455,17 @@ impl<B: Block> RaidArray<'_, B> {
 }
 
 impl<B: Block> Block for RaidArray<'_, B> {
+    fn device_class(&self) -> BlkDeviceClass {
+        match self {
+            Self::Mirror(a) => a.device_class(),
+            Self::Stripe(a) => a.device_class(),
+            Self::Parity(a) => a.device_class(),
+            Self::DualParity(a) => a.device_class(),
+            Self::TripleParity(a) => a.device_class(),
+            Self::Raid10(a) => a.device_class(),
+        }
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         match self {
             Self::Mirror(a) => a.geometry(),

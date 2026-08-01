@@ -37,6 +37,7 @@ extern crate alloc;
 pub mod gpt;
 pub mod mbr;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
@@ -319,6 +320,13 @@ impl<B: Block> PartitionBlock<B> {
 }
 
 impl<B: Block> Block for PartitionBlock<B> {
+    /// A window onto a device is the same hardware: the underlying device's
+    /// class, so a filesystem on a partition is served the real disk's I/O
+    /// budget rather than the unclassified default.
+    fn device_class(&self) -> BlkDeviceClass {
+        self.inner.device_class()
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
             block_size: self.block_size,

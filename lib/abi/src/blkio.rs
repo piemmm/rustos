@@ -358,7 +358,7 @@ impl BlkStatus {
 }
 
 /// Byte offsets of the completion frame: `status(4) || errno(4) ||
-/// block_size(4) || block_count(8) || flags(4)`.
+/// block_size(4) || block_count(8) || flags(4) || class(4)`.
 const COMPLETION_STATUS_OFF: usize = 0;
 const COMPLETION_ERRNO_OFF: usize = 4;
 const COMPLETION_GEOMETRY_OFF: usize = 8;
@@ -368,9 +368,9 @@ const COMPLETION_HEADER_LEN: usize = COMPLETION_GEOMETRY_OFF;
 
 /// Encoded length of a block-service completion: the health/status word, an
 /// [`Errno`] detail word (`0` when none), then the geometry payload
-/// (`block_size(4) || block_count(8) || flags(4)`, zero-filled for the
-/// non-geometry operations). Also the endpoint's maximum reply size.
-pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4;
+/// (`block_size(4) || block_count(8) || flags(4) || class(4)`, zero-filled
+/// for the non-geometry operations). Also the endpoint's maximum reply size.
+pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4 + 4;
 
 /// [`BlkCompletion::flags`] bit: the logical unit is write-protected; a
 /// [`BlkOp::Write`] will be refused [`Errno::PermissionDenied`].
@@ -390,6 +390,21 @@ pub struct BlkCompletion {
     pub block_count: u64,
     /// Device flags ([`BLK_FLAG_READ_ONLY`]).
     pub flags: u32,
+    /// The device's declared [`BlkDeviceClass`], from which the consumer
+    /// derives the per-request deadline, reissue budget, and recovery grace
+    /// window it serves this device with ([`BlkDeviceClass::budget`]).
+    ///
+    /// The serving driver is the one component that knows what the hardware
+    /// is, so it declares the class here (from its [`Block::device_class`])
+    /// and the consumer derives its budget from that one shared policy
+    /// instead of assuming a single envelope for every device.
+    ///
+    /// The driver is untrusted, and this field needs no trust: it selects
+    /// only how patient the consumer is with *this* device, grants no
+    /// authority, and is bounded by the widest class budget either way. A
+    /// driver that overstates its patience only delays its own deadline; one
+    /// that understates it only fails itself sooner.
+    pub class: BlkDeviceClass,
 }
 
 /// Write one completion frame (`status || errno || geometry`) into `buf`.
@@ -411,6 +426,7 @@ fn encode_frame(
     put_u32(buf, COMPLETION_GEOMETRY_OFF, geometry.block_size);
     put_u64(buf, COMPLETION_GEOMETRY_OFF + 4, geometry.block_count);
     put_u32(buf, COMPLETION_GEOMETRY_OFF + 12, geometry.flags);
+    put_u32(buf, COMPLETION_GEOMETRY_OFF + 16, geometry.class.as_u32());
     Ok(BLK_COMPLETION_LEN)
 }
 
@@ -534,6 +550,13 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 block_size: read_u32(reply, COMPLETION_GEOMETRY_OFF),
                 block_count: read_u64(reply, COMPLETION_GEOMETRY_OFF + 4),
                 flags: read_u32(reply, COMPLETION_GEOMETRY_OFF + 12),
+                // An unrecognised class word is not a reason to discard an
+                // otherwise well-formed completion: the class selects only
+                // how patient this consumer is, so a device speaking a class
+                // we do not know is served the bounded unclassified envelope
+                // rather than being trusted with a wider one.
+                class: BlkDeviceClass::from_u32(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16))
+                    .unwrap_or(BlkDeviceClass::Virtual),
             },
             error: status.default_errno(),
         }
@@ -650,6 +673,38 @@ impl BlkDeviceClass {
                 queue_depth: 16,
                 grace_ns: 12_000_000_000,
             },
+        }
+    }
+
+    /// The more patient of two classes: the one whose [`budget`](Self::budget)
+    /// waits longer before failing a device closed.
+    ///
+    /// A device composed of several others — a RAID array, a tiered cache —
+    /// can only answer as fast as the slowest device it is waiting on, so it
+    /// declares the most patient of its live members' classes. Declaring the
+    /// faster one would have the consumer time out a perfectly healthy array
+    /// whose rotational member is merely spinning up.
+    ///
+    /// The ordering is *derived* from the budgets themselves (deadline, then
+    /// grace, then the wire value as a deterministic final tie-break) rather
+    /// than a second hand-written table that could drift from
+    /// [`budget`](Self::budget); it is total and commutative, so folding a
+    /// member set in any order yields the same class.
+    #[must_use]
+    pub const fn most_patient(self, other: Self) -> Self {
+        let mine = self.budget();
+        let theirs = other.budget();
+        let wider = if theirs.deadline_ns != mine.deadline_ns {
+            theirs.deadline_ns > mine.deadline_ns
+        } else if theirs.grace_ns != mine.grace_ns {
+            theirs.grace_ns > mine.grace_ns
+        } else {
+            other.as_u32() > self.as_u32()
+        };
+        if wider {
+            other
+        } else {
+            self
         }
     }
 }
@@ -1759,11 +1814,19 @@ fn classify<B: Block>(
         Err(err) => return Served::Refused(err),
     };
     match request.op {
-        BlkOp::Geometry => Served::Device(device.geometry().map(|geometry| BlkCompletion {
-            block_size: geometry.block_size,
-            block_count: geometry.block_count,
-            flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
-        })),
+        BlkOp::Geometry => {
+            // The geometry reply is where a consumer learns what this device
+            // *is*: its declared class travels with its size and write policy
+            // so the consumer derives its deadline, reissue, and grace budget
+            // from the same shared policy the driver serves it with.
+            let class = device.device_class();
+            Served::Device(device.geometry().map(|geometry| BlkCompletion {
+                block_size: geometry.block_size,
+                block_count: geometry.block_count,
+                flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
+                class,
+            }))
+        }
         BlkOp::Read => match data_extent(device, request.blocks, window.len()) {
             Ok(len) => Served::Device(
                 device
@@ -1962,11 +2025,87 @@ mod tests {
             block_size: 512,
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
+            class: BlkDeviceClass::Rotational,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         let n = completion.encode(&mut buf).expect("encodes");
         assert_eq!(n, BLK_COMPLETION_LEN);
         assert_eq!(decode_completion(&buf[..n]), Ok(completion));
+    }
+
+    #[test]
+    fn completion_round_trips_every_device_class() {
+        // The class a device declares survives the wire unchanged, so the
+        // consumer derives the same budget the driver serves it with.
+        for class in [
+            BlkDeviceClass::Rotational,
+            BlkDeviceClass::SolidState,
+            BlkDeviceClass::Removable,
+            BlkDeviceClass::Virtual,
+        ] {
+            let completion = BlkCompletion {
+                block_size: 4096,
+                block_count: 9,
+                flags: 0,
+                class,
+            };
+            let mut buf = [0u8; BLK_COMPLETION_LEN];
+            completion.encode(&mut buf).expect("encodes");
+            let decoded = decode_completion(&buf).expect("valid completion");
+            assert_eq!(decoded.class, class);
+            assert_eq!(decoded.class.budget(), class.budget());
+        }
+    }
+
+    #[test]
+    fn an_unknown_class_word_decodes_to_the_bounded_unclassified_envelope() {
+        // A device claiming a class this build does not know is served the
+        // unclassified envelope, never a wider one it asked for and never a
+        // discarded completion: the class is patience policy, not authority.
+        let completion = BlkCompletion {
+            block_size: 512,
+            block_count: 4,
+            flags: 0,
+            class: BlkDeviceClass::Rotational,
+        };
+        let mut buf = [0u8; BLK_COMPLETION_LEN];
+        completion.encode(&mut buf).expect("encodes");
+        put_u32(&mut buf, COMPLETION_GEOMETRY_OFF + 16, 0xDEAD_BEEF);
+        let decoded = decode_completion(&buf).expect("valid completion");
+        assert_eq!(decoded.class, BlkDeviceClass::Virtual);
+        assert_eq!(decoded.block_count, 4);
+    }
+
+    #[test]
+    fn most_patient_picks_the_wider_budget_in_either_order() {
+        let all = [
+            BlkDeviceClass::Rotational,
+            BlkDeviceClass::SolidState,
+            BlkDeviceClass::Removable,
+            BlkDeviceClass::Virtual,
+        ];
+        for left in all {
+            assert_eq!(left.most_patient(left), left);
+            for right in all {
+                let folded = left.most_patient(right);
+                // Commutative, so a member set folds to the same class in
+                // any order.
+                assert_eq!(folded, right.most_patient(left));
+                // And it is genuinely the more patient of the two.
+                assert!(folded.budget().deadline_ns >= left.budget().deadline_ns);
+                assert!(folded.budget().deadline_ns >= right.budget().deadline_ns);
+            }
+        }
+        // A spinning disk out-waits every other class, so an array holding
+        // one is served its envelope.
+        assert_eq!(
+            BlkDeviceClass::SolidState.most_patient(BlkDeviceClass::Rotational),
+            BlkDeviceClass::Rotational
+        );
+        assert_eq!(
+            BlkDeviceClass::Virtual.most_patient(BlkDeviceClass::SolidState),
+            BlkDeviceClass::Virtual
+        );
     }
 
     #[test]
@@ -2018,6 +2157,7 @@ mod tests {
             block_size: 4096,
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
+            class: BlkDeviceClass::Removable,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         geometry
@@ -3058,6 +3198,10 @@ mod tests {
     const BLOCK_COUNT: u64 = 64;
     /// `BLOCK_SIZE` as the wire-width type the geometry carries.
     const BLOCK_SIZE_U32: u32 = 512;
+    /// The class the double declares. Deliberately *not* the trait default,
+    /// so a test asserting it proves the engine asked the device rather than
+    /// falling back.
+    const MEM_BLOCK_CLASS: BlkDeviceClass = BlkDeviceClass::Rotational;
 
     /// An in-memory 512-byte-block device with a flush counter.
     struct MemBlock {
@@ -3080,6 +3224,10 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
             })
+        }
+
+        fn device_class(&self) -> BlkDeviceClass {
+            MEM_BLOCK_CLASS
         }
 
         fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
@@ -3160,6 +3308,7 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: 0,
+                class: MEM_BLOCK_CLASS,
             })
         );
         assert_eq!(
@@ -3168,8 +3317,31 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: BLK_FLAG_READ_ONLY,
+                class: MEM_BLOCK_CLASS,
             })
         );
+    }
+
+    #[test]
+    fn serve_geometry_reports_the_devices_own_class_not_the_default() {
+        // The engine asks the device what it is rather than assuming an
+        // envelope, so a consumer derives this device's real budget.
+        let mut device = MemBlock::new();
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let completion = serve(
+            &mut device,
+            false,
+            &BlkRequest {
+                op: BlkOp::Geometry,
+                lba: 0,
+                blocks: 0,
+            },
+            &mut window,
+        )
+        .expect("geometry");
+        assert_eq!(completion.class, MEM_BLOCK_CLASS);
+        assert_ne!(MEM_BLOCK_CLASS, BlkDeviceClass::Virtual);
+        assert_eq!(completion.class.budget(), MEM_BLOCK_CLASS.budget());
     }
 
     #[test]
