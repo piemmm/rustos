@@ -1,0 +1,32 @@
+[package]
+name = "tairix-test-blkio-fault"
+description = "FIX-IO IO2 block-transport fault fixture: a minimal, separately-linked pure-Rust EL0 program that stands up two block-service endpoints on the live kernel — one served through the shared per-request recovery engine, one deliberately left unserviced — and proves the bounded submit/reap seam fails a wedged device closed at its deadline without disturbing the healthy one."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-blkio-fault"
+path = "src/main.rs"
+
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust
+# userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
+# exists solely for non-Rust programs. It names `tairix-abi` for the block
+# service wire types and the shared per-request recovery engine, `tairix-caps`
+# for the capability sets `call_create` binds an endpoint with, and the volume
+# manager's `lib` for the production block *consumer* (`RemoteBlock`) this
+# fixture drives — the same client the autoloaded volume-manager process uses,
+# so the vertical proves the real consumer rather than a look-alike. Only on
+# the native Tier-1 targets (`target_os = "none"`); on the host it is an inert
+# stub so `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-drv-storage-volmgr = { path = "../../../drivers/storage/volmgr", version = "=0.0.0" }

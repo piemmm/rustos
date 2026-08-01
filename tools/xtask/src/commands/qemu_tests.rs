@@ -3023,6 +3023,42 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The FIX-IO IO2 block-transport fault vertical: the live-kernel proof
+    // that the bounded submit/reap block seam contains a wedged device
+    // (`plans/FIX-IO.md` IO2). The host doubles cannot express it, because
+    // the per-request deadline, the `CallReply` wait-set source, and the
+    // ticket lifecycle are all kernel machinery. The chassis installs the
+    // production `KernelDispatchHook` and spawns one EL0 fixture holding only
+    // `CAP_IPC_ENDPOINT`; the fixture stands up a healthy block service
+    // (driven by the shared `blkio::serve_request_recovering` engine over a
+    // fault-injecting device, consumed through the production `RemoteBlock`)
+    // beside a wedged one that is never serviced. It proves a transient blip
+    // is ridden out inside the shared per-class reissue budget, a blip that
+    // outlasts it fails closed as the typed transient class, a bad sector
+    // keeps its own medium-error class, and an outstanding wedged request
+    // neither stalls the healthy device nor completes early before its
+    // elapsed deadline wakes the parked reaper and the claim reaps
+    // `TimedOut`. PASS once the chassis reaps a fixture exit of 0; every
+    // failure site carries a distinct finisher (the fixture's diagnostic exit
+    // code is folded in). Single CPU; the 60-second budget is the usual
+    // inactivity ceiling — the run itself is dominated by the fixture's own
+    // 300 ms wedged deadline.
+    QemuTest {
+        package: "tairix-test-blkio-fault-qemu-aarch64",
+        binary: "tairix-test-blkio-fault-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // The riscv64 twin of the stack-grow vertical above: the same
     // four-role fixture program and production `KernelDispatchHook`
     // chassis, driven on the riscv64 `virt` board through the S-mode trap

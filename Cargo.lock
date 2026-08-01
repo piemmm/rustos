@@ -2427,6 +2427,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-blkio-fault"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drv-storage-volmgr",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-test-blkio-fault-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-caps",
+ "tairix-fdt",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-cfq",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-test-c-program-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

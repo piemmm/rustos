@@ -250,7 +250,7 @@ tests that a `CallReply` member wakes on a ready reply and on a deadline; the
 every new `BlkStatus`; fuzz the completion/status decode and the reap/deadline
 path (§19.6).
 
-### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **in progress**
+### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **done**
 
 Stop the "entire strata locks up": no shared blocking thread across devices.
 
@@ -308,12 +308,33 @@ Landed:
   state machine). Proven host-side: the status→availability mapping, the
   consumer fold, and the snapshot overlay (incl. stored-state precedence).
 
-Remaining:
-- A QEMU vertical with a wedged/removed virtio-blk or USB MSD device beside a
-  live volume, asserting the live device's throughput is unaffected while the
-  wedged one fails closed at its deadline (true concurrent head-of-line
-  freedom, which the host doubles cannot express without the kernel deadline
-  machinery).
+- **Proven on the live kernel, not only host-side.** The QEMU vertical
+  `tests/integration/blkio_fault_qemu_aarch64` (+ its EL0 fixture
+  `blkio_fault_program`) closes the gap the host doubles cannot express,
+  because the per-request deadline, the `CallReply` wait-set source, and the
+  ticket lifecycle are kernel machinery. Its chassis installs the production
+  `KernelDispatchHook` and spawns one fixture holding only `CAP_IPC_ENDPOINT`;
+  its drive loop performs the timed-wake sweep a production timer tick would,
+  which is what lets an elapsed deadline wake a parked reaper. The fixture
+  stands up two block-service endpoints — a healthy one served through the
+  shared `blkio::serve_request_recovering` engine over a fault-injecting
+  device and consumed through the production `RemoteBlock`, and a wedged one
+  never serviced — and asserts, through real traps: a transient blip is ridden
+  out inside the shared per-class reissue budget and returns correct data (the
+  device confirming it really injected exactly `IoBudget::max_retries` faults,
+  so the ride-out cannot pass vacuously); a blip that outlasts the budget
+  fails closed as the typed transient class; a bad sector keeps its own
+  medium-error class; a request outstanding to the wedged device neither
+  stalls the healthy device (sixteen interleaved transfers complete, each
+  verifying its data) nor completes early, its elapsed deadline wakes the
+  parked reaper exactly like a real completion, and the claim then reaps
+  `TimedOut` no earlier than the deadline; and a per-ticket `call_cancel`
+  withdraws an outstanding request while a foreign ticket cancels nothing.
+  Each failure site carries its own exit code, folded into the QEMU finisher.
+  Both halves live in one address space, so the vertical proves the
+  *transport's* head-of-line freedom rather than a second process boundary
+  (per-driver process isolation is the §4 property the driver-spawn verticals
+  already prove).
 
 ### Stage IO3 — Per-device health state machine + the recovery grace window. **in progress**
 
@@ -410,10 +431,18 @@ Remaining:
   kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
   Recovering}`); the remaining observability is the audit-log health trail
   (Stage IO5).
-- A QEMU vertical driving a device through fault → grace(recovering) →
-  return-inside-window → Healthy and fault → grace-expiry → Faulted →
-  fail-closed, which the host doubles cannot express without the live kernel
-  deadline machinery.
+- The **return-inside-window** leg is proven on the live kernel by the IO2
+  vertical above (`tests/integration/blkio_fault_qemu_aarch64`): a device that
+  stalls transiently is held `Recovering` by the shared engine, answered
+  reissuably, reissued by the production consumer within the shared per-class
+  budget, and returns correct data once it recovers — with the fault injection
+  itself asserted, so the ride-out cannot pass vacuously. What remains is the
+  **grace-expiry** leg (fault → window elapses → `Faulted` → fail closed →
+  D4 retention). It cannot ride on that vertical: the narrowest real class
+  window is eight seconds of wall clock, and shortening one for a test would
+  make the vertical assert a policy the system does not ship. It needs a
+  vertical whose guest time source it can advance, or a class whose window a
+  real device legitimately declares that short.
 
 Deliverables (design):
 - **A per-device health state machine, owned by the block driver process:**
