@@ -302,10 +302,9 @@
 //! serve process that reads each discovered device's superblock, assembles the
 //! members through [`ArrayIdentity`], turns the scheduler's decisions into real
 //! transfers, and publishes the composed device as its own block-service node
-//! rides with the multi-device volume-assembly work (`plans/FIX-IO.md` IO6
-//! remaining); the engine, its metadata, and this policy are proven host-side
-//! first, exactly as the other FIX-IO primitives landed their shared logic
-//! before their live wiring.
+//! is designed and staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f); the engine,
+//! its metadata, and this policy are proven host-side first, exactly as the
+//! other FIX-IO primitives landed their shared logic before their live wiring.
 
 #![no_std]
 #![forbid(unsafe_code)]

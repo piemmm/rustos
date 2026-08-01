@@ -13,9 +13,9 @@ that decides when an array heals itself all live in `drivers/storage/raid` as a
 host-testable library. The autoloaded serve process that reads each discovered
 device's superblock, assembles the members, turns those maintenance decisions
 into real transfers, and publishes the composed device as its own block-service
-node rides with the multi-device volume-assembly work (`plans/FIX-IO.md` IO6
-remaining); the engine, its metadata, and the policy are proven host-side first,
-as the other FIX-IO primitives were.
+node is designed and staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f); the engine,
+its metadata, and the policy are proven host-side first, as the other FIX-IO
+primitives were.
 
 ## RAID1 mirror (`MirrorArray`)
 

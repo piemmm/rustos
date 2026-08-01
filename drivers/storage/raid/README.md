@@ -98,5 +98,5 @@ dependency direction holds (a member is reached through the `Block` trait the
 serve process is handed, never a sibling driver crate, `AGENTS.md` §17.4).
 
 The autoloaded serve process that assembles members from discovered array
-metadata and turns this scheduler's decisions into real transfers rides with
-the multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining).
+metadata and turns this scheduler's decisions into real transfers is designed
+and staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f).

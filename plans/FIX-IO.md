@@ -1191,24 +1191,14 @@ now durable, through one definition both halves share (§2.2):
   `a_pass_resumed_from_the_records_position_still_rearms_the_period` fails
   before the fix and passes after.
 
-Remaining:
-- The autoloaded serve process that reads each discovered device's superblock,
-  groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
-  populates each engine's member buffer through the shared `raid::fill_members`
-  bridge (above), wraps it in the shared `RaidArray` dispatch (above), restores
-  the persisted position through `MaintenanceRecord::progress_for` +
-  `RaidArray::restore_progress` and checkpoints `RaidArray::progress()` back to
-  its members as the array works, turns the shared `raid::ArrayMaintenance`
-  decisions into real transfers against its members (driving `note_foreground`
-  from its serve path and `note_member_returned` from the IO3/IO4 recovery
-  signals, and arming its wait from `wait_deadline_ns`), and publishes the
-  composed device as its own block-service node — plus the ARXFS-native
-  multi-device composition that consumes the same engine, dispatch, scheduler,
-  and record. This rides with the multi-device volume-assembly work; the engine,
-  its metadata, the `fill_members` reassembly bridge, the `RaidArray` dispatch,
-  the maintenance policy, and the durable progress record are the single shared
-  definition all consumers reuse (§2.2), proven host-side first exactly as the
-  other FIX-IO primitives landed their shared logic before their live wiring.
+Remaining — **the live array service**. Everything above is shared, host-proven
+machinery with, today, *no live consumer*: no process can legitimately hold
+client authority over the several member devices an array is made of. That
+authority model is the whole of what is missing, and it is designed in §2.6
+below (stages IO6a–IO6f), decided against the tree's real grant machinery
+rather than assumed. The ARXFS-native multi-device composition consumes the
+same engine, dispatch, scheduler, and record (§2.2) and follows the same
+staging.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size
@@ -1389,6 +1379,177 @@ touches a current member; a lost record simply starts the passes over; and the
 record itself round-trips, refuses every malformed/foreign/superseded form, and
 is fuzzed.
 
+## 2.6 IO6 live array service — the authority model and its staging
+
+### The blocker, named
+
+An array is several devices driven as one, so **one process must hold client
+authority over N member block devices at once**. Nothing in the tree can do
+that today, and that — not the composition maths — is why the engine above has
+no consumer:
+
+- A driver is spawned for exactly **one** matched node and receives exactly
+  that node's declared resources. The singular `node_id` runs unbroken from
+  `devmgr`'s `StoreRequest::Load { bundle_id, node_id }` through
+  `HwNodeResolver::resolve_resources(node_id)` and
+  `DriverProcessSpawn::spawn_driver(…, node_id: Option<u32>)` to
+  `KernelSpawnCtx`. Nothing unions two nodes' resources into one grant set.
+- Calling a `CAP_IPC_ENDPOINT`-gated endpoint requires a per-endpoint
+  `HwResource::endpoint(id)` grant, obtainable only by creating the endpoint
+  (`call_create`) or by inheriting it from a matched node at spawn.
+- `shm_grant(region, endpoint)` delegates a **`Shared`** grant to the live task
+  serving a named endpoint — narrowing-only, recipient named by a live endpoint
+  rather than a reusable pid. There is **no `Endpoint`-kind counterpart**: half
+  an abstraction (§27).
+
+### Decisions
+
+1. **Complete the delegation primitive rather than widen authority.** Add
+   `call_grant(endpoint, recipient)` as the exact sibling of `shm_grant`: the
+   donor must already hold `HwResource::endpoint(endpoint)`, the recipient is
+   the *live server* of `recipient`, and the kernel mints the recipient its own
+   grant. Narrowing-only, fail-closed, audited, **no new `CAP_*`** (§5.2) — the
+   missing half of a primitive that already exists (§27), not a new authority.
+2. **The composed array is published as an ordinary block-service node**, so
+   `volmgr` mounts an array exactly as it mounts a disk and arrays nest over
+   arrays for free. Publication is `hw_emit_node`, which the kernel gates on the
+   caller having a matched node and on `grant_covers` for **every** declared
+   resource — so the composer can only ever republish authority it holds. This
+   is why the service is an autoloaded **driver**, not a `/System/Services/`
+   app: a service holds no matched node and could not publish, and would have to
+   duplicate volmgr's whole probe/naming/attach policy (§2.2).
+3. **The composer is a singleton anchored to a durable node.** The kernel's
+   arch-neutral hardware-tree bootstrap publishes one synthetic
+   `tairix,virtual-bus` node under the root — the anchor every *virtual* block
+   composition needs (Linux's `virtual` bus, not a device list, so §18.5 is
+   untouched). `devmgr` matches the RAID driver to it and loads exactly **one**
+   composer: no leader election, no well-known-id race, and array nodes hang
+   off a parent whose lifetime is the subsystem's, not any member's.
+4. **Members are recognised by `volmgr` and represented as their own nodes.**
+   `volmgr` already refuses to attach a bare member (`PlanSummary::raid_members`
+   via `fsprobe::probe_raid_member`); it now also emits, under its own matched
+   node, a `Storage` node bearing `tairix,raid-member` and re-declaring the
+   endpoint + window grants it holds. Discovery stays the only path (§18): the
+   fact "this disk is an array member" is *read off the disk*, never configured.
+5. **Rejected: an agent proxying its member's I/O to the composer.** It needs no
+   new primitive but puts a second IPC hop on every block transfer — a
+   permanent hot-path cost to avoid a one-off authority design (§2.16).
+   **Rejected: a per-array well-known registry id with first-member election.**
+   Deterministic but leaves the array owned by an arbitrary member's process, so
+   pulling that disk destroys a healthy array.
+6. **Placement — decision to confirm.** The User selected hoisting the six
+   engines to `lib/raid`. Against the tree as it stands that hoist has exactly
+   **one** consumer (the composer), which §6/§15.5 do not justify, and §2.22
+   would read it as a single-consumer hoist to be collapsed back. The design
+   below therefore keeps the engines in `drivers/storage/raid` and makes the
+   composer that crate's own `Run` binary — the shape `usb_msd` and `volmgr`
+   already use, with no `drivers/*`→`drivers/*` edge and no unjustified crate.
+   The hoist to `lib/raid` lands **when** `drivers/filesystem/arxfs` becomes the
+   second consumer, as an in-place move (§2.13), not a migration seam. If the
+   User prefers the hoist up front, only the crate boundary moves; every stage
+   below is unchanged.
+
+### Stages
+
+Each is complete and green on its own (§2.19); IO6a–IO6b are security work on
+the critical path and land first.
+
+- **IO6a — Close two authority defects in the existing grant machinery.**
+  Both are live today, both are prerequisites for any endpoint delegation, and
+  both carry a regression test that fails before and passes after (§2.18, §7).
+  - **Stale endpoint-grant authority.** `callreg::register` refuses only a
+    *live* id clash, so a numeric endpoint id is re-creatable by a **different**
+    task once the original is torn down — and endpoint teardown
+    (`callreg::teardown_owned_by`) never revokes the `HwResource::endpoint(id)`
+    grants other tasks hold for it (`AddressSpaceRegistry::withdraw` clears only
+    the *exiting* task's own grants). A holder's stale grant therefore silently
+    retargets to whatever task next binds that id. Fix: index minted
+    `Endpoint` grants by endpoint id and revoke every one of them in the same
+    teardown that destroys the endpoint, so delegated authority can never
+    outlive the endpoint *instance* it names and id reuse is safe by
+    construction. Fails closed: a call on a revoked grant is
+    `PermissionDenied`, never a retarget.
+  - **Unbounded grant minting.** `mint_grant` inserts a fresh handle on every
+    call into the *recipient's* growable table, so a donor holding one grant can
+    call `shm_grant` in a loop and grow a victim's kernel-side map without limit
+    (§4 kernel memory, §26.3). Fix: make delegation **idempotent** — a recipient
+    that already holds a grant *covering* the resource gets that handle back,
+    not a second entry. Authority is a set, not a multiset, so this is the
+    correct semantics and needs no invented ceiling (§24.4 does not apply: this
+    is duplicate suppression, not a capacity).
+- **IO6b — `call_grant`, the endpoint half of grant delegation.** Syscall 106
+  in `lib/abi/src/syscalls.rs` (two `IpcEndpoint` args, `U64` handle-or-`-errno`
+  return, `required_capability: CAP_IPC_ENDPOINT`, `audit: true`), the dispatch
+  arm and handler mirroring `shm_grant` exactly, the `lib/rt` and `lib/abi-sys`
+  wrappers, and the regenerated C header; `abi-check`/`c-header` enforce the
+  drift guards. Fail-closed order: the donor's own grant is checked **before**
+  any endpoint state is read (§5.4, §23.1), an unknown recipient endpoint is
+  `NotFound` with nothing minted (no existence oracle), and the minted grant is
+  owner-bound so it is useless to a bystander. Reserve
+  `RAID_REGISTRY_ENDPOINT` in `lib/abi/src/ipc.rs` and enrol it in
+  `is_reserved_endpoint`, so binding it demands `CAP_IPC_BIND_PRIVILEGED` and an
+  unprivileged task cannot squat the registry.
+- **IO6c — The member agent.** `volmgr` emits the `tairix,raid-member` node
+  (decision 4). The RAID `Run` binary, when matched to such a node, is an
+  *agent*: it `call_grant`s its member's block endpoint and `shm_grant`s its
+  window to `RAID_REGISTRY_ENDPOINT`, registers (array UUID and slot are read by
+  the composer from the member itself — the emitter is never trusted for them,
+  §23.1), then parks on a long membership call. If the composer dies its
+  endpoints are torn down and that call is cancelled, waking the agent to
+  re-delegate and re-register when the composer returns — recovery with no
+  reboot (§18.4) and no spin (§2.23; retry is an event-timed one-shot). It exits
+  only when its own node vanishes (the D4 hot-removal path).
+- **IO6d — The composer: assembly and service.** Matched to the synthetic
+  `tairix,virtual-bus` node, one instance. It owns `RAID_REGISTRY_ENDPOINT`,
+  accumulates registered members in a growable table (no member ceiling,
+  §24.1 — the engines borrow a caller-owned slice, so the growable tier is
+  here), reads each member's superblock itself, groups with `distinct_arrays`,
+  resolves each array through `ArrayIdentity::resolve`, places slots through the
+  shared `fill_members` bridge, and wraps the result in the `RaidArray`
+  dispatch. Each assembled array gets its own block endpoint + shared window
+  (both created by the composer, so it holds their grants) served through the
+  **shared** `blkio::serve_request_recovering` engine with its own `BlkHealth`
+  (§2.2 — the array is fault-aware exactly like a leaf device), and is published
+  with `hw_emit_node` as a `tairix,raid-array` `Storage` node under the virtual
+  bus, whereupon `devmgr` loads `volmgr` on it and the array's filesystems mount
+  through the existing audited `volume_attach` path, unchanged. It does not
+  build its `RtDriverHost` again after startup: `MAX_GRANTS` is a per-node
+  validation bound (§24.4), and the composer learns member ids from
+  registrations, never by re-reading its accumulated grant table.
+- **IO6e — Maintenance driving and durable checkpoints.** The composer turns
+  `ArrayMaintenance` decisions into real transfers: `note_foreground` from its
+  serve path, `note_member_returned` from the IO3/IO4 recovery signals, and its
+  wait armed from the minimum of `recovery_wait_timeout`,
+  `fault_domain_wait_timeout`, and `wait_deadline_ns` (one park, three
+  event-timed sources, never a spin). Position is restored at assembly through
+  `MaintenanceRecord::progress_for` + `RaidArray::restore_progress` and
+  checkpointed back to the members from `RaidArray::progress()` as the array
+  works, so a scrub or rebuild spanning days survives a restart (§26.6). Array
+  health is surfaced through the existing `MountAvailability` fold and the IO5
+  health-event vocabulary (`BlkHealthTransition`), never a second vocabulary.
+- **IO6f — Array creation and administration.** An array must be *created*
+  before it can be discovered: a system command app (§16.2, §16.7 — `mdadm` is
+  the reference surface) that writes member superblocks through the composer's
+  audited admin path, and reports array/member state and scrub/rebuild progress
+  through the System Information API (§16.6), never a `/proc`-style scrape.
+  Creation is capability-gated and audited like every other destructive storage
+  operation; the composer, which already holds the members, is the only writer.
+
+### Tests (§7)
+
+Host-side: the two IO6a regressions (a re-created id does not resurrect a
+revoked grant; delegating twice yields one handle); `call_grant`'s fail-closed
+matrix mirroring `shm_grant_delegates_only_a_held_region_to_the_endpoints_server`
+(unheld grant, unknown recipient, owner-bound handle, bystander refused); the
+composer's registration→assembly→publication decision logic over member doubles,
+including a foreign/duplicate/stale registrant refused and an array that stays
+degraded rather than assembling short. QEMU vertical: several emulated members
+discovered, one array assembled and published, a filesystem inside it mounted
+through the unmodified `volmgr` path, a member pulled (array degrades, mount
+survives), the member returned (rebuild resumes from the persisted cursor), and
+the composer restarted (agents re-register, arrays reassemble) — the §26.7 floor
+applied to composition.
+
 ---
 
 ## 3. Cross-cutting test floor (§26.7 / §7)
@@ -1413,7 +1574,11 @@ green on its own. The IO1 transport shape is decided — the async
 submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
 HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
-composition **engine** (the `drivers/storage/raid` mirror) is independent of
-ARXFS and has landed host-side; only its live serve process and the
-ARXFS-native multi-device composition that consumes the same engine remain, and
-those ride with the multi-device volume-assembly work.
+composition **engine** (`drivers/storage/raid`) is independent of ARXFS and has
+landed host-side; what remains is the live array service, whose authority model
+is decided and staged in §2.6 (IO6a–IO6f). That reaches further than the stages
+above — it adds a syscall (`call_grant`), fixes two defects in the kernel's
+grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
+bootstrap — so it is staged the same way: IO6a–IO6b are the security
+prerequisites and land first, each stage complete and green on its own. One
+placement question inside it is flagged for the User (§2.6 decision 6).
