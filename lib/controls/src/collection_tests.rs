@@ -15,7 +15,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::collection::{
@@ -26,6 +26,7 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState, SelectionState,
 };
+use crate::testkit::high_contrast;
 
 const W: u32 = 240;
 const H: u32 = 28;
@@ -46,22 +47,6 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
     (xr.0..xr.1)
         .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
         .any(|(x, y)| surface.get(x, y) == Some(want))
-}
-
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 fn row_surface(row: &ListRow, theme: &Theme, scale: Scale) -> Surface {

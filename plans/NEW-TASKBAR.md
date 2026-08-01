@@ -1223,10 +1223,10 @@ never reallocated, and erase-on-replace/drop with a redacting `Debug`.
 the Switchboard/appearance surfaces above, every shipped row acts for real,
 and the gate is green.
 
-## T14 — Reactive Alloy fidelity pass
+## T14 — Reactive Alloy fidelity pass — done
 
-Verify the full design vocabulary is present and correct across taskbar +
-Switchboard, adding any missing shared control to `lib/controls`.
+The full design vocabulary is present as shared `lib/controls` behaviour and
+used by the taskbar and the Switchboard; no surface draws its own.
 
 **Vocabulary → where it appears** (all from `lib/controls`, §2.2):
 
@@ -1235,20 +1235,58 @@ Switchboard, adding any missing shared control to `lib/controls`.
 | **Pressure rail** | Switchboard resource meters + pressure cards; the Switchboard tray icon under pressure |
 | **Live seam** | task rows with live CPU/IO activity |
 | **Signal badge / bead** | tray icon job/alert/recovery counts; notification & recovery items |
-| **Edge wake** | scrolled task lists wake the action column on the edge |
+| **Edge wake** | the Switchboard's action column, while its list is displaced |
 | **Danger state** | hung-app icon, force-quit/power actions, destructive dialogs |
 | **Heat seam** | background-job progress; pressure live-rate |
-| **Focus field** | the current section/row soft focus glow |
+| **Focus field** | the focused row and every one of its actions, as one group |
 | **Action beads** | summary counts on action groups |
-| **Magnetic motion** | controls stay aligned/grounded as the system moves (respecting reduced-motion) |
+| **Magnetic motion** | `lib/theme`'s timing model; controls stay aligned as the system moves (reduced motion collapses each transition to an immediate state change) |
 
-**Deliverables**: audit each surface against `plans/GUI-CONTROLS-DESIGN.md`
-§5/§9/§11/§14/§15; ensure dark/light, high-contrast shape fallbacks, and
-reduced-motion for every state; every new visual is a shared control with its
-own tests, never a per-surface draw.
+**Focus Field.** `FocusState` holds two orthogonal facts — holds the keyboard,
+and belongs to a highlighted group — and the shared `resolve_frame` recipe
+turns membership into a partial lift of the member's rim toward the active
+rim, so every family inherits it from one definition. `apply_focus_marks`
+sets membership from the same `focus_here` fact that places the ring, so the
+two can never disagree: the focused row (or card), all of its action buttons,
+and nothing else are the group. A control that is both focused and a member
+takes the ring only — the language draws one or the other, never both. A
+filled plate keeps its matching rim (tinting it would put a foreign edge on a
+coloured control), and heavy contrast lifts all the way to the active rim
+rather than relying on a blend a high-contrast palette would flatten.
 
-**Done when**: every listed element is present, themed, high-contrast, and
-reduced-motion correct, with tests; gate green.
+Membership is the weakest claim a rim can carry, and a rim-owning disposition
+outranks it: a disabled, denied, needs-capability, failed-closed, or pending
+control draws identically in or out of a highlighted group. Each of those is
+stating something the user needs far more than which row a control belongs
+to, and a control that cannot be actioned must never look livelier than a
+resting one that can. Only an ordinary interactive control is lifted —
+including one awaiting confirmation, which is still actionable and still
+takes its plain role emphasis.
+
+**Edge Wake.** An anchored control does not move while content scrolls past
+it, so a still frame cannot say whether it is pinned or merely where the rows
+left it; the wake answers that on its edge. `paint_edge_wake` lights the
+leading edge of the Switchboard's action column for exactly as long as the
+list beside it is displaced, at the shared seam breadth, doubled under heavy
+contrast. It is a *state*, not an animation: nothing fades, so reduced motion
+needs no second path and a screendump carries the same information as a live
+surface. A card section has no wake — a card draws its own footer actions
+inside itself, so no anchored column stands beside the list. The column's
+geometry comes from the same `split_row` the buttons are laid out with, and
+the per-section action count is now the single `row_actions(Section)` the
+render pass, the hit-test pass, and the Group popup's anchor all share (it was
+a bare literal restated at nine sites, so a click could have landed on a
+button the user was not looking at).
+
+**Tests**: the rim lift is visible, partial, absent on a filled plate, full
+under heavy contrast, and present under both appearances; focus beats
+membership on one control; every rim-owning disposition draws identically in
+or out of a field while one awaiting confirmation is still lifted; the
+focused row's whole action group is marked and no other row is; leaving the
+content region clears the field; the field is visible in the rendered pixels.
+For the wake: absent unscrolled, present when scrolled, cleared on scrolling
+back, absent for card sections, thicker under heavy contrast, and landing
+exactly on the first action button's left edge.
 
 ## T15 — Documentation, integration tests, and the validation gate
 

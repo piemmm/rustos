@@ -12,10 +12,11 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Theme};
+use tairix_theme::Theme;
 
 use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
 use crate::state::{PressureKind, PressureState, ProgressValue};
+use crate::testkit::high_contrast;
 
 const W: u32 = 96;
 
@@ -35,23 +36,6 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
     (xr.0..xr.1)
         .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
         .any(|(x, y)| surface.get(x, y) == Some(want))
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 /// A theme identical to [`Theme::dark`] but with reduced motion.

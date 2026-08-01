@@ -341,6 +341,10 @@ fn role_emphasis(palette: &Palette, role: ControlRole) -> Emphasis {
 const PRESS_DARKEN: u16 = 220;
 /// How far a filled plate is lightened while hovered, in permille.
 const HOVER_LIGHTEN: u16 = 90;
+/// How far a Focus Field member's rim is carried toward the active rim, in
+/// permille — a partial lift, so a member reads as *related to* the focused
+/// control without competing with the control that actually holds the ring.
+const FIELD_LIFT: u16 = 550;
 
 /// Black and white, the two ends a filled role colour is mixed toward to
 /// derive its pressed and hovered neighbours.
@@ -358,6 +362,35 @@ fn filled_plate(color: Rgba, pointer: PointerState) -> Rgba {
     }
 }
 
+/// The rim an ordinary interactive Focus Field *member* draws: the resting
+/// rim carried part-way toward the active rim, so a set of related controls
+/// reads as one group while the member that actually holds keyboard focus
+/// keeps the only ring.
+///
+/// Only the caller's interactive dispositions reach here; a disabled, denied,
+/// failed-closed, or pending control keeps the rim its disposition gave it.
+///
+/// A filled plate is left alone. Its rim is its plate colour by construction,
+/// and tinting one without the other would put a foreign edge on a coloured
+/// control — the invariant [`resolve_frame`] documents. A filled member states
+/// its membership through the group's other members instead.
+///
+/// Under a heavier-contrast theme the lift goes all the way to the active rim:
+/// contrast comes before glow, so the field must survive a palette a partial
+/// blend would wash out.
+#[must_use]
+fn field_rim(theme: &Theme, plate: Rgba, rim: Rgba) -> Rgba {
+    if rim == plate {
+        return rim;
+    }
+    let active = theme.palette().rim_active;
+    if heavy_contrast(theme) {
+        active
+    } else {
+        rim.mix(active, FIELD_LIFT)
+    }
+}
+
 /// Resolve the shared plate/rim/label colours for one theme, role, and state.
 ///
 /// The rim carries the spec §13 disposition: a disabled control shows a quiet
@@ -371,6 +404,13 @@ fn filled_plate(color: Rgba, pointer: PointerState) -> Rgba {
 /// the label before it states it on the plate — pressing a quiet or outlined
 /// control colours it rather than merely darkening it, which is what makes a
 /// click visible without motion.
+///
+/// An ordinary interactive control that belongs to a highlighted Focus Field
+/// but does not itself hold focus takes the lifted [`field_rim`]: the design
+/// language draws either a focus ring *or* a Focus Field, never both on one
+/// control, so membership is stated on the edge and the ring stays the
+/// property of the one control the keyboard is actually on. A disposition
+/// that owns the rim outranks membership entirely — see below.
 #[must_use]
 pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlState) -> FrameColors {
     let palette = theme.palette();
@@ -415,6 +455,22 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
             palette.on_surface,
         ),
         Emphasis::Quiet => (palette.surface_raised, palette.rim, palette.on_surface),
+    };
+
+    // A disposition that owns the rim outranks the Focus Field. A disabled,
+    // denied, failed-closed, or pending control is stating something the user
+    // needs far more than which group it belongs to, and lifting its edge
+    // toward the active rim would both soften that statement and make a
+    // control that cannot be actioned look livelier than a resting one that
+    // can. Membership is cosmetic; those four are not.
+    let interactive = matches!(
+        disposition,
+        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation
+    );
+    let rim = if state.focus.in_focus_field && !state.focus.focused && interactive {
+        field_rim(theme, plate, rim)
+    } else {
+        rim
     };
 
     FrameColors {
@@ -621,6 +677,35 @@ pub(crate) fn rail_thickness(theme: &Theme, scale: Scale) -> u32 {
 #[must_use]
 pub(crate) fn seam_thickness(theme: &Theme, scale: Scale) -> u32 {
     scale.scale_length(theme.metrics().seam_thickness).max(1)
+}
+
+/// Paint an Edge Wake down the leading edge of `bounds`: a lit seam on the
+/// side of an anchored control that displaced content sits against.
+///
+/// The design language uses the wake to answer a question the user would
+/// otherwise have to answer by eye — *did this column move, or did the list
+/// move under it?* The control never moves, so the confirmation has to come
+/// from its edge, and the edge that carries it is the one facing the content;
+/// the caller passes the anchored control's own bounds.
+///
+/// It is a state, not an animation: the seam is lit for exactly as long as
+/// the adjacent content is displaced, so a reduced-motion theme needs no
+/// separate path (there is nothing to animate) and a still frame carries the
+/// same information as a moving one. It is drawn in the active rim colour, at
+/// the shared seam breadth, doubled under heavy contrast so the wake
+/// strengthens with the rest of the theme's edges rather than relying on a
+/// glow a high-contrast palette would flatten.
+pub(crate) fn paint_edge_wake(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    let Some((x, y, w, h)) = surface_rect(bounds) else {
+        return;
+    };
+    let thickness = seam_thickness(theme, scale)
+        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+        .min(w);
+    if thickness == 0 || h == 0 {
+        return;
+    }
+    surface.fill_rect(x, y, thickness, h, Color::from(theme.palette().rim_active));
 }
 
 /// The width a Heat Seam of the given `activity` covers across `w` pixels: a

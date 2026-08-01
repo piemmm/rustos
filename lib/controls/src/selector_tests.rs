@@ -11,7 +11,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::selector::{
     selector_mark_rect, toggle_track_rect, Checkbox, Radio, SelectorAction, Toggle,
@@ -19,6 +19,7 @@ use crate::selector::{
 use crate::state::{
     AuthorityState, ControlState, PressureKind, PressureState, SelectionState, ValidationState,
 };
+use crate::testkit::high_contrast;
 
 const W: u32 = 160;
 const H: u32 = 28;
@@ -101,23 +102,6 @@ fn mark(theme: &Theme) -> (u32, u32, u32, u32) {
 /// The toggle track rectangle for the test row, measured the same way.
 fn track(theme: &Theme) -> (u32, u32, u32, u32) {
     toggle_track_rect(Rect::new(0, 0, W, H), Scale::ONE, theme).expect("track rect")
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 // --- Measurement --------------------------------------------------------

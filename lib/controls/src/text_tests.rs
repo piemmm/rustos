@@ -21,9 +21,10 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::state::{AuthorityState, ControlState, ValidationState};
+use crate::testkit::high_contrast;
 use crate::text::{
     debug_buffer_identity, debug_bytes, debug_secret_cell_layout, debug_zeroize, zeroize_range,
     SearchField, TextAction, TextField,
@@ -90,23 +91,6 @@ fn search_surface(field: &SearchField, theme: &Theme) -> Surface {
 
 fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 /// Type a string into a focused, editable field a character at a time.

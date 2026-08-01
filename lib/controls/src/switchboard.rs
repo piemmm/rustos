@@ -71,7 +71,7 @@ use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::collection::{Card, CardAction, ListRow, Panel, PanelAction, RowAction};
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
-use crate::paint::{clamp_permille, to_i32, RenderInvariant};
+use crate::paint::{clamp_permille, paint_edge_wake, to_i32, RenderInvariant};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{
@@ -1508,6 +1508,54 @@ impl Switchboard {
         }
     }
 
+    /// How many inline action buttons a row of `section` carries.
+    ///
+    /// The render pass, the hit-test pass, the Group popup's anchor, and the
+    /// action column's geometry must all agree on this count or a click will
+    /// land on a button the user is not looking at, so it is defined once
+    /// here rather than restated as a literal at each site. A section whose
+    /// items are cards carries none: a card draws its own footer actions
+    /// inside itself, so there is no anchored column beside the list.
+    #[must_use]
+    const fn row_actions(section: Section) -> u32 {
+        match section {
+            Section::Tasks | Section::Recovery => 2,
+            Section::Activities => 4,
+            Section::Overview => 1,
+            Section::Jobs | Section::Pressure => 0,
+        }
+    }
+
+    /// The anchored action column of the active section: the strip the rows'
+    /// inline action buttons stand in, spanning the whole visible list.
+    ///
+    /// Every row lays its actions against the same trailing edge, so the
+    /// column is one rectangle rather than a per-row fact; it is derived from
+    /// the same [`Switchboard::split_row`] geometry the buttons themselves
+    /// are laid out with, so the column cannot drift away from its contents.
+    /// [`None`] when the section's items carry no inline actions.
+    fn action_column(
+        info: ListInfo,
+        section: Section,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let buttons = Self::row_actions(section);
+        if buttons == 0 {
+            return None;
+        }
+        let probe = info.item_rect(0);
+        let (_, rects) = Self::split_row(probe, buttons, scale, theme);
+        let first = rects.first()?;
+        let width = u32::try_from((probe.right() - first.left()).max(0)).ok()?;
+        Some(Rect::new(
+            first.left(),
+            info.list_rect.top(),
+            width,
+            info.list_rect.height,
+        ))
+    }
+
     /// Split a list-item rectangle into the row content rect and `buttons`
     /// inline action-button rects (laid from the trailing edge), so the row
     /// text and its actions never overlap.
@@ -1625,7 +1673,12 @@ impl Switchboard {
         if let Some(slot) = task.checked_sub(start) {
             if let Ok(slot) = u32::try_from(slot) {
                 if slot < info.visible() {
-                    let (_, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+                    let (_, buttons) = Self::split_row(
+                        info.item_rect(slot),
+                        Self::row_actions(Section::Tasks),
+                        scale,
+                        theme,
+                    );
                     if let Some(rect) = buttons.get(1) {
                         return *rect;
                     }
@@ -1718,7 +1771,8 @@ impl Switchboard {
         }
     }
 
-    /// Paint the active section's content.
+    /// Paint the active section's content, then the Edge Wake on the action
+    /// column if the list beside it is displaced.
     fn render_section(
         &self,
         surface: &mut Surface,
@@ -1736,6 +1790,24 @@ impl Switchboard {
             Section::Recovery => self.render_recovery_rows(surface, info, scale, theme, font),
             Section::Overview => self.render_overview(surface, layout, info, scale, theme, font),
         }
+        self.render_edge_wake(surface, info, scale, theme);
+    }
+
+    /// Paint the Edge Wake: the action column's leading edge lights while the
+    /// rows beside it are scrolled away from the top of the list.
+    ///
+    /// The column is anchored — its buttons hold the same screen position at
+    /// every offset — so without the wake a user cannot tell from a still
+    /// frame whether the column is pinned or simply happens to be where the
+    /// rows left it. It is drawn after the rows so a row's own plate cannot
+    /// paint over it.
+    fn render_edge_wake(&self, surface: &mut Surface, info: ListInfo, scale: Scale, theme: &Theme) {
+        if self.offsets[self.section.index()] == 0 {
+            return;
+        }
+        if let Some(column) = Self::action_column(info, self.section, scale, theme) {
+            paint_edge_wake(surface, column, scale, theme);
+        }
     }
 
     /// Render the visible task rows and their primary action + Group buttons.
@@ -1752,7 +1824,12 @@ impl Switchboard {
             let Some(entry) = self.tasks.get(start + slot as usize) else {
                 break;
             };
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Tasks),
+                scale,
+                theme,
+            );
             entry.row.render(surface, row_rect, scale, theme, font);
             if let Some(rect) = buttons.first() {
                 entry.action.render(surface, *rect, scale, theme, font);
@@ -1814,7 +1891,8 @@ impl Switchboard {
                     let Some(entry) = self.activities.get(ai) else {
                         continue;
                     };
-                    let (row_rect, buttons) = Self::split_row(item, 4, scale, theme);
+                    let (row_rect, buttons) =
+                        Self::split_row(item, Self::row_actions(Section::Activities), scale, theme);
                     if let Some(edit) = self.rename.as_ref().filter(|e| e.index == ai) {
                         edit.field.render(surface, row_rect, scale, theme, font);
                     } else {
@@ -1896,7 +1974,12 @@ impl Switchboard {
             let Some(entry) = self.recovery.get(start + slot as usize) else {
                 break;
             };
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Recovery),
+                scale,
+                theme,
+            );
             entry.row.render(surface, row_rect, scale, theme, font);
             if let Some(rect) = buttons.first() {
                 entry.restart.render(surface, *rect, scale, theme, font);
@@ -1939,7 +2022,12 @@ impl Switchboard {
             let Some(entry) = self.services.get(start + slot as usize) else {
                 break;
             };
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 1, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Overview),
+                scale,
+                theme,
+            );
             entry.row.render(surface, row_rect, scale, theme, font);
             if let Some(rect) = buttons.first() {
                 entry.action.render(surface, *rect, scale, theme, font);
@@ -2072,7 +2160,12 @@ impl Switchboard {
         let mut selected = None;
         for slot in 0..info.visible() {
             let idx = start + slot as usize;
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Tasks),
+                scale,
+                theme,
+            );
             let Some(entry) = self.tasks.get_mut(idx) else {
                 break;
             };
@@ -2142,7 +2235,8 @@ impl Switchboard {
             let item = info.item_rect(slot);
             match row {
                 ActivityRow::Header(ai) => {
-                    let (_, buttons) = Self::split_row(item, 4, scale, theme);
+                    let (_, buttons) =
+                        Self::split_row(item, Self::row_actions(Section::Activities), scale, theme);
                     let Some(entry) = self.activities.get_mut(ai) else {
                         continue;
                     };
@@ -2247,7 +2341,12 @@ impl Switchboard {
         let mut selected = None;
         for slot in 0..info.visible() {
             let idx = start + slot as usize;
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 2, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Recovery),
+                scale,
+                theme,
+            );
             let Some(entry) = self.recovery.get_mut(idx) else {
                 break;
             };
@@ -2298,7 +2397,12 @@ impl Switchboard {
         let mut selected = None;
         for slot in 0..info.visible() {
             let idx = start + slot as usize;
-            let (row_rect, buttons) = Self::split_row(info.item_rect(slot), 1, scale, theme);
+            let (row_rect, buttons) = Self::split_row(
+                info.item_rect(slot),
+                Self::row_actions(Section::Overview),
+                scale,
+                theme,
+            );
             let Some(entry) = self.services.get_mut(idx) else {
                 break;
             };
@@ -2770,6 +2874,13 @@ impl Switchboard {
 
     /// Reflect the current focus region on the sub-controls: the focused tab,
     /// the focused scrollbar, and the focused content item's primary action.
+    ///
+    /// The focused content item is also a **Focus Field**: its row (or card)
+    /// and *every* one of its actions are marked as members of the group,
+    /// while only the one action `row_action` names takes the ring. That is
+    /// what makes a row read as a related set rather than as one lit button
+    /// beside some unrelated neighbours, and it is why membership is set from
+    /// the same `focus_here` fact the ring is — the two can never disagree.
     fn apply_focus_marks(&mut self) {
         let sel = self.tabs.selected().unwrap_or(0);
         self.tabs
@@ -2796,46 +2907,69 @@ impl Switchboard {
         let action = self.row_action;
         for (i, entry) in self.tasks.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Tasks && i == idx;
+            entry.row.set_in_focus_field(focus_here);
             entry.action.set_focused(focus_here && action == 0);
+            entry.action.set_in_focus_field(focus_here);
             entry.group_button.set_focused(focus_here && action == 1);
+            entry.group_button.set_in_focus_field(focus_here);
         }
         for (i, card) in self.jobs.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Jobs && i == idx;
+            card.set_in_focus_field(focus_here);
             for (b, button) in card.footer_mut().iter_mut().enumerate() {
                 button.set_focused(focus_here && b == action);
+                button.set_in_focus_field(focus_here);
             }
         }
         for (i, entry) in self.pressure.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Pressure && i == idx;
+            entry.card.set_in_focus_field(focus_here);
             for (b, button) in entry.card.footer_mut().iter_mut().enumerate() {
                 button.set_focused(focus_here && b == action);
+                button.set_in_focus_field(focus_here);
             }
         }
         // Only an Activities header row carries buttons, so the flattened row
-        // focus marks a button only when it names a header.
-        let focused_header = (content && self.section == Section::Activities)
+        // focus marks a button only when it names a header; a member row is a
+        // field of one.
+        let focused_activity = (content && self.section == Section::Activities)
             .then(|| self.activity_row_at(idx))
-            .flatten()
-            .and_then(|row| match row {
-                ActivityRow::Header(ai) => Some(ai),
-                ActivityRow::Member(..) => None,
-            });
+            .flatten();
+        let focused_header = focused_activity.and_then(|row| match row {
+            ActivityRow::Header(ai) => Some(ai),
+            ActivityRow::Member(..) => None,
+        });
+        let focused_member = focused_activity.and_then(|row| match row {
+            ActivityRow::Member(ai, mi) => Some((ai, mi)),
+            ActivityRow::Header(..) => None,
+        });
         for (i, entry) in self.activities.iter_mut().enumerate() {
             let focus_here = focused_header == Some(i);
+            entry.header.set_in_focus_field(focus_here);
             entry.switch.set_focused(focus_here && action == 0);
+            entry.switch.set_in_focus_field(focus_here);
             entry.pause_resume.set_focused(focus_here && action == 1);
+            entry.pause_resume.set_in_focus_field(focus_here);
             entry.rename.set_focused(focus_here && action == 2);
+            entry.rename.set_in_focus_field(focus_here);
             entry.close.set_focused(focus_here && action == 3);
+            entry.close.set_in_focus_field(focus_here);
+            for (m, member) in entry.members.iter_mut().enumerate() {
+                member.set_in_focus_field(focused_member == Some((i, m)));
+            }
         }
         for (i, entry) in self.recovery.iter_mut().enumerate() {
             let focus_here = content && self.section == Section::Recovery && i == idx;
+            entry.row.set_in_focus_field(focus_here);
             entry.restart.set_focused(focus_here && action == 0);
+            entry.restart.set_in_focus_field(focus_here);
             entry.force.set_focused(focus_here && action == 1);
+            entry.force.set_in_focus_field(focus_here);
         }
         for (i, entry) in self.services.iter_mut().enumerate() {
-            entry
-                .action
-                .set_focused(content && self.section == Section::Overview && i == idx);
+            let focus_here = content && self.section == Section::Overview && i == idx;
+            entry.row.set_in_focus_field(focus_here);
+            entry.action.set_focused(focus_here);
         }
     }
 }

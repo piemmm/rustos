@@ -10,8 +10,11 @@
 use tairix_raster::Color;
 use tairix_theme::{Rgba, Theme};
 
-use crate::paint::resolve_frame;
-use crate::state::{AuthorityState, ControlRole, ControlState, PointerState, ValidationState};
+use crate::paint::{resolve_frame, FrameColors};
+use crate::state::{
+    AuthorityState, ControlRole, ControlState, FocusState, PointerState, ValidationState,
+};
+use crate::testkit::high_contrast;
 
 fn pointer(pointer: PointerState) -> ControlState {
     ControlState {
@@ -20,8 +23,27 @@ fn pointer(pointer: PointerState) -> ControlState {
     }
 }
 
+/// A resting control that belongs to a highlighted Focus Field but does not
+/// itself hold the keyboard.
+fn field_member() -> ControlState {
+    ControlState {
+        focus: FocusState {
+            focused: false,
+            in_focus_field: true,
+        },
+        ..ControlState::idle()
+    }
+}
+
 fn rgb(rgba: Rgba) -> Color {
     Color::from(rgba)
+}
+
+/// A resolved frame's four facts as a comparable tuple. `FrameColors` is a
+/// paint result rather than a value type, so it carries no derives of its
+/// own and a test that wants "these two draw identically" spells it out.
+fn parts(frame: &FrameColors) -> (Color, Color, Color, bool) {
+    (frame.plate, frame.rim, frame.label, frame.focused)
 }
 
 /// A filled plate while pressed, mirroring the recipe's darkening.
@@ -158,6 +180,161 @@ fn focus_lifts_a_quiet_rim_and_is_reported_to_the_renderer() {
     let frame = resolve_frame(&theme, ControlRole::Neutral, state);
     assert_eq!(frame.rim, rgb(palette.rim_active));
     assert!(frame.focused);
+}
+
+#[test]
+fn focus_field_membership_lifts_a_members_rim_without_giving_it_the_ring() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let rest = resolve_frame(&theme, ControlRole::Neutral, ControlState::idle());
+    let member = resolve_frame(&theme, ControlRole::Neutral, field_member());
+
+    assert_ne!(
+        member.rim, rest.rim,
+        "a field member states its membership on the edge"
+    );
+    assert_ne!(
+        member.rim,
+        rgb(palette.rim_active),
+        "a partial lift, so the member never matches the focused control"
+    );
+    assert_eq!(
+        member.plate, rest.plate,
+        "membership is an edge state, not a plate state"
+    );
+    assert_eq!(member.label, rest.label);
+    assert!(!member.focused, "a member draws no focus ring");
+}
+
+#[test]
+fn focus_wins_over_field_membership_on_the_same_control() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let state = ControlState {
+        focus: FocusState {
+            focused: true,
+            in_focus_field: true,
+        },
+        ..ControlState::idle()
+    };
+    let frame = resolve_frame(&theme, ControlRole::Neutral, state);
+    assert_eq!(
+        frame.rim,
+        rgb(palette.rim_active),
+        "the focused member takes the full active rim, not the partial lift"
+    );
+    assert!(frame.focused);
+}
+
+#[test]
+fn focus_field_never_puts_a_foreign_edge_on_a_filled_plate() {
+    let theme = Theme::dark();
+    for role in [ControlRole::Primary, ControlRole::Recovery] {
+        let frame = resolve_frame(&theme, role, field_member());
+        assert_eq!(
+            frame.rim, frame.plate,
+            "{role:?} keeps a coloured plate's matching rim"
+        );
+    }
+    // A pressed outlined control is filled too, so the same holds there.
+    let pressed = ControlState {
+        pointer: PointerState::Pressed,
+        focus: FocusState {
+            focused: false,
+            in_focus_field: true,
+        },
+        ..ControlState::idle()
+    };
+    let frame = resolve_frame(&theme, ControlRole::Destructive, pressed);
+    assert_eq!(frame.rim, frame.plate);
+}
+
+#[test]
+fn focus_field_reaches_the_full_active_rim_under_heavy_contrast() {
+    let theme = high_contrast();
+    let frame = resolve_frame(&theme, ControlRole::Neutral, field_member());
+    assert_eq!(
+        frame.rim,
+        rgb(theme.palette().rim_active),
+        "contrast before glow: a partial blend would wash out"
+    );
+}
+
+#[test]
+fn a_rim_owning_disposition_outranks_focus_field_membership() {
+    let theme = Theme::dark();
+    // Each of these says something the user needs more than which group the
+    // control belongs to, so none of them may be softened by a lift.
+    let cases = [
+        ControlState {
+            enabled: false,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::Denied,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::NeedsCapability,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::FailedClosed,
+            ..ControlState::idle()
+        },
+        ControlState {
+            validation: ValidationState::Pending,
+            ..ControlState::idle()
+        },
+    ];
+    for state in cases {
+        let member = ControlState {
+            focus: FocusState {
+                focused: false,
+                in_focus_field: true,
+            },
+            ..state
+        };
+        for role in [ControlRole::Neutral, ControlRole::Primary] {
+            assert_eq!(
+                parts(&resolve_frame(&theme, role, member)),
+                parts(&resolve_frame(&theme, role, state)),
+                "{:?}/{role:?} must draw identically in or out of a Focus Field",
+                state.disposition()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_control_awaiting_confirmation_still_joins_the_focus_field() {
+    let theme = Theme::dark();
+    // Unlike the four above, this one is actionable and takes its plain role
+    // emphasis, so nothing is being softened by the lift.
+    let state = ControlState {
+        authority: AuthorityState::NeedsConfirmation,
+        ..ControlState::idle()
+    };
+    let member = ControlState {
+        focus: FocusState {
+            focused: false,
+            in_focus_field: true,
+        },
+        ..state
+    };
+    assert_ne!(
+        resolve_frame(&theme, ControlRole::Neutral, member).rim,
+        resolve_frame(&theme, ControlRole::Neutral, state).rim
+    );
+}
+
+#[test]
+fn light_theme_lifts_a_field_member_too() {
+    let theme = Theme::light();
+    let rest = resolve_frame(&theme, ControlRole::Neutral, ControlState::idle());
+    let member = resolve_frame(&theme, ControlRole::Neutral, field_member());
+    assert_ne!(member.rim, rest.rim);
+    assert_eq!(member.plate, rest.plate);
 }
 
 #[test]

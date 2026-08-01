@@ -16,7 +16,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
-use tairix_theme::{Contrast, Theme};
+use tairix_theme::Theme;
 
 use crate::meter::{Meter, MeterValue};
 use crate::state::{
@@ -29,27 +29,11 @@ use crate::switchboard::{
     ResourceSummary, Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel,
     SystemAction, TaskSummary,
 };
+use crate::testkit::high_contrast;
 use crate::window::FurniturePart;
 
 fn font() -> BitmapFont {
     BitmapFont::inconsolata()
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 const PRESS: InputEvent = InputEvent::PointerPressed {
@@ -2262,6 +2246,35 @@ fn settled(theme: &Theme) -> Switchboard {
     sb
 }
 
+/// The active section's list metrics at the test bounds.
+fn list_info(sb: &Switchboard, theme: &Theme) -> crate::switchboard::ListInfo {
+    let layout = sb.compute_layout(bounds(), Scale::ONE, theme, font());
+    sb.list_info(&layout, Scale::ONE, theme)
+}
+
+/// How many pixels wide the Edge Wake seam is at the action column's leading
+/// edge, measured on the row band's vertical centre so no row plate, label,
+/// or button rim is sampled instead.
+fn wake_seam_width(sb: &Switchboard, surface: &Surface, theme: &Theme) -> u32 {
+    let info = list_info(sb, theme);
+    let Some(column) = Switchboard::action_column(info, sb.section, Scale::ONE, theme) else {
+        return 0;
+    };
+    let want = tairix_raster::Color::from(theme.palette().rim_active).premultiply();
+    let y = u32::try_from(column.top()).unwrap_or(0) + column.height / 2;
+    let x0 = u32::try_from(column.left()).unwrap_or(0);
+    (x0..x0 + column.width)
+        .take_while(|&x| surface.get(x, y) == Some(want))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+/// Whether the action column's leading edge carries an Edge Wake.
+fn column_edge_is_lit(sb: &Switchboard, surface: &Surface, theme: &Theme) -> bool {
+    wake_seam_width(sb, surface, theme) > 0
+}
+
 /// A point over the header resource band — an instrument that takes no
 /// pointer input, so a sample there crosses no control.
 fn band_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
@@ -2382,6 +2395,192 @@ fn focus_change_changes_the_composition() {
     sb.on_key(Key::Named(NamedKey::Tab));
 
     assert_ne!(sb, before, "the focus ring moves to another region");
+}
+
+#[test]
+fn the_focused_row_and_all_its_actions_form_one_focus_field() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    sb.on_key(Key::Named(NamedKey::Down));
+
+    let focused = sb.content_focus;
+    let entry = &sb.tasks[focused];
+    assert!(
+        entry.row.state().focus.in_focus_field,
+        "the focused row is a member of its own field"
+    );
+    assert!(!entry.row.state().focus.focused, "the row takes no ring");
+    assert!(
+        entry.action.state().focus.in_focus_field
+            && entry.group_button.state().focus.in_focus_field,
+        "every action of the focused row is a member"
+    );
+    assert!(
+        entry.action.state().focus.focused ^ entry.group_button.state().focus.focused,
+        "exactly one member holds the ring"
+    );
+
+    let other = &sb.tasks[focused + 1];
+    assert!(
+        !other.row.state().focus.in_focus_field
+            && !other.action.state().focus.in_focus_field
+            && !other.group_button.state().focus.in_focus_field,
+        "an unfocused row is no part of the field"
+    );
+}
+
+#[test]
+fn leaving_the_content_region_clears_the_focus_field() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    sb.on_key(Key::Named(NamedKey::Down));
+    assert!(sb.tasks[sb.content_focus].row.state().focus.in_focus_field);
+
+    // Content -> Scrollbar: the content list no longer holds the keyboard.
+    sb.on_key(Key::Named(NamedKey::Tab));
+
+    assert!(
+        sb.tasks.iter().all(|t| !t.row.state().focus.in_focus_field
+            && !t.action.state().focus.in_focus_field
+            && !t.group_button.state().focus.in_focus_field),
+        "no row glows once focus has left the list"
+    );
+}
+
+#[test]
+fn an_unscrolled_list_shows_no_edge_wake() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    assert_eq!(sb.scroll_offset(), 0, "the fixture starts at the top");
+
+    let surface = painted(&mut sb, &theme);
+    assert!(
+        !column_edge_is_lit(&sb, &surface, &theme),
+        "nothing has moved, so the anchored column has nothing to confirm"
+    );
+}
+
+#[test]
+fn scrolling_the_list_wakes_the_action_columns_edge() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    feed(
+        &mut sb,
+        &theme,
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    );
+    assert!(sb.scroll_offset() > 0, "the list must actually scroll");
+
+    let surface = painted(&mut sb, &theme);
+    assert!(
+        column_edge_is_lit(&sb, &surface, &theme),
+        "the anchored column wakes on the edge the rows moved past"
+    );
+}
+
+#[test]
+fn scrolling_back_to_the_top_lets_the_edge_wake_settle() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    feed(
+        &mut sb,
+        &theme,
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    );
+    feed(
+        &mut sb,
+        &theme,
+        &InputEvent::PointerScrolled { dx: 0, dy: -3 },
+    );
+    assert_eq!(sb.scroll_offset(), 0);
+
+    let surface = painted(&mut sb, &theme);
+    assert!(
+        !column_edge_is_lit(&sb, &surface, &theme),
+        "the wake is a state, so it clears with the displacement that caused it"
+    );
+}
+
+#[test]
+fn a_card_section_has_no_action_column_to_wake() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    sb.select_section(Section::Jobs);
+    feed(
+        &mut sb,
+        &theme,
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+    );
+    assert!(sb.scroll_offset() > 0, "the job list must actually scroll");
+
+    // A card draws its own footer actions inside itself, so there is no
+    // anchored column beside the list and nothing to wake.
+    let info = list_info(&sb, &theme);
+    assert_eq!(
+        Switchboard::action_column(info, Section::Jobs, Scale::ONE, &theme),
+        None
+    );
+}
+
+#[test]
+fn the_edge_wake_strengthens_under_heavy_contrast() {
+    let normal = Theme::dark();
+    let heavy = high_contrast();
+    let mut a = settled(&normal);
+    let mut b = settled(&heavy);
+    for (sb, theme) in [(&mut a, &normal), (&mut b, &heavy)] {
+        feed(sb, theme, &InputEvent::PointerScrolled { dx: 0, dy: 3 });
+        assert!(sb.scroll_offset() > 0, "the list must actually scroll");
+    }
+
+    let thin = painted(&mut a, &normal);
+    let thick = painted(&mut b, &heavy);
+    assert!(
+        wake_seam_width(&b, &thick, &heavy) > wake_seam_width(&a, &thin, &normal),
+        "high contrast strengthens the wake's edge rather than adding glow"
+    );
+}
+
+#[test]
+fn the_edge_wake_lands_on_the_action_columns_leading_edge() {
+    let theme = Theme::dark();
+    let sb = settled(&theme);
+
+    let info = list_info(&sb, &theme);
+    let column =
+        Switchboard::action_column(info, Section::Tasks, Scale::ONE, &theme).expect("column");
+    let (_, buttons) = Switchboard::split_row(
+        info.item_rect(0),
+        Switchboard::row_actions(Section::Tasks),
+        Scale::ONE,
+        &theme,
+    );
+    assert_eq!(
+        column.left(),
+        buttons.first().expect("an action button").left(),
+        "the column starts exactly where its first button does, so the wake \
+         cannot drift away from the controls it belongs to"
+    );
+    assert_eq!(column.top(), info.list_rect.top());
+    assert_eq!(column.height, info.list_rect.height);
+}
+
+#[test]
+fn the_focus_field_is_visible_in_the_pixels() {
+    let theme = Theme::dark();
+    let mut in_field = settled(&theme);
+    in_field.on_key(Key::Named(NamedKey::Down));
+    let mut elsewhere = in_field.clone();
+    // Move focus off the list entirely, leaving the same rows on screen.
+    elsewhere.on_key(Key::Named(NamedKey::Tab));
+
+    let a = painted(&mut in_field, &theme);
+    let b = painted(&mut elsewhere, &theme);
+    assert_ne!(
+        a.pixels(),
+        b.pixels(),
+        "a Focus Field the user cannot see is not a Focus Field"
+    );
 }
 
 #[test]

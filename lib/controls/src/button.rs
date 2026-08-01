@@ -369,6 +369,15 @@ impl Button {
         self.state.focus.focused = focused;
     }
 
+    /// Set whether the button belongs to the highlighted Focus Field — the
+    /// group of related controls around whichever one holds keyboard focus.
+    ///
+    /// Orthogonal to [`set_focused`](Self::set_focused): the sibling actions
+    /// of a focused row are members without holding the ring themselves.
+    pub fn set_in_focus_field(&mut self, member: bool) {
+        self.state.focus.in_focus_field = member;
+    }
+
     /// Paint the button into `surface` at `bounds` for the active theme.
     pub fn render(
         &self,

@@ -13,11 +13,12 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
+use crate::testkit::high_contrast;
 
 fn font() -> BitmapFont {
     BitmapFont::inconsolata()
@@ -43,22 +44,6 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
     (xr.0..xr.1)
         .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
         .any(|(x, y)| surface.get(x, y) == Some(want))
-}
-
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {

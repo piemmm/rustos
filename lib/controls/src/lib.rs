@@ -253,6 +253,8 @@ mod state_tests;
 #[cfg(test)]
 mod tabs_tests;
 #[cfg(test)]
+mod testkit;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod text_tests;

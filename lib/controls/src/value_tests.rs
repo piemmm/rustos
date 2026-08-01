@@ -11,13 +11,14 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::paint::progress_thickness;
 use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
     RecoveryState,
 };
+use crate::testkit::high_contrast;
 use crate::value::{Progress, Slider, SliderAction};
 
 const W: u32 = 200;
@@ -70,23 +71,6 @@ fn progress_surface(progress: &Progress, theme: &Theme) -> Surface {
         font(),
     );
     surface
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 /// A theme identical to [`Theme::dark`] but with reduced motion.

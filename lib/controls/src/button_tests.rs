@@ -10,13 +10,14 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState,
 };
+use crate::testkit::high_contrast;
 
 const W: u32 = 140;
 const H: u32 = 28;
@@ -62,24 +63,6 @@ fn focused_state() -> crate::state::FocusState {
 
 fn transparent() -> Pixel {
     Color::TRANSPARENT.premultiply()
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`], so the
-/// high-contrast rendering path can be exercised without a second built-in.
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 /// Whether `want` appears anywhere inside the plate interior — the region

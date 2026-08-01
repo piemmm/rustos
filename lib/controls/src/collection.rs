@@ -265,6 +265,16 @@ impl ListRow {
         self.state.focus.focused = focused;
     }
 
+    /// Set whether the row belongs to the highlighted Focus Field — the group
+    /// of related controls around whichever one holds keyboard focus.
+    ///
+    /// Orthogonal to [`set_focused`](Self::set_focused): a row whose own
+    /// action button holds the keyboard is a field member without holding the
+    /// ring itself.
+    pub fn set_in_focus_field(&mut self, member: bool) {
+        self.state.focus.in_focus_field = member;
+    }
+
     /// Set the row's selection.
     pub fn set_selected(&mut self, selected: bool) {
         self.state.selection = if selected {
@@ -757,6 +767,15 @@ impl Card {
     /// Replace the card's composed state.
     pub fn set_state(&mut self, state: ControlState) {
         self.state = state;
+    }
+
+    /// Set whether the card belongs to the highlighted Focus Field — the group
+    /// of related controls around whichever one holds keyboard focus.
+    ///
+    /// A card never holds the ring itself (its footer buttons do), so this is
+    /// how a card whose action group has the keyboard reads as part of it.
+    pub fn set_in_focus_field(&mut self, member: bool) {
+        self.state.focus.in_focus_field = member;
     }
 
     /// The card's footer action buttons.

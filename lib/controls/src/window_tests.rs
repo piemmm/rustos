@@ -14,12 +14,13 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::state::{
     AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
+use crate::testkit::high_contrast;
 use crate::window::{
     ControlPlacement, FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
     ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
@@ -59,23 +60,6 @@ const PRESS: InputEvent = InputEvent::PointerPressed {
 const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
 };
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`].
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
-}
 
 fn furniture() -> WindowFurnitureState {
     WindowFurnitureState {

@@ -13,10 +13,11 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Rgba, Theme};
+use tairix_theme::{Rgba, Theme};
 
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::state::{AuthorityState, ControlRole, ControlState};
+use crate::testkit::high_contrast;
 
 const W: u32 = 200;
 const ROW_H: u32 = 28;
@@ -579,24 +580,6 @@ fn grouped_row_rects_still_mirror_hit_testing() {
         );
     }
     assert_eq!(menu.row_rect(3, bounds, Scale::ONE, &theme), None);
-}
-
-/// A theme identical to [`Theme::dark`] but with [`Contrast::High`], so the
-/// high-contrast rendering path can be exercised without a second built-in.
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 #[test]

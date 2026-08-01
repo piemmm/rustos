@@ -10,11 +10,12 @@
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Theme};
+use tairix_theme::Theme;
 
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 use crate::state::{AuthorityState, ControlState};
+use crate::testkit::high_contrast;
 
 const VW: u32 = 16;
 const VH: u32 = 300;
@@ -58,22 +59,6 @@ fn premul(rgba: tairix_theme::Rgba) -> Pixel {
 
 fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
-}
-
-fn high_contrast() -> Theme {
-    let base = Theme::dark();
-    Theme::new(
-        base.id(),
-        "Test High Contrast",
-        base.appearance(),
-        *base.palette(),
-        *base.metrics(),
-        base.fonts().clone(),
-        base.cursors().clone(),
-        base.motion(),
-        base.density(),
-        Contrast::High,
-    )
 }
 
 /// The requested offset from an action, if any.

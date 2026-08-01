@@ -32,6 +32,54 @@ owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 
+## Grouped focus and anchored edges
+
+Two of the design language's reactive state patterns describe a *relationship
+between controls* rather than the state of any one of them, so both are
+resolved in the crate's shared paint recipe and inherited by every family
+instead of being drawn per surface.
+
+### The Focus Field
+
+`FocusState` carries two independent facts: whether a control holds the
+keyboard, and whether it belongs to a group whose **Focus Field** is
+highlighted. A row of related controls — a list row and the action buttons
+that act on it — is one such group: the member the keyboard is actually on
+takes the focus ring, and every other member states its membership by
+lifting its rim part-way toward the active rim.
+
+The lift is partial by design, so a member never looks like the focused
+control; a control that is *both* focused and a member simply takes the ring,
+because the language draws one or the other and never both on the same
+control. A filled plate is left alone: its rim is its plate colour by
+construction, and tinting one without the other would put a foreign edge on a
+coloured control. Under a high-contrast theme the lift goes all the way to the
+active rim — contrast comes before glow, and a partial blend would wash out.
+
+Membership is the *weakest* claim a rim can carry. A disabled, denied,
+needs-capability, failed-closed, or pending control keeps the rim its
+disposition gave it and draws identically whether or not its group is
+highlighted: each of those is telling the user something they need far more
+than which row a control belongs to, and a control that cannot be actioned
+must never look livelier than a resting one that can. Only an ordinary
+interactive control — including one merely awaiting confirmation, which is
+still actionable and still takes its plain role emphasis — is lifted.
+
+### The Edge Wake
+
+An anchored control that content scrolls past does not move, which leaves a
+still frame ambiguous: did the column stay put, or is it merely where the rows
+left it? The **Edge Wake** answers that on the control's edge. The Switchboard
+lights the leading edge of its action column for exactly as long as the rows
+beside it are displaced from the top of the list.
+
+It is a state, not an animation. There is nothing to fade, so a reduced-motion
+theme needs no second path and a screenshot carries the same information as a
+live surface. The seam is drawn at the shared seam breadth in the active rim
+colour, doubled under heavy contrast like every other edge in the theme. A
+section whose items are cards has no wake: a card draws its own footer actions
+inside itself, so no anchored column stands beside the list.
+
 ## Masked text entry
 
 `TextField::secret(max_len)` puts a field into masked mode for credential
