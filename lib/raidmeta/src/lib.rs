@@ -337,6 +337,63 @@ impl RaidLevel {
         }
     }
 
+    /// Whether an array of this level can serve its logical blocks with
+    /// exactly the members `slots` reports present.
+    ///
+    /// This is the *metadata-layer* precondition an assembling process asks
+    /// before it composes anything: given the reassembled slot table
+    /// ([`ArrayIdentity::fill_slots`]), is the surviving set structurally
+    /// capable of reconstructing every logical block, or would the array be
+    /// serving data it cannot vouch for? An array that fails it is left
+    /// unassembled rather than brought online short (`AGENTS.md` §5.4, §26.5)
+    /// — a partial stripe or a twice-punctured RAID5 has holes no redundancy
+    /// can fill, and publishing it would hand a filesystem a device that
+    /// silently cannot read parts of itself.
+    ///
+    /// Each level's answer follows from its redundancy, and this is the single
+    /// definition of it, beside [`is_redundant`](Self::is_redundant) and
+    /// [`data_members`](Self::data_members): a stripe holds nothing spare, so
+    /// it needs every member; a mirror needs any one copy; single, double, and
+    /// triple parity tolerate one, two, and three missing members
+    /// respectively; and RAID10 tolerates any number of losses as long as no
+    /// mirrored pair loses both of its copies.
+    ///
+    /// It answers about the *slot table*, not about live hardware: a slot it
+    /// counts present may still turn out unreachable when the composition
+    /// engine probes it, and the engine's own `assemble` remains the authority
+    /// on what the live devices can do. The two questions compose — this one
+    /// decides whether composing is worth attempting at all.
+    ///
+    /// Total and fail-closed: a slot table whose width the level cannot be
+    /// composed from at all (below [`min_members`](Self::min_members), or an
+    /// odd RAID10 width) is not servable, so a caller that has not already
+    /// validated the width can never conclude a nonsensical array is usable.
+    #[must_use]
+    pub fn can_serve(self, slots: &[SlotDisposition]) -> bool {
+        if slots.len() < usize::from(self.min_members())
+            || self.data_members(slots.len() as u64).is_none()
+        {
+            return false;
+        }
+        let present = |slot: &SlotDisposition| matches!(slot, SlotDisposition::Present { .. });
+        let missing = slots.iter().filter(|slot| !present(slot)).count();
+        match self {
+            Self::Stripe => missing == 0,
+            Self::Mirror => missing < slots.len(),
+            Self::Parity => missing <= 1,
+            Self::DualParity => missing <= 2,
+            Self::TripleParity => missing <= 3,
+            // Losses are only survivable while they fall in *different*
+            // pairs: a column that lost both of its copies has no source for
+            // its stripes, however healthy the other columns are.
+            Self::Raid10 => slots
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair.iter().any(present)),
+        }
+    }
+
     /// Decode an on-disk level byte, failing closed on an unknown value.
     ///
     /// # Errors

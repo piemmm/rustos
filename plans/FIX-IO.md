@@ -1615,23 +1615,71 @@ the critical path and land first.
     it was added, so this cannot be conjured from a bogus id. Regression:
     `waitset_reports_a_call_reply_member_whose_endpoint_was_torn_down`, which
     fails before the fix.
-- **IO6d — The composer: assembly and service.** Matched to the synthetic
-  `tairix,virtual-bus` node, one instance. It owns `RAID_REGISTRY_ENDPOINT`,
-  accumulates registered members in a growable table (no member ceiling,
-  §24.1 — the engines borrow a caller-owned slice, so the growable tier is
-  here), reads each member's superblock itself, groups with `distinct_arrays`,
-  resolves each array through `ArrayIdentity::resolve`, places slots through the
-  shared `fill_members` bridge, and wraps the result in the `RaidArray`
-  dispatch. Each assembled array gets its own block endpoint + shared window
-  (both created by the composer, so it holds their grants) served through the
-  **shared** `blkio::serve_request_recovering` engine with its own `BlkHealth`
-  (§2.2 — the array is fault-aware exactly like a leaf device), and is published
-  with `hw_emit_node` as a `tairix,raid-array` `Storage` node under the virtual
-  bus, whereupon `devmgr` loads `volmgr` on it and the array's filesystems mount
+- **IO6d — The composer: assembly and service. in progress.**
+  **Landed (the assembly decisions).** *Which* offered devices form which array,
+  and *when* an array may be brought online, is where the data-integrity risk
+  lives — not in the IPC around it — so it is the pure, host-tested
+  `compose::MemberRegistry` in the RAID driver's `lib` half, driven by a
+  caller-supplied monotonic clock. It accumulates registered members in a
+  growable, fallibly-allocated table (no member ceiling, §24.1 — the engines
+  borrow a caller-owned slice, so the growable tier is here; `try_reserve`, so
+  exhaustion is a value the caller ends the membership on, never a panic, §2.9),
+  holds each member's metadata exactly once as its reassembly `Candidate` (tag =
+  member index, so a resolved slot maps straight back to its device), and
+  answers `next_action(now)` with `Assemble{array}` / `Join{array, member, slot,
+  in_sync}` / `Wait{deadline}`. Two rules keep a broken array off the bus:
+  - **An array its members cannot serve is never published.** The single
+    definition is the new shared `RaidLevel::can_serve(&[SlotDisposition])`
+    (`lib/raidmeta`, beside `is_redundant`/`data_members`): every member for a
+    stripe, any one copy for a mirror, one/two/three losses for the parity
+    levels, and no wholly-lost *pair* for RAID10, failing closed on a width the
+    level cannot be composed from. It answers about the reassembled slot table;
+    each engine's `assemble` remains the authority on the live devices, and the
+    two compose (§5.4, §26.5).
+  - **A complete array is composed at once; an incomplete one settles first.** A
+    member that is merely spinning up, or riding out a blip inside its own
+    driver's grace window, is not a missing member, and starting without it
+    forces a needless rebuild. The settle window is that hardware's own recovery
+    grace window (`RetryCadence::for_class`, folded over the members' declared
+    `BlkDeviceClass` with `most_patient`), not an invented scalar (§24.2); it
+    widens to the slowest member but always runs from the array's *first*
+    member, so it cannot be postponed indefinitely by a trickle of arrivals.
+  A member the authoritative shape does not place (a width contradiction, a slot
+  contest lost to a fresher copy) is **held unused, never refused** — a later,
+  fresher member can legitimately redefine the array, and refusing would let one
+  corrupt disk evict a healthy one from consideration. A member arriving after
+  the array started degraded is offered for placement into the live array as the
+  in-sync or stale copy its own generation says it is, never into a slot a
+  serving member holds. A refused assembly escalates the shared `RetryState`
+  instead of being retried at once, and every wait is an absolute deadline
+  strictly in the future (an array only a further member could help asks for
+  none), so the caller parks on a one-shot timer and never spins (§2.23).
+
+  **Remaining (the live service).** The program half, matched to the synthetic
+  `tairix,virtual-bus` node the kernel's arch-neutral hardware-tree bootstrap
+  must first publish, one instance. It owns `RAID_REGISTRY_ENDPOINT`, connects a
+  block client to each offered device to read its superblock itself, feeds the
+  registry, and on `Assemble` groups with `distinct_arrays`, resolves through
+  `ArrayIdentity::resolve`, places slots through the shared `fill_members`
+  bridge, and wraps the result in the `RaidArray` dispatch. Starting an array
+  degraded **bumps the generation and re-stamps the surviving members**
+  (`bump_generation` + `member_superblock`), so a member that returns later is
+  the stale rebuild target it must be rather than a copy trusted as current.
+  Each assembled array gets its own block endpoint + shared window (both created
+  by the composer, so it holds their grants) served through the **shared**
+  `blkio::serve_request_recovering` engine with its own `BlkHealth` (§2.2 — the
+  array is fault-aware exactly like a leaf device), and is published with
+  `hw_emit_node` as a `tairix,raid-array` `Storage` node under the virtual bus,
+  whereupon `devmgr` loads `volmgr` on it and the array's filesystems mount
   through the existing audited `volume_attach` path, unchanged. It does not
   build its `RtDriverHost` again after startup: `MAX_GRANTS` is a per-node
   validation bound (§24.4), and the composer learns member ids from
-  registrations, never by re-reading its accumulated grant table.
+  registrations, never by re-reading its accumulated grant table. A prerequisite
+  it must land with: the blkio block client is today volmgr's own, read-only and
+  in a `drivers/*` crate the RAID driver may not depend on (§17.4), so the one
+  client moves to `lib/*` and grows the write path the composition needs — one
+  definition both consumers read (§2.2), with volmgr keeping its read-only
+  stance as an explicit mode rather than by having no write path at all.
 - **IO6e — Maintenance driving and durable checkpoints.** The composer turns
   `ArrayMaintenance` decisions into real transfers: `note_foreground` from its
   serve path, `note_member_returned` from the IO3/IO4 recovery signals, and its
@@ -1662,10 +1710,19 @@ revoked handle number never re-issued, a narrower resource not swallowed by a
 wider held one, and `call_grant`'s fail-closed matrix mirroring
 `shm_grant_delegates_only_a_held_region_to_the_endpoints_server` (unheld grant,
 unknown recipient, owner-bound handle, bystander refused, idempotent repeat).
-Still to come with their stages: the
-composer's registration→assembly→publication decision logic over member doubles,
-including a foreign/duplicate/stale registrant refused and an array that stays
-degraded rather than assembling short. QEMU vertical: several emulated members
+Host-side, **landed with IO6d's decision half**: `RaidLevel::can_serve` per
+level (the survivable and unsurvivable loss patterns, the RAID10 pair rule, and
+the fail-closed widths), and the composer's registration → assembly →
+publication decisions over member doubles — a complete array composed with no
+wait, an incomplete one settling first, the settle window read from the members'
+own classes and widening to the slowest without restarting, a punctured stripe
+and a twice-punctured RAID5 never brought online and asking for no deadline, a
+second membership for a device already held refused, a foreign array's members
+never marked by another's publication, a stale slot claimant and a
+shape-contradicting member held unused rather than refused, a late member joined
+as the stale rebuild target it is, a refused assembly backing off and
+escalating, and the array forgotten when its last member leaves. Still to come
+with their stages — the QEMU vertical: several emulated members
 discovered, one array assembled and published, a filesystem inside it mounted
 through the unmodified `volmgr` path, a member pulled (array degrades, mount
 survives), the member returned (rebuild resumes from the persisted cursor), and
@@ -1703,5 +1760,7 @@ above — it adds a syscall (`call_grant`), fixes the defects in the kernel's
 grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
 bootstrap — so it is staged the same way. IO6a–IO6b, the security
 prerequisites, have landed, as has IO6c (the shared `lib/raid` hoist, the
-composition protocol, the emitted member node, and the member agent); IO6d
-onward remain, each stage complete and green on its own.
+composition protocol, the emitted member node, and the member agent) and IO6d's
+assembly-decision half (`compose::MemberRegistry` + the shared
+`RaidLevel::can_serve`); IO6d's live service and IO6e–IO6f remain, each stage
+complete and green on its own.

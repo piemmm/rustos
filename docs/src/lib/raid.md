@@ -63,6 +63,69 @@ The rendezvous id is reserved, so binding it demands
 that claimed the id first would be handed read/write authority over every array
 member on the machine as each agent delegated to it in turn.
 
+## Deciding when an array may be brought online (`MemberRegistry`)
+
+Members arrive one at a time and in any order, so the composer has to judge,
+each time its picture changes, whether an array is ready to serve. That
+judgement is where the data-integrity risk lives — not in the IPC around it —
+so it is pure logic in the RAID driver's library half
+(`drivers/storage/raid`, `MemberRegistry`), driven by a caller-supplied
+monotonic clock and proven host-side over member doubles. The live half reads a
+device's superblock, hands it to the registry, and does what
+`MemberRegistry::next_action` says: assemble an array, place a late member into
+one already serving, or park until a deadline.
+
+Two failures are possible, and both lose data:
+
+- **Serving an array that cannot answer for itself.** A stripe missing a
+  member, or a RAID5 missing two, has holes no redundancy can fill; publishing
+  it would hand a filesystem a device that silently cannot read parts of
+  itself. `RaidLevel::can_serve` (`lib/raidmeta`, beside `is_redundant` and
+  `data_members`) is the single definition of that question over a reassembled
+  slot table — every member for a stripe, any one copy for a mirror, one, two,
+  or three losses for the parity levels, and no *pair* wholly lost for RAID10 —
+  and an array that fails it is left unassembled rather than brought online
+  short. It answers about the slot table; each engine's own `assemble` remains
+  the authority on what the live devices can do, and the two questions compose.
+- **Starting degraded too eagerly.** A member that is merely slow — spinning
+  up, or riding out a bus blip inside its own driver's recovery grace window —
+  is not a missing member, and bringing the array up without it forces a
+  needless rebuild of a disk that was never really absent. An *incomplete*
+  array therefore waits a **settle window** before it starts degraded, while a
+  complete one is composed with no delay at all, so an array comes up at boot
+  as promptly as a plain disk.
+
+The settle window is not a number chosen on a developer's machine: it is the
+array's own hardware's recovery grace window, taken through
+`RetryCadence::for_class` and folded over the members' declared classes with
+`BlkDeviceClass::most_patient`. A rotational array waits out a spin-up; a
+solid-state one does not; a mixed array is only as impatient as its slowest
+member. The window always runs from the instant the array's *first* member
+appeared, so widening it for slow hardware can never be turned into an
+indefinite postponement by a trickle of arrivals.
+
+Everything else follows from reading the disks rather than believing the
+offers:
+
+- A member whose superblock contradicts the authoritative shape, or which loses
+  a slot contest to a fresher copy, is **held unused rather than refused**. A
+  later, fresher member can legitimately redefine the array and make it
+  placeable, and refusing would let one corrupt or hostile disk evict a healthy
+  one from consideration.
+- A member that turns up after the array started degraded is offered for
+  placement into the live array as the in-sync or stale copy its own generation
+  counter says it is — never into a slot a serving member already holds.
+- A refused assembly attempt escalates the same `RetryState` the rest of the
+  RAID layer uses rather than being retried at once, so an array whose devices
+  are unreachable is not re-probed in a tight loop.
+- Every wait the registry asks for is an absolute deadline strictly in the
+  future, and an array nothing but a further member could help asks for no
+  deadline at all, so the caller always parks on a one-shot timer and never
+  spins (`AGENTS.md` §2.23).
+- The member table grows fallibly (`try_reserve`): there is no member ceiling
+  (`AGENTS.md` §24.1) and allocation failure is a value the caller ends the
+  membership on, never a panic (§2.9).
+
 ## RAID1 mirror (`MirrorArray`)
 
 The first composition is a RAID1 mirror: every member holds a full copy of the

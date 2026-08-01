@@ -30,14 +30,29 @@
 //!
 //! [`MemberAgent`] is that lifecycle as pure, host-tested logic; the `Run`
 //! program supplies the clock, the syscalls, and the audit trail.
+//!
+//! # The composer
+//!
+//! The other half of the same `Run` binary is matched to the virtual bus the
+//! kernel publishes, and is the process every agent delegates to: it reads
+//! each offered device's own superblock, groups the devices into the arrays
+//! their metadata describes, and brings each array online as one served block
+//! device. [`MemberRegistry`] is that judgement as pure, host-tested logic —
+//! which members belong to which array, and when an array may be published
+//! without serving data it cannot vouch for — while the composition
+//! arithmetic beneath it is the shared `tairix_raid` crate.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 mod agent;
+mod compose;
 
 pub use agent::{AgentStep, MemberAgent, REOFFER_BASE_NS, REOFFER_CEILING_NS};
+pub use compose::{Admission, ComposerAction, HeldMember, MemberRegistry, MemberStanding};
 
 use tairix_abi::raid_ipc::RAID_MEMBER_COMPATIBLE;
 use tairix_abi::{DriverBindKey, HwMatchKey};

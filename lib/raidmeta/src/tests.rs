@@ -958,3 +958,66 @@ fn logical_block_count_fails_closed_on_overflow_and_underwidth() {
     assert_eq!(RaidLevel::DualParity.logical_block_count(1000, 2), None);
     assert_eq!(RaidLevel::Stripe.logical_block_count(1000, 0), None);
 }
+
+/// A slot table whose entries follow `present`: `true` fills the slot with a
+/// current member, `false` leaves it missing.
+fn slots_from<const N: usize>(present: [bool; N]) -> [SlotDisposition; N] {
+    let mut slots = [SlotDisposition::Missing; N];
+    for (tag, slot) in slots.iter_mut().enumerate() {
+        if present[tag] {
+            *slot = SlotDisposition::Present { tag, in_sync: true };
+        }
+    }
+    slots
+}
+
+#[test]
+fn a_stripe_can_serve_only_with_every_member_present() {
+    // No redundancy: a gap is a hole in the logical block space, so the array
+    // is left unassembled rather than serving reads it cannot answer.
+    assert!(RaidLevel::Stripe.can_serve(&slots_from([true, true, true])));
+    assert!(!RaidLevel::Stripe.can_serve(&slots_from([true, false, true])));
+}
+
+#[test]
+fn a_mirror_can_serve_from_any_single_surviving_copy() {
+    assert!(RaidLevel::Mirror.can_serve(&slots_from([false, false, true])));
+    assert!(!RaidLevel::Mirror.can_serve(&slots_from([false, false, false])));
+}
+
+#[test]
+fn each_parity_level_tolerates_exactly_its_syndrome_count_of_losses() {
+    // Single parity reconstructs one lost member and no more.
+    assert!(RaidLevel::Parity.can_serve(&slots_from([true, false, true, true])));
+    assert!(!RaidLevel::Parity.can_serve(&slots_from([true, false, false, true])));
+    // Double parity survives two losses, not three.
+    assert!(RaidLevel::DualParity.can_serve(&slots_from([false, true, true, false, true])));
+    assert!(!RaidLevel::DualParity.can_serve(&slots_from([false, true, false, false, true])));
+    // Triple parity survives three losses, not four.
+    assert!(RaidLevel::TripleParity.can_serve(&slots_from([false, false, true, false, true])));
+    assert!(!RaidLevel::TripleParity.can_serve(&slots_from([false, false, true, false, false])));
+}
+
+#[test]
+fn a_raid10_survives_losses_in_distinct_pairs_but_not_a_lost_pair() {
+    // One copy gone from each of the three columns: every stripe still has a
+    // source, so the array serves.
+    assert!(RaidLevel::Raid10.can_serve(&slots_from([true, false, false, true, true, false])));
+    // Both copies of the middle column gone: its stripes have no source,
+    // however healthy the other columns are.
+    assert!(!RaidLevel::Raid10.can_serve(&slots_from([true, true, false, false, true, true])));
+}
+
+#[test]
+fn can_serve_fails_closed_on_a_width_the_level_cannot_be_composed_from() {
+    // An empty table describes no array at all.
+    assert!(!RaidLevel::Mirror.can_serve(&[]));
+    // Below the level's structural floor: RAID5 needs three members, RAID6
+    // four, RAID-TP five.
+    assert!(!RaidLevel::Parity.can_serve(&slots_from([true, true])));
+    assert!(!RaidLevel::DualParity.can_serve(&slots_from([true, true, true])));
+    assert!(!RaidLevel::TripleParity.can_serve(&slots_from([true, true, true, true])));
+    // An odd RAID10 width pairs no column cleanly, so it is not an array this
+    // level can serve however many members are present.
+    assert!(!RaidLevel::Raid10.can_serve(&slots_from([true, true, true, true, true])));
+}

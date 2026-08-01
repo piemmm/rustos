@@ -51,12 +51,49 @@ which slot it holds and which generation it last saw are read from the device
 itself by the composer, through the shared on-disk metadata definition — never
 taken from the agent, which is an ordinary user-space process.
 
+## The composer's assembly decisions
+
+The other half of the same binary is the composer every agent delegates to. Its
+*judgement* — which offered devices form which array, and when an array may be
+brought online — is where the data-integrity risk lives, so it is pure logic
+(`src/compose.rs`, `MemberRegistry`) driven by a caller-supplied monotonic
+clock and proven host-side over member doubles; the live half reads a device's
+superblock, hands it in, and does what `next_action` says.
+
+Two failures are possible and both lose data, so the rules that avoid them live
+in one place:
+
+- **An array that cannot answer for itself is never published.** A stripe
+  missing a member, or a RAID5 missing two, has holes no redundancy can fill.
+  `RaidLevel::can_serve` (`lib/raidmeta`) is the single definition of that
+  question, and an array failing it is left unassembled rather than brought
+  online short.
+- **A complete array is composed at once; an incomplete one settles first.** A
+  member that is merely spinning up, or riding out a bus blip inside its own
+  driver's grace window, is not a missing member, and starting without it
+  forces a needless rebuild. The wait is that hardware's own recovery grace
+  window (`RetryCadence::for_class`, folded over the members' declared classes
+  with `BlkDeviceClass::most_patient`), and it runs from the array's first
+  member, so widening it for a slow disk can never become an indefinite
+  postponement.
+
+A member the authoritative shape does not place — one contradicting the array's
+width, or losing a slot contest to a fresher copy — is held unused rather than
+refused: a later, fresher member can legitimately redefine the array, and
+refusing would let one corrupt disk evict a healthy one from consideration. A
+member that turns up after the array started degraded is placed into the live
+array as the in-sync or stale copy its own generation counter says it is, never
+into a slot a serving member already holds. A refused assembly escalates the
+shared `RetryState` instead of being retried at once, every wait is a deadline
+strictly in the future, and the member table grows fallibly, so there is no
+member ceiling and allocation failure is a value rather than a panic.
+
 ## Required capabilities
 
-`CAP_IPC_ENDPOINT` (delegate its one granted block endpoint and post the
-offer), `CAP_SHM` (delegate its one granted data window), and `CAP_LOG_EMIT`
-(diagnostics). No MMIO, DMA, IRQ, node-emission, or mount authority, and no
-filesystem access.
+The member agent holds `CAP_IPC_ENDPOINT` (delegate its one granted block
+endpoint and post the offer), `CAP_SHM` (delegate its one granted data window),
+and `CAP_LOG_EMIT` (diagnostics). No MMIO, DMA, IRQ, node-emission, or mount
+authority, and no filesystem access.
 
 Two properties bound what a compromised agent could do. It can delegate only a
 resource it already holds a grant for, so it can never hand over another
@@ -82,12 +119,25 @@ ceiling, a release and a vanished composer both lead to a re-offer, a refusal
 stops the agent for good, and a successful offer clears a previous outage's
 escalation. The escalation arithmetic underneath is proven once in `lib/raid`.
 
+The composer's decisions are proven the same way (`src/compose/tests.rs`): a
+complete array is composed with no wait at all while an incomplete one settles
+first; the settle window is read from the members' own declared classes and
+widens to the slowest of them without restarting; an array its members cannot
+serve — a punctured stripe, a twice-punctured RAID5 — is never brought online
+and asks for no deadline; composing one array marks only its own members; a
+member that turns up late joins the array already serving as the stale rebuild
+target it is; a stale claimant of an occupied slot and a member that disagrees
+about the array's shape are both held unused rather than refused; a refused
+assembly backs off and escalates; and releasing the last member forgets the
+array. The reassembly and escalation arithmetic underneath is proven once in
+`lib/raidmeta` and `lib/raid`.
+
 The live path — a real delegation to a real composer — arrives with the
-composer itself (`plans/FIX-IO.md` IO6d) and its QEMU vertical.
+composer's serving half (`plans/FIX-IO.md` IO6d) and its QEMU vertical.
 
 ## Scope
 
-Only the member agent so far. The composer half — matched to the synthetic
-virtual bus, accumulating offers, assembling each array through the shared
-engines and publishing it as its own block-service node — is staged as IO6d
-onward in `plans/FIX-IO.md` §2.6.
+The member agent and the composer's assembly decisions. The composer's live
+half — matched to the synthetic virtual bus, connecting to each offered device,
+composing each array through the shared engines and publishing it as its own
+block-service node — is staged as IO6d onward in `plans/FIX-IO.md` §2.6.
