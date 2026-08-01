@@ -49,7 +49,7 @@
 //!
 //! The bootstrap-floor disk type `B` (virtio-blk on the QEMU `virt` / x86_64
 //! root, EMMC2 on the Raspberry Pi 4) is dynamic in one binary, so the
-//! concrete `ARXFS<PartitionBlock<SharedBlockHandle<'static, B>>>` differs
+//! concrete `ARXFS<PartitionBlock<BorrowedBlockWindow<'static, B>>>` differs
 //! per board. The boot-time [`LateFilesystem`] / [`MountedFilesystemService`]
 //! statics must be a *single* concrete type, so the mounted driver is erased
 //! behind [`KernelFs`] (a `Box<dyn KernelFs>`); the forwarding impls below

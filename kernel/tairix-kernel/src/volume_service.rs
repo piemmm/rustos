@@ -103,6 +103,7 @@ use tairix_partition::PartitionBlock;
 use tairix_sync::{OnceCell, SpinLock};
 
 use crate::kernel_fs::KernelFs;
+use crate::shared_block::{OwnedBlockWindow, SharedBlock};
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::volume_policy::{GroupMappedFs, LATE_STORAGE_GID};
 
@@ -342,6 +343,10 @@ pub struct RuntimeVolumeService {
     /// parking; guards are held only for lookups and brief mutations,
     /// never across device I/O.
     state: SpinLock<Vec<AttachedVolume>>,
+    /// The served block devices the attached volumes live on, one entry
+    /// per block-service endpoint ([`SharedDevice`]). Mutated only under
+    /// the operation lock; the guard is never held across device I/O.
+    devices: SpinLock<Vec<SharedDevice>>,
     /// The next mount handle to mint.
     next_handle: AtomicU64,
 }
@@ -358,6 +363,7 @@ impl RuntimeVolumeService {
             wiring: OnceCell::new(),
             op: SleepLock::new(()),
             state: SpinLock::new(Vec::new()),
+            devices: SpinLock::new(Vec::new()),
             next_handle: AtomicU64::new(VOLUME_HANDLE_BASE + 1),
         }
     }
@@ -374,6 +380,85 @@ impl RuntimeVolumeService {
         match self.wiring.get() {
             Ok(Some(wiring)) => Ok(wiring),
             _ => Err(Errno::NotImplemented),
+        }
+    }
+
+    /// The shared device serving `request`'s endpoint, connecting it on
+    /// first use.
+    ///
+    /// Every volume on one disk shares the single connected client, because
+    /// they share the one staging window the transfers move bytes through
+    /// (see [`SharedDevice`]). Entries are keyed by the endpoint **and** the
+    /// window: sharing is only safe for consumers staging bytes in the same
+    /// buffer, and a device presenting a different window is a different
+    /// staging buffer, so it gets its own client rather than being folded
+    /// onto a stale one. Entries no attached volume names any more are
+    /// dropped first, so a torn-down endpoint's client can never be handed
+    /// to a device that later re-uses its id.
+    ///
+    /// Runs under the caller's operation lock; the registry guard is taken
+    /// only for the lookup and the insertion, never across the connect.
+    ///
+    /// # Errors
+    ///
+    /// `(cause, errno)` pairs the attach path audits through its refusal
+    /// helper.
+    fn shared_device(
+        &self,
+        request: &VolumeAttachRequest<'_>,
+        wiring: &Wiring,
+    ) -> Result<SharedDevice, (&'static str, Errno)> {
+        self.retire_unused_devices();
+        let existing = {
+            let devices = self.devices.lock();
+            devices
+                .iter()
+                .find(|d| d.endpoint == request.endpoint && d.window == request.window)
+                .cloned()
+        };
+        if let Some(device) = existing {
+            return Ok(device);
+        }
+        let device = connect_device(request, wiring)?;
+        self.devices.lock().push(device.clone());
+        Ok(device)
+    }
+
+    /// The registered shared device serving `endpoint` over `window`, if it
+    /// is still connected.
+    fn device_for(&self, endpoint: u64, window: u64) -> Option<SharedDevice> {
+        let devices = self.devices.lock();
+        devices
+            .iter()
+            .find(|d| d.endpoint == endpoint && d.window == window)
+            .cloned()
+    }
+
+    /// Drop every shared device no attached volume names any more, closing
+    /// its client and releasing its window hold.
+    ///
+    /// Called at the head of an attach or detach, both of which hold the
+    /// operation lock: the surprise-removal path runs in endpoint-teardown
+    /// context and only marks volumes, so it never drops a client there.
+    fn retire_unused_devices(&self) {
+        let live: Vec<(u64, u64)> = {
+            let state = self.state.lock();
+            state.iter().map(|v| (v.endpoint, v.window)).collect()
+        };
+        // Each retired entry is dropped *outside* the registry guard:
+        // releasing the last reference closes the client and its window
+        // hold, which must not run under a spin lock.
+        loop {
+            let retired = {
+                let mut devices = self.devices.lock();
+                devices
+                    .iter()
+                    .position(|d| !live.contains(&(d.endpoint, d.window)))
+                    .map(|index| devices.swap_remove(index))
+            };
+            if retired.is_none() {
+                break;
+            }
         }
     }
 
@@ -446,7 +531,7 @@ struct OpenedVolume {
 /// read/write. `None` (the gid cell not yet installed, or a format with
 /// a real owner model) leaves the driver unwrapped.
 fn open_filesystem(
-    window: PartitionBlock<JournaledBlock<BlkClient>>,
+    window: PartitionBlock<JournaledBlock<OwnedBlockWindow<BlkClient>>>,
     fstype: VolumeFsType,
     read_only: bool,
     map_gid: Option<GroupId>,
@@ -553,13 +638,47 @@ fn register_with_health(
     Ok(())
 }
 
-/// The device transport an attach or recovery operates over: the
-/// connected kernel blkio client with its write policy and geometry, the
-/// requested extent already validated against the live device.
-struct ConnectedDevice {
-    client: BlkClient,
+/// One served block device, connected once and shared by every runtime
+/// volume that lives on it.
+///
+/// A disk carries several volumes (its partitions), and each of them drives
+/// the **same** served device over the **same** single shared data window:
+/// the block-service protocol stages each transfer's bytes in that window, so
+/// two clients issuing requests over it concurrently would overwrite each
+/// other's staged bytes and hand a reader another volume's data. The device
+/// is therefore connected once per block-service endpoint and reached through
+/// [`SharedBlock`], whose sleeping lock serialises whole device operations —
+/// so the window holds exactly one transfer at a time by construction.
+///
+/// Sharing the client also gives a disk one health fold rather than a
+/// divergent copy per volume: the reported-health overlay and the I/O
+/// counters are properties of the device, not of a mount.
+#[derive(Clone)]
+struct SharedDevice {
+    /// The block-service endpoint the device is served over; the registry
+    /// key.
+    endpoint: u64,
+    /// The shared data window's region id, as the attach declared it.
+    window: u64,
+    /// The one client, shared and serialised.
+    device: Arc<SharedBlock<BlkClient>>,
+    /// The device's write policy, read once at connect.
     read_only: bool,
-    block_size: u32,
+    /// The device's reported-health overlay, folded once for every volume
+    /// on the device.
+    health: VolumeHealthSource,
+}
+
+impl SharedDevice {
+    /// A fresh window onto the shared device for one mount to own.
+    fn window(&self) -> OwnedBlockWindow<BlkClient> {
+        self.device.owned_handle()
+    }
+
+    /// The device's block size, from the geometry cached at connect.
+    fn block_size(&self) -> u32 {
+        self.device.geometry().block_size
+    }
 }
 
 /// Connect the kernel blkio client for `request` and validate the
@@ -572,7 +691,7 @@ struct ConnectedDevice {
 fn connect_device(
     request: &VolumeAttachRequest<'_>,
     wiring: &Wiring,
-) -> Result<ConnectedDevice, (&'static str, Errno)> {
+) -> Result<SharedDevice, (&'static str, Errno)> {
     // Reach the shared data window through the kernel's counted hold.
     let hold = kernel_hold(installed_shared_mem_facility(), request.window)
         .map_err(|err| ("window_unreachable", err))?;
@@ -580,22 +699,38 @@ fn connect_device(
     let client = BlkClient::connect(request.endpoint, hold, wiring.audit)
         .map_err(|err| ("endpoint_unusable", err))?;
     let read_only = client.read_only();
-    // Bound the requested extent by the live geometry.
-    let geometry = client
-        .geometry()
-        .map_err(|err| ("geometry_unreadable", err.as_errno()))?;
+    let health = client.health_source();
+    // Wrapping caches the geometry, so the shared device answers it
+    // lock-free; a device whose geometry cannot be read is never wrapped.
+    let device = SharedBlock::new(client).map_err(|err| ("geometry_unreadable", err.as_errno()))?;
+    Ok(SharedDevice {
+        endpoint: request.endpoint,
+        window: request.window,
+        device: Arc::new(device),
+        read_only,
+        health,
+    })
+}
+
+/// Bound the requested extent by the device's live geometry.
+///
+/// # Errors
+///
+/// The `(cause, errno)` pair the attach path audits when the extent runs
+/// past the end of the device (fail closed — never a clamped window).
+fn validate_extent(
+    request: &VolumeAttachRequest<'_>,
+    device: &SharedDevice,
+) -> Result<(), (&'static str, Errno)> {
+    let block_count = device.device.geometry().block_count;
     if request
         .first_lba
         .checked_add(request.blocks)
-        .is_none_or(|end| end > geometry.block_count)
+        .is_none_or(|end| end > block_count)
     {
         return Err(("extent_out_of_range", Errno::LengthOutOfRange));
     }
-    Ok(ConnectedDevice {
-        client,
-        read_only,
-        block_size: geometry.block_size,
-    })
+    Ok(())
 }
 
 /// Read the first `len` bytes of the requested extent, rounded up to
@@ -603,8 +738,8 @@ fn connect_device(
 /// length is the rounded figure). `None` when the geometry is degenerate,
 /// the extent is too short, the allocation is refused, or the device
 /// refuses the read — the caller fails closed, never guesses.
-fn read_extent_head(
-    client: &mut BlkClient,
+fn read_extent_head<B: Block>(
+    client: &mut B,
     request: &VolumeAttachRequest<'_>,
     block_size: u32,
     len: usize,
@@ -663,8 +798,8 @@ fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
 /// mutation-evidence shadow seeded from the probed extent `head` (D4c).
 /// A volume with no declared window (or an unreadable one) simply holds
 /// no evidence; a later re-insert then fails closed to the conflict path.
-fn seeded_journal(
-    client: &mut BlkClient,
+fn seeded_journal<B: Block>(
+    client: &mut B,
     request: &VolumeAttachRequest<'_>,
     block_size: u32,
     head: Option<&[u8]>,
@@ -771,11 +906,15 @@ impl VolumeService for RuntimeVolumeService {
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
-        let ConnectedDevice {
-            mut client,
-            read_only,
-            block_size,
-        } = connect_device(request, wiring).map_err(|(cause, errno)| refused(cause, errno))?;
+        // Every volume on this disk drives the one shared client over the
+        // one staging window, serialised (see `SharedDevice`).
+        let device = self
+            .shared_device(request, wiring)
+            .map_err(|(cause, errno)| refused(cause, errno))?;
+        validate_extent(request, &device).map_err(|(cause, errno)| refused(cause, errno))?;
+        let read_only = device.read_only;
+        let block_size = device.block_size();
+        let mut disk = device.window();
 
         // A re-insert of a surprise-removed volume is recovered in place
         // — proven unmutated and replayed, or held read-only with its
@@ -783,22 +922,22 @@ impl VolumeService for RuntimeVolumeService {
         // extent head names the volume's durable identity; a head that
         // matches nothing simply attaches fresh.
         let head = read_extent_head(
-            &mut client,
+            &mut disk,
             request,
             block_size,
             tairix_fsprobe::PROBE_HEAD_LEN,
         );
         if let Some(target) = self.reinsert_target(head.as_deref()) {
-            return self.recover(request, wiring, client, read_only, block_size, &target);
+            return self.recover(request, wiring, &device, &target);
         }
 
         // Thread the device through the uncommitted-write journal, its
         // mutation-evidence shadow seeded from the extent head.
-        let journal = seeded_journal(&mut client, request, block_size, head.as_deref());
-        // Keep the block client's reported-health overlay for the mount
-        // snapshot before the journal chain consumes the client.
-        let health = client.health_source();
-        let journaled = JournaledBlock::new(client, Arc::clone(&journal), wiring.pressure);
+        let journal = seeded_journal(&mut disk, request, block_size, head.as_deref());
+        // The device's reported-health overlay, shared by every volume on
+        // it, for the mount snapshot.
+        let health = device.health.clone();
+        let journaled = JournaledBlock::new(disk, Arc::clone(&journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
 
@@ -884,6 +1023,7 @@ impl VolumeService for RuntimeVolumeService {
         let audit = wiring.audit;
         // Serialise whole attach/detach operations (see the struct docs).
         let _op = self.op.lock();
+        self.retire_unused_devices();
 
         // Snapshot the entry's facts; the registry guard is never held
         // across the device I/O below.
@@ -929,7 +1069,8 @@ impl VolumeService for RuntimeVolumeService {
         // when nothing can be committed does it discard.
         let commit_refusal = match availability {
             Availability::Available => {
-                commit_for_detach(handle, endpoint, window, &journal, audit).err()
+                commit_for_detach(handle, self.device_for(endpoint, window).as_ref(), &journal)
+                    .err()
             }
             Availability::UnavailableDirty => {
                 Some(("volume_unavailable_dirty", Errno::DeviceFault))
@@ -974,6 +1115,10 @@ impl VolumeService for RuntimeVolumeService {
         let _ = vfs.mounts_write().unmount(&path);
         let _ = LATE_FILESYSTEM.unregister(handle);
         let _ = VOLUME_FOREST.unpublish(&request.volume_id);
+        // The disk's last volume just went: close the shared client and
+        // release its window hold rather than holding them until the next
+        // storage operation.
+        self.retire_unused_devices();
         audit_detach_outcome(audit, &name, discarded);
         Ok(())
     }
@@ -1036,10 +1181,8 @@ fn audit_detach_outcome(
 /// discarded here — that is the caller's audited force path).
 fn commit_for_detach(
     handle: DriverHandle,
-    endpoint: u64,
-    window: u64,
+    device: Option<&SharedDevice>,
     journal: &Arc<SpinLock<RetainedWrites>>,
-    audit: &'static (dyn Sink + Sync),
 ) -> Result<(), (&'static str, Errno)> {
     let driver = LATE_FILESYSTEM
         .driver(handle)
@@ -1048,24 +1191,41 @@ fn commit_for_detach(
         .lock()
         .flush()
         .map_err(|err| ("filesystem_flush_failed", err.as_errno()))?;
-    match kernel_hold(installed_shared_mem_facility(), window)
-        .and_then(|hold| BlkClient::connect(endpoint, hold, audit))
-    {
-        Ok(mut client) => match client.flush() {
-            Ok(()) | Err(DriverError::Unsupported) => {
-                journal.lock().commit();
-                Ok(())
-            }
-            Err(err) => Err(("device_flush_failed", err.as_errno())),
-        },
-        Err(Errno::NotFound) => {
-            if journal.lock().is_dirty() {
-                Err(("device_vanished_dirty", Errno::DeviceFault))
+    // The device cache is flushed through the volume's own shared window,
+    // so the flush is serialised against the sibling volumes still driving
+    // the same disk rather than racing them over the one staging buffer.
+    //
+    // A device that vanished mid-detach cannot be committed to at all, which
+    // is tolerable only when nothing was uncommitted. That is asked of the
+    // endpoint registry rather than inferred from the failure class, so a
+    // genuine flush failure on a *live* device is never mistaken for a
+    // vanished one and quietly tolerated.
+    let Some(device) = device else {
+        return vanished_commit(journal);
+    };
+    match device.window().flush() {
+        Ok(()) | Err(DriverError::Unsupported) => {
+            journal.lock().commit();
+            Ok(())
+        }
+        Err(err) => {
+            if tairix_kernel_core::callreg::contains(EndpointId(device.endpoint)) {
+                Err(("device_flush_failed", err.as_errno()))
             } else {
-                Ok(())
+                vanished_commit(journal)
             }
         }
-        Err(err) => Err(("device_unreachable", err)),
+    }
+}
+
+/// The commit verdict for a volume whose device vanished before its cache
+/// could be flushed: tolerated when nothing was uncommitted, refused when
+/// the journal still holds writes the medium never took.
+fn vanished_commit(journal: &Arc<SpinLock<RetainedWrites>>) -> Result<(), (&'static str, Errno)> {
+    if journal.lock().is_dirty() {
+        Err(("device_vanished_dirty", Errno::DeviceFault))
+    } else {
+        Ok(())
     }
 }
 
@@ -1160,9 +1320,9 @@ impl RuntimeVolumeService {
     /// the retained writes onto it, or name the conflict that forbids
     /// replay (`plans/DEVICES.md` D4c). Any doubt is a conflict — never a
     /// silent merge.
-    fn attempt_replay(
+    fn attempt_replay<B: Block>(
         request: &VolumeAttachRequest<'_>,
-        client: &mut BlkClient,
+        client: &mut B,
         block_size: u32,
         target: &RecoveryTarget,
         device_read_only: bool,
@@ -1224,11 +1384,12 @@ impl RuntimeVolumeService {
         &self,
         request: &VolumeAttachRequest<'_>,
         wiring: &Wiring,
-        mut client: BlkClient,
-        device_read_only: bool,
-        block_size: u32,
+        device: &SharedDevice,
         target: &RecoveryTarget,
     ) -> Result<(), Errno> {
+        let device_read_only = device.read_only;
+        let block_size = device.block_size();
+        let mut disk = device.window();
         let audit = wiring.audit;
         let refused = |cause: &'static str, errno: Errno| -> Errno {
             RuntimeVolumeService::audit_event(
@@ -1245,17 +1406,17 @@ impl RuntimeVolumeService {
             .map_err(|err| refused("no_mount_table", err))?;
 
         let outcome =
-            Self::attempt_replay(request, &mut client, block_size, target, device_read_only);
+            Self::attempt_replay(request, &mut disk, block_size, target, device_read_only);
         let conflict = matches!(outcome, RecoveryOutcome::Conflict(_));
         // A conflicted volume returns read-only until its retained set is
         // explicitly discarded; a proven one returns per the device.
         let read_only = device_read_only || conflict;
 
-        // Rebuild the volume over the retained journal and new transport.
-        // Keep the block client's reported-health overlay for the remounted
-        // volume before the client is consumed by the journal chain.
-        let health = client.health_source();
-        let journaled = JournaledBlock::new(client, Arc::clone(&target.journal), wiring.pressure);
+        // Rebuild the volume over the retained journal and the re-inserted
+        // device's shared window, carrying the device's reported-health
+        // overlay onto the remounted volume.
+        let health = device.health.clone();
+        let journaled = JournaledBlock::new(disk, Arc::clone(&target.journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
         let map_gid = identity_map_gid(request.fstype);

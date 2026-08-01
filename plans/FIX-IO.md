@@ -103,6 +103,20 @@ recovery (`plans/WATCHDOG.md`).
 8. **No self-compat, no dead code (§2.13, §2.14).** The deadline-less block
    path and the success-or-`errno`-only `BlkCompletion` are replaced in place,
    with every consumer updated in the same change. No v1/v2 seam, no shim.
+9. **A device's shared data window has exactly one user at a time.** The
+   block-service protocol stages a transfer's payload bytes in the device's
+   one shared window, so two transfers in flight on one device would overwrite
+   each other's staged bytes and hand a reader another extent's data — silent
+   corruption, not a fault, and invisible to a checksum-less filesystem. Every
+   consumer of a device therefore drives it through **one** client, and that
+   is enforced structurally rather than by convention: in the kernel by
+   connecting once per block-service endpoint and sharing the client behind
+   the `SharedBlock` sleeping lock (which also gives a disk one health fold
+   rather than a divergent copy per mount), and across processes by ordering
+   the phases so a prober drops its transport before the mounts it creates
+   begin (the dropped borrow makes a later probe read a compile error). This
+   is the isolation invariant (2) applied *within* one device: a disk's
+   volumes share the hardware, so they must share its serialisation.
 
 ---
 
@@ -292,6 +306,36 @@ Landed:
   transient blip that resolves inside the retry budget is ridden out (correct
   data returned), and a device that resets on every attempt fails closed as
   `Busy` at the budget.
+- **One client per device, so a disk's volumes share its one staging window**
+  (invariant 9). Isolating *devices* from each other is only half of it: the
+  consumers of a single device shared its endpoint but each opened a private
+  `BlkClient` over the *same* shared data window, so two partitions of one
+  disk (and the detach-time device-cache flush) could stage transfers in that
+  one buffer concurrently and read back each other's bytes. The kernel now
+  connects a device **once per block-service endpoint**
+  (`RuntimeVolumeService::shared_device`) and hands every volume an owned
+  window onto that one client behind `SharedBlock`'s sleeping lock, so whole
+  device operations serialise; the client (and its window hold) is released
+  when the disk's last volume goes, and a later attach connects afresh rather
+  than resurrecting a retired entry — so a torn-down endpoint's client can
+  never be handed to a device that re-uses its id. `SharedBlock` gained the
+  owned (`Arc`-backed) window flavour a long-lived mount needs, sharing the
+  one `Block` implementation with the borrowing flavour so the two cannot
+  diverge in what they serialise. The device's reported-health overlay and
+  I/O counters are now folded once per *device* rather than once per mount
+  (they were always device properties). Across processes the same window was
+  shared between volmgr's probe and the mounts it was creating — volmgr
+  attached each volume from inside its probe callback — so the kernel drove
+  the disk while the probe was still reading through the buffer. volmgr now
+  probes to completion, **drops** its transport, and only then attaches; the
+  dropped borrow makes a later probe read a compile error. Proven host-side
+  in the volume-service lifecycle harness: two FAT32 volumes on one served
+  disk attach over one client (the served double counts the geometry queries
+  that only a *connect* issues), each serves and rewrites its own extent's
+  bytes, the detach-time flush reuses that client, a sibling's detach never
+  closes a device another volume is mounted on, and a fresh attach after the
+  last detach reconnects — plus the owned-window unit tests in
+  `shared_block`.
 - **The affected volume is marked degraded, not just its callers.** The
   kernel `BlkClient` folds every completion's reported `BlkStatus` through the
   single shared `MountAvailability::from_block_status` mapping (`lib/abi`,

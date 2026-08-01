@@ -121,6 +121,11 @@ impl BlkHealthCountersAtomic {
 /// overlay the client updates on every completion, and the cumulative
 /// [`BlkHealthCountersAtomic`] the client folds. It carries no capability
 /// token and no secret.
+///
+/// It is cloneable because a device's health is a property of the *device*,
+/// not of a mount: every volume on one disk registers the same handles, so
+/// they all read one fold rather than a divergent copy each.
+#[derive(Clone)]
 pub struct VolumeHealthSource {
     /// The block-service call-endpoint id serving this volume's device.
     pub dev: u64,

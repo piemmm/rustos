@@ -45,6 +45,9 @@
 //! every port shares this one definition and the per-device bring-up
 //! (virtio-blk, EMMC2, …) wraps its brought-up device in it.
 
+use alloc::sync::Arc;
+use core::ops::Deref;
+
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
@@ -101,11 +104,34 @@ impl<B: Block> SharedBlock<B> {
         self.geometry
     }
 
-    /// A new independent window onto the shared device. Each handle is a
-    /// [`Block`]; the underlying device serialises their operations.
+    /// The device's declared class (lock-free; see the module docs).
     #[must_use]
-    pub fn handle(&self) -> SharedBlockHandle<'_, B> {
+    pub fn device_class(&self) -> BlkDeviceClass {
+        self.class
+    }
+
+    /// A new independent window onto the shared device, borrowing it. Each
+    /// handle is a [`Block`]; the underlying device serialises their
+    /// operations.
+    #[must_use]
+    pub fn handle(&self) -> BorrowedBlockWindow<'_, B> {
         SharedBlockHandle { shared: self }
+    }
+
+    /// A new independent window that **owns** a counted reference to the
+    /// shared device, so it may outlive the scope that opened it.
+    ///
+    /// This is the window a runtime mount takes: the mounted filesystem
+    /// driver is stored in the mount registry and long outlives the attach
+    /// call, and several mounts of one disk's partitions must reach the same
+    /// device — the shared client and its single data window — rather than
+    /// each opening a private one. The last window dropped releases the
+    /// device.
+    #[must_use]
+    pub fn owned_handle(self: &Arc<Self>) -> OwnedBlockWindow<B> {
+        SharedBlockHandle {
+            shared: Arc::clone(self),
+        }
     }
 }
 
@@ -144,18 +170,35 @@ unsafe impl<B: Block> Send for SharedBlock<B> {}
 // serialised down to one device operation at a time.
 unsafe impl<B: Block> Sync for SharedBlock<B> {}
 
-/// One window onto a [`SharedBlock`]. It is itself a [`Block`]: every
-/// operation locks the shared device for the duration of the single device
-/// call, so concurrent handles never interleave a device operation.
+/// One window onto a [`SharedBlock`], reached through `R`. It is itself a
+/// [`Block`]: every operation locks the shared device for the duration of the
+/// single device call, so concurrent handles never interleave a device
+/// operation.
 ///
-/// Handles are cheap (a borrow of the [`SharedBlock`]) and independent: two
-/// handles may be open at once — e.g. the read-only `/System` driver-store
-/// window and the encrypted-root unlock window over the one boot disk.
-pub struct SharedBlockHandle<'a, B: Block> {
-    shared: &'a SharedBlock<B>,
+/// Handles are independent and several may be open at once — e.g. the
+/// read-only `/System` driver-store window and the encrypted-root unlock
+/// window over the one boot disk, or one window per mounted partition of a
+/// runtime-attached disk.
+///
+/// `R` is how the window reaches the shared device, and is the only
+/// difference between the two flavours: [`BorrowedBlockWindow`] holds a plain
+/// `&SharedBlock` for a window that lives inside the scope that opened it,
+/// [`OwnedBlockWindow`] holds an `Arc` for one that must outlive it. Both go
+/// through this single [`Block`] implementation, so the two flavours cannot
+/// drift apart in what they serialise.
+pub struct SharedBlockHandle<R> {
+    shared: R,
 }
 
-impl<B: Block> Block for SharedBlockHandle<'_, B> {
+/// A [`SharedBlockHandle`] that borrows the shared device for the scope that
+/// opened it.
+pub type BorrowedBlockWindow<'a, B> = SharedBlockHandle<&'a SharedBlock<B>>;
+
+/// A [`SharedBlockHandle`] that holds a counted reference to the shared
+/// device, so the window may outlive the scope that opened it.
+pub type OwnedBlockWindow<B> = SharedBlockHandle<Arc<SharedBlock<B>>>;
+
+impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R> {
     /// The shared device's own class, so a consumer reached through this
     /// window serves the real hardware's I/O budget rather than the
     /// unclassified default. Served from the cache, like the geometry.
@@ -257,7 +300,7 @@ impl<B: Block> DriverStoreService<B> {
     /// the `SharedBlock` lock serialises device operations across windows, so the autoload window and the encrypted-root unlock
     /// window never interleave a device operation.
     #[must_use]
-    pub fn window(&self) -> SharedBlockHandle<'_, B> {
+    pub fn window(&self) -> BorrowedBlockWindow<'_, B> {
         self.shared.handle()
     }
 
@@ -509,6 +552,68 @@ mod tests {
             handle.device_health().unwrap(),
             DeviceHealth::Available(_)
         ));
+    }
+
+    #[test]
+    fn an_owned_window_outlives_the_scope_that_opened_it() {
+        // The runtime-mount case: the filesystem driver built over the
+        // window is stored in the mount registry and long outlives the
+        // attach call that opened it, so the window must own its reference
+        // to the device rather than borrow it.
+        let mut window = {
+            let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
+            shared.owned_handle()
+        };
+        let payload = [0x7Eu8; 64];
+        window.write_blocks(3, &payload).unwrap();
+        let mut readback = [0u8; 64];
+        window.read_blocks(3, &mut readback).unwrap();
+        assert_eq!(readback, payload);
+    }
+
+    #[test]
+    fn owned_windows_drive_the_one_shared_device() {
+        // Two mounted partitions of one disk: each holds its own window,
+        // both reach the one device, and the lock serialises them.
+        let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
+        let mut first = shared.owned_handle();
+        let mut second = shared.owned_handle();
+        let payload = [0x2Bu8; 64];
+        first.write_blocks(4, &payload).unwrap();
+        let mut readback = [0u8; 64];
+        second.read_blocks(4, &mut readback).unwrap();
+        assert_eq!(
+            readback, payload,
+            "the second window sees the first's write"
+        );
+    }
+
+    #[test]
+    fn the_device_is_released_when_the_last_owned_window_drops() {
+        // The device (and, in production, its client and window hold) must
+        // go when the disk's last mount does — not linger.
+        let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
+        let first = shared.owned_handle();
+        let second = shared.owned_handle();
+        assert_eq!(Arc::strong_count(&shared), 3);
+        drop(first);
+        drop(second);
+        assert_eq!(
+            Arc::strong_count(&shared),
+            1,
+            "dropping the windows releases their references"
+        );
+    }
+
+    #[test]
+    fn an_owned_window_reports_the_shared_device_class_and_geometry() {
+        // Both window flavours answer from the one cache, so a consumer
+        // above the sharing boundary still derives the real device's I/O
+        // budget rather than the unclassified default.
+        let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
+        let window = shared.owned_handle();
+        assert_eq!(window.device_class(), shared.device_class());
+        assert_eq!(window.geometry().unwrap(), shared.geometry());
     }
 
     #[test]

@@ -37,6 +37,47 @@ mapping is per-consumer-agnostic, a fault on one device surfaces only to that
 device's callers while every other mount keeps running (`plans/FIX-IO.md`
 IO1/IO2).
 
+## The shared data window has exactly one user at a time
+
+A served block device is reached over **two** things: a call endpoint that
+carries the fixed-size `BlkRequest`/`BlkCompletion` frames, and a **shared
+data window** that the payload bytes themselves are staged in. The request
+frame names an offset and a length; the driver writes the read bytes into
+that window, or reads the write bytes out of it. The window is a property of
+the *device*, not of a consumer: one node, one window.
+
+That makes the window a **critical section**. Two transfers in flight on one
+device would each stage bytes in the same buffer, so one would overwrite the
+other's payload and a reader would be handed bytes belonging to a different
+extent — silent corruption rather than a fault, and exactly the kind of defect
+a checksum-less filesystem would never notice. The rule is therefore absolute:
+
+> A device's data window has one user at a time, and every consumer of that
+> device drives it through one client.
+
+It is upheld structurally, never by convention:
+
+- **In the kernel**, the runtime volume service connects a device **once per
+  block-service endpoint** and shares that one client behind
+  `SharedBlock`'s sleeping lock, so every volume on a disk — each partition's
+  mount, and the detach-time device-cache flush — serialises whole operations
+  onto it. A mount holds an *owned* window (`OwnedBlockWindow`) because the
+  filesystem driver long outlives the attach call that opened it; the last
+  window dropped closes the client and releases its window hold. Sharing the
+  client also gives a disk **one** health fold and one set of I/O counters
+  rather than a divergent copy per mount, which is the honest reading anyway:
+  health is a property of the device.
+- **Across processes**, the volume manager and the kernel's mounts are ordered
+  rather than interleaved. The manager probes the whole device, **drops** its
+  transport, and only then asks the kernel to attach the volumes it found.
+  Dropping the client consumes the window borrow, so it is the compiler — not
+  a comment — that stops a later probe read from racing the mounts it just
+  created.
+
+A serving driver correspondingly resolves the window a request names and may
+refuse a request naming a window it was never granted (fail closed); it never
+assumes the requester is alone.
+
 ## The declared device class
 
 How patient a consumer should be with a device is a property of the *device*: a
@@ -705,8 +746,15 @@ declared partition types are hints the probe ignores), and the
 deterministic naming policy (the volume's own label sanitised through
 the alias character rules, else `<fstype><n>`; a name collision appends
 the volume-identity fingerprint, lengthened per retry, so re-inserting
-the same volume re-derives the same name). Each recognised volume is
-handed to the kernel through the `CAP_FS_MOUNT`-gated, audited
+the same volume re-derives the same name).
+
+It runs in **two ordered phases**, because the probe and the mounts it
+creates would otherwise be two concurrent users of the device's one staging
+window (see "The shared data window has exactly one user at a time"). First
+the whole device is probed and every recognised volume recorded; then the
+blkio transport is *dropped*, which consumes the window borrow so no further
+probe read can compile; only then is each recorded volume handed to the
+kernel through the `CAP_FS_MOUNT`-gated, audited
 `volume_attach` syscall — the kernel re-validates the grants, extent,
 and name, opens the filesystem itself, mounts under `/Storage/<name>`,
 and publishes the durable `id::` root. The instance then exits `0`

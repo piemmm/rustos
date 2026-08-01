@@ -186,10 +186,18 @@ impl Block for RamBlock {
     }
 }
 
-/// The served device: image bytes plus a flush counter.
+/// The served device: image bytes, a flush counter, and a count of the
+/// geometry queries served.
+///
+/// The geometry count is how many times a consumer *connected* to this
+/// device: connecting is the only thing that asks for the geometry, so the
+/// count is the observable form of "how many block clients exist for this
+/// one device" — the fact every volume on a disk must share one
+/// (`plans/FIX-IO.md`).
 struct ServedDevice {
     block: RamBlock,
     flushes: usize,
+    geometries: usize,
 }
 
 /// Serve blkio requests over `endpoint` against `device`, moving data
@@ -215,6 +223,7 @@ fn serve(
                     let bytes = request.blocks as usize * BLOCK_SIZE;
                     match request.op {
                         BlkOp::Geometry => {
+                            device.geometries += 1;
                             let geometry = device.block.geometry().unwrap();
                             BlkCompletion {
                                 block_size: geometry.block_size,
@@ -446,6 +455,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: image,
         flushes: 0,
+        geometries: 0,
     }));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
@@ -535,6 +545,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     forced_unmount_of_a_healthy_volume_scenario(window_ptr, facility);
     verified_reinsert_replays_scenario(window_ptr, facility);
     mutated_reinsert_conflicts_scenario(window_ptr, facility);
+    sibling_volumes_share_one_client_scenario(window_ptr, facility);
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -563,6 +574,7 @@ fn attach_then_yank(
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: image,
         flushes: 0,
+        geometries: 0,
     }));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
@@ -742,6 +754,7 @@ fn dirty_yank_round(
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: image,
         flushes: 0,
+        geometries: 0,
     }));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
@@ -805,6 +818,7 @@ fn reinsert(
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: RamBlock { data: image },
         flushes: 0,
+        geometries: 0,
     }));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
@@ -998,6 +1012,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
     let device = StdArc::new(Mutex::new(ServedDevice {
         block: image,
         flushes: 0,
+        geometries: 0,
     }));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
@@ -1038,4 +1053,145 @@ fn forced_unmount_of_a_healthy_volume_scenario(
         None,
         "the force-detached identity no longer resolves"
     );
+}
+
+/// Assert the file on the mounted volume at `path` holds exactly `expected`.
+fn assert_volume_reads(path: &str, expected: &[u8]) {
+    let mut buf = [0u8; 64];
+    let n = FS_SERVICE
+        .read(0, &NoCaps, path, 0, &mut buf)
+        .unwrap_or_else(|err| std::panic!("read {path}: {err:?}"));
+    assert_eq!(&buf[..n], expected, "{path}");
+}
+
+/// Both mounted siblings of one disk serve, and rewrite, their own extent's
+/// bytes: the staging window they share never hands one volume the other's
+/// data (`plans/FIX-IO.md` invariant 9).
+fn assert_each_sibling_serves_its_own_extent() {
+    assert_volume_reads("/Storage/part1/hello.txt", b"first partition payload");
+    assert_volume_reads("/Storage/part2/hello.txt", b"second partition payload");
+
+    // Interleaved writes through both mounts stay on their own extents.
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/part1/hello.txt", 0, false, b"1")
+        .expect("write the first partition");
+    FS_SERVICE
+        .write(0, &NoCaps, "/Storage/part2/hello.txt", 0, false, b"2")
+        .expect("write the second partition");
+    assert_volume_reads("/Storage/part1/hello.txt", b"1irst partition payload");
+    assert_volume_reads("/Storage/part2/hello.txt", b"2econd partition payload");
+}
+
+/// Two volumes on **one** disk share one block client, and that client is
+/// released when the last of them goes (`plans/FIX-IO.md`).
+///
+/// A disk's volumes are served over one endpoint and one shared data
+/// window, and the blkio protocol stages every transfer's bytes in that
+/// window. A second client on the same device would therefore be a second
+/// concurrent user of the one staging buffer: two transfers in flight
+/// would overwrite each other's bytes and hand a reader another extent's
+/// data — silent corruption, not a fault. So the service connects the
+/// device once and serialises every volume's operations onto it.
+///
+/// Connecting is the only thing that queries the geometry, so the served
+/// device's geometry count *is* the number of clients that ever existed for
+/// it: this scenario pins that count rather than racing two mounts and
+/// hoping to observe a corruption.
+fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    // One disk carrying two distinct FAT32 volumes back to back — the
+    // ordinary partitioned stick.
+    let (first, first_identity) = fat32_image(0x0D15_C007, b"first partition payload");
+    let (second, second_identity) = fat32_image(0x0D15_C008, b"second partition payload");
+    let extent_blocks = (first.data.len() / BLOCK_SIZE) as u64;
+    let mut data = first.data;
+    data.extend_from_slice(&second.data);
+    let disk = RamBlock { data };
+
+    let endpoint_id = 0xB1D0_5E17_0000_0007_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_1007);
+    let device = StdArc::new(Mutex::new(ServedDevice {
+        block: disk,
+        flushes: 0,
+        geometries: 0,
+    }));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0008), 8).expect("region");
+
+    let attach_extent = |name: &'static [u8], first_lba: u64| VolumeAttachRequest {
+        endpoint: endpoint_id,
+        window: region,
+        first_lba,
+        blocks: extent_blocks,
+        fstype: VolumeFsType::Fat32,
+        name,
+    };
+    VOLUME_SERVICE
+        .attach(&attach_extent(b"part1", 0))
+        .expect("attach the first partition");
+    VOLUME_SERVICE
+        .attach(&attach_extent(b"part2", extent_blocks))
+        .expect("attach the second partition");
+
+    assert_eq!(
+        device.lock().unwrap().geometries,
+        1,
+        "both volumes on one disk drive one shared client, not one each"
+    );
+
+    assert_each_sibling_serves_its_own_extent();
+
+    // Detaching commits through the same shared client: the device-cache
+    // flush no longer opens a client of its own behind the sibling's back.
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: first_identity,
+            force: false,
+        })
+        .expect("detach the first partition");
+    assert_eq!(
+        device.lock().unwrap().geometries,
+        1,
+        "the detach-time device flush reuses the shared client"
+    );
+    // The surviving sibling still serves: retiring one volume never closes
+    // a device another volume is still mounted on.
+    assert_volume_reads("/Storage/part2/hello.txt", b"2econd partition payload");
+    assert_eq!(
+        device.lock().unwrap().geometries,
+        1,
+        "the surviving volume kept the one client, it did not reconnect"
+    );
+
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: second_identity,
+            force: false,
+        })
+        .expect("detach the second partition");
+
+    // The disk's last volume went, so the shared client was released: a
+    // fresh attach connects anew rather than reusing a retired one.
+    VOLUME_SERVICE
+        .attach(&attach_extent(b"part1", 0))
+        .expect("re-attach the first partition");
+    assert_eq!(
+        device.lock().unwrap().geometries,
+        2,
+        "the released client is re-connected, not resurrected"
+    );
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: first_identity,
+            force: false,
+        })
+        .expect("detach the re-attached partition");
+
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("sibling scenario server thread");
 }

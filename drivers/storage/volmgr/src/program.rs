@@ -1,8 +1,24 @@
 //! The freestanding body of the volume-manager `Run` binary (`main.rs`):
 //! grant resolution, the blkio probe, and the attach loop
 //! (`plans/DEVICES.md` D3c).
+//!
+//! # Probe first, then hand the device over
+//!
+//! The probe and the kernel's mounts drive the *same* served device over the
+//! *same* single shared data window, which the blkio protocol stages each
+//! transfer's bytes in. Two users of that window at once would overwrite each
+//! other's staged bytes and read back another extent's data — silent
+//! corruption, not a fault. So the two phases are strictly ordered here: the
+//! whole device is probed, the transport is **dropped**, and only then is the
+//! first volume attached. Dropping the client consumes the window borrow, so
+//! the compiler, not a convention, is what stops a later probe read from
+//! racing the kernel (`plans/FIX-IO.md`).
 
-use tairix_abi::blkio::{BlkDeviceClass, BLK_DATA_LEN};
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+use tairix_abi::blkio::BLK_DATA_LEN;
 use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -272,11 +288,37 @@ fn main() -> i32 {
         }
     };
 
-    // Probe and attach. The sink runs per recognised volume; attach
-    // failures are logged per volume, never fatal to the sibling volumes
-    // on the same device (fail only the affected volume).
+    // Phase 1 — probe. The sink only records; nothing is attached while
+    // this driver is still reading the device through the shared window
+    // (see the module docs). The plan count is bounded by the device's own
+    // validated partition table, and the list grows to fit it rather than
+    // capping at a hand-picked constant.
+    let mut plans: Vec<VolumePlan> = Vec::new();
+    let summary = plan_volumes(&mut client, |plan| plans.push(*plan));
+    let summary = match summary {
+        Ok(summary) => summary,
+        Err(err) => {
+            log_hex_event(
+                VOLMGR_DEVICE_FAILED,
+                Level::Error,
+                "volmgr: device probe failed, exiting",
+                "errno_hex",
+                err as u64,
+            );
+            return EXIT_DEVICE_FAILED;
+        }
+    };
+
+    // Hand the device over: dropping the client releases the window borrow,
+    // so no probe read can follow — the kernel's mounts have the staging
+    // buffer to themselves from here on.
+    drop(client);
+
+    // Phase 2 — attach. A refusal is logged per volume and is never fatal
+    // to the sibling volumes on the same device (fail only the affected
+    // volume).
     let mut attached = 0u64;
-    let summary = plan_volumes(&mut client, |plan| {
+    for plan in &plans {
         match attach_plan(endpoint, window_id, plan) {
             Ok(()) => {
                 attached += 1;
@@ -298,20 +340,7 @@ fn main() -> i32 {
                 );
             }
         }
-    });
-    let summary = match summary {
-        Ok(summary) => summary,
-        Err(err) => {
-            log_hex_event(
-                VOLMGR_DEVICE_FAILED,
-                Level::Error,
-                "volmgr: device probe failed, exiting",
-                "errno_hex",
-                err as u64,
-            );
-            return EXIT_DEVICE_FAILED;
-        }
-    };
+    }
 
     if summary.raid_members > 0 {
         log_hex_event(
