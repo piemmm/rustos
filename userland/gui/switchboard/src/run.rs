@@ -82,8 +82,8 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
     use tairix_switchboard::{
-        advance_deadline, authenticate_command, probe_scopes, refusal_notice, wait_timeout_ns,
-        CycleOutcome, DegradedField, Service, ServiceHost, WaitToken, PANEL_TITLE,
+        authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField, Service,
+        ServiceHost, WaitToken, PANEL_TITLE,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{WindowClient, WindowTransport};
@@ -101,10 +101,6 @@ mod program {
     /// present (the app is parked in the call while the session reads), so
     /// a single frame is race-free.
     const FRAME_COUNT: u32 = 1;
-
-    /// The window event mailbox's bounded capacity: input-rate events,
-    /// drained after every wake, so a small queue is ample.
-    const EVENT_CAPACITY: usize = 32;
 
     /// The command mailbox's bounded capacity: the session sends a panel
     /// open on a click and a seat report when the seat's health changes, so
@@ -639,7 +635,7 @@ mod program {
                 ..
             } => {
                 host.resize(width_px, height_px);
-                service.panel_mut().redraw(host);
+                service.panel_mut().mark_dirty();
                 return;
             }
             WindowEvent::Key {
@@ -668,7 +664,7 @@ mod program {
                 service.apply_grouping(host, outcome, authority);
             }
         }
-        service.panel_mut().redraw(host);
+        service.panel_mut().mark_dirty();
     }
 
     /// Drain every window event the session has delivered, applying each in
@@ -844,7 +840,11 @@ mod program {
         }
         let events = tairix_window::event_endpoint_for(pid);
         if tairix_abi::ipc::is_reserved_endpoint(events)
-            || tairix_rt::port_bind(events, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
+            || tairix_rt::port_bind(
+                events,
+                WindowEvent::WIRE_LEN,
+                tairix_window::EVENT_MAILBOX_CAPACITY,
+            ) != 0
         {
             return fail(EXIT_NO_WAIT_SOURCE, "window event mailbox bind refused");
         }
@@ -858,7 +858,6 @@ mod program {
         let mut host = RtHost::new(set, events, commands);
         let mut service = Service::new(pid, probe_scopes(&transport), &authority);
 
-        let mut next_deadline = tairix_rt::clock_get();
         loop {
             match service.cycle(&mut host, &transport, tairix_rt::clock_get(), &authority) {
                 CycleOutcome::Continue => {}
@@ -878,8 +877,14 @@ mod program {
                 }
             }
 
-            next_deadline = advance_deadline(next_deadline, tairix_rt::clock_get());
-            let timeout = wait_timeout_ns(next_deadline, tairix_rt::clock_get());
+            // One present per wake, immediately before parking: whatever the
+            // cycle above and the previous wake's drained events marked is
+            // shown in a single composition. Placing it here rather than
+            // after the drain also covers the deadline-only path, which
+            // continues straight back to the top of the loop.
+            service.panel_mut().flush(&mut host);
+
+            let timeout = service.wait_timeout_ns(tairix_rt::clock_get());
             let mut token = 0u64;
             let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
             if wait_ret != 0 {

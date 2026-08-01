@@ -189,8 +189,8 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             } else if !capacity_ok {
                 assert_eq!(
                     result,
-                    Err(Errno::LengthOutOfRange),
-                    "full mailbox must be refused"
+                    Err(Errno::WouldBlock),
+                    "full mailbox must be refused as retryable back-pressure"
                 );
                 denied_full += 1;
             } else {

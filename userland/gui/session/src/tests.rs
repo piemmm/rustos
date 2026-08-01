@@ -1091,6 +1091,174 @@ fn pump_propagates_a_source_fault_after_applying_prior_events() {
 }
 
 #[test]
+fn pump_coalesces_adjacent_pointer_motions_over_one_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    // Initial move to window and focus it so we get ClientPointerMoved.
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    // A run of N pointer motions over one window.
+    let events = &[moved(251, 251), moved(252, 252), moved(253, 253)];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+            window,
+            local: Point::new(53, 53),
+        })
+    );
+    // Observable: pointer position reflects the last sample.
+    assert_eq!(shell.router().pointer(), Point::new(253, 253));
+}
+
+#[test]
+fn pump_motion_run_interrupted_by_different_outcome_does_not_collapse_across_interruption() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    // Motion, then Release, then Motion.
+    let events = &[moved(251, 251), PRIMARY_RELEASE, moved(252, 252)];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes.len(), 3);
+    assert_eq!(
+        outcomes[0],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+            window,
+            local: Point::new(51, 51),
+        })
+    );
+    assert_eq!(
+        outcomes[1],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerReleased {
+            window,
+            local: Point::new(51, 51),
+        })
+    );
+    assert_eq!(
+        outcomes[2],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+            window,
+            local: Point::new(52, 52),
+        })
+    );
+}
+
+#[test]
+fn pump_does_not_coalesce_adjacent_non_motion_outcomes() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    // Release, then Press.
+    let events = &[PRIMARY_RELEASE, PRIMARY_PRESS];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes.len(), 2);
+    assert!(matches!(
+        outcomes[0],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerReleased { .. })
+    ));
+    assert!(matches!(
+        outcomes[1],
+        ShellOutcome::WindowManager(InputResponse::Activated { .. })
+    ));
+}
+
+#[test]
+fn pump_does_not_coalesce_interleaved_motions_over_two_windows() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let w1 = opaque_window(&mut comp, Point::new(100, 100), 100, 100);
+    let w2 = opaque_window(&mut comp, Point::new(300, 300), 100, 100);
+
+    // Focus w1.
+    shell.handle(moved(150, 150), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    // Sequence that forces different window motion outcomes by changing focus.
+    let events = &[
+        moved(151, 151), // Moved(w1)
+        moved(155, 155), // Moved(w1) - collapses into event 0
+        moved(350, 350), // Moved(w1) - still collapses (w1 focused), local is (250, 250) clamped to 99
+        PRIMARY_PRESS,   // Activated(w2) - Interrupts the run
+        moved(351, 351), // Moved(w2)
+        moved(150, 150), // Moved(w2) - collapses (w2 focused)
+        PRIMARY_PRESS,   // Activated(w1) - Interrupts the run
+        moved(152, 152), // Moved(w1)
+    ];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    // Expected sequence:
+    // 0: Moved(w1) (collapsed events 0, 1, 2)
+    // 1: Activated(w2)
+    // 2: Moved(w2) (collapsed events 3, 4)
+    // 3: Activated(w1)
+    // 4: Moved(w1)
+    assert_eq!(outcomes.len(), 5);
+    assert!(matches!(
+        outcomes[0],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window, .. }) if window == w1
+    ));
+    assert!(matches!(
+        outcomes[1],
+        ShellOutcome::WindowManager(InputResponse::Activated { window, .. }) if window == w2
+    ));
+    assert!(matches!(
+        outcomes[2],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window, .. }) if window == w2
+    ));
+    assert!(matches!(
+        outcomes[3],
+        ShellOutcome::WindowManager(InputResponse::Activated { window, .. }) if window == w1
+    ));
+    assert!(matches!(
+        outcomes[4],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window, .. }) if window == w1
+    ));
+}
+
+#[test]
+fn pump_coalescing_is_safe_because_handle_runs_per_event() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    // Focus the window.
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    // Run of motions.
+    let events = &[moved(251, 251), moved(252, 252), moved(253, 253)];
+    let _ = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    // Observable: pointer position reflects the last sample.
+    assert_eq!(shell.router().pointer(), Point::new(253, 253));
+}
+
+#[test]
 fn motion_is_ignored_and_does_not_present_the_bar() {
     let mut shell = shell();
     let mut comp = compositor();
@@ -2802,14 +2970,14 @@ fn hang_tracker_flags_only_after_threshold_of_backpressure() {
     let mut tracker = crate::HangTracker::new();
 
     // The first refusal opens the suspicion window but proves nothing yet.
-    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 1_000));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::WouldBlock, 1_000));
     assert!(!tracker.is_unresponsive(7));
     assert_eq!(tracker.unresponsive_count(), 0);
 
     // Refusals inside the threshold keep the verdict unchanged.
     assert!(!tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         1_000 + crate::UNRESPONSIVE_AFTER_NS / 2,
     ));
     assert!(!tracker.is_unresponsive(7));
@@ -2817,14 +2985,14 @@ fn hang_tracker_flags_only_after_threshold_of_backpressure() {
     // The refusal that crosses the threshold flags the owner — exactly once.
     assert!(tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         1_000 + crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert!(tracker.is_unresponsive(7));
     assert_eq!(tracker.unresponsive_count(), 1);
     assert!(!tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         2_000 + crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert_eq!(tracker.unresponsive_count(), 1);
@@ -2836,14 +3004,14 @@ fn hang_tracker_clears_on_an_accepted_delivery() {
 
     // A suspect that drains before the threshold was never unresponsive:
     // clearing it changes nothing the tray must repaint.
-    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::WouldBlock, 0));
     assert!(!tracker.note_delivered(7));
 
     // A flagged owner that drains recovers, and the change is reported.
-    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::WouldBlock, 0));
     assert!(tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert!(tracker.note_delivered(7));
@@ -2853,7 +3021,7 @@ fn hang_tracker_clears_on_an_accepted_delivery() {
     // The suspicion window restarts from scratch after a recovery.
     assert!(!tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         2 * crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert!(!tracker.is_unresponsive(7));
@@ -2865,19 +3033,48 @@ fn hang_tracker_treats_only_backpressure_as_evidence() {
 
     // A torn-down mailbox is the reap path's business, not hang evidence —
     // and it drops any standing suspicion so a recycled task id starts clean.
-    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::WouldBlock, 0));
     assert!(!tracker.note_refused(7, tairix_abi::Errno::NotFound, 1));
     assert!(!tracker.note_refused(
         7,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         crate::UNRESPONSIVE_AFTER_NS + 2,
     ));
     assert!(!tracker.is_unresponsive(7));
 
-    // Any other refusal is no evidence either way.
+    // Any other refusal is no evidence either way — including
+    // `LengthOutOfRange`, the syscall layer's malformed-call error, which
+    // must never be miscounted as the receiver hanging.
     assert!(!tracker.note_refused(9, tairix_abi::Errno::PermissionDenied, 0));
     assert!(!tracker.note_refused(9, tairix_abi::Errno::MessageTooLarge, 0));
+    assert!(!tracker.note_refused(9, tairix_abi::Errno::LengthOutOfRange, 0));
     assert!(!tracker.is_unresponsive(9));
+    assert_eq!(tracker.unresponsive_count(), 0);
+}
+
+/// A continuous run of `LengthOutOfRange` refusals — the syscall layer's
+/// malformed-call error, not the mailbox-full backpressure signal — never
+/// accumulates into a verdict, even once enough time has passed that real
+/// backpressure would have crossed the threshold. This is the regression
+/// case for the bug where the tracker keyed on an errno that also meant
+/// "malformed call": a bug in the sender must never read as the receiver
+/// hanging.
+#[test]
+fn hang_tracker_never_flags_a_malformed_call_refusal() {
+    let mut tracker = crate::HangTracker::new();
+
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(!tracker.note_refused(
+        7,
+        tairix_abi::Errno::LengthOutOfRange,
+        10 * crate::UNRESPONSIVE_AFTER_NS,
+    ));
+    assert!(!tracker.is_unresponsive(7));
     assert_eq!(tracker.unresponsive_count(), 0);
 }
 
@@ -2887,15 +3084,15 @@ fn hang_tracker_forget_reports_only_a_standing_verdict() {
 
     // Forgetting an unknown or merely-suspect owner changes nothing.
     assert!(!tracker.forget(7));
-    assert!(!tracker.note_refused(7, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(7, tairix_abi::Errno::WouldBlock, 0));
     assert!(!tracker.forget(7));
 
     // Forgetting a flagged owner (its exit was reaped) clears the verdict
     // and reports the change so the tray repaints.
-    assert!(!tracker.note_refused(8, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(8, tairix_abi::Errno::WouldBlock, 0));
     assert!(tracker.note_refused(
         8,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert!(tracker.forget(8));
@@ -2907,10 +3104,10 @@ fn hang_tracker_forget_reports_only_a_standing_verdict() {
 fn hang_tracker_counts_every_flagged_owner_and_saturates() {
     let mut tracker = crate::HangTracker::new();
     for owner in 0..3u64 {
-        assert!(!tracker.note_refused(owner, tairix_abi::Errno::LengthOutOfRange, 0));
+        assert!(!tracker.note_refused(owner, tairix_abi::Errno::WouldBlock, 0));
         assert!(tracker.note_refused(
             owner,
-            tairix_abi::Errno::LengthOutOfRange,
+            tairix_abi::Errno::WouldBlock,
             crate::UNRESPONSIVE_AFTER_NS,
         ));
     }
@@ -2919,10 +3116,10 @@ fn hang_tracker_counts_every_flagged_owner_and_saturates() {
     // The count is a u16 for the tray summary; a pathological census
     // saturates rather than wrapping.
     for owner in 3..70_000u64 {
-        let _ = tracker.note_refused(owner, tairix_abi::Errno::LengthOutOfRange, 0);
+        let _ = tracker.note_refused(owner, tairix_abi::Errno::WouldBlock, 0);
         let _ = tracker.note_refused(
             owner,
-            tairix_abi::Errno::LengthOutOfRange,
+            tairix_abi::Errno::WouldBlock,
             crate::UNRESPONSIVE_AFTER_NS,
         );
     }
@@ -2941,19 +3138,19 @@ fn hang_tracker_unresponsive_owners_names_exactly_the_flagged_set() {
     );
 
     // A merely-suspect owner (below the threshold) is not named.
-    assert!(!tracker.note_refused(9, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(9, tairix_abi::Errno::WouldBlock, 0));
     assert!(tracker.unresponsive_owners().next().is_none());
 
     // Two owners cross the threshold and are both named, ascending.
     assert!(tracker.note_refused(
         9,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         crate::UNRESPONSIVE_AFTER_NS,
     ));
-    assert!(!tracker.note_refused(3, tairix_abi::Errno::LengthOutOfRange, 0));
+    assert!(!tracker.note_refused(3, tairix_abi::Errno::WouldBlock, 0));
     assert!(tracker.note_refused(
         3,
-        tairix_abi::Errno::LengthOutOfRange,
+        tairix_abi::Errno::WouldBlock,
         crate::UNRESPONSIVE_AFTER_NS,
     ));
     assert_eq!(

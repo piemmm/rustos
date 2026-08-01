@@ -591,8 +591,9 @@ impl CallEndpoint {
     ///    by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]), else [`Errno::MessageTooLarge`]
     ///    + [`AuditEvent::CallRequestTooLarge`].
     /// 4. **Capacity check.** If the endpoint already holds `capacity`
-    ///    outstanding calls, [`Errno::LengthOutOfRange`] +
-    ///    [`AuditEvent::CallQueueFull`].
+    ///    outstanding calls, [`Errno::WouldBlock`] +
+    ///    [`AuditEvent::CallQueueFull`] — the server merely has not drained
+    ///    the queue yet, not a malformed request, so the caller may retry.
     ///
     /// On success the request is copied into a kernel-owned buffer, a fresh
     /// ticket is minted, and one [`AuditEvent::CallPosted`] is emitted. The
@@ -682,7 +683,11 @@ impl CallEndpoint {
         if g.outstanding() >= self.capacity {
             drop(g);
             record(audit, AuditEvent::CallQueueFull, &[id_field, sender_field]);
-            return Err(Errno::LengthOutOfRange);
+            // The server is merely behind, not the caller malformed: this is
+            // transient back-pressure the caller may retry, never
+            // `LengthOutOfRange` (reserved for a genuine configuration
+            // error, e.g. `CallEndpoint::create`'s bounds check).
+            return Err(Errno::WouldBlock);
         }
         let ticket = g.next_ticket;
         g.next_ticket += 1;
@@ -1323,7 +1328,11 @@ mod tests {
         let err = ep
             .post(&caller, POSTER_SCHED, b"c", u64::MAX, &sink)
             .expect_err("full");
-        assert_eq!(err, Errno::LengthOutOfRange);
+        // A full outstanding-call queue is retryable back-pressure, not a
+        // malformed request, and therefore distinct from the
+        // `LengthOutOfRange` a bad `CallEndpoint::create` configuration
+        // returns.
+        assert_eq!(err, Errno::WouldBlock);
         assert!(sink.ids().contains(&AuditEvent::CallQueueFull.id().0));
         assert_eq!(ep.outstanding(), 2);
     }

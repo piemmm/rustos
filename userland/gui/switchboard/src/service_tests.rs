@@ -40,8 +40,16 @@ fn service() -> Service {
     Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY)
 }
 
+fn test_proc_id(pid: u64) -> ProcId {
+    let mut raw = [0u8; 16];
+    raw[0..8].copy_from_slice(&pid.to_le_bytes());
+    ProcId::from_raw(raw)
+}
+
 fn cycle(service: &mut Service, host: &mut RecordingHost, now_ns: u64) -> CycleOutcome {
-    service.cycle(host, &DeadTransport, now_ns, &NO_AUTHORITY)
+    let outcome = service.cycle(host, &DeadTransport, now_ns, &NO_AUTHORITY);
+    service.panel_mut().flush(host);
+    outcome
 }
 
 #[test]
@@ -136,7 +144,11 @@ fn repeated_publish_failures_eventually_stop_the_service() {
 
     for attempt in 1..MAX_CONSECUTIVE_PUBLISH_FAILURES {
         assert_eq!(
-            cycle(&mut service, &mut host, u64::from(attempt)),
+            cycle(
+                &mut service,
+                &mut host,
+                u64::from(attempt).saturating_mul(crate::SAMPLE_PERIOD_NS)
+            ),
             CycleOutcome::Continue
         );
     }
@@ -144,7 +156,7 @@ fn repeated_publish_failures_eventually_stop_the_service() {
         cycle(
             &mut service,
             &mut host,
-            u64::from(MAX_CONSECUTIVE_PUBLISH_FAILURES)
+            u64::from(MAX_CONSECUTIVE_PUBLISH_FAILURES).saturating_mul(crate::SAMPLE_PERIOD_NS)
         ),
         CycleOutcome::PublishFailed
     );
@@ -295,6 +307,7 @@ fn a_grouping_edit_re_presents_the_panel_immediately() {
         }),
         &NO_AUTHORITY,
     );
+    service.panel_mut().flush(&mut host);
 
     assert_eq!(service.panel().model().model.activities.len(), 1);
     assert!(
@@ -361,4 +374,119 @@ fn a_rename_refusal_is_reported_and_leaves_the_name_unchanged() {
         "Activity 1"
     );
     assert_eq!(host.refused_actions(), alloc::vec!["rename that activity"]);
+}
+
+#[test]
+fn a_cycle_before_the_deadline_is_a_no_op() {
+    let transport = ProcessListTransport::new(alloc::vec![process_record(
+        10,
+        test_proc_id(10),
+        DEFAULT_UID,
+        ProcessState::Running,
+        b"alpha"
+    )]);
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+
+    // First cycle samples immediately (deadline is 0).
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    assert_eq!(host.published.len(), 1);
+    let requests = transport.request_count();
+
+    // A second cycle before the deadline does nothing.
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS / 2,
+        &NO_AUTHORITY,
+    );
+    assert_eq!(host.published.len(), 1);
+    assert_eq!(transport.request_count(), requests);
+}
+
+#[test]
+fn a_cycle_at_the_deadline_samples_exactly_once_and_advances_the_deadline() {
+    let transport = ProcessListTransport::new(alloc::vec![process_record(
+        10,
+        test_proc_id(10),
+        DEFAULT_UID,
+        ProcessState::Running,
+        b"alpha"
+    )]);
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    let requests_after_one = transport.request_count();
+    assert!(requests_after_one > 0);
+
+    // At the deadline it samples again.
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS,
+        &NO_AUTHORITY,
+    );
+    assert_eq!(transport.request_count(), requests_after_one * 2);
+
+    // And the deadline has moved: another cycle immediately is a no-op.
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS,
+        &NO_AUTHORITY,
+    );
+    assert_eq!(transport.request_count(), requests_after_one * 2);
+}
+
+#[test]
+fn many_sub_deadline_cycles_produce_exactly_one_sample_once_the_deadline_passes() {
+    let transport = ProcessListTransport::new(alloc::vec![process_record(
+        10,
+        test_proc_id(10),
+        DEFAULT_UID,
+        ProcessState::Running,
+        b"alpha"
+    )]);
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    let requests_after_one = transport.request_count();
+
+    // Many cycles before the deadline.
+    for i in 1..100 {
+        service.cycle(
+            &mut host,
+            &transport,
+            (crate::SAMPLE_PERIOD_NS / 100) * i,
+            &NO_AUTHORITY,
+        );
+    }
+    assert_eq!(transport.request_count(), requests_after_one);
+
+    // Once it passes, one sample happens.
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS + 1,
+        &NO_AUTHORITY,
+    );
+    assert_eq!(transport.request_count(), requests_after_one * 2);
+}
+
+#[test]
+fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
+    let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);
+    let mut host = RecordingHost::new();
+
+    // Deadline is 0, so it's already overdue.
+    service.cycle(&mut host, &DeadTransport, 0, &NO_AUTHORITY);
+    // Next deadline is SAMPLE_PERIOD_NS.
+
+    let t1 = service.wait_timeout_ns(0);
+    let t2 = service.wait_timeout_ns(crate::SAMPLE_PERIOD_NS / 2);
+
+    assert!(t2 < t1);
+    assert!(t2 >= crate::schedule::MIN_WAIT_NS);
 }

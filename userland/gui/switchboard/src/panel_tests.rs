@@ -186,7 +186,9 @@ fn activity_model(first_pid: u64, second_pid: u64) -> PanelModel {
 }
 
 fn open(panel: &mut Panel, host: &mut RecordingHost, section: CommandSection) -> CommandOutcome {
-    panel.command(host, SwitchboardCommand::OpenPanel { section })
+    let outcome = panel.command(host, SwitchboardCommand::OpenPanel { section });
+    panel.flush(host);
+    outcome
 }
 
 /// The window rectangle the scrolling test lays the composition out in.
@@ -316,7 +318,7 @@ fn closing_returns_to_headless_sampling() {
     // A later model change draws nothing: there is no window to draw into,
     // and the panel never re-opens one on its own.
     let presents = host.presents;
-    panel.refresh(&mut host, task_model(10));
+    panel.refresh(task_model(10));
     assert_eq!(host.presents, presents);
     assert!(!panel.is_open());
 }
@@ -350,7 +352,7 @@ fn refreshing_with_an_unchanged_model_draws_nothing() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(&mut host, empty_model());
+    panel.refresh(empty_model());
 
     assert_eq!(host.presents, presents);
 }
@@ -362,7 +364,8 @@ fn refreshing_with_a_changed_model_redraws_and_keeps_the_section() {
     open(&mut panel, &mut host, CommandSection::Recovery);
     let presents = host.presents;
 
-    panel.refresh(&mut host, task_model(10));
+    panel.refresh(task_model(10));
+    panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);
     assert_eq!(panel.section(), Some(Section::Recovery));
@@ -375,7 +378,8 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     assert_eq!(wheel(&mut panel, 4), 4);
 
-    panel.refresh(&mut host, busy_model(200));
+    panel.refresh(busy_model(200));
+    panel.flush(&mut host);
 
     assert_eq!(panel.section(), Some(Section::Tasks));
     assert_eq!(
@@ -650,4 +654,101 @@ fn a_refusal_notice_names_the_action_and_the_refusal() {
         refusal_notice("restart that task", Errno::PermissionDenied),
         "switchboard: could not restart that task (permission denied)\n"
     );
+}
+
+#[test]
+fn flushing_a_dirty_panel_presents_exactly_once() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    panel.mark_dirty();
+    panel.mark_dirty();
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn flushing_a_clean_panel_presents_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents);
+}
+
+#[test]
+fn flushing_a_closed_panel_presents_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    // Marking it dirty while closed.
+    panel.mark_dirty();
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, 0);
+}
+
+#[test]
+fn a_refused_present_is_reported_once_and_not_retried_until_marked_dirty_again() {
+    let mut host = RecordingHost::new();
+    host.present_refusal = Some(Errno::PermissionDenied);
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    // `open` helper already flushed, but it failed and reported.
+    assert_eq!(
+        host.refused_actions(),
+        alloc::vec!["redraw the overview window"]
+    );
+
+    // A second flush with no new mark does nothing.
+    panel.flush(&mut host);
+    assert_eq!(
+        host.refused_actions(),
+        alloc::vec!["redraw the overview window"]
+    );
+
+    // Marking it dirty again retries.
+    panel.mark_dirty();
+    panel.flush(&mut host);
+    assert_eq!(
+        host.refused_actions(),
+        alloc::vec!["redraw the overview window", "redraw the overview window"]
+    );
+}
+
+#[test]
+fn refreshing_with_an_unchanged_model_marks_nothing_dirty() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    panel.refresh(empty_model());
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents);
+}
+
+#[test]
+fn opening_a_marked_closed_panel_presents_on_flush() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+
+    // Marking it while closed records the intent.
+    panel.mark_dirty();
+    // Opening it marks it dirty again.
+    panel.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+    );
+
+    panel.flush(&mut host);
+    assert_eq!(host.presents, 1);
 }

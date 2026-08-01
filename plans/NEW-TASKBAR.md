@@ -809,8 +809,9 @@ What now stands:
   identity) and exits cleanly with its reason on stderr (§2.24).
 - A **sampler** (`lib`-shaped, host-tested over the `lib/procinfo`
   `Transport` seam) that reads the live system on a **tickless one-shot
-  cadence** (2 s; the wait is a single deadline-bounded park that also wakes
-  for signals — never a busy-poll, §2.23; the periodic re-poll is the
+  cadence** (2 s; sampling is strict on deadline, so an input or command
+  wake never re-queries the system; the wait is a single deadline-bounded
+  park that also wakes for signals — never a busy-poll, §2.23; the periodic
   sanctioned fallback because system-wide metrics expose no change event):
   the process list (global scope when granted, else self — probed **once**
   at startup so a denied audited query is never spammed), per-process CPU
@@ -896,9 +897,9 @@ authorised server-side; gate green.
 **Status — the Switchboard service side (`userland/gui/switchboard`): done.**
 The service binds its per-pid command mailbox, learns the session identity
 from the publish reply, and authenticates every command against that
-message's kernel-attested `Origin`. One `waitset_wait` covers the sample
-deadline, the command mailbox and — only while open — the window's event
-mailbox. `OpenPanel` opens the composition on the mapped section via
+message's kernel-attested `Origin`. One `waitset_wait` covers the next
+real sample deadline, the command mailbox and — only while open — the
+window's event mailbox. `OpenPanel` opens the composition on the mapped
 `Switchboard::select_section`; a second one raises (`ActivateOwner` naming
 its own pid) and switches section; close returns to headless sampling, which
 never stopped. Each new sample is shown through `Switchboard::set_model`, so
@@ -1020,7 +1021,8 @@ dissolve), all sweeping **only members joined to the current sample** (a
 stored pid may have been reused; unjoined members are skipped by
 construction). Tasks rows gained a `Group` button opening a `Menu` popup
 (assign / new activity / remove, with honest disabled reasons); grouping
-edits re-present the panel immediately rather than waiting a sample. The
+edits mark the panel dirty and are presented once in the same wake, before
+the service parks again. The
 mockups' Snapshot/Hibernate are absent: no process snapshot interface
 exists. Keyboard completeness came with it: a horizontal action focus
 (Left/Right + Enter) reaches every row button in every section — fixing the

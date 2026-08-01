@@ -356,11 +356,15 @@ mailbox is reported on `stderr` and dropped, never retried (`AGENTS.md`
   listening) and cleared, so it is never re-sent on a later publish.
 - `SeatReport { report }` — the unresponsive-owner view of this seat, from the
   session's own delivery evidence. Every app-ward window event is a
-  non-blocking mailbox send, so the production event sink folds each outcome
-  into the `vigil::HangTracker`: an owner whose sends come back refused as
-  mailbox-full backpressure continuously for `UNRESPONSIVE_AFTER_NS` is
-  flagged *not responding*, one accepted delivery clears it, and a reap
-  forgets it. No heartbeat is fabricated and no kernel query pretends to know.
+  non-blocking mailbox send. To avoid flooding an app with samples it can
+  only act on the newest of, `pump` coalesces adjacent pointer motions over
+  one window into the latest position, while ensuring every sample still
+  drives the window manager's own state. The production event sink folds
+  each outcome into the `vigil::HangTracker`: an owner whose sends come
+  back refused as the kernel's transient `WouldBlock` backpressure signal
+  continuously for `UNRESPONSIVE_AFTER_NS` is flagged *not responding*, one
+  accepted delivery clears it, and a reap forgets it. No heartbeat is
+  fabricated and no kernel query pretends to know.
   The report is sent **only when the tracked set actually changes** (the
   tracker's change latch, drained once per wake), never per frame and never
   polled, and it carries the truthful `total` even when more owners are hung

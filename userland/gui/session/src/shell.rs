@@ -686,10 +686,26 @@ impl DesktopShell {
 
     /// Drain every pending event from `source`, routing each through
     /// [`handle`](Self::handle) against the monotonic `now_ns`, and return
-    /// their outcomes in order.
+    /// their outcomes in order — coalescing an adjacent run of pointer
+    /// motion over the same window into the newest sample.
     ///
     /// One drain is one instant: every event of this batch resolves against
     /// the same `now_ns`, which the embedder read when the source woke it.
+    /// Every drained event still runs through [`handle`](Self::handle), so
+    /// the window manager's own hover, drag, and cursor state track the full
+    /// sample stream; only the *returned* outcome list is compressed. That
+    /// is what makes the coalescing safe: it is the app-ward forwarding path
+    /// (the embedder turns a [`ClientPointerMoved`](InputResponse::ClientPointerMoved)
+    /// outcome into one event to the owning app) that a dense mouse sweep
+    /// would otherwise flood with samples the app can only ever act on the
+    /// newest of — pointer position is level-triggered, not edge-triggered.
+    /// A run collapses only while it stays an unbroken sequence of
+    /// [`ClientPointerMoved`](InputResponse::ClientPointerMoved) outcomes
+    /// naming the *same* window: a press, a release, a scroll, a taskbar
+    /// response, an [`Ignored`](ShellOutcome::Ignored), or a motion over a
+    /// different window ends the run, so nothing the app must see (a
+    /// `Moved, Moved, Released` sequence still delivers both a `Moved` and
+    /// the `Released`) can ever be reordered or dropped.
     ///
     /// # Errors
     ///
@@ -706,9 +722,19 @@ impl DesktopShell {
     where
         S: InputSource + ?Sized,
     {
-        let mut outcomes = Vec::new();
+        let mut outcomes: Vec<ShellOutcome> = Vec::new();
         while let Some(event) = source.poll()? {
-            outcomes.push(self.handle(event, compositor, now_ns));
+            let outcome = self.handle(event, compositor, now_ns);
+            let collapses_into_last = pointer_moved_window(&outcome)
+                .zip(outcomes.last().and_then(pointer_moved_window))
+                .is_some_and(|(window, last_window)| window == last_window);
+            if collapses_into_last {
+                if let Some(last) = outcomes.last_mut() {
+                    *last = outcome;
+                }
+            } else {
+                outcomes.push(outcome);
+            }
         }
         Ok(outcomes)
     }
@@ -728,6 +754,18 @@ impl DesktopShell {
     /// leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presenter.teardown(compositor);
+    }
+}
+
+/// The window a `ClientPointerMoved` outcome names, or `None` for every
+/// other outcome — the key [`pump`](DesktopShell::pump) collapses an
+/// adjacent motion run on.
+fn pointer_moved_window(outcome: &ShellOutcome) -> Option<WindowId> {
+    match outcome {
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window, .. }) => {
+            Some(*window)
+        }
+        _ => None,
     }
 }
 

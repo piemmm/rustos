@@ -179,11 +179,15 @@ independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   calm rather than freezing a dead service's last summary.
 - **The session's own delivery evidence.** The desktop is the one component
   that observes whether an app drains its window events: every app-ward
-  event is a non-blocking mailbox send, so the production event sink folds
-  each outcome into the `vigil::HangTracker` — an owner whose sends come
-  back refused as mailbox-full backpressure continuously for
-  `UNRESPONSIVE_AFTER_NS` (4 s) is flagged *not responding*, one accepted
-  delivery clears it, and a reap forgets it (a dead app is not a hung app,
+  event is a non-blocking mailbox send. To avoid flooding an app with samples
+  it can only act on the newest of, `pump` coalesces adjacent pointer motions
+  over one window into the latest position, while ensuring every sample still
+  drives the window manager's own hover and drag state. The production event
+  sink folds each outcome into the `vigil::HangTracker` — an owner whose sends
+  come back refused as the kernel's transient `WouldBlock` back-pressure
+  signal continuously for `UNRESPONSIVE_AFTER_NS` (4 s) is flagged *not
+  responding*, one accepted delivery clears it, and a reap forgets it (a dead
+  app is not a hung app,
   and a recycled task id starts clean). No heartbeat is fabricated and no
   kernel query pretends to know. The loop drains the sink's change latch
   once per wake into `DesktopShell::set_tray_unresponsive`, which drives the
@@ -230,7 +234,8 @@ the taskbar and launcher already use (`AGENTS.md` §2.2).
 The session sends to the instance's own mailbox,
 `command_endpoint_for(<the service pid the launch table holds>)`, as a
 **non-blocking** send — the desktop loop never blocks or spins on a panel
-that is slow to drain, so a send refused for a full or absent mailbox is
+that is slow to drain, so a send refused with the kernel's `WouldBlock`
+back-pressure signal (or a `NotFound` refusal for an absent mailbox) is
 reported on `stderr` and dropped, never retried (`AGENTS.md` §2.23). Two
 commands travel it:
 
@@ -377,7 +382,11 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
 - `pump(source, &mut Compositor, now_ns)` drains every pending event, routing
   each through `handle(event, &mut Compositor, now_ns)` and returning a
-  `ShellOutcome` per event — `Ignored`, a `WindowManager` action the embedder
+  `ShellOutcome` per event. To avoid flooding an app with samples it can only
+  act on the newest of, adjacent pointer motions over one window are
+  coalesced into the latest position in the returned list; every sample still
+  drives the window manager's own hover and drag state, so the coalescing
+  is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder
   may observe, or a `Taskbar` response. One drain is one instant: the
   embedder reads the monotonic clock once when the source wakes it and every
   event of that batch resolves its tap-versus-hold gesture against the same

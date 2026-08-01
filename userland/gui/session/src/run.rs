@@ -332,17 +332,20 @@ mod program {
     }
 
     /// The production [`EventSink`]: one non-blocking `ipc_send` to the
-    /// owning app's event port per event. The send never parks this
-    /// session (a full mailbox or a dead port is a typed refusal), so a
-    /// wedged app can never wedge the desktop.
+    /// owning app's event port per event. To avoid flooding an app with
+    /// samples it can only act on the newest of, the shell coalesces
+    /// adjacent motions naming the same window; every remaining outcome is
+    /// a non-blocking send. The send never parks this session (a full
+    /// mailbox or a dead port is a typed refusal), so a wedged app can
+    /// never wedge the desktop.
     ///
     /// Every send outcome doubles as responsiveness evidence: the wrapped
-    /// [`HangTracker`] folds each mailbox-full refusal and each accepted
-    /// delivery into per-owner "not responding" verdicts (keyed by the
-    /// event-mailbox endpoint, which embeds the owning task id), and the
-    /// loop drains [`take_changed`](Self::take_changed) once per wake to
-    /// bring the taskbar capsule in step. Time is stamped only on the
-    /// delivery paths, so an idle desktop reads no clock.
+    /// [`HangTracker`] folds each `WouldBlock` back-pressure refusal and
+    /// each accepted delivery into per-owner "not responding" verdicts
+    /// (keyed by the event-mailbox endpoint, which embeds the owning task
+    /// id), and the loop drains [`take_changed`](Self::take_changed) once
+    /// per wake to bring the taskbar capsule in step. Time is stamped only
+    /// on the delivery paths, so an idle desktop reads no clock.
     struct RtEventSink {
         vigil: HangTracker,
         changed: bool,
@@ -501,12 +504,12 @@ mod program {
     /// The production [`SwitchboardMailbox`]: one non-blocking `ipc_send`
     /// to the live monitor's own per-instance command mailbox.
     ///
-    /// The send never parks the desktop. A refusal — the monitor's mailbox
-    /// full because it has not drained it, or gone because the instance
-    /// exited — is stated on `stderr` and the command dropped: the panel
-    /// missing an advisory open or seat report is not worth stalling the
-    /// session for, and a retry loop here would be the busy-wait the
-    /// desktop must never run.
+    /// The send never parks the desktop. A refusal — `WouldBlock`
+    /// back-pressure because the monitor has not drained its mailbox, or
+    /// `NotFound` because the instance exited — is stated on `stderr` and
+    /// the command dropped: the panel missing an advisory open or seat
+    /// report is not worth stalling the session for, and a retry loop here
+    /// would be the busy-wait the desktop must never run.
     struct RtSwitchboardMailbox;
 
     impl SwitchboardMailbox for RtSwitchboardMailbox {
@@ -2046,7 +2049,8 @@ mod program {
             // `owner_of` proved the window exists, so the `NotFound` is
             // the sink's: the owner's event port is gone — the kernel
             // reclaimed it at exit — and its windows go with it. Any
-            // other refusal (a full mailbox) drops the event only.
+            // other refusal (the `WouldBlock` back-pressure signal) drops
+            // the event only.
             let mut bridge = ShellWindowHost {
                 shell,
                 compositor,

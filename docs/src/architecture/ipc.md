@@ -259,11 +259,11 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint. |
 | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
 | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
-| 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
+| 3010 | Debug | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
 | 3011 | Error | `MESSAGE_SEND_DENIED`         | Sender lacks the port's required capabilities. |
 | 3012 | Error | `MESSAGE_TOO_LARGE`           | Payload exceeded `max_payload`. |
 | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
-| 3014 | Error | `MAILBOX_FULL`                | The receiver's mailbox was full. |
+| 3014 | Debug | `MAILBOX_FULL`                | The receiver's mailbox was full. |
 | 3020 | Info  | `SHMEM_CREATED`               | A shared-memory object was created. |
 | 3021 | Info  | `SHMEM_MAPPED`                | A mapping was established. |
 | 3022 | Error | `SHMEM_MAP_DENIED`            | A mapping request was refused. |
@@ -278,7 +278,7 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3044 | Error | `CALL_POST_DENIED`            | Caller lacks the endpoint's required capabilities. |
 | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | Request payload exceeded `max_request`. |
 | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
-| 3047 | Error | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
+| 3047 | Debug | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
 | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 | 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
 | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound; the freshly created endpoint is dropped (mirrors `PORT_REGISTER_DENIED`, 3004). |
@@ -293,7 +293,8 @@ Adding a new event requires assigning the next free identifier in
 |------------------------|------------------------------------------------------|
 | `PermissionDenied`     | Sender / binder / mapper lacks a required capability |
 | `MessageTooLarge`      | Payload exceeded the port's `max_payload` (EMSGSIZE) |
-| `LengthOutOfRange`     | Configuration out of range, mailbox full             |
+| `LengthOutOfRange`     | Configuration out of range                           |
+| `WouldBlock`           | Receiver's mailbox full / endpoint's call queue full — transient back-pressure, retry |
 | `NotFound`             | Send to destroyed port, map of revoked shmem, unregister of an unbound endpoint, publish naming an unregistered endpoint, withdraw of an unbound name |
 | `AlreadyExists`        | Register of an already-bound `EndpointId`, publish of an already-bound `PortName` |
 

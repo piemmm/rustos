@@ -39,7 +39,7 @@ pub const MIN_WAIT_NS: u64 = 1_000_000;
 /// deadline resyncs to one period after `now_ns` rather than firing a burst
 /// of immediate catch-up samples.
 #[must_use]
-pub fn advance_deadline(previous_deadline_ns: u64, now_ns: u64) -> u64 {
+pub(crate) fn advance_deadline(previous_deadline_ns: u64, now_ns: u64) -> u64 {
     let next = previous_deadline_ns.saturating_add(SAMPLE_PERIOD_NS);
     if next > now_ns {
         next
@@ -52,7 +52,7 @@ pub fn advance_deadline(previous_deadline_ns: u64, now_ns: u64) -> u64 {
 /// given to park until `next_deadline_ns`, floored at [`MIN_WAIT_NS`] so an
 /// already-overdue deadline never yields a zero-length (spinning) wait.
 #[must_use]
-pub fn wait_timeout_ns(next_deadline_ns: u64, now_ns: u64) -> u64 {
+pub(crate) fn wait_timeout_ns(next_deadline_ns: u64, now_ns: u64) -> u64 {
     next_deadline_ns.saturating_sub(now_ns).max(MIN_WAIT_NS)
 }
 

@@ -12,7 +12,9 @@
 //! * `max_payload` — the maximum payload length, bounded above by
 //!   [`tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN`].
 //! * a bounded mailbox; out-of-room sends fail with
-//!   [`Errno::LengthOutOfRange`] and an audit record.
+//!   [`Errno::WouldBlock`] and an audit record — a full mailbox is
+//!   transient back-pressure the sender may retry, not a malformed
+//!   request.
 //!
 //! Every refused operation emits exactly one audit event through
 //! [`crate::audit`] before returning the [`Errno`] to the caller
@@ -280,7 +282,10 @@ impl Port {
     ///    bounded again by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]; otherwise
     ///    [`Errno::MessageTooLarge`] + [`AuditEvent::MessageTooLarge`].
     /// 4. **Capacity check.** If the mailbox is at capacity,
-    ///    [`Errno::LengthOutOfRange`] + [`AuditEvent::MailboxFull`].
+    ///    [`Errno::WouldBlock`] + [`AuditEvent::MailboxFull`] — the
+    ///    receiver is merely slow, the same retryable signal
+    ///    [`Self::recv`]'s empty-mailbox case would report in reverse, and
+    ///    distinct from a malformed request.
     ///
     /// On success the payload is copied into a kernel-owned buffer
     /// and one [`AuditEvent::MessageDelivered`] is emitted.
@@ -360,7 +365,11 @@ impl Port {
         if q.len() >= self.mailbox_capacity {
             drop(q);
             record(audit, AuditEvent::MailboxFull, &[port_field, sender_field]);
-            return Err(Errno::LengthOutOfRange);
+            // The receiver is merely slow, not the caller malformed: this is
+            // the same retryable back-pressure `recv`'s empty-mailbox case
+            // reports, never `LengthOutOfRange` (reserved for a genuine
+            // configuration error, e.g. `Port::create`'s bounds check).
+            return Err(Errno::WouldBlock);
         }
         q.push_back(Message {
             sender: sender.task().0,
@@ -615,10 +624,12 @@ mod tests {
         for _ in 0..4 {
             port.send(&sender, b"x", &sink).expect("fits");
         }
-        assert_eq!(
-            port.send(&sender, b"x", &sink),
-            Err(Errno::LengthOutOfRange)
-        );
+        // A full mailbox is retryable back-pressure, not a malformed
+        // request, and therefore distinct from the `LengthOutOfRange` a
+        // bad `Port::create` configuration returns (see
+        // `create_rejects_oversize_max_payload` /
+        // `create_rejects_zero_mailbox_capacity` above).
+        assert_eq!(port.send(&sender, b"x", &sink), Err(Errno::WouldBlock));
         assert!(sink.ids().contains(&AuditEvent::MailboxFull.id().0));
         assert_eq!(port.len(), 4);
     }

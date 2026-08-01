@@ -5136,7 +5136,8 @@ mod tests {
         // ERROR-level `SyscallHandlerRejected` (id 5004) a genuine refusal
         // gets — otherwise a caller that legitimately polls while pending
         // (e.g. `login` reading `users_db_read` while the encrypted root
-        // unlocks) floods the boot log with errors.
+        // unlocks, or a sender hitting a full IPC mailbox) floods the boot
+        // log with errors.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -5152,11 +5153,16 @@ mod tests {
         args.0[0] = 1;
         args.0[1] = 0x2000;
         args.0[2] = 4;
+
+        // ipc_send returning WouldBlock (mailbox full)
         assert_eq!(
             d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
             Err(Errno::WouldBlock)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerWouldBlock.id().0]);
+        assert!(!sink
+            .ids()
+            .contains(&AuditEvent::SyscallHandlerRejected.id().0));
     }
 
     #[test]

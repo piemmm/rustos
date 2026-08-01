@@ -164,7 +164,7 @@ fn port_lifecycle_tracks_reference_model() {
                         } else if !size_ok {
                             Err(Errno::MessageTooLarge)
                         } else if !capacity_ok {
-                            Err(Errno::LengthOutOfRange)
+                            Err(Errno::WouldBlock)
                         } else {
                             Ok(())
                         };

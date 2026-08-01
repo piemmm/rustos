@@ -62,6 +62,7 @@ pub struct Panel {
     seat_report: SeatReport,
     model: PanelModel,
     view: Option<Switchboard>,
+    dirty: bool,
 }
 
 impl Panel {
@@ -74,6 +75,7 @@ impl Panel {
             seat_report: SeatReport::HEALTHY,
             model,
             view: None,
+            dirty: false,
         }
     }
 
@@ -130,6 +132,17 @@ impl Panel {
         }
     }
 
+    /// Record that the composition has changed and needs re-presenting on
+    /// the next [`flush`](Self::flush).
+    ///
+    /// Marking is what lets a whole drained batch of window events cost one
+    /// present instead of one per event: presenting is a blocking round-trip
+    /// to the session, so a dense pointer sweep that repainted per event
+    /// would keep the service from draining its own mailbox.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Show the panel on `section`: create the window if none is open, or
     /// ask the session to raise the one that is.
     ///
@@ -153,7 +166,7 @@ impl Panel {
         if let Some(view) = self.view.as_mut() {
             let _ = view.select_section(section);
         }
-        self.redraw(host);
+        self.mark_dirty();
     }
 
     /// Adopt a freshly built model, re-rendering only when it actually
@@ -166,7 +179,7 @@ impl Panel {
     /// hover, and a half-finished press are dropped by the composition,
     /// because a row index names a position rather than a task and the
     /// rows are rebuilt from the new reading.
-    pub fn refresh(&mut self, host: &mut dyn ServiceHost, model: PanelModel) {
+    pub fn refresh(&mut self, model: PanelModel) {
         if model == self.model {
             return;
         }
@@ -175,7 +188,7 @@ impl Panel {
             return;
         };
         view.set_model(self.model.model.clone());
-        self.redraw(host);
+        self.mark_dirty();
     }
 
     /// Apply every effect `action` implies under `authority`, in order, and
@@ -282,9 +295,20 @@ impl Panel {
         }
     }
 
-    /// Re-present the open composition, stating a refusal rather than
-    /// ending the session over it. A closed panel draws nothing.
-    pub fn redraw(&mut self, host: &mut dyn ServiceHost) {
+    /// Re-present the open composition if it has been marked dirty,
+    /// stating a refusal rather than ending the session over it.
+    ///
+    /// The flag is cleared by every flush, so the panel is never dirty
+    /// afterwards — including when the present was refused (the refusal is
+    /// already reported through [`ServiceHost::report_refusal`], and
+    /// re-attempting it every wake with nothing changed would be a refusal
+    /// storm) and when no window is open (a closed panel draws nothing, and
+    /// opening one marks it afresh, so nothing stale can be carried over).
+    pub fn flush(&mut self, host: &mut dyn ServiceHost) {
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
         let Some(view) = self.view.as_mut() else {
             return;
         };

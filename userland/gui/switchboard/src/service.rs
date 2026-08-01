@@ -143,6 +143,7 @@ pub struct Service {
     last_sample: Sample,
     activities: Activities,
     panel: Panel,
+    next_sample_ns: u64,
 }
 
 impl Service {
@@ -172,6 +173,7 @@ impl Service {
             meters,
             last_sample,
             activities,
+            next_sample_ns: 0,
         }
     }
 
@@ -190,6 +192,11 @@ impl Service {
     /// activity-grouping state, rebuild the panel, and publish when the
     /// gate says so.
     ///
+    /// A cycle before the next sample is due (less than
+    /// [`SAMPLE_PERIOD_NS`](crate::SAMPLE_PERIOD_NS) since the last one) is
+    /// a no-op that returns immediately, so an input or command wake never
+    /// re-queries the system.
+    ///
     /// Every step happens whether or not a window is open — the panel
     /// refresh simply draws nothing while closed — so a closed window never
     /// stops the tray summary from being published.
@@ -200,6 +207,10 @@ impl Service {
         now_ns: u64,
         authority: &dyn CapabilityQuery,
     ) -> CycleOutcome {
+        if now_ns < self.next_sample_ns {
+            return CycleOutcome::Continue;
+        }
+
         let sample = self.sampler.sample(transport, now_ns);
         for field in &sample.degradations {
             host.note_degradation(*field);
@@ -221,7 +232,9 @@ impl Service {
             self.activities.refresh_names(&sample.processes);
         }
         self.last_sample = sample;
-        self.rebuild(host, authority);
+        self.rebuild(authority);
+
+        self.next_sample_ns = crate::schedule::advance_deadline(self.next_sample_ns, now_ns);
 
         let Some(offered) = self.publisher.offer(summary, now_ns) else {
             return CycleOutcome::Continue;
@@ -243,6 +256,13 @@ impl Service {
         }
     }
 
+    /// The relative timeout, in nanoseconds, to park the service until
+    /// its next sample is due.
+    #[must_use]
+    pub fn wait_timeout_ns(&self, now_ns: u64) -> u64 {
+        crate::schedule::wait_timeout_ns(self.next_sample_ns, now_ns)
+    }
+
     /// Apply one authenticated command from the desktop session.
     ///
     /// A fresh seat report changes which owners are unresponsive, so the
@@ -255,14 +275,16 @@ impl Service {
         authority: &dyn CapabilityQuery,
     ) {
         if self.panel.command(host, command) == CommandOutcome::Rebuild {
-            self.rebuild(host, authority);
+            self.rebuild(authority);
         }
     }
 
     /// Apply a grouping-related outcome the panel reported from a window
-    /// action, then re-present the panel immediately from the sample
-    /// already in hand — so the popup or rename the user just committed is
-    /// visible now, not at the next sample.
+    /// action, then mark the panel for re-presentation.
+    ///
+    /// The edit is marked and presented once in this same wake, before the
+    /// service parks again — so the popup or rename the user just committed
+    /// is visible now, not at the next sample.
     ///
     /// Every edit resolves the index it carries through the *current*
     /// [`crate::model::PanelModel`] to a stable activity id before touching
@@ -348,7 +370,7 @@ impl Service {
             }
         }
 
-        self.rebuild(host, authority);
+        self.rebuild(authority);
     }
 
     /// The current index of the activity `id` still names, or `None` when
@@ -360,7 +382,7 @@ impl Service {
 
     /// Rebuild the live model from the sample and meter state in hand and
     /// hand it to the panel, which re-renders only if it actually changed.
-    fn rebuild(&mut self, host: &mut dyn ServiceHost, authority: &dyn CapabilityQuery) {
+    fn rebuild(&mut self, authority: &dyn CapabilityQuery) {
         let self_uid = derive_self_uid(&self.last_sample, self.self_pid);
         let model = build_model(
             PANEL_TITLE,
@@ -371,7 +393,7 @@ impl Service {
             &self.activities,
             self_uid,
         );
-        self.panel.refresh(host, model);
+        self.panel.refresh(model);
     }
 }
 

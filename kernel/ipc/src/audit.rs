@@ -21,11 +21,11 @@
 //! | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint in the registry. |
 //! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
 //! | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
-//! | 3010 | Info  | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
+//! | 3010 | Debug | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput transport. |
 //! | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused because the sender lacked the port's required capabilities. |
 //! | 3012 | Error | `MESSAGE_TOO_LARGE`           | A send was refused because the payload exceeded the port's `max_payload`. |
 //! | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
-//! | 3014 | Error | `MAILBOX_FULL`                | A send was refused because the receiver's mailbox was full. |
+//! | 3014 | Debug | `MAILBOX_FULL`                | A send was refused because the receiver's mailbox was full. Recorded at `Debug`: a busy receiver is a routine resource condition on a normal high-rate path, not an authorisation decision, so recording one per refused send would flood the log; forensics recovers it by lowering the level. |
 //! | 3020 | Info  | `SHMEM_CREATED`               | A shared-memory object was created. |
 //! | 3021 | Info  | `SHMEM_MAPPED`                | A mapping into a recipient was established. |
 //! | 3022 | Error | `SHMEM_MAP_DENIED`            | A mapping request was refused. |
@@ -36,11 +36,11 @@
 //! | 3040 | Info  | `CALL_ENDPOINT_CREATED`       | A capability-checked synchronous call endpoint was created. |
 //! | 3041 | Error | `CALL_ENDPOINT_CREATE_DENIED` | A call-endpoint creation request was refused (creator lacks bind authority). |
 //! | 3042 | Info  | `CALL_ENDPOINT_DESTROYED`     | A call endpoint was destroyed (in-flight callers fail closed). |
-//! | 3043 | Debug | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. Recorded at `Debug`: the synchronous call path is the high-throughput RPC transport (e.g. the USB URB endpoint), so a successful post is routine and would otherwise flood the log two records per round-trip. Its denials (3044–3047) stay at `Error`. |
+//! | 3043 | Debug | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. Recorded at `Debug`: the synchronous call path is the high-throughput RPC transport (e.g. the USB URB endpoint), so a successful post is routine and would otherwise flood the log two records per round-trip. Its authorisation/size denials (3044, 3045) stay at `Error`; the queue-full resource condition (3047) is `Debug` for the same reason as the post itself. |
 //! | 3044 | Error | `CALL_POST_DENIED`            | A request was refused for lack of the endpoint's required capabilities. |
 //! | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | A request was refused because its payload exceeded `max_request`. |
 //! | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
-//! | 3047 | Error | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. |
+//! | 3047 | Debug | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. `Debug` for the same reason as `MAILBOX_FULL` (3014): a busy server is a routine resource condition, not an authorisation decision. |
 //! | 3048 | Debug | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput RPC completion. Its denial (3049) stays at `Error`. |
 //! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
 //! | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound (the created endpoint is dropped; mirrors `PORT_REGISTER_DENIED`, 3004). |
@@ -80,6 +80,10 @@ pub enum AuditEvent {
     /// endpoint it resolved to was unregistered).
     PortNameWithdrawn,
     /// A message was enqueued for delivery.
+    ///
+    /// Recorded at [`Level::Debug`] for the same reason as
+    /// [`Self::CallPosted`]: a routine high-throughput transport, not an
+    /// authorisation decision.
     MessageDelivered,
     /// A send was refused for lack of the port's required capabilities.
     MessageSendDenied,
@@ -88,6 +92,11 @@ pub enum AuditEvent {
     /// A send raced with destruction and lost.
     MessageSendToClosedPort,
     /// A send was refused because the receiver's mailbox was full.
+    ///
+    /// This is a resource condition, not a denial: the receiver merely has
+    /// not drained the mailbox yet, and the sender may retry
+    /// ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)). See
+    /// [`Self::level`] for why it is recorded at `Debug`.
     MailboxFull,
     /// A shared-memory object was created.
     ShmemCreated,
@@ -118,6 +127,11 @@ pub enum AuditEvent {
     /// A post raced with destruction and lost.
     CallPostToClosedEndpoint,
     /// A post was refused because the endpoint's outstanding-call queue was full.
+    ///
+    /// This is a resource condition, not a denial: the server merely has not
+    /// drained the queue yet, and the caller may retry
+    /// ([`Errno::WouldBlock`](tairix_abi::Errno::WouldBlock)). See
+    /// [`Self::level`] for why it is recorded at `Debug`.
     CallQueueFull,
     /// A server delivered a reply to an in-flight call.
     CallReplied,
@@ -175,13 +189,25 @@ impl AuditEvent {
     /// Refused decisions are recorded at [`Level::Error`] so they surface
     /// above a routine info filter without further configuration.
     /// Successful decisions are recorded at [`Level::Info`], **except** the
-    /// per-round-trip synchronous-call records [`CallPosted`](Self::CallPosted)
-    /// and [`CallReplied`](Self::CallReplied): the call path is the
-    /// high-throughput RPC transport (e.g. the USB URB endpoint), so a
-    /// successful post/reply is routine throughput that would flood the log
-    /// two records per round-trip. They are recorded at [`Level::Debug`],
-    /// below the default `Info` filter, and remain available for forensics
-    /// when the level is lowered; their *denials* stay at `Error`.
+    /// high-throughput transport records [`MessageDelivered`](Self::MessageDelivered),
+    /// [`CallPosted`](Self::CallPosted), and [`CallReplied`](Self::CallReplied):
+    /// these paths are the high-throughput transport (e.g. window events,
+    /// input, notifications, and the USB URB RPC endpoint), so a
+    /// successful delivery, post, or reply is routine throughput that would
+    /// flood the log one or two records per transaction. They are recorded at
+    /// [`Level::Debug`], below the default `Info` filter, and remain available
+    /// for forensics when the level is lowered; their *denials* stay at `Error`.
+    ///
+    /// [`MailboxFull`](Self::MailboxFull) and
+    /// [`CallQueueFull`](Self::CallQueueFull) are `Debug` for a related but
+    /// distinct reason: a full mailbox or call queue is a *resource*
+    /// condition on those same high-rate paths, not an authorisation decision
+    /// — the sender did nothing wrong, the receiver merely has not drained
+    /// yet — so recording one per refused send would let ordinary traffic to
+    /// a busy receiver flood the log exactly as the transport records themselves
+    /// would. They stay recoverable by lowering the level, while every
+    /// genuine denial ([`MessageSendDenied`](Self::MessageSendDenied),
+    /// [`CallPostDenied`](Self::CallPostDenied), …) stays `Error`.
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
@@ -191,7 +217,6 @@ impl AuditEvent {
             | Self::PortUnregistered
             | Self::PortNamePublished
             | Self::PortNameWithdrawn
-            | Self::MessageDelivered
             | Self::ShmemCreated
             | Self::ShmemMapped
             | Self::ShmemRevoked
@@ -200,21 +225,23 @@ impl AuditEvent {
             | Self::CallEndpointCreated
             | Self::CallEndpointDestroyed
             | Self::CallPosterVanished => Level::Info,
-            Self::CallPosted | Self::CallReplied => Level::Debug,
+            Self::MessageDelivered
+            | Self::CallPosted
+            | Self::CallReplied
+            | Self::MailboxFull
+            | Self::CallQueueFull => Level::Debug,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
             | Self::PortNamePublishDenied
             | Self::MessageSendDenied
             | Self::MessageTooLarge
             | Self::MessageSendToClosedPort
-            | Self::MailboxFull
             | Self::ShmemMapDenied
             | Self::NotifySignalDenied
             | Self::CallEndpointCreateDenied
             | Self::CallPostDenied
             | Self::CallRequestTooLarge
             | Self::CallPostToClosedEndpoint
-            | Self::CallQueueFull
             | Self::CallReplyDenied
             | Self::CallEndpointRegisterDenied => Level::Error,
         }
@@ -447,20 +474,44 @@ mod tests {
     }
 
     #[test]
-    fn routine_call_round_trip_logs_below_info() {
-        // The synchronous-call post/reply pair fires on every RPC
-        // round-trip (notably the USB URB transport), so a successful
-        // post/reply is demoted below the default `Info` filter to keep a
-        // busy IPC path from flooding the log; the records remain available
-        // when the level is lowered for forensics. Their denials stay at
-        // `Error` (covered by `refused_events_log_at_error_level`).
+    fn routine_transport_logs_below_info() {
+        // Routine high-throughput transport records (one-way delivery,
+        // synchronous post/reply pair) are demoted below the default `Info`
+        // filter to keep a busy IPC path from flooding the log; the records
+        // remain available when the level is lowered for forensics. Their
+        // denials stay at `Error`.
         use tairix_log::Level;
+        assert_eq!(AuditEvent::MessageDelivered.level(), Level::Debug);
         assert_eq!(AuditEvent::CallPosted.level(), Level::Debug);
         assert_eq!(AuditEvent::CallReplied.level(), Level::Debug);
+        assert!(AuditEvent::MessageDelivered.level() < Level::Info);
         assert!(AuditEvent::CallPosted.level() < Level::Info);
         assert!(AuditEvent::CallReplied.level() < Level::Info);
-        // The one-way control-plane delivery stays at `Info`.
-        assert_eq!(AuditEvent::MessageDelivered.level(), Level::Info);
+
+        // A lifecycle record such as `PortCreated` stays at `Info`.
+        assert_eq!(AuditEvent::PortCreated.level(), Level::Info);
+    }
+
+    #[test]
+    fn back_pressure_events_log_below_error_and_denials_stay_error() {
+        // A full mailbox or call queue is the receiver/server merely being
+        // slow, not an authorisation decision, so it must not cost the same
+        // log severity as a genuine denial — otherwise an ordinary sender
+        // hitting a busy receiver at syscall rate floods the audit log
+        // exactly as the routine transport records would if they were `Error`.
+        use tairix_log::Level;
+        assert_eq!(AuditEvent::MailboxFull.level(), Level::Debug);
+        assert_eq!(AuditEvent::CallQueueFull.level(), Level::Debug);
+        assert!(AuditEvent::MailboxFull.level() < Level::Error);
+        assert!(AuditEvent::CallQueueFull.level() < Level::Error);
+        // A genuine denial on the very same paths stays at `Error`.
+        assert_eq!(AuditEvent::MessageSendDenied.level(), Level::Error);
+        assert_eq!(AuditEvent::CallPostDenied.level(), Level::Error);
+        assert!(AuditEvent::MailboxFull.level() < AuditEvent::MessageSendDenied.level());
+        assert!(AuditEvent::CallQueueFull.level() < AuditEvent::CallPostDenied.level());
+        // And below Info.
+        assert!(AuditEvent::MailboxFull.level() < Level::Info);
+        assert!(AuditEvent::CallQueueFull.level() < Level::Info);
     }
 
     #[test]
@@ -472,14 +523,12 @@ mod tests {
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
             AuditEvent::MessageSendToClosedPort,
-            AuditEvent::MailboxFull,
             AuditEvent::ShmemMapDenied,
             AuditEvent::NotifySignalDenied,
             AuditEvent::CallEndpointCreateDenied,
             AuditEvent::CallPostDenied,
             AuditEvent::CallRequestTooLarge,
             AuditEvent::CallPostToClosedEndpoint,
-            AuditEvent::CallQueueFull,
             AuditEvent::CallReplyDenied,
             AuditEvent::CallEndpointRegisterDenied,
         ] {

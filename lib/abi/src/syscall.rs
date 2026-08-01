@@ -47,8 +47,9 @@ impl SyscallNumber {
     /// effective set on every send, records the sender's kernel-attested
     /// [`crate::Origin`] beside the bytes, and wakes the port's owner if it
     /// is parked on a wait-set observing the port. The send never blocks: a
-    /// full mailbox is a typed refusal, never a wait — so a server can
-    /// deliver to an unresponsive client without ever being parked by it.
+    /// full mailbox is the retryable [`crate::Errno::WouldBlock`], never a
+    /// wait — so a server can deliver to an unresponsive client without ever
+    /// being parked by it.
     pub const IPC_SEND: Self = Self(2);
     /// Receive a message from an IPC message port the caller owns.
     ///
@@ -564,8 +565,9 @@ impl SyscallNumber {
     /// the **caller's** effective set before posting (no ambient authority), validates both buffers against the
     /// caller's address space, and blocks the caller cooperatively until the
     /// reply arrives (the same park shape as [`SyscallNumber::HW_TREE_WAIT`]
-    /// / [`SyscallNumber::WAIT`]), never busy-spinning. A
-    /// reply larger than `reply_cap` fails closed with
+    /// / [`SyscallNumber::WAIT`]), never busy-spinning. A full
+    /// outstanding-call queue is the retryable [`crate::Errno::WouldBlock`].
+    /// A reply larger than `reply_cap` fails closed with
     /// [`crate::Errno::BufferTooSmall`]; an unknown
     /// endpoint, a missing capability, or the endpoint being destroyed
     /// mid-call each fail closed. A build with no call-endpoint registry

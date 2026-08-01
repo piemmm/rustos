@@ -147,16 +147,26 @@ pub(crate) fn process_record(
 /// unmeasured here.
 pub(crate) struct ProcessListTransport {
     records: Vec<ProcessRecord>,
+    requests: core::sync::atomic::AtomicUsize,
 }
 
 impl ProcessListTransport {
     pub(crate) fn new(records: Vec<ProcessRecord>) -> Self {
-        Self { records }
+        Self {
+            records,
+            requests: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn request_count(&self) -> usize {
+        self.requests.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
 impl Transport for ProcessListTransport {
     fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+        self.requests
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let header = SysinfoRequestHeader::from_bytes(request)?;
         if !matches!(
             header.query,

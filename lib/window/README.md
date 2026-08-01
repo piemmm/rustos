@@ -31,7 +31,12 @@ server and every app's client can never drift apart.
   id; `present` sends a frame index plus damage, never pixels; `close`
   tears the window down. `WindowEvents` wraps the injected `EventSource`
   seam — a **parked** wait on the app's own event endpoint, never a
-  poll — and decodes each delivered `WindowEvent` fail-closed.
+  poll — and decodes each delivered `WindowEvent` fail-closed. The
+  endpoint's *name* (`event_endpoint_for`) and its *depth*
+  (`EVENT_MAILBOX_CAPACITY`) are both defined here, once, because both
+  ends depend on them agreeing: the session reads a refused delivery as
+  evidence that the owner has stopped draining, which would mean
+  different things per app if each chose its own slack.
 
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an

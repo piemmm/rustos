@@ -135,6 +135,6 @@ pub use sample::{
     probe_scopes, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,
     ScopeVerdicts, TopTask,
 };
-pub use schedule::{advance_deadline, wait_timeout_ns, MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
+pub use schedule::{MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
 pub use service::{CycleOutcome, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES};
 pub use wait::{required_members, WaitToken};

@@ -5,13 +5,14 @@
 //! non-blocking send to the owning app's event mailbox (the
 //! [`EventSink`](tairix_window::EventSink) seam). A healthy app drains that
 //! mailbox promptly, so a send only comes back refused with the kernel's
-//! mailbox-full backpressure signal when the app has stopped consuming its
-//! events — the one observable, evidence-based hang signal the desktop has.
-//! [`HangTracker`] folds those per-delivery outcomes into a per-owner
-//! verdict: an owner whose deliveries have been refused as backpressure
-//! continuously for at least [`UNRESPONSIVE_AFTER_NS`] is *unresponsive*;
-//! one accepted delivery clears it, because acceptance proves the mailbox
-//! drained.
+//! transient `WouldBlock` back-pressure signal — the same one an empty
+//! mailbox already answers a non-blocking receive with — when the app has
+//! stopped consuming its events; that is the one observable, evidence-based
+//! hang signal the desktop has. [`HangTracker`] folds those per-delivery
+//! outcomes into a per-owner verdict: an owner whose deliveries have been
+//! refused as back-pressure continuously for at least
+//! [`UNRESPONSIVE_AFTER_NS`] is *unresponsive*; one accepted delivery clears
+//! it, because acceptance proves the mailbox drained.
 //!
 //! The tracker is pure bookkeeping: time is supplied by the caller as
 //! monotonic nanoseconds (the session stamps `clock_get` only on the
@@ -68,18 +69,21 @@ impl HangTracker {
 
     /// Record one refused delivery to `owner`'s event mailbox at `now_ns`.
     ///
-    /// Only the kernel's mailbox-full refusal (`LengthOutOfRange`, the
-    /// documented backpressure signal of the port send) is hang evidence: it
-    /// proves the mailbox exists and the owner is not draining it. A send to
-    /// a torn-down port (`NotFound`) means the owner is gone — that is the
+    /// Only the kernel's transient `WouldBlock` refusal (the documented
+    /// mailbox-full back-pressure signal of the port send) is hang evidence:
+    /// it proves the mailbox exists and the owner is not draining it. A send
+    /// to a torn-down port (`NotFound`) means the owner is gone — that is the
     /// reap path's business, and any standing suspicion is dropped here so a
     /// recycled task id can never inherit stale evidence. Every other
-    /// refusal is no evidence either way and leaves the verdict unchanged.
+    /// refusal — including a malformed-call error such as
+    /// `LengthOutOfRange` — is no evidence either way and leaves the verdict
+    /// unchanged, so a bug in the sender can never be miscounted as the
+    /// receiver hanging.
     ///
     /// Returns `true` when the unresponsive set changed.
     pub fn note_refused(&mut self, owner: u64, error: Errno, now_ns: u64) -> bool {
         match error {
-            Errno::LengthOutOfRange => {
+            Errno::WouldBlock => {
                 let suspect = self.suspects.entry(owner).or_insert(Suspect {
                     since_ns: now_ns,
                     flagged: false,

@@ -54,10 +54,11 @@ service's own pid) and switches section rather than stacking a second. The
 window's close control destroys it and the service returns to headless
 sampling — sampling and publishing continue unchanged whether or not a
 window is open, because the window is a view onto a monitor that never stops
-monitoring.
+monitoring. The system is re-sampled strictly on its 2 s deadline: an input
+or command wake never re-queries the system.
 
-The model is rebuilt on the same sample cadence and re-rendered only when it
-actually changed. What it carries:
+The model is rebuilt on the same sample cadence and re-presented at most
+once per wake, only when it actually changed. What it carries:
 
 | Section | Source |
 |---|---|
@@ -140,7 +141,9 @@ ends the service.
 The loop is tickless and event-driven: **one** `waitset_wait` per iteration
 covers the termination signal, the command mailbox, and — only while a
 window is open — that window's event mailbox, with a timeout equal to the
-time remaining until the next sample is due. There is no poll loop and no
+time until the next real sample is due. Sampling is strict: a cycle
+triggered by an input or command wake before the deadline is a no-op that
+never re-queries the system. There is no poll loop and no
 sleep. The window's event source joins the set when the window opens and
 leaves it when the window closes, so a closed window's channel is never left
 armed. The periodic re-sample is the documented polling fallback: the

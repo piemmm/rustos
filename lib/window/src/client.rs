@@ -25,6 +25,20 @@ use tairix_abi::{Errno, ProcId};
 /// [`event_endpoint_for`]).
 const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
 
+/// Bounded slot count every window-channel app binds its event mailbox
+/// with: input-rate events, drained after every wake, so a small queue is
+/// ample and a stalled app costs the kernel a bounded mailbox rather than
+/// unbounded memory.
+///
+/// The depth is one value for the whole channel, not each app's own
+/// choice: the session's delivery path treats a refused send as evidence
+/// that the owner has stopped draining, so two apps disagreeing about how
+/// much slack they grant it would make that evidence mean different things
+/// per app. Sized against a drained-every-wake consumer, with the session
+/// coalescing an adjacent run of pointer motion over one window into its
+/// newest sample before it ever reaches this queue.
+pub const EVENT_MAILBOX_CAPACITY: usize = 32;
+
 /// The event-mailbox endpoint id an app binds for its window events: the
 /// app's kernel task id (never reused) under a fixed high tag, so every
 /// app instance binds a distinct, collision-free, non-reserved id — the

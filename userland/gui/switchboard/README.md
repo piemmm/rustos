@@ -68,9 +68,11 @@ session alone owns the window stack — and switches to the requested
 section rather than stacking a second window. The window's close control
 destroys it and the service returns to headless sampling; **sampling and
 publishing continue unchanged whether or not a window is open**, because
-the window is a view onto a monitor that never stops monitoring. The model
-is rebuilt on the same sample cadence and re-rendered only when it actually
-changed.
+the window is a view onto a monitor that never stops monitoring. The
+system is re-sampled strictly on its 2 s deadline: an input or command
+wake never re-queries the system. The model is rebuilt on that same
+tickless cadence and re-presented at most once per wake, only when it
+actually changed.
 
 | Section | Source |
 |---|---|
@@ -89,8 +91,8 @@ emptied group dissolved — only on a sample whose process list succeeded,
 so a degraded sample never wipes groupings; set actions sweep **only
 members joined to the current sample**, because a stored numeric pid whose
 process exited may have been reused by an unrelated process. Grouping
-edits re-present the window immediately (`Service::apply_grouping`) rather
-than waiting for the next sample.
+edits mark the panel dirty and are presented once in the same wake, before
+the service parks again.
 
 The seat report carries owner **ids only**; the names beside them are the
 ones this service attested itself, so display text is never taken from the
@@ -182,8 +184,10 @@ see; a refused scope is an answer, not a fatal error.
 ## Cadence and keepalive
 
 The run loop is tickless: **one** `waitset_wait` per iteration, parked with
-a timeout equal to the time until the next thing that must happen
-(`src/schedule.rs`). That single wait covers every source (`src/wait.rs`):
+a timeout equal to the time until the next real sample is due
+(`src/schedule.rs`). Sampling is strict: a cycle triggered by an input or
+command wake before the deadline is a no-op that never re-queries the
+system. That single wait covers every source (`src/wait.rs`):
 the termination signal, the command mailbox, and — only while a window is
 open — that window's event mailbox, which joins the set when the window
 opens and leaves it when the window closes so a closed window's channel is

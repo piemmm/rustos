@@ -55,10 +55,6 @@ mod program {
     /// frame is race-free.
     const FRAME_COUNT: u32 = 1;
 
-    /// The event mailbox's bounded capacity: input-rate events, drained after
-    /// every wake, so a small queue is ample.
-    const EVENT_CAPACITY: usize = 32;
-
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
 
@@ -328,7 +324,11 @@ mod program {
         };
         let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
         if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || tairix_rt::port_bind(event_endpoint, WindowEvent::WIRE_LEN, EVENT_CAPACITY) != 0
+            || tairix_rt::port_bind(
+                event_endpoint,
+                WindowEvent::WIRE_LEN,
+                tairix_window::EVENT_MAILBOX_CAPACITY,
+            ) != 0
         {
             return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
         }
