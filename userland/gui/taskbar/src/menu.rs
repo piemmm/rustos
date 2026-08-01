@@ -84,6 +84,19 @@ pub(crate) enum MenuOutcome {
     Dismissed,
 }
 
+/// The row index of *Open* in a pinned-shortcut or program-library-entry
+/// context menu.
+///
+/// [`rows_for`] builds both menus in one fixed order — *Open* first, the pin
+/// affordance second — and [`BarMenu::choose`] reads the activated row back
+/// through these same two definitions, so the order is stated once and a
+/// reordering cannot silently re-map what a row does.
+const MENU_OPEN_ROW: usize = 0;
+
+/// The row index of the pin affordance in those same menus (see
+/// [`MENU_OPEN_ROW`]).
+const MENU_PIN_ROW: usize = 1;
+
 /// The computed geometry of the open context menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MenuLayout {
@@ -264,14 +277,14 @@ impl BarMenu {
                     index,
                     running: true,
                 },
-                0,
+                MENU_OPEN_ROW,
             ) => MenuChoice::RestorePin(index),
             (
                 MenuSubject::Pin {
                     index,
                     running: false,
                 },
-                0,
+                MENU_OPEN_ROW,
             ) => MenuChoice::LaunchPin(index),
             (
                 MenuSubject::Pin { index, .. }
@@ -279,15 +292,15 @@ impl BarMenu {
                     pinned: Some(index),
                     ..
                 },
-                1,
+                MENU_PIN_ROW,
             ) => MenuChoice::Unpin(index),
-            (MenuSubject::Entry { entry, .. }, 0) => MenuChoice::OpenEntry(entry),
+            (MenuSubject::Entry { entry, .. }, MENU_OPEN_ROW) => MenuChoice::OpenEntry(entry),
             (
                 MenuSubject::Entry {
                     entry,
                     pinned: None,
                 },
-                1,
+                MENU_PIN_ROW,
             ) => MenuChoice::PinEntry(entry),
             (MenuSubject::System { .. }, row) => match system::action_at(row) {
                 Some(action) => MenuChoice::System(action),
