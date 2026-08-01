@@ -3,19 +3,65 @@
 A RAID volume is a **virtual block device that composes child block
 endpoints** through the same fault-aware block seam every leaf device uses
 (`plans/FIX-IO.md` IO6; `AGENTS.md` §2.2, §27). It is itself a
-[`tairix_abi::driver::block::Block`](./block.md), so a composed array presents
+[`tairix_abi::driver::block::Block`](../drivers/block.md), so a composed array presents
 one logical device to the filesystem layer and multi-layered sets nest
 naturally over the recursive seam. RAID **consumes** the block-layer health
 vocabulary (`blkio::BlkStatus`, `DriverError`); it never re-invents it.
 
-The composition engine, its on-disk metadata layer, and the maintenance policy
-that decides when an array heals itself all live in `drivers/storage/raid` as a
-host-testable library. The autoloaded serve process that reads each discovered
-device's superblock, assembles the members, turns those maintenance decisions
-into real transfers, and publishes the composed device as its own block-service
-node is designed and staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f); the engine,
-its metadata, and the policy are proven host-side first, as the other FIX-IO
-primitives were.
+The composition engine and the maintenance policy that decides when an array
+heals itself live in the shared `lib/raid` crate, over the on-disk metadata
+layer in `lib/raidmeta`. They sit in `lib/` rather than in a driver because
+composition is device-agnostic arithmetic over the generic block seam — the
+engines compose devices they are *handed* as `Block` implementations and never
+reach hardware themselves — and because two independent consumers compose
+several devices as one and must share a single definition: the autoloaded RAID
+composer driver (`drivers/storage/raid`) and the native filesystem's
+multi-device volumes (`drivers/filesystem/arxfs`). Neither could reach a copy
+held by the other, since one driver crate may not depend on another.
+
+The autoloaded serve process that reads each discovered device's superblock,
+assembles the members, turns those maintenance decisions into real transfers,
+and publishes the composed device as its own block-service node is designed and
+staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f); the engine, its metadata, and the
+policy are proven host-side first, as the other FIX-IO primitives were.
+
+## How a device reaches the composer
+
+An array is several block devices driven as one, so one process must hold
+client authority over every member at once. Nothing is born that way: a driver
+is spawned for exactly one matched hardware-tree node and receives exactly that
+node's resource grants. Authority therefore flows to the composer one device at
+a time, from the process that legitimately holds it.
+
+1. **Discovery recognises the member.** While probing a device the volume
+   manager reads a valid array superblock at an extent's first block
+   (`lib/fsprobe`), refuses to attach it as a standalone volume — mounting one
+   bare mirror copy would diverge the array or serve stale data — and publishes
+   a `tairix,raid-member` node re-declaring that device's block-service
+   endpoint and data window. The kernel parents the node to the volume
+   manager's own matched node and admits a declared resource only if that task
+   already holds a grant covering it, so the emission republishes that
+   device's transport and nothing else.
+2. **The member agent delegates.** The RAID driver
+   (`drivers/storage/raid`), matched to that node, delegates the endpoint and
+   the window to the composer's reserved rendezvous (`call_grant`,
+   `shm_grant`) and posts a `MemberOffer` naming them
+   (`tairix_abi::raid_ipc`).
+3. **The composer verifies for itself.** Which array the device belongs to,
+   which slot it holds and which generation it last saw are read back off the
+   device through `lib/raidmeta` — never taken from the offer. The node is a
+   pointer to look, never a datum to believe, so a mistaken or malicious
+   emitter cannot place a disk into an array it has nothing to do with.
+4. **The membership stays open.** The composer answers the offer only when the
+   membership ends, so one outstanding call carries the whole lifecycle: the
+   agent parks on the reply, and the composer's endpoint being torn down
+   cancels the call and wakes it, whereupon it re-offers. A composer that
+   restarts reassembles its arrays without a reboot, and nothing polls.
+
+The rendezvous id is reserved, so binding it demands
+`CAP_IPC_BIND_PRIVILEGED`. That gate is load-bearing: an unprivileged squatter
+that claimed the id first would be handed read/write authority over every array
+member on the machine as each agent delegated to it in turn.
 
 ## RAID1 mirror (`MirrorArray`)
 
@@ -633,7 +679,7 @@ with `add_member`; see *Degrade — never fail the system* above.
 
 ## Device health (`device_health`)
 
-Every composition is itself a [`Block`](./block.md), so a consumer that
+Every composition is itself a [`Block`](../drivers/block.md), so a consumer that
 schedules a scrub from a device's `SMART` / `NVMe` telemetry
 (`docs/src/filesystem/arxfs-spec.md` §11) queries the *array* through
 `Block::device_health` and must still see the health of the disks underneath
@@ -672,7 +718,7 @@ absence of data is never mistaken for a perfectly-healthy array.
 
 An array is also a device in the eyes of the consumer that derives its I/O
 budget — the per-request deadline, reissue count, and recovery grace window —
-from a device's declared `BlkDeviceClass` (see [block drivers](./block.md)).
+from a device's declared `BlkDeviceClass` (see [block drivers](../drivers/block.md)).
 An array answers only as fast as the member it is waiting on, so it declares
 the **most patient** of its live members' classes
 (`BlkDeviceClass::most_patient`): a mirror pairing an SSD with a spinning disk
@@ -695,7 +741,7 @@ waiting out disks that are not there.
 
 The six compositions above are siblings over the same block seam (`AGENTS.md`
 §2.2), but a serving process must present exactly **one** logical
-[`tairix_abi::driver::block::Block`](./block.md) device to the filesystem
+[`tairix_abi::driver::block::Block`](../drivers/block.md) device to the filesystem
 layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
 composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's

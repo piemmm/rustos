@@ -19,11 +19,15 @@
 //!
 //! It holds only `CAP_SHM` (map the granted data window),
 //! `CAP_IPC_ENDPOINT` (issue blkio calls on its one granted endpoint),
-//! `CAP_FS_MOUNT` (request the audited attach), and `CAP_LOG_EMIT`
-//! (diagnostics). No MMIO, no DMA, no IRQ, no node emission: a
+//! `CAP_FS_MOUNT` (request the audited attach), `CAP_HW_EMIT` (publish the
+//! array-member node for a device whose metadata says it belongs to a RAID
+//! array), and `CAP_LOG_EMIT` (diagnostics). No MMIO, no DMA, no IRQ: a
 //! compromised volume manager can neither reach another device's
 //! transport (the per-endpoint grant gates every call) nor mount anything
-//! the kernel's own validation refuses.
+//! the kernel's own validation refuses. Its node emission is bounded the
+//! same way — the kernel parents the node to this driver's own matched node
+//! and admits only resources this task already holds a grant for, so the
+//! emission can republish this device's transport and nothing else.
 //!
 //! It is a **pure-Rust** program; on the host it is an inert stub so
 //! `cargo build --workspace`, clippy, and fmt still cover the file. The

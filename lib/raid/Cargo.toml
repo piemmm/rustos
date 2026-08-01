@@ -1,0 +1,35 @@
+[package]
+name = "tairix-raid"
+description = "TAIRiX RAID composition engines: fault-aware virtual block devices that compose child block endpoints through the public block seam (plans/FIX-IO.md IO6). Six sibling levels (RAID1 mirror, RAID0 stripe, RAID5/6/TP distributed parity, RAID10 stripe of mirrors) serve reads from any healthy member, auto-repair a proven-bad copy from a good one, fan writes out, degrade (never fail the system) when a member faults, and rebuild a returning member with a bounded, interruptible resync. One RaidArray dispatch presents whichever level as a single logical device, and one ArrayMaintenance policy decides when it re-admits, rebuilds, and scrubs without starving the foreground workload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A `no_std` shared crate: the six RAID composition engines that consume child
+# `Block` endpoints through the public block seam and the shared health
+# classification (`tairix_abi::blkio`), the `RaidArray` composed-device
+# dispatch over them, and the `ArrayMaintenance` policy that schedules their
+# self-healing. It lives in `lib/` because composition is device-agnostic
+# arithmetic over the generic block seam — not any device's bring-up, firmware,
+# quirk, or register logic — and because two independent consumers compose
+# multiple devices through it: the autoloaded RAID composer driver
+# (`drivers/storage/raid`), which assembles discovered members and serves each
+# array as one logical block device, and the native filesystem
+# (`drivers/filesystem/arxfs`), whose multi-device volumes compose the same
+# engines directly. Neither could reach the other's copy without a
+# `drivers/*`->`drivers/*` edge, so the single definition belongs here.
+
+[dependencies]
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The on-disk array-member superblock format and reassembly logic
+# (`tairix_raidmeta`) — the single definition shared with the storage-discovery
+# probe (`lib/fsprobe`/volmgr) so the composition and discovery sides can never
+# disagree about what a member is (`AGENTS.md` §2.2). This crate consumes it to
+# assemble the engines from decoded members.
+tairix-raidmeta = { path = "../raidmeta", version = "=0.0.0" }

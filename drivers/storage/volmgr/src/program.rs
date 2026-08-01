@@ -19,10 +19,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BLK_DATA_LEN;
-use tairix_abi::hwtree::HwResourceKind;
+use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::raid_ipc::RAID_MEMBER_COMPATIBLE;
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
 use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
@@ -73,14 +74,22 @@ const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
 /// diagnosable rather than looking blank.
 const VOLMGR_RAID_MEMBER: EventId = EventId(4185);
 
+/// Diagnostic event id: the RAID member node could not be published, so no
+/// agent will offer this device to the array composer and any array it belongs
+/// to stays short a member. Not fatal to this device's other volumes.
+const VOLMGR_RAID_MEMBER_UNPUBLISHED: EventId = EventId(4190);
+
 /// The capability set the driver host re-checks up front; the kernel is
 /// the authority and re-checks every trap. It is the least-privilege set
-/// this policy driver needs — no MMIO, DMA, IRQ, or node emission.
+/// this policy driver needs — no MMIO, DMA, or IRQ. Node emission is held
+/// only to publish the RAID member node below, and the kernel admits that
+/// emission only for resources this task already holds.
 fn driver_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::SHM);
     caps.insert(CapabilityId::IPC_ENDPOINT);
     caps.insert(CapabilityId::FS_MOUNT);
+    caps.insert(CapabilityId::HW_EMIT);
     caps.insert(CapabilityId::LOG_EMIT);
     caps
 }
@@ -88,6 +97,45 @@ fn driver_caps() -> CapabilitySet {
 /// Recover an [`Errno`] from a raw negative kernel result (`-errno`).
 fn errno_from(neg: i64) -> Errno {
     Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
+}
+
+/// Publish the member node the array composer's agent binds, re-declaring
+/// this device's transport under it (`plans/FIX-IO.md` `IO6c`).
+///
+/// The node says only "this device's first block, or one of its partitions,
+/// carries array metadata" — it is a pointer for the composer to look, never a
+/// datum for it to believe. Which array, which slot, and which generation are
+/// read back off the device itself, so a mistaken or malicious emitter cannot
+/// place a disk into an array it has nothing to do with. That is also why one
+/// node covers a whole device however many of its partitions are members: the
+/// composer re-probes the device through the same shared definition this probe
+/// used.
+///
+/// The kernel assigns the node's identity and parents it to this driver's own
+/// matched node, and admits each declared resource only if this task already
+/// holds a grant covering it — so the emission can republish this device's
+/// transport and nothing else. Best-effort: a refusal leaves the member
+/// unassembled and logged, exactly as a device with no driver is left unbound,
+/// and never fails the volumes this device did attach.
+fn publish_raid_member(endpoint: u64, window_id: u64) {
+    let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Storage);
+    let published = HwMatchKey::compatible(RAID_MEMBER_COMPATIBLE)
+        .and_then(|key| node.push_match_key(key))
+        .and_then(|()| node.push_resource(HwResource::endpoint(endpoint)))
+        .and_then(|()| node.push_resource(HwResource::shared(window_id)))
+        .map_or_else(
+            |err| -i64::from(err.as_i32()),
+            |()| tairix_rt::hw_emit_node(&node),
+        );
+    if published < 0 {
+        log_hex_event(
+            VOLMGR_RAID_MEMBER_UNPUBLISHED,
+            Level::Warn,
+            "volmgr: could not publish the RAID member node; array cannot assemble",
+            "errno_hex",
+            errno_from(published) as u64,
+        );
+    }
 }
 
 /// The production blkio transport: the bounded, capability-checked async
@@ -350,6 +398,7 @@ fn main() -> i32 {
             "raid_members_hex",
             u64::from(summary.raid_members),
         );
+        publish_raid_member(endpoint, window_id);
     }
     if summary.planned == 0 {
         // Only genuinely blank when there is also no RAID member: a member is

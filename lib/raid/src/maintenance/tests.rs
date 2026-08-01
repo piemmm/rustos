@@ -10,9 +10,9 @@ use core::cell::Cell;
 
 use super::{
     ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,
-    READD_BACKOFF_CEILING,
 };
 use crate::array::{RaidArray, RaidError};
+use crate::backoff::RetryCadence;
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorMember};
 use crate::stripe::{StripeArray, StripeMember};
 use tairix_abi::blkio::BlkDeviceClass;
@@ -34,8 +34,7 @@ const TEST_POLICY: MaintenancePolicy = MaintenancePolicy {
     scrub_period_ns: 1_000,
     busy_duty_percent: 50,
     foreground_idle_ns: 100,
-    readd_backoff_ns: 10,
-    readd_backoff_max_ns: 40,
+    readd: RetryCadence::new(10, 40),
 };
 
 /// An in-memory block device whose presence and per-request faults a test
@@ -189,16 +188,16 @@ fn the_first_readd_delay_is_the_classs_own_recovery_grace_window() {
         BlkDeviceClass::Virtual,
     ] {
         let policy = MaintenancePolicy::for_class(class);
-        let grace_ns = class.budget().grace_ns;
         assert_eq!(
-            policy.readd_backoff_ns, grace_ns,
+            policy.readd,
+            RetryCadence::for_class(class),
+            "a member is re-probed on the shared cadence for its class, never a second rule"
+        );
+        assert_eq!(
+            policy.readd.base_ns(),
+            class.budget().grace_ns,
             "re-probing before the device's own driver has given up on it asks nothing useful"
         );
-        assert_eq!(
-            policy.readd_backoff_max_ns,
-            grace_ns * READD_BACKOFF_CEILING
-        );
-        assert!(policy.readd_backoff_max_ns > policy.readd_backoff_ns);
     }
 }
 

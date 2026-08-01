@@ -2283,8 +2283,21 @@ where
             // Matched on the caller's security task id, the same claimant the
             // post recorded, so a member only ever reports the caller's own
             // completions; the woken owner drains with `call_reap`.
-            WaitSourceKind::CallReply => crate::callreg::lookup(EndpointId(m.id))
-                .is_some_and(|ep| ep.has_ready_reply_for(caller.caps.task().0, now)),
+            //
+            // An endpoint that no longer resolves is ready too. Unlike the
+            // other kinds — where a vanished resource simply stops reporting,
+            // because their waiter is a *listener* with nothing outstanding —
+            // this waiter is a client whose posted requests the teardown just
+            // retired. Reporting not-ready would leave it parked on a reply
+            // that can never arrive, with no deadline to end the wait; the
+            // woken client reaps the `NotFound` that says the server is gone.
+            // This can only ever name an endpoint that existed when the member
+            // was added (an unknown id is refused there), so a caller cannot
+            // conjure a permanently-ready member out of a bogus id.
+            WaitSourceKind::CallReply => match crate::callreg::lookup(EndpointId(m.id)) {
+                Some(ep) => ep.has_ready_reply_for(caller.caps.task().0, now),
+                None => true,
+            },
             // The IRQ ready flag is *peeked* (`ready_for`), not consumed,
             // so a faulting `token_out` after the scan never drops a
             // delivered edge.
@@ -27992,6 +28005,95 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(0x5B0A), 1);
+    }
+
+    /// A `CallReply` member whose endpoint is torn down while a request is
+    /// outstanding reports ready, so a client parked with **no deadline** is
+    /// woken and reaps the `NotFound` that says the server is gone.
+    ///
+    /// Regression: readiness resolved the endpoint and reported not-ready when
+    /// the lookup failed, which is right for the *listener* kinds but wrong
+    /// here — this waiter is a client with a posted request that the teardown
+    /// just retired. A long-lived client that deliberately waits with no
+    /// deadline (a service rendezvous held open for as long as the service
+    /// holds it, `plans/FIX-IO.md` `IO6c`) would park forever on a reply that
+    /// could never arrive.
+    #[test]
+    fn waitset_reports_a_call_reply_member_whose_endpoint_was_torn_down() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        arch.set_monotonic_ns(0);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5B0B), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5B0B, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5B0B),
+            caps: &caps,
+        };
+        let id = 0xCA11_500B;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Post with **no** deadline — the client means to wait as long as the
+        // membership lasts — and observe the endpoint's replies.
+        assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
+        let ticket = {
+            let guard = aspaces.read();
+            let (_s, physmap) = guard.resolve(SecTaskId(0x5B0B)).expect("aspace present");
+            read_ticket(physmap)
+        };
+        let set = h.waitset_create(&ctx).expect("create");
+        let call_reply_kind = tairix_abi::WaitSourceKind::CallReply as u32;
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, call_reply_kind, id, 0xCD)
+            .expect("add call-reply member");
+
+        // While the server is alive with nothing to say, the member is not
+        // ready: an unanswered call is exactly what the client is waiting for.
+        arch.set_monotonic_ns(1_000);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // The server goes away. The member is ready at once, with no deadline
+        // anywhere to have produced that wake.
+        crate::callreg::unregister(EndpointId(id));
+        arch.set_monotonic_ns(2_000);
+        assert_eq!(
+            h.waitset_wait(&ctx, set, u64::MAX, 0x2000),
+            Ok(0),
+            "a client waiting on a service that vanished must be woken, not left parked"
+        );
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5B0B))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0xCD
+        );
+
+        // And the reap tells it why: the server is gone.
+        assert_eq!(
+            h.call_reap(&ctx, id, ticket, 0x2000, 64),
+            Err(Errno::NotFound)
+        );
+
+        assert_eq!(crate::waitset::release_owned_by(0x5B0B), 1);
     }
 
     /// `port_bind` binds a port owned by the kernel-trusted caller, refuses

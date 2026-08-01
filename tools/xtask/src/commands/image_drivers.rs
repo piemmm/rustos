@@ -104,6 +104,11 @@ pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b
 /// driver that binds the per-LUN block-service nodes.
 pub const VOLMGR_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"volmgr", b"Run"];
 
+/// Store path of the RAID composition-driver bundle: class `storage`, the
+/// `raid` leaf naming the (vendor-neutral, bus-neutral) driver that binds the
+/// array-member nodes the volume manager emits.
+pub const RAID_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"raid", b"Run"];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -389,10 +394,12 @@ pub fn build_usb_msd_bundle(
 /// A pure policy driver: it maps the shared data window its block driver
 /// forwarded (`CAP_SHM`), issues blkio calls on its one granted
 /// block-service endpoint (`CAP_IPC_ENDPOINT`), requests the audited
-/// kernel attach of each recognised volume (`CAP_FS_MOUNT`), and emits
-/// diagnostics (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
-/// DMA, IRQ, or node-emission authority. Carries
-/// `tairix_drv_storage_volmgr::BIND_KEYS`, so it autoloads against the
+/// kernel attach of each recognised volume (`CAP_FS_MOUNT`), publishes the
+/// array-member node for a device whose metadata says it belongs to a RAID
+/// array (`CAP_HW_EMIT`), and emits diagnostics (`CAP_LOG_EMIT`) — and
+/// nothing more. It holds **no** MMIO, DMA, or IRQ authority, and its node
+/// emission can only republish transport the kernel already granted it.
+/// Carries `tairix_drv_storage_volmgr::BIND_KEYS`, so it autoloads against the
 /// per-LUN block-service storage node the mass-storage class driver
 /// emitted (`plans/DEVICES.md` D3c).
 ///
@@ -412,9 +419,45 @@ pub fn build_volmgr_bundle(
             CapabilityId::SHM,
             CapabilityId::IPC_ENDPOINT,
             CapabilityId::FS_MOUNT,
+            CapabilityId::HW_EMIT,
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_storage_volmgr::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the RAID composition-driver bundle.
+///
+/// Matched to an array-member node it is that member's **agent**: it delegates
+/// its one granted block-service endpoint (`CAP_IPC_ENDPOINT`) and its one
+/// granted data window (`CAP_SHM`) to the composer's reserved rendezvous, and
+/// emits diagnostics (`CAP_LOG_EMIT`) — and nothing more. It never reads or
+/// writes the device, holds no MMIO, DMA, IRQ, node-emission, or mount
+/// authority, and can delegate only what it was granted. Carries
+/// `tairix_drv_storage_raid::BIND_KEYS`, so it autoloads against the
+/// `tairix,raid-member` node the volume manager emits for a device whose own
+/// first block probed as array metadata (`plans/FIX-IO.md` `IO6c`), and stays
+/// unbound on a machine with no array members.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_raid_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-storage-raid",
+        &[
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::LOG_EMIT,
+        ],
+        tairix_drv_storage_raid::BIND_KEYS,
         profile,
     )
 }

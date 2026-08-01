@@ -916,7 +916,7 @@ block device that composes child block endpoints** through the same fault-aware
 so it nests naturally over the recursive seam and *consumes* the block-layer
 health vocabulary (`blkio::BlkStatus`, `DriverError`) rather than re-inventing
 it. The first composition is the RAID1 mirror `raid::MirrorArray`
-(`drivers/storage/raid`, host-testable `lib`): it is `no_std`,
+(`lib/raid`): it is `no_std`,
 `forbid(unsafe_code)`, and **allocation-free** — it borrows a caller-owned
 member slice, so there is no fixed member ceiling (§24.1) and the growable
 member tier lives in the assembling serve process. Its complete behaviour is
@@ -981,7 +981,7 @@ proven host-side over a fault-injecting `Block` double:
   nothing, and the array reports `Unavailable` only when no live member exposes
   any. Proven host-side per array (aggregate, faulted/absent exclusion,
   resyncing inclusion, all-unavailable, errored-member skip).
-  Design: `docs/src/drivers/raid.md`.
+  Design: `docs/src/lib/raid.md`.
 
 **Landed (the on-disk array metadata + reassembly logic):** the prerequisite
 for the autoloaded serve process is the shared, host-tested metadata layer in
@@ -1049,7 +1049,7 @@ serve process resolves each array through `ArrayIdentity::resolve` in turn — a
 array is *discovered*, never configured (§18, §16.5). Proven host-side (empty,
 single-array dedup, interleaved multi-array first-appearance order, and
 compose-with-`resolve`).
-Design: `docs/src/drivers/raid.md`.
+Design: `docs/src/lib/raid.md`.
 
 **Landed (the composed-device dispatch — `RaidArray`):** once an array is
 *discovered* and its `RaidLevel` resolved, a serve process presents exactly one
@@ -1071,7 +1071,7 @@ exactly as the stripe engine reports only `Optimal`/`Failed`. Proven host-side
 (per-level I/O round-trip incl. through a `&mut dyn Block`, observation, the
 mirror and block-budget parity maintenance dispatch, the stripe `NotRedundant`
 refusals, `BadScratch`, and the `RaidError` `From` mapping incl. its defensive
-catch). Design: `docs/src/drivers/raid.md`.
+catch). Design: `docs/src/lib/raid.md`.
 
 **Landed (discovery-side member recognition — a bare member is never mounted):**
 the on-disk metadata format and reassembly were hoisted from the driver into
@@ -1098,7 +1098,7 @@ the assembling serve process below.
 layer (which resolves a discovered array to a `SlotDisposition` per slot) and
 the composition engines (which each borrow a caller-owned member buffer) is the
 shared, host-tested `raid::fill_members` + `AssembleMember` bridge
-(`drivers/storage/raid`, §2.2, §27). Every consumer that assembles a
+(`lib/raid`, §2.2, §27). Every consumer that assembles a
 *discovered* array — the autoloaded serve process and the ARXFS-native
 multi-device composition alike — would otherwise hand-roll the same placement
 loop, and a slip is a data-integrity fault, not a cosmetic one: admitting a
@@ -1117,7 +1117,7 @@ redundant member types that carry the current/stale/absent vocabulary
 deliberately excluded (its `assemble` fails closed on a gap). `no_std`,
 `forbid(unsafe_code)`, allocation-free, proven host-side (current/stale/absent
 placement, cross-type uniformity, and the width-mismatch/missing-device
-fail-closed cases). Design: `docs/src/drivers/raid.md`.
+fail-closed cases). Design: `docs/src/lib/raid.md`.
 
 **Landed (the maintenance scheduler — *when* an array heals itself):** exposing
 a self-healing surface is not the same as driving it. `RaidArray` offers
@@ -1175,7 +1175,7 @@ and signal floor; deterministic slot choice; idle/busy/clamped pacing and the
 failed-chunk backoff; the scrub start, completion re-arm, refusal deferral, and
 the pause-and-resume across a degrade; and that an idle deadline is never in the
 past, so parking on it is a wait and not a spin). Design:
-`docs/src/drivers/raid.md`.
+`docs/src/lib/raid.md`.
 
 **Landed (durable maintenance progress — a pass survives a restart):** a scrub
 and a rebuild each advance a cursor one bounded chunk at a time, so on a 100 TB+
@@ -1244,7 +1244,7 @@ rather than assumed. The ARXFS-native multi-device composition consumes the
 same engine, dispatch, scheduler, and record (§2.2) and follows the same
 staging.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
-  (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
+  (`lib/raid`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size
   chunks (`ArraySuperblock::chunk_blocks`, a persisted per-array stripe unit —
   policy, not a global const, §24.1) across the members. It is a sibling of the
@@ -1265,9 +1265,9 @@ staging.
   `forbid(unsafe_code)`, proven host-side over a fault-injecting `Block` double
   (striping-map white-box, cross-stripe gather, every assemble refusal, the
   whole-device-fail-closed and per-block-media-only journeys, all-member flush,
-  range validation, buffer-class forwarding). Design: `docs/src/drivers/raid.md`.
+  range validation, buffer-class forwarding). Design: `docs/src/lib/raid.md`.
 - **Landed (the RAID5 distributed-parity sibling):** `raid::ParityArray`
-  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 1`
+  (`lib/raid`) composes `member_count - 1`
   members' worth of capacity as one logical device with single-fault
   redundancy — the capacity-plus-redundancy sibling of the mirror and the
   stripe over the same seam (§2.2 parallel implementations), reusing their
@@ -1292,9 +1292,9 @@ staging.
   The on-disk `ArraySuperblock` grew a `RaidLevel::Parity` (evolved in place,
   §2.13; level and stripe unit must agree or the record is refused
   `BadStripeChunk`), threaded through `ArrayIdentity`'s shape match. Design:
-  `docs/src/drivers/raid.md`.
+  `docs/src/lib/raid.md`.
 - **Landed (the RAID6 double-parity sibling):** `raid::DualParityArray`
-  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 2`
+  (`lib/raid`) composes `member_count - 2`
   members' worth of capacity as one logical device with **double-fault**
   redundancy — the sibling of the mirror, the stripe, and single parity over the
   same seam (§2.2 parallel implementations), reusing their
@@ -1326,9 +1326,9 @@ staging.
   the record is refused `BadStripeChunk`), threaded through `ArrayIdentity`'s
   shape match. `assemble` needs ≥ 4 members and fails closed above 255 data
   members (`TooManyMembers`), where the GF(2^8) Q coefficients would collide.
-  Design: `docs/src/drivers/raid.md`.
+  Design: `docs/src/lib/raid.md`.
 - **Landed (the RAID-TP triple-parity sibling):** `raid::TripleParityArray`
-  (`drivers/storage/raid`, host-testable `lib`) composes `member_count - 3`
+  (`lib/raid`) composes `member_count - 3`
   members' worth of capacity as one logical device with **triple-fault**
   redundancy — the sibling of the mirror, the stripe, and single/double parity
   over the same seam (§2.2 parallel implementations), reusing their
@@ -1358,9 +1358,9 @@ staging.
   threaded through `ArrayIdentity`'s shape match, with the shared 255-data-member
   GF(2^8) ceiling generalised to `MAX_PARITY_DATA_MEMBERS` (one definition for
   RAID6 and RAID-TP, §2.2). `RaidArray` dispatch gained the `TripleParity` arm.
-  Design: `docs/src/drivers/raid.md`.
+  Design: `docs/src/lib/raid.md`.
 - **Landed (the RAID10 stripe-of-mirrors sibling):** `raid::Raid10Array`
-  (`drivers/storage/raid`, host-testable `lib`) composes an even number of
+  (`lib/raid`) composes an even number of
   members (≥ 4) into two-copy mirror pairs and stripes fixed-size chunks
   (`ArraySuperblock::chunk_blocks`) across the pairs — the capacity-*and*-
   redundancy sibling of the mirror and the stripe over the same seam (§2.2
@@ -1386,11 +1386,11 @@ staging.
   a striped level, so a non-zero stripe unit is required, and its member count
   must be even and ≥ 4 — `data_members` is the single composability oracle the
   `decode` boundary reuses so an odd count fails closed identically). `RaidArray`
-  dispatch gained the `Raid10` arm. Design: `docs/src/drivers/raid.md`.
+  dispatch gained the `Raid10` arm. Design: `docs/src/lib/raid.md`.
 - RAID levels beyond RAID10 are further sibling compositions over the
   same seam (§2.2 parallel implementations), added when needed.
 
-Tests (§7): the mirror engine is proven host-side in `drivers/storage/raid`
+Tests (§7): the mirror engine is proven host-side in `lib/raid`
 over a fault-injecting `Block` double — two healthy copies assemble optimal; a
 bad sector is recovered from a copy and the bad copy repaired; a whole-device
 read fault drops a copy and degrades the array; a read with no good copy fails
@@ -1482,17 +1482,20 @@ came only from the single node it was matched to:
    **Rejected: a per-array well-known registry id with first-member election.**
    Deterministic but leaves the array owned by an arbitrary member's process, so
    pulling that disk destroys a healthy array.
-6. **Placement — decision to confirm.** The User selected hoisting the six
-   engines to `lib/raid`. Against the tree as it stands that hoist has exactly
-   **one** consumer (the composer), which §6/§15.5 do not justify, and §2.22
-   would read it as a single-consumer hoist to be collapsed back. The design
-   below therefore keeps the engines in `drivers/storage/raid` and makes the
-   composer that crate's own `Run` binary — the shape `usb_msd` and `volmgr`
-   already use, with no `drivers/*`→`drivers/*` edge and no unjustified crate.
-   The hoist to `lib/raid` lands **when** `drivers/filesystem/arxfs` becomes the
-   second consumer, as an in-place move (§2.13), not a migration seam. If the
-   User prefers the hoist up front, only the crate boundary moves; every stage
-   below is unchanged.
+6. **Placement — decided: the engines are `lib/raid`; the driver is
+   `drivers/storage/raid`.** The six composition engines, the `RaidArray`
+   dispatch, the `fill_members` bridge, the `health` folds and
+   `ArrayMaintenance` live in the shared `lib/raid` crate over `lib/raidmeta`.
+   They are not a device's support code and so are not held by §2.22: they
+   compose devices they are *handed* as `Block` implementations and never reach
+   hardware, carrying no bring-up, firmware, quirk, or register logic. Two
+   independent consumers compose several devices as one — the composer driver
+   below and `drivers/filesystem/arxfs`'s multi-device volumes — and neither
+   could reach a copy held by the other without a `drivers/*`→`drivers/*` edge
+   (§17.4), so the single definition belongs in `lib/` (§2.2, §6).
+   `drivers/storage/raid` is then the driver proper: `BIND_KEYS` plus the one
+   `Run` binary that is the agent (IO6c) and the composer (IO6d), the shape
+   `usb_msd` and `volmgr` already use.
 
 ### Stages
 
@@ -1557,26 +1560,61 @@ the critical path and land first.
   driver publishes a child node carrying `HwResource::endpoint(id)` before the
   serving process binds it, and the grant is authority over the id, not a
   reference to an instance — IO6a's revocation is what keeps that safe.
-  - `RAID_REGISTRY_ENDPOINT` is **not** reserved here. A reserved id with no
-    protocol module and no binder is speculative surface (§2.3, §2.4), and every
-    other reserved id lives in its own protocol module rather than in
-    `lib/abi/src/ipc.rs`. It is reserved by IO6c, the stage that creates that
-    module and binds the id.
-- **IO6c — The member agent.** `volmgr` emits the `tairix,raid-member` node
-  (decision 4). This stage also introduces the array-composition protocol
-  module in `lib/abi` and with it `RAID_REGISTRY_ENDPOINT`, enrolled in
-  `is_reserved_endpoint` so binding it demands `CAP_IPC_BIND_PRIVILEGED` and an
-  unprivileged task cannot squat the registry (moved here from IO6b: a reserved
-  id is declared by the stage that gives it a protocol and a binder, never
-  ahead of one). The RAID `Run` binary, when matched to such a node, is an
-  *agent*: it `call_grant`s its member's block endpoint and `shm_grant`s its
-  window to `RAID_REGISTRY_ENDPOINT`, registers (array UUID and slot are read by
-  the composer from the member itself — the emitter is never trusted for them,
-  §23.1), then parks on a long membership call. If the composer dies its
-  endpoints are torn down and that call is cancelled, waking the agent to
-  re-delegate and re-register when the composer returns — recovery with no
-  reboot (§18.4) and no spin (§2.23; retry is an event-timed one-shot). It exits
-  only when its own node vanishes (the D4 hot-removal path).
+- **IO6c — The member agent. done.** The composition engines were first hoisted
+  in place to the shared `lib/raid` crate (decision 6), leaving
+  `drivers/storage/raid` as the driver proper: `BIND_KEYS` plus the one `Run`
+  binary that is the agent now and the composer from IO6d.
+  - **The protocol** is `lib/abi/src/raid_ipc.rs`: `RAID_MEMBER_COMPATIBLE`
+    (the node string, held here because both the emitting `volmgr` and the
+    binding RAID driver must mean the same thing and neither may depend on the
+    other, §17.4), `RAID_REGISTRY_ENDPOINT` (enrolled in `is_reserved_endpoint`,
+    so binding it demands `CAP_IPC_BIND_PRIVILEGED` — the gate that stops a
+    squatter being handed every array member on the machine), the fixed-width
+    `MemberOffer{endpoint, window, node}`, and `MembershipEnd`, which reads a
+    completed membership call's outcome from the **shared** status reply
+    (§2.2) as `Released` / `Refused` / `ComposerGone` (a cancelled call, i.e.
+    `None`). Decode fails closed on a short frame, a foreign magic/version, a
+    zero resource id, and an undecodable reply (read as a refusal, never a
+    release).
+  - **`volmgr` emits the node** for a device whose probe recognised a member,
+    under `CAP_HW_EMIT`, re-declaring that device's endpoint + window. One node
+    per *device* however many of its partitions are members: the composer
+    re-probes the device through the same shared definition, so the node is a
+    pointer to look, never a datum to believe (§23.1). The kernel parents it to
+    volmgr's own matched node and `grant_covers`-checks every declared
+    resource, so the emission can republish only transport volmgr holds. A
+    refused emission is logged (`VOLMGR_RAID_MEMBER_UNPUBLISHED 4190`) and never
+    fails the volumes the device did attach.
+  - **The agent** is the RAID `Run` binary matched to that node, holding only
+    `CAP_IPC_ENDPOINT` + `CAP_SHM` + `CAP_LOG_EMIT` (it never reads the device).
+    Its lifecycle is the pure, host-tested `MemberAgent` / `AgentStep`
+    (`Offer` → `AwaitReply` → `Retry{deadline}` → `Stop`): it `call_grant`s its
+    block endpoint and `shm_grant`s its window to `RAID_REGISTRY_ENDPOINT` —
+    repeated on every offer, which is free because IO6a made delegation
+    idempotent, and *necessary* because a restarted composer is a new task
+    holding none of the old grants — then posts the offer with **no deadline**
+    and parks on the reply. A release or a cancelled call re-offers on a paced
+    cadence; a refusal stops (the verdict came from the device's own metadata).
+    Delegation necessarily precedes the verdict — reading the metadata *is* an
+    access — which is proportionate because the node is only emitted for a
+    device discovery already identified as a member.
+  - **The re-offer cadence is the shared `raid::RetryCadence`/`RetryState`**,
+    extracted from `ArrayMaintenance`'s member re-add so the base/doubling/
+    ceiling/recovery-floor arithmetic has one definition (§2.2); only the base
+    differs, and the agent's is a documented service-lifecycle default (1 s,
+    ×32 ceiling) rather than a device class, because it paces against the
+    composer's availability, not a disk's speed.
+  - **Kernel defect fixed en route (§2.18).** A `CallReply` wait-set member
+    resolved its endpoint and reported *not ready* when the lookup failed. That
+    is right for the listener kinds but wrong for a client with a posted
+    request the teardown just retired: a client waiting with no deadline — which
+    is exactly what a membership is — would park forever on a reply that could
+    never arrive, even though `has_ready_reply_for` already reports a *closed*
+    endpoint as ready. A vanished endpoint now reads ready and the woken client
+    reaps `NotFound`. A member can only ever name an endpoint that existed when
+    it was added, so this cannot be conjured from a bogus id. Regression:
+    `waitset_reports_a_call_reply_member_whose_endpoint_was_torn_down`, which
+    fails before the fix.
 - **IO6d — The composer: assembly and service.** Matched to the synthetic
   `tairix,virtual-bus` node, one instance. It owns `RAID_REGISTRY_ENDPOINT`,
   accumulates registered members in a growable table (no member ceiling,
@@ -1658,12 +1696,12 @@ green on its own. The IO1 transport shape is decided — the async
 submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
 HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
-composition **engine** (`drivers/storage/raid`) is independent of ARXFS and has
+composition **engine** (`lib/raid`) is independent of ARXFS and has
 landed host-side; what remains is the live array service, whose authority model
 is decided and staged in §2.6 (IO6a–IO6f). That reaches further than the stages
 above — it adds a syscall (`call_grant`), fixes the defects in the kernel's
 grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
 bootstrap — so it is staged the same way. IO6a–IO6b, the security
-prerequisites, have landed; IO6c onward remain, each stage complete and green
-on its own. One placement question inside it is flagged for the User (§2.6
-decision 6).
+prerequisites, have landed, as has IO6c (the shared `lib/raid` hoist, the
+composition protocol, the emitted member node, and the member agent); IO6d
+onward remain, each stage complete and green on its own.

@@ -1462,6 +1462,10 @@ fn build_image_driver_bundles(
             image_drivers::VOLMGR_STORE_PATH,
             image_drivers::build_volmgr_bundle(ctx, arch, profile)?,
         ),
+        (
+            image_drivers::RAID_STORE_PATH,
+            image_drivers::build_raid_bundle(ctx, arch, profile)?,
+        ),
     ])
 }
 

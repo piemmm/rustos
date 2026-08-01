@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-storage-raid"
-description = "TAIRiX RAID composition driver: fault-aware virtual block devices that compose child block endpoints through the public block seam (plans/FIX-IO.md IO6). Six sibling levels (RAID1 mirror, RAID0 stripe, RAID5/6/TP distributed parity, RAID10 stripe of mirrors) serve reads from any healthy member, auto-repair a proven-bad copy from a good one, fan writes out, degrade (never fail the system) when a member faults, and rebuild a returning member with a bounded, interruptible resync. One RaidArray dispatch presents whichever level as a single logical device, and one ArrayMaintenance policy decides when it re-admits, rebuilds, and scrubs without starving the foreground workload."
+description = "TAIRiX RAID composition driver (plans/FIX-IO.md IO6): the autoloaded policy driver that turns discovered array members into served arrays. Matched to a tairix,raid-member node it is a member agent, delegating that device's block transport and data window to the reserved array-composer rendezvous and holding the membership open until the device or the array goes away. The composition arithmetic itself is the shared lib/raid crate."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,24 +11,24 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is a host-testable `lib`: the six RAID composition engines that
-# consume child `Block` endpoints through the public block seam and the shared
-# health classification (`tairix_abi::blkio`), the `RaidArray` composed-device
-# dispatch over them, and the `ArrayMaintenance` policy that schedules their
-# self-healing. It depends only on `lib/*`, so the layered dependency direction
-# holds (no `drivers/*`->`drivers/*` edge: a member is reached through the
-# `Block` trait the composing serve process is handed, never a sibling driver
-# crate). The autoloaded serve process that assembles members from discovered
-# array metadata and turns the scheduler's decisions into real transfers rides
-# with the multi-device volume-assembly work (plans/FIX-IO.md IO6 remaining);
-# these engines and policies are proven host-side first.
+# A hybrid library + binary crate, the shape the sibling storage policy drivers
+# use: the library half carries the bind table the signed bundle publishes and
+# the pure, host-tested decision logic, while `src/main.rs` is the freestanding
+# program the kernel spawns for a matched node (installed as the bundle's `Run`
+# entry point). The driver holds no MMIO, DMA, or IRQ authority: it only
+# forwards the transport it was granted.
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The on-disk array-member superblock format and reassembly logic
-# (`tairix_raidmeta`) — the single definition shared with the storage-discovery
-# probe (`lib/fsprobe`/volmgr) so the composition and discovery sides can never
-# disagree about what a member is (`AGENTS.md` §2.2), without a
-# `drivers/*`->`drivers/*` edge (§17.4). This crate consumes it to assemble the
-# engines from decoded members.
-tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
+# The shared escalating retry cadence (`tairix_raid::RetryCadence`), so an
+# agent re-offering its device and an array re-probing a faulted member pace
+# themselves by one definition. The composition engines in the same crate are
+# what the composer half assembles once it is matched to the virtual bus.
+tairix-raid = { path = "../../../lib/raid", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

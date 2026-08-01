@@ -1148,7 +1148,12 @@ name = "tairix-drv-storage-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-raidmeta",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-raid",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1983,6 +1988,14 @@ dependencies = [
 [[package]]
 name = "tairix-qemu"
 version = "0.0.0"
+
+[[package]]
+name = "tairix-raid"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-raidmeta",
+]
 
 [[package]]
 name = "tairix-raidmeta"
@@ -4787,6 +4800,7 @@ dependencies = [
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-virtio-net",
+ "tairix-drv-storage-raid",
  "tairix-drv-storage-usb-msd",
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",

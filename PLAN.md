@@ -5472,7 +5472,7 @@ extent's block 0 (via `fsprobe::probe_raid_member`) *before* any filesystem
 signature and refuses to attach a bare member — mounting one raw mirror copy
 would diverge the array or serve stale data (§26.5); the on-disk RAID
 array-superblock format and reassembly were hoisted into the new `lib/raidmeta`
-crate so the RAID composition driver (`drivers/storage/raid`) and this probe
+crate so the RAID composition engines (`lib/raid`) and this probe
 share one definition (§2.2) without a `drivers/*`→`drivers/*` edge (§17.4).
 D3d (done) landed the user-facing mount policy:
 the well-known `storage` group (`tairix_users::STORAGE_GROUP`, resolved by

@@ -43,9 +43,12 @@ public `tairix_abi::blkio` protocol.
 ## Required capabilities
 
 `CAP_SHM` (map the granted data window), `CAP_IPC_ENDPOINT` (blkio calls
-on the one granted endpoint), `CAP_FS_MOUNT` (the audited attach), and
-`CAP_LOG_EMIT` (diagnostics). No MMIO, DMA, IRQ, or node-emission
-authority.
+on the one granted endpoint), `CAP_FS_MOUNT` (the audited attach),
+`CAP_HW_EMIT` (publish the array-member node for a device recognised as a
+RAID member), and `CAP_LOG_EMIT` (diagnostics). No MMIO, DMA, or IRQ
+authority. The kernel parents an emitted node to this driver's own matched
+node and admits only resources this task already holds, so the emission can
+republish this device's transport and nothing else.
 
 ## Limitations
 

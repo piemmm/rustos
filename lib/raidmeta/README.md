@@ -12,8 +12,8 @@ It is a pure, `no_std`, `forbid(unsafe_code)`, allocation-free library shared by
 two independent consumers so they can never disagree about what a RAID member
 is (`AGENTS.md` §2.2) without a `drivers/*`->`drivers/*` edge (§17.4):
 
-- the **RAID composition driver** (`drivers/storage/raid`), which assembles the
-  mirror / stripe / parity / double-parity / triple-parity engines from decoded
+- the **RAID composition engines** (`lib/raid`), which assemble the
+  mirror / stripe / parity / double-parity / triple-parity levels from decoded
   members, and
 - the **storage-discovery probe** (`lib/fsprobe`, used by `drivers/storage/volmgr`),
   which recognises a member so a bare, un-assembled array member is never
@@ -62,4 +62,4 @@ be written at completely different rates. A member's share of the array's
 *data* begins at `RESERVED_METADATA_BLOCKS`, the single definition of that
 offset every consumer derives (§2.2).
 
-See `docs/src/drivers/raid.md`.
+See `docs/src/lib/raid.md`.

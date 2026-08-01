@@ -45,6 +45,7 @@ pub mod notify_ipc;
 pub mod origin;
 pub mod power;
 pub mod process;
+pub mod raid_ipc;
 pub mod random;
 pub mod reply;
 pub mod rlimit;

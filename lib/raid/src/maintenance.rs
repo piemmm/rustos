@@ -90,6 +90,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 
 use crate::array::{RaidArray, RaidError};
+use crate::backoff::{RetryCadence, RetryState};
 use crate::mirror::{ArrayHealth, MemberState};
 
 /// How long after the last foreground request an array still counts as busy.
@@ -113,15 +114,6 @@ const FOREGROUND_IDLE_NS: u64 = 1_000_000_000;
 /// enough that the pass is unobtrusive, short enough that a second fault
 /// rarely arrives first.
 const SCRUB_PERIOD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
-
-/// How far the per-member re-add backoff may escalate, as a multiple of its
-/// base delay.
-///
-/// The backoff doubles on every refused attempt so a dead disk is not
-/// re-probed at the cadence of a merely-slow one, and stops doubling here so a
-/// disk that comes back after a long absence still rejoins within a bounded
-/// wait rather than an ever-receding one (`AGENTS.md` §18.4).
-const READD_BACKOFF_CEILING: u64 = 32;
 
 /// What a serve loop should do next for one composed array.
 ///
@@ -173,13 +165,10 @@ pub struct MaintenancePolicy {
     /// How long after the last request reported to
     /// [`ArrayMaintenance::note_foreground`] the array still counts as busy.
     pub foreground_idle_ns: u64,
-    /// The delay before the first re-add attempt on a member that has just
-    /// faulted, and the floor no recovery signal may pull an attempt below.
-    pub readd_backoff_ns: u64,
-    /// The ceiling the doubling re-add backoff stops at. A value below
-    /// [`readd_backoff_ns`](Self::readd_backoff_ns) is raised to it, so a
-    /// mis-set policy can never make an escalated wait shorter than the first.
-    pub readd_backoff_max_ns: u64,
+    /// The escalating cadence a faulted member is re-probed on, and the delay
+    /// a failed maintenance chunk is held off by. Its base delay is the floor
+    /// no recovery signal may pull an attempt below.
+    pub readd: RetryCadence,
 }
 
 impl MaintenancePolicy {
@@ -207,7 +196,6 @@ impl MaintenancePolicy {
     /// [`Self::foreground_idle_ns`]).
     #[must_use]
     pub const fn for_class(class: BlkDeviceClass) -> Self {
-        let grace_ns = class.budget().grace_ns;
         Self {
             scrub_period_ns: SCRUB_PERIOD_NS,
             busy_duty_percent: match class {
@@ -216,8 +204,7 @@ impl MaintenancePolicy {
                 BlkDeviceClass::SolidState => 40,
             },
             foreground_idle_ns: FOREGROUND_IDLE_NS,
-            readd_backoff_ns: grace_ns,
-            readd_backoff_max_ns: grace_ns.saturating_mul(READD_BACKOFF_CEILING),
+            readd: RetryCadence::for_class(class),
         }
     }
 }
@@ -228,29 +215,17 @@ impl MaintenancePolicy {
 /// costs no allocation and hits no fixed member ceiling (`AGENTS.md` §24.1) —
 /// the same shape the composition engines' member buffers use. The contents
 /// are the scheduler's; a caller only supplies the storage, default-initialised.
+///
+/// The escalation itself is the shared [`RetryState`], so a member re-add and
+/// the member agent's registry re-offer pace themselves by one definition.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct MemberRetry {
-    /// Monotonic time the next attempt on this slot may run.
-    due_ns: u64,
-    /// The current backoff step, doubling towards the policy ceiling.
-    backoff_ns: u64,
-    /// Monotonic time this slot was last attempted (or armed), the floor a
-    /// recovery signal may not pull an attempt below.
-    last_attempt_ns: u64,
-    /// Whether this slot currently holds a faulted member awaiting re-admission.
-    armed: bool,
-}
+pub struct MemberRetry(RetryState);
 
 impl MemberRetry {
     /// A fresh, unarmed record, usable in a `const` array initialiser.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            due_ns: 0,
-            backoff_ns: 0,
-            last_attempt_ns: 0,
-            armed: false,
-        }
+        Self(RetryState::new())
     }
 }
 
@@ -367,20 +342,16 @@ impl<'a> ArrayMaintenance<'a> {
     /// (`plans/FIX-IO.md` IO3/IO4) — so its re-add is attempted without waiting
     /// out an escalated backoff.
     ///
-    /// The attempt is still floored at [`MaintenancePolicy::readd_backoff_ns`]
-    /// after the previous one, so a member that flaps — or a signal source that
-    /// repeats — can never turn this into a re-probe storm. A slot that is not
-    /// currently faulted, and an index this array does not have, are ignored.
+    /// The attempt is still floored at one base delay of
+    /// [`MaintenancePolicy::readd`] after the previous one, so a member that
+    /// flaps — or a signal source that repeats — can never turn this into a
+    /// re-probe storm. A slot that is not currently faulted, and an index this
+    /// array does not have, are ignored.
     pub fn note_member_returned(&mut self, member: usize, now_ns: u64) {
-        let floor_step = self.policy.readd_backoff_ns;
-        let Some(retry) = self.retries.get_mut(member) else {
-            return;
-        };
-        if !retry.armed {
-            return;
+        let cadence = self.policy.readd;
+        if let Some(retry) = self.retries.get_mut(member) {
+            retry.0.note_signal(cadence, now_ns);
         }
-        let floor = retry.last_attempt_ns.saturating_add(floor_step);
-        retry.due_ns = retry.due_ns.min(now_ns.max(floor));
     }
 
     /// Decide what the array should do next.
@@ -469,19 +440,12 @@ impl<'a> ArrayMaintenance<'a> {
     /// [`RaidArray::readd_member`] can re-probe it. An absent slot holds none,
     /// and an in-sync or resyncing one needs nothing.
     fn sync_retries<B: Block>(&mut self, array: &RaidArray<'_, B>, now_ns: u64) {
-        let base = self.policy.readd_backoff_ns;
+        let cadence = self.policy.readd;
         for (index, retry) in self.retries.iter_mut().enumerate() {
-            if array.member_state(index) != Some(MemberState::Faulted) {
-                *retry = MemberRetry::new();
-                continue;
-            }
-            if !retry.armed {
-                *retry = MemberRetry {
-                    due_ns: now_ns.saturating_add(base),
-                    backoff_ns: base,
-                    last_attempt_ns: now_ns,
-                    armed: true,
-                };
+            if array.member_state(index) == Some(MemberState::Faulted) {
+                retry.0.arm(cadence, now_ns);
+            } else {
+                retry.0.disarm();
             }
         }
     }
@@ -492,24 +456,24 @@ impl<'a> ArrayMaintenance<'a> {
         self.retries
             .iter()
             .enumerate()
-            .filter(|(_, retry)| retry.armed && retry.due_ns <= now_ns)
-            .min_by_key(|(index, retry)| (retry.due_ns, *index))
-            .map(|(index, _)| index)
+            .filter_map(|(index, retry)| {
+                let due = retry.0.due_ns()?;
+                (due <= now_ns).then_some((due, index))
+            })
+            .min()
+            .map(|(_, index)| index)
     }
 
     fn note_readd(&mut self, member: usize, now_ns: u64, outcome: Result<(), RaidError>) {
-        let base = self.policy.readd_backoff_ns;
-        let ceiling = self.policy.readd_backoff_max_ns.max(base);
+        let cadence = self.policy.readd;
         let Some(retry) = self.retries.get_mut(member) else {
             return;
         };
         if outcome.is_ok() {
-            *retry = MemberRetry::new();
-            return;
+            retry.0.disarm();
+        } else {
+            retry.0.note_failure(cadence, now_ns);
         }
-        retry.backoff_ns = retry.backoff_ns.max(base).saturating_mul(2).min(ceiling);
-        retry.last_attempt_ns = now_ns;
-        retry.due_ns = now_ns.saturating_add(retry.backoff_ns);
     }
 
     /// Hold the next maintenance chunk off long enough to keep maintenance
@@ -520,7 +484,7 @@ impl<'a> ArrayMaintenance<'a> {
             // The members reported the transfer failed. Give them the recovery
             // grace window their class allows before asking again, rather than
             // hammering hardware that is already unwell.
-            self.next_chunk_ns = now_ns.saturating_add(self.policy.readd_backoff_ns);
+            self.next_chunk_ns = now_ns.saturating_add(self.policy.readd.base_ns());
             return;
         }
         if !self.foreground_busy(now_ns) {
@@ -549,8 +513,7 @@ impl<'a> ArrayMaintenance<'a> {
         let next_retry = self
             .retries
             .iter()
-            .filter(|retry| retry.armed)
-            .map(|retry| retry.due_ns)
+            .filter_map(|retry| retry.0.due_ns())
             .min();
         let next_cycle = if chunk_pending(array).is_some() {
             Some(self.next_chunk_ns)
