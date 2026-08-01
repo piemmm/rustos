@@ -762,6 +762,7 @@ dependencies = [
  "tairix-input",
  "tairix-raster",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1242,6 +1243,7 @@ dependencies = [
  "tairix-help",
  "tairix-resref",
  "tairix-rt",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -1753,6 +1755,7 @@ dependencies = [
  "tairix-sysconfig",
  "tairix-termcap",
  "tairix-users",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -2062,6 +2065,7 @@ dependencies = [
  "tairix-log",
  "tairix-resref",
  "tairix-sync",
+ "tairix-util",
 ]
 
 [[package]]

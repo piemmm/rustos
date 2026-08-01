@@ -163,6 +163,7 @@ pub mod input;
 pub mod keyboard;
 pub mod launch;
 pub mod library;
+pub mod lock;
 pub mod picker;
 pub mod pins;
 pub mod presenter;
@@ -188,6 +189,7 @@ pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
 pub use library::{load_library, LoadedLibrary};
+pub use lock::{LockOutcome, ScreenLock, Unlocker, MAX_PASSWORD, UNNAMED_ACCOUNT};
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };

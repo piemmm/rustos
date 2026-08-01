@@ -475,6 +475,40 @@ hold that has already opened Recovery never also opens Tasks on release,
 and a press dragged off the capsule before release opens nothing at all
 (fail closed, `AGENTS.md` §5.4).
 
+## The system quick-actions menu
+
+A **secondary** press on the Switchboard capsule opens the desktop's system
+menu through the bar's one modal menu surface — there is no second popup
+(`plans/NEW-TASKBAR.md` T13). Its rows are one table, `system::ROWS`, from
+which both the rendered menu and the row → command mapping are derived, so
+the two can never disagree (`AGENTS.md` §2.2):
+
+| Row | What the session does |
+|---|---|
+| About This System | opens the Switchboard's overview |
+| System Monitor | opens the Switchboard's task list |
+| Task Shell | launches the terminal bundle |
+| Light / Dark Appearance | switches the desktop's theme |
+| Lock Screen | secures the screen behind this user's password |
+| Log Out | ends the session; the login supervisor re-prompts |
+| Restart / Shut Down | confirmed, then relayed to the one holder of the power capability |
+
+The bar holds none of this authority. Each row reports a typed response and
+the session resolves it, and every row whose backing is missing renders
+**non-actionable with its reason stated** rather than being hidden or
+silently offered: an uninstalled terminal bundle, a Switchboard that has not
+attested it can power the machine, or a session that has attested it cannot
+prompt for a password. Every such attestation defaults to refusing, so a bar
+that was never told offers nothing it cannot deliver (`AGENTS.md` §5.4).
+
+Locking heads the last group because it is the one way out of the session
+that *keeps* the session; everything below it ends work in progress. The row
+is offered only where the session runs on a console whose login supervisor
+can re-verify the signed-in user (`DesktopShell::set_lock_available`) — a
+lock that could never be undone is a trap, not a security measure. What the
+lock then guarantees is described in [the desktop
+session](session.md#the-screen-lock).
+
 ## Theming
 
 The taskbar owns the active theme (see *The owned theme*) and adopts a new
@@ -482,9 +516,8 @@ one with `Taskbar::apply_theme`; the rest of its state is untouched, so a
 runtime dark/light switch needs no model relayout (`AGENTS.md` §10). The
 region **colours**, the control plates, and the text **foreground** roles are
 wired through that theme by the renderer. The interactive light/dark switch
-lives in the Switchboard's System menu (`plans/NEW-TASKBAR.md` T13); until
-that lands the session switches themes programmatically
-(`DesktopSession::set_theme`).
+is the appearance pair in the system quick-actions menu above; the session
+also switches programmatically (`DesktopSession::set_theme`).
 
 ## Tests
 

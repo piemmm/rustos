@@ -34,6 +34,9 @@ pub enum SystemAction {
     TaskShell,
     /// Switch the desktop to this appearance.
     Appearance(Appearance),
+    /// Secure the screen behind this user's password, leaving the session
+    /// and everything running in it untouched.
+    Lock,
     /// End this desktop session and return to the login prompt.
     LogOut,
     /// Restart the machine.
@@ -69,8 +72,10 @@ pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
 /// from it, never written out a second time.
 ///
 /// The grouping separates what the rows *do*: inspecting the machine, then
-/// changing how it looks, then leaving or stopping it. The two power rows
-/// are destructive and confirmed; nothing above them is.
+/// changing how it looks, then securing, leaving, or stopping it. The two
+/// power rows are destructive and confirmed; nothing above them is. Locking
+/// heads the last group because it is the one way out of the session that
+/// keeps the session — everything below it ends work in progress.
 pub const ROWS: &[SystemRow] = &[
     SystemRow {
         action: SystemAction::About,
@@ -103,9 +108,15 @@ pub const ROWS: &[SystemRow] = &[
         role: ControlRole::Neutral,
     },
     SystemRow {
+        action: SystemAction::Lock,
+        label: "Lock Screen",
+        group_break: true,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
         action: SystemAction::LogOut,
         label: "Log Out",
-        group_break: true,
+        group_break: false,
         role: ControlRole::Neutral,
     },
     SystemRow {
@@ -138,6 +149,13 @@ pub const REASON_NOT_INSTALLED: &str = "Not installed";
 /// permission.
 pub const REASON_NO_POWER_AUTHORITY: &str = "The system service cannot power this machine";
 
+/// Why the lock row cannot act: this session has no console whose password
+/// prompt could unlock it again.
+///
+/// Locking a screen that can never be unlocked is a trap, not a security
+/// measure, so the row refuses up front rather than stranding the user.
+pub const REASON_NO_UNLOCK_PROMPT: &str = "This session has no password prompt to unlock with";
+
 /// What the menu is allowed to offer, as attested by the processes that
 /// would actually carry each command out.
 ///
@@ -155,6 +173,10 @@ pub struct SystemPermits {
     /// Whether the terminal bundle the Task Shell row launches is present
     /// in the desktop's catalog.
     pub task_shell_installed: bool,
+    /// Whether this session can put a password prompt in front of the
+    /// screen — that is, whether it runs on a console whose login
+    /// supervisor can be asked to re-verify the signed-in user.
+    pub lock_available: bool,
 }
 
 /// Build the menu's rows for `permits`.
@@ -178,6 +200,11 @@ pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
                 SystemAction::TaskShell if !permits.task_shell_installed => item
                     .with_state(ControlState::disabled())
                     .with_reason(REASON_NOT_INSTALLED),
+                SystemAction::Lock if !permits.lock_available => item
+                    .with_state(
+                        ControlState::default().with_authority(AuthorityState::NeedsCapability),
+                    )
+                    .with_reason(REASON_NO_UNLOCK_PROMPT),
                 SystemAction::Restart | SystemAction::ShutDown if !permits.power => item
                     .with_state(
                         ControlState::default().with_authority(AuthorityState::NeedsCapability),

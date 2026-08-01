@@ -56,16 +56,20 @@
 
 extern crate alloc;
 
+use tairix_abi::elevate::{
+    elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    BootFacts, BootId, CapabilityId, FileStat, HwNode, InputMode, LimitKind, MapFlags, OpenFlags,
-    Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp,
-    SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO,
-    STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    BootFacts, BootId, CapabilityId, Errno, FileStat, HwNode, InputMode, LimitKind, MapFlags,
+    OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal,
+    SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN,
+    STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
+use tairix_util::secret::Wiped;
 
 #[cfg(rt_native)]
 mod start;
@@ -3184,6 +3188,70 @@ pub fn self_origin() -> Result<Origin, i64> {
     Origin::from_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
+/// One elevation request, posted to the console's supervisor.
+///
+/// Post `request` to the elevation broker serving this console and block until
+/// the exchange resolves.
+///
+/// It reads the caller's kernel-attested console from [`self_origin`], names
+/// the per-console rendezvous, and performs the synchronous IPC call.
+/// Unprivileged: the gate is the re-authentication itself (performed by the
+/// broker), exactly as the login prompt is reachable by anyone at the
+/// keyboard.
+///
+/// # Security
+///
+/// An [`ElevateRequest`] carries a plaintext password — both
+/// [`Run`](ElevateRequest::Run) and [`Verify`](ElevateRequest::Verify) do.
+/// The encoded request therefore lives in a [`Wiped`] buffer, which erases
+/// itself when the scope ends: the value returned, the `?` that returned
+/// early, and an unwind all erase it alike, so no future edit can grow an
+/// exit path that leaves a password on the stack. The erase is volatile, so
+/// an optimiser cannot drop it as a store nobody reads.
+///
+/// The reply carries no secret, so it needs no such treatment.
+///
+/// # Errors
+///
+/// Returns the [`Errno`] naming the failure: no console to elevate on, an
+/// encoding error, a transport failure, a protocol mismatch, or the broker's
+/// own refusal (for example `PermissionDenied` on a wrong password).
+pub fn elevate(request: &ElevateRequest<'_>) -> Result<ElevateReply, Errno> {
+    let console = self_origin().map_err(errno_from)?.console();
+    let endpoint = elevate_endpoint(console)?;
+    let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
+    elevate_exchange(endpoint, request, &mut buf[..])
+}
+
+/// Encode `request` into `buf`, post it to `endpoint`, and decode the reply.
+///
+/// Split out from [`elevate`] so the exchange can be driven against a
+/// caller-owned buffer whose contents a test can inspect once the call has
+/// returned. Erasing that buffer is the caller's guard, never this function's
+/// business: keeping the two apart is what lets the test prove the erase
+/// happens on the failing paths too.
+fn elevate_exchange(
+    endpoint: u64,
+    request: &ElevateRequest<'_>,
+    buf: &mut [u8],
+) -> Result<ElevateReply, Errno> {
+    let len = request.encode(buf)?;
+    let mut reply = [0u8; ELEVATE_REPLY_LEN];
+    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(errno_from)?;
+    ElevateReply::decode(&reply[..reply_len])
+}
+
+/// Convert a raw negative kernel result (`-errno`) into an [`Errno`].
+///
+/// Fails closed as `NotImplemented` for any code the `abi-v1` source of truth
+/// does not recognise.
+fn errno_from(ret: i64) -> Errno {
+    i32::try_from(-ret)
+        .ok()
+        .and_then(Errno::from_i32)
+        .unwrap_or(Errno::NotImplemented)
+}
+
 /// Read the **unfiltered, global** kernel introspection view
 /// (`SyscallNumber::SYSINFO_INTROSPECT`; P-C).
 ///
@@ -4577,6 +4645,46 @@ mod tests {
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_send(7, &payload), want);
         });
+    }
+
+    #[test]
+    fn the_elevation_request_buffer_is_erased_on_every_path() {
+        const PASSWORD: &str = "correct horse battery staple";
+        let request = ElevateRequest::Verify { password: PASSWORD };
+
+        // The broker answered. The exchange really did put the plaintext on
+        // the stack, and the guard the caller wraps it in takes it away.
+        seam::arm(u64::try_from(ELEVATE_REPLY_LEN).expect("reply length fits"));
+        let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
+        assert!(
+            elevate_exchange(0x1234, &request, &mut buf[..]).is_ok(),
+            "the armed seam answers the call"
+        );
+        assert!(
+            contains(&buf[..], PASSWORD.as_bytes()),
+            "the encoded request carried the plaintext password"
+        );
+        buf.wipe();
+        assert_eq!(buf[..], [0u8; ELEVATE_MAX_REQUEST][..]);
+
+        // The broker refused. A refusal leaves exactly the same plaintext
+        // behind — this is the path a wrong password takes — and the same
+        // guard erases it.
+        let refused = -i64::from(Errno::PermissionDenied.as_i32());
+        seam::arm(u64::from_ne_bytes(refused.to_ne_bytes()));
+        let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
+        assert_eq!(
+            elevate_exchange(0x1234, &request, &mut buf[..]),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(contains(&buf[..], PASSWORD.as_bytes()));
+        buf.wipe();
+        assert_eq!(buf[..], [0u8; ELEVATE_MAX_REQUEST][..]);
+    }
+
+    /// Whether `haystack` contains `needle` anywhere.
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|run| run == needle)
     }
 
     #[test]

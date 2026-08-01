@@ -141,6 +141,7 @@ pub struct Taskbar {
     notifications: NotificationArea,
     clock: Clock,
     tray: SwitchboardTray,
+    lock_available: bool,
     repaint: TaskbarRepaint,
 }
 
@@ -165,6 +166,7 @@ impl Taskbar {
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
+            lock_available: false,
             repaint: TaskbarRepaint::NONE,
         }
     }
@@ -390,6 +392,23 @@ impl Taskbar {
     pub fn set_tray_unresponsive(&mut self, count: u16) {
         if self.tray.set_unresponsive(count) {
             self.latch_tray();
+        }
+    }
+
+    /// Adopt the session's attestation that it can put a password prompt in
+    /// front of the screen, so the *Lock Screen* row is offered only when
+    /// choosing it could really lock — and really unlock again.
+    ///
+    /// The bar cannot know this: whether a re-verification prompt exists is
+    /// a property of the session's console, which the session reads from
+    /// the kernel. It defaults to refusing, so a bar that was never told
+    /// offers no lock rather than a lock with no way back. Only the system
+    /// menu renders it, and only while open, so a change latches that
+    /// surface alone.
+    pub fn set_lock_available(&mut self, available: bool) {
+        if self.lock_available != available {
+            self.lock_available = available;
+            self.repaint |= TaskbarRepaint::MENU;
         }
     }
 
@@ -634,9 +653,10 @@ impl Taskbar {
     ///
     /// The rows' postures are read from what the bar already knows: the
     /// appearance it is painting with, whether the publishing service
-    /// attested that it can power the machine, and whether the terminal
-    /// bundle is in the catalog the session handed it. None of that is
-    /// authority the bar holds — it renders what it was told, and every
+    /// attested that it can power the machine, whether the terminal bundle
+    /// is in the catalog the session handed it, and whether the session
+    /// attested that it can prompt for this user's password. None of that
+    /// is authority the bar holds — it renders what it was told, and every
     /// unknown reads as refused.
     pub(crate) fn open_system_menu(&mut self, anchor: Rect) {
         let permits = SystemPermits {
@@ -644,6 +664,7 @@ impl Taskbar {
             power: self.tray.power_capable(),
             task_shell_installed: EntryId::new(system::TASK_SHELL_BUNDLE)
                 .is_ok_and(|id| self.library.catalog().entry(&id).is_some()),
+            lock_available: self.lock_available,
         };
         self.menu.open(MenuSubject::System { permits }, anchor);
         self.repaint |= TaskbarRepaint::MENU;

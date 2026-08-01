@@ -58,6 +58,15 @@ and panic-free throughout.
   saturates at `u64::MAX` rather than wrapping, since a count larger than
   the input is served exactly by "all of it". The tool-specific sign
   handling (`head`'s leading `-`, `tail`'s `+`) stays in each tool.
+* `secret` — the one definition of "the secret is gone": `wipe` overwrites a
+  byte slice through volatile writes and fences afterwards, and `Wiped<N>`
+  is a fixed-size buffer that wipes itself at the end of its scope. A plain
+  `fill(0)` before the bytes are freed or reused is a dead store the
+  optimiser may delete outright, so every credential buffer in the tree —
+  the `lib/rt` elevation client, the shell's `elevate` builtin, the login
+  supervisor's elevation broker, and the masked text field in
+  `lib/controls` — erases through this one implementation rather than its
+  own.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`
   retain only the trailing N units of a stream, so `head`'s `-c -N` /

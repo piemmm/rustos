@@ -50,6 +50,7 @@
   - [`tairix-caps`](./lib/caps.md)
   - [`tairix-collections`](./lib/collections.md)
   - [`tairix-complete`](./lib/complete.md)
+  - [`tairix-controls`](./lib/controls.md)
   - [`tairix-cpuops`](./lib/cpuops.md)
   - [`tairix-crypto`](./lib/crypto.md)
   - [`tairix-curses`](./lib/curses.md)

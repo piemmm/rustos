@@ -45,6 +45,12 @@ tairix-sync = { path = "../sync", version = "=0.0.0" }
 # §20). The one logging vocabulary the workspace shares (`AGENTS.md` §2.2).
 tairix-log = { path = "../log", version = "=0.0.0" }
 
+# The volatile secret erase the elevation client wipes its request buffer
+# with. A plain `fill(0)` on a buffer nothing reads again is a dead store the
+# optimiser may delete, so "the password is gone" has exactly one definition
+# in the workspace and every credential site shares it (`AGENTS.md` §2.2, §4).
+tairix-util = { path = "../util", version = "=0.0.0" }
+
 # The host trap seam used to assert the wrappers' marshalling without a kernel
 # (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.

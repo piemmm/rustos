@@ -10,6 +10,7 @@
 
 use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_util::secret::wipe;
 
 use crate::decfmt::DecBuf;
 use crate::error::LoginError;
@@ -84,13 +85,14 @@ impl<'a> Login<'a> {
             // The line buffers live on this frame, not the heap: the whole
             // prompt → authenticate path must work without an allocator
             // (the `mem_map`-backed userland heap is not required to read
-            // a keystroke). The password buffer is zeroed after every
-            // attempt, success or failure (nothing that
-            // held a credential survives the attempt).
+            // a keystroke). The password buffer is erased after every
+            // attempt, success or failure, through the one volatile wipe an
+            // optimiser cannot delete — nothing that held a credential
+            // survives the attempt.
             let mut username_buf = [0u8; INPUT_LINE_MAX];
             let mut password_buf = [0u8; INPUT_LINE_MAX];
             let attempt = self.attempt(&mut username_buf, &mut password_buf);
-            password_buf.fill(0);
+            wipe(&mut password_buf);
             match attempt {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => self.cfg.view.note_failure(),

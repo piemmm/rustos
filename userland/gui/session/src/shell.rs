@@ -557,6 +557,19 @@ impl DesktopShell {
         self.present(compositor);
     }
 
+    /// Attest to the taskbar whether this session can put a password prompt
+    /// in front of the screen, so the system menu's *Lock Screen* row is
+    /// offered only where locking could really be undone.
+    ///
+    /// Only the embedder knows: the answer turns on the console the session
+    /// runs on, which it reads from the kernel. The bar refuses the row
+    /// until told otherwise, so a session that never calls this offers no
+    /// lock rather than one with no way back.
+    pub fn set_lock_available(&mut self, compositor: &mut Compositor, available: bool) {
+        self.session.taskbar_mut().set_lock_available(available);
+        self.present(compositor);
+    }
+
     /// Show, raise, and focus the running task shown as `window`, restoring
     /// it if it was minimised — how the embedder brings an already-open
     /// window forward instead of launching a second copy (the Files button's

@@ -49,9 +49,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::elevate::{
-        elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
-    };
+    use tairix_abi::elevate::{ElevateReply, ElevateRequest};
     use tairix_abi::fs::{DirEntry, FS_IO_MAX};
     use tairix_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
@@ -704,31 +702,12 @@ mod program {
         }
 
         fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
-            let console = tairix_rt::self_origin().map_err(errno_from)?.console();
-            // `elevate_endpoint` refuses the "no console" sentinel, so a
-            // stream-fed shell (a pipe, a network session) cannot name a
-            // rendezvous it is not sitting on.
-            let endpoint = elevate_endpoint(console)?;
             let request = ElevateRequest::Run {
                 username,
                 password,
                 program,
             };
-            let mut request_buf = [0u8; ELEVATE_MAX_REQUEST];
-            let encoded = match request.encode(&mut request_buf) {
-                Ok(len) => len,
-                Err(err) => {
-                    request_buf.fill(0);
-                    return Err(err);
-                }
-            };
-            let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
-            let posted = tairix_rt::ipc_call(endpoint, &request_buf[..encoded], &mut reply_buf);
-            // The request carries the offered password: zero it as soon as
-            // the exchange resolves, before the reply is even decoded.
-            request_buf.fill(0);
-            let reply_len = posted.map_err(errno_from)?;
-            match ElevateReply::decode(&reply_buf[..reply_len])? {
+            match tairix_rt::elevate(&request)? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),
                 ElevateReply::Refused(err) => Err(err),
                 // The builtin only ever posts a `Run` request, which the

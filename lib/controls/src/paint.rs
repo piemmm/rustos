@@ -679,6 +679,23 @@ pub(crate) fn dominant_color(theme: &Theme, role: ControlRole, state: ControlSta
     Color::from(rgba)
 }
 
+/// Paint one filled circle of `diameter` at `(x, y)`.
+///
+/// This is the one circle-fill primitive the desktop shares: a Signal
+/// Bead's completion mark and a secret [`TextField`](crate::TextField)'s
+/// masking beads round through here rather than each hand-rolling its own
+/// circle, over the same [`Surface::fill_round_rect`] every other rounded
+/// fill in this crate already uses.
+pub(crate) fn paint_filled_circle(
+    surface: &mut Surface,
+    x: u32,
+    y: u32,
+    diameter: u32,
+    color: Color,
+) {
+    surface.fill_round_rect(x, y, diameter, diameter, diameter / 2, color);
+}
+
 /// Draw one Signal Bead of `size` at `(bx, by)` in the given shape, so the
 /// alert role reads by shape as well as colour.
 pub(crate) fn paint_bead(
@@ -690,7 +707,7 @@ pub(crate) fn paint_bead(
     shape: BeadShape,
 ) {
     match shape {
-        BeadShape::Check => surface.fill_round_rect(bx, by, size, size, size / 2, color),
+        BeadShape::Check => paint_filled_circle(surface, bx, by, size, color),
         BeadShape::Lock => surface.fill_round_rect(bx, by, size, size, size / 4, color),
         BeadShape::Diamond => {
             if let Some(mut glyph) = Surface::new(size, size) {

@@ -300,6 +300,63 @@ surface leaves the on-screen window untouched rather than blanking the bar, a
 window the compositor no longer knows is re-created on the next present, and
 `teardown` removes every window so a session shutdown leaves nothing orphaned.
 
+## The screen lock
+
+Choosing *Lock Screen* in the taskbar's [system quick-actions
+menu](taskbar.md#the-system-quick-actions-menu) secures the display behind
+the signed-in user's password (`lock::ScreenLock`,
+`plans/NEW-TASKBAR.md` T13). Locking is the one way out of a session that
+*keeps* the session: every application carries on running — a build
+finishes, an editor keeps its unsaved buffer — but nothing on screen is
+legible and no input reaches any of it.
+
+A modal window would not be a lock, because a window can be moved, lowered,
+or clicked past. Three properties carry it instead, and all three are
+load-bearing:
+
+- **It covers the screen.** The surface is the compositor's full extent and
+  fully opaque, so a passer-by learns nothing about what is on the machine.
+- **It takes every event.** While `ScreenLock::is_locked`, the session drains
+  the seat's pointer and keyboard *straight into the lock* rather than
+  through `DesktopShell::pump`/`handle`, so no motion, click, or keystroke
+  reaches the window manager, the taskbar, a served application, or the
+  confirmation prompt. When a password is verified part-way through a drained
+  batch, the remainder of that batch is drained and **discarded**: it is the
+  tail of the gesture that typed the password, and delivering it into the
+  session the instant it becomes visible would leak part of a password entry
+  into whatever holds focus.
+- **It stays on top.** `keep_topmost` raises it immediately before every
+  composite, so an application that opens or raises a window behind the lock
+  cannot surface over it.
+
+The lock holds no authority to authenticate anybody. It offers the typed
+password to the per-console **elevation broker** — the login supervisor that
+started this session — through the one shared client, `tairix_rt::elevate`,
+as an `ElevateRequest::Verify`. The broker attests the caller's identity from
+the kernel, checks the password against *that* uid, audits the decision, and
+answers; the lock believes only `Verified`. A refusal, a transport failure, a
+broker that is not there, and a reply it cannot parse are all one answer:
+still locked (`AGENTS.md` §5.4). It deliberately keeps no attempt counter and
+no rate limit — the broker owns that policy and audits every attempt, and a
+second copy here would be a second place to get it wrong (`AGENTS.md` §2.2).
+
+The password lives in exactly one place, the masked field's own bounded,
+pre-reserved buffer, and is erased on every path out of the prompt: verified,
+refused, unreachable, or abandoned when the session tears down. The field is
+`tairix_controls::TextField` in secret mode — the one shared text control,
+never a second text entry — which draws one bead per character rather than
+the characters themselves, reserves its buffer once so typing can never
+reallocate and strand a copy of the secret in a freed block, and redacts
+itself in `Debug`. The erase is the workspace's single volatile
+`tairix_util::secret::wipe`, which an optimiser cannot delete as a store
+nobody reads back.
+
+Whether the row is offered at all is the session's attestation: it tells the
+bar through `DesktopShell::set_lock_available` whether it runs on a console
+that has an elevation endpoint to unlock with. The bar refuses the row until
+told otherwise, because a lock that could never be undone would strand the
+user rather than protect them.
+
 ## Routing one input stream to both routers
 
 The desktop has two input routers — the window manager's `tairix_wm::InputRouter`

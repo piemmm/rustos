@@ -609,6 +609,24 @@ Text fields use a quiet Alloy Plate with a clear focus ring.
 - Denied or read-only fields must be visually distinct from disabled fields.
 - Cursor, selection, and text rendering are theme-driven and DPI-scaled.
 
+A `TextField` also has a masked (secret) mode for credential entry; a search
+field does not, because a query is not a credential.
+
+- Masked mode carries a character bound and draws one filled bead per `char`
+  at a fixed theme- and scale-derived advance, never the buffer's characters
+  and never a repeated masking glyph, so the drawn run's width reports only
+  the length and the font needs no particular glyph.
+- The caret sits between bead cells, the selection covers whole cells, and the
+  pointer hit test maps the offset onto the cell advance and then to a `char`
+  boundary. A masked field measures the same height as a plain one, still
+  shows its placeholder while empty, and keeps every other state rendering.
+- The bound exists so the buffer can reserve its worst-case capacity once and
+  never reallocate while filling, which would strand a copy of the credential
+  in a released block. Every path that discards buffer content, `Drop`
+  included, erases the bytes first through the shared secret wipe, and a
+  debug dump reports the character count instead of the content.
+- The control offers no way to reveal the buffer.
+
 ### 11.9 ComboBox
 
 A combo box is a field plus disclosure action. It uses the text field focus model and the menu model for expanded choices. Selection state belongs to the choice list, not to string parsing inside the control.

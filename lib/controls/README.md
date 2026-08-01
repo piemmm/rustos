@@ -84,7 +84,10 @@ track; a `Progress` is a read-only instrument trace (known %, working/
 indeterminate segment that freezes under reduced motion, complete/failed). The
 **text-entry family** (`text`) is `TextField` and `SearchField` over a pure
 caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed
-`TextAction`; read-only, disabled, and denied render distinctly.
+`TextAction`; read-only, disabled, and denied render distinctly. A
+`TextField` additionally has a **masked (secret) mode** for credential entry —
+`TextField::secret(max_len)` — described below; a `SearchField` has none,
+since a query is not a credential.
 
 The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 
@@ -107,6 +110,48 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 The shared chevron and focus-ring/cell-outline primitives live once in the
 private `paint` module (`ChevronDir`/`paint_chevron`, `draw_outline`), so no
 family carries its own triangle or outline recipe.
+
+## Masked text entry
+
+`TextField::secret(max_len)` turns a field into a password/passphrase/PIN
+entry, and `TextField::is_secret` reports it. Everything else about the field
+is unchanged: the plate, rim, focus ring, validation rim, Authority Mark,
+read-only and disabled rendering, high contrast, and reduced motion all behave
+exactly as they do for a plain field, and every editing key, the pointer caret
+placement, and drag-selection work identically. There is deliberately no way
+to reveal the buffer through the control.
+
+**It draws beads, not a repeated glyph.** A masked field paints one filled
+round bead per `char` at a fixed advance — derived from the theme's selector
+extent and the active `Scale`, never a hard-coded pixel size — through the same
+shared circle primitive the Signal Bead uses. Beads rather than a repeated
+character because the drawn run's width then depends only on the buffer's
+*length* and never on which characters it holds, so the rendering cannot leak
+anything about the secret through its width, and because no particular glyph
+has to exist in the font. The caret sits between bead cells, the selection
+highlight covers whole cells, and the pointer hit test divides the pointer
+offset by the cell advance and resolves the resulting cell to a `char`
+boundary, so a click can never land mid-scalar. An empty field still shows its
+placeholder: a placeholder is not a secret.
+
+**The buffer is reserved once, up front.** Secret mode is inseparable from its
+bound, because the bound is what lets the editor reserve the worst case UTF-8
+needs for `max_len` characters the moment the mode is set. A `String` that
+grows moves its contents to a new allocation and releases the old block with
+the characters typed so far still in it — a copy of the credential no later
+erase can reach. Reserving up front means the buffer can never grow while it
+fills, so there is only ever one copy to erase.
+
+**Discarded bytes are erased.** Every path that drops buffer content —
+replacing the text, overwriting a selection, clearing, truncating to the
+bound, and the editor's `Drop` — overwrites the bytes it discards first. The
+erase is the workspace's shared `tairix_util::secret::wipe`, not a plain
+`fill(0)`: nothing reads those bytes back, so an ordinary store is dead by the
+language's own rules and a release build may delete it outright, leaving the
+plaintext in the released block. The erase applies in plain mode too — it is
+cheap, harmless, and one editor is better than two. A `TextField`'s `Debug`
+output redacts a secret buffer, printing its character count in place of its
+content.
 
 ## Equality is render equivalence
 
@@ -143,11 +188,12 @@ exclusion is proved rather than asserted.
 dependencies; the drawn controls (`button`, `selector`, `value`, `text`, `menu`,
 `toolbar`, `tabs`, `combo`) depend only on other `lib/*`
 crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-font`,
-`tairix-icon`, and `tairix-input` — never on `kernel/*`, `drivers/*`, or
-`userland/*`, so the crate stays a shared building block the desktop consumers
-depend on and never the reverse. The owning viewport maps the computed
-one-dimensional `ThumbSpan` onto a `tairix_geometry::Rect` for its orientation
-at the edge.
+`tairix-icon`, `tairix-input`, and `tairix-util` (the shared secret erase a
+masked text field discards its buffer through) — never on `kernel/*`,
+`drivers/*`, or `userland/*`, so the crate stays a shared building block the
+desktop consumers depend on and never the reverse. The owning viewport maps the
+computed one-dimensional `ThumbSpan` onto a `tairix_geometry::Rect` for its
+orientation at the edge.
 
 The remaining drawn families are also complete: the value controls
 (`value` — `Slider`/`Progress`), the text entries (`text` — `TextField`/

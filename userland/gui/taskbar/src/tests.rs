@@ -4100,7 +4100,8 @@ fn the_row_table_renders_its_labels_groups_and_roles() {
                 false,
                 tairix_controls::ControlRole::Neutral
             ),
-            ("Log Out", true, tairix_controls::ControlRole::Neutral),
+            ("Lock Screen", true, tairix_controls::ControlRole::Neutral),
+            ("Log Out", false, tairix_controls::ControlRole::Neutral),
             ("Restart", false, tairix_controls::ControlRole::Destructive),
             (
                 "Shut Down",
@@ -4237,6 +4238,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
         // The dark row is the one in use under the dark theme, so it is not
         // actionable and reports nothing; the light row above it is.
         TaskbarResponse::Ignored,
+        TaskbarResponse::LockSession,
         TaskbarResponse::LogOut,
         TaskbarResponse::ConfirmSystemPower {
             action: tairix_abi::PowerAction::Restart,
@@ -4254,6 +4256,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
     for (index, want) in expected.into_iter().enumerate() {
         let mut bar = bar_with_task_shell();
         bar.set_tray_summary(Some(power_capable_summary()));
+        bar.set_lock_available(true);
         let mut input = TaskbarInput::new();
         open_system_menu(&mut input, &mut bar);
         assert_eq!(
@@ -4273,7 +4276,7 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
     let mut input = TaskbarInput::new();
     open_system_menu(&mut input, &mut bar);
 
-    for row in [6, 7] {
+    for row in [7, 8] {
         let item = &bar.menu().control().items()[row];
         assert_eq!(
             item.state().authority,
@@ -4290,7 +4293,7 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
 
     // Choosing one reports nothing: a refused row acts on nothing at all.
     assert_eq!(
-        choose_row(&mut input, &mut bar, 6),
+        choose_row(&mut input, &mut bar, 7),
         TaskbarResponse::Ignored
     );
     assert!(
@@ -4307,7 +4310,7 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
     let mut input = TaskbarInput::new();
     open_system_menu(&mut input, &mut bar);
 
-    for row in [6, 7] {
+    for row in [7, 8] {
         let item = &bar.menu().control().items()[row];
         assert_eq!(
             item.state().authority,
@@ -4323,12 +4326,64 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
     bar.close_menu();
     bar.set_tray_summary(Some(power_capable_summary()));
     open_system_menu(&mut input, &mut bar);
-    assert!(bar.menu().control().items()[6].state().is_actionable());
+    assert!(bar.menu().control().items()[7].state().is_actionable());
 
     bar.close_menu();
     bar.set_tray_summary(None);
     open_system_menu(&mut input, &mut bar);
-    assert!(!bar.menu().control().items()[6].state().is_actionable());
+    assert!(!bar.menu().control().items()[7].state().is_actionable());
+}
+
+#[test]
+fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
+    // Nothing attested yet: a bar that was never told offers no lock,
+    // because a lock with no way back is a trap, not a security measure.
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    let item = &bar.menu().control().items()[5];
+    assert_eq!(item.label(), "Lock Screen");
+    assert_eq!(
+        item.state().authority,
+        tairix_controls::AuthorityState::NeedsCapability,
+        "the lock row fails closed before the session attests"
+    );
+    assert!(!item.state().is_actionable());
+    assert_eq!(
+        item.reason(),
+        Some("This session has no password prompt to unlock with")
+    );
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 5),
+        TaskbarResponse::Ignored,
+        "a lock that could never be undone is never emitted"
+    );
+
+    // The session attests, and the row becomes the real command.
+    bar.close_menu();
+    bar.set_lock_available(true);
+    open_system_menu(&mut input, &mut bar);
+    let item = &bar.menu().control().items()[5];
+    assert!(item.state().is_actionable());
+    assert_eq!(item.reason(), None);
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 5),
+        TaskbarResponse::LockSession
+    );
+}
+
+#[test]
+fn attesting_the_lock_prompt_latches_only_the_menu_surface() {
+    let mut bar = bar_with_task_shell();
+    let _ = bar.take_repaint();
+
+    bar.set_lock_available(true);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
+
+    // Re-attesting the same answer changes no pixel anywhere.
+    bar.set_lock_available(true);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 }
 
 #[test]

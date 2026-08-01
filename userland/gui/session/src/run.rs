@@ -79,6 +79,7 @@ mod program {
     use alloc::collections::BTreeMap;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+    use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
     use tairix_abi::input::KeyInput;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -100,11 +101,11 @@ mod program {
         maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
         serve_switchboard_request, window_control_event, Answer, CliError, Command, ConcludedPick,
         ConfirmPrompt, DesktopShell, DeviceInputSource, HangTracker, IconCache, IconRasteriser,
-        KeyboardInputSource, LaunchTable, OwnerWindow, PickConclusion, PinBridge, PinService,
-        ResolvedPin, SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter,
-        SessionPicker, SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE,
+        InputSource, KeyboardInputSource, LaunchTable, LockOutcome, OwnerWindow, PickConclusion,
+        PinBridge, PinService, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
+        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -409,6 +410,93 @@ mod program {
                 Err(error)
             }
         }
+    }
+
+    /// The [`Unlocker`] the running desktop uses: the per-console elevation
+    /// broker served by the login supervisor that started this session.
+    ///
+    /// The request goes through the shared runtime client, which derives
+    /// this process's console from its kernel-attested origin and erases the
+    /// request buffer on every return path. The broker re-reads the caller's
+    /// identity from the kernel rather than trusting anything sent to it, so
+    /// no caller can ask it to check a password against another account.
+    struct BrokerUnlocker;
+
+    impl Unlocker for BrokerUnlocker {
+        fn verify(&mut self, password: &str) -> Result<bool, Errno> {
+            match tairix_rt::elevate(&ElevateRequest::Verify { password })? {
+                ElevateReply::Verified => Ok(true),
+                ElevateReply::Refused(_) => Ok(false),
+                // `Completed` answers a `Run` request, never a `Verify`. A
+                // broker that sent it is not speaking this protocol, and a
+                // lock does not open on a reply it did not understand.
+                ElevateReply::Completed { .. } => Err(Errno::NotSupported),
+            }
+        }
+    }
+
+    /// How a locked drain ended.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Drained {
+        /// Both channels are empty. The screen may or may not still be
+        /// locked; a verified password takes the lock down mid-drain.
+        Empty,
+        /// A channel faulted. The seat is no longer trustworthy.
+        Faulted,
+    }
+
+    /// Drain the seat's pointer and keyboard straight into the lock while
+    /// the screen is secured, routing nothing anywhere else.
+    ///
+    /// This is what makes the lock a lock. The shell is never given the
+    /// events, so no motion, click, or keystroke can reach the window
+    /// manager, the taskbar, a served application, or the confirmation
+    /// prompt while the screen is locked.
+    ///
+    /// Both channels are drained to empty even once a password has been
+    /// verified mid-batch, and everything after that point is **discarded**.
+    /// What is left in the queue at that instant is the tail of the gesture
+    /// that typed the password — the release of the `Enter` that submitted
+    /// it, a stray keystroke behind it — and delivering that into the
+    /// session the moment it becomes visible would leak part of a password
+    /// entry into whatever holds focus. Emptying the channels also keeps the
+    /// seat from waking the loop over events nobody will read.
+    fn drain_locked(
+        lock: &mut ScreenLock,
+        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
+        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
+        unlocker: &mut dyn Unlocker,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Drained {
+        let mut unlocked = false;
+        loop {
+            match pointer.poll() {
+                Ok(None) => break,
+                Ok(Some(event)) => {
+                    if !unlocked
+                        && lock.handle(&event, unlocker, shell, compositor) == LockOutcome::Unlocked
+                    {
+                        unlocked = true;
+                    }
+                }
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        loop {
+            match keyboard.poll_record() {
+                Ok(None) => break,
+                Ok(Some((event, _))) => {
+                    if !unlocked
+                        && lock.handle(&event, unlocker, shell, compositor) == LockOutcome::Unlocked
+                    {
+                        unlocked = true;
+                    }
+                }
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        Drained::Empty
     }
 
     /// Classify one drain fault: losing the seat is the session's normal
@@ -865,6 +953,23 @@ mod program {
         // the desktop itself rather than by the bar, which holds no
         // authority; an unanswered prompt relays nothing.
         let mut confirm = ConfirmPrompt::new();
+        // The screen lock, and the account it re-verifies. `USER` is what
+        // login exported for this session; it names whose password the
+        // prompt is asking for and nothing more — the broker reads the
+        // identity it actually checks against from the kernel, so a wrong
+        // or missing name here cannot unlock anybody's session. An unset or
+        // malformed value simply leaves the prompt unnamed.
+        let mut lock = ScreenLock::new();
+        let account = tairix_rt::env_var(b"USER")
+            .and_then(|raw| core::str::from_utf8(raw).ok())
+            .unwrap_or_default();
+        // Offer the Lock row only where this session really has a password
+        // prompt to unlock with: a console the login supervisor brokers
+        // re-verification on. Without one, locking would strand the user.
+        shell.set_lock_available(
+            &mut compositor,
+            elevate_endpoint(self_origin.console()).is_ok(),
+        );
 
         let mut token = 0u64;
         loop {
@@ -1044,6 +1149,25 @@ mod program {
                         }
                     },
                 );
+            } else if token == SEAT_TOKEN && lock.is_locked() {
+                // Locked: the seat's events belong to the lock and to
+                // nothing else. They are drained straight out of the
+                // channels here — not through the shell — so no pointer
+                // motion, click, or keystroke can reach the window manager,
+                // the taskbar, or a served application while the screen is
+                // secured. This is the routing half of the lock; the
+                // full-screen surface only hides the session.
+                if drain_locked(
+                    &mut lock,
+                    &mut pointer,
+                    &mut keyboard,
+                    &mut BrokerUnlocker,
+                    &mut shell,
+                    &mut compositor,
+                ) == Drained::Faulted
+                {
+                    return drain_fault(Errno::DeviceFault);
+                }
             } else if token == SEAT_TOKEN {
                 // Drain both input channels through the shell, routing
                 // every outcome onward (to the focused app window, or the
@@ -1072,6 +1196,8 @@ mod program {
                         &identity,
                         &mut picker,
                         &mut confirm,
+                        &mut lock,
+                        account,
                         &mut launched,
                         &mut pins,
                         &mut switchboard_pid,
@@ -1098,6 +1224,8 @@ mod program {
                                 &identity,
                                 &mut picker,
                                 &mut confirm,
+                                &mut lock,
+                                account,
                                 &mut launched,
                                 &mut pins,
                                 &mut switchboard_pid,
@@ -1158,6 +1286,11 @@ mod program {
                     &launched,
                 );
             }
+            // Nothing an application does may surface over a locked
+            // screen: whatever opened, raised, or resized behind the lock
+            // this wake, the lock goes back on top before the frame is
+            // shown. Idle when the screen is not locked.
+            lock.keep_topmost(&mut compositor);
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
             // copies only that region.
@@ -1323,6 +1456,8 @@ mod program {
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         confirm: &mut ConfirmPrompt,
+        lock: &mut ScreenLock,
+        account: &str,
         launched: &mut LaunchTable,
         pins: &mut PinPanel,
         switchboard: &mut Option<u64>,
@@ -1762,11 +1897,25 @@ mod program {
                 shell.present(compositor);
                 confirm.repaint(shell, compositor);
             }
+            ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
+                // Secure the screen. The prompt goes down first: an
+                // unanswered question must not sit behind a lock where the
+                // user cannot see what they are agreeing to. A lock that
+                // could not be put up says so rather than leaving the user
+                // believing the screen is secured.
+                confirm.abandon(shell, compositor);
+                if !lock.engage(account, shell, compositor) {
+                    let _ = tairix_rt::stderr(
+                        b"desktop: could not lock the screen; it is still open\n",
+                    );
+                }
+            }
             ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
                 // The user asked for the session to end: take the prompt down
                 // unanswered (so nothing irreversible follows a log-out) and
                 // unwind through the one owner-checked release.
                 confirm.abandon(shell, compositor);
+                lock.abandon(compositor);
                 return Routed::EndSession;
             }
             ShellOutcome::Taskbar(TaskbarResponse::ConfirmSystemPower { action }) => {

@@ -306,8 +306,7 @@ the authority at the right granularity and, if so, uses it.
     not-yet-published service leaves the rows **denied** — fail closed, never
     optimistic.
 - Session **Lock** re-authentication mints **no capability**, and no second
-  authenticator is written (landed; the lock *surface* is still outstanding —
-  see T13). The per-console elevation broker
+  authenticator is written. The per-console elevation broker
   (`lib/abi/src/elevate.rs`, served by the login supervisor, which already
   holds `CAP_SPAWN_AS_USER` + `CAP_USERS_READ`) already performs exactly this
   work — timing-equalised re-authentication through the same `Authenticator`
@@ -316,6 +315,9 @@ the authority at the right granularity and, if so, uses it.
   protocol, `ElevateRequest::Verify`, which verifies the **caller's own
   kernel-attested uid** and runs nothing. It is strictly weaker than the
   `Run` request the same endpoint already serves, so it widens no authority.
+  Callers reach it through the one shared client, `tairix_rt::elevate`, which
+  derives the console from the caller's own kernel-attested origin and erases
+  the request buffer on every return path.
 
 ## 5. On-disk stores (data, never code)
 
@@ -1107,6 +1109,7 @@ authority: each row reports a typed outcome and the session resolves it.
 | — | | |
 | Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one carries a check bead and is not actionable |
 | — | | |
+| Lock Screen | session `ScreenLock` → `ElevateRequest::Verify` | the per-console elevation broker |
 | Log Out | session exits cleanly | the login supervisor re-prompts |
 | Restart | session → Switchboard → `system_power(Restart)` | `CAP_SYSTEM_POWER` |
 | Shut Down | session → Switchboard → `system_power(PowerOff)` | `CAP_SYSTEM_POWER` |
@@ -1127,21 +1130,18 @@ authority: each row reports a typed outcome and the session resolves it.
 - **Launch rows resolve through the catalog, never a compiled-in path.** A row
   whose bundle is absent from the program-library catalog is disabled with a
   stated reason rather than emitting a launch that would fail.
+- **Lock heads the last group.** It is the one way out of the session that
+  *keeps* the session; everything below it ends work in progress.
+- **A lock that could not be undone is never offered.** `SystemPermits`
+  carries `lock_available`, attested by the session from
+  `elevate_endpoint(self_origin().console())`. It defaults to refusing, so a
+  bar that was never told renders the row non-actionable with the Authority
+  Mark and a stated reason rather than stranding the user behind a prompt
+  nothing can answer.
 
 **Rows deliberately not shipped, and what each waits on.** A row that cannot
 act must not exist, so these are absent rather than present-but-dead:
 
-- **Lock** — its *authentication* half is **done**: the per-console elevation
-  broker now serves `ElevateRequest::Verify`, which re-authenticates the
-  caller's own kernel-attested uid and runs nothing, reusing the login
-  prompt's own `Authenticator` (timing-equalised, refusals indistinguishable,
-  audited as `VERIFY_GRANTED` / `VERIFY_REFUSED`, secret zeroised on every
-  path). Its **surface** half remains: a full-screen session-owned modal that
-  captures every input class so no event reaches the window manager, the
-  taskbar, or any application; a masked password field in `lib/controls`
-  (`TextField` has no secret mode yet); the client call; and zeroisation of
-  the typed buffer on every path including cancel and teardown. The row lands
-  with that surface — a Lock row that cannot lock is worse than none.
 - **New command** — the session's spawn path passes no argv and the terminal
   bundle accepts no command to run, so there is nothing for the row to
   invoke. It needs an argv-carrying launch path (`plans/APPS.md`,
@@ -1157,17 +1157,67 @@ act must not exist, so these are absent rather than present-but-dead:
   is separate work. System Settings therefore remains reached from the shell
   until that surface exists; it is still **not** a program-library folder.
 
+**The lock surface** (`userland/gui/session/src/lock.rs`, `ScreenLock`).
+Locking is the one way out of a session that keeps the session: everything
+behind the lock carries on running, but nothing on screen is legible and no
+event reaches it. Three properties, each load-bearing:
+
+- **It covers the screen.** An opaque surface at the compositor's full
+  extent, so a passer-by learns nothing about what is on the machine.
+- **It takes every event.** While `is_locked()`, the session drains the seat's
+  pointer and keyboard *straight into the lock* rather than through
+  `DesktopShell::pump`/`handle`, so no motion, click, or keystroke reaches
+  the window manager, the taskbar, a served application, or the confirmation
+  prompt. On a mid-batch unlock the remainder of the batch is drained and
+  **discarded** — it is the tail of the password-entry gesture and must never
+  land in the session that just became visible.
+- **It stays on top.** `keep_topmost` raises it before every composite, so a
+  window opened or raised behind the lock cannot surface over it.
+
+Authentication is not the lock's to decide: it offers the password to the
+per-console broker and believes only `Verified`. A refusal, a transport
+failure, an absent broker, and an unparseable reply are one answer — still
+locked. It deliberately holds no attempt counter or rate limit; the broker
+owns that policy and audits every attempt, and a second copy here would be a
+second place to get it wrong.
+
+The password lives in exactly one place, the masked field's own bounded,
+pre-reserved buffer, and is erased on every path out — verified, refused,
+unreachable, or abandoned at teardown.
+
+**The masked field** (`lib/controls`, `TextField::secret(max_len)`) is a mode
+of the one shared text control, never a second text entry. It draws one
+filled bead per character rather than a repeated glyph, so the rendered run's
+width depends only on the length and no particular glyph need exist in the
+font; hit-testing maps x onto fixed bead cells and always lands on a char
+boundary. Secret mode is bounded so the buffer is reserved once and typing
+can never reallocate and strand a copy of the secret in a freed block;
+replacing, clearing, and dropping erase it, and `Debug` redacts it. The erase
+itself is the workspace's single `tairix_util::secret::wipe` — a volatile
+write an optimiser cannot delete as a dead store, now shared by the login
+prompt, the broker, the shell's `elevate` builtin, and the runtime's
+elevation client.
+
 **Tests**: the row table renders the expected labels, groups, roles and check
 marks for both appearances; a secondary press on the Switchboard capsule opens the menu
 and a press elsewhere does not; the menu is modal and a click away dismisses
 without acting; keyboard navigation reaches every row; an unpermitted power
 row is non-actionable, carries the Authority Mark and states its reason;
-power rows are denied when no authority has been published; a launch row with
-no catalog entry is disabled and emits nothing; each row maps to exactly the
-expected typed outcome; the confirmation dialog relays exactly once on
-confirm and nothing on cancel or Escape; the power relay round-trips and
-rejects malformed input; the Switchboard acts only when it holds the
-capability.
+power rows are denied when no authority has been published; the lock row is
+denied until the session attests it can prompt, and emits nothing while
+denied; a launch row with no catalog entry is disabled and emits nothing;
+each row maps to exactly the expected typed outcome; the confirmation dialog
+relays exactly once on confirm and nothing on cancel or Escape; the power
+relay round-trips and rejects malformed input; the Switchboard acts only when
+it holds the capability. For the lock: engaging covers the screen and is
+idempotent; a wrong password, an unreachable broker, Escape, Enter on an
+empty field, and a pointer press all leave it locked; a correct password
+unlocks and removes the surface; the verifier is offered exactly what was
+typed and never a retained previous attempt; `keep_topmost` raises over a
+later window; `abandon` and `repaint` behave. For the masked field: one bead
+per character, a render independent of which characters are held, no glyphs
+drawn, caret and selection on cell boundaries, the bound enforced, the buffer
+never reallocated, and erase-on-replace/drop with a redacting `Debug`.
 
 **Done when**: the quick-actions menu exposes the session/power controls and
 the Switchboard/appearance surfaces above, every shipped row acts for real,

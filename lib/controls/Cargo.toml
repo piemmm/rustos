@@ -26,6 +26,10 @@ tairix-icon = { path = "../icon", version = "=0.0.0" }
 # The shared pointer/keyboard input vocabulary a control's interaction
 # consumes; the same events the window manager routes.
 tairix-input = { path = "../input", version = "=0.0.0" }
+# The one definition of "the secret is gone": a masked field erases its
+# buffer through the shared volatile wipe, because a plain `fill(0)` before
+# the bytes are freed is a dead store an optimiser may delete outright.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 # The controls' host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).

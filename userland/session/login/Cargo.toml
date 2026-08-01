@@ -48,6 +48,12 @@ tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
 # The one civil-calendar definition: the view's header clock converts the
 # wall-clock Time64 through the shared day/date arithmetic.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The one volatile secret erase (`AGENTS.md` §2.2, §4): the offered password,
+# the elevation request that carries it, and the user-database image are
+# wiped through it. A plain `fill(0)` on a buffer nothing reads again is a
+# dead store an optimiser may delete, which would leave the credential in
+# memory exactly where the code claims it is gone.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and

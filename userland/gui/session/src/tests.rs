@@ -28,17 +28,17 @@ use tairix_taskbar::{
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
-    Color, Compositor, Corners, InputEvent, InputResponse, Point, PointerButton, Rect, Scale,
-    Surface, WindowActivationState, WindowId,
+    Color, Compositor, Corners, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton,
+    Rect, Scale, Surface, WindowActivationState, WindowId,
 };
 
 use crate::{
     command_section, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
     open_tray, serve_switchboard_request, DesktopSession, DesktopShell, InputSource, LaunchTable,
-    OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService, SessionFileReader,
-    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome,
-    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
-    TaskbarPresenter, SWITCHBOARD_RUN_PATH,
+    LockOutcome, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService, ScreenLock,
+    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
+    ShellOutcome, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -4337,4 +4337,396 @@ fn setting_an_appearance_switches_the_theme_and_re_themes_the_bar() {
     assert_eq!(session.set_appearance(Appearance::Dark), ThemeId::DARK);
     assert_eq!(session.active_theme().appearance(), Appearance::Dark);
     assert_eq!(session.taskbar().theme().id(), ThemeId::DARK);
+}
+
+// ---- screen lock ----
+
+/// A fake [`Unlocker`] that answers from a scripted list of verdicts, oldest
+/// first, and records every password it was ever offered — so a test can
+/// assert both what was typed and what came back for it.
+#[derive(Default)]
+struct ScriptedUnlocker {
+    answers: Vec<Result<bool, Errno>>,
+    offered: Vec<String>,
+}
+
+impl ScriptedUnlocker {
+    /// Answers `answers` in order as it is offered passwords, one verdict
+    /// per offer. Offered past the end of the script, it refuses.
+    fn scripted(mut answers: Vec<Result<bool, Errno>>) -> Self {
+        answers.reverse();
+        Self {
+            answers,
+            offered: Vec::new(),
+        }
+    }
+
+    /// Refuses every password it is ever offered.
+    fn refusing() -> Self {
+        Self::scripted(Vec::new())
+    }
+}
+
+impl Unlocker for ScriptedUnlocker {
+    fn verify(&mut self, password: &str) -> Result<bool, Errno> {
+        self.offered.push(String::from(password));
+        self.answers.pop().unwrap_or(Ok(false))
+    }
+}
+
+/// A key press with no modifiers held.
+fn key_press(key: Key) -> InputEvent {
+    InputEvent::KeyPressed {
+        key,
+        modifiers: tairix_wm::Modifiers::default(),
+    }
+}
+
+/// Type `password`'s characters into the lock one key at a time, then press
+/// Enter, returning the outcome of that final, submitting event.
+fn submit(
+    lock: &mut ScreenLock,
+    password: &str,
+    unlocker: &mut dyn Unlocker,
+    shell: &DesktopShell,
+    comp: &mut Compositor,
+) -> LockOutcome {
+    for ch in password.chars() {
+        lock.handle(&key_press(Key::Char(ch)), unlocker, shell, comp);
+    }
+    lock.handle(
+        &key_press(Key::Named(NamedKey::Enter)),
+        unlocker,
+        shell,
+        comp,
+    )
+}
+
+/// The lock's own window, found the same way the rest of this suite finds a
+/// window it has no id for: by asking the compositor what is showing there.
+/// A `ScreenLock` exposes no window-id accessor of its own, and the lock
+/// covers its own origin for as long as it is engaged.
+fn locked_window(comp: &Compositor) -> WindowId {
+    comp.window_at(Point::new(0, 0))
+        .expect("the lock covers its own origin while engaged")
+}
+
+#[test]
+fn engaging_locks_the_screen_and_covers_the_whole_screen_rectangle() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+
+    assert!(lock.engage("ann", &shell, &mut comp));
+
+    assert!(lock.is_locked());
+    assert_eq!(comp.window_count(), 1, "exactly one lock window");
+    let id = locked_window(&comp);
+    assert_eq!(window_rect(&comp, id), comp.screen_rect());
+}
+
+#[test]
+fn engaging_an_already_locked_screen_is_idempotent() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+
+    assert!(
+        lock.engage("someone else", &shell, &mut comp),
+        "a lock already up answers true and changes nothing"
+    );
+
+    assert!(lock.is_locked());
+    assert_eq!(comp.window_count(), 1, "still exactly one lock window");
+}
+
+/// An empty account name heads the prompt with exactly [`UNNAMED_ACCOUNT`] —
+/// not merely with some other, unspecified stand-in text — and a non-empty
+/// name is used instead. Neither string is observable through a public
+/// accessor, so this probes the one thing that is: what the lock draws.
+#[test]
+fn an_empty_account_name_heads_the_prompt_with_the_unnamed_placeholder() {
+    let shell = shell();
+    let mut comp_empty = compositor();
+    let mut comp_placeholder = compositor();
+    let mut comp_named = compositor();
+    let mut empty = ScreenLock::new();
+    let mut placeholder = ScreenLock::new();
+    let mut named = ScreenLock::new();
+
+    assert!(empty.engage("", &shell, &mut comp_empty));
+    assert!(placeholder.engage(UNNAMED_ACCOUNT, &shell, &mut comp_placeholder));
+    assert!(named.engage("ann", &shell, &mut comp_named));
+
+    let empty_id = locked_window(&comp_empty);
+    let placeholder_id = locked_window(&comp_placeholder);
+    let named_id = locked_window(&comp_named);
+    let empty_surface = comp_empty.window(empty_id).expect("live").surface();
+    let placeholder_surface = comp_placeholder
+        .window(placeholder_id)
+        .expect("live")
+        .surface();
+    let named_surface = comp_named.window(named_id).expect("live").surface();
+
+    assert_eq!(
+        empty_surface, placeholder_surface,
+        "an empty account name renders exactly like the UNNAMED_ACCOUNT placeholder"
+    );
+    assert_ne!(
+        empty_surface, named_surface,
+        "a non-empty account name is used instead of the placeholder"
+    );
+}
+
+#[test]
+fn a_wrong_password_leaves_the_screen_locked() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(false)]);
+
+    let outcome = submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
+
+    assert_eq!(outcome, LockOutcome::Pending);
+    assert!(
+        lock.is_locked(),
+        "a refused password leaves the screen locked"
+    );
+}
+
+/// A broker the lock cannot reach at all is not the same answer as a real
+/// refusal, and it is certainly not the same as a verified user: both are
+/// "still locked", which is the fail-closed property under test here.
+#[test]
+fn an_unreachable_broker_leaves_the_screen_locked() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Err(Errno::NotFound)]);
+
+    let outcome = submit(&mut lock, "whatever", &mut unlocker, &shell, &mut comp);
+
+    assert_eq!(
+        outcome,
+        LockOutcome::Pending,
+        "a broker that cannot be reached never unlocks the screen"
+    );
+    assert!(
+        lock.is_locked(),
+        "an error from the broker fails closed, exactly like a real refusal"
+    );
+}
+
+#[test]
+fn a_correct_password_unlocks_the_screen_and_removes_the_lock_window() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let id = locked_window(&comp);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+
+    let outcome = submit(
+        &mut lock,
+        "correct horse battery staple",
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+
+    assert_eq!(outcome, LockOutcome::Unlocked);
+    assert!(!lock.is_locked());
+    assert!(
+        comp.window(id).is_none(),
+        "the lock window is gone from the compositor"
+    );
+}
+
+#[test]
+fn the_typed_password_is_offered_to_the_verifier_exactly_as_typed() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+
+    submit(&mut lock, "Hunter2!", &mut unlocker, &shell, &mut comp);
+
+    assert_eq!(unlocker.offered, vec![String::from("Hunter2!")]);
+}
+
+/// After a refusal the next submission must offer a password typed fresh,
+/// never the previous attempt still sitting in the field with more
+/// characters appended to or retained alongside it.
+#[test]
+fn the_password_is_erased_after_every_attempt() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(false), Ok(true)]);
+
+    submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
+    submit(&mut lock, "right", &mut unlocker, &shell, &mut comp);
+
+    assert_eq!(
+        unlocker.offered,
+        vec![String::from("wrong"), String::from("right")],
+        "the second attempt is never the first with more characters appended"
+    );
+}
+
+/// Escape, Enter on an empty field, Tab, and a printable key are all
+/// harmless against a verifier that refuses everything: none of them is a
+/// second way out of the lock besides a verified password. Escape especially
+/// must not be mistaken for a cancel-and-dismiss.
+#[test]
+fn no_key_dismisses_the_lock_without_a_verified_password() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::refusing();
+
+    lock.handle(
+        &key_press(Key::Named(NamedKey::Escape)),
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+    assert!(lock.is_locked(), "Escape does not unlock the screen");
+
+    lock.handle(
+        &key_press(Key::Named(NamedKey::Enter)),
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+    assert!(lock.is_locked(), "Enter on an empty field does not unlock");
+
+    lock.handle(
+        &key_press(Key::Named(NamedKey::Tab)),
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+    assert!(lock.is_locked(), "Tab does not unlock");
+
+    lock.handle(&key_press(Key::Char('x')), &mut unlocker, &shell, &mut comp);
+    assert!(
+        lock.is_locked(),
+        "a printable key does not unlock by itself"
+    );
+}
+
+#[test]
+fn a_pointer_press_does_not_unlock_and_reaches_nothing_else() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::refusing();
+
+    let outcome = lock.handle(&PRIMARY_PRESS, &mut unlocker, &shell, &mut comp);
+
+    assert_eq!(outcome, LockOutcome::Pending);
+    assert!(lock.is_locked(), "a pointer press never unlocks the screen");
+    assert_eq!(
+        comp.window_count(),
+        1,
+        "the press reaches nothing beyond the lock's own window"
+    );
+    assert!(
+        unlocker.offered.is_empty(),
+        "a press alone offers the verifier no password"
+    );
+}
+
+#[test]
+fn keep_topmost_raises_the_lock_above_a_window_added_after_it() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let lock_id = locked_window(&comp);
+
+    let intruder = opaque_window(&mut comp, Point::new(0, 0), 10, 10);
+    assert_eq!(
+        comp.window_at(Point::new(0, 0)),
+        Some(intruder),
+        "a window added after the lock is on top of it by default"
+    );
+
+    lock.keep_topmost(&mut comp);
+
+    assert_eq!(
+        comp.window_at(Point::new(0, 0)),
+        Some(lock_id),
+        "keep_topmost raises the lock back above it"
+    );
+}
+
+#[test]
+fn abandon_takes_the_lock_down_and_unlocks_nothing() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let id = locked_window(&comp);
+
+    lock.abandon(&mut comp);
+
+    assert!(!lock.is_locked());
+    assert!(
+        comp.window(id).is_none(),
+        "the lock window is gone from the compositor"
+    );
+}
+
+#[test]
+fn repaint_while_locked_keeps_exactly_one_lock_window_and_stays_locked() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+
+    lock.repaint(&shell, &mut comp);
+
+    assert!(lock.is_locked(), "a repaint never uncovers the session");
+    assert_eq!(
+        comp.window_count(),
+        1,
+        "a repaint never adds a second lock window"
+    );
+}
+
+/// A `ScreenLock` that was never engaged is inert: every method is a
+/// harmless no-op against a compositor that never sees a lock window.
+#[test]
+fn an_unengaged_lock_is_harmless() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    let mut unlocker = ScriptedUnlocker::refusing();
+
+    assert_eq!(
+        lock.handle(&PRIMARY_PRESS, &mut unlocker, &shell, &mut comp),
+        LockOutcome::Pending
+    );
+    assert!(!lock.is_locked());
+    assert_eq!(comp.window_count(), 0, "nothing was ever added");
+
+    lock.keep_topmost(&mut comp);
+    lock.repaint(&shell, &mut comp);
+    lock.abandon(&mut comp);
+
+    assert!(!lock.is_locked());
+    assert_eq!(
+        comp.window_count(),
+        0,
+        "an idle lock never touches the compositor"
+    );
 }

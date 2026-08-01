@@ -153,6 +153,11 @@ pub enum TaskbarResponse {
         /// The appearance to switch to.
         appearance: Appearance,
     },
+    /// *Lock Screen* was chosen. The embedder puts its own password prompt
+    /// in front of the whole screen and stops routing input anywhere else
+    /// until the signed-in user is re-verified; the session and everything
+    /// running in it keep running untouched.
+    LockSession,
     /// *Log Out* was chosen. The embedder ends this desktop session
     /// cleanly; the login supervisor that started it prompts again.
     LogOut,
@@ -651,6 +656,7 @@ impl TaskbarInput {
                 Err(_) => TaskbarResponse::Ignored,
             },
             SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
+            SystemAction::Lock => TaskbarResponse::LockSession,
             SystemAction::LogOut => TaskbarResponse::LogOut,
             SystemAction::Restart => TaskbarResponse::ConfirmSystemPower {
                 action: PowerAction::Restart,

@@ -65,6 +65,13 @@ tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
 # and buffer can never disagree.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
+# The one volatile secret erase (`AGENTS.md` §2.2, §4): the `elevate`
+# builtin wipes the password it read before returning. A plain `fill(0)` on
+# a buffer nothing reads again is a dead store an optimiser may delete,
+# which would leave the credential in memory exactly where the code claims
+# it is gone.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers.
 # TAIRiX is Rust-only, so the shell links this runtime, never the C ABI

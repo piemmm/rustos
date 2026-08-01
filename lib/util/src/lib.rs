@@ -30,6 +30,11 @@
 //!   (`-c`/`-n` values), consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the GNU multiplier alphabet
 //!   exists in exactly one place.
+//! * [`secret`] — erasing a password/key buffer so the optimiser cannot
+//!   delete the erasure, consumed by the `lib/rt` elevation client, the
+//!   shell's `elevate` builtin, the login supervisor's elevation broker,
+//!   and `lib/controls`' masked text field, so "the secret is gone" means
+//!   the same thing everywhere a credential is marshalled.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -53,5 +58,6 @@ pub mod cnum;
 pub mod conf;
 pub mod count;
 pub mod fmt;
+pub mod secret;
 pub mod size;
 pub mod tailwindow;

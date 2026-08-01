@@ -21,6 +21,8 @@
 use alloc::format;
 use alloc::string::String;
 
+use tairix_util::secret::wipe;
+
 use crate::builtin::BuiltinContext;
 
 /// Status returned when the builtin is used incorrectly or refused.
@@ -61,7 +63,7 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         },
         Err(err) => Err(err),
     };
-    secret.fill(0);
+    wipe(&mut secret);
 
     match result {
         Ok(exit_code) => exit_code,

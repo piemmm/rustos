@@ -91,6 +91,7 @@ mod program {
     use tairix_rt::LogSink;
     use tairix_termcap::TermType;
     use tairix_users::{UsersDb, FONTD_UID, MAX_DB_LEN};
+    use tairix_util::secret::wipe;
 
     /// Set once the sandboxed OS font service (`fontd`) has been started, so
     /// login launches it at most once per process (`plans/FONT-SERVICE.md`).
@@ -352,7 +353,7 @@ mod program {
             let mut ticket = 0u64;
             let Ok(len) = tairix_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
             else {
-                request.fill(0);
+                wipe(&mut request);
                 return;
             };
             // Attest the caller's placement and identity from the same
@@ -378,7 +379,7 @@ mod program {
                 &RtElevateLauncher,
                 sink,
             );
-            request.fill(0);
+            wipe(&mut request);
             let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
             if let Ok(total) = reply.encode(&mut reply_buf) {
                 let _ = tairix_rt::call_reply(self.endpoint, ticket, &reply_buf[..total]);
@@ -580,7 +581,7 @@ mod program {
             Err(code) if code == pending => DbLoad::Pending,
             Err(_) => DbLoad::Absent,
         };
-        buf.fill(0);
+        wipe(&mut buf);
         state
     }
 
