@@ -1,6 +1,8 @@
-//! The RAID **array superblock**: the on-disk metadata every member of an
-//! array carries, and the fail-closed logic that reassembles an array from a
-//! set of discovered members (`plans/FIX-IO.md` IO6).
+//! The RAID **on-disk metadata**: the array superblock every member of an
+//! array carries, the durable maintenance record that carries the array's
+//! self-maintenance progress across a restart, and the fail-closed logic that
+//! reassembles an array from a set of discovered members (`plans/FIX-IO.md`
+//! IO6).
 //!
 //! A RAID array is not a hand-maintained list of devices: the assembling
 //! serve process discovers block devices (`AGENTS.md` §18) and reads a
@@ -66,10 +68,27 @@
 //! rebuilt member back to current is the same `member_superblock` write, so
 //! the read and write halves share one notion of "current" and cannot diverge
 //! (`AGENTS.md` §2.2).
+//!
+//! # Maintenance progress
+//!
+//! Beside the superblock, each member carries a [`MaintenanceRecord`]: the
+//! array's live scrub and rebuild cursors and the instant its last complete
+//! verification pass finished. It is what stops a restart silently discarding
+//! the hours of work a pass over a large array represents. It is a separate
+//! record in a separate block ([`MAINTENANCE_BLOCK`]) precisely so a routine
+//! progress checkpoint can never put the array's identity at risk. See
+//! [`MaintenanceRecord`] for the format and its fail-safe contract.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+mod maintenance;
+
+pub use maintenance::{
+    ArrayProgress, MaintenanceRecord, MaintenanceRecordError, MAINTENANCE_BLOCK,
+    RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK,
+};
 
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::time::Time64;

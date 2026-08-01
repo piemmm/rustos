@@ -192,6 +192,36 @@ impl Time64 {
         }
         Self { secs, nanos }
     }
+
+    /// The span from `earlier` to `self`, saturating the seconds at the `i64`
+    /// bounds rather than wrapping.
+    ///
+    /// The difference of two instants, completing the pair with
+    /// [`saturating_add`](Self::saturating_add) and
+    /// [`saturating_sub`](Self::saturating_sub) (which offset one instant *by*
+    /// a span). Its first user asks "how long ago did this recorded event
+    /// happen?" of a persisted [`Time64`] stamp.
+    ///
+    /// A `self` that precedes `earlier` yields a negative span rather than
+    /// silently clamping to zero, so a caller can tell "no time has passed"
+    /// from "the ordering is not what I assumed" (a stepped clock, a record
+    /// from the future) and decide for itself.
+    ///
+    /// [`saturating_add`]: Self::saturating_add
+    #[must_use]
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration64 {
+        let mut secs = self.secs.saturating_sub(earlier.secs);
+        let nanos = if self.nanos < earlier.nanos {
+            // Borrow one whole second to cover the nanosecond underflow; both
+            // fields are `< NANOS_PER_SEC`, so one borrow always suffices and
+            // the result stays canonical.
+            secs = secs.saturating_sub(1);
+            self.nanos + NANOS_PER_SEC - earlier.nanos
+        } else {
+            self.nanos - earlier.nanos
+        };
+        Duration64 { secs, nanos }
+    }
 }
 
 /// The kernel's honest assessment of how trustworthy the wall-clock reading
@@ -394,6 +424,24 @@ impl Duration64 {
             return Err(Errno::BufferTooSmall);
         }
         Self::new(read_i64(bytes, 0), read_u32(bytes, 8))
+    }
+
+    /// The span as a whole nanosecond count, saturating at [`u64::MAX`] and
+    /// flooring a negative span at zero.
+    ///
+    /// The inverse of [`from_nanos`](Self::from_nanos), for the callers that
+    /// hand a span to an interface counting plain nanoseconds (the kernel's
+    /// monotonic timeouts and deadlines). A negative span has no meaning as an
+    /// unsigned count, so it reports zero rather than wrapping to an enormous
+    /// positive one — the direction that cannot turn a backwards clock into an
+    /// effectively infinite wait.
+    #[must_use]
+    pub fn saturating_total_nanos(&self) -> u64 {
+        let Ok(secs) = u64::try_from(self.secs) else {
+            return 0;
+        };
+        secs.saturating_mul(u64::from(NANOS_PER_SEC))
+            .saturating_add(u64::from(self.nanos))
     }
 }
 
@@ -636,5 +684,69 @@ mod tests {
     fn duration64_orders_chronologically() {
         assert!(Duration64::from_nanos(1) < Duration64::from_nanos(u64::from(NANOS_PER_SEC)));
         assert!(Duration64::from_secs(-1) < Duration64::ZERO);
+    }
+
+    #[test]
+    fn duration_since_measures_the_span_between_two_instants() {
+        let earlier = Time64::new(1_700_000_000, 900_000_000).unwrap();
+        let later = Time64::new(1_700_000_003, 100_000_000).unwrap();
+        let span = later.saturating_duration_since(earlier);
+        // Two whole seconds plus 200 ms: the nanosecond field borrows one
+        // second and stays canonical.
+        assert_eq!(span.secs(), 2);
+        assert_eq!(span.subsec_nanos(), 200_000_000);
+        assert_eq!(span.saturating_total_nanos(), 2_200_000_000);
+        // It is the exact inverse of offsetting the earlier instant forward.
+        assert_eq!(earlier.saturating_add(span), later);
+    }
+
+    #[test]
+    fn duration_since_is_zero_for_the_same_instant() {
+        let t = Time64::new(-1, 5).unwrap();
+        assert_eq!(t.saturating_duration_since(t), Duration64::ZERO);
+    }
+
+    #[test]
+    fn duration_since_reports_a_negative_span_when_ordering_reverses() {
+        // A "later" instant that actually precedes `earlier` (a stepped clock,
+        // or a record claiming the future) must be visible as negative, not
+        // silently clamped, so the caller can reject it.
+        let earlier = Time64::from_secs(2_000_000_000);
+        let later = Time64::from_secs(1_000_000_000);
+        let span = later.saturating_duration_since(earlier);
+        assert!(span < Duration64::ZERO);
+        // As an unsigned nanosecond count a negative span floors at zero
+        // rather than wrapping to an effectively infinite wait.
+        assert_eq!(span.saturating_total_nanos(), 0);
+    }
+
+    #[test]
+    fn duration_since_spans_the_epoch_and_the_2038_boundary() {
+        // 1901-12-13 to 2038-01-19: a span no 32-bit second count could hold.
+        let earlier = Time64::new(-2_147_483_648, 1).unwrap();
+        let later = Time64::new(2_147_483_648, 0).unwrap();
+        let span = later.saturating_duration_since(earlier);
+        assert_eq!(span.secs(), 4_294_967_295);
+        assert_eq!(span.subsec_nanos(), 999_999_999);
+        assert_eq!(earlier.saturating_add(span), later);
+    }
+
+    #[test]
+    fn duration_since_saturates_instead_of_wrapping() {
+        let span = Time64::from_secs(i64::MAX).saturating_duration_since(Time64::from_secs(-1));
+        assert_eq!(span.secs(), i64::MAX);
+    }
+
+    #[test]
+    fn total_nanos_round_trips_from_nanos_and_saturates() {
+        for ns in [0u64, 1, 999_999_999, 1_000_000_000, 2_500_000_001] {
+            assert_eq!(Duration64::from_nanos(ns).saturating_total_nanos(), ns);
+        }
+        // A span far beyond what a nanosecond count can express saturates at
+        // the ceiling rather than wrapping to a small value.
+        assert_eq!(
+            Duration64::from_secs(i64::MAX).saturating_total_nanos(),
+            u64::MAX
+        );
     }
 }

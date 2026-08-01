@@ -297,8 +297,10 @@ pub struct ArrayMaintenance<'a> {
     next_scrub_ns: u64,
     /// The last foreground request the caller reported, if any.
     last_foreground_ns: Option<u64>,
-    /// Whether a scrub pass this scheduler started is still running, so its
-    /// completion re-arms the period.
+    /// Whether a scrub pass is running, so its completion re-arms the period.
+    /// Adopted from the array at construction, because a pass resumed from the
+    /// array's persisted maintenance record was started before this scheduler
+    /// existed and still has to re-arm the period when it finishes.
     scrub_active: bool,
     /// The deadline the last [`Self::next_action`] computed for its caller.
     wake_ns: Option<u64>,
@@ -316,6 +318,13 @@ impl<'a> ArrayMaintenance<'a> {
     /// an array whose verification history is unknown is verified rather than
     /// assumed clean (`AGENTS.md` §5.4, §26.5), and the duty pacing bounds what
     /// that costs.
+    ///
+    /// An array handed over **mid-pass** — one whose cursor was restored from
+    /// its maintenance record ([`RaidArray::restore_progress`]) — is adopted as
+    /// such, so finishing that pass re-arms the period like any other. Were the
+    /// resumed pass treated as none of this scheduler's doing, its completion
+    /// would go unnoticed and the already-overdue period would start it again
+    /// at once, verifying the array back-to-back forever.
     ///
     /// # Errors
     ///
@@ -342,7 +351,7 @@ impl<'a> ArrayMaintenance<'a> {
             next_chunk_ns: now_ns,
             next_scrub_ns,
             last_foreground_ns: None,
-            scrub_active: false,
+            scrub_active: array.scrubbing(),
             wake_ns: None,
         })
     }

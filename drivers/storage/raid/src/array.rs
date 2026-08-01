@@ -31,7 +31,7 @@ use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError};
 use crate::parity::{ParityArray, ParityError};
 use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::StripeArray;
-use crate::superblock::RaidLevel;
+use crate::superblock::{ArrayProgress, RaidLevel};
 use crate::triple::{TripleParityArray, TripleParityError};
 
 /// A reason a level-agnostic [`RaidArray`] operation could not be carried out.
@@ -63,6 +63,11 @@ pub enum RaidError {
     /// holds a device; vacate it with [`RaidArray::remove_member`] first, or
     /// hot-swap a faulted one with [`RaidArray::replace_member`].
     SlotOccupied,
+    /// A restored maintenance cursor named a block outside the array, so it
+    /// cannot have come from this array in this shape. Refused rather than
+    /// clamped: adopted as a rebuild position it would declare a member fully
+    /// copied without its tail ever having been written.
+    CursorOutOfRange,
     /// A composition-policy rejection a reconfiguration path does not normally
     /// produce (an assembly-time failure surfaced from a member operation).
     /// Kept as a defensive, fail-closed catch so a future engine variant can
@@ -78,6 +83,7 @@ impl From<MirrorError> for RaidError {
             MirrorError::ProbeFailed => Self::ProbeFailed,
             MirrorError::GeometryMismatch => Self::GeometryMismatch,
             MirrorError::SlotOccupied => Self::SlotOccupied,
+            MirrorError::CursorOutOfRange => Self::CursorOutOfRange,
             _ => Self::Policy,
         }
     }
@@ -91,6 +97,7 @@ impl From<ParityError> for RaidError {
             ParityError::ProbeFailed => Self::ProbeFailed,
             ParityError::GeometryMismatch => Self::GeometryMismatch,
             ParityError::SlotOccupied => Self::SlotOccupied,
+            ParityError::CursorOutOfRange => Self::CursorOutOfRange,
             _ => Self::Policy,
         }
     }
@@ -104,6 +111,7 @@ impl From<DualParityError> for RaidError {
             DualParityError::ProbeFailed => Self::ProbeFailed,
             DualParityError::GeometryMismatch => Self::GeometryMismatch,
             DualParityError::SlotOccupied => Self::SlotOccupied,
+            DualParityError::CursorOutOfRange => Self::CursorOutOfRange,
             _ => Self::Policy,
         }
     }
@@ -117,6 +125,7 @@ impl From<Raid10Error> for RaidError {
             Raid10Error::ProbeFailed => Self::ProbeFailed,
             Raid10Error::GeometryMismatch => Self::GeometryMismatch,
             Raid10Error::SlotOccupied => Self::SlotOccupied,
+            Raid10Error::CursorOutOfRange => Self::CursorOutOfRange,
             // Assembly-shape failures (empty/odd/too-few members, zero chunk,
             // unaligned or missing geometry, overflow) are composition policy.
             _ => Self::Policy,
@@ -132,6 +141,7 @@ impl From<TripleParityError> for RaidError {
             TripleParityError::ProbeFailed => Self::ProbeFailed,
             TripleParityError::GeometryMismatch => Self::GeometryMismatch,
             TripleParityError::SlotOccupied => Self::SlotOccupied,
+            TripleParityError::CursorOutOfRange => Self::CursorOutOfRange,
             _ => Self::Policy,
         }
     }
@@ -307,6 +317,63 @@ impl<B: Block> RaidArray<'_, B> {
             Self::Raid10(a) => a.begin_scrub(),
         }
         Ok(())
+    }
+
+    /// The array's resumable maintenance position: how far the current scrub
+    /// pass and rebuild have got, or [`ArrayProgress::IDLE`] if neither is
+    /// running.
+    ///
+    /// The serving process checkpoints this to the members' on-disk
+    /// maintenance record ([`MaintenanceRecord`](crate::superblock::MaintenanceRecord))
+    /// as the array works, so a pass measured in hours — which on a 100 TB+
+    /// array is the normal case — is not silently discarded by a reboot
+    /// (`AGENTS.md` §26.6).
+    ///
+    /// An observation, so it is answered for every level: a non-redundant
+    /// stripe has no maintenance to record and reports
+    /// [`ArrayProgress::IDLE`], exactly as it reports an idle scrub cursor.
+    #[must_use]
+    pub fn progress(&self) -> ArrayProgress {
+        match self {
+            Self::Mirror(a) => a.progress(),
+            // A stripe has no redundancy, so it never scrubs or rebuilds.
+            Self::Stripe(_) => ArrayProgress::IDLE,
+            Self::Parity(a) => a.progress(),
+            Self::DualParity(a) => a.progress(),
+            Self::TripleParity(a) => a.progress(),
+            Self::Raid10(a) => a.progress(),
+        }
+    }
+
+    /// Resume maintenance at a previously checkpointed `progress`, read back
+    /// from the members' on-disk maintenance record.
+    ///
+    /// Called once after assembly, before the first maintenance step. The
+    /// record only yields a position it can vouch for — the same array at the
+    /// same generation, decoding cleanly — and otherwise yields
+    /// [`ArrayProgress::IDLE`], which leaves the array at its fresh-start
+    /// position: a lost, foreign, or corrupt record costs time and never
+    /// correctness (`AGENTS.md` §5.4, §26.5).
+    ///
+    /// # Errors
+    ///
+    /// * [`RaidError::NotRedundant`] for a stripe, which has no maintenance to
+    ///   resume — the level check wins, as for every redundancy-only operation.
+    /// * [`RaidError::CursorOutOfRange`] if a cursor names a block outside the
+    ///   array; the array is left at its fresh-start position.
+    pub fn restore_progress(&mut self, progress: ArrayProgress) -> Result<(), RaidError> {
+        if !self.level().is_redundant() {
+            return Err(RaidError::NotRedundant);
+        }
+        match self {
+            Self::Mirror(a) => a.restore_progress(progress).map_err(RaidError::from),
+            Self::Parity(a) => a.restore_progress(progress).map_err(RaidError::from),
+            Self::DualParity(a) => a.restore_progress(progress).map_err(RaidError::from),
+            Self::TripleParity(a) => a.restore_progress(progress).map_err(RaidError::from),
+            Self::Raid10(a) => a.restore_progress(progress).map_err(RaidError::from),
+            // The stripe arm returned above; maintenance is redundant-only.
+            Self::Stripe(_) => Err(RaidError::NotRedundant),
+        }
     }
 
     /// Verify and repair one bounded chunk of a scrub pass, advancing the

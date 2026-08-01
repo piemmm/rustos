@@ -3,6 +3,7 @@
 
 use super::{Raid10Array, Raid10Error};
 use crate::mirror::{ArrayHealth, MemberState, MirrorMember};
+use crate::superblock::ArrayProgress;
 use core::cell::Cell;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
@@ -639,4 +640,81 @@ fn the_class_carrying_read_and_write_thread_the_sensitivity_class() {
         .read_blocks_with_class(0, &mut buf, BufferClass::Sensitive)
         .expect("class read");
     assert!(buf.iter().all(|&b| b == pat(0)));
+}
+
+#[test]
+fn a_verification_pass_resumes_where_a_restart_left_it() {
+    // A pass over a 100 TB+ array runs for hours, so it will meet a restart.
+    // Losing the cursor would restart the pass every time, and an array
+    // rebooted often enough would never finish verifying itself at all.
+    let mut members = four(0);
+    let mut scrub_scratch = [0u8; BS as usize];
+    let checkpoint = {
+        let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles");
+        array.begin_scrub();
+        array
+            .scrub_step(&mut scrub_scratch)
+            .expect("one scrub chunk");
+        assert!(array.scrubbing());
+        let checkpoint = array.progress();
+        assert_eq!(checkpoint.scrub_cursor, Some(array.scrub_cursor()));
+        assert_eq!(checkpoint.resync_cursor, None);
+        checkpoint
+    };
+
+    // The serving process restarts and the array is assembled afresh, which by
+    // itself abandons the pass; the checkpointed position resumes it.
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("re-assembles");
+    assert!(!array.scrubbing(), "a fresh assembly is not mid-pass");
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+    array
+        .restore_progress(checkpoint)
+        .expect("the checkpointed position is adopted");
+    assert!(array.scrubbing());
+    assert_eq!(Some(array.scrub_cursor()), checkpoint.scrub_cursor);
+
+    let mut steps = 0u32;
+    while array.scrubbing() {
+        array.scrub_step(&mut scrub_scratch).expect("scrub chunk");
+        steps += 1;
+        assert!(steps <= 100, "the pass terminates");
+    }
+}
+
+#[test]
+fn a_restored_cursor_outside_the_array_is_refused_and_changes_nothing() {
+    // A cursor past the end cannot have come from this array. Adopted as a
+    // rebuild position it would mark a member fully rebuilt without its tail
+    // ever being written, leaving stale data trusted as current — so it is
+    // refused outright rather than clamped.
+    let mut members = four(0);
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles");
+    for cursor in [NBLK, NBLK + 1, u64::MAX] {
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: Some(cursor),
+                resync_cursor: None,
+            }),
+            Err(Raid10Error::CursorOutOfRange)
+        );
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: None,
+                resync_cursor: Some(cursor),
+            }),
+            Err(Raid10Error::CursorOutOfRange)
+        );
+    }
+    assert!(!array.scrubbing());
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+
+    // The last real block is accepted, so the refusal is exactly at the end
+    // and not one block early.
+    array
+        .restore_progress(ArrayProgress {
+            scrub_cursor: Some(NBLK - 1),
+            resync_cursor: None,
+        })
+        .expect("the last block is a valid position");
+    assert_eq!(array.scrub_cursor(), NBLK - 1);
 }

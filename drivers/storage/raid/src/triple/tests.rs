@@ -3,6 +3,7 @@
 
 use super::{TripleParityArray, TripleParityError, TripleParityMember, SCRATCH_BLOCKS};
 use crate::mirror::{ArrayHealth, MemberState};
+use crate::superblock::ArrayProgress;
 use core::cell::RefCell;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -614,4 +615,82 @@ fn device_health_aggregates_live_members() {
         }
         DeviceHealth::Unavailable => panic!("live members expose telemetry"),
     }
+}
+
+#[test]
+fn a_verification_pass_resumes_where_a_restart_left_it() {
+    // A pass over a 100 TB+ array runs for hours, so it will meet a restart.
+    // Losing the cursor would restart the pass every time, and an array
+    // rebooted often enough would never finish verifying itself at all.
+    let checkpoint = {
+        let mut m = members();
+        let mut s = scratch();
+        let mut array = TripleParityArray::assemble(&mut m, &mut s, CHUNK).expect("assembles");
+        array.begin_scrub();
+        array.scrub_step(1).expect("one scrub chunk");
+        assert!(array.scrubbing());
+        let checkpoint = array.progress();
+        assert_eq!(checkpoint.scrub_cursor, Some(array.scrub_cursor()));
+        assert_eq!(checkpoint.resync_cursor, None);
+        checkpoint
+    };
+
+    // The serving process restarts and the array is assembled afresh, which by
+    // itself abandons the pass; the checkpointed position resumes it.
+    let mut m = members();
+    let mut s = scratch();
+    let mut array = TripleParityArray::assemble(&mut m, &mut s, CHUNK).expect("re-assembles");
+    assert!(!array.scrubbing(), "a fresh assembly is not mid-pass");
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+    array
+        .restore_progress(checkpoint)
+        .expect("the checkpointed position is adopted");
+    assert!(array.scrubbing());
+    assert_eq!(Some(array.scrub_cursor()), checkpoint.scrub_cursor);
+
+    let mut steps = 0u32;
+    while array.scrubbing() {
+        array.scrub_step(1).expect("scrub chunk");
+        steps += 1;
+        assert!(steps <= 100, "the pass terminates");
+    }
+}
+
+#[test]
+fn a_restored_cursor_outside_the_array_is_refused_and_changes_nothing() {
+    // A cursor past the end cannot have come from this array. Adopted as a
+    // rebuild position it would mark a member fully rebuilt without its tail
+    // ever being written, leaving stale data trusted as current — so it is
+    // refused outright rather than clamped.
+    let mut m = members();
+    let mut s = scratch();
+    let mut array = TripleParityArray::assemble(&mut m, &mut s, CHUNK).expect("assembles");
+    for cursor in [MB, MB + 1, u64::MAX] {
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: Some(cursor),
+                resync_cursor: None,
+            }),
+            Err(TripleParityError::CursorOutOfRange)
+        );
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: None,
+                resync_cursor: Some(cursor),
+            }),
+            Err(TripleParityError::CursorOutOfRange)
+        );
+    }
+    assert!(!array.scrubbing());
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+
+    // The last real block is accepted, so the refusal is exactly at the end
+    // and not one block early.
+    array
+        .restore_progress(ArrayProgress {
+            scrub_cursor: Some(MB - 1),
+            resync_cursor: None,
+        })
+        .expect("the last block is a valid position");
+    assert_eq!(array.scrub_cursor(), MB - 1);
 }

@@ -48,7 +48,7 @@
 
 use crate::gf256;
 use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
-use crate::superblock::RaidLevel;
+use crate::superblock::{ArrayProgress, RaidLevel};
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -185,6 +185,11 @@ pub enum DualParityError {
     /// [`DualParityArray::add_member`] was asked to populate a slot that
     /// already holds a device (it is not [`MemberState::Absent`]).
     SlotOccupied,
+    /// A restored maintenance cursor named a block outside the array, so it
+    /// cannot have come from this array in this shape. Refused rather than
+    /// clamped: adopted as a rebuild position it would declare a member fully
+    /// copied without its tail ever having been written.
+    CursorOutOfRange,
     /// The array has more than 255 data members — more than the GF(2^8) Q
     /// syndrome can give distinct, non-zero coefficients — so a valid Q could
     /// not be encoded. Fails closed rather than build an unrecoverable array.
@@ -1260,6 +1265,66 @@ impl<B: Block> DualParityArray<'_, B> {
     /// restarts from block 0.
     pub fn begin_scrub(&mut self) {
         self.scrub_next_lba = 0;
+    }
+
+    /// The array's resumable maintenance position: how far the current scrub
+    /// pass and rebuild have got (in member-local blocks, as
+    /// [`scrub_cursor`](Self::scrub_cursor) reports), or
+    /// [`ArrayProgress::IDLE`] if neither is running.
+    ///
+    /// This is what the serving process checkpoints to the members' on-disk
+    /// maintenance record, so a pass measured in hours survives a restart
+    /// (`AGENTS.md` §26.6). Several members can rebuild at once with different
+    /// cursors, and one record can only carry a single position, so the
+    /// **least advanced** is reported: resuming from it re-copies blocks a
+    /// further-ahead member already had (harmless — a rebuild write is
+    /// idempotent) and can never skip a block that was still outstanding.
+    #[must_use]
+    pub fn progress(&self) -> ArrayProgress {
+        ArrayProgress {
+            scrub_cursor: self.scrubbing().then_some(self.scrub_next_lba),
+            resync_cursor: self
+                .members
+                .iter()
+                .filter(|m| m.state == MemberState::Resyncing)
+                .map(|m| m.resync_next_lba)
+                .min(),
+        }
+    }
+
+    /// Resume maintenance at a previously checkpointed `progress`.
+    ///
+    /// Called once after [`assemble`](Self::assemble), before any maintenance
+    /// step, with the position read back from the members' on-disk record. A
+    /// position the record could not vouch for arrives as
+    /// [`ArrayProgress::IDLE`] and simply leaves the array at its fresh-start
+    /// position, so a lost or foreign record costs time and never correctness.
+    ///
+    /// A rebuild cursor is planted only on the members that are actually
+    /// rebuilding, which the assembled member table decides: a member that
+    /// rejoined as in sync is untouched, so a restored cursor can never
+    /// un-sync a current member.
+    ///
+    /// # Errors
+    ///
+    /// [`DualParityError::CursorOutOfRange`] if a cursor names a block outside
+    /// the array. The array is left exactly as it was, so the caller can
+    /// proceed from the fresh-start position.
+    pub fn restore_progress(&mut self, progress: ArrayProgress) -> Result<(), DualParityError> {
+        if !progress.fits_span(self.per_member_blocks) {
+            return Err(DualParityError::CursorOutOfRange);
+        }
+        if let Some(cursor) = progress.scrub_cursor {
+            self.scrub_next_lba = cursor;
+        }
+        if let Some(cursor) = progress.resync_cursor {
+            for member in &mut *self.members {
+                if member.state == MemberState::Resyncing {
+                    member.resync_next_lba = cursor;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Verify and repair up to `blocks` member-local stripe rows of a scrub

@@ -6,7 +6,7 @@
 //! serve process, `AGENTS.md` §24), so the array imposes no fixed member
 //! ceiling and holds only a borrow.
 
-use crate::superblock::SlotDisposition;
+use crate::superblock::{ArrayProgress, SlotDisposition};
 use tairix_abi::blkio::{BlkDeviceClass, BlkStatus};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -181,6 +181,22 @@ impl<B: Block> MirrorMember<B> {
         self.resync_next_lba
     }
 
+    /// Resume this member's rebuild at `cursor`, if it is rebuilding at all.
+    ///
+    /// Only a [`MemberState::Resyncing`] slot has a rebuild to resume: a
+    /// cursor is never planted on an in-sync, faulted, or absent member, since
+    /// that would describe a rebuild that is not happening. The caller has
+    /// already checked the cursor against the array
+    /// ([`ArrayProgress::fits_span`]), so it names a block the member has.
+    ///
+    /// Shared by the mirror and by the RAID10 stripe of mirrors, which is
+    /// built from these same members (`AGENTS.md` §2.2).
+    pub(crate) const fn resume_resync(&mut self, cursor: u64) {
+        if matches!(self.state, MemberState::Resyncing) {
+            self.resync_next_lba = cursor;
+        }
+    }
+
     /// Borrow the underlying device (for identity/health queries), or [`None`]
     /// for an [`MemberState::Absent`] slot that has no device.
     #[must_use]
@@ -254,6 +270,11 @@ pub enum MirrorError {
     /// with [`MirrorArray::remove_member`], or hot-swap it with
     /// [`MirrorArray::replace_member`].
     SlotOccupied,
+    /// A restored maintenance cursor named a block outside the array, so it
+    /// cannot have come from this array in this shape. Refused rather than
+    /// clamped: adopted as a rebuild position it would declare a member fully
+    /// copied without its tail ever having been written.
+    CursorOutOfRange,
 }
 
 /// A RAID1 mirror presenting several child [`Block`] copies as one logical
@@ -715,6 +736,63 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// restarts the pass from block 0.
     pub fn begin_scrub(&mut self) {
         self.scrub_next_lba = 0;
+    }
+
+    /// The array's resumable maintenance position: how far the current scrub
+    /// pass and rebuild have got, or [`ArrayProgress::IDLE`] if neither is
+    /// running.
+    ///
+    /// This is what the serving process checkpoints to the members' on-disk
+    /// maintenance record, so a pass measured in hours survives a restart
+    /// (`AGENTS.md` §26.6). Several members can rebuild at once with different
+    /// cursors, and one record can only carry a single position, so the
+    /// **least advanced** is reported: resuming from it re-copies blocks a
+    /// further-ahead member already had (harmless — a rebuild write is
+    /// idempotent) and can never skip a block that was still outstanding.
+    #[must_use]
+    pub fn progress(&self) -> ArrayProgress {
+        ArrayProgress {
+            scrub_cursor: self.scrubbing().then_some(self.scrub_next_lba),
+            resync_cursor: self
+                .members
+                .iter()
+                .filter(|m| m.state == MemberState::Resyncing)
+                .map(|m| m.resync_next_lba)
+                .min(),
+        }
+    }
+
+    /// Resume maintenance at a previously checkpointed `progress`.
+    ///
+    /// Called once after [`assemble`](Self::assemble), before any maintenance
+    /// step, with the position read back from the members' on-disk record. A
+    /// position the record could not vouch for arrives as
+    /// [`ArrayProgress::IDLE`] and simply leaves the array at its fresh-start
+    /// position, so a lost or foreign record costs time and never correctness.
+    ///
+    /// A rebuild cursor is planted only on the members that are actually
+    /// rebuilding, which the assembled member table decides: a member that
+    /// rejoined as in sync is untouched, so a restored cursor can never
+    /// un-sync a current copy.
+    ///
+    /// # Errors
+    ///
+    /// [`MirrorError::CursorOutOfRange`] if a cursor names a block outside the
+    /// array. The array is left exactly as it was, so the caller can proceed
+    /// from the fresh-start position.
+    pub fn restore_progress(&mut self, progress: ArrayProgress) -> Result<(), MirrorError> {
+        if !progress.fits_span(self.geometry.block_count) {
+            return Err(MirrorError::CursorOutOfRange);
+        }
+        if let Some(cursor) = progress.scrub_cursor {
+            self.scrub_next_lba = cursor;
+        }
+        if let Some(cursor) = progress.resync_cursor {
+            for member in &mut *self.members {
+                member.resume_resync(cursor);
+            }
+        }
+        Ok(())
     }
 
     /// Verify and repair one bounded chunk of a scrub pass, advancing the

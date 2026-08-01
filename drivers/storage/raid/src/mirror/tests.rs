@@ -1,6 +1,7 @@
 //! Host tests for the RAID1 mirror over a fault-injecting [`Block`] double.
 
 use super::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+use crate::superblock::ArrayProgress;
 use crate::SlotDisposition;
 use core::cell::Cell;
 use tairix_abi::blkio::BlkDeviceClass;
@@ -1360,4 +1361,281 @@ fn an_array_with_no_live_member_declares_the_bounded_envelope() {
     assert!(array.write_blocks(0, &block(0x5A)).is_err());
     assert_eq!(array.member_state(0), Some(MemberState::Faulted));
     assert_eq!(array.device_class(), BlkDeviceClass::Virtual);
+}
+
+#[test]
+fn an_array_with_nothing_running_reports_no_progress() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let array = MirrorArray::assemble(&mut members).expect("assembles");
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+    assert!(!array.progress().is_active());
+}
+
+#[test]
+fn a_rebuild_resumes_where_a_restart_left_it() {
+    // A rebuild of a 100 TB+ array runs for hours, so it will meet a restart.
+    // Losing the cursor would mean starting over every time, and an array
+    // rebooted often enough would never finish rebuilding at all.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+    ];
+    let mut scratch = [0u8; 2 * BS as usize];
+    let checkpoint = {
+        let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+        fill(&mut array);
+        assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
+        array.resync_step(&mut scratch).expect("one rebuild chunk");
+        assert_eq!(array.member(1).unwrap().resync_cursor(), 2);
+        let checkpoint = array.progress();
+        assert_eq!(checkpoint.resync_cursor, Some(2));
+        assert_eq!(checkpoint.scrub_cursor, None);
+        checkpoint
+    };
+
+    // The serving process restarts: the array is assembled afresh from the
+    // same devices, which by itself starts the rebuild over.
+    let mut array = MirrorArray::assemble(&mut members).expect("re-assembles");
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 0);
+    array
+        .restore_progress(checkpoint)
+        .expect("the checkpointed position is adopted");
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 2);
+
+    // Six blocks remain in two-block chunks: exactly three more steps. A
+    // rebuild that had silently restarted would need four.
+    let mut steps = 0u32;
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("rebuild chunk");
+        steps += 1;
+        assert!(steps <= 100, "the rebuild terminates");
+    }
+    assert_eq!(steps, 3, "the rebuild resumed rather than starting over");
+    assert_eq!(array.member_state(1), Some(MemberState::InSync));
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+
+    // The resumed rebuild is complete and correct: with the source gone, the
+    // rebuilt copy serves every block, including the two copied before the
+    // restart.
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    for lba in 0..NBLK {
+        let mut buf = block(0);
+        array
+            .read_blocks(lba, &mut buf)
+            .expect("served from the rebuilt copy");
+        assert_eq!(buf, block(pat(lba)), "block {lba} holds current data");
+    }
+}
+
+#[test]
+fn a_scrub_pass_resumes_where_a_restart_left_it() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut scratch = [0u8; 2 * BS as usize];
+    let checkpoint = {
+        let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+        fill(&mut array);
+        array.begin_scrub();
+        array.scrub_step(&mut scratch).expect("one scrub chunk");
+        assert_eq!(array.scrub_cursor(), 2);
+        let checkpoint = array.progress();
+        assert_eq!(checkpoint.scrub_cursor, Some(2));
+        assert_eq!(checkpoint.resync_cursor, None);
+        checkpoint
+    };
+
+    let mut array = MirrorArray::assemble(&mut members).expect("re-assembles");
+    assert!(!array.scrubbing(), "a fresh assembly is not mid-pass");
+    array
+        .restore_progress(checkpoint)
+        .expect("the checkpointed position is adopted");
+    assert!(array.scrubbing());
+    assert_eq!(array.scrub_cursor(), 2);
+
+    let mut steps = 0u32;
+    while array.scrubbing() {
+        array.scrub_step(&mut scratch).expect("scrub chunk");
+        steps += 1;
+        assert!(steps <= 100, "the pass terminates");
+    }
+    assert_eq!(steps, 3, "the pass resumed rather than starting over");
+}
+
+#[test]
+fn a_restored_cursor_never_un_syncs_a_current_member() {
+    // A rebuild cursor is meaningless for a member that is not rebuilding, and
+    // planting one on a current copy would describe a rebuild that is not
+    // happening. Every copy must stay a trusted read source.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    array
+        .restore_progress(ArrayProgress {
+            scrub_cursor: None,
+            resync_cursor: Some(3),
+        })
+        .expect("accepted: the cursor is inside the array");
+    assert_eq!(array.health(), ArrayHealth::Optimal);
+    for index in 0..2 {
+        assert_eq!(array.member_state(index), Some(MemberState::InSync));
+        assert_eq!(array.member(index).unwrap().resync_cursor(), 0);
+    }
+    assert!(!array.needs_resync());
+}
+
+#[test]
+fn a_cursor_outside_the_array_is_refused_and_changes_nothing() {
+    // A cursor past the end cannot have come from this array. Adopted as a
+    // rebuild position it would mark the copy fully rebuilt without its tail
+    // ever being written, leaving stale data trusted as current — so it is
+    // refused outright rather than clamped.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    assert_eq!(array.member_state(1), Some(MemberState::Resyncing));
+
+    for cursor in [NBLK, NBLK + 1, u64::MAX] {
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: Some(cursor),
+                resync_cursor: None,
+            }),
+            Err(MirrorError::CursorOutOfRange)
+        );
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: None,
+                resync_cursor: Some(cursor),
+            }),
+            Err(MirrorError::CursorOutOfRange)
+        );
+    }
+    // Nothing moved: the array is still at its fresh-start position.
+    assert!(!array.scrubbing());
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 0);
+
+    // The last real block is accepted, so the refusal is exactly at the end
+    // and not one block early.
+    array
+        .restore_progress(ArrayProgress {
+            scrub_cursor: Some(NBLK - 1),
+            resync_cursor: Some(NBLK - 1),
+        })
+        .expect("the last block is a valid position");
+    assert_eq!(array.scrub_cursor(), NBLK - 1);
+    assert_eq!(array.member(1).unwrap().resync_cursor(), NBLK - 1);
+}
+
+#[test]
+fn a_lost_record_costs_time_and_never_correctness() {
+    // The record was absent or unreadable, so the caller restores the idle
+    // position: the array simply starts its passes from the beginning.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    array
+        .restore_progress(ArrayProgress::IDLE)
+        .expect("an empty position is always acceptable");
+    assert!(!array.scrubbing());
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 0);
+
+    let mut scratch = [0u8; 2 * BS as usize];
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("rebuild chunk");
+    }
+    dev(&array, 0)
+        .read_fault
+        .set(Some(DriverError::DeviceOffline));
+    for lba in 0..NBLK {
+        let mut buf = block(0);
+        array
+            .read_blocks(lba, &mut buf)
+            .expect("rebuilt copy serves");
+        assert_eq!(buf, block(pat(lba)));
+    }
+}
+
+#[test]
+fn the_reported_rebuild_position_is_the_least_advanced_copy() {
+    // Two copies rebuilding at different cursors, one record: reporting the
+    // furthest ahead would leave the other's outstanding blocks never copied,
+    // so the least advanced is reported and a resume merely re-copies a little.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::with_role(FaultBlock::new(0), MemberRole::Stale),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles");
+    fill(&mut array);
+    let mut scratch = [0u8; 2 * BS as usize];
+    array.resync_step(&mut scratch).expect("one rebuild chunk");
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 2);
+
+    // The third copy now fails a write, drops out, recovers, and starts its
+    // own rebuild from the beginning — so the two rebuilds are at different
+    // cursors, which is the case one record has to represent.
+    dev(&array, 2)
+        .write_fault
+        .set(Some(DriverError::DeviceFault));
+    array
+        .write_blocks(0, &block(0xD1))
+        .expect("the write still lands on a surviving copy");
+    assert_eq!(array.member_state(2), Some(MemberState::Faulted));
+    dev(&array, 2).write_fault.set(None);
+    array
+        .readd_member(2)
+        .expect("the copy rejoins as a rebuild");
+    assert_eq!(array.member(2).unwrap().resync_cursor(), 0);
+
+    // The reported position is the *least* advanced of the two, not the
+    // furthest ahead: block 0 is still outstanding on the copy that just
+    // rejoined, and a record claiming block 0 was done would leave it holding
+    // pre-fault data while the array counted it fully rebuilt.
+    let checkpoint = array.progress();
+    assert_eq!(checkpoint.resync_cursor, Some(0));
+
+    // Restoring it puts both rebuilds there: the copy that was further ahead
+    // merely re-copies blocks it already holds, which a rebuild write makes
+    // harmless, and no outstanding block is skipped.
+    array
+        .restore_progress(checkpoint)
+        .expect("both rebuilds resume at the shared position");
+    assert_eq!(array.member(1).unwrap().resync_cursor(), 0);
+    assert_eq!(array.member(2).unwrap().resync_cursor(), 0);
+
+    // Both finish, and both hold current data — including the block written
+    // while one of them was out.
+    while array.needs_resync() {
+        array.resync_step(&mut scratch).expect("rebuild chunk");
+    }
+    for source in [1usize, 2] {
+        for other in [0usize, 1, 2] {
+            let fault = (other != source).then_some(DriverError::DeviceOffline);
+            dev(&array, other).read_fault.set(fault);
+        }
+        for lba in 0..NBLK {
+            let mut buf = block(0);
+            array
+                .read_blocks(lba, &mut buf)
+                .expect("served from the rebuilt copy");
+            let want = if lba == 0 { 0xD1 } else { pat(lba) };
+            assert_eq!(buf, block(want), "copy {source} block {lba}");
+        }
+    }
 }

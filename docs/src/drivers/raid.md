@@ -834,6 +834,12 @@ which makes the first pass due immediately — an array whose verification histo
 is unknown is verified rather than assumed clean (`AGENTS.md` §5.4, §26.5), and
 the duty pacing bounds what that costs.
 
+An array handed over **mid-pass** — one whose cursor was restored from its
+maintenance record (below) — is adopted as such, so finishing that pass re-arms
+the period like any other. Were the resumed pass treated as none of the
+scheduler's doing, its completion would go unnoticed and the already-overdue
+period would start it again at once, verifying the array back-to-back forever.
+
 ### What it deliberately does not do
 
 - It never installs or removes a device. `add_member` / `remove_member` are the
@@ -848,3 +854,76 @@ the duty pacing bounds what that costs.
   redundancy at all is `RaidLevel::is_redundant`, the single definition the
   composed-device dispatch also refuses its redundancy-only operations with, so
   the two cannot disagree about which arrays can heal themselves.
+
+## Durable maintenance progress (`MaintenanceRecord`, `ArrayProgress`)
+
+A scrub and a rebuild both advance a cursor one bounded chunk at a time, so on
+a 100 TB+ array a full pass runs for **hours or days** — longer than the
+interval between reboots on a real machine. If the cursor lived only in memory,
+every restart would silently discard the work and begin again: an array
+rebooted often enough would never finish a rebuild, and might never be verified
+at all. That is a latent, unbounded data-integrity hole exactly where
+redundancy is supposed to protect the most data (`AGENTS.md` §26.5, §26.6), so
+the position is durable.
+
+`ArrayProgress` is the resumable position — the scrub cursor and the rebuild
+cursor, each `None` when that pass is not running. It is the *same* value the
+engines report and accept and the on-disk record carries, so the in-memory and
+persisted notions of "how far have we got" are one definition (`AGENTS.md`
+§2.2). Every level answers `RaidArray::progress()` (a non-redundant stripe has
+nothing in progress and reports the idle position), and every redundant level
+accepts `RaidArray::restore_progress()` once after assembly, before the first
+maintenance step.
+
+Two rules make the report and the restore safe:
+
+- **The reported rebuild cursor is the *least advanced* member's.** Several
+  members can rebuild at once at different cursors, and one record carries a
+  single position. Resuming from the least advanced re-copies blocks a
+  further-ahead member already holds — harmless, because a rebuild write is
+  idempotent — whereas resuming from the furthest ahead would leave another
+  member's outstanding blocks never copied while the array counted it fully
+  rebuilt.
+- **A cursor outside the array is refused, never clamped**
+  (`RaidError::CursorOutOfRange`). Adopted as a rebuild position it would
+  declare a member fully copied without its tail ever having been written,
+  leaving stale data trusted as a current read source (`AGENTS.md` §5.4,
+  §26.5). A restored cursor is also planted only on members that are actually
+  rebuilding, so it can never un-sync a current copy.
+
+`MaintenanceRecord` (in `lib/raidmeta`, beside the superblock so the
+composition driver and the discovery probe share one definition) is the on-disk
+form each member carries in the block after its superblock
+(`MAINTENANCE_BLOCK`). Keeping it a *separate* record in a *separate* block is
+deliberate: the superblock changes only when the array's shape does, while
+progress is checkpointed continuously as the array works, and a torn write of a
+routine checkpoint must never be able to damage the metadata assembly depends
+on. A member's share of the array's data therefore begins at
+`RESERVED_METADATA_BLOCKS`, the single definition of that offset.
+
+Beside the cursors the record carries the `Time64` instant the last **complete**
+verification pass finished — the value `ArrayMaintenance::new` is seeded with.
+That stamp deliberately survives a membership change: verifying the array is a
+property of the data, not of the member set.
+
+Every way of losing or doubting the record degrades toward *more* verification,
+never less:
+
+| Situation | Outcome |
+| --- | --- |
+| Absent, blank, torn, or corrupt (CRC-32C) | No position; passes start from the beginning |
+| Written by another array (UUID mismatch) | Ignored entirely |
+| From an earlier array generation | Cursors ignored; the completion stamp still honoured |
+| Completion stamp ahead of the wall clock | Read as "unknown"; a pass is due at once |
+| Cursor outside the array | Refused; the array stays at its fresh-start position |
+
+An earlier generation invalidates the cursors because a member has joined or
+left since, so a resumed cursor could skip data the new member never received.
+An implausible future stamp — an unset or stepped clock, or a forged record —
+must not be able to suppress verification indefinitely, so it reads as unknown
+rather than as "recently clean". Because the checksum, the identity binding and
+the canonical-encoding checks are all enforced on decode, a hostile or failing
+disk cannot use this record to make an array *skip* work: the worst a bad
+record achieves is being discarded. The decoder is fuzzed for panic-freedom,
+including against an adversary that reseals a corrupted record with a valid
+checksum (`AGENTS.md` §19.6).

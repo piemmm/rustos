@@ -194,6 +194,12 @@ pub const TARGETS: &[Target] = &[
             "RAID array-superblock decode (untrusted on-disk member metadata: magic, bounds, CRC)",
     },
     Target {
+        package: "tairix-raidmeta",
+        test: "fuzz_maintenance",
+        description:
+            "RAID maintenance-record decode (untrusted on-disk scrub/rebuild cursors: flags, canonical fields, CRC)",
+    },
+    Target {
         package: "tairix-compress",
         test: "fuzz_compress",
         description: "first-party LZ decode (untrusted compressed-record bytes)",

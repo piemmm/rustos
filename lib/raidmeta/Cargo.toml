@@ -1,6 +1,6 @@
 [package]
 name = "tairix-raidmeta"
-description = "TAIRiX RAID on-disk metadata: the one no_std definition of the array-member superblock (identity, level, geometry, slot, generation) and the fail-closed logic that reassembles an array from a set of discovered members (plans/FIX-IO.md IO6). Shared by the RAID composition driver (assembly) and the storage-discovery probe (lib/fsprobe/volmgr, member recognition), so the format and reassembly can never diverge between them (AGENTS.md §2.2) without a drivers/*->drivers/* edge (§17.4)."
+description = "TAIRiX RAID on-disk metadata: the one no_std definition of the array-member superblock (identity, level, geometry, slot, generation), the durable maintenance record carrying an array's scrub/rebuild progress across a restart, and the fail-closed logic that reassembles an array from a set of discovered members (plans/FIX-IO.md IO6). Shared by the RAID composition driver (assembly) and the storage-discovery probe (lib/fsprobe/volmgr, member recognition), so the format and reassembly can never diverge between them (AGENTS.md §2.2) without a drivers/*->drivers/* edge (§17.4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

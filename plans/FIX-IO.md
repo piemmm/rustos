@@ -1133,20 +1133,80 @@ the pause-and-resume across a degrade; and that an idle deadline is never in the
 past, so parking on it is a wait and not a spin). Design:
 `docs/src/drivers/raid.md`.
 
+**Landed (durable maintenance progress — a pass survives a restart):** a scrub
+and a rebuild each advance a cursor one bounded chunk at a time, so on a 100 TB+
+array a full pass runs for **hours or days** — longer than the interval between
+reboots on a real machine. Held only in memory the cursor is lost on every
+restart, so an array rebooted often enough would never finish a rebuild and
+might never be verified at all: a latent, unbounded data-integrity hole exactly
+where redundancy should protect the most data (§26.5, §26.6). The position is
+now durable, through one definition both halves share (§2.2):
+- `raidmeta::ArrayProgress` is the resumable position (scrub cursor + rebuild
+  cursor, `None` when not running) — the same value the engines report and
+  accept and the on-disk record carries. Every engine and the `RaidArray`
+  dispatch gained `progress()` / `restore_progress()`; a stripe reports the idle
+  position (an observation, answered for every level) and refuses the restore
+  `NotRedundant` like every other redundancy-only operation.
+- **The reported rebuild cursor is the least advanced member's.** Members
+  rebuild concurrently at different cursors and one record carries one position;
+  resuming from the least advanced re-copies blocks a further-ahead member
+  already holds (idempotent), whereas the furthest ahead would leave another
+  member's outstanding blocks never copied while the array counted it rebuilt.
+- **A cursor outside the array is refused, never clamped**
+  (`CursorOutOfRange`, its own class through every engine → `RaidError`
+  mapping). Adopted as a rebuild position it would declare a member fully
+  copied without its tail ever being written, leaving stale data trusted as a
+  current read source (§5.4, §26.5). A restored cursor is planted only on
+  members actually rebuilding, so it can never un-sync a current copy.
+- `raidmeta::MaintenanceRecord` is the on-disk form each member carries in the
+  block after its superblock (`MAINTENANCE_BLOCK`; a member's data begins at
+  the shared `RESERVED_METADATA_BLOCKS`). It is a *separate* record in a
+  *separate* block deliberately: the superblock changes only with the array's
+  shape while progress is checkpointed continuously, so a torn write of a
+  routine checkpoint can never damage the metadata assembly depends on. It
+  carries the array UUID + generation, a checkpoint sequence
+  (`is_fresher_than` picks the freshest of the members' copies), the cursors,
+  and the `Time64` instant of the last **complete** pass (the value
+  `ArrayMaintenance::new` is seeded with, which deliberately survives a
+  membership change — verifying the array is a property of the data, not the
+  member set). Sealed with CRC-32C, canonically encoded (a field the flags
+  declare absent must be zero), and fail-closed on every malformed byte.
+  Every way of losing or doubting it degrades toward *more* verification:
+  undecodable → no position; foreign UUID → ignored; earlier generation →
+  cursors dropped (a member joined/left, so a resumed cursor could skip data
+  the new member never received) while the completion stamp stands; a
+  completion stamp *ahead* of the wall clock (unset/stepped clock, or forged) →
+  "unknown", so a pass is due at once rather than suppressed indefinitely. A
+  hostile or failing disk therefore cannot use the record to make an array skip
+  work. Fuzzed for panic-freedom including a resealed-corruption adversary
+  (§19.6). `Time64` gained the instant-difference and span→nanoseconds helpers
+  this needs, completing the pair with its existing offset-by-a-span
+  arithmetic.
+- **Defect fixed in the same change (§2.18):** `ArrayMaintenance` tracked only a
+  scrub *it* had started, so an array handed over mid-pass (exactly the restored
+  case) completed that pass without re-arming the period — and since such an
+  array's history reads as overdue, it would restart the pass immediately and
+  verify itself back-to-back forever, spending I/O the workload should have. It
+  now adopts the array's live scrub state at construction; regression test
+  `a_pass_resumed_from_the_records_position_still_rearms_the_period` fails
+  before the fix and passes after.
+
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
   groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
   populates each engine's member buffer through the shared `raid::fill_members`
-  bridge (above), wraps it in the shared `RaidArray` dispatch (above), turns the
-  shared `raid::ArrayMaintenance` decisions into real transfers against its
-  members (driving `note_foreground` from its serve path and
-  `note_member_returned` from the IO3/IO4 recovery signals, and arming its wait
-  from `wait_deadline_ns`), persists the last-scrub record the scheduler is
-  seeded from, and publishes the composed device as its own block-service node —
-  plus the ARXFS-native multi-device composition that consumes the same engine,
-  dispatch, and scheduler. This rides with the multi-device volume-assembly
-  work; the engine, its metadata, the `fill_members` reassembly bridge, the
-  `RaidArray` dispatch, and the maintenance policy are the single shared
+  bridge (above), wraps it in the shared `RaidArray` dispatch (above), restores
+  the persisted position through `MaintenanceRecord::progress_for` +
+  `RaidArray::restore_progress` and checkpoints `RaidArray::progress()` back to
+  its members as the array works, turns the shared `raid::ArrayMaintenance`
+  decisions into real transfers against its members (driving `note_foreground`
+  from its serve path and `note_member_returned` from the IO3/IO4 recovery
+  signals, and arming its wait from `wait_deadline_ns`), and publishes the
+  composed device as its own block-service node — plus the ARXFS-native
+  multi-device composition that consumes the same engine, dispatch, scheduler,
+  and record. This rides with the multi-device volume-assembly work; the engine,
+  its metadata, the `fill_members` reassembly bridge, the `RaidArray` dispatch,
+  the maintenance policy, and the durable progress record are the single shared
   definition all consumers reuse (§2.2), proven host-side first exactly as the
   other FIX-IO primitives landed their shared logic before their live wiring.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
@@ -1319,7 +1379,15 @@ read path never repairs is found and healed by a scrub; a whole-device fault is
 dropped; a block bad on every copy is surfaced yet the cursor still advances; a
 two-block scratch scrubs the array a chunk at a time and `begin_scrub` restarts
 it; a failed array fails closed without advancing; a ragged/empty scratch is
-rejected.
+rejected. Durable progress is proven the same way, per engine and through the
+dispatch: a rebuild and a scrub each resume where a restart left them (taking
+exactly the remaining chunks, and the resumed rebuild leaving current data on
+the rebuilt copy); the reported rebuild cursor is the least advanced of two
+copies rebuilding at different positions; a cursor past the end is refused with
+its own class while the last real block is accepted; a restored cursor never
+touches a current member; a lost record simply starts the passes over; and the
+record itself round-trips, refuses every malformed/foreign/superseded form, and
+is fuzzed.
 
 ---
 

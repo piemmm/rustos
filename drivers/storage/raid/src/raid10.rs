@@ -47,7 +47,7 @@
 
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
 use crate::stripe::StripeArray;
-use crate::superblock::RaidLevel;
+use crate::superblock::{ArrayProgress, RaidLevel};
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -92,6 +92,11 @@ pub enum Raid10Error {
     /// [`Raid10Array::remove_member`] or hot-swap it with
     /// [`Raid10Array::replace_member`] first.
     SlotOccupied,
+    /// A restored maintenance cursor named a block outside a member, so it
+    /// cannot have come from this array in this shape. Refused rather than
+    /// clamped: adopted as a rebuild position it would declare a copy fully
+    /// rebuilt without its tail ever having been written.
+    CursorOutOfRange,
 }
 
 impl From<MirrorError> for Raid10Error {
@@ -104,6 +109,7 @@ impl From<MirrorError> for Raid10Error {
             MirrorError::NotFaulted => Self::NotFaulted,
             MirrorError::ProbeFailed => Self::ProbeFailed,
             MirrorError::SlotOccupied => Self::SlotOccupied,
+            MirrorError::CursorOutOfRange => Self::CursorOutOfRange,
         }
     }
 }
@@ -411,6 +417,64 @@ impl<'a, B: Block> Raid10Array<'a, B> {
     /// Begin a proactive scrub pass from member-local block 0.
     pub fn begin_scrub(&mut self) {
         self.scrub_next_lba = 0;
+    }
+
+    /// The array's resumable maintenance position: how far the current scrub
+    /// pass and rebuild have got (in member-local blocks, as
+    /// [`scrub_cursor`](Self::scrub_cursor) reports), or
+    /// [`ArrayProgress::IDLE`] if neither is running.
+    ///
+    /// This is what the serving process checkpoints to the members' on-disk
+    /// maintenance record, so a pass measured in hours survives a restart
+    /// (`AGENTS.md` §26.6). Copies in several pairs can rebuild at once with
+    /// different cursors, and one record can only carry a single position, so
+    /// the **least advanced** is reported: resuming from it re-copies blocks a
+    /// further-ahead copy already had (harmless — a rebuild write is
+    /// idempotent) and can never skip a block that was still outstanding.
+    #[must_use]
+    pub fn progress(&self) -> ArrayProgress {
+        ArrayProgress {
+            scrub_cursor: self.scrubbing().then_some(self.scrub_next_lba),
+            resync_cursor: self
+                .members
+                .iter()
+                .filter(|m| m.state() == MemberState::Resyncing)
+                .map(MirrorMember::resync_cursor)
+                .min(),
+        }
+    }
+
+    /// Resume maintenance at a previously checkpointed `progress`.
+    ///
+    /// Called once after [`assemble`](Self::assemble), before any maintenance
+    /// step, with the position read back from the members' on-disk record. A
+    /// position the record could not vouch for arrives as
+    /// [`ArrayProgress::IDLE`] and simply leaves the array at its fresh-start
+    /// position, so a lost or foreign record costs time and never correctness.
+    ///
+    /// A rebuild cursor is planted only on the copies that are actually
+    /// rebuilding, through the same guarded member seam the mirror uses
+    /// (`AGENTS.md` §2.2), so a restored cursor can never un-sync a current
+    /// copy.
+    ///
+    /// # Errors
+    ///
+    /// [`Raid10Error::CursorOutOfRange`] if a cursor names a block outside a
+    /// member. The array is left exactly as it was, so the caller can proceed
+    /// from the fresh-start position.
+    pub fn restore_progress(&mut self, progress: ArrayProgress) -> Result<(), Raid10Error> {
+        if !progress.fits_span(self.per_member.block_count) {
+            return Err(Raid10Error::CursorOutOfRange);
+        }
+        if let Some(cursor) = progress.scrub_cursor {
+            self.scrub_next_lba = cursor;
+        }
+        if let Some(cursor) = progress.resync_cursor {
+            for member in &mut *self.members {
+                member.resume_resync(cursor);
+            }
+        }
+        Ok(())
     }
 
     /// Verify and repair one bounded chunk of a scrub pass across every pair,

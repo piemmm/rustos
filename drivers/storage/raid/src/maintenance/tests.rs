@@ -763,3 +763,64 @@ fn a_scrub_pauses_while_redundancy_is_reduced_and_resumes_where_it_stopped() {
     );
     assert_eq!(array.scrub_cursor(), paused_at);
 }
+
+#[test]
+fn a_pass_resumed_from_the_records_position_still_rearms_the_period() {
+    // A verification pass restored from the array's persisted maintenance
+    // record was begun before this scheduler existed. It must still be
+    // recognised as running, or its completion goes unnoticed: the period —
+    // already overdue, which is exactly why the pass was outstanding — would
+    // start the whole pass again immediately, and the array would verify
+    // itself back-to-back forever, spending I/O it should be giving the
+    // workload.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = mirror(&mut members);
+    let mut scratch = [0u8; BS as usize];
+
+    // Assembly restores a pass that was part-way through when the service
+    // last stopped.
+    array.begin_scrub().expect("scrub begins");
+    array.scrub_step(&mut scratch).expect("one chunk");
+    let resumed = array.progress();
+    array.begin_scrub().expect("a fresh assembly starts over");
+    array
+        .restore_progress(resumed)
+        .expect("the record's position is adopted");
+    assert!(array.scrubbing());
+
+    // The scheduler is built over that already-running array, with no record
+    // of a *completed* pass.
+    let mut retries = [MemberRetry::new(); 2];
+    let mut maintenance = scheduler(&array, &mut retries, 0, u64::MAX);
+
+    // It carries the resumed pass to completion rather than restarting it.
+    let mut chunks = 0u32;
+    while array.scrubbing() {
+        assert_eq!(maintenance.next_action(&array, 0), MaintenanceAction::Scrub);
+        let outcome = array.scrub_step(&mut scratch);
+        maintenance.note_step(MaintenanceAction::Scrub, 0, 0, outcome);
+        chunks += 1;
+        assert!(chunks <= 100, "the resumed pass terminates");
+    }
+    assert_eq!(
+        u64::from(chunks),
+        NBLK - 1,
+        "the pass resumed rather than starting over"
+    );
+
+    // Finishing it re-arms the period: the array now waits a full period
+    // instead of being told to verify itself again at once.
+    assert_eq!(
+        maintenance.next_action(&array, 0),
+        MaintenanceAction::Idle,
+        "the array has just been verified, so there is nothing to do"
+    );
+    assert_eq!(
+        idle_at(&mut maintenance, &array, 0),
+        Some(1_000),
+        "the next pass is a full period after the resumed one finished"
+    );
+}

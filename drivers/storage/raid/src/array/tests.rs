@@ -8,11 +8,13 @@
 //! in their sibling test modules; here we test only the composition.
 
 use super::{RaidArray, RaidError};
+use crate::dualparity::DualParityError;
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
-use crate::parity::{ParityArray, ParityMember};
-use crate::raid10::Raid10Array;
+use crate::parity::{ParityArray, ParityError, ParityMember};
+use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::{StripeArray, StripeMember};
-use crate::superblock::RaidLevel;
+use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::triple::TripleParityError;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::DriverError;
 
@@ -354,4 +356,134 @@ fn raid_error_maps_member_faults_and_catches_policy() {
     // An assembly-time reason a reconfiguration path does not produce maps to
     // the defensive catch rather than being silently discarded.
     assert_eq!(RaidError::from(MirrorError::NoMembers), RaidError::Policy);
+}
+
+// -- Maintenance progress (durable scrub/rebuild position) ---------------
+
+#[test]
+fn the_dispatch_reports_and_restores_progress_on_every_redundant_level() {
+    // The serving process checkpoints and resumes through this one surface,
+    // whatever level assembled the array, so the dispatch must forward both
+    // halves for each of them.
+    let mut mirror_members = [
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+    ];
+    let mut parity_members = [
+        ParityMember::new(RamBlock::new(0)),
+        ParityMember::new(RamBlock::new(0)),
+        ParityMember::new(RamBlock::new(0)),
+    ];
+    let mut parity_scratch = [0u8; 2 * BS as usize];
+    let mut raid10_members = [
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+        MirrorMember::new(RamBlock::new(0)),
+    ];
+    let arrays = [
+        RaidArray::Mirror(MirrorArray::assemble(&mut mirror_members).expect("mirror assembles")),
+        RaidArray::Parity(
+            ParityArray::assemble(&mut parity_members, &mut parity_scratch, CHUNK)
+                .expect("parity assembles"),
+        ),
+        RaidArray::Raid10(
+            Raid10Array::assemble(&mut raid10_members, CHUNK).expect("raid10 assembles"),
+        ),
+    ];
+    let mut scratch = [0u8; BS as usize];
+    for mut array in arrays {
+        let level = array.level();
+        assert_eq!(array.progress(), ArrayProgress::IDLE, "{level:?} idle");
+
+        array.begin_scrub().expect("scrub begins");
+        array.scrub_step(&mut scratch).expect("one scrub chunk");
+        let checkpoint = array.progress();
+        assert_eq!(
+            checkpoint.scrub_cursor,
+            Some(array.scrub_cursor()),
+            "{level:?} reports its live cursor"
+        );
+
+        // Abandon the pass as a fresh assembly would, then resume it.
+        array.begin_scrub().expect("scrub restarts");
+        assert_eq!(array.scrub_cursor(), 0);
+        array
+            .restore_progress(checkpoint)
+            .expect("the checkpointed position is adopted");
+        assert_eq!(Some(array.scrub_cursor()), checkpoint.scrub_cursor);
+
+        // A cursor the array cannot have produced is refused with its own
+        // class, not folded into the defensive catch-all.
+        assert_eq!(
+            array.restore_progress(ArrayProgress {
+                scrub_cursor: Some(u64::MAX),
+                resync_cursor: None,
+            }),
+            Err(RaidError::CursorOutOfRange),
+            "{level:?} refuses an impossible cursor"
+        );
+        assert_eq!(Some(array.scrub_cursor()), checkpoint.scrub_cursor);
+    }
+}
+
+#[test]
+fn a_stripe_has_no_progress_to_report_or_restore() {
+    let mut members = [
+        StripeMember::new(RamBlock::new(0)),
+        StripeMember::new(RamBlock::new(0)),
+    ];
+    let mut array =
+        RaidArray::Stripe(StripeArray::assemble(&mut members, CHUNK).expect("assembles"));
+
+    // Reporting is an observation, answered for every level: a stripe never
+    // scrubs or rebuilds, so it has nothing in progress.
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
+    // Restoring is a redundancy-only operation, refused like the rest — and
+    // the level check wins even over an impossible cursor, giving the
+    // informative reason.
+    assert_eq!(
+        array.restore_progress(ArrayProgress::IDLE).err(),
+        Some(RaidError::NotRedundant)
+    );
+    assert_eq!(
+        array
+            .restore_progress(ArrayProgress {
+                scrub_cursor: Some(u64::MAX),
+                resync_cursor: None,
+            })
+            .err(),
+        Some(RaidError::NotRedundant)
+    );
+}
+
+#[test]
+fn an_out_of_range_cursor_keeps_its_class_through_every_engine_mapping() {
+    // The mapping into the unified error is per-engine, so a missed arm would
+    // silently degrade this to the defensive policy catch and lose the reason.
+    assert_eq!(
+        RaidError::from(MirrorError::CursorOutOfRange),
+        RaidError::CursorOutOfRange
+    );
+    assert_eq!(
+        RaidError::from(ParityError::CursorOutOfRange),
+        RaidError::CursorOutOfRange
+    );
+    assert_eq!(
+        RaidError::from(DualParityError::CursorOutOfRange),
+        RaidError::CursorOutOfRange
+    );
+    assert_eq!(
+        RaidError::from(TripleParityError::CursorOutOfRange),
+        RaidError::CursorOutOfRange
+    );
+    assert_eq!(
+        RaidError::from(Raid10Error::CursorOutOfRange),
+        RaidError::CursorOutOfRange
+    );
+    // The stripe-of-mirrors carries the mirror's reason through unchanged.
+    assert_eq!(
+        Raid10Error::from(MirrorError::CursorOutOfRange),
+        Raid10Error::CursorOutOfRange
+    );
 }
