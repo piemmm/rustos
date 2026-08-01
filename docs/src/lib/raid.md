@@ -42,11 +42,16 @@ a time, from the process that legitimately holds it.
    manager's own matched node and admits a declared resource only if that task
    already holds a grant covering it, so the emission republishes that
    device's transport and nothing else.
-2. **The member agent delegates.** The RAID driver
-   (`drivers/storage/raid`), matched to that node, delegates the endpoint and
-   the window to the composer's reserved rendezvous (`call_grant`,
-   `shm_grant`) and posts a `MemberOffer` naming them
-   (`tairix_abi::raid_ipc`).
+2. **The member agent delegates.** The RAID member-agent driver
+   (`drivers/storage/raid_member`), matched to that node, delegates the
+   endpoint and the window to the composer's reserved rendezvous
+   (`call_grant`, `shm_grant`) and posts a `MemberOffer` naming them
+   (`tairix_abi::raid_ipc`). It is its own driver crate, not a second role of
+   the composer, because one signed bundle grants its whole manifest's
+   capability set to every instance loaded from it, and one instance of the
+   agent runs per member disk: sharing a bundle with the composer would hand
+   every agent the composer's privileged-endpoint-bind and node-emit
+   authority it has no need of.
 3. **The composer verifies for itself.** Which array the device belongs to,
    which slot it holds and which generation it last saw are read back off the
    device through `lib/raidmeta` — never taken from the offer. The node is a
@@ -68,7 +73,7 @@ member on the machine as each agent delegated to it in turn.
 Members arrive one at a time and in any order, so the composer has to judge,
 each time its picture changes, whether an array is ready to serve. That
 judgement is where the data-integrity risk lives — not in the IPC around it —
-so it is pure logic in the RAID driver's library half
+so it is pure logic in the RAID composer driver's library half
 (`drivers/storage/raid`, `MemberRegistry`), driven by a caller-supplied
 monotonic clock and proven host-side over member doubles. The live half reads a
 device's superblock, hands it to the registry, and does what
@@ -554,11 +559,11 @@ restoring redundancy without a reboot (`AGENTS.md` §18.4).
 ## On-disk metadata and reassembly (`ArraySuperblock`, `ArrayIdentity`)
 
 The on-disk metadata format and the reassembly logic live in the shared
-`lib/raidmeta` crate, not in this driver, so the RAID composition engines here
+`lib/raidmeta` crate, not in a driver, so the RAID composition engines here
 and the **storage-discovery probe** (`lib/fsprobe`, used by
 `drivers/storage/volmgr`) read one definition of what a member is and can never
 disagree (`AGENTS.md` §2.2) — and without a `drivers/*`→`drivers/*` edge
-(§17.4). The driver re-exports the types (`tairix_drv_storage_raid::ArraySuperblock`,
+(§17.4). This crate re-exports the types (`tairix_raid::ArraySuperblock`,
 …) for its own use. The probe consumes the same decode to **refuse mounting a
 bare, un-assembled member**: a member carries its superblock at block 0, so
 `fsprobe::probe_raid_member` recognises it before any filesystem signature and

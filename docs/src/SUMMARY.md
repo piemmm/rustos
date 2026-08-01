@@ -46,6 +46,7 @@
   - [`tairix-abi`](./lib/abi.md)
   - [`tairix-appload`](./lib/appload.md)
   - [`tairix-binfmt`](./lib/binfmt.md)
+  - [`tairix-blkclient`](./lib/blkclient.md)
   - [`tairix-bootload`](./lib/bootload.md)
   - [`tairix-caps`](./lib/caps.md)
   - [`tairix-collections`](./lib/collections.md)

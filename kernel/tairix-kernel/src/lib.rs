@@ -213,6 +213,19 @@ pub mod hwtree_store;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod boot_hwtree;
 
+// The synthetic virtual bus (`plans/FIX-IO.md` `IO6d`): the one always-present
+// hardware-tree node beneath the root that a *composed* block device — a RAID
+// array built out of its member disks — hangs from, because it can hang
+// neither from a member (pulling that disk would orphan an array the
+// survivors still serve) nor from the root (no driver is matched to the
+// root). Published at the one arch-neutral seam where the discovered boot
+// tree becomes the live inventory, so every port gets it and none can forget
+// it. Pure `lib/abi` node construction, host-tested on the CI host; gated,
+// like the `hwtree_store` it is published into, on the three instruction sets
+// whose boot path installs that store.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod virtual_bus;
+
 // The kernel block-device sharing layer (Design D, D2a —
 // `.junie/next-pi-prompt.md`): wraps the one brought-up bootstrap-floor
 // block device behind a `lib/sync` lock so it can back two concurrent

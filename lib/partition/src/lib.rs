@@ -38,7 +38,7 @@ pub mod gpt;
 pub mod mbr;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
 
@@ -325,6 +325,16 @@ impl<B: Block> Block for PartitionBlock<B> {
     /// budget rather than the unclassified default.
     fn device_class(&self) -> BlkDeviceClass {
         self.inner.device_class()
+    }
+
+    /// Health telemetry is a property of the disk, not of a window onto it,
+    /// so it is the inner device's answer. Inheriting the "no telemetry"
+    /// default instead would hide a failing drive's reallocated-sector and
+    /// error counters from every filesystem that is mounted on a partition —
+    /// which is nearly all of them — and from the scrub scheduler that reads
+    /// them to decide how hard to verify the medium.
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        self.inner.device_health()
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

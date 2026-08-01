@@ -63,6 +63,21 @@ use crate::Errno;
 /// back off the device itself.
 pub const RAID_MEMBER_COMPATIBLE: &[u8] = b"tairix,raid-member";
 
+/// The compatible string on the hardware-tree node the array composer
+/// publishes for an assembled array, served as one logical block device.
+///
+/// The contract between the composer, which brings an array online and emits
+/// the node carrying the array's own block-service endpoint and shared data
+/// window, and the volume manager, which binds it and probes the array's
+/// filesystems exactly as it would a leaf disk. It lives here because both
+/// ends must mean the same string and neither driver may depend on the other.
+///
+/// Vendor- and bus-neutral by construction: an array is defined by its
+/// members' on-disk metadata, never by who made the disks or what they hang
+/// off. A consumer treats the array as an ordinary block device; that it is
+/// composed of several members is the composer's business alone.
+pub const RAID_ARRAY_COMPATIBLE: &[u8] = b"tairix,raid-array";
+
 /// Reserved well-known call-endpoint id of the RAID array composer (`"RA"`
 /// hex-spelled prefix, following [`crate::seat::SEATMGR_ENDPOINT`]'s
 /// convention).

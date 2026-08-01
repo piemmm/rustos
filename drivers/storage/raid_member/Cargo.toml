@@ -1,0 +1,40 @@
+[package]
+name = "tairix-drv-storage-raid-member"
+description = "TAIRiX RAID member-agent driver (plans/FIX-IO.md IO6c): the autoloaded per-disk driver matched to a tairix,raid-member node the volume manager emits for a device whose first block probed as array metadata. It delegates that one device's block transport and shared data window to the reserved array-composer rendezvous and holds the membership open for as long as the array holds the device. The composition arithmetic itself, and the sibling array-composer driver that decides which offered devices form which array, live in the shared lib/raid crate and the drivers/storage/raid crate respectively."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A hybrid library + binary crate, the shape the sibling storage policy
+# drivers use: the library half carries the bind table the signed bundle
+# publishes and the pure, host-tested member-agent lifecycle, while
+# `src/main.rs` is the freestanding program the kernel spawns for a matched
+# node. The driver holds no MMIO, DMA, or IRQ authority: it only forwards the
+# transport it was granted.
+#
+# This crate is deliberately its own bundle rather than sharing one with the
+# array composer (`drivers/storage/raid`): a signed bundle grants its whole
+# manifest's capability set to every instance loaded from it, and one instance
+# of this driver runs per member disk, so folding the composer in would hand
+# every per-disk agent the composer's privileged-endpoint-bind and node-emit
+# authority it has no need of.
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared escalating retry cadence (`tairix_raid::RetryCadence`), so an
+# agent re-offering its device and an array re-probing a faulted member pace
+# themselves by one definition.
+tairix-raid = { path = "../../../lib/raid", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

@@ -525,6 +525,7 @@ tairix/
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap carve-out.
 │   ├── appload/         # Application-bundle load gate.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
+│   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.

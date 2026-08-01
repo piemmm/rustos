@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-storage-raid"
-description = "TAIRiX RAID composition driver (plans/FIX-IO.md IO6): the autoloaded policy driver that turns discovered array members into served arrays. Matched to a tairix,raid-member node it is a member agent, delegating that device's block transport and data window to the reserved array-composer rendezvous and holding the membership open until the device or the array goes away. The composition arithmetic itself is the shared lib/raid crate."
+description = "TAIRiX RAID array-composer driver (plans/FIX-IO.md IO6d): the autoloaded policy driver, matched to the kernel's synthetic virtual bus, that assembles the members offered by the sibling drivers/storage/raid_member agents into served arrays. The composition arithmetic itself is the shared lib/raid crate."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,22 +13,49 @@ workspace = true
 
 # A hybrid library + binary crate, the shape the sibling storage policy drivers
 # use: the library half carries the bind table the signed bundle publishes and
-# the pure, host-tested decision logic, while `src/main.rs` is the freestanding
-# program the kernel spawns for a matched node (installed as the bundle's `Run`
-# entry point). The driver holds no MMIO, DMA, or IRQ authority: it only
-# forwards the transport it was granted.
+# the pure, host-tested composition-decision and live-array logic
+# (`compose`/`service`), while `src/main.rs` is the freestanding program the
+# kernel spawns for the matched virtual-bus node. The binary is a freestanding
+# pure-Rust program on the native Tier-1 targets and an inert host stub
+# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/storage/volmgr`.
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The shared escalating retry cadence (`tairix_raid::RetryCadence`), so an
-# agent re-offering its device and an array re-probing a faulted member pace
-# themselves by one definition. The composition engines in the same crate are
-# what the composer half assembles once it is matched to the virtual bus.
+# The composition engines this driver assembles once matched to the virtual
+# bus: the six levels, the RaidArray dispatch, the owning composed device, and
+# the assembly bridge.
 tairix-raid = { path = "../../../lib/raid", version = "=0.0.0" }
+# The shared RAID on-disk metadata block reservation (the reserved
+# metadata/data boundary each member view begins at). The array identity and
+# superblock types come through `tairix-raid`'s re-export; these block
+# constants are not re-exported, so the crate depends on the metadata layer
+# directly for them.
+tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
+# The shared, bounds-checked partition-window layer: each member is composed
+# through a view that begins past its own reserved metadata, so a member's
+# superblock can never be exposed as array data.
+tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
 
+# Everything the freestanding program links beyond the `lib` is pulled in only
+# for the bare-metal targets the binary is actually built for; on the host the
+# binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The shared blkio block client (`RemoteBlock`, opened read/write here) and its
+# production async transport (`RtBlkCall`), so the composer reads and serves the
+# members the same way every other block consumer does.
+tairix-blkclient = { path = "../../../lib/blkclient", version = "=0.0.0" }
+# The user-space driver runtime: resolves the kernel-issued grant set the
+# matched virtual-bus node carried and re-checks the composer's capability set.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
-tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, and the syscall wrappers the composer issues (endpoint create/recv/
+# reply, shm create/map, wait-set, node emit, clock, wall time), plus the
+# `LogSink` that marshals diagnostics to the kernel log over `log_emit`.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The structured diagnostic event vocabulary (`Event`/`Field`/`Level`).
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
+# allocation in the freestanding driver.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

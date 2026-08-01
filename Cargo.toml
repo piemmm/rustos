@@ -36,6 +36,7 @@ members = [
     "lib/abi-trap",
     "lib/appload",
     "lib/binfmt",
+    "lib/blkclient",
     "lib/bootload",
     "lib/browse",
     "lib/kalloc",
@@ -142,6 +143,7 @@ members = [
     "drivers/storage/usb_msd",
     "drivers/storage/volmgr",
     "drivers/storage/raid",
+    "drivers/storage/raid_member",
 
     # Drivers — network
     "drivers/network/virtio_net",

@@ -28,7 +28,7 @@ tree:
 
 - **The block seam is an unbounded synchronous call.** A consumer drives a
   device through `tairix_abi::driver::block::Block`, implemented by
-  `RemoteBlock` over the `BlkCall` seam (`drivers/storage/volmgr/src/blk.rs`).
+  `RemoteBlock` over the `BlkCall` seam (`lib/blkclient/src/client.rs`).
   `BlkCall::call(request, reply, window)` issues `ipc_call` on the granted
   block endpoint. `ipc_call` (`lib/abi/src/syscalls.rs`, 5 args: endpoint,
   request ptr, request len, reply ptr, reply cap) has **no `timeout_ns`/
@@ -43,8 +43,9 @@ tree:
   `Errno` (`encode_error_completion` / `decode_completion`). There is no
   "transient vs permanent", "retrying", "resetting", or "degraded" outcome, so
   a consumer cannot tell a disk that will come back from one that is dead, and
-  cannot make an isolation decision. `errno_to_driver` (`blk.rs`) collapses
-  everything it does not specifically recognise to `DriverError::DeviceFault`.
+  cannot make an isolation decision. `errno_to_driver` (`lib/blkclient/src/client.rs`)
+  collapses everything it does not specifically recognise to
+  `DriverError::DeviceFault`.
 - **Fault domains are not modelled for I/O stalls.** The hardware tree
   (`lib/abi/src/hwtree.rs`) captures topology and the D4 surprise-removal path
   (`plans/DEVICES.md`; `MountAvailability::{UnavailableDirty,UnavailableLost,
@@ -246,7 +247,7 @@ Deliverables:
 
 Consumers rewritten in place (no shim, §2.13): the kernel-side block client
 (`kernel/core/src/fs/blkclient.rs`), the volume manager's `RemoteBlock`
-(`drivers/storage/volmgr/src/blk.rs` — its `BlkCall` seam becomes
+(`lib/blkclient/src/client.rs` — its `BlkCall` seam becomes
 submit/reap-on-a-wait-set while the synchronous `Block` trait it exposes to
 filesystems is preserved, so the filesystems are unchanged), and the serving
 side (`drivers/storage/usb_msd/src/serve.rs`, plus the `virtio_blk`/`emmc2`
@@ -259,10 +260,10 @@ Tests (§7): `kernel/ipc` unit tests for `call_post`/`call_reap`/`call_cancel`
 + deadline + `has_ready_reply_for` (round-trip, `-WouldBlock`, `-TimedOut`,
 per-ticket cancel, claimant mismatch fails closed); `kernel/core` wait-set
 tests that a `CallReply` member wakes on a ready reply and on a deadline; the
-`blk.rs` host doubles — a serving double that stalls past the deadline yields
-`Timeout` and the consumer unblocks; round-trip and fail-closed decode of
-every new `BlkStatus`; fuzz the completion/status decode and the reap/deadline
-path (§19.6).
+`lib/blkclient` host doubles — a serving double that stalls past the deadline
+yields `Timeout` and the consumer unblocks; round-trip and fail-closed decode
+of every new `BlkStatus`; fuzz the completion/status decode and the
+reap/deadline path (§19.6).
 
 ### Stage IO2 — Consumer-side isolation (volmgr + filesystems). **done**
 
@@ -1482,20 +1483,25 @@ came only from the single node it was matched to:
    **Rejected: a per-array well-known registry id with first-member election.**
    Deterministic but leaves the array owned by an arbitrary member's process, so
    pulling that disk destroys a healthy array.
-6. **Placement — decided: the engines are `lib/raid`; the driver is
-   `drivers/storage/raid`.** The six composition engines, the `RaidArray`
-   dispatch, the `fill_members` bridge, the `health` folds and
-   `ArrayMaintenance` live in the shared `lib/raid` crate over `lib/raidmeta`.
-   They are not a device's support code and so are not held by §2.22: they
-   compose devices they are *handed* as `Block` implementations and never reach
-   hardware, carrying no bring-up, firmware, quirk, or register logic. Two
-   independent consumers compose several devices as one — the composer driver
-   below and `drivers/filesystem/arxfs`'s multi-device volumes — and neither
-   could reach a copy held by the other without a `drivers/*`→`drivers/*` edge
-   (§17.4), so the single definition belongs in `lib/` (§2.2, §6).
-   `drivers/storage/raid` is then the driver proper: `BIND_KEYS` plus the one
-   `Run` binary that is the agent (IO6c) and the composer (IO6d), the shape
-   `usb_msd` and `volmgr` already use.
+6. **Placement — decided: the engines are `lib/raid`; the driver is two
+   sibling crates, `drivers/storage/raid` and `drivers/storage/raid_member`.**
+   The six composition engines, the `RaidArray` dispatch, the `fill_members`
+   bridge, the `health` folds and `ArrayMaintenance` live in the shared
+   `lib/raid` crate over `lib/raidmeta`. They are not a device's support code
+   and so are not held by §2.22: they compose devices they are *handed* as
+   `Block` implementations and never reach hardware, carrying no bring-up,
+   firmware, quirk, or register logic. Two independent consumers compose
+   several devices as one — the composer driver below and
+   `drivers/filesystem/arxfs`'s multi-device volumes — and neither could reach
+   a copy held by the other without a `drivers/*`→`drivers/*` edge (§17.4), so
+   the single definition belongs in `lib/` (§2.2, §6).
+   `drivers/storage/raid` is the composer driver proper: `BIND_KEYS` bound to
+   the virtual bus plus the `Run` binary that is the composer (IO6d); the
+   member agent (IO6c) is its own sibling crate, `drivers/storage/raid_member`,
+   because one signed bundle grants its whole manifest's capability set to
+   every instance loaded from it and one instance of the agent runs per member
+   disk, so a single bundle would hand every per-disk agent the composer's
+   privileged-endpoint-bind and node-emit authority it has no need of.
 
 ### Stages
 
@@ -1561,9 +1567,14 @@ the critical path and land first.
   serving process binds it, and the grant is authority over the id, not a
   reference to an instance — IO6a's revocation is what keeps that safe.
 - **IO6c — The member agent. done.** The composition engines were first hoisted
-  in place to the shared `lib/raid` crate (decision 6), leaving
-  `drivers/storage/raid` as the driver proper: `BIND_KEYS` plus the one `Run`
-  binary that is the agent now and the composer from IO6d.
+  in place to the shared `lib/raid` crate (decision 6), leaving the member
+  agent as its own driver crate, `drivers/storage/raid_member`: `BIND_KEYS`
+  plus the `Run` binary that is the agent. It is a sibling of, not a second
+  role inside, the composer driver (`drivers/storage/raid`, IO6d): one signed
+  bundle grants its whole manifest's capability set to every instance loaded
+  from it, and one instance of the agent runs per member disk, so a single
+  bundle would hand every per-disk agent the composer's
+  privileged-endpoint-bind and node-emit authority it has no need of.
   - **The protocol** is `lib/abi/src/raid_ipc.rs`: `RAID_MEMBER_COMPATIBLE`
     (the node string, held here because both the emitting `volmgr` and the
     binding RAID driver must mean the same thing and neither may depend on the
@@ -1585,8 +1596,9 @@ the critical path and land first.
     resource, so the emission can republish only transport volmgr holds. A
     refused emission is logged (`VOLMGR_RAID_MEMBER_UNPUBLISHED 4190`) and never
     fails the volumes the device did attach.
-  - **The agent** is the RAID `Run` binary matched to that node, holding only
-    `CAP_IPC_ENDPOINT` + `CAP_SHM` + `CAP_LOG_EMIT` (it never reads the device).
+  - **The agent** is the RAID member-agent driver's `Run` binary matched to
+    that node, holding only `CAP_IPC_ENDPOINT` + `CAP_SHM` + `CAP_LOG_EMIT`
+    (it never reads the device).
     Its lifecycle is the pure, host-tested `MemberAgent` / `AgentStep`
     (`Offer` → `AwaitReply` → `Retry{deadline}` → `Stop`): it `call_grant`s its
     block endpoint and `shm_grant`s its window to `RAID_REGISTRY_ENDPOINT` —
@@ -1674,12 +1686,16 @@ the critical path and land first.
   through the existing audited `volume_attach` path, unchanged. It does not
   build its `RtDriverHost` again after startup: `MAX_GRANTS` is a per-node
   validation bound (§24.4), and the composer learns member ids from
-  registrations, never by re-reading its accumulated grant table. A prerequisite
-  it must land with: the blkio block client is today volmgr's own, read-only and
-  in a `drivers/*` crate the RAID driver may not depend on (§17.4), so the one
-  client moves to `lib/*` and grows the write path the composition needs — one
-  definition both consumers read (§2.2), with volmgr keeping its read-only
-  stance as an explicit mode rather than by having no write path at all.
+  registrations, never by re-reading its accumulated grant table. **Landed
+  (the shared client prerequisite).** The blkio block client is now
+  `lib/blkclient` (`RemoteBlock` + its production `RtBlkCall` transport), so
+  the RAID driver can depend on it without the layering violation a
+  `drivers/*` crate would have been (§17.4). It carries a real write path and
+  an explicit, named access stance — `RemoteBlock::connect_read_write` for a
+  caller that also commits, `RemoteBlock::connect_read_only` for one that only
+  ever inspects — with volmgr kept on the read-only constructor rather than on
+  having no write path at all. The composer opens its member and array clients
+  read/write from this one definition (§2.2).
 - **IO6e — Maintenance driving and durable checkpoints.** The composer turns
   `ArrayMaintenance` decisions into real transfers: `note_foreground` from its
   serve path, `note_member_returned` from the IO3/IO4 recovery signals, and its

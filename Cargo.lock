@@ -641,6 +641,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-blkclient"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-bootload"
 version = "0.0.0"
 dependencies = [
@@ -1148,6 +1156,14 @@ name = "tairix-drv-storage-raid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-raid",
+]
+
+[[package]]
+name = "tairix-drv-storage-raid-member"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
@@ -1182,6 +1198,7 @@ name = "tairix-drv-storage-volmgr"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-blkclient",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-fsprobe",
@@ -2448,8 +2465,8 @@ name = "tairix-test-blkio-fault"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-blkclient",
  "tairix-caps",
- "tairix-drv-storage-volmgr",
  "tairix-rt",
 ]
 
@@ -4800,7 +4817,7 @@ dependencies = [
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-virtio-net",
- "tairix-drv-storage-raid",
+ "tairix-drv-storage-raid-member",
  "tairix-drv-storage-usb-msd",
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",

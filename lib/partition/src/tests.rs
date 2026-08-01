@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use super::*;
 use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::DriverError;
 
 /// An in-memory [`Block`] device over a byte vector, for building and
@@ -455,6 +456,72 @@ fn window_from_partition_uses_the_extent() {
     let part = root(64, 128);
     let win = PartitionBlock::from_partition(dev, &part).expect("window");
     assert_eq!(win.block_count(), 128);
+}
+
+/// A device that reports both a class and real health telemetry, so a test
+/// can tell a forwarded answer from the trait's "no telemetry" default.
+struct TelemetryBlock {
+    inner: VecBlock,
+}
+
+impl Block for TelemetryBlock {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.inner.geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.inner.read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.inner.write_blocks(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.inner.flush()
+    }
+
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::Rotational
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        Ok(DeviceHealth::Available(HealthSnapshot {
+            power_on_hours: 0,
+            unsafe_shutdowns: 0,
+            media_errors: 7,
+            reallocated_sectors: 3,
+            pending_sectors: 0,
+            uncorrectable_sectors: 0,
+            crc_errors: 0,
+            percentage_used: 0,
+            available_spare: 100,
+            temperature_kelvin: 300,
+            critical_warning: true,
+        }))
+    }
+}
+
+#[test]
+fn window_reports_the_underlying_disks_class_and_health() {
+    // A window is a range of the same physical disk, so both the patience it
+    // is owed and its failing-drive telemetry are the disk's answers. If the
+    // window inherited the trait defaults instead, a filesystem on a
+    // partition — nearly every filesystem — would be served the unclassified
+    // I/O budget and would see a dying drive as having no telemetry at all,
+    // silently disabling the scrub scheduling those counters drive.
+    let dev = TelemetryBlock {
+        inner: VecBlock::new(512, 64),
+    };
+    let win = PartitionBlock::new(dev, 10, 4).expect("window fits");
+
+    assert_eq!(win.device_class(), BlkDeviceClass::Rotational);
+    let DeviceHealth::Available(snapshot) = win.device_health().expect("health forwards") else {
+        panic!("the window must not swallow the disk's telemetry");
+    };
+    assert_eq!(snapshot.media_errors, 7);
+    assert_eq!(snapshot.reallocated_sectors, 3);
+    assert!(snapshot.critical_warning);
 }
 
 #[test]

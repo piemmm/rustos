@@ -379,6 +379,12 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     /// `scrub_next_lba` carries the pair's scrub cursor (the array block count
     /// when no scrub is in progress); the per-member rebuild cursor lives in
     /// each [`MirrorMember`], so it persists across transient views.
+    ///
+    /// [`OwnedRaidArray`](crate::owned::OwnedRaidArray) reuses this same
+    /// idiom for a top-level mirror: it owns its members on the heap and
+    /// builds a transient view here per operation instead of calling
+    /// `assemble` again, which would re-derive every member's state from a
+    /// fresh probe and silently re-admit one that faulted while serving.
     pub(crate) fn from_prepared(
         members: &'a mut [MirrorMember<B>],
         geometry: BlockGeometry,

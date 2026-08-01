@@ -5474,6 +5474,13 @@ would diverge the array or serve stale data (§26.5); the on-disk RAID
 array-superblock format and reassembly were hoisted into the new `lib/raidmeta`
 crate so the RAID composition engines (`lib/raid`) and this probe
 share one definition (§2.2) without a `drivers/*`→`drivers/*` edge (§17.4).
+The blkio client itself (`RemoteBlock` over the `BlkCall` transport seam,
+plus its production `RtBlkCall` async transport) was likewise hoisted out of
+this crate into the new `lib/blkclient` crate and grew a real write path and
+an explicit, named access stance (`connect_read_write` / `connect_read_only`),
+so the RAID array composer can share the identical client and wire
+discipline; `drivers/storage/volmgr` keeps its narrow authority through the
+read-only constructor (`plans/FIX-IO.md` IO6).
 D3d (done) landed the user-facing mount policy:
 the well-known `storage` group (`tairix_users::STORAGE_GROUP`, resolved by
 name from the loaded group registry at root unlock into the set-once

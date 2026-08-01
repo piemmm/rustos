@@ -317,10 +317,25 @@
 //! assembling the members through [`ArrayIdentity`], turning the scheduler's
 //! decisions into real transfers, and publishing the composed device as its
 //! own block-service node — is staged in `plans/FIX-IO.md` §2.6 (IO6a–IO6f).
+//!
+//! # Owning the composed device ([`OwnedRaidArray`])
+//!
+//! The engines above and [`RaidArray`] all borrow a caller-owned member
+//! slice, which is exactly what lets them impose no member ceiling and hold
+//! no allocation. A long-running serve process that discovers a variable
+//! number of arrays at runtime, though, must own its members on the heap and
+//! hold the composed device alongside them — which cannot be one
+//! self-referential struct. [`OwnedRaidArray`] is that owning counterpart: it
+//! keeps its members in a growable [`Vec`](alloc::vec::Vec) per level, and
+//! drives every operation through a transient [`RaidArray`] view built over
+//! them, so a member's recorded state (in particular a fault) is carried
+//! forward untouched rather than re-derived from a fresh probe on every call.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+extern crate alloc;
 
 mod array;
 mod assemble;
@@ -330,6 +345,7 @@ mod gf256;
 mod health;
 mod maintenance;
 mod mirror;
+mod owned;
 mod parity;
 mod raid10;
 mod stripe;
@@ -344,6 +360,7 @@ pub use maintenance::{
     ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,
 };
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use owned::OwnedRaidArray;
 pub use parity::{ParityArray, ParityError, ParityMember};
 pub use raid10::{Raid10Array, Raid10Error};
 pub use stripe::{StripeArray, StripeError, StripeMember};

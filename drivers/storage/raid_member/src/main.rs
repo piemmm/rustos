@@ -1,6 +1,6 @@
-//! The `Run` entry-point binary of the **RAID composition driver**, installed
+//! The `Run` entry-point binary of the **RAID member-agent driver**, installed
 //! as a signed `/System/Drivers/` bundle and autoloaded into user space by
-//! `devmgr` (`plans/FIX-IO.md` IO6).
+//! `devmgr` (`plans/FIX-IO.md` `IO6c`).
 //!
 //! Matched to a `tairix,raid-member` node — the node the volume manager emits
 //! for a device whose first block probed as array metadata — the instance is a

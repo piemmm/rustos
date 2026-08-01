@@ -44,6 +44,10 @@ tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The shared blkio block client (`RemoteBlock`, opened read-only here) and
+# its production async transport (`RtBlkCall`), so this driver and the RAID
+# array composer read the same device the same way.
+tairix-blkclient = { path = "../../../lib/blkclient", version = "=0.0.0" }
 # The user-space driver runtime: resolves the kernel-issued device-resource
 # grants (the block-service endpoint and the shared data window) the matched
 # storage node carried.

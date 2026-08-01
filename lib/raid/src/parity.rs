@@ -316,6 +316,51 @@ impl<'a, B: Block> ParityArray<'a, B> {
         })
     }
 
+    /// Wrap already-prepared members and scratch as a parity view without
+    /// re-probing geometry.
+    ///
+    /// The owning composed device ([`OwnedRaidArray`](crate::owned::OwnedRaidArray))
+    /// keeps its members and scratch buffer on the heap for a long-running
+    /// serve process and cannot itself be a borrow, so it builds a transient
+    /// view here per operation instead of calling [`assemble`](Self::assemble)
+    /// again — re-probing every device on each call would re-derive a
+    /// returned-to-health member as fully in sync, discarding the very fault
+    /// state the array exists to remember. `geometry`, `per_member_blocks`,
+    /// and `chunk_blocks` are exactly what `assemble` established and never
+    /// change afterwards; `scrub_next_lba` is the array's own resumable scrub
+    /// position, carried in and read back out by the caller after the
+    /// operation. The per-member rebuild cursor already lives in each member,
+    /// so it needs no separate handling here.
+    pub(crate) fn from_prepared(
+        members: &'a mut [ParityMember<B>],
+        scratch: &'a mut [u8],
+        geometry: BlockGeometry,
+        per_member_blocks: u64,
+        chunk_blocks: u64,
+        scrub_next_lba: u64,
+    ) -> Self {
+        Self {
+            members,
+            scratch,
+            geometry,
+            per_member_blocks,
+            chunk_blocks,
+            scrub_next_lba,
+        }
+    }
+
+    /// The per-member logical block count established at
+    /// [`assemble`](Self::assemble) (every member is the same size).
+    ///
+    /// Exposed so [`OwnedRaidArray`](crate::owned::OwnedRaidArray) can capture
+    /// this assemble-derived value once and thread it into every later
+    /// [`from_prepared`](Self::from_prepared) view without re-probing the
+    /// members.
+    #[must_use]
+    pub(crate) const fn per_member_blocks(&self) -> u64 {
+        self.per_member_blocks
+    }
+
     /// The logical geometry of the composed array (block size shared with the
     /// members; block count is `(member_count - 1)` members' worth).
     #[must_use]

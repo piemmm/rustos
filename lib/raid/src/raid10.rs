@@ -220,6 +220,47 @@ impl<'a, B: Block> Raid10Array<'a, B> {
         })
     }
 
+    /// Wrap an already-prepared member sub-slice as a RAID10 view without
+    /// re-probing geometry.
+    ///
+    /// The owning composed device ([`OwnedRaidArray`](crate::owned::OwnedRaidArray))
+    /// keeps its members on the heap for a long-running serve process and
+    /// cannot itself be a borrow, so it builds a transient view here per
+    /// operation instead of calling [`assemble`](Self::assemble) again, which
+    /// would re-derive every pair's member state from a fresh probe and
+    /// silently re-admit a member that faulted while serving. `geometry`,
+    /// `per_member`, and `chunk_blocks` are exactly what `assemble`
+    /// established and never change afterwards; `scrub_next_lba` is the
+    /// array's own resumable scrub position, carried in and read back out by
+    /// the caller after the operation.
+    pub(crate) fn from_prepared(
+        members: &'a mut [MirrorMember<B>],
+        geometry: BlockGeometry,
+        per_member: BlockGeometry,
+        chunk_blocks: u64,
+        scrub_next_lba: u64,
+    ) -> Self {
+        Self {
+            members,
+            geometry,
+            per_member,
+            chunk_blocks,
+            scrub_next_lba,
+        }
+    }
+
+    /// The per-member geometry established at [`assemble`](Self::assemble),
+    /// shared by every pair.
+    ///
+    /// Exposed so [`OwnedRaidArray`](crate::owned::OwnedRaidArray) can capture
+    /// this assemble-derived value once and thread it into every later
+    /// [`from_prepared`](Self::from_prepared) view without re-probing the
+    /// members.
+    #[must_use]
+    pub(crate) const fn per_member_geometry(&self) -> BlockGeometry {
+        self.per_member
+    }
+
     /// The number of mirror pairs (stripe columns) the array is composed of.
     const fn pairs(&self) -> u64 {
         self.members.len() as u64 / 2

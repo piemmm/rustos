@@ -87,6 +87,12 @@ pub const VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID: u32 = region(5);
 /// every input node id unambiguous and never aliases an MMIO-probed device.
 pub const VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID: u32 = region(6);
 
+/// The id of the synthetic virtual-bus node ([`crate::virtual_bus`]), the
+/// always-present parent a composed block device hangs from. A single node
+/// (there is one virtual bus per machine), so it needs only the one id at its
+/// region base.
+pub const VIRTUAL_BUS_NODE_ID: u32 = region(7);
+
 // A single probe walk emits at most one id per enumerated bus slot
 // (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
 // so the highest id a walk can reach in its region is
@@ -103,7 +109,7 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 7] = [
+    const BASES: [u32; 8] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
@@ -111,6 +117,7 @@ mod tests {
         VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
         VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
+        VIRTUAL_BUS_NODE_ID,
     ];
 
     #[test]

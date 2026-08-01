@@ -210,6 +210,31 @@ impl<'a, B: Block> StripeArray<'a, B> {
         })
     }
 
+    /// Wrap an already-prepared member sub-slice as a stripe view without
+    /// re-probing geometry.
+    ///
+    /// The owning composed device ([`OwnedRaidArray`](crate::owned::OwnedRaidArray))
+    /// keeps its members on the heap for a long-running serve process and
+    /// cannot itself be a borrow, so it builds a transient view here per
+    /// operation instead of calling [`assemble`](Self::assemble) again.
+    /// `geometry` and `chunk_blocks` are exactly what `assemble` established
+    /// and never change afterwards; `failed` is the array's own sticky fault
+    /// state, carried in so a member lost on a previous operation can never be
+    /// quietly forgotten.
+    pub(crate) fn from_prepared(
+        members: &'a mut [StripeMember<B>],
+        geometry: BlockGeometry,
+        chunk_blocks: u64,
+        failed: bool,
+    ) -> Self {
+        Self {
+            members,
+            geometry,
+            chunk_blocks,
+            failed,
+        }
+    }
+
     /// The logical geometry of the composed array (block size shared with the
     /// members, block count their sum).
     #[must_use]

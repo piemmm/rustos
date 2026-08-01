@@ -1,4 +1,4 @@
-//! The freestanding body of the RAID composition driver's `Run` binary
+//! The freestanding body of the RAID member-agent driver's `Run` binary
 //! (`main.rs`): the member agent's grant resolution, delegation, and
 //! membership loop (`plans/FIX-IO.md` `IO6c`).
 //!
@@ -23,7 +23,7 @@ use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_drv_storage_raid::{AgentStep, MemberAgent};
+use tairix_drv_storage_raid_member::{AgentStep, MemberAgent};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;

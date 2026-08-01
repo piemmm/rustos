@@ -13,9 +13,9 @@
 //! * **the healthy device** — served through the *shared* per-request engine
 //!   (`tairix_abi::blkio::serve_request_recovering`) over a fault-injecting
 //!   `FaultDisk`, and consumed through the *production* client
-//!   (`tairix_drv_storage_volmgr::blk::RemoteBlock`). Both halves are shipped
-//!   code, so the vertical proves the real engine and the real consumer rather
-//!   than a look-alike.
+//!   (`tairix_blkclient::RemoteBlock`). Both halves are shipped code, so the
+//!   vertical proves the real engine and the real consumer rather than a
+//!   look-alike.
 //! * **the wedged device** — an endpoint whose requests are deliberately never
 //!   serviced, modelling a driver stalled on the medium.
 //!
@@ -56,8 +56,8 @@ mod program {
     use tairix_abi::driver::block::{Block, BlockGeometry};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{DriverError, Errno};
+    use tairix_blkclient::{BlkCall, RemoteBlock};
     use tairix_caps::CapabilitySet;
-    use tairix_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
 
     /// Endpoint id of the healthy block service this fixture stands up. The
     /// `b"BLKF"` tag keeps the pair clear of anything the chassis binds.
@@ -522,7 +522,8 @@ mod program {
         }
 
         let mut window = [0u8; WINDOW_LEN];
-        let Ok(mut client) = RemoteBlock::connect(ServedLoopback::new(EP_HEALTHY), &mut window)
+        let Ok(mut client) =
+            RemoteBlock::connect_read_write(ServedLoopback::new(EP_HEALTHY), &mut window)
         else {
             return 12;
         };

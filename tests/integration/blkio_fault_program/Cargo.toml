@@ -19,14 +19,15 @@ path = "src/main.rs"
 # userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
 # exists solely for non-Rust programs. It names `tairix-abi` for the block
 # service wire types and the shared per-request recovery engine, `tairix-caps`
-# for the capability sets `call_create` binds an endpoint with, and the volume
-# manager's `lib` for the production block *consumer* (`RemoteBlock`) this
-# fixture drives — the same client the autoloaded volume-manager process uses,
-# so the vertical proves the real consumer rather than a look-alike. Only on
-# the native Tier-1 targets (`target_os = "none"`); on the host it is an inert
-# stub so `cargo build --workspace` / clippy still cover it.
+# for the capability sets `call_create` binds an endpoint with, and the shared
+# `lib/blkclient` for the production block *consumer* (`RemoteBlock`) this
+# fixture drives — the same client every consumer (the autoloaded
+# volume-manager process, the RAID array composer) uses, so the vertical
+# proves the real consumer rather than a look-alike. Only on the native
+# Tier-1 targets (`target_os = "none"`); on the host it is an inert stub so
+# `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-tairix-drv-storage-volmgr = { path = "../../../drivers/storage/volmgr", version = "=0.0.0" }
+tairix-blkclient = { path = "../../../lib/blkclient", version = "=0.0.0" }

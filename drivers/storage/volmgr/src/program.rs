@@ -22,10 +22,9 @@ use tairix_abi::blkio::BLK_DATA_LEN;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::raid_ipc::RAID_MEMBER_COMPATIBLE;
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
-use tairix_drv_storage_volmgr::blk::{BlkCall, RemoteBlock};
 use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
 use tairix_drv_storage_volmgr::plan::{plan_volumes, VolumePlan};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -138,93 +137,6 @@ fn publish_raid_member(endpoint: u64, window_id: u64) {
     }
 }
 
-/// The production blkio transport: the bounded, capability-checked async
-/// submit/reap seam on the granted block-service endpoint (`plans/FIX-IO.md`
-/// IO1). Each request is `call_post`ed with the caller's per-request deadline,
-/// the reply awaited on a `CallReply` wait-set, and reaped with `call_reap`,
-/// so a wedged device fails this transfer closed at its deadline instead of
-/// parking the probe forever. The deadline is the caller's, derived from the
-/// device's own declared class, so this transport carries no deadline policy.
-/// The serving driver fills the shared window during the call, so the window
-/// parameter is untouched here.
-struct RtBlkCall {
-    endpoint: u64,
-    /// The wait-set multiplexing this device's reply completions, created
-    /// lazily on first use and `0` until then. One device needs only one
-    /// member, but using the wait-set seam even here keeps the single
-    /// transport shape the multi-device consumer (IO2) also uses.
-    waitset: u64,
-}
-
-impl RtBlkCall {
-    /// A fresh transport for `endpoint` with its wait-set unset (created on
-    /// the first [`BlkCall::call`]).
-    fn new(endpoint: u64) -> Self {
-        Self {
-            endpoint,
-            waitset: 0,
-        }
-    }
-
-    /// Mint the reply wait-set and register this endpoint's `CallReply`
-    /// member, once. The wait-set is reclaimed by the kernel when this
-    /// run-to-completion program exits, so it needs no explicit teardown.
-    fn ensure_waitset(&mut self) -> Result<u64, Errno> {
-        if self.waitset == 0 {
-            let set = tairix_rt::waitset_create();
-            if set < 0 {
-                return Err(errno_from(set));
-            }
-            let set = set as u64;
-            let ctl = tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::CallReply,
-                self.endpoint,
-                0,
-            );
-            if ctl < 0 {
-                return Err(errno_from(ctl));
-            }
-            self.waitset = set;
-        }
-        Ok(self.waitset)
-    }
-}
-
-impl BlkCall for RtBlkCall {
-    fn call(
-        &mut self,
-        request: &[u8],
-        reply: &mut [u8],
-        _window: &mut [u8],
-        deadline_ns: u64,
-    ) -> Result<usize, Errno> {
-        let set = self.ensure_waitset()?;
-        let ticket =
-            tairix_rt::call_post(self.endpoint, request, deadline_ns).map_err(errno_from)?;
-        loop {
-            match tairix_rt::call_reap(self.endpoint, ticket, reply) {
-                Ok(len) => return Ok(len),
-                Err(neg) => {
-                    let err = errno_from(neg);
-                    // Not ready yet: park on the reply wait-set until the
-                    // reply lands or the per-request deadline elapses (which
-                    // makes the member ready and the next reap `TimedOut`),
-                    // never a busy poll. Every other outcome — a timeout, a
-                    // vanished endpoint — fails closed.
-                    if err == Errno::WouldBlock {
-                        let mut token = 0u64;
-                        let _ = tairix_rt::waitset_wait(set, deadline_ns, &mut token);
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-    }
-}
-
 /// Emit one structured diagnostic event with a single hex field.
 fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
     let mut value_buf = [0u8; 16];
@@ -322,7 +234,7 @@ fn main() -> i32 {
     let window =
         unsafe { core::slice::from_raw_parts_mut(window_base as usize as *mut u8, BLK_DATA_LEN) };
 
-    let mut client = match RemoteBlock::connect(RtBlkCall::new(endpoint), window) {
+    let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint), window) {
         Ok(client) => client,
         Err(err) => {
             log_hex_event(

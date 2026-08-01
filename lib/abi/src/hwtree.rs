@@ -66,6 +66,28 @@ pub const HW_NODE_ROOT_ID: u32 = 0;
 /// carries inline. Longer strings are rejected, never truncated.
 pub const HW_COMPATIBLE_MAX: usize = 64;
 
+/// The `compatible` string of the synthetic **virtual bus** the kernel
+/// publishes directly beneath the root on every machine.
+///
+/// Firmware describes only physical devices, so a *composed* block device —
+/// a RAID array assembled from several member disks, a future
+/// device-mapper-style volume — has no discovered node to hang from and no
+/// parent whose lifetime outlives the devices it is built out of. The
+/// virtual bus is that parent: an always-present container, exactly like
+/// Linux's `virtual` bus, whose lifetime is the machine's rather than any
+/// disk's, so pulling a member can never orphan the array node built above
+/// it.
+///
+/// It describes no hardware and asserts nothing about the machine, so it is
+/// not a static device list standing in for detection: it is a fixed
+/// structural feature of the tree, like the root itself. The driver matched
+/// to it composes devices it is *given*; it discovers nothing from the
+/// node's existence.
+///
+/// The string lives here because the kernel publishes the node and a
+/// user-space driver binds it, and neither may depend on the other.
+pub const HW_VIRTUAL_BUS_COMPATIBLE: &[u8] = b"tairix,virtual-bus";
+
 /// Maximum number of [`HwMatchKey`]s a single node carries.
 pub const HW_NODE_MAX_MATCH_KEYS: usize = 4;
 

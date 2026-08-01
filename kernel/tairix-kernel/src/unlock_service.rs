@@ -82,7 +82,8 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 
 /// Record the resolved root binding and the firmware DTB pointer for the
 /// init seam, and seed the authoritative hardware-inventory store
-/// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree`.
+/// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree` plus the
+/// synthetic virtual bus every machine has ([`crate::virtual_bus`]).
 ///
 /// `tree` is the full discovered hardware tree the kthread matches against
 /// the signed driver store during autoload — it
@@ -95,10 +96,17 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// ([`crate::hwtree_store::HwTreeStore::publish_child`]), and the autoload
 /// load gate resolves a matched node's grants from the live store directly.
 ///
+/// The virtual bus is appended here rather than by each architecture's
+/// discovery because firmware cannot describe it and every port needs it
+/// identically: it is the parent a *composed* block device hangs from. This
+/// is the one arch-neutral point where a discovered tree becomes the live
+/// inventory, so publishing it here is what makes forgetting it impossible.
+///
 /// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT` and
 /// [`crate::hwtree_store`]).
 pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &[HwNode]) {
     crate::hwtree_store::HW_TREE.seed(tree);
+    crate::hwtree_store::HW_TREE.append(&crate::virtual_bus::node());
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
 }
 
@@ -877,7 +885,10 @@ mod tests {
 
     #[test]
     fn the_boot_stash_and_inventory_round_trip_through_seed_and_snapshot() {
-        use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
+        use tairix_abi::hwtree::{
+            HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+            HW_VIRTUAL_BUS_COMPATIBLE,
+        };
 
         // `record_boot` stashes the binding + DTB and seeds the authoritative
         // inventory with the discovered tree `FdtDiscovery` built — here a
@@ -886,22 +897,39 @@ mod tests {
         // chain. (The single test touching the `HW_TREE` / `UNLOCK_BOOT`
         // globals, so it never races a sibling.)
         let seed = [
-            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
-            HwNode::new(2, 1, HwDeviceClass::Bus),
+            HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(2, HW_NODE_ROOT_ID, HwDeviceClass::Bus),
         ];
         record_boot(None, 0xDEAD_0000, &seed);
         let boot = take_boot();
         assert!(boot.binding.is_none());
         assert_eq!(boot.dtb, 0xDEAD_0000);
 
-        // The live inventory snapshot reflects exactly the seeded tree; a
-        // user-space bus driver's enumerated children are added at runtime
-        // through `hw_emit_node` (`publish_child`) and observed through the
-        // reactive `hw_tree_wait` generation.
+        // The live inventory snapshot reflects the seeded tree plus the one
+        // node firmware can never describe: the synthetic virtual bus a
+        // composed block device hangs from. A user-space bus driver's
+        // enumerated children are added at runtime through `hw_emit_node`
+        // (`publish_child`) and observed through the reactive `hw_tree_wait`
+        // generation.
         let snap = crate::hwtree_store::HW_TREE.snapshot();
-        assert_eq!(snap.len(), 2, "the seeded discovered tree, nothing dropped");
+        assert_eq!(snap.len(), 3, "the seeded tree plus the virtual bus");
         assert_eq!(snap[0], seed[0], "existing nodes keep their order");
         assert_eq!(snap[1], seed[1]);
+        assert_eq!(
+            snap[2],
+            crate::virtual_bus::node(),
+            "every boot publishes the virtual bus, whatever firmware found"
+        );
+        assert_eq!(
+            snap[2].parent(),
+            HW_NODE_ROOT_ID,
+            "the virtual bus is a child of the root, so the autoload walk reaches it"
+        );
+        assert_eq!(
+            snap[2].match_keys()[0].compatible_bytes(),
+            HW_VIRTUAL_BUS_COMPATIBLE,
+            "and is matchable, so a composer driver can bind to it"
+        );
 
         // A child published at runtime (the user-space bus driver's
         // `hw_emit_node`) lands in the live store under the bus, keyed by its
@@ -912,9 +940,9 @@ mod tests {
             .expect("match key fits");
         let id = crate::hwtree_store::HW_TREE.publish_child(2, child);
         let snap = crate::hwtree_store::HW_TREE.snapshot();
-        assert_eq!(snap.len(), 3, "the runtime child is added, nothing dropped");
-        assert_eq!(snap[2].id(), id, "the store assigned the published id");
-        assert_eq!(snap[2].parent(), 2, "parented under the emitter's node");
+        assert_eq!(snap.len(), 4, "the runtime child is added, nothing dropped");
+        assert_eq!(snap[3].id(), id, "the store assigned the published id");
+        assert_eq!(snap[3].parent(), 2, "parented under the emitter's node");
     }
 
     /// A [`Sink`] that records each logged event's id and message so a test

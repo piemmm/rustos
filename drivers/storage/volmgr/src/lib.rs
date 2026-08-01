@@ -2,10 +2,13 @@
 //!
 //! This crate is a `lib` (the loadable-module identity — the [`BIND_KEYS`]
 //! bind table `devmgr` matches a discovered block-service storage node
-//! against — plus the host-testable policy engine: the blkio block client
-//! ([`blk`]), the partition + filesystem probe plan ([`plan`]), and the
-//! catalog naming policy ([`name`])) **and** a `Run` binary
-//! (`src/main.rs`, the autoloaded per-node policy process).
+//! against — plus the host-testable policy engine: the partition +
+//! filesystem probe plan ([`plan`]) and the catalog naming policy
+//! ([`name`])) **and** a `Run` binary (`src/main.rs`, the autoloaded
+//! per-node policy process). The blkio block client it probes a device
+//! through is the shared `tairix_blkclient::RemoteBlock`, opened
+//! read-only: this driver only ever inspects a device's layout and commits
+//! nothing to it.
 //!
 //! # What it is
 //!
@@ -46,7 +49,6 @@
 #[cfg(test)]
 extern crate alloc;
 
-pub mod blk;
 pub mod name;
 pub mod plan;
 

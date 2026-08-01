@@ -1,0 +1,25 @@
+[package]
+name = "tairix-blkclient"
+description = "TAIRiX block-service client: the one no_std tairix_abi::driver::block::Block implementation over the blkio call endpoint plus shared data window a served storage node grants, and the production async blkio transport its consumers share (plans/FIX-IO.md IO6)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The blkio wire protocol (`tairix_abi::blkio`), the `Block` device trait
+# this crate implements, and the `DriverError`/`Errno` vocabulary every
+# fail-closed path returns — the one ABI definition.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The pure-Rust userland runtime: the `call_post`/`call_reap` async blkio
+# submit/reap pair and the `waitset_*` wrappers the production transport
+# parks a caller on. The crate builds cleanly on the host (its syscall trap
+# fails closed with a sentinel there rather than requiring a kernel), so
+# this dependency needs no target-conditional gate for the client to stay
+# host-testable end to end.
+tairix-rt = { path = "../rt", version = "=0.0.0" }

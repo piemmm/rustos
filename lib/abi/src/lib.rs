@@ -104,7 +104,8 @@ pub use fs::{
 pub use hwtree::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, HwTreeHeader,
     MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID, SIMPLE_FRAMEBUFFER_COMPATIBLE,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE,
+    SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
 pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
