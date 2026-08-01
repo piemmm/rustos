@@ -16,5 +16,7 @@ version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_PROC_SPAWN", "CAP_SHM"]
 # A windowed, user-facing application: list it in the desktop's program
-# library under the task-shell folder (plans/NEW-TASKBAR.md T3).
+# library under the task-shell folder (plans/NEW-TASKBAR.md T3), drawn with
+# the bundle's own icon asset (Resources/terminal.png).
 library = "SystemTools"
+library-icon = "terminal.png"
