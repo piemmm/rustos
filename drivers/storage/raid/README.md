@@ -15,13 +15,18 @@ so a composed array nests naturally over the same seam every leaf device uses
 (`AGENTS.md` §2.2 one seam, §27 complete abstraction). It **consumes** the
 block-layer health vocabulary (`tairix_abi::blkio`); it does not re-invent it.
 
-Four compositions are provided as siblings over that one seam (`AGENTS.md`
+Six compositions are provided as siblings over that one seam (`AGENTS.md`
 §2.2 parallel implementations): the redundant **RAID1 mirror**
 (`MirrorArray`), the capacity-aggregating **RAID0 stripe** (`StripeArray`), the
-single-fault **RAID5 distributed parity** (`ParityArray`), and the two-fault
+single-fault **RAID5 distributed parity** (`ParityArray`), the two-fault
 **RAID6 double distributed parity** (`DualParityArray`, P + Q Reed-Solomon
-syndromes over the first-party `gf256` GF(2^8) field). They share one
-`MemberState`/`MemberRole`/`ArrayHealth` vocabulary and fault classification.
+syndromes over the first-party `gf256` GF(2^8) field), the three-fault
+**RAID-TP triple distributed parity** (`TripleParityArray`, P + Q + R over the
+same field), and the **RAID10 stripe of mirrors** (`Raid10Array`). They share
+one `MemberState`/`MemberRole`/`ArrayHealth` vocabulary and fault
+classification. A serving process drives whichever level composes an array
+through the one `RaidArray` dispatch, and schedules its self-healing through
+the one `ArrayMaintenance` policy (below).
 
 The RAID1 mirror (`MirrorArray`):
 
@@ -55,20 +60,43 @@ At the boundary of what it can vouch for (no surviving copy for a read, no copy
 accepting a write, no copy committing a flush) the array **fails closed**
 (`AGENTS.md` §5.4): the *operation* fails, the *system* keeps running.
 
+## Maintenance scheduling (`ArrayMaintenance`)
+
+Offering a self-healing surface is not the same as driving it. `ArrayMaintenance`
+is the one policy that decides, turn by turn, whether an array should re-admit a
+faulted member, advance a rebuild, run a proactive scrub, or do none of those so
+the foreground workload keeps the array (`AGENTS.md` §2.2, §27, §26.1). It is
+pure, allocation-free, and **event-timed** — it holds no clock and never spins:
+the caller supplies its monotonic reading, and `wait_deadline_ns` gives the
+one-shot deadline the serve loop parks on (`AGENTS.md` §2.23).
+
+Restoring redundancy outranks verifying it (re-add, then rebuild, then scrub),
+a scrub runs only on a fully `Optimal` array and pauses at its cursor while
+redundancy is reduced, and maintenance keeps to a duty share of a busy array.
+A faulted member is re-probed on a bounded, doubling cadence whose base is that
+device class's own recovery grace window, so a dead disk is not hammered and a
+returning one always rejoins without a reboot (`AGENTS.md` §18.4). The
+scheduler never installs or removes a device, and drives nothing on a `Failed`
+array — recovering one is a re-resolution of its members' superblocks, not a
+maintenance decision.
+
 ## Crate shape
 
 This crate is the host-testable composition **engine** — one module per level
-(`src/mirror.rs`, `src/stripe.rs`, `src/parity.rs`, `src/dualparity.rs`, over
-the shared `src/superblock.rs` metadata and `src/gf256.rs` field), each proven
+(`src/mirror.rs`, `src/stripe.rs`, `src/parity.rs`, `src/dualparity.rs`,
+`src/triple.rs`, `src/raid10.rs`, over the shared `src/gf256.rs` field) — plus
+the level-agnostic layers above it: the `src/array.rs` composed-device
+dispatch, the `src/assemble.rs` reassembly→member bridge, the `src/health.rs`
+and device-class folds, and the `src/maintenance.rs` scheduler. Each is proven
 host-side over a fault-injecting `Block` double (its `*/tests.rs`). It is
 `no_std`, `forbid(unsafe_code)`, and allocation-free: every array borrows a
-caller-owned member slice (and, for the parity levels, a scratch buffer), so it
-imposes no fixed member ceiling (`AGENTS.md` §24.1) and holds only a borrow. It
-depends only on `lib/abi`, so
-the layered dependency direction holds (a member is reached through the
-`Block` trait the serve process is handed, never a sibling driver crate,
-`AGENTS.md` §17.4).
+caller-owned member slice (and, for the parity levels, a scratch buffer; and,
+for the scheduler, a per-member retry slice), so it imposes no fixed member
+ceiling (`AGENTS.md` §24.1) and holds only a borrow. It depends only on
+`lib/abi` and the shared on-disk metadata crate `lib/raidmeta`, so the layered
+dependency direction holds (a member is reached through the `Block` trait the
+serve process is handed, never a sibling driver crate, `AGENTS.md` §17.4).
 
 The autoloaded serve process that assembles members from discovered array
-metadata and drives resync off the members' recovery signals rides with the
-multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining).
+metadata and turns this scheduler's decisions into real transfers rides with
+the multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining).

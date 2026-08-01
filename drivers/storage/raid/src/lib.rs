@@ -280,16 +280,32 @@
 //! meaningful for a *redundant* array fail closed on a RAID0 stripe with
 //! [`RaidError::NotRedundant`].
 //!
+//! # Maintenance scheduling ([`ArrayMaintenance`])
+//!
+//! Exposing a self-healing surface is not the same as driving it. An array
+//! heals itself only if something decides, turn by turn, whether to re-admit a
+//! returning member, advance a rebuild, or run a proactive scrub — and when it
+//! must do none of those so the foreground workload keeps the array
+//! (`AGENTS.md` §26.1, §2.16). [`ArrayMaintenance`] is that one decision
+//! (`AGENTS.md` §2.2, §27): a pure, event-timed, allocation-free policy that
+//! ranks restoring redundancy above verifying it, paces each chunk against a
+//! busy array's duty share, re-probes a faulted member on a bounded escalating
+//! cadence rather than a spin (`AGENTS.md` §2.23), and hands its caller the
+//! one-shot deadline to park on. Its cadences come from the array's own
+//! discovered [`BlkDeviceClass`](tairix_abi::blkio::BlkDeviceClass) through
+//! [`MaintenancePolicy::for_class`], never a frozen scalar (`AGENTS.md` §24.2).
+//!
 //! # Scope
 //!
-//! This crate is the host-testable composition **engine** plus the on-disk
-//! metadata layer above. The autoloaded serve process that reads each
-//! discovered device's superblock, assembles the members through
-//! [`ArrayIdentity`], drives resync off the members' recovery signals, and
-//! publishes the composed device as its own block-service node rides with the
-//! multi-device volume-assembly work (`plans/FIX-IO.md` IO6 remaining); the
-//! engine and its metadata are proven host-side first, exactly as the other
-//! FIX-IO primitives landed their shared logic before their live wiring.
+//! This crate is the host-testable composition **engine**, the on-disk metadata
+//! layer above, and the maintenance policy that drives them. The autoloaded
+//! serve process that reads each discovered device's superblock, assembles the
+//! members through [`ArrayIdentity`], turns the scheduler's decisions into real
+//! transfers, and publishes the composed device as its own block-service node
+//! rides with the multi-device volume-assembly work (`plans/FIX-IO.md` IO6
+//! remaining); the engine, its metadata, and this policy are proven host-side
+//! first, exactly as the other FIX-IO primitives landed their shared logic
+//! before their live wiring.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -300,6 +316,7 @@ mod assemble;
 mod dualparity;
 mod gf256;
 mod health;
+mod maintenance;
 mod mirror;
 mod parity;
 mod raid10;
@@ -310,6 +327,9 @@ mod triple;
 pub use array::{RaidArray, RaidError};
 pub use assemble::{fill_members, AssembleError, AssembleMember};
 pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH_BLOCKS};
+pub use maintenance::{
+    ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,
+};
 pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
 pub use parity::{ParityArray, ParityError, ParityMember};
 pub use raid10::{Raid10Array, Raid10Error};

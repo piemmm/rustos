@@ -2,8 +2,9 @@
 //! dispatches to whichever concrete RAID level composes it
 //! (`plans/FIX-IO.md` IO6).
 //!
-//! The four RAID compositions ([`MirrorArray`], [`StripeArray`],
-//! [`ParityArray`], [`DualParityArray`]) are siblings over the same block
+//! The six RAID compositions ([`MirrorArray`], [`StripeArray`],
+//! [`ParityArray`], [`DualParityArray`], [`TripleParityArray`],
+//! [`Raid10Array`]) are siblings over the same block
 //! seam (`AGENTS.md` §2.2). A serving process, once it has *discovered* an
 //! array from its members' superblocks and resolved its [`RaidLevel`], must
 //! present exactly one logical [`Block`] device to the filesystem layer and
@@ -321,7 +322,7 @@ impl<B: Block> RaidArray<'_, B> {
     ///   multiple.
     /// * [`RaidError::Io`] if the underlying transfer fails.
     pub fn scrub_step(&mut self, scratch: &mut [u8]) -> Result<(), RaidError> {
-        if matches!(self, Self::Stripe(_)) {
+        if !self.level().is_redundant() {
             return Err(RaidError::NotRedundant);
         }
         let blocks = self.scratch_blocks(scratch)?;
@@ -348,7 +349,7 @@ impl<B: Block> RaidArray<'_, B> {
     ///   multiple.
     /// * [`RaidError::Io`] if the underlying transfer fails.
     pub fn resync_step(&mut self, scratch: &mut [u8]) -> Result<(), RaidError> {
-        if matches!(self, Self::Stripe(_)) {
+        if !self.level().is_redundant() {
             return Err(RaidError::NotRedundant);
         }
         let blocks = self.scratch_blocks(scratch)?;

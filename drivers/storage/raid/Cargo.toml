@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-storage-raid"
-description = "TAIRiX RAID composition driver: a fault-aware virtual block device that composes child block endpoints through the public block seam (plans/FIX-IO.md IO6). The RAID1 mirror serves reads from any healthy member, auto-repairs a proven-bad copy from a good one, fans writes out to every copy, degrades (never fails the system) when a member faults, and rebuilds a returning member with a bounded, interruptible resync."
+description = "TAIRiX RAID composition driver: fault-aware virtual block devices that compose child block endpoints through the public block seam (plans/FIX-IO.md IO6). Six sibling levels (RAID1 mirror, RAID0 stripe, RAID5/6/TP distributed parity, RAID10 stripe of mirrors) serve reads from any healthy member, auto-repair a proven-bad copy from a good one, fan writes out, degrade (never fail the system) when a member faults, and rebuild a returning member with a bounded, interruptible resync. One RaidArray dispatch presents whichever level as a single logical device, and one ArrayMaintenance policy decides when it re-admits, rebuilds, and scrubs without starving the foreground workload."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,16 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is a host-testable `lib`: the RAID composition engines
-# (`MirrorArray`/`StripeArray`/`ParityArray`/`DualParityArray`) that consume
-# child `Block` endpoints through the public block seam and the shared health
-# classification (`tairix_abi::blkio`). It depends only on `lib/*`, so the
-# layered dependency direction holds (no `drivers/*`->`drivers/*` edge: a member
-# is reached through the `Block` trait the composing serve process is handed,
-# never a sibling driver crate). The autoloaded serve process that assembles
-# members from discovered array metadata rides with the multi-device
-# volume-assembly work (plans/FIX-IO.md IO6 remaining); this engine is proven
-# host-side first.
+# The crate is a host-testable `lib`: the six RAID composition engines that
+# consume child `Block` endpoints through the public block seam and the shared
+# health classification (`tairix_abi::blkio`), the `RaidArray` composed-device
+# dispatch over them, and the `ArrayMaintenance` policy that schedules their
+# self-healing. It depends only on `lib/*`, so the layered dependency direction
+# holds (no `drivers/*`->`drivers/*` edge: a member is reached through the
+# `Block` trait the composing serve process is handed, never a sibling driver
+# crate). The autoloaded serve process that assembles members from discovered
+# array metadata and turns the scheduler's decisions into real transfers rides
+# with the multi-device volume-assembly work (plans/FIX-IO.md IO6 remaining);
+# these engines and policies are proven host-side first.
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

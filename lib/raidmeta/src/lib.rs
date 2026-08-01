@@ -166,6 +166,26 @@ impl RaidLevel {
         )
     }
 
+    /// Whether this level stores enough redundancy to reconstruct a member's
+    /// data from the others — so the array can degrade rather than fail, heal
+    /// a latent media error from a good copy, and rebuild a returning member.
+    ///
+    /// Every level but the RAID0 stripe does: a mirror holds a full copy per
+    /// member, the parity levels hold one, two, or three syndromes per stripe,
+    /// and RAID10 mirrors within each stripe column. A stripe holds nothing
+    /// spare, so it has nothing to scrub from, rebuild from, or hot-swap.
+    ///
+    /// This is the *single* definition of the redundancy question, beside
+    /// [`is_striped`](Self::is_striped) and [`data_members`](Self::data_members):
+    /// the composed-device dispatch refuses redundancy-only operations on a
+    /// non-redundant array with it, and the maintenance scheduler asks it
+    /// before driving any self-healing at all, so the two cannot disagree
+    /// about which arrays can heal themselves (`AGENTS.md` §2.2).
+    #[must_use]
+    pub const fn is_redundant(self) -> bool {
+        !matches!(self, Self::Stripe)
+    }
+
     /// The fewest member slots this level's structure can be composed from.
     /// Below it the record does not describe the level it claims to be: a
     /// mirror or a stripe needs at least one member, single parity needs three

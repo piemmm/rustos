@@ -8,13 +8,14 @@ one logical device to the filesystem layer and multi-layered sets nest
 naturally over the recursive seam. RAID **consumes** the block-layer health
 vocabulary (`blkio::BlkStatus`, `DriverError`); it never re-invents it.
 
-The composition engine and its on-disk metadata layer live in
-`drivers/storage/raid` as a host-testable library. The autoloaded serve
-process that reads each discovered device's superblock, assembles the members,
-drives resync off the members' recovery signals, and publishes the composed
-device as its own block-service node rides with the multi-device
-volume-assembly work (`plans/FIX-IO.md` IO6 remaining); the engine and its
-metadata are proven host-side first, as the other FIX-IO primitives were.
+The composition engine, its on-disk metadata layer, and the maintenance policy
+that decides when an array heals itself all live in `drivers/storage/raid` as a
+host-testable library. The autoloaded serve process that reads each discovered
+device's superblock, assembles the members, turns those maintenance decisions
+into real transfers, and publishes the composed device as its own block-service
+node rides with the multi-device volume-assembly work (`plans/FIX-IO.md` IO6
+remaining); the engine, its metadata, and the policy are proven host-side first,
+as the other FIX-IO primitives were.
 
 ## RAID1 mirror (`MirrorArray`)
 
@@ -736,3 +737,114 @@ wins over scratch validation, so the caller always learns the informative
 reason. Its `Block` I/O path, `level`, `health`, `member_count`,
 `array_geometry`, and `member_state` (a stripe member maps to `InSync` when
 live and `Faulted` when dropped) forward normally.
+
+## Maintenance scheduling (`ArrayMaintenance`)
+
+Exposing a self-healing surface is not the same as driving it. `RaidArray`
+offers `readd_member`, `resync_step`, and `begin_scrub`/`scrub_step`, but an
+array only heals itself if something decides, turn by turn, which of those to
+do next — and, just as importantly, when to do none of them so the foreground
+workload keeps the array (`AGENTS.md` §26.1, §26.2, §2.16). Every consumer that
+owns a composed array — the autoloaded serve process and the ARXFS-native
+multi-device composition alike — needs exactly that decision, and getting it
+wrong is a data-integrity or availability fault, not a cosmetic one:
+
+- A rebuild that is never started leaves the array degraded until the *next*
+  fault loses data (`AGENTS.md` §26.5).
+- A rebuild that never yields starves the workload the array exists to serve.
+- Re-probing a faulted member in a tight loop is the busy-wait the charter
+  forbids (`AGENTS.md` §2.23); never re-probing it means a disk that came back
+  stays out of the array (`AGENTS.md` §18.4).
+- Scrubbing an array that is mid-rebuild spends the bandwidth the rebuild needs
+  to restore redundancy.
+
+`ArrayMaintenance` is that one decision, defined once so the consumers cannot
+hand-roll it differently (`AGENTS.md` §2.2, §27). It is pure and **event-timed**:
+it holds no clock, arms no timer, and never spins. The caller supplies the
+monotonic reading it took on every entry point, and when there is nothing to do
+`wait_deadline_ns` gives the absolute one-shot deadline the serve loop parks on
+— the same idiom the per-device health machine and the fault domain use
+(`blkio::BlkHealth::grace_deadline_ns`). It is allocation-free: the per-member
+re-add backoff records live in a caller-owned slice, exactly as the engines'
+members do, so a wide array imposes no fixed ceiling (`AGENTS.md` §24.1).
+
+The serve loop's contract per turn is: `next_action` to decide, perform the
+action against the array, `note_step` to hand back what happened (which is what
+paces the next chunk and escalates a refused re-add), and on `Idle` park until
+the soonest of the array's own I/O and `wait_deadline_ns`. Foreground traffic is
+reported through `note_foreground`, and a member's demonstrated return — the
+recovery signal its leaf health machine or its fault domain publishes (IO3/IO4)
+— through `note_member_returned`.
+
+### Priority — restore redundancy, then verify it
+
+1. **Re-admit a faulted member** whose backoff has elapsed. An array short a
+   copy is one fault from data loss, so getting the copy back outranks
+   everything else.
+2. **Advance a rebuild** of a member that is already resyncing.
+3. **Advance or start a proactive scrub**, and only on a fully `Optimal` array.
+   While a copy is missing or rebuilding, the bandwidth belongs to restoring
+   redundancy, and a scrub that can detect but not repair spends I/O to no
+   benefit. An array that degrades mid-pass therefore *pauses* its scrub where
+   the cursor stands and resumes it once full redundancy is back, rather than
+   abandoning the work already done or pressing on without a copy to repair
+   from.
+
+### Pacing — a duty share, not a fixed rate
+
+An idle array runs maintenance flat out. While the array is also serving
+foreground I/O, a chunk that took `d` holds the next one off for
+`d × (100 − duty) / duty`, so maintenance keeps to its share of the array
+whatever chunk size the caller's scratch buffer implies — unlike a fixed
+bytes-per-second limit, which has to be retuned for every device. A share
+outside `1..=100` is clamped, so a mis-set policy can neither stall maintenance
+completely nor divide by zero. A chunk the members failed backs off by the
+class's recovery grace window rather than hammering hardware that is already
+unwell.
+
+### Cadences come from the array's discovered class
+
+`MaintenancePolicy::for_class` derives the defaults from the class the members'
+fold declares through `Block::device_class` (see [Device class](#device-class-device_class)),
+never a frozen scalar (`AGENTS.md` §24.2). The two genuinely hardware-dependent
+quantities come from that class's own `IoBudget` rather than a second table that
+could drift from it (`AGENTS.md` §2.2):
+
+- The **first re-add delay** is the class's recovery grace window (`grace_ns`).
+  Re-probing sooner asks a device that is still inside the window its own driver
+  gives it to come back. The delay doubles on each refusal up to 32× it, so a
+  dead disk is not re-probed at the cadence of a merely slow one, yet a disk
+  that returns after a long absence still rejoins within a bounded wait. A
+  recovery signal collapses an escalated wait back to the base delay after the
+  last attempt and no further, so neither a flapping member nor a repeating
+  signal can turn the hook into a re-probe storm.
+- The **busy duty share** reflects how destructive maintenance is to foreground
+  latency on that class: a rotational disk pays for every extra seek and a
+  removable unit has a shallow queue that saturates as easily, so both keep a
+  small share; a solid-state device absorbs a parallel background stream with
+  far less interference, and a paravirtual device sits between them.
+
+The scrub period and the busy window are properties of the accepted risk and of
+the workload rather than of the hardware, so they are one default for every
+class and are overridable per array through the policy's public fields. The
+period is measured end-of-pass to start-of-pass. `ArrayMaintenance::new` takes
+how long ago the last pass completed, as the caller knows it from the array's
+persisted maintenance record; a caller with **no** record passes `u64::MAX`,
+which makes the first pass due immediately — an array whose verification history
+is unknown is verified rather than assumed clean (`AGENTS.md` §5.4, §26.5), and
+the duty pacing bounds what that costs.
+
+### What it deliberately does not do
+
+- It never installs or removes a device. `add_member` / `remove_member` are the
+  operator/hotplug hot-swap workflow; an `Absent` slot has no device to
+  re-probe, so the scheduler leaves it alone rather than inventing a spare.
+- It drives nothing on a `Failed` array. With no in-sync member there is nothing
+  to rebuild a returning copy from, and admitting one as current would serve
+  data the array cannot vouch for (`AGENTS.md` §5.4, §26.5). Bringing a failed
+  array back is a re-resolution of its members' superblocks against their
+  generation counters — an assembly decision, not a maintenance one.
+- It drives nothing on a non-redundant RAID0 stripe. Whether a level has
+  redundancy at all is `RaidLevel::is_redundant`, the single definition the
+  composed-device dispatch also refuses its redundancy-only operations with, so
+  the two cannot disagree about which arrays can heal themselves.

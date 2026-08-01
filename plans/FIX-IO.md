@@ -1046,19 +1046,80 @@ deliberately excluded (its `assemble` fails closed on a gap). `no_std`,
 placement, cross-type uniformity, and the width-mismatch/missing-device
 fail-closed cases). Design: `docs/src/drivers/raid.md`.
 
+**Landed (the maintenance scheduler — *when* an array heals itself):** exposing
+a self-healing surface is not the same as driving it. `RaidArray` offers
+`readd_member`/`resync_step`/`begin_scrub`/`scrub_step`, but an array only heals
+itself if something decides, turn by turn, which to do next — and when to do
+none so the foreground workload keeps the array (§26.1, §26.2, §2.16). Both
+named consumers (the autoloaded serve process, the ARXFS-native composition)
+need that decision, and a slip in it is a data-integrity or availability fault,
+not a cosmetic one: a rebuild never started leaves the array degraded until the
+*next* fault loses data (§26.5); an unpaced one starves the workload; a blind
+re-probe loop is the busy-wait §2.23 forbids while never re-probing strands a
+disk that came back (§18.4). `raid::ArrayMaintenance` is that one decision
+(§2.2, §27) — pure, allocation-free, and event-timed (it holds no clock and
+never spins: the caller supplies the monotonic reading, and `wait_deadline_ns`
+gives the absolute one-shot deadline the serve loop parks on, the same idiom
+`BlkHealth::grace_deadline_ns` uses; the per-member re-add records live in a
+caller-owned slice, so a wide array has no fixed ceiling, §24.1). Its priority
+restores redundancy before verifying it: re-admit a faulted member whose backoff
+has elapsed, then advance a rebuild, then advance or start a proactive scrub —
+the scrub **only** on a fully `Optimal` array, so an array that degrades
+mid-pass pauses at its cursor and resumes once redundancy is back rather than
+spending I/O it cannot repair from. Maintenance yields to the workload by a
+**duty share** (a chunk taking `d` holds the next off `d × (100 − duty) / duty`
+while foreground traffic is present, full speed when idle), which is chunk-size
+independent and so needs no per-device retuning, unlike Linux md's global
+KB/s `speed_limit_*`; an out-of-range share is clamped so a mis-set policy can
+neither stall maintenance nor divide by zero, and a failed chunk backs off by
+the class's grace window instead of hammering unwell hardware.
+`MaintenancePolicy::for_class` derives the defaults from the array's
+*discovered* class (the members' `BlkDeviceClass` fold), never a frozen scalar
+(§24.2): the first re-add delay **is** that class's `IoBudget::grace_ns` — one
+definition, so a member is never re-probed before its own driver would have
+given up on it — doubling to a 32× ceiling, and a demonstrated return
+(`note_member_returned`, the IO3/IO4 recovery signal) collapses an escalated
+wait back to that base delay and no further, so neither a flapping member nor a
+repeating signal becomes a re-probe storm. The scrub cadence and the busy window
+are properties of the accepted risk and of the workload rather than of the
+hardware, so they are one documented default per array, settable through the
+policy's public fields; `ArrayMaintenance::new` takes the elapsed time since the
+last completed pass from the caller's persisted record, and `u64::MAX` (no
+record) makes the first pass due at once — an array whose verification history
+is unknown is verified, not assumed clean (§5.4, §26.5). Deliberately out of
+scope: it never installs or removes a device (an `Absent` slot awaits an
+operator spare), drives nothing on a `Failed` array (with no in-sync member
+there is nothing to rebuild from, and admitting a copy as current would serve
+data the array cannot vouch for — recovery there is a superblock re-resolution,
+an assembly decision), and drives nothing on a non-redundant stripe. Whether a
+level has redundancy at all is now the single shared `RaidLevel::is_redundant`
+in `lib/raidmeta`, which the `RaidArray` dispatch also refuses its
+redundancy-only operations with, so the dispatch and the scheduler cannot
+disagree about which arrays can heal themselves (§2.2). Proven host-side (the
+class-derived policy; the width-mismatch fail-closed; the priority order; the
+degraded/absent/failed/stripe leave-alone cases; the backoff escalation, ceiling
+and signal floor; deterministic slot choice; idle/busy/clamped pacing and the
+failed-chunk backoff; the scrub start, completion re-arm, refusal deferral, and
+the pause-and-resume across a degrade; and that an idle deadline is never in the
+past, so parking on it is a wait and not a spin). Design:
+`docs/src/drivers/raid.md`.
+
 Remaining:
 - The autoloaded serve process that reads each discovered device's superblock,
   groups them with `distinct_arrays`, assembles each through `ArrayIdentity`,
   populates each engine's member buffer through the shared `raid::fill_members`
-  bridge (above), wraps it in the shared `RaidArray` dispatch (above), drives
-  `resync_step` off the members' IO3 recovery signals, and publishes the
-  composed device as its own block-service node — plus the ARXFS-native
-  multi-device composition that consumes the same engine and dispatch. This
-  rides with the multi-device volume-assembly work; the engine, its metadata,
-  the `fill_members` reassembly bridge, and the `RaidArray` dispatch are the
-  single shared definition all consumers reuse (§2.2), proven host-side first
-  exactly as the other FIX-IO primitives landed their shared logic before their
-  live wiring.
+  bridge (above), wraps it in the shared `RaidArray` dispatch (above), turns the
+  shared `raid::ArrayMaintenance` decisions into real transfers against its
+  members (driving `note_foreground` from its serve path and
+  `note_member_returned` from the IO3/IO4 recovery signals, and arming its wait
+  from `wait_deadline_ns`), persists the last-scrub record the scheduler is
+  seeded from, and publishes the composed device as its own block-service node —
+  plus the ARXFS-native multi-device composition that consumes the same engine,
+  dispatch, and scheduler. This rides with the multi-device volume-assembly
+  work; the engine, its metadata, the `fill_members` reassembly bridge, the
+  `RaidArray` dispatch, and the maintenance policy are the single shared
+  definition all consumers reuse (§2.2), proven host-side first exactly as the
+  other FIX-IO primitives landed their shared logic before their live wiring.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`drivers/storage/raid`, host-testable `lib`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size

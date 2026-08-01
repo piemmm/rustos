@@ -880,6 +880,18 @@ fn decode_admits_the_minimum_and_boundary_member_counts_per_level() {
 }
 
 #[test]
+fn is_redundant_is_the_shared_answer_for_every_level() {
+    // Only the RAID0 stripe holds nothing spare, so only it has nothing to
+    // scrub from, rebuild from, or hot-swap.
+    assert!(!RaidLevel::Stripe.is_redundant());
+    assert!(RaidLevel::Mirror.is_redundant());
+    assert!(RaidLevel::Parity.is_redundant());
+    assert!(RaidLevel::DualParity.is_redundant());
+    assert!(RaidLevel::TripleParity.is_redundant());
+    assert!(RaidLevel::Raid10.is_redundant());
+}
+
+#[test]
 fn data_members_is_the_shared_usable_width_per_level() {
     // A mirror presents one copy's worth regardless of how many copies exist.
     assert_eq!(RaidLevel::Mirror.data_members(1), Some(1));
