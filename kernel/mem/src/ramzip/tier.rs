@@ -28,16 +28,16 @@
 
 use alloc::collections::BTreeMap;
 
+use tairix_log::Sink;
+use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
+
 use crate::anon::zero_frame;
 use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::phys::PhysMap;
-use crate::pressure::{
-    ramzip_handoff, EscalationStep, FreeMemorySource, MemoryPressure, PressureBand, RamzipHandoff,
-};
+use crate::pressure::{ramzip_handoff, EscalationStep, RamzipHandoff};
 use crate::ptr::slice_within;
 use crate::seal::{EntropySource, NonceSequence, SealError, SealKey};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError};
-use tairix_log::Sink;
 
 use super::audit::{log_ramzip_failure, RamzipAuditEvent};
 use super::caps::{decompression_floor, RamzipCaps};

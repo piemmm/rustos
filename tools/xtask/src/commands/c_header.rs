@@ -45,6 +45,7 @@ use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
 };
+use tairix_abi::sysinfo::SYSINFO_QUERIES;
 use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
     DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
@@ -1478,51 +1479,16 @@ fn sysinfo_emit_framing(out: &mut String) {
 fn sysinfo_emit_query_ids(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str("/* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */\n");
-    let query_ids = [
-        (
-            "TAIRIX_SYSINFO_QUERY_SELF_PROCESS_LIST",
-            SysinfoQueryId::SELF_PROCESS_LIST,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_GLOBAL_PROCESS_LIST",
-            SysinfoQueryId::GLOBAL_PROCESS_LIST,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_KERNEL_MEMORY_STATS",
-            SysinfoQueryId::KERNEL_MEMORY_STATS,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_HARDWARE_TREE",
-            SysinfoQueryId::HARDWARE_TREE,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_SYSTEM_IDENTITY",
-            SysinfoQueryId::SYSTEM_IDENTITY,
-        ),
-        ("TAIRIX_SYSINFO_QUERY_UPTIME", SysinfoQueryId::UPTIME),
-        (
-            "TAIRIX_SYSINFO_QUERY_MOUNT_LIST",
-            SysinfoQueryId::MOUNT_LIST,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_RESOURCE_LIMITS",
-            SysinfoQueryId::RESOURCE_LIMITS,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_PROCESS_IDENTITY",
-            SysinfoQueryId::PROCESS_IDENTITY,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_LOAD_AVERAGE",
-            SysinfoQueryId::LOAD_AVERAGE,
-        ),
-        (
-            "TAIRIX_SYSINFO_QUERY_USER_DIRECTORY",
-            SysinfoQueryId::USER_DIRECTORY,
-        ),
-    ];
-    for (name, id) in query_ids {
-        let _ = writeln!(out, "#define {name} ((uint16_t){}u)", id.as_u16());
+    // One macro per registry row, named from the row's own stable name,
+    // so a query added to `lib/abi` appears here with no edit and the
+    // header cannot fall behind the registry it is generated from.
+    for spec in SYSINFO_QUERIES {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_SYSINFO_QUERY_{} ((uint16_t){}u)",
+            spec.name.to_ascii_uppercase(),
+            spec.id.as_u16()
+        );
     }
     out.push('\n');
 }
@@ -2399,42 +2365,43 @@ fn emit_waitset_contract(out: &mut String) {
         "#define TAIRIX_WAITSET_OP_DEL {}u",
         WaitSetOp::Del.as_u32()
     );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_ENDPOINT {}u",
-        WaitSourceKind::Endpoint.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_IRQ {}u",
-        WaitSourceKind::Irq.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_CHILD {}u",
-        WaitSourceKind::Child.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_SEAT_INPUT {}u",
-        WaitSourceKind::SeatInput.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_PORT {}u",
-        WaitSourceKind::Port.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_STREAM {}u",
-        WaitSourceKind::Stream.as_u32()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_WAIT_SOURCE_SIGNAL {}u",
-        WaitSourceKind::Signal.as_u32()
-    );
+    // Every wait source in the closed ABI set, discovered by walking the
+    // wire values `WaitSourceKind::from_u32` accepts rather than a list
+    // kept in step by hand: a hand-written list silently omitted two
+    // kinds once already, and a header that does not name a source a
+    // program can legally use is a broken contract.
+    for value in 0.. {
+        let Ok(kind) = WaitSourceKind::from_u32(value) else {
+            break;
+        };
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_WAIT_SOURCE_{} {}u",
+            wait_source_macro_suffix(kind),
+            kind.as_u32()
+        );
+    }
     out.push('\n');
+}
+
+/// The C macro suffix naming `kind`, as `TAIRIX_WAIT_SOURCE_<suffix>`.
+///
+/// Exhaustive on purpose: adding a wait source to the ABI must fail to
+/// compile here until it is named, so the generated header can never
+/// again fall behind the enum it is generated from.
+const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
+    match kind {
+        WaitSourceKind::Endpoint => "ENDPOINT",
+        WaitSourceKind::Irq => "IRQ",
+        WaitSourceKind::Child => "CHILD",
+        WaitSourceKind::SeatInput => "SEAT_INPUT",
+        WaitSourceKind::Port => "PORT",
+        WaitSourceKind::Stream => "STREAM",
+        WaitSourceKind::Signal => "SIGNAL",
+        WaitSourceKind::File => "FILE",
+        WaitSourceKind::CallReply => "CALL_REPLY",
+        WaitSourceKind::MemoryPressure => "MEMORY_PRESSURE",
+    }
 }
 
 /// Emit the filesystem-call contract items into `tairix_syscall.h`: the

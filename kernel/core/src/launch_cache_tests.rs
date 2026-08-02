@@ -8,7 +8,7 @@ use super::*;
 
 use alloc::boxed::Box;
 
-use tairix_kernel_mem::{FreeMemorySource, PressureBand};
+use tairix_reclaim::{FreeMemorySource, PressureBand};
 
 use crate::test_bundle::{composed_bundle, gate_load, verified_app};
 use crate::test_pressure::{free_for, pressured, unpressured, TEST_TOTAL};

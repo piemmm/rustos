@@ -771,8 +771,10 @@ mod tests {
     use tairix_devmatch::{resolve, MatchResolution};
     use tairix_drv_network_virtio_net::VIRTIO_NET_DEVICE_ID;
     use tairix_drvhost::store::scan_store;
-    use tairix_drvhost::{DriverStore, ImageSource, Sink};
-    use tairix_log::Event;
+    use tairix_drvhost::{DriverStore, ImageSource};
+    // These tests assert through the resolved match, not the audit stream,
+    // so the scan's records have nowhere to go.
+    use tairix_log::DiscardSink;
     use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 
     /// An arbitrary non-empty program image: the store scan and the match
@@ -843,14 +845,6 @@ mod tests {
             }
             Err(Errno::NotFound)
         }
-    }
-
-    /// Discarding audit sink — these tests assert through the resolved match,
-    /// not the audit stream.
-    struct DiscardSink;
-
-    impl Sink for DiscardSink {
-        fn write_event(&self, _event: &Event<'_>) {}
     }
 
     /// Scan the three-bundle store, candidate indices pinned by scan order

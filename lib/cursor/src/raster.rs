@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::Point;
 use tairix_raster::Surface;
+use tairix_reclaim::CachedBytes;
 
 use crate::vector::VectorCursor;
 
@@ -26,6 +27,20 @@ use crate::vector::VectorCursor;
 pub struct CursorImage {
     surface: Surface,
     hotspot: Point,
+}
+
+impl CachedBytes for CursorImage {
+    /// The image's only heap allocation is its `Surface`'s pixel buffer;
+    /// the hotspot is a plain `Copy` coordinate pair with no heap part.
+    fn payload_bytes(&self) -> usize {
+        self.surface.payload_bytes()
+    }
+
+    /// Delegate to the surface's own wipe: the hotspot carries no
+    /// rendered data worth clearing.
+    fn wipe(&mut self) {
+        self.surface.wipe();
+    }
 }
 
 impl CursorImage {

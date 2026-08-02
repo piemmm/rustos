@@ -15,7 +15,12 @@ use crate::geometry::{Point, Rect};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
+use tairix_cursor::CursorImage;
+use tairix_log::{Event, Sink};
+use tairix_reclaim::{PressureBand, ReclaimCache, ReportedPressure};
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
+
+use crate::select::{cursor_cache, CursorEpoch};
 
 use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
@@ -1531,7 +1536,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
 
     // First refresh over the desktop installs the arrow.
     router.handle(moved(70, 70), &mut c);
@@ -1554,7 +1559,7 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
 
     // Arrow over the background, then Text over the window.
     router.handle(moved(70, 70), &mut c);
@@ -1578,7 +1583,7 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
 fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let router = InputRouter::new();
-    let mut ctrl = CursorController::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
 
     // No cursor shown yet and the policy has not run: raising the output
     // scale damages the screen but there is nothing to install, and a
@@ -1593,7 +1598,7 @@ fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
 fn controller_re_renders_on_scale_change() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
 
     // Show a cursor at 1:1, then raise the output scale: a refresh sees the
     // new density and re-rasterises, so the footprint enlarges even though
@@ -1613,7 +1618,7 @@ fn controller_re_renders_on_scale_change() {
 fn controller_re_renders_on_registry_swap() {
     let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
-    let mut ctrl = CursorController::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
 
     router.handle(moved(10, 10), &mut c);
     assert!(ctrl.refresh(&router, &mut c));
@@ -2758,4 +2763,164 @@ fn size_toggle_is_refused_for_windows_that_cannot_maximize() {
     let before = c.window(fixed).unwrap().bounds();
     assert!(c.toggle_window_size(fixed, work_area).is_none());
     assert_eq!(c.window(fixed).unwrap().bounds(), before);
+}
+
+/// A 1080p 32-bit output's worth of bytes: the backing the cursor cache's
+/// budget is derived from in these tests, so the ceiling under test is the
+/// real derivation rather than a number invented here.
+const TEST_FB_BYTES: usize = 1920 * 1080 * 4;
+
+/// The seat the cursor caches under test are charged to.
+const TEST_SEAT: u64 = 1;
+
+/// Discards audit records. These tests assert cache behaviour; the audit
+/// path itself is covered where it is defined, in `lib/reclaim`.
+struct SilentSink;
+
+impl Sink for SilentSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+static TEST_SINK: SilentSink = SilentSink;
+
+/// The gauge shared by every cursor test that does not care about
+/// pressure. It is only ever reported `Normal`, so the tests may run in
+/// parallel without one perturbing another; a test that *does* move the
+/// band declares its own gauge instead.
+static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+/// A cursor cache at normal pressure, sized from a 1080p output.
+fn test_cursor_cache() -> ReclaimCache<CursorKind, CursorImage, CursorEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    cursor_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
+#[test]
+fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    let after_first = ctrl.cache_stats().misses();
+
+    // Moving onto the window and back re-shows the arrow: the second
+    // showing must come from the cache, not a fresh rasterisation.
+    router.handle(moved(20, 20), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(
+        ctrl.cache_stats().misses(),
+        after_first + 1,
+        "only the newly shown kind may rasterise"
+    );
+    assert!(ctrl.cache_stats().hits() >= 1);
+}
+
+#[test]
+fn a_scale_change_invalidates_every_cached_cursor() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.cache_len(), 1);
+
+    assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(
+        ctrl.cache_len(),
+        1,
+        "the new scale's image replaces the old one rather than joining it"
+    );
+    assert_eq!(ctrl.cache_stats().invalidations(), 1);
+}
+
+#[test]
+fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
+    // A gauge private to this test: it moves the band, and the shared one
+    // must stay at normal for the tests running beside it.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    PRESSURE.report(PressureBand::Normal);
+
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(cursor_cache(
+        TEST_SEAT,
+        TEST_FB_BYTES,
+        &PRESSURE,
+        &TEST_SINK,
+    ));
+
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.cache_len(), 1);
+    assert!(ctrl.cache_bytes() > 0);
+
+    // Mild pressure forces a disposable-UI cache to zero, ahead of any
+    // clean-file or anonymous-page reclaim.
+    PRESSURE.report(PressureBand::Mild);
+    assert!(ctrl.trim() > 0, "mild pressure must release bytes");
+    assert_eq!(ctrl.cache_len(), 0);
+    assert_eq!(ctrl.cache_bytes(), 0);
+
+    // A different shape is still drawn correctly; it is simply
+    // rasterised on demand instead of retained.
+    router.handle(moved(20, 20), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Text);
+    assert!(c.cursor_bounds().is_some());
+    assert_eq!(ctrl.cache_len(), 0, "no growth while pressure holds");
+}
+
+#[test]
+fn the_cursor_cache_budget_follows_the_output_it_was_built_for() {
+    // The budget is derived from the output's own frame size, so a tiny
+    // panel is allowed a tiny cache and a large display a large one —
+    // never one hand-picked ceiling for both. A 64x64 output's whole
+    // frame is smaller than a single rasterised cursor, so nothing may
+    // be retained, while the 1080p output of the other tests retains
+    // normally.
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let tiny_output_bytes = 64 * 64 * 4;
+    let mut ctrl = CursorController::new(cursor_cache(
+        TEST_SEAT,
+        tiny_output_bytes,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    ));
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c), "the cursor is still drawn");
+    assert!(c.cursor_bounds().is_some());
+    assert_eq!(
+        ctrl.cache_len(),
+        0,
+        "an output too small to budget a cursor retains none"
+    );
+    assert!(ctrl.cache_stats().refusals() >= 1);
+}
+
+#[test]
+fn teardown_releases_every_cached_cursor() {
+    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(70, 70), &mut c);
+    assert!(ctrl.refresh(&router, &mut c));
+    assert_eq!(ctrl.cache_len(), 1);
+
+    ctrl.teardown();
+    assert_eq!(ctrl.cache_len(), 0);
+    assert_eq!(ctrl.cache_bytes(), 0);
+    assert_eq!(ctrl.cache_stats().teardowns(), 1);
 }

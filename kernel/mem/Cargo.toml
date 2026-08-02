@@ -43,6 +43,13 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # to depend on `lib/*`.
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 
+# The shared reclaimable-memory model (`plans/SMARTRAM.md`): the
+# reclaim-class taxonomy, cache budget/accounting ledger, and the
+# pressure-band vocabulary `kernel/mem::pressure` builds its ramzip
+# handoff and escalation ordering on top of. Shared with the desktop
+# session so both sides of the syscall boundary reclaim by one policy.
+tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
+
 # First-party LZ codec for the `ramzip` compressed anonymous-memory tier
 # (`plans/SWAPSWAPSWAP.md` §8): pages are compressed *before* they are
 # sealed, through the one shared codec — never a second compressor and

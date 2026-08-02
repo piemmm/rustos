@@ -51,6 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_reclaim::RESERVE_DIVISOR;
 use tairix_sync::SpinLock;
 
 use crate::bootinfo::{BootMemoryMap, RegionKind};
@@ -80,14 +81,10 @@ pub const PAGE_SHIFT: u32 = 12;
 /// compile-time assertion in `kernel/core` keeps this coupling honest.
 pub const MAX_ORDER: u32 = 13;
 
-/// Fraction of usable RAM held back as a kernel reserve: `usable_frames /
-/// RESERVE_DIVISOR` frames a *user* commit may never draw into, so the
-/// kernel always retains headroom to make progress (grow its heap, build
-/// page tables, service a fault) even when userland is starving the
-/// machine. The one definition shared with the memory-pressure policy
-/// (`crate::pressure`), so the frame allocator's user-commit floor and the
-/// pressure band's critical floor can never diverge. ~1.6% of RAM.
-pub const RESERVE_DIVISOR: usize = 64;
+// [`RESERVE_DIVISOR`](tairix_reclaim::RESERVE_DIVISOR) is the one
+// definition shared with the memory-pressure policy (`tairix_reclaim`),
+// so the frame allocator's user-commit floor and the pressure band's
+// critical floor can never diverge.
 
 /// Type alias for "number of frames", used to keep call-site arithmetic
 /// distinct from frame-index arithmetic.

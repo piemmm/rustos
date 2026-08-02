@@ -60,7 +60,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
-use tairix_kernel_mem::{CacheBudget, MemoryPressure};
+use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::SpinLock;
 use zeroize::Zeroize;
 
@@ -558,7 +558,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use tairix_kernel_mem::FreeMemorySource;
+    use tairix_reclaim::FreeMemorySource;
 
     const BLOCK_SIZE: u32 = 512;
 

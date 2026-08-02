@@ -86,6 +86,7 @@ members = [
     "lib/raid",
     "lib/raidmeta",
     "lib/raster",
+    "lib/reclaim",
     "lib/resolver",
     "lib/resref",
     "lib/rng",

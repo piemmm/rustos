@@ -5,10 +5,13 @@
 //! a dense row-major array of [`Pixel`]s with no padding; a consumer
 //! places it on screen at an origin and blends it through [`Pixel::over`].
 
+use core::mem::size_of;
 use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
+
+use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
 use crate::round::round_rect_coverage;
@@ -19,6 +22,20 @@ pub struct Surface {
     width: u32,
     height: u32,
     pixels: Vec<Pixel>,
+}
+
+impl CachedBytes for Surface {
+    /// The retained heap size of the pixel buffer — the only heap
+    /// allocation a `Surface` owns.
+    fn payload_bytes(&self) -> usize {
+        self.pixels.len() * size_of::<Pixel>()
+    }
+
+    /// Overwrite every pixel with fully transparent black, so a reclaimed
+    /// surface leaves no rendered user data behind in freed heap memory.
+    fn wipe(&mut self) {
+        self.pixels.fill(Pixel::TRANSPARENT);
+    }
 }
 
 impl Surface {

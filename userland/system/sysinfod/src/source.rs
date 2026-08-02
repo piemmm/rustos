@@ -18,9 +18,9 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
-    LoadAverage, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
-    ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-    VolumeIoHealthRecord,
+    LoadAverage, MemoryPressureBand, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
+    UserDirectoryRecord, VolumeIoHealthRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
@@ -184,6 +184,15 @@ pub trait SysinfoSource {
     /// same boundary as [`kernel_memory_stats`](Self::kernel_memory_stats)
     /// (`plans/STRESSTEST.md` ST1).
     fn memory_pressure(&self, caller: &Caller) -> Result<MemoryPressureStats, Errno>;
+
+    /// Return the published memory-pressure band alone.
+    ///
+    /// Ungated: a process must be able to learn that the machine is
+    /// short of memory in order to give its own caches back, and the
+    /// band carries no bytes and nothing per-principal. The detailed
+    /// [`memory_pressure`](Self::memory_pressure) view stays behind
+    /// `CAP_SYSINFO_KERNEL`.
+    fn memory_pressure_band(&self, caller: &Caller) -> Result<MemoryPressureBand, Errno>;
 
     /// Return the reclaimable-cache ledger: one record per reclaim class,
     /// in class-id order, aggregated across every live cache.

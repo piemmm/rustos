@@ -500,7 +500,7 @@ mod tests {
     }
 
     fn desktop() -> (DesktopShell, Compositor) {
-        let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480));
+        let shell = crate::tests::shell_for(TaskbarConfig::bottom_bar(640, 480));
         let compositor =
             Compositor::new(mode(640, 480, DisplayFormat::Rgba8888), Color::rgb(0, 0, 0))
                 .expect("compositor builds");

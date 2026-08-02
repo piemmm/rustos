@@ -76,10 +76,10 @@ use tairix_kernel_core::{
     CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
     VolumeForest,
 };
-use tairix_kernel_mem::{CacheBudget, MemoryPressure, ReclaimOwner};
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+use tairix_reclaim::{CacheBudget, MemoryPressure, ReclaimOwner};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::shared_block::DriverStoreService;

@@ -97,7 +97,7 @@ mod program {
     use tairix_browse::{DirectorySource, VfsDirectorySource};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        build_pin_views, command_section, deliver_pending_open, load_library,
+        artwork_cache, build_pin_views, command_section, deliver_pending_open, load_library,
         maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
         serve_switchboard_request, window_control_event, Answer, CliError, Command, ConcludedPick,
         ConfirmPrompt, DesktopShell, DeviceInputSource, HangTracker, IconCache, IconRasteriser,
@@ -109,6 +109,8 @@ mod program {
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
+    use tairix_procinfo::IpcTransport;
+    use tairix_reclaim::PressureBand;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -212,6 +214,12 @@ mod program {
     /// relay it to the capsule.
     const SWITCHBOARD_TOKEN: u64 = 5;
 
+    /// The wait-set token of the memory-pressure member: the kernel wakes
+    /// the loop when the machine's pressure band changes, so the desktop
+    /// gives its cached pixels back as memory tightens instead of holding
+    /// them until something else is starved.
+    const PRESSURE_TOKEN: u64 = 6;
+
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
     /// covers several concurrent clients.
@@ -244,6 +252,26 @@ mod program {
         let _ = tairix_rt::stderr(reason.as_bytes());
         let _ = tairix_rt::stderr(b"\n");
         code
+    }
+
+    /// Read the machine's current memory-pressure band and publish it to
+    /// the process gauge every cache in this session consults, returning
+    /// whether the band actually moved.
+    ///
+    /// The band is fetched through the shared System Information client
+    /// (the ungated band-only query, which takes no free-memory reading),
+    /// so the desktop learns the same band the kernel's own caches obey.
+    /// A refused or failed read publishes nothing: the gauge keeps the
+    /// band it already had rather than assuming the machine is
+    /// comfortable, which costs cache hits and never correctness.
+    fn refresh_pressure_band() -> bool {
+        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
+            return false;
+        };
+        // The wire decode already refuses a depth outside the known set,
+        // and the shared model's own decode reads anything unrecognised
+        // as the deepest band — shrink everything — never as normal.
+        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
     }
 
     /// The production [`DisplayTransport`]: one synchronous `ipc_call` to
@@ -484,7 +512,10 @@ mod program {
 
     /// Classify one drain fault: losing the seat is the session's normal
     /// fail-loud teardown; anything else is an untrustworthy input stream.
-    fn drain_fault(err: Errno) -> i32 {
+    /// Either way the session is ending, so the shell's disposable-UI caches
+    /// are wiped before the exit code is returned.
+    fn drain_fault(shell: &mut DesktopShell, compositor: &mut Compositor, err: Errno) -> i32 {
+        shell.teardown(compositor);
         match err {
             Errno::SeatRevoked | Errno::SeatNotOwner => {
                 fail(EXIT_SEAT_LOST, "seat lease lost; tearing the session down")
@@ -497,18 +528,27 @@ mod program {
     /// refusal onto the session's exit codes. The service refuses a caller
     /// whose lease is no longer live (`SeatRevoked` from the kernel's
     /// per-request check; a stale owner surfaces as a permission refusal),
-    /// so a lost seat is observed here exactly as on a drain.
+    /// so a lost seat is observed here exactly as on a drain. Any refusal
+    /// ends the session, so the shell's disposable-UI caches are wiped
+    /// before the exit code is returned.
     fn present(
+        shell: &mut DesktopShell,
         compositor: &mut Compositor,
         display: &mut RemoteDisplay<'_, RtDisplayTransport>,
     ) -> Result<(), i32> {
         match compositor.present(display) {
             Ok(()) => Ok(()),
-            Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => Err(fail(
-                EXIT_SEAT_LOST,
-                "seat lease lost; tearing the session down",
-            )),
-            Err(_) => Err(fail(EXIT_PRESENT_FAILED, "display present refused")),
+            Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
+                shell.teardown(compositor);
+                Err(fail(
+                    EXIT_SEAT_LOST,
+                    "seat lease lost; tearing the session down",
+                ))
+            }
+            Err(_) => {
+                shell.teardown(compositor);
+                Err(fail(EXIT_PRESENT_FAILED, "display present refused"))
+            }
         }
     }
 
@@ -714,7 +754,19 @@ mod program {
         // --- Desktop bring-up: the shell, the compositor over the active
         // theme's desktop colour, and the two live seat input sources with
         // the queried mode as the pointer's screen rectangle.
-        let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(mode.width_px, mode.height_px));
+        // The seat's two rasterised-asset caches are budgeted from one
+        // frame of this very output, so the desktop is allowed more cached
+        // pixels on a large display than a small one and no ceiling is
+        // guessed. They are governed by the process pressure gauge, which
+        // the wait loop below keeps current from the kernel's band.
+        static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+        let mut shell = DesktopShell::new(
+            TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
+            SEAT_PRIMARY,
+            frame_len,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        );
         let Some(mut compositor) = Compositor::new(mode, shell.desktop_background()) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
@@ -739,7 +791,12 @@ mod program {
         // loaded. Edits arriving later (a context-menu unpin, a pin request
         // or drop from an app) mark the service dirty and the loop
         // re-resolves before its next present.
-        let mut pins = load_pin_service();
+        let mut pins = load_pin_service(IconCache::new(artwork_cache(
+            SEAT_PRIMARY,
+            frame_len,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        )));
 
         // First frame: place the bar, install the pointer cursor at the
         // seat's initial pointer position, and push the whole surface once;
@@ -747,7 +804,7 @@ mod program {
         // is then kept live by the shell as each seat event is pumped.
         shell.present(&mut compositor);
         shell.refresh_cursor(&mut compositor);
-        if let Err(code) = present(&mut compositor, &mut display) {
+        if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
             return code;
         }
 
@@ -814,8 +871,9 @@ mod program {
 
         // Park on the wait-set: the seat member wakes on input delivery
         // and on lease loss, the endpoint member on a posted window
-        // request, and the any-child member when a spawned app exits (so
-        // its windows are torn down promptly). Every member is
+        // request, the any-child member when a spawned app exits (so its
+        // windows are torn down promptly), and the memory-pressure member
+        // when the machine's pressure band moves. Every member is
         // owner-checked at add; the session never polls and never sleeps
         // through its own revocation.
         let set = tairix_rt::waitset_create();
@@ -874,6 +932,22 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "child wait refused");
         }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::MemoryPressure,
+            0,
+            PRESSURE_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "memory-pressure wait refused");
+        }
+        // Start from the band in force now: the member reports only
+        // *changes*, so without this the caches would run on the gauge's
+        // fail-closed unknown state until the machine happened to move
+        // band. A read that fails leaves the gauge closed, which costs
+        // cache hits and nothing else.
+        refresh_pressure_band();
 
         // The window channel's server state: the engine, the session-side
         // window table, the kernel-attested caller identity, the app-ward
@@ -1071,6 +1145,25 @@ mod program {
                     };
                     let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply[..len]);
                 }
+            } else if token == PRESSURE_TOKEN {
+                // The machine's memory-pressure band moved. Read it and, if
+                // it really changed, give back whatever the new band says a
+                // disposable-UI cache may keep — at the moment pressure
+                // rises, not at whatever later frame happens to touch a
+                // cache. The desktop's rasterised pixels are among the first
+                // memory the system reclaims, ahead of clean file data and
+                // well ahead of compressing anyone's anonymous pages.
+                //
+                // The cursor and glyphs remain correct throughout: a dropped
+                // entry is simply rasterised again on demand, so this costs
+                // rendering work and never a wrong pixel. Nothing is
+                // repainted here, and a band that demands nothing releases
+                // nothing, so a wake the desktop has already acted on is
+                // almost free.
+                if refresh_pressure_band() {
+                    let _ = shell.trim_caches();
+                    let _ = pins.icons.trim();
+                }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
                 // whose asynchronous load was refused exits with a reserved
@@ -1149,7 +1242,7 @@ mod program {
                     &mut compositor,
                 ) == Drained::Faulted
                 {
-                    return drain_fault(Errno::DeviceFault);
+                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
                 }
             } else if token == SEAT_TOKEN {
                 // Drain both input channels through the shell, routing
@@ -1164,7 +1257,7 @@ mod program {
                 let now_ns = tairix_rt::clock_get();
                 let outcomes = match shell.pump(&mut pointer, &mut compositor, now_ns) {
                     Ok(outcomes) => outcomes,
-                    Err(err) => return drain_fault(err),
+                    Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 };
                 for outcome in outcomes {
                     if route_outcome(
@@ -1187,6 +1280,8 @@ mod program {
                         &mut pending_open,
                     ) == Routed::EndSession
                     {
+                        shell.teardown(&mut compositor);
+                        pins.icons.teardown();
                         return EXIT_LOGGED_OUT;
                     }
                 }
@@ -1215,10 +1310,12 @@ mod program {
                                 &mut pending_open,
                             ) == Routed::EndSession
                             {
+                                shell.teardown(&mut compositor);
+                                pins.icons.teardown();
                                 return EXIT_LOGGED_OUT;
                             }
                         }
-                        Err(err) => return drain_fault(err),
+                        Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                     }
                 }
             }
@@ -1277,7 +1374,7 @@ mod program {
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
             // copies only that region.
-            if let Err(code) = present(&mut compositor, &mut display) {
+            if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
                 return code;
             }
         }
@@ -1313,7 +1410,11 @@ mod program {
     /// Load the user's pin store (reporting an unusable one loudly) into a
     /// service over the production file seams, alongside the sandboxed
     /// icon pipeline.
-    fn load_pin_service() -> PinPanel {
+    ///
+    /// `icons` is the seat's ready-built artwork cache: the caller owns
+    /// the output size, the seat, the pressure gauge, and the audit sink
+    /// that classify and bound it.
+    fn load_pin_service(icons: IconCache) -> PinPanel {
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let (store, warning) = SessionPins::load(&mut VfsFileReader, home);
         if let Some(warning) = warning {
@@ -1326,7 +1427,7 @@ mod program {
             rasteriser: SandboxRasteriser {
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
             },
-            icons: IconCache::new(),
+            icons,
         }
     }
 

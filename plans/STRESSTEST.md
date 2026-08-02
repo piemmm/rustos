@@ -72,7 +72,7 @@ Facts the stages below build on, so no stage re-derives them:
   reclaim, caches, or `ramzip`.
 - **The kernel already keeps the numbers; it just does not export them.**
   `kernel/mem::pressure` is the shared five-band gauge with hysteresis and
-  per-band transition counters; `kernel/mem::reclaim` is the classified
+  per-band transition counters; `tairix_reclaim` is the classified
   ledger (per-class payload/metadata bytes, shrink/teardown/failure
   counters); `kernel/mem::ramzip` accounts caps, stored/logical bytes,
   compression attempts/acceptances/rejections, fault-ins, authentication
@@ -160,7 +160,7 @@ like their sibling:
   `kernel/mem::pressure` five-band gauge), the band thresholds actually in
   force (derived values, reported not promised), the reserve floor, free
   frames, and the per-band transition counters since boot.
-- **`RECLAIM_STATS`** — the `kernel/mem::reclaim` ledger paged per class:
+- **`RECLAIM_STATS`** — the `tairix_reclaim` ledger paged per class:
   class id, payload bytes, metadata bytes, entry count, shrink/teardown
   counters, refusal counters. The SMARTRAM caches (filesystem cache,
   transform cache, launch cache, block cache) appear here as the classes
@@ -448,7 +448,7 @@ implementation fixed):
   (`load_observations_track_dispatch`).
 - `ReclaimClassRecord` carries exactly this plan's field list (class,
   payload/metadata bytes, entries, refusal/shrink/teardown/failure
-  counters). `kernel/mem::reclaim::CacheAccounting` was made
+  counters). `tairix_reclaim::CacheAccounting` was made
   interior-atomic and class-attributed for those figures (entries as a
   live per-class gauge; refusals/shrinks/teardowns/failures per class,
   whole-cache accessors now sum), so a shared `Arc<CacheAccounting>` is

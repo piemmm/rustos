@@ -5,32 +5,35 @@
 //! structured record through [`tairix_log`]. The numeric identifiers
 //! are part of the audit contract with external log consumers and may
 //! not be re-used or re-numbered. Per the range convention established
-//! in `lib/log` (subsystems pick ranges of `1_000`), `kernel/mem` owns
-//! `2_000..3_000`.
+//! in `lib/log` (subsystems pick ranges of `1_000`), the reclaimable-
+//! memory subsystem owns `2_000..3_000` — this crate emits 2000 and
+//! 2001 for every cache it governs (kernel-side and desktop-side
+//! alike), and the kernel's `ramzip` tier emits 2002 and 2003 from the
+//! same range.
 //!
 //! # Event catalogue
 //!
 //! | ID   | Level | Name                     | Sink  | When |
 //! |-----:|-------|--------------------------|-------|------|
-//! | 2000 | Error | `RECLAIM_CACHE_REFUSED`  | audit | A cache candidate failed the [`classification gate`](crate::reclaim::CacheCandidate::classify) at construction; the cache is poisoned from birth and its consumer serves without caching (fail closed). The `cause` field names the [`AdmissionRefusal`]. |
+//! | 2000 | Error | `RECLAIM_CACHE_REFUSED`  | audit | A cache candidate failed the [`classification gate`](crate::model::CacheCandidate::classify) at construction; the cache is poisoned from birth and its consumer serves without caching (fail closed). The `cause` field names the [`AdmissionRefusal`]. |
 //! | 2001 | Error | `RECLAIM_CACHE_POISONED` | audit | A live cache detected an internal ledger or index defect (a corruption-like event), drained itself, and disabled admission (fail closed). The `cause` field names the defect. |
 //!
 //! Every record carries the same field shape: `cache` (the emitting
 //! cache's fixed label), `owner` (the owning kernel subsystem's name,
-//! or the owner kind `volume` / `task`), `owner_id` (the owning
-//! volume's mount handle or task id; `0` for a named kernel
-//! subsystem), and `cause`. The fields are fixed labels and numeric
+//! or the owner kind `volume` / `task` / `session`), `owner_id` (the
+//! owning volume's mount handle, task id, or seat; `0` for a named
+//! kernel subsystem), and `cause`. The fields are fixed labels and numeric
 //! handles only — never file names, cached plaintext, keys, or
 //! capability tokens (`plans/SMARTRAM.md` section 9).
 //!
 //! Adding a new event requires assigning the next free identifier
-//! across the whole `kernel/mem` range — the `ramzip` tier's events
-//! (2002, 2003) live in [`crate::ramzip::RamzipAuditEvent`] — and
-//! updating the tables in `docs/src/architecture/memory.md`.
+//! across the whole `2_000..3_000` range — the `ramzip` tier's events
+//! (2002, 2003) live in `kernel/mem::ramzip` — and updating the tables
+//! in `docs/src/architecture/memory.md`.
 
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 
-use crate::reclaim::{AdmissionRefusal, ReclaimOwner};
+use crate::model::{AdmissionRefusal, ReclaimOwner};
 
 /// Audit event identifiers emitted for the reclaimable-cache
 /// subsystem.
@@ -73,15 +76,17 @@ impl ReclaimAuditEvent {
 
 /// The `owner` / `owner_id` field pair for a cache's declared owner.
 ///
-/// A named kernel subsystem logs its name with id `0`; a volume or
-/// task owner logs its kind with the numeric handle. An unclassified
-/// cache (the refusal itself may be a missing owner) logs `unknown`.
+/// A named kernel subsystem logs its name with id `0`; a volume, task,
+/// or desktop-session owner logs its kind with the numeric handle. An
+/// unclassified cache (the refusal itself may be a missing owner) logs
+/// `unknown`.
 const fn owner_fields(owner: Option<ReclaimOwner>) -> (&'static str, u64) {
     match owner {
         None => ("unknown", 0),
         Some(ReclaimOwner::KernelSubsystem(name)) => (name, 0),
         Some(ReclaimOwner::FilesystemVolume { volume }) => ("volume", volume),
         Some(ReclaimOwner::Task { task }) => ("task", task),
+        Some(ReclaimOwner::DesktopSession { seat }) => ("session", seat),
     }
 }
 
@@ -162,7 +167,7 @@ mod tests {
     use tairix_log::{Event, FieldValue, Sink};
 
     use super::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
-    use crate::reclaim::{AdmissionRefusal, ReclaimOwner};
+    use crate::model::{AdmissionRefusal, ReclaimOwner};
 
     /// One captured record: id, message, and rendered `(key, value)`
     /// fields.

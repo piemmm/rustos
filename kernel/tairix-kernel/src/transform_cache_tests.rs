@@ -14,7 +14,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
-use tairix_kernel_mem::{FreeMemorySource, PressureBand};
+use tairix_reclaim::{FreeMemorySource, PressureBand};
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
 /// on readable byte counts.

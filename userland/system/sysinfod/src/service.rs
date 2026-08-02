@@ -171,6 +171,11 @@ fn dispatch(
         user_directory(source, caller, payload, response)
     } else if query == SysinfoQueryId::MEMORY_PRESSURE {
         write_bytes(&source.memory_pressure(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::MEMORY_PRESSURE_BAND {
+        write_bytes(
+            &source.memory_pressure_band(caller)?.to_le_bytes(),
+            response,
+        )
     } else if query == SysinfoQueryId::RECLAIM_STATS {
         reclaim_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
@@ -719,14 +724,14 @@ mod tests {
     use tairix_abi::sysinfo::{
         CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
         CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
-        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
-        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-        ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
-        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
-        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
+        MemoryPressureStats, MountAvailability, MountListRequest, MountRecord, ProcessListRequest,
+        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord,
+        VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN,
+        RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
+        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
@@ -1029,6 +1034,12 @@ mod tests {
         }
         fn memory_pressure(&self, _caller: &Caller) -> Result<MemoryPressureStats, Errno> {
             Ok(fixture_pressure())
+        }
+        fn memory_pressure_band(&self, _caller: &Caller) -> Result<MemoryPressureBand, Errno> {
+            Ok(MemoryPressureBand {
+                band: fixture_pressure().band,
+                reserved: [0; 7],
+            })
         }
         fn reclaim_records(
             &self,
@@ -2309,6 +2320,30 @@ mod tests {
             sink.events.borrow().as_slice(),
             &[(Level::Debug, events::QUERY_SERVED)]
         );
+    }
+
+    #[test]
+    fn the_memory_pressure_band_is_ungated_unaudited_and_matches_the_gated_view() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let req = request_bytes(SysinfoQueryId::MEMORY_PRESSURE_BAND, &[]);
+        let mut resp = [0u8; 256];
+
+        // No capability at all: a process must be able to learn that the
+        // machine is short of memory in order to give its caches back.
+        let sink = RecordingSink::new();
+        let none = Caps(&[]);
+        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
+        assert_eq!(n, MemoryPressureBand::WIRE_LEN);
+        let decoded = MemoryPressureBand::from_bytes(&resp[..n]).expect("round trip");
+
+        // The same band the gated detailed view reports: one gauge, two
+        // views, never two notions of pressure.
+        assert_eq!(decoded.band, fixture_pressure().band);
+
+        // Unaudited: an ungated query a process may issue on every band
+        // change must not be able to drive the security log.
+        assert!(sink.events.borrow().as_slice().is_empty());
     }
 
     #[test]

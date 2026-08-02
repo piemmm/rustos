@@ -64,8 +64,6 @@ pub mod pressure;
 pub mod ptr;
 pub mod ramtest;
 pub mod ramzip;
-pub mod reclaim;
-pub mod reclaim_audit;
 pub mod seal;
 pub mod sensitive;
 pub mod slab;
@@ -88,8 +86,7 @@ pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
 pub use pressure::{
-    escalation, ramzip_handoff, ramzip_reclaim_batch, shrink_target, EscalationStep,
-    FreeMemorySource, MemoryPressure, PressureBand, PressureThresholds, RamzipHandoff,
+    escalation, ramzip_handoff, ramzip_reclaim_batch, EscalationStep, RamzipHandoff,
 };
 pub use ramtest::{
     run as ram_selftest, snapshot_free_regions as ram_snapshot_free_regions,
@@ -102,12 +99,6 @@ pub use ramzip::{
     PageKind, Ramzip, RamzipCaps, RamzipCounters, RamzipFaultOutcome, RamzipLedger,
     RamzipReclaimSummary, VmContext, WarmOutcome,
 };
-pub use reclaim::{
-    AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
-    InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
-    MAX_ENTRY_METADATA,
-};
-pub use reclaim_audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
 pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};

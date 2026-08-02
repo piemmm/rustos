@@ -6,7 +6,7 @@
 //! the tier fails closed. Each such failure emits exactly one
 //! structured record through [`tairix_log`]. The identifiers continue
 //! the `kernel/mem` range (`2_000..3_000`) established in
-//! [`crate::reclaim_audit`]; IDs are assigned once across the whole
+//! [`tairix_reclaim::audit`]; IDs are assigned once across the whole
 //! range and never re-used or re-numbered.
 //!
 //! # Event catalogue

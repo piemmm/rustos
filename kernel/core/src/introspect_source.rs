@@ -24,16 +24,15 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureStats, ProcessRecord, ProcessState, ReclaimClassRecord, ResourceLimitRecord,
-    SystemIdentity, Uptime, UserDirectoryRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX,
-    PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    MemoryPressureBand, MemoryPressureStats, ProcessRecord, ProcessState, ReclaimClassRecord,
+    ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord, CPU_INFO_FLAG_FREQ_MEASURED,
+    CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
-use tairix_kernel_mem::pressure::PressureBand;
-use tairix_kernel_mem::reclaim::ReclaimClass;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::TaskId as SecTaskId;
+use tairix_reclaim::{PressureBand, ReclaimClass};
 
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
@@ -436,6 +435,18 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         Ok(stats.to_le_bytes().to_vec())
     }
 
+    fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno> {
+        // The published band, with no reading taken: this backs the
+        // ungated query, so an unprivileged caller must not be able to
+        // drive a free-memory sample. Before boot brings the gauge
+        // online the registry truthfully reports the shallowest band.
+        let report = MemoryPressureBand {
+            band: crate::memstats::MEM_STATS.published_band().depth(),
+            reserved: [0u8; 7],
+        };
+        Ok(report.to_le_bytes().to_vec())
+    }
+
     fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
         // One record per reclaim class, aggregated across every
         // registered live cache ledger; the wire class id is the class's
@@ -680,8 +691,8 @@ fn user_directory_page(
 mod tests {
     use super::counts_toward_load;
     use tairix_abi::sysinfo::{PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
-    use tairix_kernel_mem::reclaim::ReclaimClass;
     use tairix_kernel_sched_api::TaskState;
+    use tairix_reclaim::ReclaimClass;
 
     /// The wire class ids the reclaim export emits are the kernel
     /// taxonomy's own indexes; the two closed sets must stay the same
@@ -699,7 +710,7 @@ mod tests {
     /// five-band set.
     #[test]
     fn pressure_bands_match_the_abi_count() {
-        use tairix_kernel_mem::pressure::PressureBand;
+        use tairix_reclaim::PressureBand;
         for depth in 0..PRESSURE_BAND_COUNT {
             let band = PressureBand::from_depth(u8::try_from(depth).unwrap());
             assert_eq!(usize::from(band.depth()), depth);

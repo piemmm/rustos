@@ -20,7 +20,6 @@
 //! under its stored identity so the user can still unpin it — it simply
 //! cannot launch, and activating it reports why.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -28,8 +27,10 @@ use alloc::vec::Vec;
 use tairix_abi::{AppInfoHeader, Errno, APPINFO_WIRE_MAX};
 use tairix_geometry::Point;
 use tairix_icon::IconKind;
+use tairix_log::Sink;
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::Surface;
+use tairix_reclaim::{disposable_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 use tairix_taskbar::{BarLayout, PinView, TaskId};
 use tairix_taskpins::{
     parse as parse_pins, render as render_pins, user_pins_path, BundlePath, PinError, PinList,
@@ -538,24 +539,110 @@ pub trait IconRasteriser {
     fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// The per-session artwork cache: one rasterised surface per icon asset
-/// path and pixel side.
+/// One decode outcome, retained: the rasterised artwork, or the refusal
+/// that decoding it produced.
 ///
-/// Refusals are cached too (as `None`), so a malformed icon is decoded —
-/// and refused — once, not on every strip refresh. A scale change alters
-/// the side and so misses the cache, re-rasterising at the new geometry;
-/// the cache lives for the session, matching how bundles change (at
-/// install time, not while their icon is on the bar).
-#[derive(Default)]
+/// A refusal is worth remembering — it stops a malformed icon being
+/// decoded again on every strip refresh — and it is charged its
+/// bookkeeping like any other entry, so a bundle store full of broken
+/// artwork cannot grow the cache past its budget.
+///
+/// Public only because it names the value type of the cache
+/// [`artwork_cache`] builds and [`IconCache::new`] takes; the outcome
+/// itself is reached through [`IconCache::artwork`].
+pub struct CachedArtwork(Option<Surface>);
+
+impl CachedBytes for CachedArtwork {
+    fn payload_bytes(&self) -> usize {
+        self.0.as_ref().map_or(0, CachedBytes::payload_bytes)
+    }
+
+    fn wipe(&mut self) {
+        if let Some(surface) = self.0.as_mut() {
+            surface.wipe();
+        }
+    }
+}
+
+/// The per-seat pinned-app artwork cache: one decode outcome per icon
+/// asset path and pixel side.
+///
+/// A scale change alters the side and so misses the cache, re-rasterising
+/// at the new geometry. Nothing invalidates the whole cache at once —
+/// bundle artwork changes at install time, not while its icon is on the
+/// bar — so the generation is the unit value; what bounds this cache is
+/// its budget, and what ends it is the seat's teardown.
+///
+/// The entries are a user's own pinned-application artwork, so they are
+/// owned by the seat, overwritten when released, and given back under
+/// memory pressure like every other rasterised desktop asset. The keys
+/// are bundle-supplied paths, so an unbounded map here would let a
+/// crafted or merely crowded bundle store grow the session without
+/// limit; the budget forecloses that.
 pub struct IconCache {
-    entries: BTreeMap<(String, u32), Option<Surface>>,
+    entries: ReclaimCache<(String, u32), CachedArtwork, ()>,
+}
+
+/// Bytes of bookkeeping each retained decode costs beyond its pixels: the
+/// asset path the entry is keyed by (bounded by the shared path cap), the
+/// pixel side, the recency index node, and the map nodes holding them.
+const ARTWORK_ENTRY_METADATA_BYTES: usize = 256;
+
+/// Build the cache [`IconCache::new`] wraps, classified and budgeted by
+/// the one shared desktop policy.
+///
+/// `fb_bytes` is the output's frame size, so the artwork a seat may retain
+/// scales with the display it is drawn on rather than a fixed ceiling.
+#[must_use]
+pub fn artwork_cache(
+    seat: u64,
+    fb_bytes: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+    sink: &'static (dyn Sink + Sync),
+) -> ReclaimCache<(String, u32), CachedArtwork, ()> {
+    disposable_ui_cache(
+        "session.pin-artwork",
+        seat,
+        fb_bytes,
+        ARTWORK_ENTRY_METADATA_BYTES,
+        pressure,
+        sink,
+    )
 }
 
 impl IconCache {
-    /// An empty cache.
+    /// An empty cache over the caller's ready-built reclaimable cache.
+    ///
+    /// The cache is injected rather than defaulted for the same reason
+    /// the window manager's and taskbar's are: only the session knows the
+    /// output's size, the seat, the live pressure gauge, and the audit
+    /// sink, and a cache built without them would retain nothing while
+    /// looking like it worked.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new(entries: ReclaimCache<(String, u32), CachedArtwork, ()>) -> Self {
+        Self { entries }
+    }
+
+    /// Release every retained decode, overwriting the artwork first.
+    ///
+    /// Called when the seat is lost or its session ends, so one user's
+    /// pinned-application artwork never outlives their session in
+    /// reusable heap.
+    pub fn teardown(&mut self) {
+        self.entries.teardown();
+    }
+
+    /// Apply the current memory-pressure band's forced shrink, returning
+    /// the bytes released.
+    pub fn trim(&mut self) -> usize {
+        self.entries.enforce_pressure()
+    }
+
+    /// Bytes currently charged for retained artwork, payload plus this
+    /// cache's own per-entry bookkeeping.
+    #[must_use]
+    pub fn charged_bytes(&self) -> usize {
+        self.entries.charged_bytes()
     }
 
     /// The artwork for `source` at `side` pixels: served from the cache,
@@ -574,13 +661,11 @@ impl IconCache {
         R: SessionFileReader + ?Sized,
         D: IconRasteriser + ?Sized,
     {
-        let key = (source.path(), side);
-        if let Some(cached) = self.entries.get(&key) {
-            return cached.clone();
-        }
-        let rendered = render_icon(reader, rasteriser, &key.0, side);
-        self.entries.insert(key, rendered.clone());
-        rendered
+        let path = source.path();
+        let served = self.entries.get_or_build(&(), (path.clone(), side), || {
+            Some(CachedArtwork(render_icon(reader, rasteriser, &path, side)))
+        })?;
+        served.0.clone()
     }
 }
 

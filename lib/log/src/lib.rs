@@ -188,6 +188,25 @@ pub trait Sink {
     fn write_event(&self, event: &Event<'_>);
 }
 
+/// A sink for a component that genuinely has nowhere to log.
+///
+/// Not a convenience and not a default: it exists for the narrow case of
+/// a component built outside a running system — a host build tool that
+/// instantiates production types to reuse their arithmetic, a harness
+/// with no journal — where there is no destination to write to and
+/// inventing one would be a fiction. It is a ZST, so a `&'static` costs
+/// nothing.
+///
+/// It must never stand in for a real sink on a path that makes security
+/// decisions: discarding an audit record is exactly the silent failure
+/// the structured log exists to prevent.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct DiscardSink;
+
+impl Sink for DiscardSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
 /// Global maximum severity filter, exclusive of records below this level.
 ///
 /// Initialised to [`Level::Info`]; change with [`set_max_level`] (e.g. from

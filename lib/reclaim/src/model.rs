@@ -5,8 +5,9 @@
 //! rebuilt from its canonical source — so the memory it occupies is a
 //! loan the VM can call in at any time. This module is the one
 //! definition of how such a cache is classed, bounded, and accounted:
-//! the consumer (today the filesystem cache in `kernel/core::fs`)
-//! charges every entry here, and reclaim decisions read these numbers
+//! every consumer — the kernel's filesystem, block, transform and
+//! launch caches, and the desktop session's rasterised-asset caches —
+//! charges its entries here, and reclaim decisions read these numbers
 //! rather than re-deriving their own.
 //!
 //! # Classification and admission
@@ -152,6 +153,16 @@ pub enum ReclaimOwner {
         /// The owning task's id.
         task: u64,
     },
+    /// A graphical desktop session, identified by the seat it is bound
+    /// to. Distinct from [`Self::Task`] because the memory is
+    /// seat-scoped rather than merely process-scoped: revoking the
+    /// seat invalidates every entry charged here, and a per-seat
+    /// ledger keeps one session's rendered user data attributable to
+    /// (and reclaimable with) exactly that seat.
+    DesktopSession {
+        /// The seat the session holds.
+        seat: u64,
+    },
 }
 
 /// How expensive a cached entry is to rebuild from its canonical
@@ -262,7 +273,7 @@ pub enum AdmissionRefusal {
 
 impl AdmissionRefusal {
     /// The stable `cause` label carried by the refusal's audit record
-    /// (see [`crate::reclaim_audit`]).
+    /// (see [`crate::audit`]).
     #[must_use]
     pub const fn cause(self) -> &'static str {
         match self {

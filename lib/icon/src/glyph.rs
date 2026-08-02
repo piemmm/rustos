@@ -28,7 +28,11 @@ const DESIGN: u32 = 24;
 /// A closed set: adding a glyph is a new variant plus its coordinate table
 /// (and its [`index`](Self::index) slot), never an open-ended string lookup
 /// at the draw site.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+///
+/// `Ord` orders the cache-invalidation candidates a reclaim cache indexes,
+/// not a meaningful glyph ordering — the taskbar's icon cache
+/// (`plans/SMARTRAM.md` section 6.4) needs `IconKind` as a `BTreeMap` key.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum IconKind {
     /// Network / signal-strength bars.
     Network,

@@ -45,6 +45,11 @@ tairix-sync = { path = "../sync", version = "=0.0.0" }
 # §20). The one logging vocabulary the workspace shares (`AGENTS.md` §2.2).
 tairix-log = { path = "../log", version = "=0.0.0" }
 
+# The shared reclaimable-memory model: the process-wide pressure gauge
+# every cache in a program consults, so a userland cache shrinks on the
+# same band, in the same order, as the kernel's own caches.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+
 # The volatile secret erase the elevation client wipes its request buffer
 # with. A plain `fill(0)` on a buffer nothing reads again is a dead store the
 # optimiser may delete, so "the password is gone" has exactly one definition

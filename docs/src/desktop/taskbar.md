@@ -235,10 +235,13 @@ Switching themes simply re-renders with the new palette.
 
 `TaskbarRenderer` is a small stateful object — the region fills, clock, and
 task titles are cheap to repaint every frame, but the vector notification
-glyphs are not, so it holds a `tairix-raster` `RasterCache` of rasterised
-glyphs across frames. The renderer is the right home for that state: the
-`Taskbar` model stays pure data. `render_library` (the popup painter) needs
-no cache of its own, so it stays a `&self` method.
+glyphs are not, so it holds a `tairix_reclaim::ReclaimCache` of rasterised
+glyphs across frames, built by `icon_cache` from the shared
+`tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
+bounded by a budget derived from the real framebuffer byte size, dropped
+under memory pressure, and wiped on release. The renderer is the right home
+for that state: the `Taskbar` model stays pure data. `render_library` (the
+popup painter) needs no cache of its own, so it stays a `&self` method.
 
 ## Notification icons
 
@@ -256,12 +259,13 @@ around it. The icons rasterise through the *same* supersampled polygon path
 rather than panicking (`AGENTS.md` §2.9).
 
 Rasterising a glyph is the expensive step, so the `TaskbarRenderer` does it
-only once per tint and size: its `RasterCache` is keyed by `IconKind` within a
-`(tint, pixel-size, set-generation)` epoch, so repeated frames reuse the
-cached glyph and only a theme change (new tint), a scale change (new size), or
-an installed icon set (new generation) re-rasterises — the SVG-first "convert
-once, re-render only on a scale or theme change" rule (`AGENTS.md` §10),
-sharing the one cache the window manager uses for cursors (`AGENTS.md` §2.2).
+only once per tint and size: its `ReclaimCache` is keyed by `IconKind` within a
+`(tint, pixel-size, set-generation)` epoch (`IconEpoch`), so repeated frames
+reuse the cached glyph and only a theme change (new tint), a scale change (new
+size), or an installed icon set (new generation) re-rasterises — the
+SVG-first "convert once, re-render only on a scale or theme change" rule
+(`AGENTS.md` §10), sharing the same disposable-UI-cache policy the window
+manager uses for cursors (`AGENTS.md` §2.2).
 See [SVG asset decoding](svg-assets.md) for the caching layer and
 [Desktop icons](icons.md) for the vector representation and the glyph set.
 

@@ -2342,6 +2342,17 @@ where
             // exactly its watchers ready. The wait loop advances the observed
             // generation when it reports the member (the edge consume).
             WaitSourceKind::File => crate::fswatch::current_generation(m.file) != m.observed,
+            // The machine's memory-pressure band differs from the one
+            // this member last saw. A peek at the published band, never
+            // a fresh reading: an unprivileged waiter must not be able
+            // to drive a free-memory sample, and the band is refreshed
+            // by whoever actually spends memory. The wait loop advances
+            // the observed band when it reports the member (the edge
+            // consume), so a band that deepens and relaxes again before
+            // the waiter runs correctly reports nothing to do.
+            WaitSourceKind::MemoryPressure => {
+                u64::from(crate::memstats::MEM_STATS.published_band().depth()) != m.observed
+            }
         }
     }
 
@@ -6160,6 +6171,7 @@ where
                 .seat_registry
                 .records(arg, records_that_fit(out_cap, SeatRecord::WIRE_LEN)?),
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
+            IntrospectDomain::MemoryPressureBand => self.introspect.memory_pressure_band()?,
             IntrospectDomain::Reclaim => self.introspect.reclaim(
                 arg,
                 records_that_fit(out_cap, ReclaimClassRecord::WIRE_LEN)?,
@@ -7779,6 +7791,18 @@ where
                         }
                         member_file = stat.id;
                     }
+                    // The machine has exactly one band, so there is
+                    // nothing to resolve and nothing to own: any process
+                    // may learn that memory is short, exactly as any may
+                    // read the load average. A non-zero `id` names a
+                    // source that does not exist and is refused like any
+                    // other unresolvable member rather than silently
+                    // accepted as an alias for the one band.
+                    WaitSourceKind::MemoryPressure => {
+                        if id != 0 {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                 }
                 // Record the member first; only on a successful, non-
                 // duplicate add do we register the file-change watch, so a
@@ -7805,6 +7829,21 @@ where
                         caller.task_id.0,
                         set,
                         WaitSourceKind::File,
+                        id,
+                        baseline,
+                    );
+                }
+                if kind == WaitSourceKind::MemoryPressure {
+                    // Baseline on the band in force at the add, so a
+                    // member added while the machine is already tight
+                    // does not immediately report an edge that has
+                    // nothing new in it. The caller reads the band once
+                    // at start-up and is then told only about moves.
+                    let baseline = u64::from(crate::memstats::MEM_STATS.published_band().depth());
+                    let _ = crate::waitset::advance_observed(
+                        caller.task_id.0,
+                        set,
+                        WaitSourceKind::MemoryPressure,
                         id,
                         baseline,
                     );
@@ -7869,6 +7908,14 @@ where
         // below), letting a wedged callee's timeout wake the reaper exactly
         // like a real completion, never a busy poll.
         let observes_callreply = members.iter().any(|m| m.kind == WaitSourceKind::CallReply);
+        // `PRESSURE_WAITQ` is joined only by a set holding a
+        // `MemoryPressure` member. Its wake is flagged from inside
+        // whatever was spending memory when the band moved and drained
+        // at the next dispatcher-context point, so a band change never
+        // disturbs a waiter that did not ask about it.
+        let observes_pressure = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::MemoryPressure);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -7880,6 +7927,9 @@ where
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_pressure {
+            crate::waitq::PRESSURE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_callreply {
             let claimant = caller.caps.task().0;
@@ -7999,6 +8049,9 @@ where
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
         }
+        if observes_pressure {
+            crate::waitq::PRESSURE_WAITQ.deregister(sched_task);
+        }
         if observes_callreply {
             crate::waitq::CALL_WAITQ.deregister(sched_task);
         }
@@ -8060,6 +8113,23 @@ where
                     generation,
                 );
             }
+        }
+        // Consume a MemoryPressure winner's edge: advance the member's
+        // observed band to the published one, so the next wait blocks
+        // until the band moves *again*. Advancing to the band as it
+        // stands now (not the one the scan saw) is deliberate: the
+        // caller reads the band for itself after this returns, so a move
+        // that raced in between is already in what it will read, and
+        // re-reporting it would be a spurious wake with nothing to do.
+        if kind == WaitSourceKind::MemoryPressure {
+            let band = u64::from(crate::memstats::MEM_STATS.published_band().depth());
+            let _ = crate::waitset::advance_observed(
+                caller.task_id.0,
+                set,
+                WaitSourceKind::MemoryPressure,
+                id,
+                band,
+            );
         }
         Ok(0)
     }
@@ -14912,7 +14982,7 @@ mod tests {
     /// published, so the cache-behaviour tests exercise admission and hits.
     fn install_launch_cache(store: &crate::appspawn::AppStore) {
         struct PlentyFree;
-        impl tairix_kernel_mem::FreeMemorySource for PlentyFree {
+        impl tairix_reclaim::FreeMemorySource for PlentyFree {
             fn free_bytes(&self) -> usize {
                 1 << 29
             }
@@ -14921,12 +14991,12 @@ mod tests {
             }
         }
         let source: &'static PlentyFree = Box::leak(Box::new(PlentyFree));
-        let pressure: &'static tairix_kernel_mem::MemoryPressure =
-            Box::leak(Box::new(tairix_kernel_mem::MemoryPressure::over(source)));
+        let pressure: &'static tairix_reclaim::MemoryPressure =
+            Box::leak(Box::new(tairix_reclaim::MemoryPressure::over(source)));
         let audit: &'static crate::test_sink::TestSink =
             Box::leak(Box::new(crate::test_sink::TestSink::new()));
         store.install_reclaim(
-            tairix_kernel_mem::CacheBudget::from_backing(1 << 24),
+            tairix_reclaim::CacheBudget::from_backing(1 << 24),
             pressure,
             audit,
         );
@@ -20762,7 +20832,7 @@ mod tests {
         fn ramzip_reclaim(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _residue: usize,
             _want: usize,
             _template: tairix_kernel_mem::PageCandidate,
@@ -20773,7 +20843,7 @@ mod tests {
         fn ramzip_cluster(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _va: u64,
             _sink: &dyn Sink,
         ) -> usize {
@@ -20782,7 +20852,7 @@ mod tests {
         fn ramzip_warm(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _sink: &dyn Sink,
         ) -> usize {
             0
@@ -24417,6 +24487,10 @@ mod tests {
         fn memory_pressure(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
         }
+
+        fn memory_pressure_band(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
         fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(alloc::vec::Vec::new())
         }
@@ -27571,6 +27645,9 @@ mod tests {
     const WS_KIND_PORT: u32 = tairix_abi::WaitSourceKind::Port as u32;
     const WS_KIND_STREAM: u32 = tairix_abi::WaitSourceKind::Stream as u32;
     const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
+    const WS_KIND_PRESSURE: u32 = tairix_abi::WaitSourceKind::MemoryPressure as u32;
+
+    use tairix_reclaim::PressureBand;
 
     /// A [`ProcessWait`] test double over the real [`ProcessTable`]
     /// bookkeeping, so the wait-set `Child` tests exercise the same matcher
@@ -27690,9 +27767,10 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
-        // Kind 9 is past the last defined `WaitSourceKind` (`CallReply` = 8).
+        // Kind 10 is past the last defined `WaitSourceKind`
+        // (`MemoryPressure` = 9).
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 9, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 10, line, 0),
             Err(Errno::OutOfRange)
         );
 
@@ -27781,6 +27859,130 @@ mod tests {
         // The edge was consumed: a second wait with no new fire times out.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
         assert_eq!(crate::waitset::release_owned_by(7), 1);
+    }
+
+    /// The machine has one memory-pressure band, so the only nameable
+    /// source is `0`. Any other id names nothing and is refused like
+    /// every other unresolvable member — never quietly accepted as an
+    /// alias for the one band.
+    #[test]
+    fn waitset_pressure_member_refuses_a_source_that_does_not_exist() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No capability at all: learning that the machine is short of
+        // memory is ungated, exactly like reading the load average.
+        let caps = make_caps_record(0x5901, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5901),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 1, 0xAA),
+            Err(Errno::NotFound)
+        );
+        // The one real source is accepted without any capability, and a
+        // duplicate of it is still refused by the registry.
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0xAA)
+            .expect("the one band is addable by any caller");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0xBB),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(crate::waitset::release_owned_by(0x5901), 1);
+    }
+
+    /// A band change makes `waitset_wait` report the pressure member's
+    /// token and consume the edge, and a member added while the band is
+    /// already where it is stays quiet.
+    ///
+    /// This is the **only** test that moves the process-global published
+    /// band (see `crate::test_pressure::global_pressure_source`): the
+    /// band is process-wide and the test binary runs tests concurrently,
+    /// so a second steering test would race with this one.
+    #[test]
+    fn waitset_pressure_member_reports_a_band_change_and_consumes_the_edge() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5902), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5902, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5902),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let source = crate::test_pressure::global_pressure_source();
+        let gauge = crate::memstats::MEM_STATS
+            .current_pressure()
+            .expect("the installer brought the gauge online");
+        source.set_free(crate::test_pressure::free_for(PressureBand::Normal));
+        assert_eq!(gauge.sample(), PressureBand::Normal);
+
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0x9911)
+            .expect("add pressure member");
+
+        // Baselined on the band in force at the add: nothing has moved,
+        // so there is nothing to report.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // The machine tightens. Whoever spends memory next folds the
+        // reading and publishes the deeper band.
+        source.set_free(crate::test_pressure::free_for(PressureBand::Mild));
+        assert_eq!(gauge.sample(), PressureBand::Mild);
+
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5902))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x9911
+        );
+
+        // The edge was consumed: the band is unchanged, so the next wait
+        // blocks rather than re-reporting the same move.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // Relaxing is an edge too — a process must be told it may grow
+        // its caches again, not only that it must shrink them.
+        source.set_free(crate::test_pressure::free_for(PressureBand::Normal));
+        assert_eq!(gauge.sample(), PressureBand::Normal);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        assert_eq!(crate::waitset::release_owned_by(0x5902), 1);
     }
 
     /// A pending request on a member endpoint makes `waitset_wait` report that

@@ -99,10 +99,15 @@ coded per window action. The window manager's `select` module
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
 - The controller rasterises each kind at most once per scale and cursor set: a
-  `tairix-raster` `RasterCache` keyed by `CursorKind` within a
-  `(scale, cursor-set)` epoch keeps the converted `CursorImage`, so toggling
-  back to a previously-shown kind reuses its image and only a scale change or a
-  set swap re-rasterises (the SVG-first "convert once, re-render only on a scale
-  or theme change" rule, `AGENTS.md` §10). It is the same cache the taskbar uses
-  for its notification glyphs — one mechanism, not one per asset kind
-  (`AGENTS.md` §2.2). See [SVG asset decoding](./svg-assets.md).
+  `tairix_reclaim::ReclaimCache` keyed by `CursorKind` within a
+  `(scale, cursor-set)` epoch (`CursorEpoch`) keeps the converted
+  `CursorImage`, so toggling back to a previously-shown kind reuses its image
+  and only a scale change or a set swap re-rasterises (the SVG-first "convert
+  once, re-render only on a scale or theme change" rule, `AGENTS.md` §10). The
+  cache is built by `cursor_cache` from the shared
+  `tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
+  bounded by a budget derived from the real framebuffer byte size, dropped
+  under memory pressure, and wiped on release rather than left to linger in
+  reusable heap. It is the same policy the taskbar uses for its notification
+  glyphs — one mechanism, not one per asset kind (`AGENTS.md` §2.2). See
+  [SVG asset decoding](./svg-assets.md).

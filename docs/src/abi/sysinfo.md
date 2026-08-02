@@ -56,6 +56,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_RESOLVER_SERVERS`  | none                   | no      |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 | `VOLUME_IO_HEALTH`      | `CAP_SYSINFO_KERNEL`   | yes     |
+| `MEMORY_PRESSURE_BAND`  | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -90,7 +91,18 @@ user/system/nice/iowait split. The list is paged by a
 `CpuTimeListRequest` exactly like the mount list. `SEAT_LIST` is gated
 like `HARDWARE_TREE` and audited: each `SeatRecord` names which task owns
 a physical display — cross-principal surface topology, not a self-scoped
-observer.
+observer. `MEMORY_PRESSURE_BAND` is ungated and unaudited like
+`LOAD_AVERAGE`: its `MemoryPressureBand` response is a single band index
+into `PRESSURE_BAND_NAMES` and nothing else — no byte figure, no
+watermark, no per-task or per-user attribution — and it is *read-only of
+the already-published state*, taking no fresh reading, so an unprivileged
+caller cannot use it to drive a free-memory sample on demand. It is
+strictly coarser than `LOAD_AVERAGE`'s run-queue census, and withholding
+it would not protect anything: it would only leave an unprivileged
+cooperative reclaimer (`plans/SMARTRAM.md` SMART5) with no way to learn
+when to give memory back. The gated, audited `MEMORY_PRESSURE` view below
+(free/total bytes, every watermark, the transition history) is unchanged
+and is the one query privileged monitoring reads.
 
 The kernel-statistics queries (`plans/STRESSTEST.md` ST1; storage health
 `plans/FIX-IO.md` IO5) share `KERNEL_MEMORY_STATS`'s security boundary —

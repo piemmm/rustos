@@ -46,6 +46,15 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # title-bar identity/title through the one `lib/font` blitter every consumer
 # uses, so decorated windows render text without a second font path (§2.2).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
+# cursor controller's rasterised-image cache is a bounded, pressure-governed
+# `ReclaimCache` built from the shared desktop cache policy, never an
+# unbounded cache of its own (§2.2).
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The structured `Event`/`Sink`/`Level` logging vocabulary the cursor cache's
+# audit sink is typed against (§2.2): the controller never invents its own
+# logging vocabulary.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 # The compositor's host tests draw window-title text, so they inject the
 # shared solid test transport via the `test-util` feature (never `fontd`).

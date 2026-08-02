@@ -1,6 +1,7 @@
 //! Unit tests for the shared rasterisation primitives.
 
-use crate::cache::RasterCache;
+use tairix_reclaim::CachedBytes;
+
 use crate::color::{Color, Pixel};
 use crate::round::round_rect_coverage;
 use crate::surface::Surface;
@@ -465,86 +466,22 @@ fn fill_polygon_composites_over_existing_pixels() {
     assert!(s.pixels().iter().all(|p| *p == blended));
 }
 
-// ---- rasterisation cache --------------------------------------------
+// ---- CachedBytes: Surface plugs into the shared reclaim cache --------
 
 #[test]
-fn cache_starts_empty_with_no_epoch() {
-    let cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    assert!(cache.is_empty());
-    assert_eq!(cache.len(), 0);
-    assert_eq!(cache.epoch(), None);
-}
-
-#[test]
-fn cache_renders_once_then_reuses_within_epoch() {
-    let mut cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    let mut renders = 0;
-    let first = *cache
-        .get_or_render(&1, 7, || {
-            renders += 1;
-            Some(70)
-        })
-        .expect("rendered");
-    assert_eq!(first, 70);
-    // A second lookup of the same key at the same epoch does not re-render.
-    let second = *cache
-        .get_or_render(&1, 7, || {
-            renders += 1;
-            Some(999)
-        })
-        .expect("cached");
-    assert_eq!(second, 70);
-    assert_eq!(renders, 1);
-    assert_eq!(cache.len(), 1);
-    assert_eq!(cache.epoch(), Some(&1));
-}
-
-#[test]
-fn cache_keeps_distinct_keys_in_one_epoch() {
-    let mut cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    assert_eq!(*cache.get_or_render(&1, 1, || Some(11)).expect("a"), 11);
-    assert_eq!(*cache.get_or_render(&1, 2, || Some(22)).expect("b"), 22);
-    assert_eq!(cache.len(), 2);
-    // Both remain reachable without re-rendering.
-    assert_eq!(*cache.get_or_render(&1, 1, || Some(0)).expect("a"), 11);
-    assert_eq!(*cache.get_or_render(&1, 2, || Some(0)).expect("b"), 22);
-}
-
-#[test]
-fn cache_invalidates_when_epoch_changes() {
-    let mut cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    assert_eq!(*cache.get_or_render(&1, 7, || Some(70)).expect("a"), 70);
-    // A new epoch (a scale or theme change) discards the old entries and
-    // re-renders.
-    assert_eq!(*cache.get_or_render(&2, 7, || Some(71)).expect("b"), 71);
-    assert_eq!(cache.len(), 1);
-    assert_eq!(cache.epoch(), Some(&2));
-}
-
-#[test]
-fn cache_does_not_remember_a_failed_render() {
-    let mut cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    assert_eq!(cache.get_or_render(&1, 7, || None), None);
-    assert!(cache.is_empty());
-    // The next attempt is retried rather than the failure being cached.
-    let mut renders = 0;
+fn payload_bytes_matches_the_pixel_buffer_size() {
+    let surface = Surface::new(4, 5).expect("allocates");
     assert_eq!(
-        *cache
-            .get_or_render(&1, 7, || {
-                renders += 1;
-                Some(70)
-            })
-            .expect("retried"),
-        70
+        surface.payload_bytes(),
+        (4 * 5) * core::mem::size_of::<Pixel>()
     );
-    assert_eq!(renders, 1);
 }
 
 #[test]
-fn cache_clear_drops_entries_and_epoch() {
-    let mut cache: RasterCache<u8, u32, u32> = RasterCache::new();
-    let _ = cache.get_or_render(&1, 7, || Some(70));
-    cache.clear();
-    assert!(cache.is_empty());
-    assert_eq!(cache.epoch(), None);
+fn wipe_clears_every_pixel() {
+    let mut surface = Surface::new(2, 2).expect("allocates");
+    surface.fill(RED);
+    assert!(surface.pixels().iter().all(|p| *p == RED.premultiply()));
+    surface.wipe();
+    assert!(surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
 }

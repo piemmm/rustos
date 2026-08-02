@@ -71,12 +71,12 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapab
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
 use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
-use tairix_kernel_mem::{
+use tairix_log::Sink;
+use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
     ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_log::Sink;
 use zeroize::Zeroize;
 
 /// Approximate per-entry bookkeeping cost (map nodes, the LRU index

@@ -53,12 +53,12 @@ use alloc::vec::Vec;
 
 use tairix_drv_fs_arxfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
-use tairix_kernel_mem::{
+use tairix_log::Sink;
+use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
     ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_log::Sink;
 use zeroize::Zeroize;
 
 /// Approximate per-entry bookkeeping cost (map nodes, the LRU index

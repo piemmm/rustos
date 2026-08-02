@@ -34,11 +34,11 @@ use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, SleepLock,
     YieldHandle,
 };
-use tairix_kernel_mem::MemoryPressure;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_log::{Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+use tairix_reclaim::MemoryPressure;
 
 use crate::block_cache::BlockCache;
 use crate::driver_catalog::KERNEL_DRIVER_SIGNER_PUBKEY;

@@ -37,10 +37,10 @@ use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, Share
 use tairix_kernel_core::fs::FilesystemService;
 use tairix_kernel_core::{sharedreg, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
-use tairix_kernel_mem::{FreeMemorySource, MemoryPressure};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, TaskId, UserId, UserRecord};
 use tairix_log::Sink;
+use tairix_reclaim::{FreeMemorySource, MemoryPressure};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};

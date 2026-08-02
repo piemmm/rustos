@@ -194,8 +194,9 @@ pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
 pub use pins::{
-    build_pin_views, resolve_pin_drop, resolve_pins, DragOffer, IconCache, IconRasteriser,
-    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, SessionPins,
+    artwork_cache, build_pin_views, resolve_pin_drop, resolve_pins, CachedArtwork, DragOffer,
+    IconCache, IconRasteriser, PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin,
+    SessionPins,
 };
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};

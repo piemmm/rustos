@@ -97,22 +97,32 @@ a loaded set is swapped in at runtime without rebuilding the consumer:
 ## Caching the rasterised form
 
 Rasterising the vector form is the expensive step, so it happens only when its
-result can change. `lib/raster`'s `RasterCache` is the one shared mechanism
-that enforces "convert once, re-render only on a scale or theme change"
-(`AGENTS.md` §10). It is keyed by an asset identity within an *epoch* — a scale
-paired with a theme identity:
+result can change. `tairix_reclaim::ReclaimCache`, built by each consumer from
+the shared `tairix_reclaim::desktop::disposable_ui_cache` policy
+(`plans/SMARTRAM.md` SMART5), is the one shared mechanism that enforces
+"convert once, re-render only on a scale or theme change" (`AGENTS.md` §10).
+It is keyed by an asset identity within an *epoch* — a scale paired with a
+theme identity:
 
 - the window manager's `CursorController` caches each on-screen pointer
   `CursorKind` against the `(scale, cursor-set)` epoch, so re-showing a kind
   reuses its image and only a scale change or a cursor-set swap re-rasterises;
 - the taskbar's `TaskbarRenderer` caches each notification glyph against the
-  `(tint, pixel-size)` epoch, so the bar repaints its cheap regions every frame
-  but rasterises a glyph only once per theme and scale.
+  `(tint, pixel-size, set-generation)` epoch, so the bar repaints its cheap
+  regions every frame but rasterises a glyph only once per theme, scale, and
+  installed icon set.
 
-A changed epoch discards every cached entry; a render that fails closed (a
-degenerate asset or scale, §2.9) is not remembered, so the asset is retried
-rather than a failure being cached. Both consumers share this single cache
-rather than each growing its own (`AGENTS.md` §2.2 / §6).
+Both caches are owned by the seat they belong to, bounded by a budget derived
+from the real framebuffer byte size rather than a hand-picked constant, and
+shrink or drop under memory pressure exactly like the kernel's own
+reclaimable caches (see [the reclaimable-memory
+model](../architecture/memory.md)). A changed epoch discards every
+cached entry; a render that fails closed (a degenerate asset or scale, §2.9)
+is not remembered, so the asset is retried rather than a failure being
+cached. Logout or seat revocation tears both caches down, wiping every
+retained entry — a cached glyph is rendered user-visible data, not disposable
+bytes. Both consumers build from the same policy rather than each growing its
+own cache (`AGENTS.md` §2.2 / §6).
 
 ## Untrusted input
 

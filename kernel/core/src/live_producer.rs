@@ -738,7 +738,7 @@ mod tests {
         fn ramzip_reclaim(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _reclaimable_residue: usize,
             _want: usize,
             _template: tairix_kernel_mem::PageCandidate,
@@ -752,7 +752,7 @@ mod tests {
         fn ramzip_cluster(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _va: u64,
             _sink: &dyn tairix_log::Sink,
         ) -> usize {
@@ -764,7 +764,7 @@ mod tests {
         fn ramzip_warm(
             &mut self,
             _tier: &tairix_sync::SpinLock<tairix_kernel_mem::Ramzip>,
-            _pressure: &tairix_kernel_mem::MemoryPressure,
+            _pressure: &tairix_reclaim::MemoryPressure,
             _sink: &dyn tairix_log::Sink,
         ) -> usize {
             // As `ramzip_cluster`: warm-up is exercised against the real

@@ -78,11 +78,18 @@ router**:
   it reads `Compositor::scale` when it rasterises, and `refresh` re-renders the
   pointer when the kind, the cursor set, **or** the output scale changes
   (`AGENTS.md` §10 / §2.2). It rasterises each `CursorKind` at most once per
-  scale and cursor set: a shared `tairix-raster` `RasterCache` keyed by kind
-  keeps the converted image so re-showing a kind reuses it and only a scale or
-  set change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md`
-  §10) — the same cache the taskbar uses for its notification glyphs
-  (`AGENTS.md` §2.2).
+  scale and cursor set: a `tairix-reclaim` `ReclaimCache` keyed by kind keeps
+  the converted image so re-showing a kind reuses it and only a scale or set
+  change re-rasterises (the SVG-first "convert once" rule, `AGENTS.md` §10) —
+  a bounded, pressure-governed cache built from the shared desktop cache
+  policy (`plans/SMARTRAM.md` SMART5), the same policy the taskbar uses
+  for its notification glyphs (`AGENTS.md` §2.2). `CursorController` never
+  builds this cache itself: `cursor_cache` assembles it from the real output
+  size, the owning seat, and the process's live pressure gauge and audit
+  sink, and the caller hands the result to `new` or `with_registry` as a
+  required constructor argument — there is no parameterless fallback,
+  because a cache built without a live gauge would classify and serve every
+  lookup correctly while retaining nothing.
 
   The compositor owns its output's density (`Compositor::scale` /
   `set_scale`); a window's effective density is `Compositor::window_scale`,
@@ -96,8 +103,8 @@ Stage 7 increments.
 
 - `no_std` (+ `alloc`); depends only on the shared `lib/*` crates
   (`tairix-abi`, `tairix-raster`, `tairix-geometry`, `tairix-input`,
-  `tairix-theme`, `tairix-cursor`) — never on a sibling userland crate
-  (`AGENTS.md` §17.4).
+  `tairix-theme`, `tairix-cursor`, `tairix-reclaim`) — never on a sibling
+  userland crate (`AGENTS.md` §17.4).
 - No `unsafe`; no `unwrap`/`expect`/`panic!` in production paths — every
   fallible entry point returns a `Result`/`Option` (`AGENTS.md` §2.9).
 

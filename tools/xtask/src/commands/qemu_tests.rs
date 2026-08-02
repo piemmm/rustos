@@ -6791,15 +6791,35 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// and every stage is provably established before its step fires.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_desktop_session::windows::cascade_origin_for;
     use tairix_desktop_session::DesktopShell;
     use tairix_geometry::{Point, Rect, Scale};
+    use tairix_log::DiscardSink;
     use tairix_qemu::{MouseButton, PointerAction, PointerStep};
+    use tairix_reclaim::ReportedPressure;
     use tairix_taskbar::{LibraryRow, TaskbarConfig};
+
+    // The shell below exists only to reproduce the guest's layout
+    // arithmetic, so the script clicks exactly where the guest draws. It
+    // never rasterises anything and owns no display, so it is wired
+    // truthfully rather than plausibly: no display backing (a zero-sized
+    // backing budgets nothing) and a gauge that has never been told a
+    // band (which answers critical, so nothing is admitted). Its asset
+    // caches therefore stay empty instead of pretending to a reclaim
+    // policy this tool cannot obey.
+    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
 
     let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
     let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
-    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(width, height));
+    let mut shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(width, height),
+        SEAT_PRIMARY,
+        0,
+        &NO_PRESSURE_FEED,
+        &DISCARD_SINK,
+    );
     // The popup lists the same catalog the guest session merges from the
     // planted machine store, so the reconstructed rows sit exactly where
     // the guest draws them.

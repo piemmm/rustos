@@ -168,6 +168,21 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn memory_pressure(&self) -> Result<Vec<u8>, Errno>;
 
+    /// The wire image of the current
+    /// [`tairix_abi::sysinfo::MemoryPressureBand`]: the published band
+    /// and nothing else.
+    ///
+    /// Unlike [`Self::memory_pressure`] this takes **no** reading. It
+    /// backs an ungated query, and an unprivileged caller must not be
+    /// able to drive a free-memory sample on demand; the band is
+    /// refreshed by whoever actually spends memory, which is the only
+    /// moment it can have moved.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno>;
+
     /// Encode up to `max_records`
     /// [`tairix_abi::sysinfo::ReclaimClassRecord`]s beginning at class
     /// index `offset`, in class-id order, packed little-endian
@@ -268,6 +283,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn memory_pressure(&self) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

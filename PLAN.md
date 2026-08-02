@@ -3203,8 +3203,11 @@ Shipped (headless-testable, model + renderer over injected seams):
   (Porter–Duff `over`), `Surface`/`geometry`, anti-aliased rounded corners via
   supersampling (square opt-out — the one rounded-corner path, §2.2), damage
   tracking, window ops; fails closed on bad modes.
-- Shared desktop libs (§2.2, one path each): `lib/raster` (incl. the
-  `RasterCache` SVG→scale cache), `lib/theme`, `lib/geometry` (DPI/`Scale`),
+- Shared desktop libs (§2.2, one path each): `lib/raster`, `lib/theme`,
+  `lib/geometry` (DPI/`Scale`),
+  `lib/reclaim` (the reclaimable-cache model both the window manager's
+  cursor cache and the taskbar's notification-glyph cache are built from,
+  replacing the deleted `lib/raster::RasterCache`),
   `lib/font` (the text-rendering front end: a small compiled-in console atlas
   — the primary Inconsolata EX face's repertoire only, `cargo xtask
   font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a
@@ -5790,7 +5793,8 @@ Opportunistic, bounded, owner-accounted caches over spare RAM;
 
 **Done — SMART1 classification/accounting model and the clean,
 rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
-- `kernel/mem::reclaim`: the reclaimable-memory model — the complete
+- `tairix_reclaim::model` (`lib/reclaim`, hoisted out of `kernel/mem` so the
+  desktop session obeys the same model): the reclaimable-memory model — the complete
   nine-class `ReclaimClass` taxonomy with deterministic
   `reclaim_priority` in the §7 pressure order (disposable/speculative
   classes first, `CleanFileData` before `TransformCache`, `FsMetadata`
@@ -5832,7 +5836,8 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
 
 **Done — SMART2 VM pressure bands and reclaim ordering
 (`plans/SMARTRAM.md` SMART2 + §7):**
-- `kernel/mem::pressure`: the complete pressure-state model (none
+- `tairix_reclaim::pressure` (with the `ramzip`-handoff and escalation half
+  left in `kernel/mem::pressure`): the complete pressure-state model (none
   existed) — the five-band `MemoryPressure` gauge (normal/mild/
   moderate/severe/critical, the one vocabulary shared with
   `plans/SWAPSWAPSWAP.md`) over a `FreeMemorySource` (production: the
@@ -5921,7 +5926,7 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
   `failures` beside the existing event counters; `MemoryPressure`
   counts entries into each band (`band_entries`, swap-exact per stored
   change).
-- `kernel/mem::reclaim_audit` owns the subsystem's stable audit events
+- `tairix_reclaim::audit` owns the subsystem's stable audit events
   in kernel/mem's reserved `2_000..3_000` `EventId` range:
   `RECLAIM_CACHE_REFUSED` (2000) and `RECLAIM_CACHE_POISONED` (2001),
   with a closed `cache`/`owner`/`owner_id`/`cause` field shape (fixed
@@ -5981,12 +5986,61 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   `BufferClass::Sensitive` I/O bypasses *and* evicts its range so no
   key-slot block is ever retained; every released buffer is wiped.
 
+**Done — SMART5 desktop and UI cache integration
+(`plans/SMARTRAM.md` SMART5 + §6.4; `docs/src/architecture/memory.md`):**
+- The reclaimable-memory model is now **shared**, not kernel-private:
+  the classification taxonomy, budgets, checked accounting, audit
+  events, band vocabulary, hysteresis thresholds, and `shrink_target`
+  ordering moved from `kernel/mem` into the new `lib/reclaim`
+  (`tairix-reclaim`), which the kernel and userland both import. Only
+  what genuinely needs the anonymous-memory tier stayed behind in
+  `kernel/mem::pressure`: the `ramzip` handoff, the escalation ladder,
+  and the frame allocator's `FreeMemorySource` binding.
+- One `PressureGauge` interface, two vantage points: `MemoryPressure`
+  measures free memory (kernel), `ReportedPressure` holds the band it
+  was told (userland) and answers `critical` until told — an unwired
+  process admits nothing rather than assuming the machine is
+  comfortable.
+- One cache implementation, `tairix_reclaim::ReclaimCache<K, V, E>`:
+  bounded by a derived `CacheBudget`, invalidated wholesale by a
+  generation token, shrunk to the band's `shrink_target`, LRU by an
+  O(log n) recency index, wiping every non-public entry on release,
+  charging a checked payload/metadata ledger, and self-poisoning
+  (draining and serving uncached) if its books stop balancing. A
+  refusal still returns a usable value (`Served::Uncached`), so
+  caching is never required for correctness and no path renders twice.
+- Event-driven delivery, never polling: `WaitSourceKind::MemoryPressure`
+  (9, `id` 0, no capability) is edge-triggered on the published band;
+  the gauge's `BandObserver` flags `kernel/core::waitq::PRESSURE_WAITQ`
+  lock-free (it fires inside allocation paths) and the real unpark runs
+  at the next dispatcher-context drain. The ungated, unaudited
+  `SysinfoQueryId::MEMORY_PRESSURE_BAND` (28) drains the edge without
+  taking a reading; the gated, audited `MEMORY_PRESSURE` view is
+  unchanged.
+- The desktop's three rasterised-asset caches — the cursor cache, the
+  notification-glyph cache, and the session's pinned-application artwork
+  cache — are `ReclaimCache`es built from the one
+  `tairix_reclaim::desktop::disposable_ui_cache` policy: `DisposableUi`,
+  owned by the seat, `UserData` (so entries are wiped), invalidated by
+  the scale/theme generation, dropped on reclaim, with the budget derived
+  from the discovered framebuffer byte size, so a 4K output is allowed
+  proportionately more than a small panel and no ceiling is guessed. The
+  session parks on the band member, trims all three on a change, and
+  tears them down on logout or seat loss.
+  `lib/raster`'s unbounded `RasterCache` is **deleted**: it grew without
+  limit, scanned linearly, never shrank under pressure, was invisible to
+  the reclaim ledger, and never wiped rendered user data. The pin-artwork
+  cache had the same shape and was keyed by bundle-supplied asset paths,
+  so a crowded or crafted bundle store could grow a session without
+  limit; it is now bounded by the same derived budget, with cached decode
+  refusals charged their bookkeeping too.
+
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-ARXFS
 transform families (verified bundle/manifest state gated on their
 consumers) — gated on the subsystems they consume.
-UI caches (SMART5) and the reliability/background/predictive caches
-(SMART6–8) are **shelved — not added**; they are built only if a
-future decision explicitly un-shelves them.
+The reliability/background/predictive caches (SMART6–8) are
+**shelved — not added**; they are built only if a future decision
+explicitly un-shelves them.
 
 ---
 

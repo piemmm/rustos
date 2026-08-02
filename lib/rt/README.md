@@ -113,6 +113,25 @@ containing `:` stays reachable as `./name`, and `File::open_resource` remains
 the explicit constructor for a caller that has already classified its target
 (the shell's parsed redirection targets).
 
+## Memory pressure (`pressure` module)
+
+`tairix_rt::pressure` holds the process's single
+[`ReportedPressure`](../reclaim/README.md) gauge (`plans/SMARTRAM.md`
+SMART5): the process-wide answer to "how tight is memory" that every
+`tairix_reclaim::ReclaimCache` in the program consults, so they all shrink
+on the same band at the same moment. A userland process cannot measure free
+frames, watermarks, or the reserve floor itself, so `pressure::gauge()`
+answers `Critical` until `pressure::report(band)` tells it otherwise —
+admitting nothing rather than assuming the machine is comfortable.
+
+The runtime deliberately does not fetch the band itself: reading it needs a
+System Information endpoint and a transport the runtime has no business
+choosing for a program. The owning program parks on the ungated
+`WaitSourceKind::MemoryPressure` wait-set member, reads the band with the
+ungated `SysinfoQueryId::MEMORY_PRESSURE_BAND` query on wake, and calls
+`pressure::report` — event-driven throughout, never polled (`AGENTS.md`
+§2.23).
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled

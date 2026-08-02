@@ -8,7 +8,12 @@
 use alloc::string::String;
 
 /// The pointer shapes the desktop uses.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+///
+/// `Ord` orders the cache-invalidation candidates a reclaim cache indexes,
+/// not a meaningful pointer-shape ordering — the window manager's cursor
+/// cache (`plans/SMARTRAM.md` section 6.4) needs `CursorKind` as a
+/// `BTreeMap` key.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum CursorKind {
     /// The default arrow pointer.
     Arrow,

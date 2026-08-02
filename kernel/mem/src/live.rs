@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_log::Sink;
+use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
 
 use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
@@ -48,7 +49,6 @@ use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
-use crate::pressure::MemoryPressure;
 use crate::ramzip::{
     FaultError, PageCandidate, Ramzip, RamzipFaultOutcome, RamzipReclaimSummary, VmContext,
     WarmOutcome,
@@ -2134,12 +2134,12 @@ mod tests {
         use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
-        use crate::pressure::{MemoryPressure, PressureBand};
         use crate::ramzip::{PageCandidate, Ramzip, RamzipCaps, RamzipFaultOutcome};
         use crate::seal::{EntropySource, SealError};
         use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
         use alloc::boxed::Box;
         use tairix_log::{Event, Sink};
+        use tairix_reclaim::{MemoryPressure, PressureBand};
         use tairix_sync::SpinLock;
 
         /// A larger machine than the shared 64-frame harness, so a test can

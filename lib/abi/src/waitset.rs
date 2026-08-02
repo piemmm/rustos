@@ -172,6 +172,37 @@ pub enum WaitSourceKind {
     /// volume manager services many block devices without a blocking thread
     /// per device, never a poll loop).
     CallReply = 8,
+    /// The system memory-pressure band (its `id` is always `0`: the
+    /// machine has exactly one band). Ready when the band the kernel
+    /// publishes differs from the one this member last observed.
+    ///
+    /// The band is a five-level, hysteresis-damped, machine-wide
+    /// indicator — `normal`, `mild`, `moderate`, `severe`, `critical` —
+    /// and carries no per-process, per-user, or byte-level figure, so
+    /// adding the member needs no capability: any process may learn that
+    /// the machine is short of memory, exactly as it may read the load
+    /// average. The privileged, audited
+    /// [`SysinfoQueryId::MEMORY_PRESSURE`](crate::SysinfoQueryId::MEMORY_PRESSURE)
+    /// query — watermarks, free and total bytes, per-band transition
+    /// counts — is unchanged and still gated.
+    ///
+    /// Readiness is **edge-triggered on the band itself**, not on a
+    /// change counter: reporting the member ready advances its observed
+    /// band to the published one, so a band that deepens and relaxes
+    /// again before the waiter runs correctly does *not* fire — the
+    /// waiter's view is already right and there is nothing to do. A
+    /// member added while the band is `normal` therefore stays quiet
+    /// until the machine actually tightens.
+    ///
+    /// This exists so a process can *cooperate* with reclaim instead of
+    /// being reclaimed against: a desktop session holding megabytes of
+    /// rasterised glyphs and icons parks here and gives them back the
+    /// moment the band deepens, in the same order and at the same bands
+    /// as the kernel's own caches (`plans/SMARTRAM.md` SMART5). Polling
+    /// for that would burn a core to learn nothing on almost every
+    /// sample; the band changes rarely, so an edge is exactly the right
+    /// shape.
+    MemoryPressure = 9,
 }
 
 impl WaitSourceKind {
@@ -198,6 +229,7 @@ impl WaitSourceKind {
             6 => Ok(Self::Signal),
             7 => Ok(Self::File),
             8 => Ok(Self::CallReply),
+            9 => Ok(Self::MemoryPressure),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -228,10 +260,11 @@ mod tests {
             WaitSourceKind::Signal,
             WaitSourceKind::File,
             WaitSourceKind::CallReply,
+            WaitSourceKind::MemoryPressure,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(9), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(10), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -248,6 +281,7 @@ mod tests {
         assert_eq!(WaitSourceKind::Signal.as_u32(), 6);
         assert_eq!(WaitSourceKind::File.as_u32(), 7);
         assert_eq!(WaitSourceKind::CallReply.as_u32(), 8);
+        assert_eq!(WaitSourceKind::MemoryPressure.as_u32(), 9);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

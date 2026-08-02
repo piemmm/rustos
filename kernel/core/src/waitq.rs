@@ -588,6 +588,31 @@ pub fn irq_wake() {
     IRQ_WAITQ.request_wake();
 }
 
+/// The wait-queue holding every task parked on a
+/// [`WaitSourceKind::MemoryPressure`](tairix_abi::WaitSourceKind::MemoryPressure)
+/// wait-set member.
+///
+/// There is one band for the whole machine, so one queue holds every
+/// watcher; each woken waiter re-checks the band against the one its own
+/// member last observed, and a waiter already up to date simply parks
+/// again.
+pub static PRESSURE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Request a wake of every memory-pressure watcher because the published
+/// band changed.
+///
+/// Called from the pressure gauge's band-change hook, which fires inside
+/// whatever was spending memory at the time — a cache operation, a demand
+/// fault, a direct-reclaim sweep, possibly with the frame allocator's own
+/// lock held. It is therefore **lock-free**: it only flags the queue
+/// ([`WaitQueue::request_wake`]), and the real `unpark` runs later at the
+/// next dispatcher-context [`drain_pending_wakes`], exactly like a device
+/// IRQ's wake. Taking the wait-queue lock here instead could re-enter a
+/// lock the interrupted allocator already holds.
+pub fn pressure_wake() {
+    PRESSURE_WAITQ.request_wake();
+}
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree and by the timed sweep below.
@@ -776,13 +801,19 @@ pub fn drain_pending_wakes() -> bool {
         return false;
     };
     let mut woke = false;
-    // Edge wakes flagged from interrupt context (device IRQ, UART receive).
+    // Edge wakes flagged from a context that could not take a lock: a
+    // device IRQ, a UART receive, or the pressure gauge's band change
+    // inside an allocation path.
     if CONSOLE_WAITQ.take_wake_pending() {
         CONSOLE_WAITQ.wake_all(arch);
         woke = true;
     }
     if IRQ_WAITQ.take_wake_pending() {
         IRQ_WAITQ.wake_all(arch);
+        woke = true;
+    }
+    if PRESSURE_WAITQ.take_wake_pending() {
+        PRESSURE_WAITQ.wake_all(arch);
         woke = true;
     }
     // Deadline sweep flagged by the timer one-shot.
@@ -794,7 +825,8 @@ pub fn drain_pending_wakes() -> bool {
 }
 
 /// Non-consuming peek: whether an *edge-flagged* interrupt-context
-/// deferred wake (console RX or a device-IRQ [`irq_wake`]) is awaiting its
+/// deferred wake (console RX, a device-IRQ [`irq_wake`], or a
+/// memory-pressure band change [`pressure_wake`]) is awaiting its
 /// dispatcher-context [`drain_pending_wakes`].
 ///
 /// The preemption gate consults this so a timer tick on a CPU whose only
@@ -812,7 +844,9 @@ pub fn drain_pending_wakes() -> bool {
 /// elapsed), not by the flag alone.
 #[must_use]
 pub fn has_pending_deferred_wake() -> bool {
-    CONSOLE_WAITQ.wake_is_pending() || IRQ_WAITQ.wake_is_pending()
+    CONSOLE_WAITQ.wake_is_pending()
+        || IRQ_WAITQ.wake_is_pending()
+        || PRESSURE_WAITQ.wake_is_pending()
 }
 
 /// Whether a timed waiter's finite deadline has already elapsed, so the
@@ -1148,6 +1182,55 @@ mod tests {
         // Exactly the finite deadlines at or before 250, in ascending
         // deadline order (100 then 200); 300 and the untimed waiter stay.
         assert_eq!(*arch.unparked.borrow(), alloc::vec![2, 3]);
+    }
+
+    /// The pressure gauge's band-change hook must be usable from inside
+    /// an allocation path, so it only *flags* the queue; the flag is what
+    /// the preemption gate sees and what the dispatcher-context drain
+    /// consumes.
+    ///
+    /// Every assertion here is monotone in the shared flag (set, then
+    /// observe set), never "observe clear": the flag is process-global
+    /// and the test binary runs concurrently, so asserting it is clear
+    /// would be a race, not a test.
+    #[test]
+    fn a_pressure_band_change_flags_a_deferred_wake_without_unparking() {
+        pressure_wake();
+
+        assert!(
+            PRESSURE_WAITQ.wake_is_pending(),
+            "the band change owes a wake"
+        );
+        assert!(
+            has_pending_deferred_wake(),
+            "a lone-task CPU must still reschedule so the drain can run"
+        );
+        assert!(
+            PRESSURE_WAITQ.take_wake_pending(),
+            "the drain consumes the owed wake"
+        );
+    }
+
+    /// The one-shot flag semantics the pressure hook relies on, proved on
+    /// a private queue so no other test's band change can perturb it: a
+    /// wake requested once is reported once, and requesting it does not
+    /// itself unpark anybody.
+    #[test]
+    fn a_flagged_wake_is_reported_exactly_once() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(11, NO_DEADLINE);
+
+        q.request_wake();
+        assert!(
+            arch.unparked.borrow().is_empty(),
+            "flagging must not unpark from the flagging context"
+        );
+        assert!(q.take_wake_pending());
+        assert!(!q.take_wake_pending(), "one shot");
+
+        q.wake_all(&arch);
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![11]);
     }
 
     #[test]

@@ -31,13 +31,12 @@ use tairix_kernel_core::{
     NULL_CONSOLE_READ,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
-use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MemoryPressure, MmioMap, VirtAddr,
-};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Level, Sink};
+use tairix_reclaim::MemoryPressure;
 
 use crate::driver_catalog::VIRTIO_BLK_PATH;
 use crate::driver_loader::KernelDriverLoader;

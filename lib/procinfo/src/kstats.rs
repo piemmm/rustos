@@ -15,8 +15,9 @@
 //! load-bearing for a session).
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureBand,
+    MemoryPressureStats, RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId,
+    RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -57,6 +58,27 @@ pub const RECLAIM_PAGE: u16 = {
 pub fn memory_pressure(transport: &dyn Transport) -> Result<MemoryPressureStats, CallError> {
     let reply = call(transport, SysinfoQueryId::MEMORY_PRESSURE, &[])?;
     MemoryPressureStats::from_bytes(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
+}
+
+/// Query the published memory-pressure band alone
+/// ([`SysinfoQueryId::MEMORY_PRESSURE_BAND`]).
+///
+/// Ungated: this is how a process learns it must give its own caches
+/// back. It is the drain for the edge-triggered
+/// [`WaitSourceKind::MemoryPressure`](tairix_abi::WaitSourceKind::MemoryPressure)
+/// wait source — park until the band moves, then read it here — never a
+/// polling surface.
+///
+/// # Errors
+///
+/// * [`CallError::Service`] — the transport failed, or the reply did not
+///   decode against `sysinfo-v1` (reported as [`Errno::BadMagic`]). A
+///   band the caller does not recognise is a decode failure, not a
+///   guess: the caller keeps the band it already had rather than
+///   assuming the machine is comfortable.
+pub fn memory_pressure_band(transport: &dyn Transport) -> Result<MemoryPressureBand, CallError> {
+    let reply = call(transport, SysinfoQueryId::MEMORY_PRESSURE_BAND, &[])?;
+    MemoryPressureBand::from_bytes(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
 }
 
 /// Query the `ramzip` compressed-tier counters

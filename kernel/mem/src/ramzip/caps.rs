@@ -16,8 +16,9 @@
 //! working headroom). Preserving the floor by refusing to compress is
 //! a normal typed refusal, never a panic.
 
+use tairix_reclaim::PressureBand;
+
 use crate::frame::PAGE_SIZE;
-use crate::pressure::PressureBand;
 
 /// Denominator of the minimum-capacity fraction: 1% of physical RAM.
 const MIN_DIVISOR: usize = 100;
@@ -136,7 +137,7 @@ impl RamzipCaps {
 
 /// The free-memory floor compression must never push the system below:
 /// the pressure reserve plus fixed working headroom for fault-in
-/// restores. `reserve` is [`crate::pressure::PressureThresholds::reserve`].
+/// restores. `reserve` is [`tairix_reclaim::PressureThresholds::reserve`].
 #[must_use]
 pub const fn decompression_floor(reserve: usize) -> usize {
     reserve.saturating_add(DECOMPRESSION_HEADROOM_PAGES * PAGE_SIZE)

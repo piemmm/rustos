@@ -53,8 +53,9 @@ use tairix_abi::{
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
-use tairix_kernel_mem::{CacheBudget, MemoryPressure, MAX_ORDER, PAGE_SIZE};
+use tairix_kernel_mem::{MAX_ORDER, PAGE_SIZE};
 use tairix_log::Sink;
+use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::RwLock;
 
 use crate::bootinfo::KernelArch;

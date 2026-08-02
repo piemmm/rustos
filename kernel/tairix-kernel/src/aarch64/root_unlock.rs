@@ -50,14 +50,14 @@ use tairix_kernel_core::{
 };
 use tairix_kernel_irq::{IrqTable, WaitOutcome};
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MemoryPressure, MmioMap, PageTable,
-    VirtAddr,
+    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, PageTable, VirtAddr,
 };
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::dma::{alloc_dma, DmaGateError};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Level, Sink};
+use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
 
 use crate::aarch64::arch_wrapper::{

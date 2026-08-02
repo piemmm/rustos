@@ -20,7 +20,7 @@
 //! verification), system data, invalidated by generation (the read-only
 //! store is immutable for the life of the boot, so the boot *is* the
 //! generation and a system update is a new boot), droppable on demand —
-//! and classifies it through the `kernel/mem::reclaim` admission gate.
+//! and classifies it through the `tairix_reclaim` admission gate.
 //! A refusal starts the cache poisoned: every lookup misses, every
 //! insert is refused, and every launch runs the full load gate (fail
 //! closed).
@@ -62,12 +62,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_appload::LoadedApp;
-use tairix_kernel_mem::{
+use tairix_log::Sink;
+use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
     ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_log::Sink;
 
 use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
 
@@ -109,7 +109,7 @@ pub struct LaunchCache {
     /// pressure or when growth would dip into the reserve.
     pressure: &'static MemoryPressure,
     /// The audit sink a classification refusal or detected ledger
-    /// defect reports through (`kernel/mem::reclaim_audit`).
+    /// defect reports through (`tairix_reclaim::audit`).
     sink: &'static (dyn Sink + Sync),
     accounting: Arc<CacheAccounting>,
     /// The classified admission policy; `None` when classification
@@ -132,7 +132,7 @@ impl LaunchCache {
     /// Build a cache bounded by `budget` and governed by the system
     /// `pressure` gauge, charged to the kernel app-store subsystem.
     ///
-    /// The candidate declaration passes the `kernel/mem::reclaim`
+    /// The candidate declaration passes the `tairix_reclaim`
     /// classification gate; a refusal poisons the cache from birth, so
     /// every launch still works through the full load gate — fail
     /// closed, never an unclassified cache.

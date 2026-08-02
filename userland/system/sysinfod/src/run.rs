@@ -57,10 +57,10 @@ mod program {
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
         CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
-        MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
-        ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-        VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
-        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        MemoryPressureBand, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats,
+        ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
+        UserDirectoryRecord, VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
+        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -230,6 +230,10 @@ mod program {
 
         fn memory_pressure(&self, _caller: &Caller) -> Result<MemoryPressureStats, Errno> {
             MemoryPressureStats::from_bytes(&read_scalar(IntrospectDomain::MemoryPressure)?)
+        }
+
+        fn memory_pressure_band(&self, _caller: &Caller) -> Result<MemoryPressureBand, Errno> {
+            MemoryPressureBand::from_bytes(&read_scalar(IntrospectDomain::MemoryPressureBand)?)
         }
 
         fn reclaim_records(&self, _caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno> {

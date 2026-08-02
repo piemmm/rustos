@@ -338,6 +338,35 @@ impl SysinfoQueryId {
     /// capability token.
     pub const VOLUME_IO_HEALTH: Self = Self(27);
 
+    /// The current system memory-pressure band alone: a single
+    /// [`MemoryPressureBand`].
+    ///
+    /// Ungated and unaudited, and deliberately so. A process cannot
+    /// manage its own memory well without knowing whether the machine
+    /// is short of it: a desktop session holding megabytes of
+    /// rasterised glyphs and icons must give them back as pressure
+    /// rises, in the same order and at the same bands as the kernel's
+    /// own caches (`plans/SMARTRAM.md` SMART5). Denying it that would
+    /// not protect anything — it would simply make cooperative reclaim
+    /// impossible and leave the process to be reclaimed *against*.
+    ///
+    /// What it exposes is one hysteresis-damped five-level indicator of
+    /// the whole machine — no bytes, no watermarks, no per-task,
+    /// per-user, or per-address-space figure, and nothing that varies
+    /// with another principal's individual allocations. That is a
+    /// coarser disclosure than the already-ungated
+    /// [`Self::LOAD_AVERAGE`] (which reports the live task census and
+    /// the logged-in user count). The detailed view —
+    /// [`Self::MEMORY_PRESSURE`], with free and total bytes, every
+    /// watermark, and the per-band transition history — remains gated
+    /// by `CAP_SYSINFO_KERNEL` and audited, unchanged.
+    ///
+    /// This is the drain for the edge-triggered
+    /// [`WaitSourceKind::MemoryPressure`](crate::WaitSourceKind::MemoryPressure)
+    /// wait source: a process parks until the band moves, then reads it
+    /// here. It is never a polling surface.
+    pub const MEMORY_PRESSURE_BAND: Self = Self(28);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -439,6 +468,11 @@ pub enum IntrospectDomain {
     /// [`BlkHealthCounters`]), with the
     /// syscall's `arg` naming the record offset to page from.
     VolumeIoHealth = 17,
+    /// The published memory-pressure band alone, without taking a fresh
+    /// reading of free memory: a single [`MemoryPressureBand`]. Distinct
+    /// from [`Self::MemoryPressure`], which samples the gauge and
+    /// returns the whole watermark and transition picture.
+    MemoryPressureBand = 18,
 }
 
 impl IntrospectDomain {
@@ -471,6 +505,7 @@ impl IntrospectDomain {
             15 => Ok(Self::Crashes),
             16 => Ok(Self::CpuInfo),
             17 => Ok(Self::VolumeIoHealth),
+            18 => Ok(Self::MemoryPressureBand),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -692,6 +727,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "volume_io_health",
         required_capability: Some(CapabilityId::SYSINFO_KERNEL),
         audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::MEMORY_PRESSURE_BAND,
+        name: "memory_pressure_band",
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -2915,6 +2956,64 @@ impl MemoryPressureStats {
     }
 }
 
+/// Response payload for [`SysinfoQueryId::MEMORY_PRESSURE_BAND`] — the
+/// published band and nothing else.
+///
+/// Deliberately the smallest useful answer. A process that must shrink
+/// its own caches as the machine tightens needs the band and only the
+/// band; free bytes, watermarks, and transition history belong to the
+/// gated [`MemoryPressureStats`] view.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct MemoryPressureBand {
+    /// Current band depth: an index into [`PRESSURE_BAND_NAMES`].
+    pub band: u8,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: [u8; 7],
+}
+
+impl MemoryPressureBand {
+    /// Encoded size on the wire.
+    ///
+    /// Layout, little-endian: `band` (`u8`, offset 0), `reserved`
+    /// (7 bytes, offset 1).
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.band;
+        out[1..8].copy_from_slice(&self.reserved);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::OutOfRange`] if the band is not one of the
+    ///   [`PRESSURE_BAND_COUNT`] known depths, or a reserved byte is
+    ///   non-zero — an unrecognised encoding is refused, never
+    ///   interpreted as the shallowest band.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let band = bytes[0];
+        if usize::from(band) >= PRESSURE_BAND_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        let mut reserved = [0u8; 7];
+        reserved.copy_from_slice(&bytes[1..8]);
+        if reserved != [0u8; 7] {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { band, reserved })
+    }
+}
+
 /// Number of reclaim classes in `sysinfo-v1`.
 ///
 /// Mirrors the kernel reclaim ledger's closed class set; the shared
@@ -4639,13 +4738,66 @@ mod tests {
             (15, IntrospectDomain::Crashes),
             (16, IntrospectDomain::CpuInfo),
             (17, IntrospectDomain::VolumeIoHealth),
+            (18, IntrospectDomain::MemoryPressureBand),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(18), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(19), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn memory_pressure_band_round_trips_and_fails_closed() {
+        use super::{MemoryPressureBand, PRESSURE_BAND_COUNT, PRESSURE_BAND_NAMES};
+
+        let report = MemoryPressureBand {
+            band: 2,
+            reserved: [0; 7],
+        };
+        let encoded = report.to_le_bytes();
+        assert_eq!(encoded.len(), MemoryPressureBand::WIRE_LEN);
+        let decoded = MemoryPressureBand::from_bytes(&encoded).expect("round trip");
+        assert_eq!(decoded, report);
+        assert_eq!(PRESSURE_BAND_NAMES[usize::from(decoded.band)], "moderate");
+
+        assert_eq!(
+            MemoryPressureBand::from_bytes(&encoded[..7]),
+            Err(Errno::BufferTooSmall)
+        );
+
+        // An unrecognised band depth is refused, never read as the
+        // shallowest band: a consumer that mistook it for "normal"
+        // would grow its caches while the machine was starving.
+        let mut unknown = encoded;
+        unknown[0] = u8::try_from(PRESSURE_BAND_COUNT).expect("band count fits a byte");
+        assert_eq!(
+            MemoryPressureBand::from_bytes(&unknown),
+            Err(Errno::OutOfRange)
+        );
+
+        let mut dirty = encoded;
+        dirty[5] = 1;
+        assert_eq!(
+            MemoryPressureBand::from_bytes(&dirty),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn the_band_query_is_ungated_while_the_detailed_view_stays_gated() {
+        let band = spec_for(SysinfoQueryId::MEMORY_PRESSURE_BAND).expect("registered");
+        assert_eq!(band.name, "memory_pressure_band");
+        assert_eq!(band.required_capability, None);
+        assert!(!band.audit);
+
+        let detail = spec_for(SysinfoQueryId::MEMORY_PRESSURE).expect("registered");
+        assert_eq!(
+            detail.required_capability,
+            Some(CapabilityId::SYSINFO_KERNEL)
+        );
+        assert!(detail.audit);
     }
 
     #[test]

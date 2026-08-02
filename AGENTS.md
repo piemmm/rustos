@@ -575,6 +575,8 @@ tairix/
 │   ├── raid/            # RAID composition engines (levels, dispatch, maintenance).
 │   ├── raidmeta/        # RAID array-member superblock format + reassembly.
 │   ├── raster/          # Shared software rasterisation.
+│   ├── reclaim/         # Reclaimable-memory model: classification, budgets,
+│   │                    #   pressure bands, and the one bounded cache.
 │   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
 │   ├── resref/          # Shared resource-reference parser.
 │   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.

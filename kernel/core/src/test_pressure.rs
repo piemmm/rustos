@@ -7,7 +7,8 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tairix_kernel_mem::{FreeMemorySource, MemoryPressure, PressureBand};
+use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
+use tairix_sync::once::Once;
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
 /// on readable byte counts.
@@ -57,4 +58,35 @@ pub(crate) fn free_for(band: PressureBand) -> usize {
         PressureBand::Severe => TEST_TOTAL / 16 - 4096,
         PressureBand::Critical => TEST_TOTAL / 32 - 4096,
     }
+}
+
+/// The process-global system gauge every host test shares, installed
+/// over a controllable source the first time this is called.
+///
+/// The published band the wait-set readiness scan and the ungated band
+/// query read comes from `crate::memstats::MEM_STATS`, which creates its
+/// one gauge on first request and returns that same gauge forever after.
+/// A test steering a *private* gauge therefore could not move the
+/// published band at all, and two tests installing different sources
+/// would race. Both problems are closed by routing every host test that
+/// needs the published band through this one installer.
+///
+/// Exactly one test may *move* the band, because the band is process-wide
+/// and the test binary runs its tests concurrently: a second steering
+/// test would see the first's writes. That test is
+/// `waitset_pressure_member_reports_a_band_change_and_consumes_the_edge`
+/// in `crate::syscalls`; anything else may read the band but must not
+/// write it.
+pub(crate) fn global_pressure_source() -> &'static TestSource {
+    static INSTALLED: Once<&'static TestSource> = Once::new();
+    INSTALLED
+        .call_once_infallible(|| {
+            let source: &'static TestSource = Box::leak(Box::new(TestSource {
+                free: AtomicUsize::new(free_for(PressureBand::Normal)),
+            }));
+            crate::memstats::MEM_STATS.system_pressure(source);
+            source
+        })
+        .copied()
+        .expect("the installer closure cannot panic, so the cell cannot poison")
 }

@@ -13,7 +13,7 @@ use alloc::vec;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tairix_kernel_mem::{FreeMemorySource, PressureBand};
+use tairix_reclaim::{FreeMemorySource, PressureBand};
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
 /// on readable byte counts.

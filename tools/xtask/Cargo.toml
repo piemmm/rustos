@@ -227,6 +227,14 @@ tairix-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
 # the endpoint marker compares the exact on-wire spelling.
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+# The shared reclaimable-memory model and the structured-log sink trait:
+# the AW3 pointer script builds a real `DesktopShell`, which owns the
+# seat's rasterised-asset caches, so it must hand that shell the same
+# pressure gauge and audit-sink types the live session does — truthfully
+# wired for a tool that never draws (`AGENTS.md` §2.2, plans/SMARTRAM.md
+# SMART5).
+tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
+tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 
 [dev-dependencies]
 # The `image_drivers` autoload-decision tests drive the real production match
@@ -238,5 +246,4 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # above.
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
-tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }

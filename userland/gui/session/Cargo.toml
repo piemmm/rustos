@@ -34,6 +34,19 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # user's identity and resolves each pin for the bar. The bar itself never
 # touches the VFS.
 tairix-taskpins = { path = "../../../lib/taskpins", version = "=0.0.0" }
+# The shared reclaimable-memory model (plans/SMARTRAM.md SMART5): the
+# session is the party that knows the output's frame size, the seat, and the
+# process pressure gauge, so it builds the window manager's cursor cache and
+# the taskbar's glyph cache from the one classified, budgeted, band-governed
+# desktop policy and hands each crate its ready-made cache (§2.2, §24.1).
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The one structured-logging surface (§5.4): the caches audit a
+# classification refusal or a detected ledger defect through it.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared System Information client (§16.6): the session reads the
+# ungated memory-pressure band through it when the kernel wakes the loop on
+# a band change, rather than opening a second query path of its own (§2.2).
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The shared pixel surface: a pin's sandbox-rasterised icon artwork is
 # rebuilt into the premultiplied surface the taskbar's shared control blits
 # (one colour-algebra home).
@@ -124,6 +137,11 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # the session's address space. Host tests fake the `IconRasteriser` seam
 # instead.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# On the real target the session reads the ungated memory-pressure band over
+# the shared System Information client's production `ipc_call` transport
+# (`IpcTransport`, behind its `program` feature, exactly as `lspci` does);
+# the base dependency stays host-neutral so host tests need no transport.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 [lints]
 workspace = true

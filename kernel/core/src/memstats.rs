@@ -27,10 +27,31 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::sysinfo::RamzipStats;
-use tairix_kernel_mem::pressure::FreeMemorySource;
-use tairix_kernel_mem::reclaim::{CacheAccounting, ReclaimClass, ReclaimClassStats};
-use tairix_kernel_mem::MemoryPressure;
+use tairix_reclaim::{
+    BandObserver, CacheAccounting, FreeMemorySource, MemoryPressure, PressureBand, ReclaimClass,
+    ReclaimClassStats,
+};
 use tairix_sync::RwLock;
+
+/// Turns a published band change into a deferred wake of every task
+/// parked on a memory-pressure wait-set member.
+///
+/// The gauge samples itself from wherever memory is being spent, so this
+/// hook can fire inside the frame allocator, a demand fault, or a
+/// direct-reclaim sweep — contexts that may already hold the very locks a
+/// wake would need. It therefore only flags the wait-queue; the real
+/// unpark happens at the next dispatcher-context drain.
+struct PressureBandWake;
+
+impl BandObserver for PressureBandWake {
+    fn band_changed(&self, band: PressureBand) {
+        let _ = band;
+        crate::waitq::pressure_wake();
+    }
+}
+
+/// The one observer installed on the system gauge.
+static PRESSURE_BAND_WAKE: PressureBandWake = PressureBandWake;
 
 /// Discovered physical-RAM size, in bytes, published once at boot — the
 /// backing every reclaimable cache derives its byte budget from
@@ -132,9 +153,30 @@ impl MemStats {
         }
         // One boot-lifetime leak, deliberate: the gauge is shared as
         // `&'static` by every cache for the life of the kernel.
-        let gauge: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(backing)));
+        let gauge: &'static MemoryPressure = Box::leak(Box::new(
+            MemoryPressure::over(backing).observed_by(&PRESSURE_BAND_WAKE),
+        ));
         *slot = Some(gauge);
         gauge
+    }
+
+    /// The band the gauge has published, without taking a reading, or
+    /// [`PressureBand::Normal`] before boot brings the gauge online.
+    ///
+    /// A peek, deliberately: it is read on the wait-set readiness scan
+    /// and by the ungated band query, neither of which should be able to
+    /// make an unprivileged caller drive a free-memory reading. The band
+    /// is refreshed by whoever actually spends memory (a cache
+    /// operation, a demand fault, a reclaim sweep), which is the only
+    /// moment it can meaningfully have moved.
+    ///
+    /// Before the gauge exists there is no measured state to report and
+    /// nothing has yet been able to consume memory through it, so the
+    /// shallowest band is the truthful answer rather than a guess.
+    #[must_use]
+    pub fn published_band(&self) -> PressureBand {
+        self.current_pressure()
+            .map_or(PressureBand::Normal, MemoryPressure::band)
     }
 
     /// The system pressure gauge if one has been created, or `None`

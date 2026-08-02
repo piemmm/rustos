@@ -96,10 +96,10 @@ use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService};
 use tairix_kernel_ipc::EndpointId;
-use tairix_kernel_mem::{CacheBudget, MemoryPressure};
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_partition::PartitionBlock;
+use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::{OnceCell, SpinLock};
 
 use crate::kernel_fs::KernelFs;

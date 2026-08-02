@@ -57,7 +57,9 @@ use tairix_controls::{ControlRole, ControlState, PointerState, TaskVisibility, T
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconSet};
-use tairix_raster::{Color, RasterCache, Surface};
+use tairix_log::Sink;
+use tairix_raster::{Color, Surface};
+use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
 use tairix_theme::{Palette, TextRole, Theme};
 
 use crate::layout::BarLayout;
@@ -69,12 +71,46 @@ use crate::taskbar::Taskbar;
 /// Padding in pixels between a notification slot's edge and its icon glyph.
 const ICON_PADDING: u32 = 4;
 
+/// Worst-case per-entry bookkeeping the cache charges on top of a
+/// notification glyph's own pixel bytes: the LRU/index tick and
+/// charged-size fields (`u64` + `usize`) plus this cache's small share of
+/// its two `BTreeMap`s' node overhead. `IconKind` itself is a bare enum
+/// discriminant, so the key contributes negligible bytes beyond this.
+const ENTRY_METADATA_BYTES: usize = 64;
+
 /// The epoch a cached notification glyph is valid for: the tint it is drawn
 /// in, the pixel side it is rasterised to, and the generation of the active
 /// [`IconSet`]. A theme change moves the tint on, a scale change moves the
 /// side on, and installing a different icon set moves the generation on — any
 /// of the three invalidates every cached glyph.
-type IconEpoch = (Color, u32, u64);
+pub type IconEpoch = (Color, u32, u64);
+
+/// Build the one [`ReclaimCache`] a [`TaskbarRenderer`] retains rasterised
+/// notification glyphs in, classified through the shared desktop cache
+/// policy (`tairix_reclaim::disposable_ui_cache`).
+///
+/// `seat` is the seat the renderer belongs to and `fb_bytes` is the real
+/// output's backing byte size, so the cache's budget scales with the actual
+/// display rather than a guessed constant; `pressure` and `sink` are the
+/// process's live pressure gauge and audit sink. The embedder — the only
+/// party that knows all four — calls this once and hands the result to
+/// [`TaskbarRenderer::new`].
+#[must_use]
+pub fn icon_cache(
+    seat: u64,
+    fb_bytes: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+    sink: &'static (dyn Sink + Sync),
+) -> ReclaimCache<IconKind, Surface, IconEpoch> {
+    disposable_ui_cache(
+        "taskbar.icon",
+        seat,
+        fb_bytes,
+        ENTRY_METADATA_BYTES,
+        pressure,
+        sink,
+    )
+}
 
 /// Everything [`draw_icon`] needs to resolve and cache a notification glyph:
 /// the across-frame glyph cache, the active icon set, and the set's
@@ -82,7 +118,7 @@ type IconEpoch = (Color, u32, u64);
 /// the cached glyphs). Bundled so the painters take one parameter rather than
 /// three.
 struct IconContext<'a> {
-    cache: &'a mut RasterCache<IconKind, Surface, IconEpoch>,
+    cache: &'a mut ReclaimCache<IconKind, Surface, IconEpoch>,
     set: &'a IconSet,
     generation: u64,
 }
@@ -94,24 +130,38 @@ struct IconContext<'a> {
 /// and task titles are cheap to repaint every frame, but the vector
 /// notification glyphs are rasterised through `lib/raster` once per
 /// theme/scale and reused until one changes — the SVG-first "convert once,
-/// re-render only on a scale or theme change" rule, sharing the one
-/// [`RasterCache`] the window manager uses for cursors.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// re-render only on a scale or theme change" rule, through the same bounded,
+/// pressure-governed [`ReclaimCache`] the window manager uses for cursors.
+/// The cache is a required constructor argument, not something this crate
+/// builds itself: a cache built without a live pressure gauge would classify
+/// and serve every lookup correctly while retaining nothing, which is a
+/// defect that looks exactly like working software.
+///
+/// Neither `Clone` nor `PartialEq`/`Eq`/`Default` are derived: the cache
+/// holds a pressure gauge and a diagnostics sink behind trait objects, which
+/// are neither cloneable nor comparable, and cloning a live cache's charged
+/// ledger would double-count its bytes.
+#[derive(Debug)]
 pub struct TaskbarRenderer {
-    icons: RasterCache<IconKind, Surface, IconEpoch>,
+    icons: ReclaimCache<IconKind, Surface, IconEpoch>,
     icon_set: IconSet,
     icon_generation: u64,
 }
 
 impl TaskbarRenderer {
-    /// A renderer with an empty glyph cache drawing the built-in icon set.
+    /// A renderer drawing the built-in icon set, caching rasterised glyphs
+    /// in `cache`.
     ///
-    /// The desktop has a complete icon set before any on-disk SVG asset loads;
-    /// [`set_icons`](Self::set_icons) swaps a loaded set in at runtime.
+    /// The desktop has a complete icon set before any on-disk SVG asset
+    /// loads; [`set_icons`](Self::set_icons) swaps a loaded set in at
+    /// runtime. `cache` is built by the embedder from the shared desktop
+    /// cache policy ([`icon_cache`]), wired to the real display backing
+    /// size, the owning seat, and the process's live pressure gauge — this
+    /// renderer never invents that policy itself.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(cache: ReclaimCache<IconKind, Surface, IconEpoch>) -> Self {
         Self {
-            icons: RasterCache::new(),
+            icons: cache,
             icon_set: IconSet::builtin(),
             icon_generation: 0,
         }
@@ -136,6 +186,48 @@ impl TaskbarRenderer {
     #[must_use]
     pub const fn icons(&self) -> &IconSet {
         &self.icon_set
+    }
+
+    /// Wipe every cached notification glyph, so no rasterised pixel data
+    /// from this seat's session survives it.
+    ///
+    /// Called when the seat this renderer belongs to is lost or its session
+    /// ends. The cache stays usable afterwards — a later render simply
+    /// rebuilds what it needs — this only discards what was already
+    /// rendered.
+    pub fn teardown(&mut self) {
+        self.icons.teardown();
+    }
+
+    /// Apply the current memory-pressure band's forced shrink to the glyph
+    /// cache, returning the bytes released.
+    ///
+    /// The session calls this when the kernel wakes it with a deepened
+    /// band, so the bar gives its rasterised pixels back at the moment
+    /// pressure rises rather than at whatever later frame happens to
+    /// repaint a notification. A band that demands nothing releases
+    /// nothing.
+    pub fn trim(&mut self) -> usize {
+        self.icons.enforce_pressure()
+    }
+
+    /// Rasterised notification glyphs currently retained.
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.icons.len()
+    }
+
+    /// Bytes the glyph cache currently has charged: retained pixel data
+    /// plus its own per-entry bookkeeping.
+    #[must_use]
+    pub fn cache_bytes(&self) -> usize {
+        self.icons.charged_bytes()
+    }
+
+    /// The glyph cache's byte ledger and event counters, for diagnostics.
+    #[must_use]
+    pub fn cache_stats(&self) -> &CacheAccounting {
+        self.icons.accounting()
     }
 
     /// Paint `taskbar` into a [`Surface`] using its own theme's palette.
@@ -566,11 +658,10 @@ fn draw_icon(
         .min(rect.height)
         .saturating_sub(ICON_PADDING.saturating_mul(2));
     let set = icons.set;
+    let epoch = (color, side, icons.generation);
     let Some(image) = icons
         .cache
-        .get_or_render(&(color, side, icons.generation), kind, || {
-            set.icon(kind, color).rasterise(side)
-        })
+        .get_or_build(&epoch, kind, || set.icon(kind, color).rasterise(side))
     else {
         return;
     };
@@ -578,7 +669,7 @@ fn draw_icon(
     let y_offset = rect.height.saturating_sub(side) / 2;
     let x = to_i32(local(rect.left(), origin.x).saturating_add(x_offset));
     let y = to_i32(local(rect.top(), origin.y).saturating_add(y_offset));
-    surface.blit(x, y, image);
+    surface.blit(x, y, &image);
 }
 
 /// Translate a screen-space rectangle into surface-local space.

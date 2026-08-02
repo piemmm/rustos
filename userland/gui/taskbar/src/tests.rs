@@ -13,11 +13,52 @@ use tairix_controls::{
     TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconSet};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Appearance, Contrast, SignalRole, Theme, ThemeId};
+
+use tairix_log::{Event, Sink};
+use tairix_reclaim::{CacheBudget, PressureBand, ReclaimCache, ReportedPressure};
+
+/// The seat every renderer under test belongs to.
+const TEST_SEAT: u64 = 1;
+
+/// A modest display backing (roughly 1280x720x4) so the derived budget is
+/// representative of a real output rather than degenerate.
+const TEST_FB_BYTES: usize = 1280 * 720 * 4;
+
+/// Discards audit records; a test asserts on cache state, not on log
+/// output.
+struct NullSink;
+
+impl Sink for NullSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+static TEST_SINK: NullSink = NullSink;
+
+/// The band the shared [`test_icon_cache`] is governed by. Held at normal
+/// for its whole life: a test that needs a different band owns its own
+/// gauge (see [`pressured_renderer`]), because these tests run in
+/// parallel and a shared mutable band would let one test's pressure
+/// change decide another test's result.
+static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+/// A glyph cache at normal pressure, built through the real desktop
+/// policy so the tests exercise the shipping budget derivation.
+fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    icon_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
+/// A renderer governed by `gauge`, which the caller owns exclusively, so
+/// a test may deepen the band without touching any other test's.
+fn pressured_renderer(gauge: &'static ReportedPressure) -> TaskbarRenderer {
+    gauge.report(PressureBand::Normal);
+    TaskbarRenderer::new(icon_cache(TEST_SEAT, TEST_FB_BYTES, gauge, &TEST_SINK))
+}
 
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
@@ -28,7 +69,7 @@ use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
 use crate::pins::PinView;
-use crate::render::TaskbarRenderer;
+use crate::render::{icon_cache, IconEpoch, TaskbarRenderer};
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{ActivateOutcome, TaskId, TaskList};
@@ -2096,7 +2137,7 @@ fn is_coverage_blend(p: Pixel, fg: Pixel, bg: Pixel) -> bool {
 fn rendered_surface_matches_bar_dimensions() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert_eq!(surface.width(), layout.bar.width);
@@ -2106,7 +2147,7 @@ fn rendered_surface_matches_bar_dimensions() {
 #[test]
 fn background_is_the_raised_surface_colour() {
     let bar = bottom_bar();
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert_eq!(
@@ -2119,7 +2160,7 @@ fn background_is_the_raised_surface_colour() {
 fn library_button_paints_the_accent_plate_and_files_stays_quiet() {
     let bar = bottom_bar();
     let theme = Theme::dark();
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     let frame = bar.layout(Scale::ONE).bar;
@@ -2159,7 +2200,7 @@ fn focused_task_shows_the_accent_seam_and_others_stay_quiet() {
     bar.tasks_mut().activate(TaskId(1));
 
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     // The focused task's shared control draws the lower accent seam…
@@ -2193,7 +2234,7 @@ fn minimised_task_recedes_into_the_bar() {
     bar.tasks_mut().minimise(TaskId(1));
 
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     // The minimised task's shared control recesses its plate to the flat
@@ -2222,7 +2263,7 @@ fn status_signal_glyph_draws_in_the_muted_role() {
         StatusKind::Network
     )]);
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert!(region_has_role_ink(
@@ -2234,10 +2275,122 @@ fn status_signal_glyph_draws_in_the_muted_role() {
     ));
 }
 
+/// A bar showing one status signal of each kind the built-in set draws,
+/// so a render rasterises several distinct glyphs into the cache.
+fn bar_with_status_signals() -> Taskbar {
+    let mut bar = bottom_bar();
+    bar.set_status_signals(alloc::vec![
+        StatusSignal::new(IconId(1), StatusKind::Network),
+        StatusSignal::new(IconId(2), StatusKind::Volume),
+        StatusSignal::new(IconId(3), StatusKind::Battery),
+    ]);
+    bar
+}
+
+#[test]
+fn a_glyph_is_rasterised_once_per_epoch_and_retained() {
+    let bar = bar_with_status_signals();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let after_first = renderer.cache_len();
+    assert!(after_first > 0, "glyphs must be retained across frames");
+    let rasterisations = renderer.cache_stats().misses();
+
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert_eq!(renderer.cache_len(), after_first);
+    assert_eq!(
+        renderer.cache_stats().misses(),
+        rasterisations,
+        "a repaint at the same epoch must not re-rasterise"
+    );
+}
+
+#[test]
+fn a_scale_change_invalidates_every_cached_glyph() {
+    let bar = bar_with_status_signals();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let rasterisations = renderer.cache_stats().misses();
+    assert!(rasterisations > 0);
+
+    let doubled = Scale::from_percent(200).expect("scale");
+    let _ = renderer.render(&bar, doubled).expect("bar renders");
+    assert_eq!(
+        renderer.cache_stats().invalidations(),
+        1,
+        "a glyph rasterised for one pixel size is wrong at another"
+    );
+    assert!(renderer.cache_stats().misses() > rasterisations);
+}
+
+#[test]
+fn installing_a_different_icon_set_invalidates_every_cached_glyph() {
+    let bar = bar_with_status_signals();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert!(renderer.cache_len() > 0);
+
+    renderer.set_icons(IconSet::builtin());
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert_eq!(renderer.cache_stats().invalidations(), 1);
+}
+
+#[test]
+fn the_glyph_cache_never_exceeds_its_derived_budget() {
+    let bar = bar_with_status_signals();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let hard = CacheBudget::from_backing(TEST_FB_BYTES).hard();
+
+    // Every scale is a fresh epoch, so this rasterises a great many
+    // distinct glyphs through the one cache.
+    for percent in 50..250u32 {
+        let scale = Scale::from_percent(percent).expect("scale");
+        let _ = renderer.render(&bar, scale).expect("bar renders");
+        assert!(
+            renderer.cache_bytes() <= hard,
+            "the cache must stay inside its budget at every step"
+        );
+    }
+}
+
+#[test]
+fn mild_pressure_drops_the_glyph_cache_and_refuses_growth() {
+    static GAUGE: ReportedPressure = ReportedPressure::unknown();
+    let bar = bar_with_status_signals();
+    let mut renderer = pressured_renderer(&GAUGE);
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert!(renderer.cache_len() > 0);
+
+    GAUGE.report(PressureBand::Mild);
+    assert!(renderer.trim() > 0, "mild pressure must release UI pixels");
+    assert_eq!(renderer.cache_len(), 0);
+    assert_eq!(renderer.cache_bytes(), 0);
+
+    // The bar still paints correctly; the glyphs are simply rasterised
+    // on demand instead of retained.
+    let surface = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert_eq!(surface.width(), bar.layout(Scale::ONE).bar.width);
+    assert_eq!(renderer.cache_len(), 0, "no growth while pressure holds");
+}
+
+#[test]
+fn teardown_releases_every_rasterised_glyph() {
+    let bar = bar_with_status_signals();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    assert!(renderer.cache_len() > 0);
+
+    renderer.teardown();
+    assert_eq!(renderer.cache_len(), 0);
+    assert_eq!(renderer.cache_bytes(), 0);
+    assert_eq!(renderer.cache_stats().teardowns(), 1);
+}
+
 #[test]
 fn theme_switch_repaints_the_bar() {
     let mut bar = bottom_bar();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let dark = renderer.render(&bar, Scale::ONE).expect("bar renders");
     bar.apply_theme(&Theme::light());
     let light = renderer.render(&bar, Scale::ONE).expect("bar renders");
@@ -2278,7 +2431,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
-    let empty = TaskbarRenderer::new()
+    let empty = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert!(
@@ -2293,7 +2446,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
     );
 
     bar.clock_mut().set_label("12:34");
-    let drawn = TaskbarRenderer::new()
+    let drawn = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert!(region_has_role_ink(
@@ -2312,7 +2465,7 @@ fn long_task_title_never_spills_its_slot() {
     bar.tasks_mut()
         .add(TaskId(1), "An enormously long window title that cannot fit");
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     // The empty bar beyond the only task's slot carries no text ink: the
@@ -2343,7 +2496,7 @@ fn pins_render_artwork_or_fallback_glyph() {
         PinView::new("Glyph", IconKind::AppBundle),
     ]);
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
 
@@ -2377,7 +2530,7 @@ fn active_pin_shows_the_accent_seam() {
     bar.tasks_mut().set_focused(Some(task_id));
 
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
 
@@ -2401,7 +2554,7 @@ fn task_borrows_artwork_from_pin() {
     bar.tasks_mut().add(task_id, "App");
 
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
 
@@ -2418,7 +2571,7 @@ fn task_borrows_artwork_from_pin() {
 fn render_menu_paints_the_modal_plate_and_follows_theme() {
     let mut bar = bottom_bar();
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    let renderer = TaskbarRenderer::new();
+    let renderer = TaskbarRenderer::new(test_icon_cache());
 
     // None when closed.
     assert!(renderer.render_menu(&bar, Scale::ONE).is_none());
@@ -2481,7 +2634,7 @@ fn render_menu_paints_the_modal_plate_and_follows_theme() {
 #[test]
 fn render_library_is_none_while_closed() {
     let bar = bottom_bar();
-    assert!(TaskbarRenderer::new()
+    assert!(TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .is_none());
 }
@@ -2494,7 +2647,7 @@ fn open_popup_renders_panel_rows_and_search() {
     open_library(&mut input, &mut bar);
 
     let layout = bar.library_layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
     assert_eq!(surface.width(), layout.panel.width);
@@ -2546,7 +2699,7 @@ fn hovered_and_current_rows_show_their_states() {
     assert_eq!(bar.library().current(), Some(0));
 
     let layout = bar.library_layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
 
@@ -2576,7 +2729,7 @@ fn empty_library_renders_the_placeholder_ink() {
     open_library(&mut input, &mut bar);
 
     let layout = bar.library_layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
     assert!(region_has_role_ink(
@@ -2607,7 +2760,7 @@ fn overflowing_popup_paints_its_scrollbar() {
 
     let layout = bar.library_layout(Scale::ONE);
     let scrollbar = layout.scrollbar.expect("an overflow shows a scrollbar");
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
     assert!(region_has_pixel(
@@ -2631,7 +2784,7 @@ fn popup_renders_under_both_themes_and_high_contrast() {
         open_library(&mut input, &mut bar);
 
         let layout = bar.library_layout(Scale::ONE);
-        let surface = TaskbarRenderer::new()
+        let surface = TaskbarRenderer::new(test_icon_cache())
             .render_library(&bar, Scale::ONE)
             .expect("popup renders");
         assert_eq!(surface.width(), layout.panel.width);
@@ -2654,7 +2807,7 @@ fn popup_repaints_after_a_theme_switch() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
-    let renderer = TaskbarRenderer::new();
+    let renderer = TaskbarRenderer::new(test_icon_cache());
     let dark = renderer
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
@@ -2676,7 +2829,7 @@ fn popup_repaints_after_a_theme_switch() {
 fn no_popover_until_a_notification_is_raised() {
     let bar = bottom_bar();
     assert!(bar.notifications_layout(Scale::ONE).is_none());
-    assert!(TaskbarRenderer::new()
+    assert!(TaskbarRenderer::new(test_icon_cache())
         .render_notifications(&bar, Scale::ONE)
         .is_none());
 }
@@ -2739,7 +2892,7 @@ fn popover_fails_closed_on_a_degenerate_screen() {
         .expect("still lays out");
     assert!(layout.cards.is_empty(), "no card fits, so none is placed");
     // Rendering a card-less popover still fails closed (no panic).
-    let _ = TaskbarRenderer::new().render_notifications(&bar, Scale::ONE);
+    let _ = TaskbarRenderer::new(test_icon_cache()).render_notifications(&bar, Scale::ONE);
 }
 
 #[test]
@@ -2820,7 +2973,7 @@ fn render_notifications_paints_a_card_in_every_theme() {
             "Backup now",
         ));
         let layout = bar.notifications_layout(Scale::ONE).expect("popover");
-        let surface = TaskbarRenderer::new()
+        let surface = TaskbarRenderer::new(test_icon_cache())
             .render_notifications(&bar, Scale::ONE)
             .expect("popover renders");
         assert_eq!(surface.width(), layout.panel.width);
@@ -3620,7 +3773,7 @@ fn readout_opens_outward_on_every_edge_and_stays_on_screen() {
 fn capsule_paints_in_its_slot() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert!(
@@ -3637,7 +3790,7 @@ fn pressure_paints_the_dominant_kind_rail() {
     summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 700, 1));
     bar.set_tray_summary(Some(summary));
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     assert!(region_has_pixel(
@@ -3654,7 +3807,7 @@ fn jobs_paint_the_heat_seam_along_the_slot_bottom() {
     let mut bar = bottom_bar();
     bar.set_tray_summary(Some(tray_summary(2, 0, 0)));
     let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE)
         .expect("bar renders");
     // The working seam runs across the slot's lower edge — probe only the
@@ -3713,7 +3866,7 @@ fn badge_tones_follow_the_dominant_state() {
         ),
     ] {
         let layout = bar.layout(Scale::ONE);
-        let surface = TaskbarRenderer::new()
+        let surface = TaskbarRenderer::new(test_icon_cache())
             .render(bar, Scale::ONE)
             .expect("bar renders");
         assert!(
@@ -3739,7 +3892,7 @@ fn capsule_renders_across_themes_and_high_contrast() {
         summary.pressure = Some(tray_pressure(TrayPressureKind::Memory, 600, 2));
         bar.set_tray_summary(Some(summary));
         let layout = bar.layout(Scale::ONE);
-        let surface = TaskbarRenderer::new()
+        let surface = TaskbarRenderer::new(test_icon_cache())
             .render(&bar, Scale::ONE)
             .expect("bar renders");
         assert!(
@@ -3763,7 +3916,7 @@ fn capsule_renders_across_themes_and_high_contrast() {
 #[test]
 fn collapsed_readout_renders_nothing() {
     let bar = bottom_bar();
-    assert!(TaskbarRenderer::new()
+    assert!(TaskbarRenderer::new(test_icon_cache())
         .render_tray_readout(&bar, Scale::ONE)
         .is_none());
 }
@@ -3779,7 +3932,7 @@ fn readout_renders_the_state_and_value_lines() {
     hover_switchboard(&mut input, &mut bar);
 
     let layout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
-    let surface = TaskbarRenderer::new()
+    let surface = TaskbarRenderer::new(test_icon_cache())
         .render_tray_readout(&bar, Scale::ONE)
         .expect("readout renders");
     assert_eq!(surface.width(), layout.panel.width);

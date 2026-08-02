@@ -18,8 +18,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::DriverHandle;
 use tairix_caps::CapabilitySet;
-use tairix_kernel_mem::PressureBand;
 use tairix_kernel_sec::{GroupId, UserId};
+use tairix_reclaim::PressureBand;
 
 /// A driver wrapper counting every structural call, so a test can prove
 /// a cache hit never reached the device.

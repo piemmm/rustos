@@ -38,14 +38,14 @@
 //! clean file data and filesystem metadata, owned by the wrapped
 //! volume, holding decrypted user data, precisely invalidated by the
 //! volume's single writer, droppable on demand, with bounded per-entry
-//! bookkeeping — and classifies them through the `kernel/mem::reclaim`
+//! bookkeeping — and classifies them through the `tairix_reclaim`
 //! admission gate. A refusal starts the cache poisoned: every
 //! operation is served straight from the driver (fail closed, never an
 //! unclassified cache).
 //!
 //! The cache is bounded by a [`CacheBudget`] derived from the kernel
 //! heap size and accounted per class in a [`CacheAccounting`] ledger
-//! (`kernel/mem::reclaim`). An insert that would exceed the hard limit
+//! (`tairix_reclaim`). An insert that would exceed the hard limit
 //! first evicts least-recently-used entries down to the low watermark
 //! (hysteresis), evicting file data before metadata
 //! ([`ReclaimClass::reclaim_priority`]). Oversized entries (a name over
@@ -81,12 +81,13 @@ use tairix_abi::driver::filesystem::{
     VolumeStats,
 };
 use tairix_abi::DriverError;
-use tairix_kernel_mem::{
+use tairix_kernel_mem::PAGE_SIZE;
+use tairix_log::Sink;
+use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
     CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
-    ReclaimOwner, ReclaimRule, Sensitivity, PAGE_SIZE,
+    ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_log::Sink;
 use zeroize::Zeroize;
 
 use super::path::MAX_COMPONENT_LEN;
@@ -172,7 +173,7 @@ pub struct CachedFs<F> {
     /// normal pressure or when growth would dip into the reserve.
     pressure: &'static MemoryPressure,
     /// The audit sink a classification refusal or detected ledger
-    /// defect reports through (`kernel/mem::reclaim_audit`).
+    /// defect reports through (`tairix_reclaim::audit`).
     sink: &'static (dyn Sink + Sync),
     accounting: Arc<CacheAccounting>,
     /// The classified admission policies (file data, metadata); `None`
@@ -230,7 +231,7 @@ impl<F> CachedFs<F> {
     /// Wrap `inner` with an empty cache bounded by `budget`, charged to
     /// the volume `owner` and governed by the system `pressure` gauge.
     ///
-    /// Both candidate declarations pass the `kernel/mem::reclaim`
+    /// Both candidate declarations pass the `tairix_reclaim`
     /// classification gate; a refusal poisons the cache from birth, so
     /// every operation is served straight from the driver — fail
     /// closed, the volume still works.

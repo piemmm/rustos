@@ -136,9 +136,13 @@ owns:
   on top. `pin_icon_side` exposes the exact pixel geometry so owners rasterise
   at the drawn size. The surface is rectangular — the window manager rounds it
   — and the colour/blit algebra is reused from `lib/*` (`AGENTS.md` §2.2).
-  The renderer holds a `RasterCache` of the rasterised notification glyphs
-  across frames. `render_library` paints the open popup, and `render_menu`
-  paints the open context menu.
+  The renderer holds a `tairix-reclaim` `ReclaimCache` of the rasterised
+  notification glyphs across frames, built by `icon_cache` from the shared
+  desktop cache policy (`tairix_reclaim::desktop::disposable_ui_cache`,
+  `plans/SMARTRAM.md` SMART5): owned by the seat, bounded by a budget
+  derived from the real framebuffer byte size, dropped under memory
+  pressure, and wiped on release. `render_library` paints the open popup,
+  and `render_menu` paints the open context menu.
 - **Notification icon set** — the renderer draws each notification glyph from
   a `tairix-icon` `IconSet`: the built-in glyph set until `set_icons` installs
   one decoded from the on-disk `/System/Graphics` SVG assets
@@ -166,10 +170,14 @@ premultiplied-alpha `Color`/`Surface` the window manager also paints with),
 `tairix-font` (the shared text rasteriser, `AGENTS.md` §16.4),
 `tairix-controls` (the shared Reactive Alloy control vocabulary the buttons
 and popup compose, `plans/GUI-CONTROLS-DESIGN.md`), `tairix-proglib` (the
-program-library catalog the popup lists), and `tairix-theme` (the single
-shared theme definition). It does **not** depend on
-the window manager or any sibling userland crate, and nothing depends on it in
-turn (`AGENTS.md` §17.4, §17.3): the desktop is an optional, one-way-dependent
+program-library catalog the popup lists), `tairix-theme` (the single
+shared theme definition), `tairix-abi` (the `PowerAction`, notification, and
+Switchboard-tray IPC vocabulary the capsule and power controls consume),
+`tairix-reclaim` (the shared reclaimable-cache policy the notification-glyph
+cache is built from, `plans/SMARTRAM.md` SMART5), and `tairix-log` (the
+audit sink the cache reports through). It does **not** depend on the window
+manager or any sibling userland crate, and nothing depends on it in turn
+(`AGENTS.md` §17.4, §17.3): the desktop is an optional, one-way-dependent
 frontend, so a headless image omits it cleanly.
 
 It is `no_std` (with `alloc`). No `unsafe`, and no `unwrap`/`expect`/`panic!`

@@ -92,7 +92,7 @@ pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
 pub use pins::{PinStrip, PinView};
-pub use render::TaskbarRenderer;
+pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;
 pub use system::{SystemAction, SystemPermits, SystemRow};
 pub use taskbar::{Taskbar, TaskbarConfig};

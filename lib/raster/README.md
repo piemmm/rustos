@@ -37,17 +37,17 @@ This crate owns:
   corner area, not the whole rectangle. The window manager's corner mask and
   `Surface::fill_round_rect`'s Reactive Alloy control plates both round
   through this one function, so the two never drift apart (`AGENTS.md` §2.2).
-- `RasterCache` — the single scale/theme-keyed rasterisation cache. Desktop
-  assets are authored as resolution-independent vector forms and rasterised
-  into a `Surface` only when they can change; the SVG-first rule (`AGENTS.md`
-  §10) requires each asset to be converted **once** at the active scale and
-  re-rendered only on a scale or theme change, never on the hot compositing
-  path. `RasterCache` is keyed by an asset identity within an *epoch* (a scale
-  paired with a theme identity): a changed epoch discards every entry, a
-  stable epoch reuses, and a failed render is not remembered (fail closed,
-  §2.9). The window manager caches pointer cursors and the taskbar caches
-  notification glyphs through this one mechanism rather than each growing its
-  own (`AGENTS.md` §2.2 / §6).
+- `Surface`'s `tairix_reclaim::CachedBytes` impl — the one measurement of a
+  surface's retained heap size (its pixel buffer) and the one wipe that
+  clears it to fully transparent black before release. The window manager's
+  and the taskbar's rasterisation caches are `tairix_reclaim::ReclaimCache`
+  instances (`plans/SMARTRAM.md` section 6.4) built from the shared desktop
+  cache policy (`tairix_reclaim::desktop`); a `Surface` plugs into that
+  bounded, pressure-governed cache through this one impl rather than each GUI
+  crate measuring or wiping it separately (`AGENTS.md` §2.2). Rasterisation
+  caching itself — budgeting, generation invalidation, pressure-forced
+  shrinking, zero-on-release — lives entirely in `lib/reclaim`; this crate
+  only supplies the rendered value the cache holds.
 
 There is exactly one definition of the colour algebra here, so it is never
 duplicated into a sibling crate (`AGENTS.md` §2.2). A theme `Rgba` token meets
@@ -84,8 +84,9 @@ and one index computation per row instead of per pixel.
 
 Sibling userland GUI crates may not depend on one another (`AGENTS.md` §17.4),
 so the rasteriser they both use belongs in `lib/*`. It depends only on
-`lib/theme` (for the `From<Rgba>` edge) and is depended on by the GUI crates,
-never the reverse — `Layer::Lib` in the §17.4 layering.
+`lib/theme` (for the `From<Rgba>` edge) and `lib/reclaim` (for the
+`CachedBytes` trait `Surface` implements) and is depended on by the GUI
+crates, never the reverse — `Layer::Lib` in the §17.4 layering.
 
 ## Stability tier
 

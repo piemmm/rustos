@@ -14,6 +14,10 @@ publish.workspace = true
 # arithmetic of its own (§2.2); it composites through `lib/raster`'s single
 # `Pixel::over` path.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The `CachedBytes` trait `CursorImage` implements, delegating straight to
+# its `Surface`'s own impl, so the window manager's cursor cache
+# (`plans/SMARTRAM.md` section 6.4) can bound and reclaim it.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # The shared integer coordinate types (`Point`) used for hotspots and the
 # rasterised footprint (§6 / §17.4).
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }

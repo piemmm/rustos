@@ -1,0 +1,27 @@
+[package]
+name = "tairix-reclaim"
+description = "TAIRiX shared reclaimable-memory model: the cache classification/budget/accounting taxonomy, the five-band memory-pressure vocabulary and its reclaim ordering, and the bounded pressure-governed cache core the kernel and the desktop session both build their caches on (plans/SMARTRAM.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The one structured-logging surface. A classification refusal or a
+# detected ledger defect is a security-relevant decision, so it emits a
+# stable audit event rather than a bare failure — the same event contract
+# for a kernel cache and a desktop one.
+tairix-log = { path = "../log", version = "=0.0.0" }
+
+[lints]
+workspace = true
+
+# Nothing else, on purpose. The reclaimable-memory model is the shared
+# vocabulary the kernel memory manager *and* the userland desktop session
+# both classify their caches against, so it sits near the bottom of the
+# layering and is depended on, never depends. Anything platform-specific
+# (the physical frame allocator behind the kernel's live gauge, the
+# `ramzip` handoff ordering) stays with its owner and plugs in through the
+# seams defined here.

@@ -89,6 +89,10 @@ tairix-kernel-core = { path = "../core", version = "=0.0.0" }
 tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
+# The shared reclaimable-memory model: the boot path classifies the
+# block, transform, and filesystem caches it installs through this one
+# gate, budgets them against it, and governs them by its pressure band.
+tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }

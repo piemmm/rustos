@@ -1008,12 +1008,22 @@ allocator over one configured heap window, driven against a borrowed live
   (small/large RAM, half-split cap, degenerate spans), and the extended
   `mmio_map_qemu_aarch64` `-M virt` vertical's `mem_map` round-trip.
 
-## 7g. Reclaimable-memory model (`reclaim`) and the filesystem cache
+## 7g. Reclaimable-memory model (`tairix_reclaim`) and the filesystem cache
 
-`kernel/mem::reclaim` is the one definition of how a reclaimable cache —
-memory holding *derived* state that can always be rebuilt from its
-canonical source — is classed, bounded, and accounted
-(`plans/SMARTRAM.md`):
+`lib/reclaim` (`tairix_reclaim`) is the one definition of how a
+reclaimable cache — memory holding *derived* state that can always be
+rebuilt from its canonical source — is classed, bounded, and accounted
+(`plans/SMARTRAM.md`).
+
+It is a shared crate rather than a kernel module because memory pressure
+is a property of the machine, not of privilege level: the desktop
+session holds megabytes of rasterised glyphs, cursors and icons, and it
+must give them back in the same order, at the same bands, as the
+kernel's own caches. `userland/*` may not depend on `kernel/*`, so the
+one definition sits in `lib/` and both sides import it. Only what
+genuinely needs the kernel's anonymous-memory tier stayed behind in
+`kernel/mem::pressure`: the `ramzip` handoff gate, the escalation
+ladder, and the frame allocator's `FreeMemorySource` binding.
 
 - **Classes.** Each entry belongs to one `ReclaimClass` with a
   deterministic `reclaim_priority` following the `plans/SMARTRAM.md`
@@ -1091,7 +1101,7 @@ properties:
 
 ## 7h. VM pressure bands and reclaim ordering (`pressure`)
 
-`kernel/mem::pressure` is the one definition of the system's
+`tairix_reclaim::pressure` is the one definition of the system's
 memory-pressure state and of the order reclaimable caches shrink in as
 pressure rises (`plans/SMARTRAM.md` SMART2). The band vocabulary —
 normal, mild, moderate, severe, critical — is shared with
@@ -1926,6 +1936,102 @@ not a stub.
   refused (`CompressRefusal::Incompressible`, never stored raw), and
   compression is exercised under both the moderate (ordinary relief) and
   severe (emergency growth) bands the handoff opens.
+
+## 7t. The desktop UI cache and cooperative reclaim (SMART5)
+
+The desktop rasterises vector assets — pointer cursors, notification
+glyphs, icons — at the active scale and theme. Each rasterisation is
+expensive and the result is pure derived state, so it is exactly the
+`DisposableUi` class of §7g. The problem is that the desktop runs in
+*userland*: it cannot see free frames, watermarks, or the reserve floor,
+and it must not be able to. This section is how it obeys the same
+reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
+
+- **One model, two vantage points.** `PressureGauge` has exactly two
+  implementations. `MemoryPressure` *measures*: it samples the frame
+  allocator and folds the reading into a band with hysteresis (§7h).
+  `ReportedPressure` *receives*: it holds the band the kernel reported
+  and answers from that. Both drive the same `shrink_target`, so a
+  desktop cache and a kernel cache shrink identically. A
+  `ReportedPressure` that has not been told anything answers
+  `critical` — an unwired process admits nothing to its caches and
+  renders everything on demand, rather than assuming the machine is
+  comfortable.
+- **One cache implementation.** `tairix_reclaim::ReclaimCache<K, V, E>`
+  is the single bounded, generation-invalidated, pressure-governed LRU
+  cache both sides use. It charges the §7g ledger, wipes non-public
+  entries before release, evicts oldest-first through an O(log n)
+  recency index, and poisons itself — draining and serving uncached
+  for the rest of its life — if a charge or discharge ever fails to
+  balance. When it cannot admit a value it still returns a usable one
+  (`Served::Uncached`), so a caller never has to handle "caching was
+  unavailable" and no path rasterises twice.
+- **Notification, not polling.** `WaitSourceKind::MemoryPressure` (wire
+  value 9; its `id` is always `0`, since the machine has one band) is an
+  edge-triggered wait-set source. The gauge's band-change hook fires
+  only on a *stored* change and only flags `waitq::PRESSURE_WAITQ`
+  lock-free: it can be reached from inside the frame allocator or a
+  demand fault, so taking a lock there could re-enter one the
+  interrupted allocator already holds. The real unpark runs at the next
+  dispatcher-context `drain_pending_wakes`, exactly like a device IRQ's
+  wake, and `has_pending_deferred_wake` includes it so a fired tick on a
+  lone-task CPU still reschedules to deliver it.
+
+  Readiness compares the *published* band against the band the member
+  last observed, and reporting the member advances it. A band that
+  deepens and relaxes again before the waiter runs therefore correctly
+  reports nothing to do — the waiter's view is already right. A member
+  added while the machine is already tight baselines on the band in
+  force, so it stays quiet until something actually moves. No capability
+  is required and a non-zero `id` is refused.
+- **A band-only read to drain the edge.**
+  `SysinfoQueryId::MEMORY_PRESSURE_BAND` returns the published band and
+  nothing else, taking no reading — an unprivileged caller must not be
+  able to drive a free-memory sample on demand. It is ungated and
+  unaudited: it is a coarser disclosure than the already-ungated
+  `LOAD_AVERAGE` (which reports the live task census and the logged-in
+  user count), it carries no per-task, per-user, or byte-level figure,
+  and withholding it would not protect anything — it would simply make
+  cooperative reclaim impossible and leave the process to be reclaimed
+  *against*. The privileged, audited `MEMORY_PRESSURE` view (free and
+  total bytes, every watermark, the per-band transition history) is
+  unchanged.
+- **The process gauge.** `tairix_rt::pressure::gauge()` is the one
+  `ReportedPressure` per process, so every cache in a program shrinks
+  together. The runtime deliberately does not fetch the band itself:
+  reading it needs a System Information endpoint and transport the
+  runtime has no business choosing for a program. The owning program
+  parks on the wait source, reads the band, and calls
+  `tairix_rt::pressure::report`.
+- **The desktop's caches.** The window manager's cursor cache and the
+  taskbar's notification-glyph cache are built from one policy,
+  `tairix_reclaim::desktop::disposable_ui_cache`: class `DisposableUi`,
+  owner `ReclaimOwner::DesktopSession { seat }`, sensitivity `UserData`
+  (so every released entry is overwritten), invalidation by a
+  `(scale, theme)` generation token, `Drop` on reclaim. The budget is
+  derived from the discovered framebuffer byte size, so a 4K output gets
+  a proportionately larger cache than a 640×480 one and no hand-picked
+  ceiling exists. The policy lives in `lib/reclaim` because the window
+  manager and the taskbar may not depend on each other or on the
+  session, and that is the only crate all three already share.
+
+  There is exactly one constructor and it demands the real backing size,
+  the real gauge, and the real audit sink; each consumer takes its cache
+  as a constructor argument and the session assembles it. A convenience
+  constructor that defaulted the gauge would produce a cache that
+  classifies and serves correctly while retaining nothing — software
+  that looks like it works and silently rasterises every frame.
+- **Teardown wipes.** Logout or seat revocation tears the caches down,
+  overwriting every retained entry, so one session's rendered user data
+  cannot outlive its seat in reusable heap.
+- **Headless is unaffected.** The caches live in `userland/gui/*`; a
+  headless image contains none of them, and the kernel carries no
+  desktop-specific pressure policy.
+
+`lib/raster`'s former `RasterCache` is deleted rather than kept
+alongside: it was unbounded, scanned linearly, never shrank under
+pressure, was invisible to the reclaim ledger, and never wiped rendered
+user data.
 
 ## 8. Testing strategy
 

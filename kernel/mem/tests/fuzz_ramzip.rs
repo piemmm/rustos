@@ -23,10 +23,10 @@
 
 use tairix_kernel_mem::{
     AddressSpace, BootMemoryMap, CompressRefusal, EntropySource, FaultError, FrameAllocator,
-    FreeMemorySource, HostPageTable, MapFlags, MemoryPressure, MemoryRegion, Page, PageCandidate,
-    PhysAddr, PhysMap, PressureBand, Ramzip, RamzipCaps, RegionKind, SealError, SimPhysMap,
-    VirtAddr, VmContext, PAGE_SIZE,
+    HostPageTable, MapFlags, MemoryRegion, Page, PageCandidate, PhysAddr, PhysMap, Ramzip,
+    RamzipCaps, RegionKind, SealError, SimPhysMap, VirtAddr, VmContext, PAGE_SIZE,
 };
+use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
 
 const SMOKE_ITERATIONS: u64 = 2_000;
 const TOTAL_FRAMES: usize = 512;

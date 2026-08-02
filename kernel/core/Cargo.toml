@@ -66,6 +66,11 @@ tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
+# The shared reclaimable-memory model (`plans/SMARTRAM.md`, `AGENTS.md`
+# §2.2): the filesystem, block, transform, and launch caches (`src/fs/`,
+# `src/launch_cache.rs`) classify and account their entries through
+# `tairix_reclaim` rather than a second copy of the model.
+tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 # The shared kernel heap allocator (`AGENTS.md` §2.2): kernel/core hosts the
 # growable-heap wiring (`src/kheap.rs`) that lets the bin's
 # `#[global_allocator]` (a `tairix_kalloc::FreeListAllocator`) draw fresh

@@ -42,14 +42,17 @@ use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_icon::IconSet;
+use tairix_log::Sink;
 use tairix_proglib::Catalog;
+use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    icon_cache, ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
 use tairix_wm::{
-    Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect, Scale, Surface,
-    WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
+    cursor_cache, Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect,
+    Scale, Surface, WindowActivationState, WindowFrame, WindowFurnitureState, WindowId,
+    WindowSizeState,
 };
 
 use crate::input::{SessionInputResponse, SessionInputRouter};
@@ -108,7 +111,12 @@ pub enum ShellOutcome {
 /// a title-bar drag is armed with [`begin_move`](Self::begin_move);
 /// a loaded notification-icon set is installed with [`set_icons`](Self::set_icons);
 /// tearing the desktop down is [`teardown`](Self::teardown).
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: the shell owns the seat's two rasterised-asset caches, and
+/// each holds a live pressure gauge and audit sink behind trait objects.
+/// Copying a shell would double-count their charged bytes against the
+/// seat and give the copy a cache the reclaim ledger does not know about.
+#[derive(Debug)]
 pub struct DesktopShell {
     session: DesktopSession,
     router: SessionInputRouter,
@@ -132,17 +140,41 @@ impl DesktopShell {
     /// built-in icon set until [`set_icons`](Self::set_icons) installs a loaded
     /// one, and the program library is empty until
     /// [`set_library`](Self::set_library) hands it the resolved catalog.
+    /// `output_bytes` is the byte size of one frame of the output this
+    /// session drives; both rasterised-asset caches derive their budget
+    /// from it, so a 4K desktop is allowed proportionately more cached
+    /// pixels than a small panel and neither carries a hand-picked
+    /// ceiling. `seat` owns those bytes in the reclaim ledger, `pressure`
+    /// is the gauge the kernel reports the memory-pressure band into, and
+    /// `sink` receives the caches' audit records.
     #[must_use]
-    pub fn new(config: TaskbarConfig) -> Self {
+    pub fn new(
+        config: TaskbarConfig,
+        seat: u64,
+        output_bytes: usize,
+        pressure: &'static (dyn PressureGauge + 'static),
+        sink: &'static (dyn Sink + Sync),
+    ) -> Self {
         Self {
             session: DesktopSession::new(config),
             router: SessionInputRouter::new(),
             presenter: TaskbarPresenter::new(),
-            renderer: TaskbarRenderer::new(),
+            renderer: TaskbarRenderer::new(icon_cache(seat, output_bytes, pressure, sink)),
             tasks: TaskBridge::new(),
-            cursor: CursorController::new(),
+            cursor: CursorController::new(cursor_cache(seat, output_bytes, pressure, sink)),
             active_frame: None,
         }
+    }
+
+    /// Give back every rasterised pixel the current memory-pressure band
+    /// requires, returning the bytes released across both caches.
+    ///
+    /// Called when the kernel wakes the session with a deepened band, so
+    /// the desktop releases its share at the moment pressure rises rather
+    /// than at whatever later frame happens to touch a cache. A band that
+    /// demands nothing releases nothing, so a spurious wake is cheap.
+    pub fn trim_caches(&mut self) -> usize {
+        self.cursor.trim().saturating_add(self.renderer.trim())
     }
 
     /// The desktop session (theme registry + taskbar model).
@@ -772,10 +804,14 @@ impl DesktopShell {
     }
 
     /// Remove the bar and popup windows from `compositor` and forget them, so a
-    /// later [`present`](Self::present) starts fresh. Tearing the session down
-    /// leaves no orphaned windows behind.
+    /// later [`present`](Self::present) starts fresh, and wipe every rasterised
+    /// cursor image and notification glyph the two disposable-UI caches hold.
+    /// Tearing the session down leaves no orphaned windows and no rendered
+    /// user pixel data behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presenter.teardown(compositor);
+        self.cursor.teardown();
+        self.renderer.teardown();
     }
 }
 

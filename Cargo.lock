@@ -836,6 +836,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-geometry",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-svg",
  "tairix-theme",
 ]
@@ -854,8 +855,11 @@ dependencies = [
  "tairix-geometry",
  "tairix-help",
  "tairix-icon",
+ "tairix-log",
+ "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-taskbar",
@@ -1568,6 +1572,7 @@ dependencies = [
  "tairix-log",
  "tairix-partition",
  "tairix-pci",
+ "tairix-reclaim",
  "tairix-supervisor",
  "tairix-sync",
  "tairix-test-arxfs-image",
@@ -1608,6 +1613,7 @@ dependencies = [
  "tairix-log",
  "tairix-pagezero",
  "tairix-path",
+ "tairix-reclaim",
  "tairix-resref",
  "tairix-rng",
  "tairix-seat",
@@ -1662,6 +1668,7 @@ dependencies = [
  "tairix-kernel-mem",
  "tairix-log",
  "tairix-pagezero",
+ "tairix-reclaim",
  "tairix-sync",
  "zeroize",
 ]
@@ -2035,7 +2042,15 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-reclaim",
  "tairix-theme",
+]
+
+[[package]]
+name = "tairix-reclaim"
+version = "0.0.0"
+dependencies = [
+ "tairix-log",
 ]
 
 [[package]]
@@ -2101,6 +2116,7 @@ dependencies = [
  "tairix-abi-trap",
  "tairix-caps",
  "tairix-log",
+ "tairix-reclaim",
  "tairix-resref",
  "tairix-sync",
  "tairix-util",
@@ -2292,8 +2308,10 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-log",
  "tairix-proglib",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-theme",
 ]
 
@@ -4783,7 +4801,9 @@ dependencies = [
  "tairix-font",
  "tairix-geometry",
  "tairix-input",
+ "tairix-log",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-theme",
 ]
 
@@ -4827,6 +4847,7 @@ dependencies = [
  "tairix-net",
  "tairix-proglib",
  "tairix-qemu",
+ "tairix-reclaim",
  "tairix-syshelp",
  "tairix-taskbar",
  "tairix-terminal",

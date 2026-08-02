@@ -18,13 +18,15 @@ use tairix_abi::{
 use tairix_controls::{PointerState, Section};
 use tairix_cursor::CursorTheme;
 use tairix_icon::{IconKind, IconSet};
+use tairix_log::{Event, Sink};
 use tairix_proglib::{
     user_library_path, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory,
     LibraryEntry, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
 };
+use tairix_reclaim::{PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    ActivateOutcome, LibraryRow, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarRepaint,
-    TaskbarResponse,
+    icon_cache, ActivateOutcome, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
+    TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
@@ -33,13 +35,13 @@ use tairix_wm::{
 };
 
 use crate::{
-    command_section, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
-    open_tray, serve_switchboard_request, DesktopSession, DesktopShell, InputSource, LaunchTable,
-    LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService,
-    ScreenLock, SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter,
-    SessionPins, ShellOutcome, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH,
-    UNNAMED_ACCOUNT,
+    artwork_cache, command_section, deliver_pending_open, load_icon_set, load_library,
+    maybe_send_seat_report, open_tray, serve_switchboard_request, DesktopSession, DesktopShell,
+    IconCache, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
+    PinBridge, PinEditError, PinIconSource, PinService, ScreenLock, SessionFileReader,
+    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome,
+    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
+    TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -117,6 +119,49 @@ impl SessionFileWriter for &mut MemoryWriter {
     fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
         (**self).write(path, bytes)
     }
+}
+
+/// The seat every shell under test is charged to.
+const TEST_SEAT: u64 = 1;
+
+/// A 1080p 32-bit frame: the backing the shells under test derive their
+/// rasterised-asset budgets from, so the ceiling exercised here is the
+/// real derivation rather than a number invented for the test.
+const TEST_FRAME_BYTES: usize = 1920 * 1080 * 4;
+
+/// Discards audit records. These tests assert session behaviour; the
+/// caches' audit path is covered where it is defined.
+struct SilentSink;
+
+impl Sink for SilentSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+static TEST_SINK: SilentSink = SilentSink;
+
+/// The gauge the shells under test are governed by, held at normal for
+/// its whole life so tests running in parallel cannot perturb one
+/// another. A test that moves the band declares its own gauge.
+static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+/// A glyph cache at normal pressure for a renderer used on its own,
+/// outside a whole shell.
+fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    icon_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
+/// A shell for `config`, with both rasterised-asset caches built through
+/// the shipping desktop policy at normal pressure.
+pub(crate) fn shell_for(config: TaskbarConfig) -> DesktopShell {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    DesktopShell::new(
+        config,
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    )
 }
 
 #[test]
@@ -301,7 +346,7 @@ fn compositor() -> Compositor {
 fn present_adds_a_bar_window_placed_and_rounded() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -327,7 +372,7 @@ fn present_adds_a_bar_window_placed_and_rounded() {
 fn presenting_twice_reuses_the_bar_window() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -365,7 +410,7 @@ fn window_rect(comp: &Compositor, id: WindowId) -> Rect {
 fn presenting_an_empty_latch_repaints_nothing() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -401,7 +446,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
     let mut router = SessionInputRouter::new();
     open_library(&mut router, &mut comp, session.taskbar_mut());
 
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
     presenter.present(
         &mut comp,
@@ -434,7 +479,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
 fn a_surface_with_no_window_is_presented_however_empty_the_latch() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -454,7 +499,7 @@ fn a_surface_with_no_window_is_presented_however_empty_the_latch() {
 fn a_density_change_repaints_every_surface() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -493,7 +538,7 @@ fn opening_the_popup_presents_a_popup_window() {
     let mut router = SessionInputRouter::new();
     open_library(&mut router, &mut comp, session.taskbar_mut());
 
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -523,7 +568,7 @@ fn closing_the_popup_removes_the_popup_window() {
     let mut router = SessionInputRouter::new();
     open_library(&mut router, &mut comp, session.taskbar_mut());
 
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -571,7 +616,7 @@ fn teardown_removes_every_window() {
         .set_catalog(office_and_games());
     open_library(&mut router, &mut comp, session.taskbar_mut());
 
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -592,7 +637,7 @@ fn teardown_removes_every_window() {
 fn present_recreates_the_bar_when_its_window_was_removed() {
     let session = session();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -624,7 +669,7 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         .register_theme(custom_dark(ThemeId(100), 99))
         .unwrap();
     let mut comp = compositor();
-    let mut renderer = TaskbarRenderer::new();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
 
     presenter.present(
@@ -1148,7 +1193,7 @@ impl InputSource for MemoryInput {
 }
 
 fn shell() -> DesktopShell {
-    DesktopShell::new(TaskbarConfig::bottom_bar(1920, 1080))
+    shell_for(TaskbarConfig::bottom_bar(1920, 1080))
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -2020,7 +2065,7 @@ fn syncing_focus_to_an_untracked_window_leaves_the_highlight() {
 fn aw3_click_through_produces_the_staged_outcomes() {
     const WIDTH: u32 = 1024;
     const HEIGHT: u32 = 768;
-    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(WIDTH, HEIGHT));
+    let mut shell = shell_for(TaskbarConfig::bottom_bar(WIDTH, HEIGHT));
     shell
         .session_mut()
         .taskbar_mut()
@@ -2203,7 +2248,7 @@ impl DirectorySource for RefusingSource {
 /// A headless desktop for the session's own trusted windows: a shell over a
 /// bottom taskbar and a compositor at a small fixed mode.
 fn headless_desktop() -> (DesktopShell, Compositor) {
-    let shell = DesktopShell::new(TaskbarConfig::bottom_bar(640, 480));
+    let shell = shell_for(TaskbarConfig::bottom_bar(640, 480));
     let mode = DisplayMode {
         width_px: 640,
         height_px: 480,
@@ -3101,7 +3146,7 @@ fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
 fn notifications_relay_raise_dismiss_and_isolate_producers() {
     const W: u32 = 1024;
     const H: u32 = 768;
-    let mut shell = DesktopShell::new(TaskbarConfig::bottom_bar(W, H));
+    let mut shell = shell_for(TaskbarConfig::bottom_bar(W, H));
     let mode = DisplayMode {
         width_px: W,
         height_px: H,
@@ -4862,5 +4907,197 @@ fn an_unengaged_lock_is_harmless() {
         comp.window_count(),
         0,
         "an idle lock never touches the compositor"
+    );
+}
+
+/// Rasterises a solid square of the requested size, counting how many
+/// times it was asked, so a test can prove a decode was reused rather
+/// than repeated. `refuse` makes it reject everything, standing in for a
+/// malformed asset.
+struct CountingRasteriser {
+    calls: usize,
+    refuse: bool,
+}
+
+impl CountingRasteriser {
+    const fn working() -> Self {
+        Self {
+            calls: 0,
+            refuse: false,
+        }
+    }
+
+    const fn refusing() -> Self {
+        Self {
+            calls: 0,
+            refuse: true,
+        }
+    }
+}
+
+impl IconRasteriser for CountingRasteriser {
+    fn rasterise(&mut self, side: u32, _icon: &[u8]) -> Option<Vec<u8>> {
+        self.calls += 1;
+        if self.refuse {
+            return None;
+        }
+        let area = (side as usize).checked_mul(side as usize)?.checked_mul(4)?;
+        Some(vec![0xC3; area])
+    }
+}
+
+/// A bundle asset the fake reader will serve. The bytes never reach a
+/// real decoder here — the rasteriser above is injected — so any
+/// non-empty payload stands for the artwork.
+fn artwork_source(bundle: &str) -> PinIconSource {
+    PinIconSource {
+        bundle: String::from(bundle),
+        asset: String::from("icon.svg"),
+    }
+}
+
+fn artwork_assets(bundles: &[&str]) -> MemoryAssets {
+    let mut assets = MemoryAssets::default();
+    for bundle in bundles {
+        assets = assets.with(&artwork_source(bundle).path(), VALID_SVG);
+    }
+    assets
+}
+
+#[test]
+fn pin_artwork_is_decoded_once_per_path_and_side() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = IconCache::new(artwork_cache(
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    ));
+    let mut reader = artwork_assets(&["/Apps/One.app"]);
+    let mut rasteriser = CountingRasteriser::working();
+    let source = artwork_source("/Apps/One.app");
+
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_some());
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_some());
+    assert_eq!(rasteriser.calls, 1, "the second lookup is a cache hit");
+
+    // A different side is a different entry: the artwork is rasterised
+    // again at the new geometry rather than scaled from the old one.
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 32)
+        .is_some());
+    assert_eq!(rasteriser.calls, 2);
+}
+
+#[test]
+fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = IconCache::new(artwork_cache(
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    ));
+    let mut reader = artwork_assets(&["/Apps/Bad.app"]);
+    let mut rasteriser = CountingRasteriser::refusing();
+    let source = artwork_source("/Apps/Bad.app");
+
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_none());
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_none());
+    assert_eq!(rasteriser.calls, 1, "the refusal is remembered");
+}
+
+#[test]
+fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
+    // A store full of distinct icon paths must not be able to grow the
+    // session without limit: the keys come from bundles, so the bound is
+    // the budget, not the caller's restraint.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let tiny_output_bytes = 320 * 240 * 4;
+    let hard = tairix_reclaim::CacheBudget::from_backing(tiny_output_bytes).hard();
+    let mut cache = IconCache::new(artwork_cache(
+        TEST_SEAT,
+        tiny_output_bytes,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    ));
+    let bundles: Vec<String> = (0..64).map(|i| format!("/Apps/App{i}.app")).collect();
+    let refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
+    let mut reader = artwork_assets(&refs);
+    let mut rasteriser = CountingRasteriser::working();
+
+    for bundle in &bundles {
+        let source = artwork_source(bundle);
+        assert!(
+            cache
+                .artwork(&mut reader, &mut rasteriser, &source, 32)
+                .is_some(),
+            "every pin still gets its artwork, cached or not"
+        );
+    }
+    assert!(
+        cache.charged_bytes() <= hard,
+        "charged {} exceeds the {hard}-byte ceiling",
+        cache.charged_bytes()
+    );
+    // …and the ceiling was reached by evicting, not by refusing
+    // everything: the cache is still doing its job at its bound.
+    assert!(
+        cache.charged_bytes() > 0,
+        "a bounded cache still retains what it can"
+    );
+}
+
+#[test]
+fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
+    // A gauge of this test's own, so moving the band cannot perturb the
+    // shared one other tests hold at normal.
+    static PRESSURED: ReportedPressure = ReportedPressure::unknown();
+    PRESSURED.report(PressureBand::Normal);
+    let mut cache = IconCache::new(artwork_cache(
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        &PRESSURED,
+        &TEST_SINK,
+    ));
+    let mut reader = artwork_assets(&["/Apps/One.app"]);
+    let mut rasteriser = CountingRasteriser::working();
+    let source = artwork_source("/Apps/One.app");
+
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_some());
+    assert!(cache.charged_bytes() > 0);
+
+    PRESSURED.report(PressureBand::Mild);
+    assert!(cache.trim() > 0, "mild pressure releases disposable UI");
+    assert_eq!(cache.charged_bytes(), 0);
+
+    // The artwork is still served while pressure holds — correctness never
+    // depended on the cache — it is simply rasterised again each time.
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_some());
+    assert_eq!(cache.charged_bytes(), 0, "no growth under pressure");
+
+    PRESSURED.report(PressureBand::Normal);
+    assert!(cache
+        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .is_some());
+    assert!(cache.charged_bytes() > 0, "retention resumes when it may");
+
+    cache.teardown();
+    assert_eq!(
+        cache.charged_bytes(),
+        0,
+        "a seat's rendered artwork does not outlive its session"
     );
 }
