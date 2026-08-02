@@ -163,6 +163,22 @@ pub enum ReclaimOwner {
         /// The seat the session holds.
         seat: u64,
     },
+    /// A userland process — an ordinary program or a long-running
+    /// system service — named by the stable label its own cache
+    /// installer supplies, for a cache that cannot resolve
+    /// [`Self::Task`]'s numeric id.
+    ///
+    /// `abi-v1` gives a process no query to read its own task id back,
+    /// so this is the honest fallback for two shapes of caller: a
+    /// library embedded in many different consumer programs (which
+    /// names itself, not the host program it happens to run inside),
+    /// and a singleton system service reasoning about its own memory
+    /// (which names itself directly, parallel to
+    /// [`Self::KernelSubsystem`] but outside the kernel). Every entry
+    /// stays inside the one process that charged it — the ledger is
+    /// never merged across processes — so the label is all the
+    /// attribution the audit trail needs.
+    UserlandProcess(&'static str),
 }
 
 /// How expensive a cached entry is to rebuild from its canonical
@@ -454,6 +470,29 @@ impl CacheBudget {
         Self {
             hard,
             low: hard / LOW_DIVISOR * LOW_NUMERATOR,
+        }
+    }
+
+    /// Derive the budget from a ceiling the consumer already knows
+    /// outright, rather than as a fraction of a larger resource it only
+    /// borrows part of.
+    ///
+    /// [`from_backing`](Self::from_backing) fits a cache taking a small
+    /// share of something it does not own. Some caches instead have a
+    /// ceiling that *is* the derived figure: retained window furniture
+    /// can never usefully exceed one screen's worth of pixels, because
+    /// no more chrome than fills the screen can be visible at once, so
+    /// everything above that belongs to off-screen or stacked-under
+    /// windows and is exactly what reclaim should take first.
+    ///
+    /// `hard_bytes` must itself come from discovered hardware — a
+    /// display mode, a device geometry — never a hand-picked constant.
+    /// Zero yields zero, which admits nothing (fail closed).
+    #[must_use]
+    pub const fn from_ceiling(hard_bytes: usize) -> Self {
+        Self {
+            hard: hard_bytes,
+            low: hard_bytes / LOW_DIVISOR * LOW_NUMERATOR,
         }
     }
 
@@ -1006,6 +1045,14 @@ mod tests {
         assert_eq!(budget.hard(), 4 * 1024 * 1024);
         assert_eq!(budget.low(), 3 * 1024 * 1024);
         assert!(budget.low() < budget.hard());
+    }
+
+    #[test]
+    fn a_known_ceiling_is_taken_whole_with_the_same_hysteresis() {
+        let budget = CacheBudget::from_ceiling(64 * 1024 * 1024);
+        assert_eq!(budget.hard(), 64 * 1024 * 1024);
+        assert_eq!(budget.low(), 48 * 1024 * 1024);
+        assert_eq!(CacheBudget::from_ceiling(0), CacheBudget::from_backing(0));
     }
 
     #[test]

@@ -268,7 +268,7 @@ fn draw_coverage_glyph(
     surface: &mut Surface,
     x: i32,
     y: i32,
-    glyph: &client::CachedGlyph,
+    glyph: &crate::glyph_cache::CachedGlyph,
     visible: u32,
     sources: &[Pixel; 256],
 ) {
@@ -332,7 +332,7 @@ fn visible_span(origin: i32, count: u32, limit: u32) -> Option<VisibleSpan> {
 /// `None` only for a structurally impossible short bitmap — which skips the
 /// row rather than reading past it.
 fn glyph_row<'a>(
-    glyph: &'a client::CachedGlyph,
+    glyph: &'a crate::glyph_cache::CachedGlyph,
     row: usize,
     columns: &Range<usize>,
 ) -> Option<&'a [u8]> {
@@ -356,7 +356,7 @@ mod blit_tests {
     use tairix_raster::{Color, Pixel, Surface};
 
     use super::{coverage_sources, draw_coverage_glyph};
-    use crate::client::CachedGlyph;
+    use crate::glyph_cache::CachedGlyph;
 
     /// The straightforward blit: walk every glyph pixel, clip it, and
     /// composite it through the surface's per-pixel accessors.

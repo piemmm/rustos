@@ -18,8 +18,8 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
-    LoadAverage, MemoryPressureBand, MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats,
-    ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
+    LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
+    RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
     UserDirectoryRecord, VolumeIoHealthRecord,
 };
 use tairix_abi::time::Duration64;
@@ -193,6 +193,24 @@ pub trait SysinfoSource {
     /// [`memory_pressure`](Self::memory_pressure) view stays behind
     /// `CAP_SYSINFO_KERNEL`.
     fn memory_pressure_band(&self, caller: &Caller) -> Result<MemoryPressureBand, Errno>;
+
+    /// Return the machine's total usable physical RAM alone, in bytes.
+    ///
+    /// Ungated: installed RAM is a static hardware fact — the figure on
+    /// the machine's spec sheet — carrying no per-process, per-user, or
+    /// byte-level runtime state, so it discloses strictly less than the
+    /// already-ungated [`load_average`](Self::load_average). It lets a
+    /// process size its own caches against the real machine instead of a
+    /// hand-picked constant. The detailed
+    /// [`memory_pressure`](Self::memory_pressure) view — free bytes,
+    /// watermarks, the reserve, transition history — stays behind
+    /// `CAP_SYSINFO_KERNEL`.
+    ///
+    /// The same figure
+    /// [`kernel_memory_stats`](Self::kernel_memory_stats) reports as
+    /// `KernelMemoryStats::total_bytes`; a source must thread both from
+    /// one reading so the two can never disagree.
+    fn memory_total(&self, caller: &Caller) -> Result<MemoryTotal, Errno>;
 
     /// Return the reclaimable-cache ledger: one record per reclaim class,
     /// in class-id order, aggregated across every live cache.

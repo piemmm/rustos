@@ -95,6 +95,48 @@ router**:
   `set_scale`); a window's effective density is `Compositor::window_scale`,
   the read-only query apps use. A multi-monitor desktop is a set of such
   outputs, each carrying its own scale.
+- Window furniture (`chrome`): a decorated window's frame is kept as the
+  four strips it actually draws into — the top (title) band, the bottom
+  band, and the two side borders — never one surface the size of the whole
+  outer window, because the region between them is never sampled (the
+  compositor draws the window's content there). Retained bytes therefore
+  follow the frame band's thickness rather than the window's area, and a
+  screen row needs at most two of the strips at once. The strips live in a
+  bounded, pressure-governed `tairix-reclaim` `ReclaimCache` the
+  **compositor** owns and every window shares, ceilinged at one screenful
+  (no more furniture than fills the screen can be visible at once, so
+  everything above that belongs to minimised, off-screen, or stacked-under
+  windows — exactly what eviction should take first). Furniture carries the
+  window's title, so a released entry is overwritten rather than merely
+  dropped. As with the cursor cache, the compositor never builds its own
+  policy: `chrome_cache` assembles it from the real output size, the owning
+  seat, and the process's live pressure gauge and audit sink, and the caller
+  hands the result to `Compositor::new`. A change to one window (title,
+  focus, resize, size-state, decorating, closing) releases just that
+  window's entry; only a scale or theme change drops the whole cache. The
+  cache is an accelerator and never a correctness requirement — anything it
+  refuses is rendered for that frame alone, and the composited output is
+  byte-identical warm, emptied, or with a budget of zero.
+- Releasable window content (`window`): a window's content pixels are the
+  desktop's largest single allocation, and a minimised full-screen window
+  would otherwise pin them for as long as it exists, so
+  `Compositor::release_content_under_pressure` gives them back on the same
+  pressure gauge and the same `tairix_reclaim::shrink_target` ordering the
+  caches use. It is deliberately a **policy**, not a fourth cache: evicting
+  a visible window's pixels is a visual defect rather than a slowdown, so
+  what goes is decided by what the user can see — nothing at `Normal`,
+  every hidden or minimised window at `Mild` and deeper, and additionally
+  every visible but unfocused window at `Critical`; the focused window is
+  never released, because there would be nothing to show in its place, and
+  neither is a window the embedder has not declared app-presented (nobody
+  would answer its redraw). Only the pixels go: the window keeps its client
+  size, origin, furniture, cursor, viewport, and size state, still
+  hit-tests, focuses, and resizes, and composites transparent until its app
+  presents again. The buffer is user data, so it is overwritten before it is
+  dropped. Because a present carries only a damage rectangle, every release
+  queues a redraw request the embedder drains through `pending_redraws` —
+  the crate asks for the repaint but never speaks the window protocol
+  itself.
 
 GPU acceleration and the default apps build on this core in later
 Stage 7 increments.
@@ -131,3 +173,27 @@ frame a single move to the same place does), and cursor selection (the
 move-grab/window-hint/desktop policy, controller shape switching,
 re-rendering on scale and cursor-set changes, and reuse of a cached kind
 when it recurs).
+
+The window-furniture tests pin both halves of the reclaim contract: the
+exact composited pixels of every band, the rounded rim corners and the
+resize grabber; retained bytes that scale with the frame band and not the
+window area, and never past the one-screenful ceiling however many windows
+are open; a scale or theme change dropping every entry at once (including a
+theme variant that keeps its `ThemeId`) against a title, focus, or resize
+change dropping only that one window's; mild memory pressure emptying the
+cache and refusing further growth; teardown overwriting every retained
+strip; a minimised window's furniture being evicted ahead of a visible
+window's; and the composited frame coming out byte-identical with the cache
+warm, emptied, and unable to retain anything.
+
+The releasable-content tests pin the release policy the same way: the pixel
+bytes actually overwritten before the buffer is dropped and the retained
+bytes falling to zero; a released window compositing transparent while the
+rest of the desktop stays pixel-identical; a released window still
+hit-testing, still drawing its furniture, still focusing and still resizing;
+a full-window present after a release restoring pixel-identical content;
+the whole band ladder (nothing at normal, hidden at mild, visible-unfocused
+only at critical, the focused window never released at any band, and a
+session-painted window never released at all); exactly one redraw request
+queued per release; and an app that ignores the request leaving its window
+blank while the desktop composites on unharmed.

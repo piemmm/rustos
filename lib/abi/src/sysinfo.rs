@@ -367,6 +367,22 @@ impl SysinfoQueryId {
     /// here. It is never a polling surface.
     pub const MEMORY_PRESSURE_BAND: Self = Self(28);
 
+    /// The machine's total usable physical RAM alone, in bytes: a single
+    /// [`MemoryTotal`].
+    ///
+    /// Ungated and unaudited. Installed RAM is a static hardware fact —
+    /// the same figure printed on the machine's spec sheet — and carries
+    /// no per-process, per-user, or byte-level runtime state; it is a
+    /// strictly coarser disclosure than the already-ungated
+    /// [`Self::LOAD_AVERAGE`] (which reports the live task census and the
+    /// logged-in user count), exactly as [`Self::MEMORY_PRESSURE_BAND`]
+    /// is. A userland cache needs this figure to derive a real budget
+    /// from the actual machine instead of a hand-picked constant, and
+    /// denying it that would not protect anything the gated, audited
+    /// [`Self::MEMORY_PRESSURE`] view (free bytes, watermarks, the
+    /// reserve, transition history) does not already guard.
+    pub const MEMORY_TOTAL: Self = Self(29);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -473,6 +489,11 @@ pub enum IntrospectDomain {
     /// from [`Self::MemoryPressure`], which samples the gauge and
     /// returns the whole watermark and transition picture.
     MemoryPressureBand = 18,
+    /// The machine's total usable physical RAM alone, in bytes: a single
+    /// [`MemoryTotal`]. The same figure [`Self::KernelMemory`]'s
+    /// `KernelMemoryStats::total_bytes` reports, threaded from the one
+    /// frame-allocator source so the two views can never disagree.
+    MemoryTotalBytes = 19,
 }
 
 impl IntrospectDomain {
@@ -506,6 +527,7 @@ impl IntrospectDomain {
             16 => Ok(Self::CpuInfo),
             17 => Ok(Self::VolumeIoHealth),
             18 => Ok(Self::MemoryPressureBand),
+            19 => Ok(Self::MemoryTotalBytes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -731,6 +753,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::MEMORY_PRESSURE_BAND,
         name: "memory_pressure_band",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::MEMORY_TOTAL,
+        name: "memory_total",
         required_capability: None,
         audit: false,
     },
@@ -3014,6 +3042,50 @@ impl MemoryPressureBand {
     }
 }
 
+/// Response payload for [`SysinfoQueryId::MEMORY_TOTAL`] — the machine's
+/// total usable physical RAM alone, in bytes.
+///
+/// Carved out of the gated [`KernelMemoryStats::total_bytes`] figure, not
+/// measured a second way, so the ungated and gated views can never
+/// disagree. A static hardware fact rather than a runtime reading: it
+/// changes only when RAM is physically added or removed.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct MemoryTotal {
+    /// Total usable physical RAM the kernel manages, in bytes.
+    pub total_bytes: u64,
+}
+
+impl MemoryTotal {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.total_bytes);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] unless `bytes` is exactly
+    /// [`Self::WIRE_LEN`] long — a fixed-size scalar record has no
+    /// legitimate short or trailing-byte encoding, so both are refused
+    /// alike rather than silently truncated or zero-extended.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(Self {
+            total_bytes: read_u64(bytes, 0),
+        })
+    }
+}
+
 /// Number of reclaim classes in `sysinfo-v1`.
 ///
 /// Mirrors the kernel reclaim ledger's closed class set; the shared
@@ -4576,11 +4648,11 @@ impl CrashRecord {
 mod tests {
     use super::{
         encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeListRequest,
-        CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage, MountAvailability,
-        MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
-        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, VolumeStats,
-        ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT,
+        CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage, MemoryTotal,
+        MountAvailability, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+        ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+        VolumeStats, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT,
         MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
         PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
@@ -4739,12 +4811,13 @@ mod tests {
             (16, IntrospectDomain::CpuInfo),
             (17, IntrospectDomain::VolumeIoHealth),
             (18, IntrospectDomain::MemoryPressureBand),
+            (19, IntrospectDomain::MemoryTotalBytes),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(19), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(20), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -4798,6 +4871,43 @@ mod tests {
             Some(CapabilityId::SYSINFO_KERNEL)
         );
         assert!(detail.audit);
+    }
+
+    #[test]
+    fn memory_total_round_trips_and_fails_closed() {
+        let total = MemoryTotal {
+            total_bytes: 1 << 30,
+        };
+        let encoded = total.to_le_bytes();
+        assert_eq!(encoded.len(), MemoryTotal::WIRE_LEN);
+        assert_eq!(MemoryTotal::from_bytes(&encoded), Ok(total));
+
+        // Short buffer.
+        assert_eq!(
+            MemoryTotal::from_bytes(&encoded[..MemoryTotal::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Over-long buffer: a fixed-size scalar record has no trailing bytes
+        // to ignore, so extra bytes are refused rather than silently dropped.
+        let mut over_long = [0u8; MemoryTotal::WIRE_LEN + 1];
+        over_long[..MemoryTotal::WIRE_LEN].copy_from_slice(&encoded);
+        assert_eq!(
+            MemoryTotal::from_bytes(&over_long),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn the_memory_total_query_is_ungated_and_unaudited() {
+        use super::IntrospectDomain;
+        // The identifiers are part of abi-v1; do not renumber.
+        assert_eq!(SysinfoQueryId::MEMORY_TOTAL.as_u16(), 29);
+        assert_eq!(IntrospectDomain::MemoryTotalBytes.as_u32(), 19);
+
+        let total = spec_for(SysinfoQueryId::MEMORY_TOTAL).expect("registered");
+        assert_eq!(total.name, "memory_total");
+        assert_eq!(total.required_capability, None);
+        assert!(!total.audit);
     }
 
     #[test]

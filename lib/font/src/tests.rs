@@ -152,11 +152,16 @@ fn fallback_never_panics_and_is_the_replacement_character() {
 
 #[cfg(feature = "render")]
 mod render {
+    use alloc::boxed::Box;
+
+    use tairix_log::DiscardSink;
     use tairix_raster::{Color, Surface};
+    use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
 
     use crate::atlas;
-    use crate::client::install_test_transport;
+    use crate::client::{install_test_transport, set_glyph_cache};
     use crate::font::BitmapFont;
+    use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
     const WHITE: Color = Color::rgb(255, 255, 255);
 
@@ -372,16 +377,39 @@ mod render {
     }
 
     #[test]
-    fn scaled_rendering_is_deterministic_across_the_cache() {
+    fn text_renders_identically_uncached_cached_and_after_a_forced_shrink() {
+        static SINK: DiscardSink = DiscardSink;
+
         install();
-        // Drawing the same text at the same size twice must be identical:
-        // a cache miss then a cache hit resolve to the same bytes.
+        // The cache is an accelerator, never a correctness dependency, so the
+        // same text must paint the same pixels in all three states: with no
+        // cache installed at all, served from a cache, and after memory
+        // pressure has emptied one.
         let font = BitmapFont::with_pixel_height(13);
-        let mut first = surface();
-        let mut second = surface();
-        font.draw_text(&mut first, 0, 0, "cache me", WHITE);
-        font.draw_text(&mut second, 0, 0, "cache me", WHITE);
-        assert_eq!(first.pixels(), second.pixels());
+        let mut uncached = surface();
+        font.draw_text(&mut uncached, 0, 0, "cache me", WHITE);
+
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        set_glyph_cache(ReclaimCache::new(
+            "test.font.render",
+            glyph_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
+            glyph_cache_budget(1 << 30),
+            gauge,
+            &SINK,
+        ));
+
+        let mut miss = surface();
+        let mut hit = surface();
+        font.draw_text(&mut miss, 0, 0, "cache me", WHITE);
+        font.draw_text(&mut hit, 0, 0, "cache me", WHITE);
+        assert_eq!(uncached.pixels(), miss.pixels());
+        assert_eq!(uncached.pixels(), hit.pixels());
+
+        gauge.report(PressureBand::Mild);
+        let mut shrunk = surface();
+        font.draw_text(&mut shrunk, 0, 0, "cache me", WHITE);
+        assert_eq!(uncached.pixels(), shrunk.pixels());
     }
 
     #[test]

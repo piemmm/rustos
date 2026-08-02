@@ -670,6 +670,14 @@ mod program {
             }
             WindowEvent::Pointer { x, y, action, .. } => route_pointer(service, host, x, y, action),
             WindowEvent::Scrolled { dx, dy, .. } => route_scroll(service, host, dx, dy),
+            // The session reclaimed the retained pixels. The composition is
+            // unchanged, so the end-of-wake difference test would suppress
+            // the present the blank window now needs: forget what was
+            // presented and let that one path draw it.
+            WindowEvent::RedrawRequested { .. } => {
+                service.panel_mut().invalidate_presented();
+                return;
+            }
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

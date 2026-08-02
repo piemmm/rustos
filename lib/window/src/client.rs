@@ -13,6 +13,8 @@
 //! damage rectangle it just changed — never pixel bytes. The session
 //! reads the pixels through its own mapping of the granted region.
 
+use alloc::vec::Vec;
+
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
@@ -67,15 +69,43 @@ pub trait WindowTransport {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
+/// What a window last presented, so the client can re-present it when
+/// the session asks for a redraw.
+///
+/// The frame index alone is not enough: full-window damage needs the
+/// window's current client extent, which the create/resize calls are the
+/// only place that knows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct LastPresent {
+    /// The window the record belongs to.
+    window_id: u64,
+    /// Client width in pixels, as last created or resized.
+    width_px: u32,
+    /// Client height in pixels, as last created or resized.
+    height_px: u32,
+    /// The frame index of the last accepted present, if the window has
+    /// presented at all since it was created or resized.
+    frame_index: Option<u32>,
+}
+
 /// A typed handle on the desktop session's window service.
+///
+/// The client remembers each of its windows' extent and last presented
+/// frame index so it can answer a
+/// [`WindowEvent::RedrawRequested`]
+/// on the app's behalf — see [`WindowEvents::wait`].
 pub struct WindowClient<T: WindowTransport> {
     transport: T,
+    presented: Vec<LastPresent>,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
     /// A client over `transport`.
     pub const fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            presented: Vec::new(),
+        }
     }
 
     /// Open a window: `frame_count` frames shaped as `surface`, laid out
@@ -129,7 +159,9 @@ impl<T: WindowTransport> WindowClient<T> {
         .to_le_bytes();
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
         let len = self.transport.call(&request, &mut reply)?;
-        decode_create_reply(&reply[..len])
+        let (window_id, server) = decode_create_reply(&reply[..len])?;
+        self.note_extent(window_id, surface.width_px, surface.height_px);
+        Ok((window_id, server))
     }
 
     /// Present frame `frame_index` of window `window_id`, of which
@@ -151,7 +183,11 @@ impl<T: WindowTransport> WindowClient<T> {
             damage,
         }
         .to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&request)?;
+        if let Some(record) = self.record_mut(window_id) {
+            record.frame_index = Some(frame_index);
+        }
+        Ok(())
     }
 
     /// Close window `window_id`.
@@ -162,7 +198,10 @@ impl<T: WindowTransport> WindowClient<T> {
     /// status frame.
     pub fn close(&mut self, window_id: u64) -> Result<(), Errno> {
         let request = WindowRequest::Close { window_id }.to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&request)?;
+        self.presented
+            .retain(|record| record.window_id != window_id);
+        Ok(())
     }
 
     /// Re-map window `window_id` onto a fresh frame region: `frame_count`
@@ -199,7 +238,11 @@ impl<T: WindowTransport> WindowClient<T> {
             format: surface.format,
         }
         .to_le_bytes();
-        self.status_call(&request)
+        self.status_call(&request)?;
+        // The old frames describe the old extent, so the remembered
+        // present is stale until the app paints the new size.
+        self.note_extent(window_id, surface.width_px, surface.height_px);
+        Ok(())
     }
 
     /// Ask the session to run its trusted file picker for window
@@ -283,6 +326,71 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&request)
     }
 
+    /// Re-present window `window_id`'s last presented frame with
+    /// full-window damage, answering a session redraw request.
+    ///
+    /// Returns whether a frame was re-presented: a window this client
+    /// does not own, or one that has not presented since it was created
+    /// or resized, has nothing to re-send and is ignored.
+    ///
+    /// An app that renders in place (single-buffered) may have the frame
+    /// half-painted when this fires, so the session can briefly show a
+    /// partly drawn frame — the same tearing in-place rendering already
+    /// accepts, and strictly better than leaving the window blank.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal, a transport failure, or a corrupt
+    /// status frame — exactly as [`Self::present`].
+    pub fn answer_redraw(&mut self, window_id: u64) -> Result<bool, Errno> {
+        let Some(record) = self
+            .presented
+            .iter()
+            .copied()
+            .find(|record| record.window_id == window_id)
+        else {
+            return Ok(false);
+        };
+        let Some(frame_index) = record.frame_index else {
+            return Ok(false);
+        };
+        self.present(
+            window_id,
+            frame_index,
+            DamageRect {
+                x: 0,
+                y: 0,
+                width_px: record.width_px,
+                height_px: record.height_px,
+            },
+        )?;
+        Ok(true)
+    }
+
+    /// Remember `window_id`'s client extent, discarding any frame index
+    /// recorded against a previous extent.
+    fn note_extent(&mut self, window_id: u64, width_px: u32, height_px: u32) {
+        if let Some(record) = self.record_mut(window_id) {
+            record.width_px = width_px;
+            record.height_px = height_px;
+            record.frame_index = None;
+            return;
+        }
+        self.presented.push(LastPresent {
+            window_id,
+            width_px,
+            height_px,
+            frame_index: None,
+        });
+    }
+
+    /// The mutable record for `window_id`, if this client owns it.
+    fn record_mut(&mut self, window_id: u64) -> Option<&mut LastPresent> {
+        self.presented
+            .iter_mut()
+            .find(|record| record.window_id == window_id)
+    }
+
     /// Issue `request` and decode the shared status reply.
     fn status_call(&mut self, request: &[u8]) -> Result<(), Errno> {
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
@@ -316,16 +424,38 @@ impl<S: EventSource> WindowEvents<S> {
         Self { source }
     }
 
-    /// Park until the next event arrives and decode it.
+    /// Park until the next event arrives, decode it, and answer a
+    /// redraw request on the app's behalf before returning it.
+    ///
+    /// The session releases a window's retained pixels under memory
+    /// pressure and asks for them again with
+    /// [`WindowEvent::RedrawRequested`].
+    /// Answering it is mechanical — re-present the last frame with
+    /// full-window damage — so the library does it through `client`
+    /// ([`WindowClient::answer_redraw`]) and no app has to. A failed
+    /// re-present is not fatal: the window stays blank until the app
+    /// presents for a reason of its own, which is exactly the outcome
+    /// the event already documents.
+    ///
+    /// The event is still returned, so an app that would rather re-render
+    /// its content genuinely (a live view whose last frame is already
+    /// out of date) can act on it.
     ///
     /// # Errors
     ///
     /// A source failure, or the typed refusal of a malformed frame — a
     /// corrupt event is refused, never guessed at (the app may keep
     /// waiting or tear down; the frame is already consumed either way).
-    pub fn wait(&mut self) -> Result<WindowEvent, Errno> {
+    pub fn wait<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+    ) -> Result<WindowEvent, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         self.source.next(&mut frame)?;
-        WindowEvent::from_bytes(&frame)
+        let event = WindowEvent::from_bytes(&frame)?;
+        if let WindowEvent::RedrawRequested { window_id } = event {
+            let _ = client.answer_redraw(window_id);
+        }
+        Ok(event)
     }
 }

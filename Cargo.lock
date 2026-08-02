@@ -1326,7 +1326,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-geometry",
+ "tairix-log",
+ "tairix-procinfo",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-rt",
  "tairix-sync",
  "tairix-theme",
@@ -1339,8 +1342,11 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-font",
  "tairix-fontface",
  "tairix-log",
+ "tairix-procinfo",
+ "tairix-reclaim",
  "tairix-rt",
  "tairix-vt",
 ]

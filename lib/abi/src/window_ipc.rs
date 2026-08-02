@@ -751,6 +751,8 @@ const EV_SCROLLED: u16 = 7;
 const EV_MINIMIZED: u16 = 8;
 /// Wire event discriminant of [`WindowEvent::Resized`].
 const EV_RESIZED: u16 = 9;
+/// Wire event discriminant of [`WindowEvent::RedrawRequested`].
+const EV_REDRAW_REQUESTED: u16 = 10;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -862,6 +864,23 @@ pub enum WindowEvent {
         /// New client height in pixels; never zero.
         height_px: u32,
     },
+    /// The session released this window's retained content pixels to
+    /// reclaim memory, and needs the window presented again.
+    ///
+    /// The app has lost nothing: its own frame regions, size, title,
+    /// furniture, focus and place in the stack are all untouched — only
+    /// the session's copy of the pixels went away. Presenting any frame
+    /// with full-window damage restores the window exactly as it was.
+    ///
+    /// A client that ignores the event is not broken: its window simply
+    /// shows through to the desktop until it next presents for a reason
+    /// of its own. The `tairix-window` client library answers the event
+    /// on the app's behalf, so an app only handles it when it wants to
+    /// genuinely re-render rather than re-send its last frame.
+    RedrawRequested {
+        /// The window whose content must be presented again.
+        window_id: u64,
+    },
     /// The scroll wheel turned over the window while the window owns its
     /// own content scrolling (it exposes no window-manager root viewport,
     /// so the session forwards the ticks to the app instead of consuming
@@ -898,6 +917,7 @@ impl WindowEvent {
             | Self::PickCancelled { window_id }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
+            | Self::RedrawRequested { window_id }
             | Self::Scrolled { window_id, .. } => window_id,
         }
     }
@@ -956,6 +976,9 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_RESIZED);
                 put_u32(&mut out, 16, width_px);
                 put_u32(&mut out, 20, height_px);
+            }
+            Self::RedrawRequested { .. } => {
+                put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
             }
         }
         out
@@ -1063,6 +1086,10 @@ impl WindowEvent {
                     width_px,
                     height_px,
                 })
+            }
+            EV_REDRAW_REQUESTED => {
+                event_reserved_zero(bytes, 16)?;
+                Ok(Self::RedrawRequested { window_id })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -1617,6 +1644,7 @@ mod tests {
                 dx: -2,
                 dy: -5,
             },
+            WindowEvent::RedrawRequested { window_id: 4 },
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
@@ -1718,6 +1746,9 @@ mod tests {
         let mut close = WindowEvent::CloseRequested { window_id: 4 }.to_le_bytes();
         close[16] = 1;
         assert_eq!(WindowEvent::from_bytes(&close), Err(Errno::BadMagic));
+        let mut redraw = WindowEvent::RedrawRequested { window_id: 4 }.to_le_bytes();
+        redraw[WindowEvent::WIRE_LEN - 1] = 1;
+        assert_eq!(WindowEvent::from_bytes(&redraw), Err(Errno::BadMagic));
     }
 
     #[test]

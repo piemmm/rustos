@@ -188,10 +188,14 @@ mod program {
                     false,
                 )
             }
+            // A redraw request needs nothing here: the client library
+            // re-presents the last frame, and the gallery it drew has not
+            // changed. The rest are events the gallery does not act on.
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Resized { .. }
+            | WindowEvent::RedrawRequested { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
         }
@@ -415,7 +419,7 @@ mod program {
             server,
         });
         loop {
-            let event = match events.wait() {
+            let event = match events.wait(&mut client) {
                 Ok(event) => event,
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),

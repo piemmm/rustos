@@ -7,7 +7,7 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::DriverError;
 
-use crate::color::Color;
+use crate::color::{Color, Pixel};
 use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
@@ -17,9 +17,10 @@ use crate::{Compositor, WindowId};
 
 use tairix_cursor::CursorImage;
 use tairix_log::{Event, Sink};
-use tairix_reclaim::{PressureBand, ReclaimCache, ReportedPressure};
+use tairix_reclaim::{CachedBytes, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 
+use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 use crate::select::{cursor_cache, CursorEpoch};
 
 use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
@@ -35,6 +36,15 @@ fn mode(w: u32, h: u32) -> DisplayMode {
 
 fn opaque(w: u32, h: u32, color: Color) -> Surface {
     Surface::filled(w, h, color.premultiply()).expect("surface allocates")
+}
+
+/// A compositor for `mode` over `background`, holding a window-furniture
+/// cache at normal pressure sized from a 1080p output — the one place these
+/// tests assemble the cache the embedder would otherwise inject, so a test
+/// that cares about the budget or the band builds its own instead.
+fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    Compositor::new(mode, background, test_chrome_cache(), &NORMAL_PRESSURE)
 }
 
 /// Read the RGBA scan-out bytes of frame pixel `(x, y)`.
@@ -100,6 +110,7 @@ impl Display for MockDisplay {
 
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
+const GREEN: Color = Color::rgb(0, 255, 0);
 
 // The colour algebra (`Color`/`Pixel`, premultiply, `over`, `scale_alpha`)
 // and the `Surface` pixel buffer are unit-tested in their own crate
@@ -230,11 +241,11 @@ fn duplicate_damage_composites_a_window_once_and_correctly() {
     // Marking a window's rectangle dirty repeatedly must not change the
     // composited result (and, with coalescing, composites it once): the
     // frame is identical to a single clean composite.
-    let mut once = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    let mut once = new_compositor(mode(4, 4), BLUE).expect("compositor");
     once.add_window(Point::new(1, 1), opaque(2, 2, RED));
     once.composite();
 
-    let mut many = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    let mut many = new_compositor(mode(4, 4), BLUE).expect("compositor");
     let id = many.add_window(Point::new(1, 1), opaque(2, 2, RED));
     // Extra identical damage on top of the add's own damage: each
     // surface replacement re-dirties the same window rectangle.
@@ -258,8 +269,8 @@ fn duplicate_damage_composites_a_window_once_and_correctly() {
 
 #[test]
 fn new_rejects_zero_size() {
-    assert!(Compositor::new(mode(0, 4), BLUE).is_none());
-    assert!(Compositor::new(mode(4, 0), BLUE).is_none());
+    assert!(new_compositor(mode(0, 4), BLUE).is_none());
+    assert!(new_compositor(mode(4, 0), BLUE).is_none());
 }
 
 #[test]
@@ -268,12 +279,12 @@ fn new_rejects_short_stride() {
         stride_bytes: 4,
         ..mode(4, 4)
     };
-    assert!(Compositor::new(bad, BLUE).is_none());
+    assert!(new_compositor(bad, BLUE).is_none());
 }
 
 #[test]
 fn background_fills_screen() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), [0, 0, 255, 255]);
     assert_eq!(frame_pixel(&c, 1, 1), [0, 0, 255, 255]);
@@ -281,7 +292,7 @@ fn background_fills_screen() {
 
 #[test]
 fn set_background_repaints_the_whole_screen() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.composite();
 
     assert!(c.set_background(RED));
@@ -294,7 +305,7 @@ fn set_background_repaints_the_whole_screen() {
 
 #[test]
 fn set_background_same_colour_is_a_no_op() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.composite();
 
     assert!(!c.set_background(BLUE));
@@ -303,7 +314,7 @@ fn set_background_same_colour_is_a_no_op() {
 
 #[test]
 fn set_background_forces_opaque() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.composite();
 
     // A translucent spelling of the current colour is the same opaque
@@ -315,7 +326,7 @@ fn set_background_forces_opaque() {
 
 #[test]
 fn set_background_keeps_windows_on_top() {
-    let mut c = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(4, 4), BLUE).expect("compositor");
     c.add_window(Point::new(0, 0), opaque(2, 2, RED));
     c.composite();
 
@@ -331,7 +342,7 @@ fn bgra_channel_order_is_honoured() {
         format: DisplayFormat::Bgra8888,
         ..mode(2, 2)
     };
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     c.composite();
     // Blue in BGRA is byte order B,G,R,A.
     assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
@@ -339,7 +350,7 @@ fn bgra_channel_order_is_honoured() {
 
 #[test]
 fn opaque_window_overwrites_background() {
-    let mut c = Compositor::new(mode(4, 4), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(4, 4), BLUE).expect("compositor");
     c.add_window(Point::new(1, 1), opaque(2, 2, RED));
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), [0, 0, 255, 255]); // background
@@ -350,7 +361,7 @@ fn opaque_window_overwrites_background() {
 
 #[test]
 fn top_window_wins_z_order() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(2, 2, RED));
     c.add_window(Point::ORIGIN, opaque(2, 2, Color::rgb(0, 255, 0)));
     c.composite();
@@ -359,7 +370,7 @@ fn top_window_wins_z_order() {
 
 #[test]
 fn raise_changes_z_order() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     let bottom = c.add_window(Point::ORIGIN, opaque(2, 2, RED));
     c.add_window(Point::ORIGIN, opaque(2, 2, Color::rgb(0, 255, 0)));
     assert!(c.raise(bottom));
@@ -369,7 +380,7 @@ fn raise_changes_z_order() {
 
 #[test]
 fn semi_transparent_window_blends_with_background() {
-    let mut c = Compositor::new(mode(1, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     let surface =
         Surface::filled(1, 1, Color::rgba(255, 0, 0, 128).premultiply()).expect("allocates");
     c.add_window(Point::ORIGIN, surface);
@@ -383,7 +394,7 @@ fn per_region_alpha_blends_each_pixel() {
     let mut surface = Surface::new(1, 2).expect("allocates");
     surface.set(0, 0, RED.premultiply());
     surface.set(0, 1, Color::rgba(255, 0, 0, 128).premultiply());
-    let mut c = Compositor::new(mode(1, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 2), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, surface);
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]); // opaque row
@@ -392,7 +403,7 @@ fn per_region_alpha_blends_each_pixel() {
 
 #[test]
 fn set_opacity_makes_window_translucent() {
-    let mut c = Compositor::new(mode(1, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     assert!(c.set_opacity(id, 128));
     c.composite();
@@ -401,7 +412,7 @@ fn set_opacity_makes_window_translucent() {
 
 #[test]
 fn rounded_window_shows_background_at_corner() {
-    let mut c = Compositor::new(mode(20, 20), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
     assert!(c.set_corners(id, Corners::Rounded { radius: 8 }));
     c.composite();
@@ -411,7 +422,7 @@ fn rounded_window_shows_background_at_corner() {
 
 #[test]
 fn hidden_window_is_not_composited() {
-    let mut c = Compositor::new(mode(1, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     assert!(c.set_visible(id, false));
     c.composite();
@@ -420,7 +431,7 @@ fn hidden_window_is_not_composited() {
 
 #[test]
 fn removed_window_disappears() {
-    let mut c = Compositor::new(mode(1, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     assert!(c.remove(id));
     assert_eq!(c.window_count(), 0);
@@ -430,7 +441,7 @@ fn removed_window_disappears() {
 
 #[test]
 fn move_window_repaints_old_and_new() {
-    let mut c = Compositor::new(mode(4, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(4, 1), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
@@ -442,7 +453,7 @@ fn move_window_repaints_old_and_new() {
 
 #[test]
 fn composite_clears_damage_and_is_idempotent() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     assert!(c.has_damage());
     c.composite();
@@ -454,7 +465,7 @@ fn composite_clears_damage_and_is_idempotent() {
 
 #[test]
 fn unknown_window_operations_return_false() {
-    let mut c = Compositor::new(mode(2, 2), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
     let ghost = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     c.remove(ghost);
     assert!(!c.move_window(ghost, Point::new(1, 1)));
@@ -464,7 +475,7 @@ fn unknown_window_operations_return_false() {
 
 #[test]
 fn back_buffer_holds_premultiplied_pixels() {
-    let mut c = Compositor::new(mode(1, 1), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     c.composite();
     assert_eq!(c.back_buffer().get(0, 0), Some(BLUE.premultiply()));
 }
@@ -490,7 +501,7 @@ fn composite_checked(c: &mut Compositor) -> DamageRegion {
 
 #[test]
 fn has_damage_answers_exactly_what_the_next_composite_produces() {
-    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(24, 24), BLUE).expect("compositor");
     // The very first frame: a new compositor marks the whole screen.
     assert!(!composite_checked(&mut c).is_empty());
     assert!(composite_checked(&mut c).is_empty());
@@ -513,7 +524,7 @@ fn has_damage_answers_exactly_what_the_next_composite_produces() {
 
 #[test]
 fn a_cursor_move_landing_on_the_same_rectangle_is_no_work() {
-    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(24, 24), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(4, RED), Point::new(5, 5));
     c.composite();
 
@@ -526,7 +537,7 @@ fn a_cursor_move_landing_on_the_same_rectangle_is_no_work() {
 fn replacing_the_cursor_artwork_repaints_its_unchanged_rectangle() {
     // A hover shape change (arrow -> text) installs a same-size image at the
     // same pointer: the rectangle is identical, the pixels are not.
-    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(24, 24), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(4, RED), Point::new(5, 5));
     c.composite();
     assert_eq!(frame_pixel(&c, 6, 6), [255, 0, 0, 255]);
@@ -539,7 +550,7 @@ fn replacing_the_cursor_artwork_repaints_its_unchanged_rectangle() {
 
 #[test]
 fn damage_marked_entirely_off_screen_is_no_pending_work() {
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let offscreen = c.add_window(Point::new(100, 100), opaque(4, 4, RED));
     c.composite();
 
@@ -554,7 +565,7 @@ fn damage_marked_entirely_off_screen_is_no_pending_work() {
 
 #[test]
 fn no_op_window_updates_mark_no_damage_and_still_report_success() {
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let id = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
     assert!(c.set_corners(id, Corners::Rounded { radius: 2 }));
     assert!(c.set_opacity(id, 200));
@@ -572,7 +583,7 @@ fn no_op_window_updates_mark_no_damage_and_still_report_success() {
 
 #[test]
 fn a_genuine_move_still_damages_the_vacated_and_the_new_rectangle() {
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(4, 4, RED));
     c.composite();
 
@@ -587,7 +598,7 @@ fn a_genuine_move_still_damages_the_vacated_and_the_new_rectangle() {
 fn replacing_a_surface_always_marks_damage() {
     // Comparing two whole buffers costs more than recompositing the window,
     // so a replacement is assumed to differ.
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let id = c.add_window(Point::new(1, 1), opaque(4, 4, RED));
     c.composite();
 
@@ -597,7 +608,7 @@ fn replacing_a_surface_always_marks_damage() {
 
 #[test]
 fn a_content_edit_marks_only_the_rectangle_it_reports() {
-    let mut c = Compositor::new(mode(32, 32), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
     let id = c.add_window(Point::new(4, 4), opaque(16, 16, RED));
     c.composite();
 
@@ -636,7 +647,7 @@ fn content_damage_is_offset_by_a_decorated_window_frame() {
 
 #[test]
 fn content_damage_larger_than_the_window_is_clipped_to_its_client() {
-    let mut c = Compositor::new(mode(32, 32), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
     let id = c.add_window(Point::new(20, 20), opaque(8, 8, RED));
     c.add_window(Point::new(0, 0), opaque(8, 8, BLUE));
     c.composite();
@@ -650,7 +661,7 @@ fn content_damage_larger_than_the_window_is_clipped_to_its_client() {
 
 #[test]
 fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let id = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
     c.composite();
 
@@ -670,7 +681,7 @@ fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
 
 #[test]
 fn editing_an_unknown_window_never_runs_the_edit() {
-    let mut c = Compositor::new(mode(16, 16), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let mut ran = false;
     let edited = c.edit_window_surface(WindowId(9_999), |_surface| {
         ran = true;
@@ -685,7 +696,7 @@ fn editing_an_unknown_window_never_runs_the_edit() {
 #[test]
 fn present_composites_then_writes_frame() {
     let m = mode(2, 2);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(2, 2, RED));
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
@@ -696,7 +707,7 @@ fn present_composites_then_writes_frame() {
 #[test]
 fn present_propagates_driver_error() {
     let m = mode(2, 2);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     display.fail = true;
     assert_eq!(c.present(&mut display), Err(DriverError::DeviceFault));
@@ -705,7 +716,7 @@ fn present_propagates_driver_error() {
 #[test]
 fn a_present_with_no_damage_never_touches_the_display() {
     let m = mode(8, 8);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
 
     // A new compositor marks the whole screen, so the desktop's very first
@@ -726,7 +737,7 @@ fn a_present_with_no_damage_never_touches_the_display() {
 #[test]
 fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
     let m = mode(64, 64);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
@@ -760,7 +771,7 @@ fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
 #[test]
 fn whole_screen_damage_presents_the_frame_once() {
     let m = mode(32, 32);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
@@ -777,7 +788,7 @@ fn whole_screen_damage_presents_the_frame_once() {
 #[test]
 fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
     let m = mode(64, 64);
-    let mut c = Compositor::new(m, BLUE).expect("compositor");
+    let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
@@ -812,7 +823,7 @@ fn active_theme_drives_compositor_background() {
     // screen clears to. One shared definition drives the WM.
     let mut themes = ThemeRegistry::with_builtins();
     let dark_bg = themes.active().palette().desktop;
-    let mut c = Compositor::new(mode(2, 2), dark_bg.into()).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), dark_bg.into()).expect("compositor");
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), dark_bg.to_array());
 
@@ -821,7 +832,7 @@ fn active_theme_drives_compositor_background() {
         .expect("light is built in");
     let light_bg = themes.active().palette().desktop;
     assert_ne!(light_bg, dark_bg);
-    let mut c = Compositor::new(mode(2, 2), light_bg.into()).expect("compositor");
+    let mut c = new_compositor(mode(2, 2), light_bg.into()).expect("compositor");
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), light_bg.to_array());
 }
@@ -837,7 +848,7 @@ fn theme_corner_radius_shapes_windows() {
     assert_eq!(corners, Corners::Rounded { radius });
     assert_eq!(Corners::from_radius(0), Corners::Square);
 
-    let mut c = Compositor::new(mode(20, 20), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
     let id = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
     assert!(c.set_corners(id, corners));
     c.composite();
@@ -884,7 +895,7 @@ fn moved(x: i32, y: i32) -> InputEvent {
 
 #[test]
 fn hit_test_picks_top_most_visible_window() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let bottom = c.add_window(Point::new(0, 0), opaque(20, 20, RED));
     let top = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
 
@@ -902,7 +913,7 @@ fn hit_test_picks_top_most_visible_window() {
 
 #[test]
 fn press_activates_raises_and_focuses() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let bottom = c.add_window(Point::new(0, 0), opaque(30, 30, RED));
     let top = c.add_window(Point::new(20, 0), opaque(20, 30, RED));
     let mut router = InputRouter::new();
@@ -936,7 +947,7 @@ fn press_activates_raises_and_focuses() {
 
 #[test]
 fn secondary_press_activates_and_delivers_to_the_client() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let bottom = c.add_window(Point::new(0, 0), opaque(30, 30, RED));
     let top = c.add_window(Point::new(20, 0), opaque(20, 30, RED));
     let mut router = InputRouter::new();
@@ -961,7 +972,7 @@ fn secondary_press_activates_and_delivers_to_the_client() {
 
 #[test]
 fn secondary_press_on_desktop_opens_nothing() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
     assert!(router.focus(win, &c));
@@ -977,7 +988,7 @@ fn secondary_press_on_desktop_opens_nothing() {
 
 #[test]
 fn press_on_desktop_clears_focus() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
@@ -999,7 +1010,7 @@ fn press_on_desktop_clears_focus() {
 
 #[test]
 fn focus_gives_keyboard_focus_to_a_known_window() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
@@ -1013,7 +1024,7 @@ fn focus_gives_keyboard_focus_to_a_known_window() {
 
 #[test]
 fn focus_fails_closed_for_an_unknown_window() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     assert!(c.remove(win), "the window is removed");
     let mut router = InputRouter::new();
@@ -1027,7 +1038,7 @@ fn focus_fails_closed_for_an_unknown_window() {
 
 #[test]
 fn key_is_delivered_to_the_focused_window() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
     assert!(router.focus(win, &c));
@@ -1066,7 +1077,7 @@ fn key_is_delivered_to_the_focused_window() {
 
 #[test]
 fn key_without_focus_is_ignored() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
@@ -1079,7 +1090,7 @@ fn key_without_focus_is_ignored() {
 
 #[test]
 fn key_to_a_vanished_focus_is_ignored_and_drops_focus() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
     assert!(router.focus(win, &c));
@@ -1101,7 +1112,7 @@ fn an_unhandled_button_does_not_change_focus() {
     // The primary button activates and the secondary opens a context menu
     // (both raise+focus); the middle button carries no window-manager meaning,
     // so it is consumed without changing focus.
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
@@ -1118,7 +1129,7 @@ fn an_unhandled_button_does_not_change_focus() {
 
 #[test]
 fn move_grab_drags_focused_window() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1159,7 +1170,7 @@ fn move_grab_drags_focused_window() {
 
 #[test]
 fn begin_move_fails_closed_without_focus() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
@@ -1169,7 +1180,7 @@ fn begin_move_fails_closed_without_focus() {
 
 #[test]
 fn drag_ends_if_grabbed_window_removed() {
-    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1187,7 +1198,7 @@ fn drag_ends_if_grabbed_window_removed() {
 
 #[test]
 fn client_hover_moves_route_to_the_window_under_the_pointer() {
-    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1206,7 +1217,7 @@ fn client_hover_moves_route_to_the_window_under_the_pointer() {
 
 #[test]
 fn client_press_captures_the_pointer_until_release() {
-    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1260,7 +1271,7 @@ fn client_press_captures_the_pointer_until_release() {
 
 #[test]
 fn client_grab_ends_if_grabbed_window_removed() {
-    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1278,7 +1289,7 @@ fn client_grab_ends_if_grabbed_window_removed() {
 
 #[test]
 fn pointer_position_tracks_motion() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     assert_eq!(router.pointer(), Point::ORIGIN);
     router.handle(moved(7, 9), &mut c);
@@ -1306,7 +1317,7 @@ fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImage {
 
 #[test]
 fn cursor_overlay_composites_over_the_desktop() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(8, RED), Point::new(10, 10));
     assert_eq!(c.cursor_bounds(), Some(Rect::new(10, 10, 8, 8)));
     c.composite();
@@ -1317,7 +1328,7 @@ fn cursor_overlay_composites_over_the_desktop() {
 
 #[test]
 fn cursor_overlay_draws_above_windows() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let green = Color::rgb(0, 255, 0);
     c.add_window(Point::new(0, 0), opaque(40, 40, green));
     c.set_cursor(solid_cursor(8, RED), Point::new(4, 4));
@@ -1328,7 +1339,7 @@ fn cursor_overlay_draws_above_windows() {
 
 #[test]
 fn moving_the_cursor_restores_pixels_behind_it() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
     c.composite();
     assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
@@ -1342,7 +1353,7 @@ fn moving_the_cursor_restores_pixels_behind_it() {
 
 #[test]
 fn hiding_the_cursor_restores_the_pixels_beneath() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
     c.composite();
     assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
@@ -1355,7 +1366,7 @@ fn hiding_the_cursor_restores_the_pixels_beneath() {
 
 #[test]
 fn move_and_hide_cursor_fail_closed_without_a_cursor() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     assert!(!c.move_cursor(Point::new(5, 5)));
     assert!(!c.hide_cursor());
     assert_eq!(c.cursor_bounds(), None);
@@ -1363,7 +1374,7 @@ fn move_and_hide_cursor_fail_closed_without_a_cursor() {
 
 #[test]
 fn replacing_the_cursor_image_marks_both_footprints_dirty() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
     c.composite();
     assert!(!c.has_damage());
@@ -1378,7 +1389,7 @@ fn replacing_the_cursor_image_marks_both_footprints_dirty() {
 
 #[test]
 fn a_cursor_sweep_damages_only_the_rectangle_it_left_and_the_one_it_reached() {
-    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(4, RED), Point::ORIGIN);
     c.composite();
 
@@ -1400,7 +1411,7 @@ fn a_cursor_sweep_damages_only_the_rectangle_it_left_and_the_one_it_reached() {
 
 #[test]
 fn a_single_cursor_move_damages_both_of_its_rectangles() {
-    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(4, RED), Point::ORIGIN);
     c.composite();
 
@@ -1413,7 +1424,7 @@ fn a_single_cursor_move_damages_both_of_its_rectangles() {
 
 #[test]
 fn hiding_and_reshowing_the_cursor_damages_one_rectangle_each() {
-    let mut c = Compositor::new(mode(64, 64), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
     c.set_cursor(solid_cursor(4, RED), Point::new(10, 10));
     c.composite();
 
@@ -1439,7 +1450,7 @@ fn hiding_and_reshowing_the_cursor_damages_one_rectangle_each() {
 /// scan-out frame — the shape of a desktop wake that pumps a batch of
 /// pointer motion before repainting.
 fn cursor_sweep_frame(samples: &[Point]) -> alloc::vec::Vec<u8> {
-    let mut c = Compositor::new(mode(24, 24), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(24, 24), BLUE).expect("compositor");
     c.add_window(Point::new(4, 4), opaque(12, 12, RED));
     c.set_cursor(solid_cursor(6, Color::rgb(0, 255, 0)), Point::ORIGIN);
     c.composite();
@@ -1473,7 +1484,7 @@ use tairix_theme::CursorKind;
 
 #[test]
 fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {
-    let mut c = Compositor::new(mode(40, 40), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
 
     // Default hint is the plain arrow.
@@ -1490,7 +1501,7 @@ fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {
 
 #[test]
 fn desired_cursor_reflects_the_window_under_the_pointer() {
-    let mut c = Compositor::new(mode(60, 60), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
@@ -1513,7 +1524,7 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
 
 #[test]
 fn move_grab_outranks_the_window_hint() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
     assert!(c.set_window_cursor(win, CursorKind::Text));
@@ -1532,7 +1543,7 @@ fn move_grab_outranks_the_window_hint() {
 
 #[test]
 fn controller_installs_and_switches_the_cursor_shape() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
@@ -1555,7 +1566,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
 
 #[test]
 fn controller_reuses_a_cached_kind_when_it_recurs() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
@@ -1581,7 +1592,7 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
 
 #[test]
 fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -1596,7 +1607,7 @@ fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
 
 #[test]
 fn controller_re_renders_on_scale_change() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -1616,7 +1627,7 @@ fn controller_re_renders_on_scale_change() {
 
 #[test]
 fn controller_re_renders_on_registry_swap() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -1637,7 +1648,7 @@ fn controller_re_renders_on_registry_swap() {
 
 #[test]
 fn output_scale_starts_at_one_and_is_settable() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     assert_eq!(c.scale(), Scale::ONE);
 
     let bigger = Scale::from_percent(200).expect("valid scale");
@@ -1650,7 +1661,7 @@ fn output_scale_starts_at_one_and_is_settable() {
 
 #[test]
 fn setting_the_output_scale_marks_the_whole_screen_dirty() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     c.composite();
     assert!(!c.has_damage(), "a fresh composite clears the damage");
 
@@ -1664,7 +1675,7 @@ fn setting_the_output_scale_marks_the_whole_screen_dirty() {
 
 #[test]
 fn window_scale_reports_the_output_scale_for_a_known_window() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     assert_eq!(c.window_scale(win), Some(Scale::ONE));
 
@@ -1763,7 +1774,7 @@ fn layer_pixel(layer: &CapturedLayer, x: u32, y: u32) -> [u8; 4] {
 
 #[test]
 fn accelerated_present_encodes_background_and_window_layers() {
-    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     c.add_window(Point::new(1, 1), opaque(2, 2, RED));
     let mut display = MockAccel::new(mode(8, 8), generous_caps());
 
@@ -1791,7 +1802,7 @@ fn accelerated_present_encodes_background_and_window_layers() {
 
 #[test]
 fn hidden_window_is_omitted_from_the_layer_stack() {
-    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
     assert!(c.set_visible(win, false));
     let mut display = MockAccel::new(mode(8, 8), generous_caps());
@@ -1802,7 +1813,7 @@ fn hidden_window_is_omitted_from_the_layer_stack() {
 
 #[test]
 fn accelerated_present_falls_back_when_over_layer_budget() {
-    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     c.add_window(Point::new(1, 1), opaque(2, 2, RED));
     // One plane only: background + window needs two, so the engine cannot
     // serve the scene and the compositor uses the software path.
@@ -1830,7 +1841,7 @@ fn accelerated_present_falls_back_when_over_layer_budget() {
 
 #[test]
 fn accelerated_present_falls_back_when_a_layer_is_too_large() {
-    let mut c = Compositor::new(mode(8, 8), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     // The background layer is the full 8×8 screen; an engine that can
     // only source 4-px-wide planes cannot take it.
     let caps = AccelCaps {
@@ -1876,7 +1887,7 @@ fn vertical_offset(c: &Compositor, id: WindowId) -> u64 {
 
 #[test]
 fn wheel_scrolls_the_viewport_under_the_pointer() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
@@ -1899,7 +1910,7 @@ fn wheel_scrolls_the_viewport_under_the_pointer() {
 
 #[test]
 fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     // A plain window that owns its own content scrolling: no root viewport.
     let id = c.add_window(Point::ORIGIN, opaque(100, 100, RED));
     let mut router = InputRouter::new();
@@ -1926,7 +1937,7 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
 
 #[test]
 fn furniture_press_is_not_delivered_to_the_client() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
@@ -1950,7 +1961,7 @@ fn furniture_press_is_not_delivered_to_the_client() {
 
 #[test]
 fn thumb_drag_captures_tracks_and_releases() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
@@ -1981,7 +1992,7 @@ fn thumb_drag_captures_tracks_and_releases() {
 
 #[test]
 fn content_shrinking_mid_drag_reclamps_the_offset() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
@@ -2002,7 +2013,7 @@ fn content_shrinking_mid_drag_reclamps_the_offset() {
 
 #[test]
 fn track_press_below_the_thumb_pages_forward() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
@@ -2019,7 +2030,7 @@ fn track_press_below_the_thumb_pages_forward() {
 
 #[test]
 fn client_pixels_are_clipped_out_of_the_reserved_gutter() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let _ = with_vertical_viewport(&mut c);
     c.composite();
     // The client fills 0..86 with red; the reserved 14px gutter shows the
@@ -2030,7 +2041,7 @@ fn client_pixels_are_clipped_out_of_the_reserved_gutter() {
 
 #[test]
 fn clearing_a_root_viewport_removes_the_furniture() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = with_vertical_viewport(&mut c);
     assert!(c.root_viewport(id).is_some());
 
@@ -2057,7 +2068,7 @@ fn decorated() -> WindowFurnitureState {
 
 #[test]
 fn decorating_a_window_reserves_a_band_around_the_client() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
 
     // Undecorated: outer bounds are the bare content surface and the client is
@@ -2087,7 +2098,7 @@ fn decorating_a_window_reserves_a_band_around_the_client() {
 
 #[test]
 fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     let bounds = c.window(id).unwrap().bounds();
@@ -2119,7 +2130,7 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
 
 #[test]
 fn clearing_the_frame_restores_the_bare_bounds() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     assert!(c.window(id).unwrap().bounds().width > 40);
@@ -2137,7 +2148,7 @@ fn clearing_the_frame_restores_the_bare_bounds() {
 
 #[test]
 fn rescaling_grows_the_reserved_band() {
-    let mut c = Compositor::new(mode(400, 400), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     let before = c.window(id).unwrap().bounds();
@@ -2154,7 +2165,7 @@ fn rescaling_grows_the_reserved_band() {
 
 #[test]
 fn switching_theme_is_reported_and_keeps_decorated_windows() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
 
@@ -2167,7 +2178,7 @@ fn switching_theme_is_reported_and_keeps_decorated_windows() {
 
 #[test]
 fn an_undecorated_window_keeps_its_surface_bounds() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let id = c.add_window(Point::new(5, 7), opaque(40, 30, RED));
     // No frame: bounds and client are the bare surface, unchanged by this work.
     assert_eq!(c.window(id).unwrap().bounds(), Rect::new(5, 7, 40, 30));
@@ -2225,7 +2236,7 @@ fn with_reduced_motion(base: &Theme) -> Theme {
 /// a full title bar (identity text plus the four command controls) and a
 /// resize grabber, so the furniture renders as it would on a real desktop.
 fn decorated_compositor() -> (Compositor, WindowId) {
-    let mut c = Compositor::new(mode(320, 240), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
     let id = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     (c, id)
@@ -2683,7 +2694,7 @@ fn the_resize_corner_never_overlaps_a_scrollbar_thumb() {
 
 #[test]
 fn put_to_back_sends_a_window_to_the_bottom_of_the_stack() {
-    let mut c = Compositor::new(mode(200, 200), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
     let back = c.add_window(Point::new(0, 0), opaque(120, 120, RED));
     let front = c.add_window(Point::new(60, 60), opaque(120, 120, RED));
     // The overlap belongs to the most-recently-added (topmost) window.
@@ -2740,7 +2751,7 @@ fn maximize_and_restore_toggles_size_state_and_geometry() {
 
 #[test]
 fn size_toggle_is_refused_for_windows_that_cannot_maximize() {
-    let mut c = Compositor::new(mode(320, 240), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
     let work_area = c.screen_rect();
 
     // An unknown window.
@@ -2763,6 +2774,174 @@ fn size_toggle_is_refused_for_windows_that_cannot_maximize() {
     let before = c.window(fixed).unwrap().bounds();
     assert!(c.toggle_window_size(fixed, work_area).is_none());
     assert_eq!(c.window(fixed).unwrap().bounds(), before);
+}
+
+// ---- server-side window decorations (Stage E chrome strips) ----------
+//
+// `Window` used to retain one outer-window-sized decoration surface even
+// though its client region is never sampled; it now keeps only the four
+// furniture strips `Window::furniture_bands` describes. These tests pin the
+// composited pixels exactly (so the split is provably invisible) and pin the
+// retained-memory shape (so the split provably pays off).
+
+/// Total pixels the four furniture bands cover for a decorated window: the
+/// memory the strip-based chrome retains, since each strip is allocated at
+/// exactly its band's size (a zero-extent band retains nothing).
+fn retained_chrome_pixels(c: &Compositor, id: WindowId) -> u64 {
+    c.window(id)
+        .unwrap()
+        .furniture_bands()
+        .iter()
+        .map(|band| u64::from(band.width) * u64::from(band.height))
+        .sum()
+}
+
+#[test]
+fn decorated_furniture_strips_render_pixel_exact_chrome() {
+    // A titled, active, resizable decorated window: every furniture band and
+    // the client are exercised in one composite, so the strip split is
+    // checked against the exact pixels a single outer-sized surface would
+    // have produced.
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_title(id, "Untitled"));
+    c.composite();
+
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    let frame_active = c.theme().palette().frame_active.to_array();
+    let surface = c.theme().palette().surface.to_array();
+    // `decorated_compositor` clears the screen to the literal `BLUE` test
+    // constant, independently of the active theme's own palette colours.
+    let desktop = [0, 0, 255, 255];
+
+    let left_x = u32::try_from(bounds.left()).unwrap();
+    let right_x = u32::try_from(bounds.right() - 1).unwrap();
+    let top_y = u32::try_from(bounds.top()).unwrap();
+    let bottom_y = u32::try_from(bounds.bottom() - 1).unwrap();
+    let mid_x = u32::try_from(centre(bounds).x).unwrap();
+    let mid_y = u32::try_from(centre(client).y).unwrap();
+
+    // Top strip: the rim colour along the outer top edge.
+    assert_eq!(frame_pixel(&c, mid_x, top_y), frame_active);
+    // Bottom strip: the rim colour along the outer bottom edge.
+    assert_eq!(frame_pixel(&c, mid_x, bottom_y), frame_active);
+    // Left and right strips: the rim colour at the outer edge, level with a
+    // row that crosses the client's own vertical range — the case that now
+    // samples the left strip and the right strip together.
+    assert_eq!(frame_pixel(&c, left_x, mid_y), frame_active);
+    assert_eq!(frame_pixel(&c, right_x, mid_y), frame_active);
+
+    // That same row's client interior still shows the application content,
+    // strictly between the two border strips.
+    let content_x = u32::try_from(client.left() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, content_x, mid_y), [255, 0, 0, 255]);
+
+    // The title-bar interior above the client (inside the top strip, off the
+    // rim) shows the window body surface colour, proving the top strip
+    // carries more than just the rim line.
+    let body_y = u32::try_from(client.top() - 1).unwrap();
+    assert_eq!(frame_pixel(&c, content_x, body_y), surface);
+
+    // The rounded rim corners stay transparent: the extreme outer corner
+    // (carried by the top strip) shows the desktop background straight
+    // through, not the rim colour.
+    assert_eq!(frame_pixel(&c, left_x, top_y), desktop);
+
+    // The bottom-right corner (carried by the bottom strip) holds the resize
+    // grabber's grip teeth, which paint a diagonal stroke a quarter of the
+    // affordance's extent in from the very corner (the corner pixel itself
+    // falls in the gap between teeth, so it is not a useful probe here).
+    let inset = i32::try_from((c.theme().metrics().resize_grabber_extent / 4).max(1)).unwrap();
+    let grabber_x = u32::try_from(bounds.right() - inset).unwrap();
+    let grabber_y = u32::try_from(bounds.bottom() - inset).unwrap();
+    assert_ne!(frame_pixel(&c, grabber_x, grabber_y), desktop);
+}
+
+#[test]
+fn an_undecorated_window_composites_unaffected_by_the_strip_split() {
+    // A window with no frame never touches the chrome path at all; its
+    // composited pixels are exactly its own content, unaffected by anything
+    // furniture-related.
+    let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(5, 5), opaque(30, 20, RED));
+    c.composite();
+
+    assert_eq!(frame_pixel(&c, 6, 6), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 0, 0), [0, 0, 255, 255]);
+    assert!(c.window(id).unwrap().frame().is_none());
+}
+
+#[test]
+fn resizing_a_decorated_window_still_produces_correct_furniture() {
+    let (mut c, id) = decorated_compositor();
+    let frame_active = c.theme().palette().frame_active.to_array();
+    // `decorated_compositor` clears the screen to the literal `BLUE` test
+    // constant, independently of the active theme's own palette colours.
+    let desktop = [0, 0, 255, 255];
+
+    // Grow the client substantially, then re-render and re-check the same
+    // furniture invariants at the new geometry: the strips are rebuilt at
+    // the new outer size, not stretched from the old one.
+    assert!(c.resize_window_client(id, 300, 200));
+    c.composite();
+
+    let bounds = c.window(id).unwrap().bounds();
+    let client = c.window_client_rect(id).unwrap();
+    assert_eq!(client.width, 300);
+    assert_eq!(client.height, 200);
+
+    let left_x = u32::try_from(bounds.left()).unwrap();
+    let top_y = u32::try_from(bounds.top()).unwrap();
+    let mid_x = u32::try_from(centre(bounds).x).unwrap();
+    let mid_y = u32::try_from(centre(client).y).unwrap();
+
+    assert_eq!(frame_pixel(&c, mid_x, top_y), frame_active);
+    assert_eq!(frame_pixel(&c, left_x, mid_y), frame_active);
+    assert_eq!(
+        frame_pixel(&c, left_x, top_y),
+        desktop,
+        "corner still clips"
+    );
+
+    let content_x = u32::try_from(client.left() + 2).unwrap();
+    assert_eq!(frame_pixel(&c, content_x, mid_y), [255, 0, 0, 255]);
+}
+
+#[test]
+fn retained_chrome_scales_with_the_frame_band_not_the_window_area() {
+    // Two decorated windows near the width of a 1080p panel, one short and
+    // one nearly full height: a pre-split, outer-sized decoration surface
+    // would have grown by the full extra window area. The strip-based
+    // chrome only grows by the side borders' extra height — a small slice of
+    // that once the window is wide relative to its border thickness.
+    let mut short = new_compositor(mode(1920, 1080), BLUE).expect("compositor");
+    let short_id = short.add_window(Point::new(0, 0), opaque(1880, 40, RED));
+    assert!(short.set_window_frame(short_id, WindowFrame::new(decorated())));
+
+    let mut tall = new_compositor(mode(1920, 1080), BLUE).expect("compositor");
+    let tall_id = tall.add_window(Point::new(0, 0), opaque(1880, 1000, RED));
+    assert!(tall.set_window_frame(tall_id, WindowFrame::new(decorated())));
+
+    let short_outer = short.window(short_id).unwrap().bounds();
+    let tall_outer = tall.window(tall_id).unwrap().bounds();
+    let short_retained = retained_chrome_pixels(&short, short_id);
+    let tall_retained = retained_chrome_pixels(&tall, tall_id);
+
+    let outer_area = |b: Rect| u64::from(b.width) * u64::from(b.height);
+    let outer_growth = outer_area(tall_outer) - outer_area(short_outer);
+    let retained_growth = tall_retained - short_retained;
+
+    assert!(
+        retained_growth * 10 < outer_growth,
+        "retained growth {retained_growth} should stay far below the outer-area \
+         growth {outer_growth} a single outer-sized surface would have paid"
+    );
+    assert!(
+        tall_retained * 5 < outer_area(tall_outer),
+        "the tall window's retained chrome ({tall_retained}) should be a small \
+         fraction of its outer area ({})",
+        outer_area(tall_outer)
+    );
 }
 
 /// A 1080p 32-bit output's worth of bytes: the backing the cursor cache's
@@ -2795,9 +2974,15 @@ fn test_cursor_cache() -> ReclaimCache<CursorKind, CursorImage, CursorEpoch> {
     cursor_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
+/// A window-furniture cache at normal pressure, sized from a 1080p output.
+fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
 #[test]
 fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
@@ -2823,7 +3008,7 @@ fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
 
 #[test]
 fn a_scale_change_invalidates_every_cached_cursor() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -2848,7 +3033,7 @@ fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     PRESSURE.report(PressureBand::Normal);
 
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
     assert!(c.set_window_cursor(win, CursorKind::Text));
     let mut router = InputRouter::new();
@@ -2888,7 +3073,7 @@ fn the_cursor_cache_budget_follows_the_output_it_was_built_for() {
     // frame is smaller than a single rasterised cursor, so nothing may
     // be retained, while the 1080p output of the other tests retains
     // normally.
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let tiny_output_bytes = 64 * 64 * 4;
     let mut ctrl = CursorController::new(cursor_cache(
@@ -2912,7 +3097,7 @@ fn the_cursor_cache_budget_follows_the_output_it_was_built_for() {
 
 #[test]
 fn teardown_releases_every_cached_cursor() {
-    let mut c = Compositor::new(mode(80, 80), BLUE).expect("compositor");
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
     router.handle(moved(70, 70), &mut c);
@@ -2923,4 +3108,742 @@ fn teardown_releases_every_cached_cursor() {
     assert_eq!(ctrl.cache_len(), 0);
     assert_eq!(ctrl.cache_bytes(), 0);
     assert_eq!(ctrl.cache_stats().teardowns(), 1);
+}
+
+// ---- window furniture under the reclaim model -----------------------
+//
+// The four furniture strips live in a bounded, pressure-governed cache the
+// compositor owns rather than in each window. These tests pin the two
+// properties that make it worth doing — the desktop's furniture is bounded
+// and given back under pressure — and the one that makes it safe: the cache
+// is an accelerator, so the composited pixels are the same whether it is
+// warm, empty, or refusing everything.
+
+/// A decorated, titled window of `client` size placed at `(x, y)`.
+fn titled_window(c: &mut Compositor, x: i32, y: i32, client: u32, title: &str) -> WindowId {
+    let id = c.add_window(Point::new(x, y), opaque(client, client, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    assert!(c.set_window_title(id, title));
+    id
+}
+
+/// The bytes one such window's furniture costs the cache, measured rather
+/// than assumed, so a budget expressed in whole entries stays correct when
+/// the theme's band metrics change.
+fn one_window_chrome_bytes() -> usize {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    titled_window(&mut c, 20, 20, 60, "measure");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 1);
+    c.chrome_cache_bytes()
+}
+
+#[test]
+fn retained_furniture_never_exceeds_the_one_screenful_ceiling() {
+    // Far more decorated windows than a screenful of furniture can hold:
+    // the cache admits what fits and evicts the rest, so the desktop's
+    // retained chrome is bounded by the output rather than by how many
+    // windows the user happens to have open.
+    let ceiling = 320 * 240 * 4;
+    let mut c = Compositor::new(
+        mode(320, 240),
+        BLUE,
+        chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+
+    for index in 0..40 {
+        let offset = (index % 8) * 8;
+        titled_window(&mut c, offset, offset, 120, "window");
+        c.composite();
+        assert!(
+            c.chrome_cache_bytes() <= ceiling,
+            "retained furniture {} passed the one-screenful ceiling {ceiling} \
+             after {} windows",
+            c.chrome_cache_bytes(),
+            index + 1
+        );
+    }
+    assert!(
+        c.chrome_cache_len() < 40,
+        "a bounded cache cannot have retained every window's furniture"
+    );
+    assert!(c.chrome_cache_stats().evictions() > 0);
+}
+
+#[test]
+fn a_scale_change_drops_every_window_s_furniture() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    for index in 0..3 {
+        titled_window(&mut c, index * 8, index * 8, 40, "window");
+    }
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 3);
+    assert_eq!(c.chrome_cache_stats().misses(), 3);
+    assert_eq!(c.chrome_cache_stats().invalidations(), 0);
+
+    // A new density re-renders every frame, so the epoch moves and the
+    // whole cache goes at once — one invalidation, not three.
+    assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
+    c.composite();
+    assert_eq!(c.chrome_cache_stats().invalidations(), 1);
+    assert_eq!(c.chrome_cache_stats().misses(), 6);
+    assert_eq!(c.chrome_cache_len(), 3);
+}
+
+#[test]
+fn a_theme_change_drops_every_window_s_furniture() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    for index in 0..3 {
+        titled_window(&mut c, index * 8, index * 8, 40, "window");
+    }
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 3);
+    assert_eq!(c.chrome_cache_stats().misses(), 3);
+
+    assert!(c.set_theme(Theme::light()));
+    c.composite();
+    assert_eq!(c.chrome_cache_stats().invalidations(), 1);
+    assert_eq!(c.chrome_cache_stats().misses(), 6);
+}
+
+#[test]
+fn a_theme_swap_that_keeps_the_id_still_drops_the_furniture() {
+    // Two distinct themes may share a `ThemeId` — a high-contrast variant
+    // of the built-in dark theme keeps `ThemeId::DARK` — so the epoch
+    // cannot be keyed on the id: stale furniture would be a wrong pixel,
+    // not a missed hit.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 20, 20, 60, "contrast");
+    c.composite();
+    assert!(c.chrome_resident(id));
+
+    let variant = with_contrast(&Theme::dark(), Contrast::High);
+    assert_eq!(variant.id(), Theme::dark().id());
+    assert!(c.set_theme(variant));
+    assert!(
+        !c.chrome_resident(id),
+        "furniture painted under the previous palette must not be served"
+    );
+}
+
+#[test]
+fn a_title_change_invalidates_only_that_window_s_furniture() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let first = titled_window(&mut c, 10, 10, 40, "first");
+    let second = titled_window(&mut c, 90, 10, 40, "second");
+    let third = titled_window(&mut c, 170, 10, 40, "third");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 3);
+
+    assert!(c.set_window_title(second, "renamed"));
+    assert_eq!(c.chrome_cache_len(), 2);
+    assert!(c.chrome_resident(first));
+    assert!(!c.chrome_resident(second));
+    assert!(c.chrome_resident(third));
+
+    // Only the renamed window is re-rendered on the next frame.
+    c.composite();
+    assert_eq!(c.chrome_cache_stats().misses(), 4);
+    assert_eq!(c.chrome_cache_len(), 3);
+}
+
+#[test]
+fn a_focus_change_invalidates_only_that_window_s_furniture() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let first = titled_window(&mut c, 10, 10, 40, "first");
+    let second = titled_window(&mut c, 90, 10, 40, "second");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 2);
+
+    assert!(c.set_active_frame(first, false));
+    assert!(!c.chrome_resident(first));
+    assert!(c.chrome_resident(second));
+}
+
+#[test]
+fn a_resize_invalidates_only_that_window_s_furniture() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let first = titled_window(&mut c, 10, 10, 40, "first");
+    let second = titled_window(&mut c, 150, 10, 40, "second");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 2);
+
+    let outer = c.window(first).expect("window").bounds();
+    assert!(c.resize_window(
+        first,
+        Rect::new(
+            outer.left(),
+            outer.top(),
+            outer.width + 20,
+            outer.height + 20
+        )
+    ));
+    assert!(!c.chrome_resident(first));
+    assert!(c.chrome_resident(second));
+}
+
+#[test]
+fn mild_pressure_drops_the_chrome_cache_and_refuses_growth() {
+    // A gauge private to this test: it moves the band, and the shared one
+    // must stay at normal for the tests running beside it.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    PRESSURE.report(PressureBand::Normal);
+
+    let mut c = Compositor::new(
+        mode(320, 240),
+        BLUE,
+        chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        &PRESSURE,
+    )
+    .expect("compositor");
+    let id = titled_window(&mut c, 20, 20, 120, "pressed");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 1);
+    assert!(c.chrome_cache_bytes() > 0);
+    let warm = c.frame().to_vec();
+
+    // Mild pressure forces a disposable-UI cache to zero, ahead of any
+    // clean-file or anonymous-page reclaim.
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.trim_chrome() > 0, "mild pressure must release bytes");
+    assert_eq!(c.chrome_cache_len(), 0);
+    assert_eq!(c.chrome_cache_bytes(), 0);
+
+    // The frame is still drawn correctly; the furniture is simply
+    // rendered on demand instead of retained.
+    repaint_everything(&mut c);
+    assert_eq!(c.frame(), &warm[..], "pressure must not change a pixel");
+    assert_eq!(c.chrome_cache_len(), 0, "no growth while pressure holds");
+    assert!(c.chrome_cache_stats().refusals() >= 1);
+    assert!(!c.chrome_resident(id));
+}
+
+/// Force a full repaint without disturbing the scene: two background
+/// changes damage the whole screen and land back on the colour that was
+/// already there.
+fn repaint_everything(c: &mut Compositor) {
+    let background = c.background();
+    let other = Color::rgb(0, 255, 0);
+    assert_ne!(background, other);
+    assert!(c.set_background(other));
+    assert!(c.set_background(background));
+    c.composite();
+}
+
+#[test]
+fn the_composited_frame_is_identical_warm_empty_and_uncacheable() {
+    // The proof that the cache is an accelerator and never a correctness
+    // requirement: the same scene composites to the same bytes whether
+    // its furniture is retained, has just been thrown away, or can never
+    // be retained at all.
+    let scene = |c: &mut Compositor| {
+        titled_window(c, 10, 10, 60, "alpha");
+        titled_window(c, 120, 40, 80, "beta");
+        let hidden = titled_window(c, 40, 120, 50, "gamma");
+        assert!(c.set_visible(hidden, false));
+    };
+
+    let mut warm = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    scene(&mut warm);
+    warm.composite();
+    repaint_everything(&mut warm);
+    assert!(warm.chrome_cache_stats().hits() > 0, "the cache is warm");
+
+    let mut emptied = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    scene(&mut emptied);
+    emptied.composite();
+    emptied.teardown_chrome();
+    assert_eq!(emptied.chrome_cache_len(), 0);
+    repaint_everything(&mut emptied);
+
+    let mut uncacheable = Compositor::new(
+        mode(320, 240),
+        BLUE,
+        chrome_cache(TEST_SEAT, 0, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    scene(&mut uncacheable);
+    uncacheable.composite();
+    assert_eq!(
+        uncacheable.chrome_cache_len(),
+        0,
+        "a zero budget must retain nothing"
+    );
+    assert!(uncacheable.chrome_cache_stats().refusals() >= 2);
+
+    assert_eq!(warm.frame(), emptied.frame());
+    assert_eq!(warm.frame(), uncacheable.frame());
+}
+
+#[test]
+fn tearing_the_chrome_cache_down_overwrites_the_retained_strips() {
+    // Furniture carries the window's title, so releasing it is a wipe,
+    // not a drop. The wipe the cache performs on release is this one:
+    // observing it here is the only way to see bytes whose allocation is
+    // freed the instant afterwards.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 20, 20, 120, "Secret Document");
+    c.composite();
+    assert_eq!(c.chrome_cache_len(), 1);
+    assert!(c.chrome_cache_bytes() > 0);
+
+    let mut chrome = c
+        .window(id)
+        .expect("window")
+        .render_chrome(c.scale(), c.theme())
+        .expect("chrome renders");
+    assert!(chrome.payload_bytes() > 0);
+    let bands = c.window(id).expect("window").furniture_bands();
+    let drawn = |chrome: &WindowChrome| {
+        (0..bands[0].height).any(|y| chrome.top_row(y).iter().any(|p| *p != Pixel::TRANSPARENT))
+    };
+    assert!(drawn(&chrome), "the title band starts with painted pixels");
+
+    chrome.wipe();
+    assert!(!drawn(&chrome), "every title-band byte must be overwritten");
+    for y in 0..bands[1].height {
+        assert!(chrome
+            .bottom_row(y)
+            .iter()
+            .all(|p| *p == Pixel::TRANSPARENT));
+    }
+    for y in 0..bands[2].height {
+        assert!(chrome.left_row(y).iter().all(|p| *p == Pixel::TRANSPARENT));
+        assert!(chrome.right_row(y).iter().all(|p| *p == Pixel::TRANSPARENT));
+    }
+
+    c.teardown_chrome();
+    assert_eq!(c.chrome_cache_len(), 0);
+    assert_eq!(c.chrome_cache_bytes(), 0);
+    assert_eq!(c.chrome_cache_stats().teardowns(), 1);
+}
+
+#[test]
+fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
+    // Eviction takes the least recently *composited* entry, and a hidden
+    // window is not composited — so the furniture of a minimised window
+    // is what a full cache gives back, never that of the window the user
+    // is looking at.
+    let entry = one_window_chrome_bytes();
+    // A ceiling that holds two windows' furniture and forces exactly one
+    // eviction when a third arrives.
+    let ceiling = entry * 14 / 5;
+    let mut c = Compositor::new(
+        mode(320, 240),
+        BLUE,
+        chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+
+    let minimised = titled_window(&mut c, 10, 10, 60, "minimised");
+    let visible = titled_window(&mut c, 150, 10, 60, "visible");
+    c.composite();
+    assert!(c.chrome_resident(minimised));
+    assert!(c.chrome_resident(visible));
+
+    // Minimise the first and compose again: the visible one is touched,
+    // the hidden one is not, so it becomes the oldest entry.
+    assert!(c.set_visible(minimised, false));
+    c.composite();
+    assert!(
+        c.chrome_resident(minimised),
+        "hiding retains, it does not evict"
+    );
+
+    let newcomer = titled_window(&mut c, 10, 120, 60, "newcomer");
+    c.composite();
+    assert!(
+        !c.chrome_resident(minimised),
+        "the minimised window's furniture is what a full cache gives back"
+    );
+    assert!(
+        c.chrome_resident(visible),
+        "the visible window's furniture must survive"
+    );
+    assert!(c.chrome_resident(newcomer));
+}
+
+// ---- releasable window content (Stage F) -----------------------------
+
+/// A gauge private to the content-release ladder tests: they move the band,
+/// and the shared [`NORMAL_PRESSURE`] must stay at normal for the tests
+/// running beside them.
+static CONTENT_PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+/// A compositor whose content-release ladder is driven by
+/// [`CONTENT_PRESSURE`], started at the normal band.
+fn releasable_compositor(mode: DisplayMode, background: Color) -> Compositor {
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    Compositor::new(mode, background, test_chrome_cache(), &CONTENT_PRESSURE).expect("compositor")
+}
+
+/// A decorated window whose pixels an app presents — the only kind the
+/// release ladder ever takes.
+fn app_window(c: &mut Compositor, x: i32, y: i32, client: u32, title: &str) -> WindowId {
+    let id = titled_window(c, x, y, client, title);
+    assert!(c.set_app_presented(id, true));
+    id
+}
+
+/// Fill the whole of the window named by `id` with `color`, exactly as a
+/// client presenting a full-window frame does.
+fn present_full(c: &mut Compositor, id: WindowId, color: Color) {
+    let filled = c.edit_window_surface(id, |surface| {
+        let (w, h) = (surface.width(), surface.height());
+        for y in 0..h {
+            for x in 0..w {
+                surface.set(x, y, color.premultiply());
+            }
+        }
+        ((), Rect::new(0, 0, w, h))
+    });
+    assert!(filled.is_some(), "the present must reach the window");
+}
+
+#[test]
+fn releasing_content_overwrites_the_pixels_before_dropping_them() {
+    // A window's content is whatever the user was looking at, so the
+    // release is a wipe and not a drop. Taking the spent buffer out is the
+    // only way to witness bytes whose allocation is freed immediately
+    // afterwards.
+    let mut window = crate::Window::new(WindowId(1), Point::new(0, 0), opaque(8, 4, RED));
+    assert!(window.has_content());
+    assert!(window
+        .content()
+        .expect("content")
+        .pixels()
+        .iter()
+        .all(|p| *p == RED.premultiply()));
+
+    let spent = window.take_content_wiped().expect("the released buffer");
+    assert!(
+        spent.pixels().iter().all(|p| *p == Pixel::TRANSPARENT),
+        "every content byte must be overwritten before the heap is reusable"
+    );
+    assert!(!window.has_content());
+    assert!(window.take_content_wiped().is_none());
+
+    // The window keeps everything but the pixels.
+    assert_eq!(window.client_size(), (8, 4));
+    assert_eq!(window.bounds(), Rect::new(0, 0, 8, 4));
+}
+
+#[test]
+fn releasing_content_drops_the_retained_bytes_to_zero() {
+    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    let id = app_window(&mut c, 20, 20, 60, "held");
+    assert!(c.set_visible(id, false));
+    c.composite();
+    let held = c.content_bytes();
+    assert_eq!(held, 60 * 60 * size_of::<Pixel>());
+
+    CONTENT_PRESSURE.report(PressureBand::Mild);
+    assert_eq!(c.release_content_under_pressure(None), held);
+    assert_eq!(c.content_bytes(), 0);
+    assert!(!c.window(id).expect("window").has_content());
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+}
+
+#[test]
+fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical() {
+    // The desktop shows through where the pixels were; every other pixel
+    // on screen — background, furniture, the window beside it — is
+    // untouched.
+    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    let kept = app_window(&mut c, 10, 10, 40, "kept");
+    present_full(&mut c, kept, GREEN);
+    let dropped = app_window(&mut c, 120, 10, 40, "dropped");
+    present_full(&mut c, dropped, RED);
+    c.composite();
+
+    let client = c.window_client_rect(dropped).expect("client rect");
+    let before = c.frame().to_vec();
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(Some(kept)) > 0);
+    c.composite();
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+
+    // The released window's client area is now the desktop background.
+    for y in client.top()..client.bottom() {
+        for x in client.left()..client.right() {
+            let px = frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned());
+            assert_eq!(
+                px,
+                [BLUE.r, BLUE.g, BLUE.b, 255],
+                "the released client area must show the desktop at ({x}, {y})"
+            );
+        }
+    }
+    // Everything outside it is byte-for-byte what it was.
+    let after = c.frame().to_vec();
+    let stride = c.mode().stride_bytes;
+    for y in 0..c.mode().height_px {
+        for x in 0..c.mode().width_px {
+            if client.contains(Point::new(x.cast_signed(), y.cast_signed())) {
+                continue;
+            }
+            let off = (y * stride + x * 4) as usize;
+            assert_eq!(
+                before[off..off + 4],
+                after[off..off + 4],
+                "pixel ({x}, {y}) outside the released window must not move"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
+    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let id = app_window(&mut c, 20, 20, 60, "live");
+    present_full(&mut c, id, RED);
+    c.composite();
+    let bounds = c.window(id).expect("window").bounds();
+    let title_band = c.window(id).expect("window").furniture_bands()[0];
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    c.composite();
+
+    // Still hit-tests over its whole outer rectangle.
+    assert_eq!(
+        c.window_at(Point::new(bounds.left(), bounds.top())),
+        Some(id)
+    );
+    assert_eq!(
+        c.window_at(Point::new(bounds.right() - 1, bounds.bottom() - 1)),
+        Some(id)
+    );
+    // Still draws its furniture: the title band is painted, not desktop.
+    let painted = (title_band.left()..title_band.right()).any(|x| {
+        frame_pixel(&c, x.cast_unsigned(), title_band.top().cast_unsigned())
+            != [BLUE.r, BLUE.g, BLUE.b, 255]
+    });
+    assert!(painted, "a released window still draws its furniture");
+    // Still takes focus, and the activation flip still repaints furniture.
+    assert!(c.set_active_frame(id, false));
+    assert!(c.set_active_frame(id, true));
+    // Still resizes: the retained client size follows, with no buffer to
+    // grow.
+    assert!(c.resize_window_client(id, 80, 50));
+    assert_eq!(c.window(id).expect("window").client_size(), (80, 50));
+    assert!(!c.window(id).expect("window").has_content());
+    c.composite();
+}
+
+#[test]
+fn a_full_window_present_after_release_restores_pixel_identical_content() {
+    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    let id = app_window(&mut c, 20, 20, 50, "restored");
+    present_full(&mut c, id, GREEN);
+    c.composite();
+    let before = c.frame().to_vec();
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    c.composite();
+    assert_ne!(before, c.frame(), "the release must be visible");
+
+    // The redraw the release asked for arrives as a full-window present.
+    present_full(&mut c, id, GREEN);
+    c.composite();
+    assert_eq!(
+        before,
+        c.frame(),
+        "a full-window present must restore the exact frame"
+    );
+}
+
+#[test]
+fn the_release_ladder_follows_the_pressure_band() {
+    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    let focused = app_window(&mut c, 10, 10, 40, "focused");
+    let unfocused = app_window(&mut c, 100, 10, 40, "unfocused");
+    let hidden = app_window(&mut c, 200, 10, 40, "hidden");
+    assert!(c.set_visible(hidden, false));
+    c.composite();
+    let _ = c.pending_redraws();
+
+    let content = |c: &Compositor, id: WindowId| c.window(id).expect("window").has_content();
+
+    // Normal: memory is plentiful and every release costs a repaint.
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
+    assert!(content(&c, focused) && content(&c, unfocused) && content(&c, hidden));
+
+    // Mild: only what nobody is looking at.
+    CONTENT_PRESSURE.report(PressureBand::Mild);
+    assert!(c.release_content_under_pressure(Some(focused)) > 0);
+    assert!(content(&c, focused), "the focused window is never released");
+    assert!(content(&c, unfocused), "a visible window survives mild");
+    assert!(!content(&c, hidden), "a hidden window goes first");
+    assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
+
+    // Critical: visible but unfocused goes too; the focused one never does.
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(Some(focused)) > 0);
+    assert!(
+        content(&c, focused),
+        "there would be nothing to show in the focused window's place"
+    );
+    assert!(!content(&c, unfocused));
+
+    // With nothing focused, critical takes every window.
+    present_full(&mut c, focused, RED);
+    assert!(c.release_content_under_pressure(None) > 0);
+    assert!(!content(&c, focused));
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+}
+
+#[test]
+fn each_release_queues_exactly_one_redraw_request() {
+    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    let visible = app_window(&mut c, 10, 10, 40, "visible");
+    let hidden = app_window(&mut c, 120, 10, 40, "hidden");
+    assert!(c.set_visible(hidden, false));
+    c.composite();
+    // Hiding a window that still holds its pixels asks for nothing.
+    assert!(c.pending_redraws().is_empty());
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    let mut queued = c.pending_redraws();
+    queued.sort_unstable_by_key(|id| id.0);
+    assert_eq!(queued, alloc::vec![visible, hidden]);
+    assert!(
+        c.pending_redraws().is_empty(),
+        "draining must leave the queue empty"
+    );
+
+    // A second release with nothing left to give back asks for nothing.
+    assert_eq!(c.release_content_under_pressure(None), 0);
+    assert!(c.pending_redraws().is_empty());
+
+    // Showing a window whose pixels are gone asks again, once.
+    assert!(c.set_visible(hidden, true));
+    assert_eq!(c.pending_redraws(), alloc::vec![hidden]);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+}
+
+#[test]
+fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_desktop_runs_on() {
+    // The event is advisory: a client that never answers simply shows the
+    // desktop through its client area. Nothing panics, nothing spins, and
+    // every other window keeps compositing.
+    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let answering = app_window(&mut c, 10, 10, 40, "answers");
+    present_full(&mut c, answering, GREEN);
+    let silent = app_window(&mut c, 120, 10, 40, "silent");
+    present_full(&mut c, silent, RED);
+    c.composite();
+    let _ = c.pending_redraws();
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    // Both apps were asked; only one of them answers.
+    let mut asked = c.pending_redraws();
+    asked.sort_unstable_by_key(|id| id.0);
+    assert_eq!(asked, alloc::vec![answering, silent]);
+    present_full(&mut c, answering, GREEN);
+
+    for _ in 0..3 {
+        c.composite();
+    }
+    let silent_client = c.window_client_rect(silent).expect("client rect");
+    for y in silent_client.top()..silent_client.bottom() {
+        for x in silent_client.left()..silent_client.right() {
+            assert_eq!(
+                frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
+                [BLUE.r, BLUE.g, BLUE.b, 255],
+                "the silent window stays blank at ({x}, {y})"
+            );
+        }
+    }
+    let answered_client = c.window_client_rect(answering).expect("client rect");
+    assert_eq!(
+        frame_pixel(
+            &c,
+            answered_client.left().cast_unsigned(),
+            answered_client.top().cast_unsigned()
+        ),
+        [GREEN.r, GREEN.g, GREEN.b, 255]
+    );
+    // The blank window is still a window: it hit-tests and holds its size.
+    assert_eq!(
+        c.window_at(Point::new(silent_client.left(), silent_client.top())),
+        Some(silent)
+    );
+    // Nothing was queued again by merely compositing a blank window.
+    assert!(c.pending_redraws().is_empty());
+}
+
+#[test]
+fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
+    // The seat is going away, so there is nobody left to present: the
+    // pixels are overwritten and no request is raised.
+    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let a = app_window(&mut c, 10, 10, 40, "a");
+    let b = app_window(&mut c, 120, 10, 40, "b");
+    present_full(&mut c, a, RED);
+    present_full(&mut c, b, GREEN);
+    c.composite();
+    assert!(c.content_bytes() > 0);
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    c.teardown_content();
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    assert_eq!(c.content_bytes(), 0);
+    assert!(!c.window(a).expect("window").has_content());
+    assert!(!c.window(b).expect("window").has_content());
+    assert!(
+        c.pending_redraws().is_empty(),
+        "a torn-down seat has nobody to present"
+    );
+}
+
+#[test]
+fn a_window_the_embedder_paints_itself_is_never_released() {
+    // The taskbar, a session dialog, the lock screen: nobody would answer
+    // a redraw request for them, so releasing their pixels would blank
+    // them permanently. An un-declared window keeps every pixel.
+    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let session_painted = titled_window(&mut c, 10, 10, 40, "bar");
+    let app = app_window(&mut c, 120, 10, 40, "app");
+    assert!(!c
+        .window(session_painted)
+        .expect("window")
+        .is_app_presented());
+    c.composite();
+
+    CONTENT_PRESSURE.report(PressureBand::Critical);
+    assert!(c.release_content_under_pressure(None) > 0);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    assert!(
+        c.window(session_painted).expect("window").has_content(),
+        "a window nobody can redraw must keep its pixels"
+    );
+    assert!(!c.window(app).expect("window").has_content());
+    assert_eq!(c.pending_redraws(), alloc::vec![app]);
+
+    // Hiding it does not change that: even invisible, no client would
+    // present it again.
+    assert!(c.set_visible(session_painted, false));
+    CONTENT_PRESSURE.report(PressureBand::Mild);
+    assert_eq!(c.release_content_under_pressure(None), 0);
+    CONTENT_PRESSURE.report(PressureBand::Normal);
+    assert!(c.window(session_painted).expect("window").has_content());
+    assert!(c.pending_redraws().is_empty());
 }

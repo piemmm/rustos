@@ -332,6 +332,35 @@ where
         self.generation.as_ref()
     }
 
+    /// Borrow the retained value for `key` at `generation` without
+    /// building it, touching recency, or sampling pressure.
+    ///
+    /// This is for a caller that must hold *several* entries borrowed at
+    /// the same time, which the exclusive borrow
+    /// [`get_or_build`](Self::get_or_build) needs cannot express: the
+    /// compositor resolves one source row per overlapping window before
+    /// it walks the columns of a scanline, so every covering window's
+    /// furniture is read at once.
+    ///
+    /// Recency is not a casualty of the untouched read. Such a caller
+    /// first ensures residency through
+    /// [`get_or_build`](Self::get_or_build) for every key it is about to
+    /// read, in the same operation, so each entry is touched exactly
+    /// once per pass and the least-recently-*composited* window is still
+    /// the one eviction takes.
+    ///
+    /// Returns `None` for an absent key, a poisoned cache, or a
+    /// generation that differs from the retained one: a stale entry is
+    /// never served, and the caller falls back to building the value
+    /// itself exactly as it would for a cache that refused it.
+    #[must_use]
+    pub fn peek(&self, generation: &E, key: &K) -> Option<&V> {
+        if self.poisoned || self.generation.as_ref() != Some(generation) {
+            return None;
+        }
+        self.entries.get(key).map(|entry| &entry.value)
+    }
+
     /// Serve `key` at `generation`, building it once if it is absent.
     ///
     /// A generation different from the retained one empties the cache
@@ -702,6 +731,46 @@ mod tests {
         assert!(second.is_cached());
         assert_eq!(cache.accounting().hits(), 1);
         assert_eq!(cache.accounting().misses(), 1);
+    }
+
+    #[test]
+    fn peek_borrows_a_resident_entry_without_building_or_counting_it() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        let _ = cache.get_or_build(&1, 7, || Some(Block::of(64, 0xAA)));
+        let hits = cache.accounting().hits();
+        let misses = cache.accounting().misses();
+        assert_eq!(cache.peek(&1, &7), Some(&Block::of(64, 0xAA)));
+        assert_eq!(cache.peek(&1, &8), None, "an absent key builds nothing");
+        assert_eq!(cache.accounting().hits(), hits);
+        assert_eq!(cache.accounting().misses(), misses);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn peek_refuses_a_generation_the_entries_were_not_built_at() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        let _ = cache.get_or_build(&1, 7, || Some(Block::of(64, 0xAA)));
+        assert_eq!(cache.peek(&2, &7), None, "a stale entry is never served");
+        assert_eq!(cache.len(), 1, "refusing to peek must not evict");
+    }
+
+    #[test]
+    fn peek_leaves_recency_alone_so_eviction_still_follows_the_builds() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        for key in 0..3u32 {
+            let _ = cache.get_or_build(&1, key, || Some(Block::of(1024, 0xFF)));
+        }
+        assert_eq!(cache.len(), 3);
+        for _ in 0..8 {
+            assert!(cache.peek(&1, &0).is_some());
+        }
+        let _ = cache.get_or_build(&1, 3, || Some(Block::of(1024, 0xFF)));
+        assert_eq!(
+            cache.peek(&1, &0),
+            None,
+            "peeking must not refresh recency, so the first build is still the first out"
+        );
+        assert!(cache.peek(&1, &3).is_some());
     }
 
     #[test]

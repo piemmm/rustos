@@ -19,12 +19,13 @@
 //! | 2001 | Error | `RECLAIM_CACHE_POISONED` | audit | A live cache detected an internal ledger or index defect (a corruption-like event), drained itself, and disabled admission (fail closed). The `cause` field names the defect. |
 //!
 //! Every record carries the same field shape: `cache` (the emitting
-//! cache's fixed label), `owner` (the owning kernel subsystem's name,
-//! or the owner kind `volume` / `task` / `session`), `owner_id` (the
-//! owning volume's mount handle, task id, or seat; `0` for a named
-//! kernel subsystem), and `cause`. The fields are fixed labels and numeric
-//! handles only — never file names, cached plaintext, keys, or
-//! capability tokens (`plans/SMARTRAM.md` section 9).
+//! cache's fixed label), `owner` (the owning kernel subsystem's or
+//! userland process's name, or the owner kind `volume` / `task` /
+//! `session`), `owner_id` (the owning volume's mount handle, task id, or
+//! seat; `0` for a named kernel subsystem or userland process), and
+//! `cause`. The fields are fixed labels and numeric handles only — never
+//! file names, cached plaintext, keys, or capability tokens
+//! (`plans/SMARTRAM.md` section 9).
 //!
 //! Adding a new event requires assigning the next free identifier
 //! across the whole `2_000..3_000` range — the `ramzip` tier's events
@@ -76,14 +77,16 @@ impl ReclaimAuditEvent {
 
 /// The `owner` / `owner_id` field pair for a cache's declared owner.
 ///
-/// A named kernel subsystem logs its name with id `0`; a volume, task,
-/// or desktop-session owner logs its kind with the numeric handle. An
-/// unclassified cache (the refusal itself may be a missing owner) logs
-/// `unknown`.
+/// A named kernel subsystem or userland process logs its name with id
+/// `0`; a volume, task, or desktop-session owner logs its kind with the
+/// numeric handle. An unclassified cache (the refusal itself may be a
+/// missing owner) logs `unknown`.
 const fn owner_fields(owner: Option<ReclaimOwner>) -> (&'static str, u64) {
     match owner {
         None => ("unknown", 0),
-        Some(ReclaimOwner::KernelSubsystem(name)) => (name, 0),
+        Some(ReclaimOwner::KernelSubsystem(name) | ReclaimOwner::UserlandProcess(name)) => {
+            (name, 0)
+        }
         Some(ReclaimOwner::FilesystemVolume { volume }) => ("volume", volume),
         Some(ReclaimOwner::Task { task }) => ("task", task),
         Some(ReclaimOwner::DesktopSession { seat }) => ("session", seat),
@@ -259,9 +262,15 @@ mod tests {
             Some(ReclaimOwner::Task { task: 42 }),
             "orphan_index_slot",
         );
+        log_cache_poisoned(
+            &sink,
+            "font.client",
+            Some(ReclaimOwner::UserlandProcess("font-client")),
+            "ledger_imbalance",
+        );
         log_cache_poisoned(&sink, "clean_fs", None, "ledger_imbalance");
         let records = sink.records.borrow();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 4);
         assert!(records.iter().all(|(id, ..)| *id == 2001));
         assert_eq!(
             records[0].2[1],
@@ -272,6 +281,11 @@ mod tests {
         assert_eq!(records[1].2[2], ("owner_id".to_string(), "42".to_string()));
         assert_eq!(
             records[2].2[1],
+            ("owner".to_string(), "font-client".to_string())
+        );
+        assert_eq!(records[2].2[2], ("owner_id".to_string(), "0".to_string()));
+        assert_eq!(
+            records[3].2[1],
             ("owner".to_string(), "unknown".to_string())
         );
     }

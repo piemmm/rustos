@@ -167,14 +167,33 @@ impl DesktopShell {
     }
 
     /// Give back every rasterised pixel the current memory-pressure band
-    /// requires, returning the bytes released across both caches.
+    /// requires, returning the bytes released across the seat's caches.
     ///
     /// Called when the kernel wakes the session with a deepened band, so
     /// the desktop releases its share at the moment pressure rises rather
     /// than at whatever later frame happens to touch a cache. A band that
     /// demands nothing releases nothing, so a spurious wake is cheap.
-    pub fn trim_caches(&mut self) -> usize {
-        self.cursor.trim().saturating_add(self.renderer.trim())
+    ///
+    /// `compositor` is trimmed alongside the shell's own two caches
+    /// because the desktop's third disposable-UI cache — the decorated
+    /// windows' rendered furniture — belongs to the output, not the
+    /// shell, and pressure is answered by the whole session at once.
+    ///
+    /// The same call runs the window-*content* release ladder
+    /// ([`Compositor::release_content_under_pressure`]), which is a policy
+    /// rather than a cache: the compositor holds the only copy of a
+    /// window's pixels, so the focused window is spared and every window
+    /// whose pixels do go is queued for a redraw request the embedder
+    /// drains with [`Compositor::pending_redraws`]. The focused window is
+    /// the one the router already tracks, so the shell has a single notion
+    /// of focus rather than a second one for reclaim.
+    pub fn trim_caches(&mut self, compositor: &mut Compositor) -> usize {
+        let focused = self.router.focused();
+        self.cursor
+            .trim()
+            .saturating_add(self.renderer.trim())
+            .saturating_add(compositor.trim_chrome())
+            .saturating_add(compositor.release_content_under_pressure(focused))
     }
 
     /// The desktop session (theme registry + taskbar model).
@@ -805,13 +824,18 @@ impl DesktopShell {
 
     /// Remove the bar and popup windows from `compositor` and forget them, so a
     /// later [`present`](Self::present) starts fresh, and wipe every rasterised
-    /// cursor image and notification glyph the two disposable-UI caches hold.
-    /// Tearing the session down leaves no orphaned windows and no rendered
-    /// user pixel data behind.
+    /// cursor image, notification glyph, and window-furniture strip the
+    /// seat's disposable-UI caches hold, along with any window content the
+    /// compositor is still holding. Tearing the session down leaves no
+    /// orphaned windows and no rendered user pixel data behind — the
+    /// furniture carries window titles and the content is whatever the user
+    /// was looking at, so both are overwritten rather than merely dropped.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presenter.teardown(compositor);
         self.cursor.teardown();
         self.renderer.teardown();
+        compositor.teardown_chrome();
+        compositor.teardown_content();
     }
 }
 

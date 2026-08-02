@@ -12,8 +12,11 @@ theming and the taskbar build on them in later increments.
 
 The compositor turns a stack of windows into one scan-out frame:
 
-1. Each window owns a `Surface`: a dense, row-major buffer of
-   **premultiplied-alpha** `Pixel`s.
+1. Each window owns its content `Surface`: a dense, row-major buffer of
+   **premultiplied-alpha** `Pixel`s. The buffer is *releasable* under
+   memory pressure (see [Releasable window content](#releasable-window-content));
+   a window whose pixels have gone keeps every other property and
+   composites transparent until its app presents again.
 2. `Compositor::composite` walks the damaged screen regions and, for
    every dirty pixel, blends each covering window *over* the opaque
    background, bottom-to-top in z-order, using the Porter–Duff *over*
@@ -211,17 +214,46 @@ the chrome. The furniture family itself lives once in
   furniture. `clear_window_frame` collapses the band back to the bare
   surface. A DPI (`set_scale`) or theme (`set_theme`) change re-resolves the
   band for every decorated window.
-- **Rendering.** Each decorated window keeps a pre-rendered, outer-sized
-  decoration `Surface` painted through `WindowFrame::render` /
-  `TitleBar::render` (rim, body, the sanitised title text via `lib/font`,
-  and the four command controls) plus a corner `ResizeGrabber`, using the
-  one `lib/raster` fill and the shared rounded-corner path — so the rim's
-  rounded corners stay transparent and the desktop shows through. The
-  compositor samples that decoration in the reserved band and the client
-  content inside it (`Window::sample_local`), for both the software and the
-  hardware-accelerated present paths. The furniture is animation-free, so it
-  is reduced-motion correct by construction, and high contrast thickens the
+- **Rendering.** A decorated window's furniture is a `WindowChrome`: the
+  four strips the frame actually draws into — the top (title) band, the
+  bottom band, and the two side borders — painted through
+  `WindowFrame::render` / `TitleBar::render` (rim, body, the sanitised title
+  text via `lib/font`, and the four command controls) plus a corner
+  `ResizeGrabber`, using the one `lib/raster` fill and the shared
+  rounded-corner path — so the rim's rounded corners stay transparent and
+  the desktop shows through. Only the strips are kept: the region between
+  them is never sampled (the compositor draws the window's own content
+  there), so retained bytes follow the band thickness and not the window
+  area — a 1920×1080 window's furniture costs roughly a seventeenth of what
+  one outer-sized surface did. The compositor samples those strips in the
+  reserved band and the client content inside them (`Window::row` /
+  `Window::sample_local`), for both the software and the
+  hardware-accelerated present paths; a screen row needs at most two of
+  them, since a row is either in the title/bottom band or crosses the client
+  between the two side borders. The furniture is animation-free, so it is
+  reduced-motion correct by construction, and high contrast thickens the
   command-glyph and grip strokes.
+- **Retention (bounded and reclaimable).** The strips are *derived* pixels,
+  so the compositor holds them in one shared, pressure-governed
+  `ReclaimCache` keyed by `WindowId` rather than each window pinning its own
+  copy for as long as it exists. The cache is ceilinged at one screenful —
+  no more furniture than fills the screen can be visible at once, so
+  anything above that belongs to minimised, off-screen, or stacked-under
+  windows, and those are exactly the entries eviction takes first. It is
+  charged to the owning seat, and because furniture carries the window's
+  title it is *wiped*, not merely dropped, on release. The embedder builds
+  it (`tairix_wm::chrome_cache`) from the real output size, seat, pressure
+  gauge, and audit sink and hands it to `Compositor::new`, exactly as it
+  does the cursor and taskbar-icon caches; the session trims all three when
+  the kernel reports a deeper memory-pressure band and tears them down at
+  logout or seat loss. A single window's change (title, focus, resize,
+  size-state, decorating, closing) releases just that window's entry; only a
+  DPI or theme change moves the cache generation and drops every entry at
+  once. The cache is an accelerator and never a correctness requirement:
+  furniture the cache refuses — an exhausted budget, a pressure band that
+  forbids growth — is rendered for that frame alone, and the composited
+  output is byte-identical whether the cache is warm, has just been emptied,
+  or can retain nothing at all.
 - **Activation and title.** `Compositor::set_active_frame` repaints a
   window's rim, title, and controls for the focused/unfocused state the
   `InputRouter` tracks; `Compositor::set_window_title` repaints the title
@@ -262,6 +294,65 @@ the chrome. The furniture family itself lives once in
   with the new client size (nothing for a non-resizable window). These ride the
   existing window path, owner-validated by the engine; there is no ambient
   authority and no privileged force-quit button (`AGENTS.md` §4, §5.4).
+
+## Releasable window content
+
+A window's content surface is the compositor's single owned copy of the
+app's pixels, and on a full-screen window it is the largest single
+allocation the desktop holds. A minimised window that nobody can see
+would otherwise pin megabytes indefinitely, so content is **releasable**:
+under memory pressure the compositor gives the buffer back and asks the
+owning app to present again.
+
+This is deliberately **not** a keyed cache like the furniture, cursor,
+and icon caches. Evicting a visible window's pixels is a *visual defect*,
+not a slowdown, so eviction cannot be driven by recency — it has to be
+driven by what the user can currently see. Content is therefore a
+pressure-driven release **policy** over the same shared `PressureGauge`
+and the same `tairix_reclaim::shrink_target` ordering the caches use: one
+memory model, two mechanisms suited to two different kinds of memory.
+
+- **What survives a release.** Only the pixels go. The window keeps its
+  client size (`Window::client_size`, retained independently of the
+  buffer), origin, z-order, visibility, furniture, cursor, viewport, and
+  size state, so a released window still hit-tests, still draws its title
+  bar and borders, still takes focus, and still resizes. It composites as
+  fully transparent — the desktop shows through — and everything else on
+  screen is unchanged.
+- **Releasing wipes.** The buffer holds user data, so
+  `Window::release_content` overwrites every pixel before dropping the
+  allocation rather than trusting the allocator to have cleared it.
+- **The redraw handshake.** A present carries only a *damage rectangle*,
+  so a re-established surface starts transparent and is correct only once
+  a full-window present arrives. Every release therefore queues a
+  `WindowEvent::RedrawRequested` for that window, drained by the embedder
+  through `Compositor::pending_redraws`. The compositor never reaches for
+  the window protocol itself — the wm crate has no dependency on the
+  window-server side — and it queues the same request when a window with
+  no content is made visible again. `lib/window` answers the event on the
+  app's behalf by re-presenting its last frame with full-window damage,
+  so an app that does nothing still gets its pixels back; an app that
+  ignores the event simply leaves its window blank while the desktop
+  keeps running.
+- **The pressure ladder** (`Compositor::release_content_under_pressure`,
+  run by the session on a band change):
+  - **Normal** — nothing is released. There is no reason to make an app
+    repaint while memory is plentiful.
+  - **Mild and deeper** — every **hidden or minimised** window's content
+    goes. Nobody is looking at it, so the release is invisible and the
+    win is the whole surface.
+  - **Critical** — additionally every **visible but unfocused** window,
+    each with an immediate redraw request. A background window blank for
+    a frame is a far better outcome than exhausting memory.
+  - The **focused** window is never released at any band: there would be
+    nothing to show in its place.
+- **Only windows an app presents.** A window the session paints itself —
+  the taskbar, the lock screen, the file picker, a confirmation prompt —
+  has no client to answer a redraw request, so releasing it would blank
+  it permanently. `Compositor::set_app_presented` declares a window
+  app-presented and the release policy skips every window that has not;
+  the default is `false`, so a window is spared unless the embedder
+  explicitly says an app owns its pixels.
 
 ## Decorated windows in the live session
 
@@ -347,9 +438,11 @@ plus a damage rectangle (`Present`) — pixels never cross the IPC. A
 renderer), and the app's own **event endpoint**; the reply is the
 session-minted, never-reused window id. Input travels the other way as
 fixed-width `WindowEvent`s — focus changes, key events (embedding the one
-desktop `KeyInput` codec), window-local pointer events, and
-`CloseRequested` (the app owns the close decision) — delivered to that
-endpoint, where the app **parks** until one arrives; it never polls.
+desktop `KeyInput` codec), window-local pointer events, `CloseRequested`
+(the app owns the close decision), and `RedrawRequested` (the session
+released this window's retained content to reclaim memory and needs it
+presented again) — delivered to that endpoint, where the app **parks**
+until one arrives; it never polls.
 
 `lib/window` hosts both halves of the behaviour so they cannot drift:
 
@@ -366,7 +459,12 @@ endpoint, where the app **parks** until one arrives; it never polls.
   client's windows are torn down via `client_exited`, and app-ward events
   are validated against the live window before delivery.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
-  (`ipc_call`) and `EventSource` (parked endpoint wait) seams.
+  (`ipc_call`) and `EventSource` (parked endpoint wait) seams. The client
+  remembers each window's last presented frame index and extent, so
+  `WindowEvents::wait` answers a `RedrawRequested` by re-presenting that
+  frame with full-window damage before returning the event to the app —
+  no app has to implement the handshake, and an app that wants to render
+  genuinely fresh pixels still sees the event.
 
 Every decode fails closed (`tairix_abi::window_ipc`, enrolled in the
 `fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`

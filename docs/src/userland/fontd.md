@@ -54,8 +54,8 @@ closed on a corrupt frame (§5.4).
 ## The dispatcher
 
 The host-testable core is `FontService`, the rasterising dispatcher. It owns
-the parsed faces and a bounded `(face, glyph, cell height)` FIFO coverage
-cache, and turns one decoded `FontRequest` into a framed reply:
+the parsed faces and a byte-budgeted `(face, glyph, cell height, weight)`
+coverage cache, and turns one decoded `FontRequest` into a framed reply:
 
 1. Resolve the requested Unicode scalar to the covering face —
    Latin/Greek/Cyrillic to Inconsolata EX, Japanese to M PLUS 1 Code, Korean
@@ -73,6 +73,39 @@ security-relevant rasterise-and-cache logic is exhaustively host-tested against
 the committed repository faces with no on-disk `/System/Fonts`. The
 `tairix-fontface` TrueType parser additionally carries its own fuzz harness
 (`AGENTS.md` §19.6).
+
+## What a caller can make the service hold
+
+The requested cell height comes from the caller, so the *size* of what a
+request makes the service retain is caller-influenced: a client walking the
+permitted height range at the widest permitted bitmap would drive an
+entry-counted cache into hundreds of megabytes. The cache is therefore bounded
+in **bytes**, by a budget derived from the machine's total RAM
+(`tairix_procinfo::memory_total_bytes`), through the shared
+`tairix_reclaim::ReclaimCache` — the very cache, and the very cached-glyph
+declaration (`tairix_font::glyph_cache`), the render-path client on the other
+side of the endpoint uses, so the two cannot drift apart. However many
+distinct sizes a caller asks for, the retained bytes stay under that ceiling
+and the least recently used rasters are released and overwritten to make room.
+
+Bounding retention is not input validation and does not replace it: the
+permitted scalar, cell-height, and weight ranges are checked by the
+`tairix_abi::font_ipc` wire decode before a request reaches the dispatcher,
+and an out-of-range request is refused with an error frame rather than
+rasterised.
+
+The cache is injected at construction, since sizing it needs the RAM figure
+and governing it needs the process's own pressure gauge and audit sink:
+`tairix_fontd::glyph_cache` assembles one, and the `Run` binary supplies all
+three. A RAM reading the System Information service cannot supply is zero,
+which yields a zero budget that retains nothing — every glyph is then
+rasterised on demand, correct and merely slower, never a hand-picked ceiling
+standing in for a figure the machine did not supply.
+
+The serve loop waits on a wait set carrying both the endpoint and the
+kernel's memory-pressure source, so the service reacts to a band change while
+idle — giving its rasters back as the machine tightens — without ever polling
+for either.
 
 ## The `FONT_ENDPOINT` protocol
 

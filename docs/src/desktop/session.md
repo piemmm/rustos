@@ -635,6 +635,36 @@ Relaying a theme switch to the apps over IPC remains a later increment; the
 desktop now reads a live pointer **and** keyboard event stream end to end,
 each channel drained from the kernel's owner-gated seat channels.
 
+## Giving memory back under pressure
+
+The desktop holds the largest reclaimable allocations on a graphical system:
+rasterised cursors and notification glyphs, rendered window furniture, and
+every window's content pixels. The kernel's memory-pressure band is one more
+member of the session's wait set, so a deepened band **wakes** the loop rather
+than being discovered by polling (`AGENTS.md` §2.23); the woken branch runs one
+`DesktopShell::trim_caches`, which is the single place the desktop's whole
+answer lives:
+
+- the cursor, notification-glyph, and window-furniture `ReclaimCache`s each
+  shrink to their pressure-derived target, wiping what they release, and
+- `Compositor::release_content_under_pressure` runs the content ladder for the
+  window the session's own router currently focuses (see [Releasable window
+  content](./wm.md#releasable-window-content)).
+
+Releasing content is only half of the handshake: the session then drains
+`Compositor::pending_redraws` and delivers a `WindowEvent::RedrawRequested` to
+each released window's owning app over the window channel, mapping the
+compositor's `WindowId` back to the client's window through the same served-
+window table every other app-ward event uses — there is no second mapping. The
+same drain runs after a window becomes visible again, so a restored window that
+lost its pixels while minimised is asked for them immediately. Only windows the
+embedder declared app-presented are ever released, so the bar, the lock screen,
+the picker, and a confirmation prompt — which the session paints itself and no
+client would redraw — keep their pixels at every band.
+
+Logout or seat loss runs `teardown`, which tears every cache down and wipes
+each window's content: a session's retained pixels never outlive the session.
+
 ## Tests
 
 `cargo test -p tairix-desktop-session` covers: the default dark start with an

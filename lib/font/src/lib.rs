@@ -43,12 +43,20 @@
 //! stays monospaced; the cell model is one scalar per grid entry, a wide
 //! Japanese or Korean bitmap covering the lead and continuation cells reserved
 //! by `tairix_vt::char_width`.
+//!
+//! # A shared cache declaration for the whole endpoint
+//!
+//! [`glyph_cache`] (feature `glyph-cache`, pulled in by `render`) declares
+//! the one cached-glyph value type, classification, and RAM-derived byte
+//! budget both this crate's own client cache and `fontd`'s service-side
+//! cache build their bounded cache from, so a glyph cache is declared once
+//! rather than separately on each side of the font-service boundary.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(feature = "render")]
+#[cfg(any(feature = "render", feature = "glyph-cache"))]
 extern crate alloc;
 
 #[cfg(test)]
@@ -60,6 +68,8 @@ pub mod client;
 #[cfg(feature = "render")]
 pub mod font;
 pub mod glyph;
+#[cfg(feature = "glyph-cache")]
+pub mod glyph_cache;
 
 #[cfg(test)]
 mod tests;
@@ -67,7 +77,11 @@ mod tests;
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
 #[cfg(feature = "render")]
-pub use client::{set_font_transport, FontTransport};
+pub use client::{set_font_transport, set_glyph_cache, FontTransport, GlyphCache, GlyphKey};
 #[cfg(feature = "render")]
 pub use font::BitmapFont;
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
+#[cfg(feature = "glyph-cache")]
+pub use glyph_cache::{
+    glyph_cache_budget, glyph_cache_candidate, CachedGlyph, GLYPH_CACHE_ENTRY_METADATA_BYTES,
+};

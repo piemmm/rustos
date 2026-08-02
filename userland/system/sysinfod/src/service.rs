@@ -176,6 +176,8 @@ fn dispatch(
             &source.memory_pressure_band(caller)?.to_le_bytes(),
             response,
         )
+    } else if query == SysinfoQueryId::MEMORY_TOTAL {
+        write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::RECLAIM_STATS {
         reclaim_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
@@ -725,13 +727,14 @@ mod tests {
         CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
         CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
         IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
-        MemoryPressureStats, MountAvailability, MountListRequest, MountRecord, ProcessListRequest,
-        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord,
-        VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN,
-        RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
-        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
+        ProcessListRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
+        ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+        VolumeIoHealthRecord, VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
+        MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
+        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
@@ -1039,6 +1042,13 @@ mod tests {
             Ok(MemoryPressureBand {
                 band: fixture_pressure().band,
                 reserved: [0; 7],
+            })
+        }
+        fn memory_total(&self, caller: &Caller) -> Result<MemoryTotal, Errno> {
+            // Projected from the gated view's own figure, as a live source
+            // must: one machine, one size, whatever the caller holds.
+            Ok(MemoryTotal {
+                total_bytes: self.kernel_memory_stats(caller)?.total_bytes,
             })
         }
         fn reclaim_records(
@@ -2343,6 +2353,38 @@ mod tests {
 
         // Unaudited: an ungated query a process may issue on every band
         // change must not be able to drive the security log.
+        assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn the_memory_total_is_ungated_unaudited_and_matches_the_gated_view() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let req = request_bytes(SysinfoQueryId::MEMORY_TOTAL, &[]);
+        let mut resp = [0u8; 256];
+
+        // No capability at all: installed RAM is a static hardware fact,
+        // strictly coarser than the already-ungated load average, and a
+        // process needs it to size its caches against the real machine.
+        let sink = RecordingSink::new();
+        let none = Caps(&[]);
+        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
+        assert_eq!(n, MemoryTotal::WIRE_LEN);
+        let decoded = MemoryTotal::from_bytes(&resp[..n]).expect("round trip");
+
+        // The same size the gated kernel-memory view reports: one machine,
+        // two views, never two notions of how much RAM is installed.
+        let gated = source
+            .kernel_memory_stats(&caller(&Caps(&[CapabilityId::SYSINFO_KERNEL])))
+            .expect("gated view");
+        assert_eq!(decoded.total_bytes, gated.total_bytes);
+
+        // Usable as a cache budget: a real machine reports a non-zero size,
+        // and zero is reserved for "unknown" (which admits nothing).
+        assert_ne!(decoded.total_bytes, 0);
+
+        // Unaudited: an ungated query must not be able to drive the
+        // security log.
         assert!(sink.events.borrow().as_slice().is_empty());
     }
 

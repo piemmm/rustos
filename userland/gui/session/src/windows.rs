@@ -245,6 +245,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // offered.
         self.shell
             .decorate_window(self.compositor, wm, title, resizable);
+        // A served window's pixels come from the app, which the session can
+        // ask to present them again, so the compositor may give them back
+        // under memory pressure. Windows the session paints itself (the
+        // taskbar, the picker, a confirmation prompt) never declare this
+        // and so are never released: there would be no client to ask.
+        self.compositor.set_app_presented(wm, true);
         self.windows.opened += 1;
         self.windows.records.insert(window_id, WindowRecord { wm });
         self.windows.by_wm.insert(wm, window_id);
@@ -487,8 +493,10 @@ impl DamageBounds {
 mod tests {
     use super::*;
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
+    use tairix_wm::{InputEvent, PointerButton};
 
     fn mode(width: u32, height: u32, format: DisplayFormat) -> DisplayMode {
         DisplayMode {
@@ -501,9 +509,13 @@ mod tests {
 
     fn desktop() -> (DesktopShell, Compositor) {
         let shell = crate::tests::shell_for(TaskbarConfig::bottom_bar(640, 480));
-        let compositor =
-            Compositor::new(mode(640, 480, DisplayFormat::Rgba8888), Color::rgb(0, 0, 0))
-                .expect("compositor builds");
+        let compositor = Compositor::new(
+            mode(640, 480, DisplayFormat::Rgba8888),
+            Color::rgb(0, 0, 0),
+            crate::tests::test_chrome_cache(),
+            crate::tests::test_pressure(),
+        )
+        .expect("compositor builds");
         (shell, compositor)
     }
 
@@ -632,7 +644,11 @@ mod tests {
             // The window's one surface lives in the compositor; the
             // present converted the damaged pixel straight into it.
             let wm = windows.records.get(&1).expect("live").wm;
-            let content = compositor.window(wm).expect("composited").surface();
+            let content = compositor
+                .window(wm)
+                .expect("composited")
+                .content()
+                .expect("content is retained");
             assert_eq!(content.get(2, 1), Some(want.premultiply()));
             // Undamaged pixels keep the open fill.
             assert_eq!(content.get(0, 0), Some(OPEN_FILL.premultiply()));
@@ -827,7 +843,11 @@ mod tests {
             );
         }
         let wm = windows.records.get(&1).expect("live").wm;
-        let content = compositor.window(wm).expect("composited").surface();
+        let content = compositor
+            .window(wm)
+            .expect("composited")
+            .content()
+            .expect("content is retained");
         assert_eq!(
             content.get(0, 0),
             Some(OPEN_FILL.premultiply()),
@@ -1351,8 +1371,8 @@ mod tests {
         // A resize re-maps the compositor's content surface to the new size.
         host.window_resized(7, &mode(200, 150, DisplayFormat::Rgba8888))
             .expect("resizes");
-        let surface = host.compositor.window(wm).expect("live").surface();
-        assert_eq!((surface.width(), surface.height()), (200, 150));
+        let size = host.compositor.window(wm).expect("live").client_size();
+        assert_eq!(size, (200, 150));
         // An unknown window is refused.
         assert_eq!(
             host.window_resized(99, &mode(10, 10, DisplayFormat::Rgba8888)),
@@ -1380,5 +1400,93 @@ mod tests {
         host.window_closed(1);
         assert_eq!(picker.begun, alloc::vec![1]);
         assert_eq!(picker.aborted, alloc::vec![1]);
+    }
+
+    #[test]
+    fn trimming_caches_releases_served_window_content_and_spares_the_focused_one() {
+        // The desktop's whole answer to a deepened band, driven end to end:
+        // the shell runs the content ladder with the window its own router
+        // focuses, the bar it paints itself is untouched, and every window
+        // whose pixels went is queued for the redraw request the embedder
+        // delivers.
+        static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+        PRESSURE.report(PressureBand::Normal);
+        let (mut shell, mut compositor) = crate::tests::desktop_over(
+            TaskbarConfig::bottom_bar(640, 480),
+            mode(640, 480, DisplayFormat::Rgba8888),
+            &PRESSURE,
+        );
+        shell.present(&mut compositor);
+        let bar = shell.presenter().bar_window().expect("the bar is painted");
+
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let (focused, background, hidden) = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            (
+                open_one_sized(&mut host, 1, false),
+                open_one_sized(&mut host, 2, false),
+                open_one_sized(&mut host, 3, false),
+            )
+        };
+        assert!(compositor.set_visible(hidden, false));
+        // The last window opened took focus; move focus to the one under
+        // test the way a user does — a pointer press in its client area.
+        // The cascade puts the first window's client at (48, 48) and the
+        // second at (80, 80), so this point is over the first alone.
+        shell.handle(
+            InputEvent::PointerMoved {
+                to: Point::new(55, 55),
+            },
+            &mut compositor,
+            0,
+        );
+        shell.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        assert_eq!(shell.router().focused(), Some(focused));
+        let _ = compositor.pending_redraws();
+
+        let held = |c: &Compositor, id| c.window(id).expect("window").has_content();
+
+        // Normal: the desktop gives nothing back.
+        assert_eq!(shell.trim_caches(&mut compositor), 0);
+        assert!(held(&compositor, focused));
+        assert!(held(&compositor, background));
+        assert!(held(&compositor, hidden));
+
+        // Mild: only what nobody is looking at.
+        PRESSURE.report(PressureBand::Mild);
+        assert!(shell.trim_caches(&mut compositor) > 0);
+        assert!(held(&compositor, focused));
+        assert!(held(&compositor, background));
+        assert!(!held(&compositor, hidden));
+        assert_eq!(compositor.pending_redraws(), alloc::vec![hidden]);
+
+        // Critical: the background window too, never the focused one, and
+        // never the bar the session paints itself.
+        PRESSURE.report(PressureBand::Critical);
+        assert!(shell.trim_caches(&mut compositor) > 0);
+        assert!(
+            held(&compositor, focused),
+            "there would be nothing to show in the focused window's place"
+        );
+        assert!(!held(&compositor, background));
+        assert!(
+            held(&compositor, bar),
+            "no client would answer a redraw for the session's own bar"
+        );
+        assert_eq!(compositor.pending_redraws(), alloc::vec![background]);
+        PRESSURE.report(PressureBand::Normal);
     }
 }

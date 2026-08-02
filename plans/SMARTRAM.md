@@ -37,10 +37,11 @@ reclaimable-memory model hoisted whole into the shared `lib/reclaim`
 crate so kernel and userland share one classification, one budget
 derivation, one band vocabulary and one `ReclaimCache`; the
 edge-triggered `WaitSourceKind::MemoryPressure` wait source and the
-ungated band-only `MEMORY_PRESSURE_BAND` query that drains it; and the
-window manager's cursor and the taskbar's notification-glyph caches
-rebuilt on it, replacing the deleted unbounded `lib/raster::RasterCache`)
-are implemented; SMART6-SMART8 (reliability-assist,
+ungated band-only `MEMORY_PRESSURE_BAND` query that drains it; the
+desktop's cursor, notification-glyph, pinned-artwork and window-furniture
+caches and the glyph-raster caches on both sides of the font service
+rebuilt on it; and window content released by a pressure-driven policy
+over the redraw handshake) are implemented; SMART6-SMART8 (reliability-assist,
 background-validation, and predictive caches) are **shelved - not
 added**; the remaining classes are staged
 below  
@@ -409,9 +410,16 @@ Desktop cache stores UI data that is expensive to reconstruct but safe to drop:
 - font glyph atlases and shaped text runs;
 - icon and cursor rasters;
 - rendered theme primitives;
-- window backing stores and recently closed window snapshots, where session
-  policy permits them;
+- rendered window furniture (title band, bottom band, side borders);
 - taskbar and compositor asset caches.
+
+A window's **content** pixels are governed by this section's budgets, gauge,
+and band ordering but are deliberately *not* a keyed cache: they are the
+app's own frame rather than an asset the desktop can rebuild, so recency
+cannot decide what goes. They are released by a pressure-driven policy over
+what the user can currently see and asked back through the window protocol's
+redraw handshake (SMART5). Recently-closed-window snapshots are not retained
+at all.
 
 Rules:
 
@@ -880,7 +888,9 @@ caller's read (a VFS refusal blocks the cached launch).
 
 **Status: done.** The desktop's rasterised assets are now reclaimable
 memory under the same model, the same budgets, and the same band
-ordering as the kernel's own caches.
+ordering as the kernel's own caches, and a window's content pixels are
+releasable over that same gauge and ordering through the window
+protocol's redraw handshake.
 
 The stage's central problem was that a userland process cannot see
 physical memory, so a desktop cache could not obey the reclaim policy
@@ -926,10 +936,11 @@ weaker policy:
   would not protect anything — it would only make cooperative reclaim
   impossible. The gated, audited `MEMORY_PRESSURE` view (bytes,
   watermarks, transition history) is unchanged.
-- **The desktop caches.** All three of them — the window manager's
-  cursor raster cache, the taskbar's notification-glyph cache, and the
-  session's pinned-application artwork cache — are `ReclaimCache`es
-  built from the one `tairix_reclaim::desktop::disposable_ui_cache`
+- **The desktop caches.** Every rasterised desktop asset is a
+  `ReclaimCache`: the window manager's cursor rasters, the taskbar's
+  notification glyphs, the session's pinned-application artwork, and the
+  window manager's rendered window furniture. The first three are built
+  from the one `tairix_reclaim::desktop::disposable_ui_cache`
   policy —
   `DisposableUi`, owned by `ReclaimOwner::DesktopSession { seat }`,
   `UserData` sensitivity (so entries are wiped on release), invalidated
@@ -941,6 +952,44 @@ weaker policy:
   cache is injected into each consumer, never defaulted, because a cache
   built without a live gauge would retain nothing while looking like it
   worked.
+
+  The furniture cache differs only in its ceiling
+  (`tairix_reclaim::desktop::window_chrome_cache`): a whole screenful of
+  pixels rather than the small fraction a cursor or a glyph is allowed,
+  because no more furniture than fills the screen can be visible at once
+  and everything above that belongs to a minimised, off-screen, or
+  stacked-under window — exactly what eviction should take first. It is
+  owned by the `Compositor` and keyed by `WindowId` within a
+  `(scale, theme-generation)` epoch, so one window's change releases one
+  entry while a DPI or theme change drops them all.
+- **The font service's glyph rasters, on both sides.** The service's own
+  rasterised coverage and the client-side memoisation of what it fetched
+  are `ReclaimCache`es too, built from the single
+  `tairix_font::glyph_cache` candidate and budget so the two sides cannot
+  drift. That budget is derived from total RAM rather than the
+  framebuffer, because a glyph's working set follows the text a session
+  draws and not the size of its screen; a machine that cannot answer the
+  RAM query gets a zero budget and every glyph is served freshly built
+  rather than falling back to an unbounded cache.
+- **Window content: a release policy, not a cache.** A window's content
+  surface is the desktop's largest single allocation and a minimised
+  full-screen window would otherwise pin it indefinitely, so it is
+  releasable — over the *same* `PressureGauge` and the *same*
+  `shrink_target` ordering as the caches above. It is deliberately not a
+  keyed cache: evicting a visible window's pixels is a visual defect
+  rather than a slowdown, so eviction cannot follow recency. The ladder
+  follows what the user can see — nothing at `Normal`, every hidden or
+  minimised window at `Mild` and deeper, additionally every visible but
+  unfocused window at `Critical`, and never the focused window, because
+  there would be nothing to show in its place. Only windows an app
+  presents are released; the session's own bar, lock screen, picker, and
+  prompts are not, because no client would answer their redraw. The
+  buffer is wiped before it is dropped, and because a present carries
+  only a damage rectangle the compositor queues a
+  `WindowEvent::RedrawRequested` the session delivers to the owning app,
+  which the `lib/window` client answers by re-presenting its last frame
+  with full-window damage. One memory model, two mechanisms suited to two
+  different kinds of memory.
 - **`lib/raster`'s unbounded `RasterCache` is deleted**, not deprecated:
   it grew without limit, scanned linearly, never shrank under pressure,
   was invisible to the reclaim ledger, and never wiped rendered user
@@ -951,10 +1000,10 @@ weaker policy:
   bookkeeping so a store full of broken artwork cannot grow it either.
 
 Deliberately **not** built, because nothing in the tree consumes them:
-compositor window backing stores and closed-window snapshots (the
-compositor does not retain either today), shaped-text-run and
-font-glyph-atlas caches beyond the atlas the font service already owns,
-and any per-app resource-map cache. Adding a cache with no consumer
+recently-closed-window snapshots — there is no task switcher, no window
+preview, and no minimise animation that would ever draw one — shaped-text-run
+caches beyond the glyph coverage the font service and its client already
+retain, and any per-app resource-map cache. Adding a cache with no consumer
 would be speculative surface; each lands with the code that needs it,
 against the same one model.
 
@@ -974,6 +1023,21 @@ Tests:
   on a change, edge consumed on report, `id != 0` refused, no capability
   required.
 - The band query is ungated, unaudited, and agrees with the gated view.
+- Window furniture stays under the one-screenful ceiling however many
+  windows are open; one window's change releases one entry while a scale
+  or theme change drops them all; and the composited frame is
+  byte-identical with the cache warm, emptied, and unable to retain
+  anything, so caching is never required for correctness.
+- The content ladder at every band, including the focused window never
+  released and a session-painted window never released; the pixel bytes
+  actually overwritten before the buffer is dropped; a released window
+  compositing transparent while the rest of the desktop is
+  pixel-identical, and still hit-testing, focusing, and resizing; a
+  full-window present restoring pixel-identical content; exactly one
+  redraw request queued per release and delivered to the owning app; the
+  client library answering one by re-presenting its last frame, and a
+  client that never presented ignoring it; and an app that ignores the
+  request leaving its window blank with the desktop composing on.
 
 Docs:
 
@@ -1113,8 +1177,8 @@ What now holds (`docs/src/architecture/memory.md` §7k):
 
 ### SMART10 - Integration, benchmarks, and full validation
 
-**Status: done** for the implemented stages (SMART1–SMART4 + SMART9;
-the shelved SMART5–SMART8 rows of the section 13 matrix apply only if
+**Status: done** for the implemented stages (SMART1–SMART5 + SMART9;
+the shelved SMART6–SMART8 rows of the section 13 matrix apply only if
 those stages are ever un-shelved). See
 `docs/src/architecture/memory.md` §7l for the binding description.
 

@@ -3239,9 +3239,9 @@ Shipped (headless-testable, model + renderer over injected seams):
   tracking, window ops; fails closed on bad modes.
 - Shared desktop libs (§2.2, one path each): `lib/raster`, `lib/theme`,
   `lib/geometry` (DPI/`Scale`),
-  `lib/reclaim` (the reclaimable-cache model both the window manager's
-  cursor cache and the taskbar's notification-glyph cache are built from,
-  replacing the deleted `lib/raster::RasterCache`),
+  `lib/reclaim` (the reclaimable-cache model the desktop's cursor,
+  notification-glyph, pinned-artwork and window-furniture caches are all
+  built from, shared with the kernel's own caches),
   `lib/font` (the text-rendering front end: a small compiled-in console atlas
   — the primary Inconsolata EX face's repertoire only, `cargo xtask
   font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a
@@ -6051,23 +6051,37 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   `SysinfoQueryId::MEMORY_PRESSURE_BAND` (28) drains the edge without
   taking a reading; the gated, audited `MEMORY_PRESSURE` view is
   unchanged.
-- The desktop's three rasterised-asset caches — the cursor cache, the
-  notification-glyph cache, and the session's pinned-application artwork
-  cache — are `ReclaimCache`es built from the one
-  `tairix_reclaim::desktop::disposable_ui_cache` policy: `DisposableUi`,
-  owned by the seat, `UserData` (so entries are wiped), invalidated by
-  the scale/theme generation, dropped on reclaim, with the budget derived
-  from the discovered framebuffer byte size, so a 4K output is allowed
+- The desktop's four rasterised-asset caches — the cursor cache, the
+  notification-glyph cache, the session's pinned-application artwork
+  cache, and the compositor's window-furniture cache — are
+  `ReclaimCache`es sharing one classification
+  (`tairix_reclaim::desktop`): `DisposableUi`, owned by the seat,
+  `UserData` (so entries are wiped), invalidated by the scale/theme
+  generation, dropped on reclaim, with the budget derived from the
+  discovered framebuffer byte size, so a 4K output is allowed
   proportionately more than a small panel and no ceiling is guessed. The
-  session parks on the band member, trims all three on a change, and
-  tears them down on logout or seat loss.
-  `lib/raster`'s unbounded `RasterCache` is **deleted**: it grew without
-  limit, scanned linearly, never shrank under pressure, was invisible to
-  the reclaim ledger, and never wiped rendered user data. The pin-artwork
-  cache had the same shape and was keyed by bundle-supplied asset paths,
-  so a crowded or crafted bundle store could grow a session without
-  limit; it is now bounded by the same derived budget, with cached decode
-  refusals charged their bookkeeping too.
+  first three take a fraction of that output (`disposable_ui_cache`);
+  furniture takes a whole screenful (`window_chrome_cache`), because no
+  more chrome than fills the screen can be visible at once and the
+  surplus is exactly what reclaim should take first. The session parks on
+  the band member, trims all four on a change, and tears them down on
+  logout or seat loss.
+- Rasterised glyphs are the same model on both sides of `FONT_ENDPOINT`:
+  one shared declaration (`tairix_font::glyph_cache`) gives the client
+  and `fontd` a byte-bounded `ReclaimCache` whose budget derives from the
+  machine's total RAM through the ungated `SysinfoQueryId::MEMORY_TOTAL`
+  (29), so a caller cannot grow the service by walking the permitted
+  glyph-size range and an unknown total caches nothing rather than
+  guessing a ceiling. `fontd` parks on the band member alongside its
+  endpoint.
+- A window's *content* is a pressure-driven release policy rather than a
+  keyed cache, because evicting a visible window's pixels is a visual
+  defect and not merely a slowdown. It reads the same gauge and the same
+  shrink ordering: hidden and minimised windows are released at mild
+  pressure, visible unfocused ones only at critical, the focused window
+  and session-painted surfaces never. A release wipes the pixels and
+  raises `WindowEvent::RedrawRequested`, which `lib/window` answers for
+  the app by re-presenting its last frame.
 
 **Remaining (staged, `plans/SMARTRAM.md` §12):** the non-ARXFS
 transform families (verified bundle/manifest state gated on their

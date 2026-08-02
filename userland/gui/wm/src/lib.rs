@@ -50,6 +50,7 @@
 
 extern crate alloc;
 
+pub mod chrome;
 pub mod color;
 pub mod compositor;
 pub mod corner;
@@ -65,6 +66,7 @@ pub mod window;
 #[cfg(test)]
 mod tests;
 
+pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
 pub use compositor::Compositor;
 pub use corner::Corners;

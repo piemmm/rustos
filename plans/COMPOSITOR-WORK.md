@@ -131,17 +131,44 @@ change yet. That is Stage B onward.
 The furniture chrome is rendered around every decorated window. What it now
 guarantees:
 
-- Each decorated `Window` keeps a pre-rendered, outer-sized decoration
-  `Surface` (`window.rs::render_decoration`), painted through
+- A decorated window's furniture is a `WindowChrome` (`wm/src/chrome.rs`): the
+  four strips the frame actually draws into — the top (title) band, the bottom
+  band, and the two side borders — rendered by `Window::render_chrome` through
   `WindowFrame::render`/`TitleBar::render` (rim, body, the sanitised title via
   `lib/font`, the four `WindowControl` buttons) plus a corner `ResizeGrabber`,
   using the one `lib/raster` fill and the shared rounded-corner path (no second
   recipe). The rim's rounded corners stay transparent so the desktop shows
-  through.
-- `Window::sample_local` samples that decoration in the reserved band and the
-  inset client content inside it, so both the software composite and the
-  hardware-accelerated `encode_layers` path draw the furniture identically; the
-  client never overlaps the band.
+  through. The strips are cut from one transient outer-sized render because
+  the drawing primitives refuse a negative-origin destination; only the strips
+  are kept, so retained bytes scale with the band and never with the window
+  area. A zero-extent edge holds no surface at all.
+- **The chrome is not stored in the window.** The `Compositor` owns one
+  `ReclaimCache<WindowId, WindowChrome, ChromeEpoch>` (`chrome_cache`, built on
+  `tairix_reclaim::window_chrome_cache`, ceilinged at one screenful), so the
+  desktop's total furniture is bounded, charged to the seat, wiped on release
+  (it carries window titles) and given back the moment the kernel reports
+  memory pressure. The epoch is `(scale percent, theme generation)` — a
+  generation counter, not `ThemeId`, because a contrast/motion variant keeps
+  its id. A single window's change (title, focus, resize, size-state, frame
+  attach/detach, removal) is a per-key `invalidate` through the one
+  `Compositor::mutate_frame` helper every such mutation runs through; only a
+  scale or theme change drops the whole cache.
+- The cache is an accelerator, never a correctness requirement: each pass
+  (`composite`, `present_accelerated`) first runs `ensure_chrome` under the
+  exclusive borrow, then reads with `peek` during the immutable row/column
+  walk, and anything the cache refuses or evicts mid-pass is built for that
+  pass alone. The composited frame is byte-identical warm, emptied, and with a
+  zero budget — asserted.
+- `Window::row`/`sample_local` take that chrome and sample it in the reserved
+  band with the inset client content inside it, so both the software composite
+  and the hardware-accelerated `encode_layers` path draw the furniture
+  identically; the client never overlaps the band. A screen row needs at most
+  two furniture spans (a title/bottom row takes one strip; a row crossing the
+  client takes the left and right borders), which is what `WindowRow` carries.
+- The session builds the cache alongside the cursor and icon caches from the
+  same seat, output byte size, `tairix_rt::pressure::gauge()` and log sink, and
+  trims (`DesktopShell::trim_caches`) and tears it down (`teardown`) on the
+  same paths.
 - The title the WM receives on the channel (`WindowTitle`) is rendered in the
   title bar via `Compositor::set_window_title`, not merely used as the taskbar
   label.

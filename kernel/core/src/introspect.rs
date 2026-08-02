@@ -183,6 +183,20 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno>;
 
+    /// The wire image of the current
+    /// [`tairix_abi::sysinfo::MemoryTotal`]: the machine's total usable
+    /// physical RAM alone, in bytes.
+    ///
+    /// Carries the same figure [`Self::kernel_memory`]'s
+    /// `KernelMemoryStats::total_bytes` reports, read from the one
+    /// frame-allocator source rather than measured a second way, so the
+    /// ungated and gated views can never disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn memory_total_bytes(&self) -> Result<Vec<u8>, Errno>;
+
     /// Encode up to `max_records`
     /// [`tairix_abi::sysinfo::ReclaimClassRecord`]s beginning at class
     /// index `offset`, in class-id order, packed little-endian
@@ -287,6 +301,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn memory_total_bytes(&self) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

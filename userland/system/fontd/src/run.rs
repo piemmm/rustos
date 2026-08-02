@@ -1,7 +1,7 @@
 //! The `Run` entry-point binary of the font service, installed at
-//! `/System/Services/fontd.app/Run` — the long-running user-space service PID 1
-//! `init` launches before the desktop to serve glyph coverage
-//! (`plans/FONT-SERVICE.md` FS-3, FS-6; `AGENTS.md` §16.2, §16.4, §19.5).
+//! `/System/Services/fontd.app/Run` — the long-running user-space service
+//! `login` launches on a display-capable machine to serve glyph coverage
+//! (`plans/FONT-SERVICE.md` FS-3, FS-6).
 //!
 //! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
 //! userland runtime `tairix-rt` — never the C ABI. `tairix-rt` provides
@@ -22,9 +22,9 @@
 //! `CAP_IPC_BIND_PRIVILEGED`: a squatter could otherwise feed forged coverage
 //! to the compositor and every app), and blocks in a serve loop — receive a
 //! request, rasterise/serve the reply, reply. The endpoint is
-//! unrestricted-sender: drawing text is not a security boundary (§5.2), so any
-//! process may ask, and the reply path validates every field and fails closed
-//! (§5.4).
+//! unrestricted-sender: drawing text is not a security boundary, so any
+//! process may ask, and the reply path validates every field and fails
+//! closed.
 //!
 //! If a face cannot be loaded or parsed, or the endpoint cannot be bound, the
 //! service records `SERVICE_UNAVAILABLE` and exits fail-closed; PID 1
@@ -49,15 +49,47 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::font_ipc::{FontRequest, FONT_ENDPOINT, FONT_MAX_GLYPH_REPLY};
+    use tairix_abi::{WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
     use tairix_fontd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
-    use tairix_fontd::{FontService, FACE_REPERTOIRES};
+    use tairix_fontd::{glyph_cache, FontService, FACE_REPERTOIRES};
     use tairix_fontface::Repertoire;
     use tairix_log::{Event, EventId, Level};
+    use tairix_procinfo::IpcTransport;
+    use tairix_reclaim::PressureBand;
     use tairix_rt::LogSink;
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
+
+    /// Wait-set token for "a glyph request is waiting on the endpoint".
+    const REQUEST_TOKEN: u64 = 0;
+
+    /// Wait-set token for "the machine's memory-pressure band moved".
+    ///
+    /// The service parks on this alongside the endpoint rather than polling:
+    /// the kernel wakes it only when the band actually changes, and it then
+    /// gives back whatever the new band says its rasterised glyphs may no
+    /// longer occupy.
+    const PRESSURE_TOKEN: u64 = 1;
+
+    /// The audit sink every record — startup, and the reclaim model's own
+    /// classification/defect events — is written through.
+    static LOG_SINK: LogSink = LogSink;
+
+    /// Read the machine's current memory-pressure band and publish it to the
+    /// process gauge the glyph cache consults, returning whether the band
+    /// actually moved.
+    ///
+    /// A refused or failed read publishes nothing: the gauge keeps the band it
+    /// already had rather than assuming the machine is comfortable, which
+    /// costs cache hits and never correctness.
+    fn refresh_pressure_band() -> bool {
+        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
+            return false;
+        };
+        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
+    }
 
     /// The four committed faces the service loads, in the family's resolution
     /// order — the same order and scoping [`FACE_REPERTOIRES`] declares.
@@ -94,7 +126,7 @@ mod program {
     /// desktop.
     fn record(id: EventId, level: Level, message: &str) {
         let _ = tairix_log::log(
-            &LogSink,
+            &LOG_SINK,
             &Event {
                 level,
                 id,
@@ -128,7 +160,13 @@ mod program {
             .map(Vec::as_slice)
             .zip(FACE_REPERTOIRES)
             .collect();
-        let mut service = match FontService::new(&sources) {
+        // The cache is sized from the machine's own RAM, never a hand-picked
+        // ceiling: a reading the System Information service cannot supply is
+        // zero, which admits nothing and leaves every glyph rasterised on
+        // demand — slower, never wrong.
+        let total_ram = tairix_procinfo::memory_total_bytes(&IpcTransport).unwrap_or(0);
+        let cache = glyph_cache(total_ram, tairix_rt::pressure::gauge(), &LOG_SINK);
+        let mut service = match FontService::new(&sources, cache) {
             Ok(service) => service,
             Err(_) => {
                 record(
@@ -160,11 +198,76 @@ mod program {
             );
             return 1;
         }
+        // One wait set covers both things this service must react to: an
+        // arriving request and a memory-pressure change. Serving from a wait
+        // set rather than a blocking receive is what lets the cache shrink
+        // while the service is idle, without ever polling for either.
+        let set = tairix_rt::waitset_create();
+        let Ok(set) = u64::try_from(set) else {
+            record(
+                SERVICE_UNAVAILABLE,
+                Level::Warn,
+                "fontd: cannot create the serve wait-set",
+            );
+            return 1;
+        };
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            FONT_ENDPOINT,
+            REQUEST_TOKEN,
+        ) != 0
+        {
+            record(
+                SERVICE_UNAVAILABLE,
+                Level::Warn,
+                "fontd: cannot watch FONT_ENDPOINT",
+            );
+            return 1;
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::MemoryPressure,
+            0,
+            PRESSURE_TOKEN,
+        ) != 0
+        {
+            record(
+                SERVICE_UNAVAILABLE,
+                Level::Warn,
+                "fontd: cannot watch the memory-pressure band",
+            );
+            return 1;
+        }
+        // Start from the band in force now: the member reports only *changes*,
+        // so without this the cache would run on the gauge's fail-closed
+        // unknown state — retaining nothing — until the machine happened to
+        // move band.
+        refresh_pressure_band();
         record(SERVICE_READY, Level::Info, "fontd: serving FONT_ENDPOINT");
 
         let mut request = [0u8; FontRequest::WIRE_LEN];
         let mut reply = alloc::vec![0u8; FONT_MAX_GLYPH_REPLY];
+        let mut token = 0u64;
         loop {
+            if tairix_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
+                // A dead wait-set would degrade the loop into a busy poll;
+                // exit fail-loud instead and let PID 1 relaunch the service.
+                record(
+                    SERVICE_UNAVAILABLE,
+                    Level::Warn,
+                    "fontd: the serve wait-set failed",
+                );
+                return 1;
+            }
+            if token == PRESSURE_TOKEN {
+                if refresh_pressure_band() {
+                    service.trim_cache();
+                }
+                continue;
+            }
             let mut ticket: u64 = 0;
             let request_len = match tairix_rt::call_recv(FONT_ENDPOINT, &mut request, &mut ticket) {
                 Ok(len) => len,

@@ -37,6 +37,19 @@ server and every app's client can never drift apart.
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
+- **The redraw handshake is answered here, not in every app.** The
+  session may release a window's retained content to reclaim memory and
+  then send `WindowEvent::RedrawRequested`. `WindowClient` remembers each
+  window's last presented frame index and current extent, so
+  `WindowEvents::wait` re-presents that frame with full-window damage
+  before handing the event on — one definition of the answer instead of
+  one per app. The event is still delivered, so an app that would rather
+  render genuinely fresh pixels can; a window that has never presented
+  has nothing to re-send and the event is a no-op; a request naming a
+  window this client does not hold is refused like any other foreign
+  window. An app rendering in place (single-buffered) may re-present a
+  partially drawn frame, which is the same tearing it already accepts
+  from rendering in place at all.
 
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an

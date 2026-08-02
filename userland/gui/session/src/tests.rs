@@ -30,8 +30,9 @@ use tairix_taskbar::{
 };
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
-    Color, Compositor, Corners, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton,
-    Rect, Scale, Surface, WindowActivationState, WindowId,
+    chrome_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse, Key,
+    NamedKey, Point, PointerButton, Rect, Scale, Surface, WindowActivationState, WindowChrome,
+    WindowId,
 };
 
 use crate::{
@@ -151,6 +152,21 @@ fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
     icon_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
+/// The window-furniture cache every compositor under test is built with,
+/// at normal pressure and through the shipping desktop policy — the
+/// compositor takes it as an argument exactly as the session hands it one.
+pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
+/// The pressure gauge every compositor under test is built over — the same
+/// one its caches read, so the desktop under test has a single notion of
+/// how tight memory is, exactly as the shipping session does.
+pub(crate) fn test_pressure() -> &'static ReportedPressure {
+    &NORMAL_PRESSURE
+}
+
 /// A shell for `config`, with both rasterised-asset caches built through
 /// the shipping desktop policy at normal pressure.
 pub(crate) fn shell_for(config: TaskbarConfig) -> DesktopShell {
@@ -162,6 +178,25 @@ pub(crate) fn shell_for(config: TaskbarConfig) -> DesktopShell {
         &NORMAL_PRESSURE,
         &TEST_SINK,
     )
+}
+
+/// A shell and a compositor for `config`, both governed by `pressure`
+/// rather than the shared gauge — what a test that *moves* the band needs,
+/// since the shared one must stay at normal for the tests beside it.
+pub(crate) fn desktop_over(
+    config: TaskbarConfig,
+    display: DisplayMode,
+    pressure: &'static ReportedPressure,
+) -> (DesktopShell, Compositor) {
+    let shell = DesktopShell::new(config, TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK);
+    let compositor = Compositor::new(
+        display,
+        Color::rgb(0, 0, 0),
+        chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
+        pressure,
+    )
+    .expect("the compositor allocates");
+    (shell, compositor)
 }
 
 #[test]
@@ -338,6 +373,8 @@ fn compositor() -> Compositor {
             b: 0,
             a: 255,
         },
+        test_chrome_cache(),
+        test_pressure(),
     )
     .expect("the compositor allocates")
 }
@@ -364,8 +401,7 @@ fn present_adds_a_bar_window_placed_and_rounded() {
     let window = comp.window(id).expect("the bar window exists");
     assert_eq!(window.origin(), layout.bar.origin);
     assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
-    assert_eq!(window.surface().width(), layout.bar.width);
-    assert_eq!(window.surface().height(), layout.bar.height);
+    assert_eq!(window.client_size(), (layout.bar.width, layout.bar.height));
 }
 
 #[test]
@@ -401,8 +437,8 @@ fn window_rect(comp: &Compositor, id: WindowId) -> Rect {
     Rect::new(
         window.origin().x,
         window.origin().y,
-        window.surface().width(),
-        window.surface().height(),
+        window.client_size().0,
+        window.client_size().1,
     )
 }
 
@@ -1301,6 +1337,8 @@ fn sync_background_relays_a_programmatic_theme_switch() {
     let mut comp = Compositor::new(
         mode,
         shell.session().active_theme().palette().desktop.into(),
+        test_chrome_cache(),
+        test_pressure(),
     )
     .expect("the compositor allocates");
 
@@ -1678,7 +1716,7 @@ fn set_scale_rescales_the_bar_transparently_and_is_idempotent() {
         .presenter()
         .bar_window()
         .expect("the bar is presented");
-    let unscaled = comp.window(bar).expect("bar window").surface().height();
+    let unscaled = comp.window(bar).expect("bar window").client_size().1;
 
     // Switching the desktop density drives the compositor (the single source
     // of truth) and re-lays the bar in place, transparent to the taskbar.
@@ -1691,8 +1729,8 @@ fn set_scale_rescales_the_bar_transparently_and_is_idempotent() {
     let scaled = comp
         .window(bar)
         .expect("the bar window is reused")
-        .surface()
-        .height();
+        .client_size()
+        .1;
     assert_eq!(scaled, unscaled * 2, "the bar re-laid at the new density");
 
     // An app reads its window's density here; it never sets it.
@@ -2077,7 +2115,13 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         stride_bytes: WIDTH * 4,
         format: DisplayFormat::Rgba8888,
     };
-    let mut comp = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor");
+    let mut comp = Compositor::new(
+        mode,
+        Color::rgb(0, 0, 0),
+        test_chrome_cache(),
+        test_pressure(),
+    )
+    .expect("compositor");
 
     let centre = |rect: tairix_wm::Rect| -> Point {
         assert!(!rect.is_empty());
@@ -2255,7 +2299,13 @@ fn headless_desktop() -> (DesktopShell, Compositor) {
         stride_bytes: 640 * 4,
         format: DisplayFormat::Rgba8888,
     };
-    let compositor = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor builds");
+    let compositor = Compositor::new(
+        mode,
+        Color::rgb(0, 0, 0),
+        test_chrome_cache(),
+        test_pressure(),
+    )
+    .expect("compositor builds");
     (shell, compositor)
 }
 
@@ -3153,7 +3203,13 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
         stride_bytes: W * 4,
         format: DisplayFormat::Rgba8888,
     };
-    let mut comp = Compositor::new(mode, Color::rgb(0, 0, 0)).expect("compositor");
+    let mut comp = Compositor::new(
+        mode,
+        Color::rgb(0, 0, 0),
+        test_chrome_cache(),
+        test_pressure(),
+    )
+    .expect("compositor");
 
     // Producer 42 raises a notification: it lands keyed to producer 42.
     shell.apply_notify(
@@ -4347,12 +4403,23 @@ fn the_prompt_repaints_on_a_theme_switch() {
     let mut confirm = ConfirmPrompt::new();
     assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
-    let before: Vec<_> = comp.window(wm).expect("live").surface().pixels().to_vec();
+    let before: Vec<_> = comp
+        .window(wm)
+        .expect("live")
+        .content()
+        .expect("content is retained")
+        .pixels()
+        .to_vec();
 
     shell.session_mut().set_appearance(Appearance::Light);
     confirm.repaint(&mut shell, &mut comp);
 
-    let after = comp.window(wm).expect("still live").surface().pixels();
+    let after = comp
+        .window(wm)
+        .expect("still live")
+        .content()
+        .expect("content is retained")
+        .pixels();
     assert_ne!(
         before.as_slice(),
         after,
@@ -4508,12 +4575,16 @@ fn an_empty_account_name_heads_the_prompt_with_the_unnamed_placeholder() {
     let empty_id = locked_window(&comp_empty);
     let placeholder_id = locked_window(&comp_placeholder);
     let named_id = locked_window(&comp_named);
-    let empty_surface = comp_empty.window(empty_id).expect("live").surface();
-    let placeholder_surface = comp_placeholder
-        .window(placeholder_id)
-        .expect("live")
-        .surface();
-    let named_surface = comp_named.window(named_id).expect("live").surface();
+    let content = |comp: &Compositor, id: WindowId| {
+        comp.window(id)
+            .expect("live")
+            .content()
+            .expect("content is retained")
+            .clone()
+    };
+    let empty_surface = content(&comp_empty, empty_id);
+    let placeholder_surface = content(&comp_placeholder, placeholder_id);
+    let named_surface = content(&comp_named, named_id);
 
     assert_eq!(
         empty_surface, placeholder_surface,

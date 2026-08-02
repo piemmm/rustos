@@ -457,7 +457,7 @@ mod program {
             server,
         });
         loop {
-            let event = match events.wait() {
+            let event = match events.wait(&mut client) {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).
@@ -568,9 +568,17 @@ mod program {
                     let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                     return 0;
                 }
-                // Focus changes, key releases, and pointer events repaint
-                // nothing; the viewer is picker- and keyboard-driven.
-                _ => Ok(()),
+                // Focus changes, key releases, minimize, and pointer events
+                // repaint nothing; the viewer is picker- and keyboard-driven.
+                // A redraw request is already answered by the client library
+                // re-presenting the last frame, which is still what the
+                // viewer would draw. Listed rather than caught by a wildcard
+                // so a new event forces a decision here.
+                WindowEvent::Key { .. }
+                | WindowEvent::Focus { .. }
+                | WindowEvent::Minimized { .. }
+                | WindowEvent::Pointer { .. }
+                | WindowEvent::RedrawRequested { .. } => Ok(()),
             };
             if outcome.is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");

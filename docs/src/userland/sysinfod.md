@@ -34,26 +34,53 @@ a privileged query without first passing its capability gate.
 
 ## Queries served (`sysinfo-v1`)
 
-| Query                 | Capability           | Audited | Response                       |
-|-----------------------|----------------------|---------|--------------------------------|
-| `SELF_PROCESS_LIST`   | none                 | no      | packed `ProcessRecord`s        |
-| `GLOBAL_PROCESS_LIST` | `CAP_SYSINFO_GLOBAL` | yes     | packed `ProcessRecord`s        |
-| `KERNEL_MEMORY_STATS` | `CAP_SYSINFO_KERNEL` | yes     | `KernelMemoryStats`            |
-| `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page |
-| `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
-| `UPTIME`              | none                 | no      | `Uptime`                       |
-| `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
-| `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
-| `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
-| `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
-| `USER_DIRECTORY`      | none                 | no      | packed `UserDirectoryRecord`s  |
-| `CPU_TIME_STATS`      | none                 | no      | packed `CpuTimeRecord`s        |
-| `SEAT_LIST`           | `CAP_SYSINFO_HW`     | yes     | packed `SeatRecord`s           |
-| `MEMORY_PRESSURE`     | `CAP_SYSINFO_KERNEL` | yes     | `MemoryPressureStats`          |
-| `RECLAIM_STATS`       | `CAP_SYSINFO_KERNEL` | yes     | packed `ReclaimClassRecord`s   |
-| `RAMZIP_STATS`        | `CAP_SYSINFO_KERNEL` | yes     | `RamzipStats`                  |
-| `CPU_LOAD`            | `CAP_SYSINFO_KERNEL` | yes     | packed `CpuLoadRecord`s        |
-| `IRQ_LIST`            | `CAP_SYSINFO_HW`     | yes     | packed `IrqRecord`s            |
+| Query                    | Capability           | Audited | Response                            |
+|--------------------------|----------------------|---------|-------------------------------------|
+| `SELF_PROCESS_LIST`      | none                 | no      | packed `ProcessRecord`s             |
+| `GLOBAL_PROCESS_LIST`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `ProcessRecord`s             |
+| `KERNEL_MEMORY_STATS`    | `CAP_SYSINFO_KERNEL` | yes     | `KernelMemoryStats`                 |
+| `HARDWARE_TREE`          | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page      |
+| `SYSTEM_IDENTITY`        | none                 | no      | `SystemIdentity`                    |
+| `UPTIME`                 | none                 | no      | `Uptime`                            |
+| `MOUNT_LIST`             | none                 | no      | packed `MountRecord`s               |
+| `RESOURCE_LIMITS`        | none                 | no      | packed `ResourceLimitRecord`s       |
+| `PROCESS_IDENTITY`       | none                 | no      | the caller's own `Origin`           |
+| `LOAD_AVERAGE`           | none                 | no      | `LoadAverage`                       |
+| `USER_DIRECTORY`         | none                 | no      | packed `UserDirectoryRecord`s       |
+| `CPU_TIME_STATS`         | none                 | no      | packed `CpuTimeRecord`s             |
+| `SEAT_LIST`              | `CAP_SYSINFO_HW`     | yes     | packed `SeatRecord`s                |
+| `MEMORY_PRESSURE`        | `CAP_SYSINFO_KERNEL` | yes     | `MemoryPressureStats`               |
+| `RECLAIM_STATS`          | `CAP_SYSINFO_KERNEL` | yes     | packed `ReclaimClassRecord`s        |
+| `RAMZIP_STATS`           | `CAP_SYSINFO_KERNEL` | yes     | `RamzipStats`                       |
+| `CPU_LOAD`               | `CAP_SYSINFO_KERNEL` | yes     | packed `CpuLoadRecord`s             |
+| `NET_INTERFACE_FACTS`    | `CAP_SYSINFO_HW`     | yes     | packed `NetInterfaceFactsRecord`s   |
+| `NET_INTERFACE_STATE`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceStateRecord`s   |
+| `NET_INTERFACE_COUNTERS` | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceCountersRecord`s|
+| `NET_INTERFACE_RATES`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceRatesRecord`s   |
+| `NET_SOCKETS`            | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetSocketRecord`s           |
+| `NET_BOND_MEMBERS`       | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetBondMemberRecord`s       |
+| `CPU_INFO`               | none                 | no      | packed `CpuInfoRecord`s             |
+| `NET_RESOLVER_SERVERS`   | none                 | no      | packed `NetResolverServer`s         |
+| `IRQ_LIST`               | `CAP_SYSINFO_HW`     | yes     | packed `IrqRecord`s                 |
+| `CRASH_RECORD`           | `CAP_SYSINFO_KERNEL` | yes     | packed `CrashRecord`s               |
+| `VOLUME_IO_HEALTH`       | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoHealthRecord`s      |
+| `MEMORY_PRESSURE_BAND`   | none                 | no      | `MemoryPressureBand`                |
+| `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
+
+`MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
+self-regulation reads a process makes about its own resource use: the
+published pressure band, and the machine's total usable physical RAM in
+bytes. Neither carries a per-process or per-user figure, and the total is
+a static hardware fact — the number on the machine's spec sheet — so both
+disclose strictly less than the already-ungated `LOAD_AVERAGE`. Together
+they let a process size its caches against the real machine and give the
+memory back when the machine tightens, without holding
+`CAP_SYSINFO_KERNEL`. The total is the same figure `KERNEL_MEMORY_STATS`
+reports as `KernelMemoryStats::total_bytes` (the kernel derives both from
+one usable-frame census, so they cannot disagree), and a zero answer
+means *unknown*, which admits nothing. The detailed `MEMORY_PRESSURE`
+view — free bytes, watermarks, the reserve, transition history — stays
+gated and audited.
 
 `IRQ_LIST` is gated on `CAP_SYSINFO_HW`, not `CAP_SYSINFO_KERNEL`, and
 audited: like `HARDWARE_TREE` and `SEAT_LIST` it names which driver task

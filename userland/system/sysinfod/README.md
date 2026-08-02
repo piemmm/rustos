@@ -30,21 +30,48 @@ and is fully testable against an in-memory fixture.
 
 ## Queries served (`sysinfo-v1`)
 
-| Query                 | Capability           | Audited | Response                       |
-|-----------------------|----------------------|---------|--------------------------------|
-| `SELF_PROCESS_LIST`   | none                 | no      | packed `ProcessRecord`s        |
-| `GLOBAL_PROCESS_LIST` | `CAP_SYSINFO_GLOBAL` | yes     | packed `ProcessRecord`s        |
-| `KERNEL_MEMORY_STATS` | `CAP_SYSINFO_KERNEL` | yes     | `KernelMemoryStats`            |
-| `HARDWARE_TREE`       | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page |
-| `SYSTEM_IDENTITY`     | none                 | no      | `SystemIdentity`               |
-| `UPTIME`              | none                 | no      | `Uptime`                       |
-| `MOUNT_LIST`          | none                 | no      | packed `MountRecord`s          |
-| `RESOURCE_LIMITS`     | none                 | no      | packed `ResourceLimitRecord`s  |
-| `PROCESS_IDENTITY`    | none                 | no      | the caller's own `Origin`      |
-| `LOAD_AVERAGE`        | none                 | no      | `LoadAverage`                  |
-| `USER_DIRECTORY`      | none                 | no      | packed `UserDirectoryRecord`s  |
-| `CPU_TIME_STATS`      | none                 | no      | packed `CpuTimeRecord`s        |
-| `SEAT_LIST`           | `CAP_SYSINFO_HW`     | yes     | packed `SeatRecord`s           |
+| Query                    | Capability           | Audited | Response                            |
+|--------------------------|----------------------|---------|-------------------------------------|
+| `SELF_PROCESS_LIST`      | none                 | no      | packed `ProcessRecord`s             |
+| `GLOBAL_PROCESS_LIST`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `ProcessRecord`s             |
+| `KERNEL_MEMORY_STATS`    | `CAP_SYSINFO_KERNEL` | yes     | `KernelMemoryStats`                 |
+| `HARDWARE_TREE`          | `CAP_SYSINFO_HW`     | yes     | `HwTreeHeader` + `HwNode` page      |
+| `SYSTEM_IDENTITY`        | none                 | no      | `SystemIdentity`                    |
+| `UPTIME`                 | none                 | no      | `Uptime`                            |
+| `MOUNT_LIST`             | none                 | no      | packed `MountRecord`s               |
+| `RESOURCE_LIMITS`        | none                 | no      | packed `ResourceLimitRecord`s       |
+| `PROCESS_IDENTITY`       | none                 | no      | the caller's own `Origin`           |
+| `LOAD_AVERAGE`           | none                 | no      | `LoadAverage`                       |
+| `USER_DIRECTORY`         | none                 | no      | packed `UserDirectoryRecord`s       |
+| `CPU_TIME_STATS`         | none                 | no      | packed `CpuTimeRecord`s             |
+| `SEAT_LIST`              | `CAP_SYSINFO_HW`     | yes     | packed `SeatRecord`s                |
+| `MEMORY_PRESSURE`        | `CAP_SYSINFO_KERNEL` | yes     | `MemoryPressureStats`               |
+| `RECLAIM_STATS`          | `CAP_SYSINFO_KERNEL` | yes     | packed `ReclaimClassRecord`s        |
+| `RAMZIP_STATS`           | `CAP_SYSINFO_KERNEL` | yes     | `RamzipStats`                       |
+| `CPU_LOAD`               | `CAP_SYSINFO_KERNEL` | yes     | packed `CpuLoadRecord`s             |
+| `NET_INTERFACE_FACTS`    | `CAP_SYSINFO_HW`     | yes     | packed `NetInterfaceFactsRecord`s   |
+| `NET_INTERFACE_STATE`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceStateRecord`s   |
+| `NET_INTERFACE_COUNTERS` | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceCountersRecord`s|
+| `NET_INTERFACE_RATES`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetInterfaceRatesRecord`s   |
+| `NET_SOCKETS`            | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetSocketRecord`s           |
+| `NET_BOND_MEMBERS`       | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetBondMemberRecord`s       |
+| `CPU_INFO`               | none                 | no      | packed `CpuInfoRecord`s             |
+| `NET_RESOLVER_SERVERS`   | none                 | no      | packed `NetResolverServer`s         |
+| `IRQ_LIST`               | `CAP_SYSINFO_HW`     | yes     | packed `IrqRecord`s                 |
+| `CRASH_RECORD`           | `CAP_SYSINFO_KERNEL` | yes     | packed `CrashRecord`s               |
+| `VOLUME_IO_HEALTH`       | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoHealthRecord`s      |
+| `MEMORY_PRESSURE_BAND`   | none                 | no      | `MemoryPressureBand`                |
+| `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
+
+`MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated,
+unaudited self-regulation reads: the published pressure band, and the
+machine's total usable physical RAM in bytes. Both are deliberately the
+smallest useful answer, so a process can shrink its own caches and size
+them against the real machine without holding `CAP_SYSINFO_KERNEL`. The
+total is the same figure `KERNEL_MEMORY_STATS` reports as
+`KernelMemoryStats::total_bytes` — the kernel derives both from one
+usable-frame census — and a zero answer means *unknown*, which admits
+nothing. The detailed `MEMORY_PRESSURE` view stays gated and audited.
 
 ## Response encoding
 
@@ -90,7 +117,7 @@ so a userland service never links a kernel or driver crate (`AGENTS.md`
 
 ## Test surface
 
-`cargo test -p tairix-sysinfod` (12 unit tests):
+`cargo test -p tairix-sysinfod`:
 
 - self-scoped list needs no capability and is not audited;
 - paging by `offset`/`limit`, and an empty page past the end;

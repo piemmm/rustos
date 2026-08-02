@@ -123,6 +123,12 @@ TAIRiX improves on Linux on the axes the charter already privileges:
 6. **Secret hygiene is already ahead** and is preserved: the desktop keyboard
    channel zeroes drained records in place; the seat layer keeps that and
    extends zeroing to any per-seat input buffering it adds (`AGENTS.md` §4).
+   The same rule already binds the seat's *pixels*: the desktop's rasterised
+   caches (cursors, notification glyphs, window furniture) are charged to
+   the owning seat and wiped on release, and a window's content surface is
+   overwritten before it is dropped — whether it is released to reclaim
+   memory or torn down on logout or seat loss. A revoked or ended seat
+   leaves no readable frame behind.
 
 ## 3. Layering (one-way edges, `AGENTS.md` §17.4)
 

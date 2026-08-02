@@ -110,19 +110,36 @@ theme identity:
 - the taskbar's `TaskbarRenderer` caches each notification glyph against the
   `(tint, pixel-size, set-generation)` epoch, so the bar repaints its cheap
   regions every frame but rasterises a glyph only once per theme, scale, and
-  installed icon set.
+  installed icon set;
+- the window manager's `Compositor` caches each decorated window's rendered
+  furniture strips against the `(scale, theme-generation)` epoch, so a frame
+  is painted once and re-used until that window itself changes. It is the
+  one consumer whose ceiling is a whole screenful rather than the small
+  fraction a cursor or a glyph is allowed
+  (`tairix_reclaim::desktop::window_chrome_cache`), because no more
+  furniture than fills the screen can be visible at once and everything
+  above that belongs to a minimised or stacked-under window.
 
-Both caches are owned by the seat they belong to, bounded by a budget derived
-from the real framebuffer byte size rather than a hand-picked constant, and
-shrink or drop under memory pressure exactly like the kernel's own
-reclaimable caches (see [the reclaimable-memory
+All three caches are owned by the seat they belong to, bounded by a budget
+derived from the real framebuffer byte size rather than a hand-picked
+constant, and shrink or drop under memory pressure exactly like the kernel's
+own reclaimable caches (see [the reclaimable-memory
 model](../architecture/memory.md)). A changed epoch discards every
 cached entry; a render that fails closed (a degenerate asset or scale, §2.9)
 is not remembered, so the asset is retried rather than a failure being
-cached. Logout or seat revocation tears both caches down, wiping every
-retained entry — a cached glyph is rendered user-visible data, not disposable
-bytes. Both consumers build from the same policy rather than each growing its
-own cache (`AGENTS.md` §2.2 / §6).
+cached. Logout or seat revocation tears them all down, wiping every
+retained entry — a cached glyph or a rendered title bar is user-visible data,
+not disposable bytes. Every consumer builds from the same policy rather than
+each growing its own cache (`AGENTS.md` §2.2 / §6).
+
+A window's **content** pixels are governed by the same `PressureGauge` and the
+same `tairix_reclaim::shrink_target` ordering but are deliberately *not* a
+fourth cache: they are an app's own frame rather than a rasterised asset the
+desktop can rebuild, and evicting a visible window's pixels is a visual defect
+rather than a slowdown. They are released by a pressure-driven policy that
+looks at what the user can currently see, and asked back through the window
+protocol's redraw handshake — see [Releasable window
+content](./wm.md#releasable-window-content).
 
 ## Untrusted input
 

@@ -19,7 +19,7 @@ workspace = true
 # `_start` / `#[global_allocator]` / `panic_impl`.
 [features]
 default = ["program"]
-program = ["dep:tairix-rt"]
+program = ["dep:tairix-rt", "dep:tairix-procinfo"]
 
 # The package is both the `tairix-fontd` dispatcher library (the host-testable
 # `FontService` rasteriser + bounded glyph cache) and the `Run` entry-point
@@ -44,6 +44,20 @@ tairix-vt = { path = "../../../lib/vt", version = "=0.0.0", default-features = f
 # §19.4 structured audit log: face-load and bind decisions are recorded
 # through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The one shared cached-glyph declaration — the retained value type, its
+# classification, and the RAM-derived byte budget — that this service and the
+# render-path client on the other side of FONT_ENDPOINT both build their cache
+# from (§2.2). Only that module is wanted here: the service rasterises glyphs
+# itself and never draws through the crate's blitter, so its drawing
+# dependencies stay out of this build.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", default-features = false, features = [
+    "glyph-cache",
+] }
+# The shared reclaimable-memory model: the bounded, classified,
+# pressure-governed cache the rasterised glyphs are retained in, so a caller
+# cannot drive this service's memory through the size space it is allowed to
+# ask for.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
@@ -55,3 +69,10 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The System Information client the `Run` binary reads the machine's total RAM
+# through (to size the glyph cache from the machine rather than a hand-picked
+# constant) and the published memory-pressure band through (to shrink it as
+# the machine tightens). Program-only, like the runtime it builds on.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true, features = [
+    "program",
+] }

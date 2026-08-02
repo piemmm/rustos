@@ -333,6 +333,19 @@ impl Panel {
         }
     }
 
+    /// Forget what was last presented, so the next [`Panel::flush`] draws
+    /// unconditionally.
+    ///
+    /// The held record is an assertion about what is *on screen*. When the
+    /// desktop discards a window's retained pixels to reclaim memory that
+    /// assertion stops being true — the composition is unchanged, so the
+    /// difference test would suppress the very present the screen now
+    /// needs. Dropping the record restores the invariant instead of adding
+    /// a second present path.
+    pub fn invalidate_presented(&mut self) {
+        self.presented = None;
+    }
+
     /// Destroy the window and return to headless sampling. Closing an
     /// already-closed panel does nothing.
     ///

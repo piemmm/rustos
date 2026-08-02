@@ -6269,6 +6269,7 @@ where
                 .records(arg, records_that_fit(out_cap, SeatRecord::WIRE_LEN)?),
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
             IntrospectDomain::MemoryPressureBand => self.introspect.memory_pressure_band()?,
+            IntrospectDomain::MemoryTotalBytes => self.introspect.memory_total_bytes()?,
             IntrospectDomain::Reclaim => self.introspect.reclaim(
                 arg,
                 records_that_fit(out_cap, ReclaimClassRecord::WIRE_LEN)?,
@@ -24484,6 +24485,9 @@ mod tests {
         }
 
         fn memory_pressure_band(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn memory_total_bytes(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
         }
         fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {

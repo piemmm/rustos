@@ -105,8 +105,8 @@ never baked into the kernel.
   face (Latin→Inconsolata, JP→MPLUS, KR→D2Coding, HE→Noto, else U+FFFD),
   rasterises once at the requested cell height (4-bit engine coverage scaled
   ×17 to the protocol's 8-bit samples — byte-identical to the old
-  atlas/scaled blitter), and memoises in the bounded `(face, glyph, height)`
-  FIFO cache that moves here from `lib/font/src/cache.rs`. It also answers
+  atlas/scaled blitter), and memoises in the byte-budgeted `(face, glyph,
+  height, weight)` cache of §3.1. It also answers
   [`FontRequest::Metrics`] from `CellGeometry::derive` for any client that
   holds no geometry of its own.
 
@@ -136,10 +136,10 @@ follows (`cargo xtask c-header`).
 `lib/font` keeps its public shape for consumers (`BitmapFont::draw_text`,
 `with_pixel_height`, the `glyph`/blitter surface) but its body changes:
 
-- The `render`/`cache` path no longer embeds TTFs or runs `lib/fontface`
+- The `render` path no longer embeds TTFs or runs `lib/fontface`
   in-process. It sends a `FONT_ENDPOINT` request and blits the returned
-  coverage, caching replies locally per `(face, glyph, height, weight)` (the
-  same bounded FIFO, now client-side, so steady-state redraws issue no IPC).
+  coverage, caching replies locally per `(scalar, height, weight)` in the
+  byte-budgeted cache of §3.1, so steady-state redraws issue no IPC.
 - The `include_bytes!` of the four faces (`cache.rs`) and the full atlas
   (`atlas.rs` / `atlas_coverage.bin`) are **deleted** from the crate (§2.14).
 - Protocol request/reply encoders live in `lib/abi::font_ipc` and are shared
@@ -217,12 +217,15 @@ Load-bearing facts a future reader needs:
   precomputed full-Unicode atlas artifact.
 - **Service** (`userland/system/fontd`, `/System/Services/fontd.app`). A dual
   library + `Run`-binary crate modelled on `sysinfod`. The host-testable
-  `FontService` dispatcher owns the parsed faces and a bounded `(face, glyph,
-  cell height, weight)` FIFO cache, resolves a scalar to its covering face,
-  rasterises through the shared `lib/fontface` engine (4-bit `×17` → the
-  protocol's 8-bit samples; a `Regular` request is byte-identical to the old
-  blitter), thickens the coverage to the requested weight, and always emits a
-  reply (status-word error frame on failure, fail closed). Its manifest requests
+  `FontService` dispatcher owns the parsed faces and a byte-budgeted `(face,
+  glyph, cell height, weight)` glyph cache (§3.1), resolves a scalar to its
+  covering face, rasterises through the shared `lib/fontface` engine (4-bit
+  `×17` → the protocol's 8-bit samples; a `Regular` request is byte-identical
+  to the old blitter), thickens the coverage to the requested weight, and
+  always emits a reply (status-word error frame on failure, fail closed). The
+  `Run` binary serves from a wait set carrying both `FONT_ENDPOINT` and the
+  kernel's `WaitSourceKind::MemoryPressure` source, so it reacts to a band
+  change while idle without polling either. Its manifest requests
   `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the one-shot startup read of the
   faces through the secured VFS — `fs_open` is capability-gated regardless of
   the file's mode; `/System` is read-only so no write reach), and
@@ -243,8 +246,9 @@ Load-bearing facts a future reader needs:
   (`cache.rs`) and the full atlas are deleted. The transport is a
   process-global `FontTransport` seam: real programs link `tairix-font/rt`
   (routing through `tairix_rt::ipc_call`), host tests install a mock, and with
-  no transport a draw fails closed. GUI `Run` images no longer carry the ~10 MB
-  `R` LOAD segment.
+  no transport a draw fails closed. Its glyph cache (§3.1) is installed
+  through the parallel `set_glyph_cache` seam and defaults lazily under `rt`.
+  GUI `Run` images no longer carry the ~10 MB `R` LOAD segment.
 - **Image + discovery.** `image_apps::system_font_files` plants the four faces
   under `/System/Fonts` in the shared `app_store_files`, and `fontd.app` is
   auto-discovered under `/System/Services`. `fontd` is **not** a boot-floor
@@ -274,6 +278,40 @@ Load-bearing facts a future reader needs:
   `dev`. Every `(arch, profile)` bundle memo in `image_apps`/`image_drivers` is
   re-keyed through the shared `memo_slot`.
 
+### 3.1 The one glyph-cache declaration (both sides of the endpoint)
+
+The client's memoised replies and the service's memoised rasters are the same
+kind of memory, so they are **one declaration**, in `lib/font/src/glyph_cache.rs`
+(feature `glyph-cache`, pulled in by `render`; `fontd` depends on that feature
+alone, so it takes none of the drawing dependencies):
+
+- `CachedGlyph` — the retained value (`width`, `height`, owned coverage) and
+  its `CachedBytes` impl: payload is the coverage length, `wipe` zeroes it.
+- `glyph_cache_candidate(owner)` — class `DisposableUi`, `RebuildCost::Expensive`,
+  `Sensitivity::UserData` (so every released entry is overwritten — the set of
+  cached glyphs reveals which characters a user has had displayed),
+  `InvalidationSource::OwnerTeardown`, `ReclaimRule::Drop`.
+- `glyph_cache_budget(total_ram_bytes)` — `CacheBudget::from_ceiling(total /
+  4096)`. A glyph working set is a few hundred bitmaps, so this is deliberately
+  far below the 1/16th a kernel-heap-backed cache takes: 256 KiB on a 1 GiB
+  machine, 16 MiB on a 64 GiB one. **Zero total RAM yields a zero budget**,
+  which admits nothing and leaves everything served uncached — correct, merely
+  slower, never a hand-picked fallback.
+
+Each side builds its own `tairix_reclaim::ReclaimCache` from that declaration
+with its own key (the client's `(scalar, height, weight)`, the service's
+`(face, glyph, height, weight)`) and a `()` generation, since nothing
+invalidates a glyph while the faces are loaded. Both are owned by
+`ReclaimOwner::UserlandProcess` (`"font-client"` / `"fontd"`), the variant for
+a cache that cannot resolve a numeric task id.
+
+Why this matters on the service side: the cell height is **caller-supplied**,
+and the widest permitted bitmap is `FONT_MAX_GLYPH_WIDTH × FONT_MAX_CELL_HEIGHT`
+(512 KiB), so an entry-counted bound was a byte bound in the hundreds of
+megabytes a hostile client could walk it up to. The byte budget closes that;
+the protocol's own size validation (§2.2) is a separate, unchanged security
+bound and is what refuses an out-of-range request in the first place.
+
 ## 4. Cross-references
 
 - `AGENTS.md` §2.2, §2.3, §2.14, §5.2, §5.4, §16.2, §16.4, §16.5, §18.3,
@@ -290,3 +328,5 @@ Load-bearing facts a future reader needs:
   protocol pattern `font_ipc.rs` follows.
 - `lib/font`, `lib/fontface`, `lib/fbcon`, `tools/xtask` `font-atlas` — the
   crates this plan refactors.
+- `plans/SMARTRAM.md`, `lib/reclaim` — the reclaimable-memory model both glyph
+  caches (§3.1) are built from.

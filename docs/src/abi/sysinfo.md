@@ -53,10 +53,13 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_INTERFACE_RATES`   | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_SOCKETS`           | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `NET_BOND_MEMBERS`      | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `CPU_INFO`              | none                   | no      |
 | `NET_RESOLVER_SERVERS`  | none                   | no      |
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
+| `CRASH_RECORD`          | `CAP_SYSINFO_KERNEL`   | yes     |
 | `VOLUME_IO_HEALTH`      | `CAP_SYSINFO_KERNEL`   | yes     |
 | `MEMORY_PRESSURE_BAND`  | none                   | no      |
+| `MEMORY_TOTAL`          | none                   | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -103,6 +106,33 @@ cooperative reclaimer (`plans/SMARTRAM.md` SMART5) with no way to learn
 when to give memory back. The gated, audited `MEMORY_PRESSURE` view below
 (free/total bytes, every watermark, the transition history) is unchanged
 and is the one query privileged monitoring reads.
+
+`MEMORY_TOTAL` is ungated and unaudited for the same reason, and on even
+weaker grounds: its `MemoryTotal` response is one `u64` — the machine's
+total usable physical RAM in bytes, the figure printed on the machine's
+spec sheet. Installed RAM is a *static hardware fact*, not a runtime
+reading: it changes only when RAM is physically added or removed, and it
+carries no per-process, per-user, or byte-level state, so it discloses
+strictly less than the already-ungated `LOAD_AVERAGE` census (which
+varies continuously with what the machine is doing). It exists so a
+process can derive a cache budget from the real machine instead of a
+hand-picked constant, as the scalability rule requires (`AGENTS.md`
+§24.1); withholding it would protect nothing and would only force every
+caller back to a constant that a small board outgrows and a large server
+wastes.
+
+A zero answer means **unknown and admits nothing**: an unprovisioned
+machine (or a kernel that cannot report the census) reports zero, and a
+budget scaled from it must come out as "size nothing", never as
+"unbounded". The client helper `tairix_procinfo::memory_total_bytes`
+passes zero through honestly rather than substituting a default.
+
+The figure is the *same* one the gated `KERNEL_MEMORY_STATS` view reports
+as `KernelMemoryStats::total_bytes`: the kernel derives both from one
+usable-frame census, so the two can never disagree and there is no second
+definition of "how much RAM this machine has". Only the total is exposed
+here — the gated, audited `MEMORY_PRESSURE` view (free bytes, watermarks,
+the reserve, transition history) is untouched and stays gated.
 
 The kernel-statistics queries (`plans/STRESSTEST.md` ST1; storage health
 `plans/FIX-IO.md` IO5) share `KERNEL_MEMORY_STATS`'s security boundary —

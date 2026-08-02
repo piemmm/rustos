@@ -48,8 +48,29 @@ With the `render` feature, `BitmapFont` is a thin, cached client of `fontd`
 no face: `BitmapFont::draw_text` fetches each glyph's 8-bit coverage from the
 service over `tairix_abi::font_ipc::FONT_ENDPOINT` and blits it through the one
 shared `lib/raster` premultiplied-alpha path. Steady-state redraws issue no IPC
-— each `(scalar, cell height)` reply is memoised in a bounded FIFO cache on the
-client side.
+— each `(scalar, cell height, weight)` reply is memoised client-side in a
+`tairix_reclaim::ReclaimCache`.
+
+That cache is bounded in **bytes**, by a budget derived from the machine's
+total RAM (`tairix_procinfo::memory_total_bytes`), not by an entry count: a
+small board and a large server each get a cache proportioned to what they
+have, and a caller rendering at ever more sizes and scalars evicts its least
+recently used entries rather than growing without limit. It shrinks on the
+system memory-pressure bands like every other reclaimable cache and overwrites
+each released entry, since the set of cached glyphs reveals which characters
+the user has had displayed. The retained value type, the classification, and
+the budget derivation are declared once in `tairix_font::glyph_cache`, which
+`fontd` builds its own service-side cache from too, so the two sides of the
+endpoint cannot drift apart.
+
+The cache is installed rather than built in place — sizing it needs the RAM
+figure and governing it needs the process's pressure gauge and audit sink. A
+program that links `tairix-font/rt` gets one lazily on its first draw; a host
+test installs its own through `set_glyph_cache`, the same seam
+`set_font_transport` uses. Until one is installed, and whenever the RAM
+reading is unavailable (a zero total yields a zero budget), every glyph is
+fetched and served without being retained: correct, merely one call per
+glyph.
 
 The public API is unchanged from the pre-service crate, so consumers did not
 change: `BitmapFont::inconsolata` renders at the native console size,

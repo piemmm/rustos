@@ -26,8 +26,10 @@ use tairix_abi::DriverError;
 use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::CursorImage;
 use tairix_input::{InputEvent, Key};
+use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
 
+use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
 use crate::cursor::CursorLayer;
@@ -36,6 +38,17 @@ use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{Window, WindowId, WindowRow};
+
+/// The furniture a composite pass built for itself because the cache would
+/// not retain it, kept alive for exactly that pass.
+///
+/// A reclaimable cache is an accelerator, never a correctness requirement:
+/// a window whose entry is refused (the budget is exhausted, pressure
+/// forbids growth, the cache is poisoned) must still draw its frame. A
+/// short association list rather than a map is deliberate — it is empty on
+/// every healthy frame, so it allocates nothing at all, and when it does
+/// fill it holds only the windows covering the damage.
+type ChromeFallback = Vec<(WindowId, WindowChrome)>;
 
 /// Scan-out channel order for a supported [`DisplayFormat`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -57,6 +70,25 @@ pub struct Compositor {
     mode: DisplayMode,
     scale: Scale,
     theme: Theme,
+    /// Bumped every time [`set_theme`](Compositor::set_theme) really
+    /// changes the theme. It is the theme half of [`ChromeEpoch`], and a
+    /// counter rather than the theme's own id because two distinct themes
+    /// may share an id (a contrast or motion variant of the built-in dark
+    /// theme keeps `ThemeId::DARK`), which would leave furniture painted
+    /// from the superseded palette on screen.
+    theme_generation: u64,
+    /// Every decorated window's rendered furniture, bounded by one
+    /// screenful and released under memory pressure (see [`crate::chrome`]).
+    chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
+    /// The machine's memory-pressure band, shared with the furniture
+    /// cache so the desktop has one notion of how tight memory is.
+    pressure: &'static (dyn PressureGauge + 'static),
+    /// Windows whose content the compositor released (or found missing on
+    /// becoming visible) and whose owning app must therefore be asked to
+    /// present again. The embedder drains this with
+    /// [`pending_redraws`](Self::pending_redraws); the compositor never
+    /// speaks the window protocol itself.
+    pending_redraws: Vec<WindowId>,
     background: Color,
     order: ChannelOrder,
     windows: Vec<Window>,
@@ -93,11 +125,31 @@ impl Compositor {
     /// opaque and its premultiplied pixels equal their straight-alpha
     /// form on scan-out.
     ///
+    /// `chrome` is the bounded, pressure-governed cache this output
+    /// retains its decorated windows' rendered furniture in. It is handed
+    /// in rather than built here ([`chrome_cache`](crate::chrome_cache) is
+    /// the one place it is assembled) because only the embedder knows the
+    /// real output size, the owning seat, and the process's live pressure
+    /// gauge and audit sink; a cache built without them would serve every
+    /// lookup correctly while retaining nothing.
+    ///
+    /// `pressure` is that same live gauge, which the compositor also
+    /// consults directly to decide when to release window *content*
+    /// ([`release_content_under_pressure`](Self::release_content_under_pressure)).
+    /// Content is not cached furniture and is deliberately not keyed into
+    /// `chrome`; both mechanisms answer to the one gauge so the desktop
+    /// never holds two disagreeing views of how tight memory is.
+    ///
     /// Returns `None` if `mode` describes a surface too large to
     /// allocate or whose stride cannot hold one scanline, failing
     /// closed rather than panicking.
     #[must_use]
-    pub fn new(mode: DisplayMode, background: Color) -> Option<Self> {
+    pub fn new(
+        mode: DisplayMode,
+        background: Color,
+        chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
+        pressure: &'static (dyn PressureGauge + 'static),
+    ) -> Option<Self> {
         let order = channel_order(mode.format)?;
         let background = Color {
             a: 255,
@@ -109,6 +161,10 @@ impl Compositor {
             mode,
             scale: Scale::ONE,
             theme: Theme::dark(),
+            theme_generation: 0,
+            chrome,
+            pressure,
+            pending_redraws: Vec::new(),
             background,
             order,
             windows: Vec::new(),
@@ -189,6 +245,7 @@ impl Compositor {
             return false;
         }
         self.theme = theme;
+        self.theme_generation = self.theme_generation.saturating_add(1);
         self.refresh_frame_bands();
         self.damage.add(self.screen_rect());
         true
@@ -197,11 +254,230 @@ impl Compositor {
     /// Re-resolve every decorated window's furniture band for the current
     /// output scale and theme (after a DPI or theme change), so each window's
     /// outer bounds reflect the new band thickness.
+    ///
+    /// No window's retained furniture is released here. Both changes that
+    /// reach this point move the chrome epoch on, which drops the whole
+    /// cache at the next lookup — the one case where every window's
+    /// furniture really is stale at once.
     fn refresh_frame_bands(&mut self) {
         let scale = self.scale;
         for window in &mut self.windows {
             window.refresh_band(scale, &self.theme);
         }
+    }
+
+    /// The generation every retained [`WindowChrome`] is valid for: this
+    /// output's scale and the theme it was painted under.
+    fn chrome_epoch(&self) -> ChromeEpoch {
+        (self.scale.percent(), self.theme_generation)
+    }
+
+    /// Window furniture currently retained, one entry per decorated window
+    /// whose frame has been composited and not since invalidated.
+    #[must_use]
+    pub fn chrome_cache_len(&self) -> usize {
+        self.chrome.len()
+    }
+
+    /// Whether the window named by `id` has furniture retained at the
+    /// current epoch — which entry survived, not merely how many did.
+    #[cfg(test)]
+    pub(crate) fn chrome_resident(&self, id: WindowId) -> bool {
+        self.chrome.peek(&self.chrome_epoch(), &id).is_some()
+    }
+
+    /// Bytes the window-furniture cache currently has charged: retained
+    /// strip pixels plus its own per-entry bookkeeping.
+    #[must_use]
+    pub fn chrome_cache_bytes(&self) -> usize {
+        self.chrome.charged_bytes()
+    }
+
+    /// The window-furniture cache's byte ledger and event counters, for
+    /// diagnostics.
+    #[must_use]
+    pub fn chrome_cache_stats(&self) -> &CacheAccounting {
+        self.chrome.accounting()
+    }
+
+    /// Give back whatever the current memory-pressure band says retained
+    /// window furniture may keep, returning the bytes released.
+    ///
+    /// The session calls this when the kernel wakes it with a deepened
+    /// band, so the desktop releases its furniture at the moment pressure
+    /// rises rather than at whatever later frame happens to compose. Every
+    /// window stays correct throughout: a released strip is simply rendered
+    /// again on demand, so this costs rendering work and never a wrong
+    /// pixel. A band that demands nothing releases nothing.
+    pub fn trim_chrome(&mut self) -> usize {
+        self.chrome.enforce_pressure()
+    }
+
+    /// Release and wipe every retained strip, because the seat this output
+    /// belongs to is going away.
+    ///
+    /// Furniture carries window titles, so the strips are overwritten
+    /// rather than merely dropped: an ended session leaves no readable
+    /// rendered title behind in reusable heap. The cache stays usable — a
+    /// later composite rebuilds what it needs.
+    pub fn teardown_chrome(&mut self) {
+        self.chrome.teardown();
+    }
+
+    /// Release and wipe every window's content pixels, because the seat
+    /// this output belongs to is going away.
+    ///
+    /// A window's content is whatever the user was looking at, so it is
+    /// overwritten rather than merely dropped: an ended session leaves no
+    /// readable frame behind in reusable heap. No redraw is requested —
+    /// the seat is gone, so there is nobody left to present to — which is
+    /// what separates this from the pressure ladder
+    /// ([`release_content_under_pressure`](Self::release_content_under_pressure)).
+    pub fn teardown_content(&mut self) {
+        for window in &mut self.windows {
+            window.release_content();
+        }
+        self.pending_redraws.clear();
+    }
+
+    /// Release window *content* pixels according to the machine's current
+    /// memory-pressure band, returning the bytes given back.
+    ///
+    /// # Why this is a policy and not a cache
+    ///
+    /// Window furniture is a keyed LRU cache ([`crate::chrome`]) because
+    /// losing a strip costs only a re-render. Content is different: the
+    /// compositor holds the *only* copy of a window's pixels, so evicting
+    /// a visible window's content is a visible defect, not a slowdown, and
+    /// no recency ordering can make it safe. Content is therefore released
+    /// by an explicit ladder over the *same* [`PressureGauge`] and the same
+    /// [`tairix_reclaim::shrink_target`] ordering the caches obey — one
+    /// memory model, two mechanisms suited to two different kinds of
+    /// memory. Do not turn this into a cache.
+    ///
+    /// # What may be released at all
+    ///
+    /// Only an *app-presented* window ([`Window::is_app_presented`]) is
+    /// ever a candidate, whatever the band: a window the embedder paints
+    /// itself — the taskbar, a session dialog, the lock screen — has no
+    /// client to ask, so releasing it would blank it with no way back.
+    ///
+    /// # The ladder
+    ///
+    /// * [`PressureBand::Normal`] — nothing is released. Memory is
+    ///   plentiful, and every release costs the owning app a repaint.
+    /// * [`PressureBand::Mild`] and deeper — every hidden or minimised
+    ///   window's content goes. Nobody is looking at it, so the release is
+    ///   invisible until the window is shown again, and a few minimised
+    ///   full-screen windows are the largest easily-recovered block the
+    ///   desktop holds.
+    /// * [`PressureBand::Critical`] — visible but unfocused windows go
+    ///   too, `focused` alone excepted. A background window blank for the
+    ///   frame it takes its app to answer the redraw is a far better
+    ///   outcome than exhausting memory; the focused window is never
+    ///   released because there would be nothing to show in its place.
+    ///
+    /// Every released window is queued for a redraw request
+    /// ([`pending_redraws`](Self::pending_redraws)) and its outer bounds
+    /// are marked dirty, so the desktop shows through immediately rather
+    /// than keeping a stale image the compositor no longer has.
+    pub fn release_content_under_pressure(&mut self, focused: Option<WindowId>) -> usize {
+        let band = self.pressure.sample();
+        if band == PressureBand::Normal {
+            return 0;
+        }
+        let mut released = 0usize;
+        let mut freed = Vec::new();
+        for window in &mut self.windows {
+            let id = window.id();
+            if !window.is_app_presented() {
+                continue;
+            }
+            let takeable = if window.is_visible() {
+                band >= PressureBand::Critical && Some(id) != focused
+            } else {
+                true
+            };
+            if !takeable {
+                continue;
+            }
+            let bytes = window.release_content();
+            if bytes > 0 {
+                released = released.saturating_add(bytes);
+                // A hidden window draws nothing either way, so only a
+                // visible one's pixels actually changed on screen.
+                let exposed = window.is_visible().then(|| window.bounds());
+                freed.push((id, exposed));
+            }
+        }
+        for (id, exposed) in freed {
+            self.request_redraw(id);
+            if let Some(bounds) = exposed {
+                self.damage.add(bounds);
+            }
+        }
+        released
+    }
+
+    /// Heap bytes every window's retained content pixels currently
+    /// occupy — what [`release_content_under_pressure`] has to give back.
+    ///
+    /// [`release_content_under_pressure`]: Self::release_content_under_pressure
+    #[must_use]
+    pub fn content_bytes(&self) -> usize {
+        self.windows
+            .iter()
+            .fold(0, |sum, w| sum.saturating_add(w.content_bytes()))
+    }
+
+    /// Take every window awaiting a redraw request, leaving the queue
+    /// empty.
+    ///
+    /// The compositor knows *which* windows lost their pixels but nothing
+    /// about the window protocol or which app owns which window — keeping
+    /// it that way is what stops the window manager from depending on the
+    /// window-server side. The embedder drains this after a release (and
+    /// after showing a window again) and delivers the protocol's redraw
+    /// event to each owner.
+    #[must_use]
+    pub fn pending_redraws(&mut self) -> Vec<WindowId> {
+        core::mem::take(&mut self.pending_redraws)
+    }
+
+    /// Queue `id` for a redraw request, at most once per drain: a window
+    /// released twice before the embedder drains still needs exactly one
+    /// present back.
+    fn request_redraw(&mut self, id: WindowId) {
+        if !self.pending_redraws.contains(&id) {
+            self.pending_redraws.push(id);
+        }
+    }
+
+    /// Apply `change` to the window named by `id` under the active scale
+    /// and theme, releasing that window's retained furniture, and return
+    /// what `change` produced (`None` for an unknown id).
+    ///
+    /// Every mutation that can alter how a frame is drawn runs through
+    /// here, so releasing the entry is part of the mutation rather than
+    /// something each caller must remember. It is one key, never the whole
+    /// cache: a title edit or a focus flip leaves every *other* window's
+    /// furniture perfectly valid.
+    fn mutate_frame<R>(
+        &mut self,
+        id: WindowId,
+        change: impl FnOnce(&mut Window, Scale, &Theme) -> R,
+    ) -> Option<R> {
+        let scale = self.scale;
+        let Self {
+            theme,
+            windows,
+            chrome,
+            ..
+        } = self;
+        let window = windows.iter_mut().find(|w| w.id() == id)?;
+        let out = change(window, scale, theme);
+        chrome.invalidate(&id);
+        Some(out)
     }
 
     /// The desktop background colour behind every window (always opaque).
@@ -305,7 +581,35 @@ impl Compositor {
     /// visibility it already has marks no damage and still returns `true`
     /// (only an unknown `id` returns `false`).
     pub fn set_visible(&mut self, id: WindowId, visible: bool) -> bool {
-        self.mutate(id, |w| w.set_visible(visible))
+        let known = self.mutate(id, |w| w.set_visible(visible));
+        // A window shown again after its content was released has nothing
+        // to draw until its app presents, so ask now rather than leaving
+        // it blank until something else happens to it.
+        let contentless = self
+            .window(id)
+            .is_some_and(|w| w.is_app_presented() && !w.has_content());
+        if known && visible && contentless {
+            self.request_redraw(id);
+        }
+        known
+    }
+
+    /// Declare that a client presents the window named by `id` and can be
+    /// asked to present it again, or that the embedder paints it itself.
+    /// Returns `false` for an unknown id.
+    ///
+    /// This is what makes a window's content releasable under memory
+    /// pressure ([`release_content_under_pressure`](Self::release_content_under_pressure)).
+    /// A window starts un-declared, so an embedder that never calls this
+    /// keeps every pixel it hands over: releasing content nobody can
+    /// redraw would blank the window permanently, so the default fails
+    /// closed rather than guessing there is a client behind it.
+    pub fn set_app_presented(&mut self, id: WindowId, app_presented: bool) -> bool {
+        self.windows
+            .iter_mut()
+            .find(|w| w.id() == id)
+            .map(|w| w.set_app_presented(app_presented))
+            .is_some()
     }
 
     /// Replace a window's content surface; the union of the old and new
@@ -348,7 +652,7 @@ impl Compositor {
         edit: impl FnOnce(&mut Surface) -> (T, Rect),
     ) -> Option<T> {
         let window = self.windows.iter_mut().find(|w| w.id() == id)?;
-        let (out, local_damage) = edit(window.surface_mut());
+        let (out, local_damage) = edit(window.content_mut()?);
         let client = window.client_rect();
         let screen_damage = Rect::new(
             client.left().saturating_add(local_damage.left()),
@@ -402,14 +706,11 @@ impl Compositor {
         id: WindowId,
         work_area: Rect,
     ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
-        let scale = self.scale;
-        let (result, before, after) = {
-            let theme = &self.theme;
-            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+        let (result, before, after) = self.mutate_frame(id, |window, scale, theme| {
             let before = window.bounds();
             let result = window.toggle_size(work_area, scale, theme);
             (result, before, window.bounds())
-        };
+        })?;
         if result.is_some() {
             self.damage.add(before);
             self.damage.add(after);
@@ -418,11 +719,19 @@ impl Compositor {
     }
 
     /// Remove a window; its last bounds are marked dirty.
+    ///
+    /// Its retained furniture and its content pixels both go with it,
+    /// wiped rather than merely dropped: a closed window's rendered title
+    /// and its last frame are user data and must not sit in reusable heap
+    /// waiting for something else to overwrite them.
     pub fn remove(&mut self, id: WindowId) -> bool {
         let Some(index) = self.windows.iter().position(|w| w.id() == id) else {
             return false;
         };
-        let window = self.windows.remove(index);
+        let mut window = self.windows.remove(index);
+        self.chrome.invalidate(&id);
+        self.pending_redraws.retain(|pending| *pending != id);
+        window.release_content();
         self.damage.add(window.bounds());
         true
     }
@@ -491,13 +800,13 @@ impl Compositor {
     /// [`client_rect`](Window::client_rect); the client never overlaps the
     /// furniture. The union of the old and new outer bounds is marked dirty.
     pub fn set_window_frame(&mut self, id: WindowId, frame: WindowFrame) -> bool {
-        let scale = self.scale;
-        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+        let Some((before, after)) = self.mutate_frame(id, |window, scale, theme| {
+            let before = window.bounds();
+            window.set_frame(Some(frame), scale, theme);
+            (before, window.bounds())
+        }) else {
             return false;
         };
-        let before = window.bounds();
-        window.set_frame(Some(frame), scale, &self.theme);
-        let after = window.bounds();
         self.damage.add(before);
         self.damage.add(after);
         true
@@ -508,13 +817,13 @@ impl Compositor {
     /// bounds collapse back to the bare content surface. Returns `false` for an
     /// unknown id. The union of the old and new bounds is marked dirty.
     pub fn clear_window_frame(&mut self, id: WindowId) -> bool {
-        let scale = self.scale;
-        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+        let Some((before, after)) = self.mutate_frame(id, |window, scale, theme| {
+            let before = window.bounds();
+            window.set_frame(None, scale, theme);
+            (before, window.bounds())
+        }) else {
             return false;
         };
-        let before = window.bounds();
-        window.set_frame(None, scale, &self.theme);
-        let after = window.bounds();
         self.damage.add(before);
         self.damage.add(after);
         true
@@ -544,14 +853,15 @@ impl Compositor {
     /// marked dirty — the client area does not change on a focus flip — so a
     /// focus change never triggers a full-window recomposite.
     pub fn set_active_frame(&mut self, id: WindowId, active: bool) -> bool {
-        let scale = self.scale;
-        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+        let bands = self.mutate_frame(id, |window, _, _| {
+            window
+                .set_frame_active(active)
+                .then(|| window.furniture_bands())
+        });
+        let Some(Some(bands)) = bands else {
             return false;
         };
-        if !window.set_frame_active(active, scale, &self.theme) {
-            return false;
-        }
-        for band in window.furniture_bands() {
+        for band in bands {
             self.damage.add(band);
         }
         true
@@ -565,14 +875,12 @@ impl Compositor {
     /// (title) furniture band is marked dirty — a title edit never touches the
     /// client or the other frame edges.
     pub fn set_window_title(&mut self, id: WindowId, title: &str) -> bool {
-        let scale = self.scale;
-        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+        let band = self.mutate_frame(id, |window, _, _| {
+            window.set_frame_title(title).then(|| window.title_band())
+        });
+        let Some(Some(band)) = band else {
             return false;
         };
-        if !window.set_frame_title(title, scale, &self.theme) {
-            return false;
-        }
-        let band = window.title_band();
         self.damage.add(band);
         true
     }
@@ -612,13 +920,10 @@ impl Compositor {
     /// to the client; only the furniture bands are marked dirty, so a hover or
     /// press repaint never touches the client area.
     pub fn frame_pointer(&mut self, id: WindowId, event: &InputEvent) -> Option<TitleBarEvent> {
-        let scale = self.scale;
-        let (result, bands) = {
-            let theme = &self.theme;
-            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
+        let (result, bands) = self.mutate_frame(id, |window, scale, theme| {
             let result = window.on_frame_pointer(event, scale, theme);
             (result, window.furniture_bands())
-        };
+        })?;
         for band in bands {
             self.damage.add(band);
         }
@@ -630,13 +935,10 @@ impl Compositor {
     /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
     /// unknown or undecorated window.
     pub fn frame_key(&mut self, id: WindowId, key: Key) -> Option<TitleBarEvent> {
-        let scale = self.scale;
-        let (result, band) = {
-            let theme = &self.theme;
-            let window = self.windows.iter_mut().find(|w| w.id() == id)?;
-            let result = window.on_frame_key(key, scale, theme);
+        let (result, band) = self.mutate_frame(id, |window, _, _| {
+            let result = window.on_frame_key(key);
             (result, window.title_band())
-        };
+        })?;
         self.damage.add(band);
         result
     }
@@ -647,15 +949,12 @@ impl Compositor {
     /// Returns `false` for an unknown window or when the implied client size
     /// is empty. The union of the old and new outer bounds is marked dirty.
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
-        let scale = self.scale;
-        let (changed, before, after) = {
-            let theme = &self.theme;
-            let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
-                return false;
-            };
+        let Some((changed, before, after)) = self.mutate_frame(id, |window, scale, theme| {
             let before = window.bounds();
             let changed = window.resize_to_outer(new_outer, scale, theme);
             (changed, before, window.bounds())
+        }) else {
+            return false;
         };
         if changed {
             self.damage.add(before);
@@ -676,15 +975,12 @@ impl Compositor {
     /// (unlike [`resize_window`](Self::resize_window), which sizes from an
     /// outer rectangle and moves the origin for an interactive edge drag).
     pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
-        let scale = self.scale;
-        let (changed, before, after) = {
-            let theme = &self.theme;
-            let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
-                return false;
-            };
+        let Some((changed, before, after)) = self.mutate_frame(id, |window, scale, theme| {
             let before = window.bounds();
             let changed = window.resize_client(client_w, client_h, scale, theme);
             (changed, before, window.bounds())
+        }) else {
+            return false;
         };
         if changed {
             self.damage.add(before);
@@ -842,6 +1138,19 @@ impl Compositor {
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
         let base = self.background.premultiply();
+        // Bring every covering window's furniture into the cache before the
+        // walk below reads it: the read path holds several windows' strips
+        // borrowed at once, which the exclusive borrow a build needs cannot
+        // express. Doing it once for the whole composite also means a
+        // window covered by two damaged rectangles is rendered once, and
+        // that its recency records one composite rather than one per
+        // rectangle.
+        let fallback = self.ensure_chrome(|window| {
+            damage
+                .rects()
+                .iter()
+                .any(|dirty| covers(window, dirty.intersection(&screen)))
+        });
         // Reused across rectangles so a multi-rectangle composite makes
         // no per-rectangle allocation on this hot path.
         let mut hits: Vec<usize> = Vec::new();
@@ -858,13 +1167,60 @@ impl Compositor {
             // window scan from "all windows" into "the few that overlap".
             hits.clear();
             for (index, window) in self.windows.iter().enumerate() {
-                if window.is_visible() && !window.bounds().intersection(&area).is_empty() {
+                if covers(window, area) {
                     hits.push(index);
                 }
             }
-            self.recompose_rect(area, base, &hits);
+            self.recompose_rect(area, base, &hits, &fallback);
         }
         composited
+    }
+
+    /// Make the rendered furniture of every window `wanted` selects
+    /// available for the immutable pass that follows, returning whatever
+    /// the cache would not retain.
+    ///
+    /// Residency is established here, under the exclusive borrow a build
+    /// needs, so the pass itself can read several windows' strips at once
+    /// through [`ReclaimCache::peek`]. Touching each key here is also what
+    /// keeps eviction honest: the least-recently-*composited* window is the
+    /// one that goes first, so a minimised or fully-covered window's
+    /// furniture is given back before a visible window's.
+    ///
+    /// A refusal is not a failure. The cache is an accelerator, so anything
+    /// it declines — because the budget is exhausted, pressure forbids
+    /// growth, or it is poisoned — is built for this pass alone and
+    /// returned to the caller, which draws from it exactly as it would from
+    /// a retained entry. An entry admitted and then evicted by a later
+    /// window in the same pass is caught the same way.
+    fn ensure_chrome(&mut self, wanted: impl Fn(&Window) -> bool) -> ChromeFallback {
+        let epoch = self.chrome_epoch();
+        let scale = self.scale;
+        let Self {
+            theme,
+            windows,
+            chrome,
+            ..
+        } = self;
+        let mut fallback = ChromeFallback::new();
+        for window in windows.iter().filter(|w| w.is_decorated() && wanted(w)) {
+            let id = window.id();
+            if let Some(Served::Uncached(built)) =
+                chrome.get_or_build(&epoch, id, || window.render_chrome(scale, theme))
+            {
+                fallback.push((id, built));
+            }
+        }
+        for window in windows.iter().filter(|w| w.is_decorated() && wanted(w)) {
+            let id = window.id();
+            if chrome.peek(&epoch, &id).is_some() || fallback.iter().any(|(key, _)| *key == id) {
+                continue;
+            }
+            if let Some(built) = window.render_chrome(scale, theme) {
+                fallback.push((id, built));
+            }
+        }
+        fallback
     }
 
     /// The current scan-out frame, laid out for [`Compositor::mode`].
@@ -944,7 +1300,10 @@ impl Compositor {
         display: &mut dyn AcceleratedDisplay,
     ) -> Result<(), DriverError> {
         let caps = display.accel_caps()?;
-        if let Some(buffers) = self.encode_layers(&caps) {
+        // Every visible window becomes its own layer here, so every one of
+        // them needs its furniture available before the immutable encode.
+        let fallback = self.ensure_chrome(|_| true);
+        if let Some(buffers) = self.encode_layers(&caps, &fallback) {
             let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
             display.present_layers(&layers)
         } else {
@@ -955,8 +1314,10 @@ impl Compositor {
 
     /// Encode the current scene as hardware layers, or `None` if the
     /// engine's [`AccelCaps`] cannot serve it (the caller falls back to
-    /// software).
-    fn encode_layers(&self, caps: &AccelCaps) -> Option<Vec<LayerBuf>> {
+    /// software). `fallback` carries the furniture the cache would not
+    /// retain for this pass.
+    fn encode_layers(&self, caps: &AccelCaps, fallback: &ChromeFallback) -> Option<Vec<LayerBuf>> {
+        let epoch = self.chrome_epoch();
         let max_layers = usize::try_from(caps.max_layers).unwrap_or(usize::MAX);
         let mut layers = Vec::new();
         layers.push(
@@ -969,12 +1330,13 @@ impl Compositor {
                 continue;
             }
             let bounds = window.bounds();
+            let chrome = resolve_chrome(&self.chrome, &epoch, window.id(), fallback);
             layers.push(self.encode_layer(
                 bounds.width,
                 bounds.height,
                 bounds.left(),
                 bounds.top(),
-                |lx, ly| window.sample_local(lx, ly),
+                |lx, ly| window.sample_local(lx, ly, chrome),
             )?);
         }
         if let Some(cursor) = &self.cursor {
@@ -1074,12 +1436,20 @@ impl Compositor {
     /// arithmetic it actually needed. The one allocation is the row-view
     /// list, made once per damaged rectangle and refilled per row, never
     /// per pixel.
-    fn recompose_rect(&mut self, area: Rect, base: Pixel, hits: &[usize]) {
+    fn recompose_rect(
+        &mut self,
+        area: Rect,
+        base: Pixel,
+        hits: &[usize],
+        fallback: &ChromeFallback,
+    ) {
+        let epoch = self.chrome_epoch();
         let Self {
             mode,
             order,
             windows,
             cursor,
+            chrome,
             back,
             frame,
             ..
@@ -1099,11 +1469,26 @@ impl Compositor {
         ) else {
             return;
         };
+        // Which window draws here and which furniture it draws from are
+        // both fixed for the whole rectangle, so the cache lookups happen
+        // once here rather than once per scanline.
+        let mut sources: Vec<(&Window, Option<&WindowChrome>)> = Vec::with_capacity(hits.len());
+        sources.extend(hits.iter().filter_map(|&index| {
+            let window = windows.get(index)?;
+            Some((
+                window,
+                resolve_chrome(chrome, &epoch, window.id(), fallback),
+            ))
+        }));
         let mut rows: Vec<WindowRow<'_>> = Vec::with_capacity(hits.len());
         for y in area.top()..area.bottom() {
             let Ok(py) = u32::try_from(y) else { continue };
             rows.clear();
-            rows.extend(hits.iter().filter_map(|&index| windows.get(index)?.row(y)));
+            rows.extend(
+                sources
+                    .iter()
+                    .filter_map(|(window, chrome)| window.row(y, *chrome)),
+            );
             let cursor_row = cursor.and_then(|c| c.local_row(y));
             let Some(back_row) = back
                 .row_mut(py)
@@ -1140,6 +1525,33 @@ impl Compositor {
             }
         }
     }
+}
+
+/// Whether `window` can contribute a pixel inside `area`: it is visible
+/// and its outer bounds overlap. Every other window's sample there is
+/// unconditionally `None`, so skipping it is exact.
+fn covers(window: &Window, area: Rect) -> bool {
+    window.is_visible() && !window.bounds().intersection(&area).is_empty()
+}
+
+/// The furniture to draw window `id` from: the retained entry, or the one
+/// this pass built because the cache would not keep it.
+///
+/// `None` means the window has none to draw — it is undecorated, or its
+/// frame could not be rendered at all — which draws the client alone rather
+/// than failing the frame.
+fn resolve_chrome<'a>(
+    cache: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
+    epoch: &ChromeEpoch,
+    id: WindowId,
+    fallback: &'a ChromeFallback,
+) -> Option<&'a WindowChrome> {
+    cache.peek(epoch, &id).or_else(|| {
+        fallback
+            .iter()
+            .find(|(key, _)| *key == id)
+            .map(|(_, chrome)| chrome)
+    })
 }
 
 /// A baked, display-format layer buffer and its on-screen placement,

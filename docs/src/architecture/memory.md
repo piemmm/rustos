@@ -2003,8 +2003,9 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   runtime has no business choosing for a program. The owning program
   parks on the wait source, reads the band, and calls
   `tairix_rt::pressure::report`.
-- **The desktop's caches.** The window manager's cursor cache and the
-  taskbar's notification-glyph cache are built from one policy,
+- **The desktop's caches.** The window manager's cursor cache, the
+  taskbar's notification-glyph cache, and the session's pinned-artwork
+  cache are built from one policy,
   `tairix_reclaim::desktop::disposable_ui_cache`: class `DisposableUi`,
   owner `ReclaimOwner::DesktopSession { seat }`, sensitivity `UserData`
   (so every released entry is overwritten), invalidation by a
@@ -2013,7 +2014,12 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   a proportionately larger cache than a 640×480 one and no hand-picked
   ceiling exists. The policy lives in `lib/reclaim` because the window
   manager and the taskbar may not depend on each other or on the
-  session, and that is the only crate all three already share.
+  session, and that is the only crate all three already share. The window
+  manager's rendered window furniture is a fourth cache of the same class
+  and owner, differing only in its ceiling
+  (`tairix_reclaim::desktop::window_chrome_cache`): one screenful of
+  pixels rather than the small fraction a cursor or a glyph is allowed,
+  because no more furniture than fills the screen can be visible at once.
 
   There is exactly one constructor and it demands the real backing size,
   the real gauge, and the real audit sink; each consumer takes its cache
@@ -2021,9 +2027,21 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   constructor that defaulted the gauge would produce a cache that
   classifies and serves correctly while retaining nothing — software
   that looks like it works and silently rasterises every frame.
-- **Teardown wipes.** Logout or seat revocation tears the caches down,
-  overwriting every retained entry, so one session's rendered user data
-  cannot outlive its seat in reusable heap.
+- **Window content is a release policy, not a cache.** A window's content
+  surface is the desktop's largest single allocation, so it too is given
+  back under pressure — over the *same* gauge and the *same*
+  `shrink_target` ordering. It is deliberately not keyed and not
+  recency-driven: evicting a visible window's pixels is a visual defect
+  rather than a slowdown, so the ladder follows what the user can see —
+  hidden and minimised windows at mild, visible-but-unfocused ones at
+  critical, never the focused window. The buffer is wiped before it is
+  dropped and the owning app is asked to present again through the window
+  protocol's redraw handshake, which its client library answers for it.
+  One memory model, two mechanisms for two different kinds of memory
+  (see [Releasable window content](../desktop/wm.md#releasable-window-content)).
+- **Teardown wipes.** Logout or seat revocation tears the caches down and
+  wipes every window's content, overwriting every retained entry, so one
+  session's rendered user data cannot outlive its seat in reusable heap.
 - **Headless is unaffected.** The caches live in `userland/gui/*`; a
   headless image contains none of them, and the kernel carries no
   desktop-specific pressure policy.

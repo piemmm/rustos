@@ -13,7 +13,12 @@ that enforces all of it.
   `CacheBudget` derives the grow/shrink watermarks from the size of the
   backing resource, never a hand-picked constant. `CacheAccounting` is the
   checked, per-class, payload/metadata-split byte ledger with saturating
-  event counters.
+  event counters. `ReclaimOwner::UserlandProcess` names a userland process
+  or service that has no numeric task id to charge memory against (`abi-v1`
+  gives a process no way to read its own id back) — used by a library
+  embedded in many different consumer programs, or by a singleton system
+  service, each naming itself directly rather than mislabelling its memory
+  as belonging to a desktop session.
 - `pressure` — the five-band pressure vocabulary (`normal`, `mild`,
   `moderate`, `severe`, `critical`) shared with `plans/SWAPSWAPSWAP.md`,
   the hysteresis watermarks derived from the backing size, the reserve

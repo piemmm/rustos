@@ -103,8 +103,9 @@ speculative:
   + non-empty damage; `Close`), the 12-byte create reply carrying the
   session-minted non-zero window id, and the app-ward `WindowEvent`s
   (`Focus`, `Key` embedding the one `KeyInput` codec, window-local
-  `Pointer`, `CloseRequested`). `WINDOW_ENDPOINT` (`0x5749_1001`) joined
-  `is_reserved_endpoint`; the decoders are enrolled in `fuzz_decode`.
+  `Pointer`, `CloseRequested`, `RedrawRequested`). `WINDOW_ENDPOINT`
+  (`0x5749_1001`) joined `is_reserved_endpoint`; the decoders are
+  enrolled in `fuzz_decode`.
 - `lib/window` — both halves over injected seams (the `lib/display`
   precedent): `WindowServer` (decode → `CallerIdentity` attestation
   (`call_peer_origin`) → owner/bounds validation → the `WindowHost`
@@ -116,6 +117,21 @@ speculative:
   calls over `WindowTransport`, parked — never polling — event wait
   over `EventSource`). Host-proven against an in-process loopback; no
   kernel change.
+- **The redraw handshake.** The session may release a window's retained
+  content to reclaim memory (`docs/src/desktop/wm.md`, "Releasable window
+  content"), which costs the app nothing but leaves the window blank
+  until a *full-window* present arrives — a present carries only a damage
+  rectangle, so a re-established surface starts transparent.
+  `RedrawRequested` is that ask. `lib/window` answers it for the app:
+  `WindowClient` records each window's last presented frame index and
+  current extent and `WindowEvents::wait` re-presents that frame with
+  full-window damage before returning the event, so an app inherits the
+  handshake by using the client library and an app that wants genuinely
+  fresh pixels still sees the event. A window that has never presented
+  has nothing to re-send. An app that decodes its mailbox directly rather
+  than through `WindowEvents` gets no auto-answer and repaints itself
+  (the terminal and the Switchboard panel do); an app that ignores the
+  event simply shows a blank window until it next presents.
 
 ### AW3 — session window server + the files app goes live `[x]`
 
@@ -133,6 +149,18 @@ Done. What now holds:
   seat wake never touches the window endpoint (the wedge the first
   end-to-end run exposed); readiness is a non-consuming peek, so pending
   members re-report on the next wait.
+- A served window is declared **app-presented** to the compositor when it
+  opens, which is what makes its content pixels releasable under memory
+  pressure; the windows the session paints itself (bar, lock screen,
+  picker, confirmation prompt) never are, because no client would answer
+  their redraw. The memory-pressure member of the same wait set drives
+  the release: the woken branch trims the desktop's caches, runs the
+  content ladder, then drains `Compositor::pending_redraws` and delivers
+  `RedrawRequested` to each released window's owner through the existing
+  served-window id mapping — the same route every other app-ward event
+  takes, with no second table. The drain also runs after a window becomes
+  visible again, so a restored window that lost its pixels is asked for
+  them at once.
 - `userland/apps/files` ships its `Run` binary + signed `AppInfo`
   (`CAP_FS_ACCESS` only) inside the bundle: `VfsDirectorySource` over
   `tairix_rt::read_dir_all`, rendering through the shared theme, window

@@ -721,20 +721,81 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
         .collect();
     let mut waiter = WindowEvents::new(QueueSource { queue });
     assert_eq!(
-        waiter.wait(),
+        waiter.wait(&mut client),
         Ok(WindowEvent::Focus {
             window_id: a,
             focused: true
         })
     );
-    assert_eq!(waiter.wait(), Ok(WindowEvent::Key { window_id: a, key }));
     assert_eq!(
-        waiter.wait(),
+        waiter.wait(&mut client),
+        Ok(WindowEvent::Key { window_id: a, key })
+    );
+    assert_eq!(
+        waiter.wait(&mut client),
         Ok(WindowEvent::CloseRequested { window_id: a })
     );
     // An empty queue surfaces the source's wait condition, never a
     // fabricated event.
-    assert_eq!(waiter.wait(), Err(Errno::WouldBlock));
+    assert_eq!(waiter.wait(&mut client), Err(Errno::WouldBlock));
+}
+
+/// One queued redraw request for `window`, ready for the typed wait.
+fn redraw_queue(window: u64) -> VecDeque<[u8; WindowEvent::WIRE_LEN]> {
+    let mut queue = VecDeque::new();
+    queue.push_back(WindowEvent::RedrawRequested { window_id: window }.to_le_bytes());
+    queue
+}
+
+#[test]
+fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+
+    // A client that has never presented has no frame to re-send: the
+    // request is a no-op, not an error.
+    let mut waiter = WindowEvents::new(QueueSource {
+        queue: redraw_queue(window),
+    });
+    assert_eq!(
+        waiter.wait(&mut client),
+        Ok(WindowEvent::RedrawRequested { window_id: window })
+    );
+    assert!(loopback.borrow().host.presented.is_empty());
+
+    // After a present the library re-sends that frame with full-window
+    // damage, so the app sees the event but need do nothing. The partial
+    // damage of the original present is deliberately widened: a
+    // re-established surface starts transparent, so only a full-window
+    // present makes it correct again.
+    let partial = DamageRect {
+        x: 1,
+        y: 1,
+        width_px: 2,
+        height_px: 1,
+    };
+    client.present(window, 1, partial).expect("present");
+    assert_eq!(loopback.borrow().host.presented.len(), 1);
+    let mut waiter = WindowEvents::new(QueueSource {
+        queue: redraw_queue(window),
+    });
+    assert_eq!(
+        waiter.wait(&mut client),
+        Ok(WindowEvent::RedrawRequested { window_id: window })
+    );
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.host.presented.len(), 2);
+        let (id, _, seen) = inner.host.presented.last().expect("the re-present");
+        assert_eq!(*id, window);
+        assert_eq!(*seen, full_damage());
+    }
+
+    // A request naming a window this client does not own re-presents
+    // nothing (fail closed).
+    assert_eq!(client.answer_redraw(window + 500), Ok(false));
+    assert_eq!(loopback.borrow().host.presented.len(), 2);
 }
 
 #[test]

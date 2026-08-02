@@ -38,6 +38,25 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # them; the atlas-only console view links neither.
 tairix-theme = { path = "../theme", version = "=0.0.0", optional = true }
 tairix-geometry = { path = "../geometry", version = "=0.0.0", optional = true }
+# The shared reclaimable-memory model: the one cached-glyph classification
+# and byte-budgeted cache implementation this crate's own client cache and
+# the `fontd` service both build from, so a glyph cache is declared once
+# rather than twice on opposite sides of the font-service endpoint.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0", optional = true }
+# The System Information client helper the client cache reads the machine's
+# total RAM through, to derive its byte budget from the machine rather than a
+# hand-picked constant. Only the `rt` feature needs it (a host test never
+# derives a live budget); `default-features = false` keeps the pure library
+# dependency free of the runtime the `program` feature would otherwise pull.
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, default-features = false, features = [
+    "program",
+] }
+
+[dev-dependencies]
+# The audit-sink trait a host test's glyph cache is built with. A test has
+# genuinely nowhere to send a reclaim audit record, so it passes the discard
+# sink rather than pretending to have a live one.
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 [features]
 default = ["render"]
@@ -50,11 +69,18 @@ render = [
     "dep:tairix-abi",
     "dep:tairix-theme",
     "dep:tairix-geometry",
+    "glyph-cache",
 ]
+# The shared cached-glyph declaration (`glyph_cache`) alone, with none of
+# `render`'s drawing dependencies. `fontd` enables just this, since it
+# rasterises glyphs itself and never draws through this crate's blitter.
+glyph-cache = ["dep:tairix-reclaim"]
 # The production, `ipc_call`-backed font-service transport. A program that
 # runs on the TAIRiX runtime enables this so `draw_text` reaches `fontd`
-# without any explicit setup; host tests leave it off and inject a mock.
-rt = ["render", "dep:tairix-rt"]
+# without any explicit setup; host tests leave it off and inject a mock. It
+# also defaults the client's glyph cache lazily, sized from the machine's
+# total RAM through `tairix-procinfo`.
+rt = ["render", "dep:tairix-rt", "dep:tairix-procinfo"]
 # A deterministic solid-coverage test transport (`SolidTestTransport`),
 # installed lazily on first draw. A text-drawing consumer enables this as a
 # dev-dependency feature so its host tests render without a running `fontd`;

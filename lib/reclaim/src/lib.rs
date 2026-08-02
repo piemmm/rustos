@@ -60,7 +60,7 @@ pub mod pressure;
 
 pub use audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
 pub use cache::{CachedBytes, ReclaimCache, Served};
-pub use desktop::{disposable_ui_cache, disposable_ui_candidate};
+pub use desktop::{disposable_ui_cache, disposable_ui_candidate, window_chrome_cache};
 pub use model::{
     AccountingError, AdmissionRefusal, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy,
     InvalidationSource, RebuildCost, ReclaimClass, ReclaimClassStats, ReclaimOwner, ReclaimRule,

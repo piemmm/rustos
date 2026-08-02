@@ -468,6 +468,15 @@ mod program {
                                 }
                             }
                         }
+                        EventOutcome::Redraw => {
+                            // The session reclaimed the retained pixels; the
+                            // grid is still live, so re-render it in full.
+                            if present_frame(&terminal, theme, &mut client, window, frames, &mode)
+                                .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
                         EventOutcome::End => {
                             // The desktop asked, or the shell's stdin is
                             // gone: close the window and end cleanly. The
@@ -553,6 +562,12 @@ mod program {
             /// New client height in pixels.
             height_px: u32,
         },
+        /// The session released this window's retained pixels to reclaim
+        /// memory and needs them presented again. The terminal decodes its
+        /// mailbox itself, so no library re-present happens on its behalf:
+        /// it repaints the live screen in full. Nothing is lost — the screen
+        /// is rendered from the shell's grid, which the terminal still holds.
+        Redraw,
         /// The session asked the window to close, or the shell can no
         /// longer accept input: end the program cleanly.
         End,
@@ -605,6 +620,12 @@ mod program {
                             }
                         }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
+                        // The session dropped the window's pixels under
+                        // memory pressure: repaint the whole screen. Returning
+                        // hands the present to the caller (which owns the
+                        // frame region and the window client); events queued
+                        // behind it re-report on the next wake.
+                        WindowEvent::RedrawRequested { .. } => return EventOutcome::Redraw,
                         // The window manager resized the window (a settled
                         // drag-resize, or a maximize/restore): hand the new
                         // client size back to the caller, which re-maps the

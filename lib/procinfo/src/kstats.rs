@@ -9,15 +9,18 @@
 //! queries share its convention that a structurally invalid reply is
 //! [`Errno::BadMagic`], never a partial decode.
 //!
-//! Every query here is gated on `CAP_SYSINFO_KERNEL` by `sysinfod`; a
+//! Most queries here are gated on `CAP_SYSINFO_KERNEL` by `sysinfod`; a
 //! denial surfaces as [`CallError::PermissionDenied`] so a consumer can
 //! render the refusal and continue (the queries are observability, never
-//! load-bearing for a session).
+//! load-bearing for a session). The exceptions are the two coarse
+//! self-regulation reads every process may make —
+//! [`memory_pressure_band`] and [`memory_total_bytes`] — which each
+//! document why they need no capability.
 
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureBand,
-    MemoryPressureStats, RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId,
-    RECLAIM_CLASS_COUNT,
+    MemoryPressureStats, MemoryTotal, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+    SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -79,6 +82,36 @@ pub fn memory_pressure(transport: &dyn Transport) -> Result<MemoryPressureStats,
 pub fn memory_pressure_band(transport: &dyn Transport) -> Result<MemoryPressureBand, CallError> {
     let reply = call(transport, SysinfoQueryId::MEMORY_PRESSURE_BAND, &[])?;
     MemoryPressureBand::from_bytes(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
+}
+
+/// Query the machine's total usable physical RAM in bytes
+/// ([`SysinfoQueryId::MEMORY_TOTAL`]).
+///
+/// Ungated: installed RAM is a static hardware fact — the figure on the
+/// machine's spec sheet — so it discloses strictly less than the
+/// already-ungated load average. This is how a process sizes a cache
+/// budget against the real machine instead of a hand-picked constant;
+/// the detailed [`memory_pressure`] view stays behind
+/// `CAP_SYSINFO_KERNEL`.
+///
+/// **Zero means unknown and admits nothing.** An unprovisioned machine
+/// (or a kernel that cannot report the census) answers zero, and a
+/// budget derived from it must come out as "size nothing" — never as
+/// "unbounded". Scale the budget from this figure so that zero bytes of
+/// RAM yields zero bytes of cache; a caller that needs a floor states
+/// that floor itself rather than reading one into a zero answer.
+///
+/// # Errors
+///
+/// * [`CallError::Service`] — the transport failed, or the reply did not
+///   decode against `sysinfo-v1` (reported as [`Errno::BadMagic`]). A
+///   malformed reply is refused rather than read as a size, so a caller
+///   never budgets against a figure the service did not send.
+pub fn memory_total_bytes(transport: &dyn Transport) -> Result<u64, CallError> {
+    let reply = call(transport, SysinfoQueryId::MEMORY_TOTAL, &[])?;
+    MemoryTotal::from_bytes(&reply)
+        .map(|total| total.total_bytes)
+        .map_err(|_| CallError::Service(Errno::BadMagic))
 }
 
 /// Query the `ramzip` compressed-tier counters
@@ -224,8 +257,8 @@ pub fn for_each_irq(
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_cpu_load, for_each_irq, for_each_reclaim_class, memory_pressure, ramzip_stats,
-        CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
+        for_each_cpu_load, for_each_irq, for_each_reclaim_class, memory_pressure,
+        memory_total_bytes, ramzip_stats, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -233,8 +266,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, RamzipStats,
-        ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
+        CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, MemoryTotal,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
         RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::Errno;
@@ -328,6 +361,14 @@ mod tests {
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
             match header.query {
                 SysinfoQueryId::MEMORY_PRESSURE => Ok(self.pressure.to_le_bytes().to_vec()),
+                // The gauge's own total: the fixture models one machine, so
+                // the ungated size and the gated view cannot drift apart
+                // here any more than they can on a live kernel.
+                SysinfoQueryId::MEMORY_TOTAL => Ok(MemoryTotal {
+                    total_bytes: self.pressure.total_bytes,
+                }
+                .to_le_bytes()
+                .to_vec()),
                 SysinfoQueryId::RAMZIP_STATS => Ok(self.ramzip.to_le_bytes().to_vec()),
                 SysinfoQueryId::RECLAIM_STATS => {
                     let req = ReclaimListRequest::from_bytes(payload)?;
@@ -382,6 +423,35 @@ mod tests {
         );
     }
 
+    /// The ungated total is the machine's own RAM size, in bytes, and is
+    /// the same figure the gauge reports as its total: one machine, one
+    /// size.
+    #[test]
+    fn memory_total_decodes_to_the_machines_ram_size() {
+        let fixture = Fixture::new();
+        assert_eq!(memory_total_bytes(&fixture), Ok(1 << 30));
+        assert_eq!(
+            memory_total_bytes(&fixture),
+            Ok(fixture.pressure.total_bytes)
+        );
+    }
+
+    /// Zero is passed through as the honest "unknown" answer, never
+    /// rewritten into a default the caller would mistake for a real
+    /// machine: a budget scaled from it must come out as "size nothing".
+    #[test]
+    fn an_unknown_total_reads_as_zero_and_admits_nothing() {
+        let mut fixture = Fixture::new();
+        fixture.pressure.total_bytes = 0;
+        let total = memory_total_bytes(&fixture).expect("read");
+        assert_eq!(total, 0);
+
+        // A budget expressed as a fraction of the machine's RAM sizes to
+        // nothing when the machine's size is unknown.
+        let eighth_of_ram = total / 8;
+        assert_eq!(eighth_of_ram, 0);
+    }
+
     #[test]
     fn denial_maps_to_permission_denied() {
         let mut fixture = Fixture::new();
@@ -402,6 +472,13 @@ mod tests {
         fixture.malformed = Some(SysinfoQueryId::RAMZIP_STATS);
         assert_eq!(
             ramzip_stats(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
+        // A refused decode, not a zero-extended size: a caller must never
+        // budget against a figure the service did not send.
+        fixture.malformed = Some(SysinfoQueryId::MEMORY_TOTAL);
+        assert_eq!(
+            memory_total_bytes(&fixture),
             Err(CallError::Service(Errno::BadMagic))
         );
     }

@@ -119,7 +119,7 @@ mod program {
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
-    use tairix_wm::{Compositor, InputResponse, Rect};
+    use tairix_wm::{chrome_cache, Compositor, InputResponse, Rect};
 
     extern crate alloc;
 
@@ -753,11 +753,11 @@ mod program {
         // --- Desktop bring-up: the shell, the compositor over the active
         // theme's desktop colour, and the two live seat input sources with
         // the queried mode as the pointer's screen rectangle.
-        // The seat's two rasterised-asset caches are budgeted from one
-        // frame of this very output, so the desktop is allowed more cached
-        // pixels on a large display than a small one and no ceiling is
-        // guessed. They are governed by the process pressure gauge, which
-        // the wait loop below keeps current from the kernel's band.
+        // The seat's rasterised-asset caches are budgeted from one frame of
+        // this very output, so the desktop is allowed more cached pixels on
+        // a large display than a small one and no ceiling is guessed. They
+        // are governed by the process pressure gauge, which the wait loop
+        // below keeps current from the kernel's band.
         static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
         let mut shell = DesktopShell::new(
             TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
@@ -766,7 +766,23 @@ mod program {
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
-        let Some(mut compositor) = Compositor::new(mode, shell.desktop_background()) else {
+        // The decorated windows' furniture is the output's own cache, so it
+        // is built here from the same seat, output size, gauge, and sink and
+        // handed to the compositor that draws from it. The compositor takes
+        // the gauge itself as well: a window's *content* is not a keyed
+        // cache but a release policy over the same band, so it reads the
+        // pressure directly rather than through the furniture cache.
+        let Some(mut compositor) = Compositor::new(
+            mode,
+            shell.desktop_background(),
+            chrome_cache(
+                SEAT_PRIMARY,
+                frame_len,
+                tairix_rt::pressure::gauge(),
+                &LOG_SINK,
+            ),
+            tairix_rt::pressure::gauge(),
+        ) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -1153,15 +1169,28 @@ mod program {
                 // memory the system reclaims, ahead of clean file data and
                 // well ahead of compressing anyone's anonymous pages.
                 //
-                // The cursor and glyphs remain correct throughout: a dropped
-                // entry is simply rasterised again on demand, so this costs
-                // rendering work and never a wrong pixel. Nothing is
-                // repainted here, and a band that demands nothing releases
-                // nothing, so a wake the desktop has already acted on is
-                // almost free.
+                // The cursor, glyphs, and window furniture remain correct
+                // throughout: a dropped entry is simply rendered again on
+                // demand, so this costs rendering work and never a wrong
+                // pixel. Nothing is repainted here, and a band that demands
+                // nothing releases nothing, so a wake the desktop has
+                // already acted on is almost free.
+                //
+                // Window *content* is the one thing the desktop cannot
+                // re-render itself, so every window whose pixels the same
+                // trim released is asked to present again straight away.
                 if refresh_pressure_band() {
-                    let _ = shell.trim_caches();
+                    let _ = shell.trim_caches(&mut compositor);
                     let _ = pins.icons.trim();
+                    deliver_pending_redraws(
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut pins.service,
+                    );
                 }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
@@ -1317,6 +1346,19 @@ mod program {
                         Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                     }
                 }
+                // A window restored from the taskbar (or otherwise shown
+                // again) whose content was released while it was hidden
+                // has nothing to draw until its app presents, so ask now
+                // rather than leaving it blank until the next wake.
+                deliver_pending_redraws(
+                    &mut server,
+                    &mut sink,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    &mut picker,
+                    &mut pins.service,
+                );
             }
             // Fold this wake's delivery evidence into the capsule and the
             // monitor's seat view exactly once: the sink latched whether
@@ -2344,6 +2386,43 @@ mod program {
         let handle = tairix_rt::fd_grant(fd, pid);
         let _ = tairix_rt::fs_close(fd);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
+    }
+
+    /// Deliver a redraw request to the owning app of every window whose
+    /// content the compositor gave back (or found missing when the window
+    /// was shown again).
+    ///
+    /// The window manager queues window-manager ids and knows nothing of
+    /// the window protocol; the session maps each to its client window
+    /// through the one table it already keeps and sends the protocol's
+    /// redraw event. A window with no served client — the taskbar, a
+    /// session-owned popup — has nothing to ask and is skipped: the
+    /// session paints those itself.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn deliver_pending_redraws<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        pins: &mut dyn PinBridge,
+    ) {
+        for wm in compositor.pending_redraws() {
+            let Some(window_id) = windows.ipc_id(wm) else {
+                continue;
+            };
+            deliver(
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                pins,
+                &WindowEvent::RedrawRequested { window_id },
+            );
+        }
     }
 
     /// Deliver one app-ward event, tearing the owner's windows down when

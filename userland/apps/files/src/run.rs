@@ -1041,10 +1041,17 @@ mod program {
             // `apply_event` is called), so it never reaches this match; it is
             // listed here only to keep the arm exhaustive. These are honest
             // no-ops, not deferred work.
+            //
+            // A redraw request is already answered by the typed wait, which
+            // re-presents the last frame with full-window damage before
+            // handing the event on. The browser's state has not changed, so
+            // rendering it again would draw the same pixels at the cost of a
+            // second present.
             WindowEvent::Key { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::RedrawRequested { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
@@ -1687,7 +1694,19 @@ mod program {
                 }
                 _ => OperationControl::Ignore,
             },
-            _ => OperationControl::Ignore,
+            // Nothing else reaches the running operation. A redraw request
+            // needs no arm of its own: the modal loop that polls this
+            // re-presents the progress panel in full on every pass, so the
+            // released pixels are back on the next step. The rest is input
+            // that must not navigate behind the modal panel.
+            WindowEvent::Key { .. }
+            | WindowEvent::Focus { .. }
+            | WindowEvent::Minimized { .. }
+            | WindowEvent::RedrawRequested { .. }
+            | WindowEvent::Resized { .. }
+            | WindowEvent::Scrolled { .. }
+            | WindowEvent::FilePicked { .. }
+            | WindowEvent::PickCancelled { .. } => OperationControl::Ignore,
         }
     }
 
@@ -3676,7 +3695,7 @@ mod program {
                 continue;
             }
 
-            let event = match events.wait() {
+            let event = match events.wait(&mut client) {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).

@@ -83,9 +83,14 @@ the payload exceeds the pre-Korean size ceiling.
   check and a row address are paid per row rather than per pixel and a glyph
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
-- `cache` — the on-demand outline rasteriser (over embedded faces + the shared
-  `lib/fontface` engine) and its bounded, process-global cache (behind
-  `render`). See *Rendering at a chosen size* below.
+- `client` — the process-global font-service client behind `render`: the
+  injected transport seam to `fontd` and the byte-budgeted local glyph cache
+  fetched coverage is memoised in. See *Rendering at a chosen size* below.
+- `glyph_cache` — the one cached-glyph declaration (behind `glyph-cache`,
+  pulled in by `render`): the retained value type, its reclaim
+  classification, and the RAM-derived byte budget. `fontd` builds its own
+  service-side cache from this same declaration, so the two sides of
+  `FONT_ENDPOINT` cannot drift apart (`AGENTS.md` §2.2).
 
 ## Rendering at a chosen size
 
@@ -100,21 +105,37 @@ program-library popup, and the file browser render at that size. Every derived m
 (advance, cell width, baseline, line height) scales with the cell height,
 keeping the font monospaced and its aspect ratio fixed.
 
-A non-native cell rasterises each glyph **directly from the TrueType outline**
-at that exact size, through the shared `lib/fontface` engine over the embedded
-faces — the very engine the atlas is generated with. Sampling the curve at the
-target resolution keeps text crisp whether tiny or very large, so a 200-pixel
-heading is as sharp as 14-pixel body text and neither is a stretched bitmap.
+A non-native cell is rasterised **directly from the TrueType outline** at that
+exact size — but by `fontd`, not here: this crate parses no TrueType and holds
+no face. Sampling the curve at the target resolution keeps text crisp whether
+tiny or very large, so a 200-pixel heading is as sharp as 14-pixel body text
+and neither is a stretched bitmap. A scalar the faces do not cover falls back
+to the same U+FFFD glyph the atlas shows, and an unreachable or refusing
+service composites nothing rather than reaching for local font data (fail
+closed).
+
 Because the desktop redraws the same glyphs at the same size every frame, each
-rasterised glyph is memoised in a bounded, spinlock-guarded process-global
-cache keyed by `(face, glyph, cell height)`; a hit copies into the caller's
-reusable buffer with no rasterisation and the cache evicts its oldest entry
-when full, so its footprint stays bounded (`AGENTS.md` §2.16, §24.1). The
-faces are parsed once, lazily, and a scalar the faces do not cover falls back
-to the same U+FFFD glyph the atlas shows; if the (trusted) faces ever fail to
-parse, rasterisation fails closed to blank rather than panicking. The cache
-and rasteriser ride the `render` feature; the allocator-free `atlas`/`glyph`
-view never touches them.
+reply is memoised per `(scalar, cell height, weight)` in a byte-budgeted
+`tairix_reclaim::ReclaimCache`, so a steady-state redraw issues no IPC. The
+bound is **bytes, derived from the machine's total RAM** (a small fraction of
+it — a glyph working set is a few hundred bitmaps), never a hand-picked entry
+count: a small board and a large server each get a cache proportioned to what
+they have, and a caller rendering at ever more sizes evicts the least recently
+used entries instead of growing without limit. The cache shrinks on the
+system's memory-pressure bands like every other reclaimable cache, and
+overwrites each released entry — the set of cached glyphs reveals which
+characters the user has had displayed.
+
+The cache is installed, not constructed in place: sizing it needs the
+machine's RAM figure and governing it needs the process's pressure gauge and
+audit sink. A program that links `tairix-font/rt` gets one lazily on its first
+draw and needs no setup; a host test installs its own through
+`set_glyph_cache`, the same seam `set_font_transport` uses. Until one is
+installed every glyph is fetched and served without being retained — correct,
+merely one call per glyph. A RAM reading the System Information service cannot
+supply is zero, which yields a zero budget and exactly that uncached
+behaviour, never a guessed ceiling. The client and its cache ride the `render`
+feature; the allocator-free `atlas`/`glyph` view never touches them.
 
 The cell model is **one scalar per grid entry** — the deliberate simplification
 `lib/vt` and `lib/curses` document. A zero-advance combining mark renders in

@@ -1,12 +1,11 @@
 //! The font-service client: the render path's thin, cached front end to the
 //! sandboxed OS font service (`fontd`) over the reserved `FONT_ENDPOINT`.
 //!
-//! `lib/font` no longer parses TrueType or holds a font outline (`AGENTS.md`
-//! §16.4, §19.5): the four faces live only in `fontd`, which rasterises a
-//! scalar at a chosen cell height in its own minimum-capability sandbox and
-//! returns the small 8-bit coverage bitmap the blitter composites. A malformed
-//! face can therefore fault only that sandbox, never a compositor or a
-//! terminal.
+//! `lib/font` parses no TrueType and holds no font outline: the four faces
+//! live only in `fontd`, which rasterises a scalar at a chosen cell height in
+//! its own minimum-capability sandbox and returns the small 8-bit coverage
+//! bitmap the blitter composites. A malformed face can therefore fault only
+//! that sandbox, never a compositor or a terminal.
 //!
 //! # Transport seam
 //!
@@ -15,25 +14,31 @@
 //! seam: production installs the `ipc_call`-backed transport, a host test
 //! installs a mock. Under the optional `rt` feature the seam defaults lazily
 //! to the runtime transport, so a program that links `tairix-rt` needs no
-//! setup; without a transport a draw composites nothing (fail closed,
-//! `AGENTS.md` §5.4) rather than reaching for a device.
+//! setup; without a transport a draw composites nothing, fail closed, rather
+//! than reaching for a device.
 //!
 //! # Local cache
 //!
-//! Each reply is memoised per `(scalar, cell height, weight)` in a bounded FIFO
-//! cache, so a steady-state redraw of the same text in the same size and weight
-//! issues no IPC.
-//! The cache is a client-side fail-closed bound, not a scalable capacity: a
-//! pathological caller that renders at ever more sizes evicts the oldest
-//! entries rather than growing without bound.
+//! Each reply is memoised per `(scalar, cell height, weight)` in a
+//! [`tairix_reclaim::ReclaimCache`] ([`crate::glyph_cache`]), so a
+//! steady-state redraw of the same text in the same size and weight issues no
+//! IPC. The byte budget is derived from the machine's total RAM, never a
+//! hand-picked entry count, so a hostile or careless caller who renders at
+//! ever more sizes and scalars can grow the cache only up to that budget
+//! before the oldest entries are evicted. Until a cache is installed —
+//! before an `rt` program's first draw, or in a host test that never calls
+//! [`set_glyph_cache`] — every glyph is fetched and served uncached: correct,
+//! merely one IPC per glyph.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{decode_glyph_reply, FontRequest, FontWeight, FONT_MAX_GLYPH_REPLY};
 use tairix_abi::Errno;
+use tairix_reclaim::ReclaimCache;
 use tairix_sync::SpinLock;
+
+use crate::glyph_cache::CachedGlyph;
 
 /// One synchronous font-service call: send one request frame, receive one
 /// reply frame. The `ipc_call` syscall behind a seam, so the render path is
@@ -50,69 +55,46 @@ pub trait FontTransport: Send {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
-/// A rasterised glyph as the blitter consumes it: the bitmap size the service
-/// returned plus the owned `width * height` row-major 8-bit coverage.
+/// A client cache key: the Unicode scalar, the cell height it was rendered
+/// at, and the wire weight it was rendered in. A heavier weight is a
+/// different bitmap of the same scalar, so it is part of the key rather than
+/// overwriting it.
+pub type GlyphKey = (u32, u32, u16);
+
+/// The render path's glyph cache: the shared bounded, classified,
+/// pressure-governed cache holding [`CachedGlyph`] coverage under a
+/// [`GlyphKey`].
 ///
-/// The reply's `advance` field is not stored: the client lays text out from
-/// its own monospace geometry (derived identically to the service's), so the
-/// pen advance is a local computation, not a per-glyph value.
-pub(crate) struct CachedGlyph {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) data: Box<[u8]>,
-}
+/// The generation token is `()` because nothing invalidates a fetched glyph
+/// while the process lives: `fontd` parses its face set once at startup and
+/// never reloads it, so the same scalar at the same height and weight is the
+/// same bitmap every time. Entries leave only by eviction, by pressure, or
+/// with the cache itself — which is exactly the owner-teardown invalidation
+/// the shared classification declares. Inventing a churning epoch would throw
+/// a live working set away for no event.
+pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, ()>;
 
-/// The largest number of distinct `(scalar, cell height, weight)` glyphs the
-/// client retains before evicting the oldest.
+/// The audit label the client's own cache is named by in reclaim records.
+#[cfg(feature = "rt")]
+const CLIENT_CACHE_LABEL: &str = "font.client.glyphs";
+
+/// The owner the client's own cache charges its bytes to.
 ///
-/// The desktop draws a small number of sizes and weights over a modest visible
-/// glyph repertoire, so this comfortably holds a steady-state working set while
-/// capping the entry count (a fail-closed bound, not a scalable capacity).
-const MAX_ENTRIES: usize = 1024;
-
-/// The cache key: the Unicode scalar, the cell height it was rendered at, and
-/// the wire weight it was rendered in. A heavier weight is a different bitmap
-/// of the same scalar, so it is part of the key rather than overwriting it.
-type Key = (u32, u32, u16);
-
-/// A bounded FIFO map from [`Key`] to a rasterised coverage glyph.
-struct GlyphCache {
-    entries: BTreeMap<Key, CachedGlyph>,
-    order: VecDeque<Key>,
-}
-
-impl GlyphCache {
-    const fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    /// Insert `glyph` for `key`, evicting the oldest entry first when the
-    /// cache is full so its footprint stays bounded.
-    fn insert(&mut self, key: Key, glyph: CachedGlyph) {
-        if self.entries.contains_key(&key) {
-            return;
-        }
-        while self.order.len() >= MAX_ENTRIES {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-        self.order.push_back(key);
-        self.entries.insert(key, glyph);
-    }
-}
+/// The cache names *itself*, not the program it is linked into: this client
+/// is embedded in every text-drawing program, and a reader of the audit trail
+/// wants to know which subsystem inside the process is holding the memory.
+#[cfg(feature = "rt")]
+const CLIENT_CACHE_OWNER: &str = "font-client";
 
 /// The render path's process-global font client: the installed transport, a
-/// reusable receive buffer, and the local glyph cache.
+/// reusable receive buffer, and the optional local glyph cache.
 struct GlyphClient {
     transport: Option<Box<dyn FontTransport>>,
     reply: Vec<u8>,
-    cache: GlyphCache,
+    /// `None` until a cache is installed, in which case every glyph is
+    /// fetched and served without being retained — correct, merely one IPC
+    /// per glyph.
+    cache: Option<GlyphCache>,
 }
 
 impl GlyphClient {
@@ -120,32 +102,35 @@ impl GlyphClient {
         Self {
             transport: None,
             reply: Vec::new(),
-            cache: GlyphCache::new(),
+            cache: None,
         }
     }
 
-    /// Ensure `(scalar, cell_height, weight)` is cached, fetching it over the
-    /// transport on a miss, and return it — or `None` when no transport is
-    /// installed or the call/decoding failed (fail closed).
-    fn ensure(
+    /// Serve `(scalar, cell_height, weight)` to `f`, fetching it over the
+    /// transport on a miss and retaining it when a cache is installed and
+    /// admits it.
+    ///
+    /// `None` — composite nothing, fail closed — when no transport is
+    /// installed or the call or its reply could not be read.
+    fn with_glyph<R>(
         &mut self,
         scalar: char,
         cell_height: u32,
         weight: FontWeight,
-    ) -> Option<&CachedGlyph> {
-        let key = (scalar as u32, cell_height, weight.to_wire());
-        if !self.cache.entries.contains_key(&key) {
-            self.fetch(scalar, cell_height, weight, key);
-        }
-        self.cache.entries.get(&key)
-    }
-
-    /// Fetch one glyph over the transport and cache it; a failure leaves the
-    /// cache unchanged so the caller composites nothing.
-    fn fetch(&mut self, scalar: char, cell_height: u32, weight: FontWeight, key: Key) {
+        f: impl FnOnce(&CachedGlyph) -> R,
+    ) -> Option<R> {
+        // Neither the transport nor the cache can be built in the `const`
+        // initialiser of the client `static` — one issues syscalls, the other
+        // reads the machine's RAM size — so a real program's defaults are
+        // installed on first use instead, keeping it free of setup.
         #[cfg(feature = "rt")]
-        if self.transport.is_none() {
-            self.transport = Some(Box::new(RtTransport));
+        {
+            if self.transport.is_none() {
+                self.transport = Some(Box::new(RtTransport));
+            }
+            if self.cache.is_none() {
+                self.cache = Some(default_cache());
+            }
         }
         // A consumer's host tests enable `test-util` to get deterministic
         // glyph coverage without a running service; the runtime transport
@@ -159,33 +144,75 @@ impl GlyphClient {
             reply,
             cache,
         } = self;
-        let Some(transport) = transport.as_mut() else {
-            return;
+        let transport = transport.as_mut()?;
+        let Some(cache) = cache.as_mut() else {
+            let glyph = fetch(transport.as_mut(), reply, scalar, cell_height, weight)?;
+            return Some(f(&glyph));
         };
-        if reply.len() < FONT_MAX_GLYPH_REPLY {
-            reply.resize(FONT_MAX_GLYPH_REPLY, 0);
-        }
-        let request = FontRequest::Glyph {
-            scalar,
-            cell_height,
-            weight,
-        }
-        .to_le_bytes();
-        let Ok(len) = transport.call(&request, reply) else {
-            return;
-        };
-        let Ok(coverage) = decode_glyph_reply(&reply[..len]) else {
-            return;
-        };
-        cache.insert(
-            key,
-            CachedGlyph {
-                width: coverage.width,
-                height: coverage.height,
-                data: Box::from(coverage.coverage),
-            },
-        );
+        let key = (scalar as u32, cell_height, weight.to_wire());
+        let served = cache.get_or_build(&(), key, || {
+            fetch(transport.as_mut(), reply, scalar, cell_height, weight)
+        })?;
+        Some(f(&served))
     }
+}
+
+/// Fetch one glyph's coverage over `transport` into the reusable `reply`
+/// buffer.
+///
+/// Every failure — a refused call, a length the reply buffer cannot hold, a
+/// frame that does not decode — yields `None`, so a caller composites nothing
+/// rather than reading a bitmap the service did not send.
+fn fetch(
+    transport: &mut dyn FontTransport,
+    reply: &mut Vec<u8>,
+    scalar: char,
+    cell_height: u32,
+    weight: FontWeight,
+) -> Option<CachedGlyph> {
+    if reply.len() < FONT_MAX_GLYPH_REPLY {
+        reply.resize(FONT_MAX_GLYPH_REPLY, 0);
+    }
+    let request = FontRequest::Glyph {
+        scalar,
+        cell_height,
+        weight,
+    }
+    .to_le_bytes();
+    let len = transport.call(&request, reply).ok()?;
+    let frame = reply.get(..len)?;
+    let coverage = decode_glyph_reply(frame).ok()?;
+    Some(CachedGlyph::new(
+        coverage.width,
+        coverage.height,
+        Box::from(coverage.coverage),
+    ))
+}
+
+/// Build the client's own glyph cache, budgeted from the machine's total
+/// usable RAM.
+///
+/// A RAM read that fails — no System Information service, a refused or
+/// malformed reply — is a zero total, hence a zero budget, hence a cache that
+/// admits nothing and serves every glyph freshly fetched. That is the honest
+/// outcome: slower, never wrong, and never a hand-picked ceiling standing in
+/// for a figure the machine did not supply.
+#[cfg(feature = "rt")]
+fn default_cache() -> GlyphCache {
+    use tairix_reclaim::ReclaimOwner;
+
+    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+
+    let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+    ReclaimCache::new(
+        CLIENT_CACHE_LABEL,
+        crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
+            CLIENT_CACHE_OWNER,
+        )),
+        crate::glyph_cache::glyph_cache_budget(total),
+        tairix_rt::pressure::gauge(),
+        &LOG_SINK,
+    )
 }
 
 /// The one process-global font client.
@@ -200,6 +227,22 @@ pub fn set_font_transport(transport: Box<dyn FontTransport>) {
     CLIENT.lock().transport = Some(transport);
 }
 
+/// Install (or replace) the process-global glyph cache fetched coverage is
+/// memoised in.
+///
+/// The same seam as [`set_font_transport`], for the same reason: the cache
+/// reads the machine's RAM size to size itself and so cannot be built in the
+/// `const` initialiser of the client `static`. Under the `rt` feature one is
+/// installed lazily on first use, so a program needs no explicit call; a host
+/// test installs a cache built from its own gauge and sink. Until then every
+/// glyph is fetched and served without being retained.
+///
+/// Replacing a cache drops the outgoing one, wiping its entries as its
+/// declared sensitivity requires.
+pub fn set_glyph_cache(cache: GlyphCache) {
+    CLIENT.lock().cache = Some(cache);
+}
+
 /// Fetch the coverage glyph for `(scalar, cell_height, weight)` and hand it to
 /// `f`, or return `None` (compositing nothing) when the service is unreachable.
 ///
@@ -211,9 +254,7 @@ pub(crate) fn with_glyph<R>(
     weight: FontWeight,
     f: impl FnOnce(&CachedGlyph) -> R,
 ) -> Option<R> {
-    let mut client = CLIENT.lock();
-    let glyph = client.ensure(scalar, cell_height, weight)?;
-    Some(f(glyph))
+    CLIENT.lock().with_glyph(scalar, cell_height, weight, f)
 }
 
 /// The production transport: the `ipc_call` syscall to [`FONT_ENDPOINT`].
@@ -290,11 +331,26 @@ pub fn install_test_transport() {
 mod tests {
     use super::*;
 
+    use alloc::vec::Vec;
+    use tairix_log::DiscardSink;
+    use tairix_reclaim::{CacheBudget, PressureBand, ReclaimOwner, ReportedPressure};
+
+    use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
+
     /// A transport that always refuses, to exercise the fail-closed path.
     struct Refusing;
     impl FontTransport for Refusing {
         fn call(&mut self, _request: &[u8], _reply: &mut [u8]) -> Result<usize, Errno> {
             Err(Errno::NotFound)
+        }
+    }
+
+    /// A transport that claims to have written more than the buffer holds, so
+    /// the client's own reply-length handling is exercised.
+    struct Overlong;
+    impl FontTransport for Overlong {
+        fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            Ok(reply.len() + 1)
         }
     }
 
@@ -304,31 +360,72 @@ mod tests {
         client
     }
 
+    /// A cache built exactly as production builds one — the shared
+    /// classification, the shared budget derivation — but from a gauge the
+    /// test drives and a sink a host test has nowhere to send records to.
+    fn cache_at(
+        band: PressureBand,
+        budget: CacheBudget,
+    ) -> (GlyphCache, &'static ReportedPressure) {
+        static SINK: DiscardSink = DiscardSink;
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(band);
+        let cache = ReclaimCache::new(
+            "test.font.glyphs",
+            glyph_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
+            budget,
+            gauge,
+            &SINK,
+        );
+        (cache, gauge)
+    }
+
+    /// A comfortable machine's client: solid glyphs, room to cache them.
+    fn cached_client() -> (GlyphClient, &'static ReportedPressure) {
+        let (cache, gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let mut client = client_with(SolidTestTransport);
+        client.cache = Some(cache);
+        (client, gauge)
+    }
+
+    /// The coverage the client hands the blitter, copied out so it can be
+    /// compared across cache states.
+    fn coverage(
+        client: &mut GlyphClient,
+        scalar: char,
+        height: u32,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        client.with_glyph(scalar, height, FontWeight::Regular, |glyph| {
+            (glyph.width, glyph.height, glyph.data.to_vec())
+        })
+    }
+
     #[test]
     fn a_glyph_is_fetched_then_served_from_cache() {
-        let mut client = client_with(SolidTestTransport);
-        let first = client
-            .ensure('A', 28, FontWeight::Regular)
-            .expect("fetched");
+        let (mut client, _gauge) = cached_client();
+        let (width, height, data) = coverage(&mut client, 'A', 28).expect("fetched");
         // Two cells wide, `cell_height` tall, solid coverage.
-        assert_eq!(first.height, 28);
-        assert_eq!(first.width, 2 * crate::atlas::CELL_WIDTH);
-        assert_eq!(first.data.len(), (first.width * first.height) as usize);
-        assert!(first.data.iter().all(|&c| c == 255));
-        // A second lookup hits the cache: one entry, still present.
-        assert!(client.ensure('A', 28, FontWeight::Regular).is_some());
-        assert_eq!(client.cache.order.len(), 1);
+        assert_eq!(height, 28);
+        assert_eq!(width, 2 * crate::atlas::CELL_WIDTH);
+        assert_eq!(data.len(), (width * height) as usize);
+        assert!(data.iter().all(|&c| c == 255));
+
+        assert!(coverage(&mut client, 'A', 28).is_some());
+        let cache = client.cache.as_ref().expect("installed");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.accounting().hits(), 1);
+        assert_eq!(cache.accounting().misses(), 1);
     }
 
     #[test]
     fn a_heavier_weight_is_a_distinct_cache_entry() {
-        let mut client = client_with(SolidTestTransport);
+        let (mut client, _gauge) = cached_client();
         for weight in [FontWeight::Regular, FontWeight::Medium, FontWeight::Bold] {
-            assert!(client.ensure('A', 28, weight).is_some());
+            assert!(client.with_glyph('A', 28, weight, |_| ()).is_some());
         }
         // The same scalar at the same height in three weights is three
         // bitmaps, so a bold run can never be served a regular raster.
-        assert_eq!(client.cache.order.len(), 3);
+        assert_eq!(client.cache.as_ref().expect("installed").len(), 3);
     }
 
     // Only meaningful without a transport feature: with `test-util` (or `rt`)
@@ -338,27 +435,108 @@ mod tests {
     #[test]
     fn no_transport_composites_nothing() {
         let mut client = GlyphClient::new();
-        assert!(client.ensure('A', 20, FontWeight::Regular).is_none());
+        assert!(coverage(&mut client, 'A', 20).is_none());
     }
 
     #[test]
     fn a_refused_call_fails_closed() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
         let mut client = client_with(Refusing);
-        assert!(client.ensure('A', 20, FontWeight::Regular).is_none());
+        client.cache = Some(cache);
+        assert!(coverage(&mut client, 'A', 20).is_none());
         // Nothing is cached, so a later working transport is still consulted.
-        assert!(client.cache.entries.is_empty());
+        assert_eq!(client.cache.as_ref().expect("installed").len(), 0);
     }
 
     #[test]
-    fn the_cache_evicts_the_oldest_beyond_the_bound() {
+    fn a_reply_longer_than_the_buffer_fails_closed() {
+        let mut client = client_with(Overlong);
+        assert!(
+            coverage(&mut client, 'A', 20).is_none(),
+            "a length the buffer cannot hold is refused, never read past the end"
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_bounds_the_cache_however_many_glyphs_are_drawn() {
+        let budget = CacheBudget::from_ceiling(64 * 1024);
+        let (cache, _gauge) = cache_at(PressureBand::Normal, budget);
         let mut client = client_with(SolidTestTransport);
-        // Vary the scalar (the cell-height band is only a few hundred wide) so
-        // the distinct-key count exceeds the bound and forces eviction.
-        let count = u32::try_from(MAX_ENTRIES + 16).expect("bound fits a u32");
-        for scalar in 0..count {
+        client.cache = Some(cache);
+        // Far more distinct glyphs than the ceiling can hold, each a full
+        // bitmap: the cache must evict, never grow past the ceiling.
+        for scalar in 0..1024u32 {
             let ch = char::from_u32(scalar).unwrap_or('A');
-            assert!(client.ensure(ch, 20, FontWeight::Regular).is_some());
+            assert!(coverage(&mut client, ch, 28).is_some(), "still rendered");
+            let cache = client.cache.as_ref().expect("installed");
+            assert!(
+                cache.charged_bytes() <= budget.hard(),
+                "charged {} exceeds the ceiling {}",
+                cache.charged_bytes(),
+                budget.hard()
+            );
         }
-        assert!(client.cache.order.len() <= MAX_ENTRIES);
+        let cache = client.cache.as_ref().expect("installed");
+        assert!(cache.accounting().evictions() > 0, "the bound must bite");
+        assert!(!cache.poisoned(), "bounding is ordinary, not a defect");
+    }
+
+    #[test]
+    fn an_unknown_ram_size_caches_nothing_yet_still_renders() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(0));
+        let mut client = client_with(SolidTestTransport);
+        client.cache = Some(cache);
+        let (width, height, data) = coverage(&mut client, 'A', 28).expect("still rendered");
+        assert_eq!(data.len(), (width * height) as usize);
+        assert!(data.iter().all(|&c| c == 255));
+        let cache = client.cache.as_ref().expect("installed");
+        assert_eq!(cache.len(), 0, "a zero budget retains nothing");
+        assert_eq!(cache.charged_bytes(), 0);
+    }
+
+    #[test]
+    fn mild_pressure_empties_the_cache_and_refuses_further_growth() {
+        let (mut client, gauge) = cached_client();
+        assert!(coverage(&mut client, 'A', 28).is_some());
+        assert_eq!(client.cache.as_ref().expect("installed").len(), 1);
+
+        gauge.report(PressureBand::Mild);
+        let cache = client.cache.as_mut().expect("installed");
+        assert!(cache.enforce_pressure() > 0, "mild pressure must release");
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.charged_bytes(), 0);
+
+        assert!(
+            coverage(&mut client, 'B', 28).is_some(),
+            "a shrunk cache still renders"
+        );
+        assert_eq!(
+            client.cache.as_ref().expect("installed").len(),
+            0,
+            "no growth while the band forbids it"
+        );
+    }
+
+    #[test]
+    fn the_same_glyph_renders_identically_cached_uncached_and_after_a_shrink() {
+        let mut uncached = client_with(SolidTestTransport);
+        let expected = coverage(&mut uncached, 'A', 28).expect("rendered with no cache at all");
+        assert!(uncached.cache.is_none());
+
+        let (mut client, gauge) = cached_client();
+        assert_eq!(coverage(&mut client, 'A', 28).as_ref(), Some(&expected));
+        assert_eq!(
+            coverage(&mut client, 'A', 28).as_ref(),
+            Some(&expected),
+            "a cache hit serves the same bitmap the fetch did"
+        );
+
+        gauge.report(PressureBand::Mild);
+        let _ = client.cache.as_mut().expect("installed").enforce_pressure();
+        assert_eq!(
+            coverage(&mut client, 'A', 28).as_ref(),
+            Some(&expected),
+            "the cache is an accelerator; losing it changes nothing"
+        );
     }
 }

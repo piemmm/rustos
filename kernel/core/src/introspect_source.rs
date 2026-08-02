@@ -24,9 +24,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureBand, MemoryPressureStats, ProcessRecord, ProcessState, ReclaimClassRecord,
-    ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord, CPU_INFO_FLAG_FREQ_MEASURED,
-    CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    MemoryPressureBand, MemoryPressureStats, MemoryTotal, ProcessRecord, ProcessState,
+    ReclaimClassRecord, ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+    CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE,
+    RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use tairix_kernel_mem::PAGE_SIZE;
@@ -81,6 +82,26 @@ const OS_VERSION_PATCH: u16 = version_component(env!("CARGO_PKG_VERSION_PATCH"))
 /// measured quantity). Every *other* awake task is real load and counts.
 fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) -> bool {
     matches!(state, TaskState::Ready | TaskState::Running) && Some(task) != observer
+}
+
+/// Total usable physical RAM in bytes, scaled from the frame allocator's
+/// `usable_frames` census.
+///
+/// Usable frames, not the allocator's address-space extent: the extent
+/// spans from physical address zero to the highest mapped address, so on a
+/// platform whose RAM sits above an MMIO window (e.g. a 1 GiB hole below
+/// the RAM base) it would overstate the machine's memory and make
+/// `total - free` look almost exhausted on a fresh boot.
+///
+/// This is the one place the figure is derived. Both the gated
+/// [`KernelMemoryStats::total_bytes`] view and the ungated
+/// [`MemoryTotal`] view read it from here, so the two can never disagree.
+/// The multiply saturates: a frame census that could overflow a `u64` of
+/// bytes is physically impossible, and reporting `u64::MAX` is still an
+/// over-report a budget-sizing caller can bound, where a wrapped product
+/// would look like a nearly-empty machine.
+fn usable_ram_bytes(usable_frames: usize) -> u64 {
+    (usable_frames as u64).saturating_mul(PAGE_SIZE as u64)
 }
 
 /// The unprovisioned machine-id sentinel: all zero, meaning "no per-install
@@ -163,6 +184,12 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
     fn monotonic_ns(&self) -> u64 {
         let cpu = SchedulerArch::current_cpu(&*self.state.arch);
         self.state.arch.monotonic_ns(cpu)
+    }
+
+    /// The frame allocator's usable-frame census, the input
+    /// [`usable_ram_bytes`] scales.
+    fn usable_frames(&self) -> usize {
+        self.state.frame_allocator.usable_frames()
     }
 }
 
@@ -248,17 +275,10 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 
     fn kernel_memory(&self) -> Result<Vec<u8>, Errno> {
-        // Usable frames, not the allocator's address-space extent: the
-        // extent spans from physical address zero to the highest mapped
-        // address, so on a platform whose RAM sits above an MMIO window
-        // (e.g. a 1 GiB hole below the RAM base) it would overstate the
-        // machine's memory and make `total - free` look almost exhausted
-        // on a fresh boot.
-        let usable_frames = self.state.frame_allocator.usable_frames() as u64;
         let free_frames = self.state.frame_allocator.free_frames() as u64;
         let page = PAGE_SIZE as u64;
         let stats = KernelMemoryStats {
-            total_bytes: usable_frames.saturating_mul(page),
+            total_bytes: usable_ram_bytes(self.usable_frames()),
             free_bytes: free_frames.saturating_mul(page),
             kernel_heap_bytes: self.kernel_heap_bytes,
             // Per-space resident accounting has no live accounter yet; report
@@ -445,6 +465,18 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             reserved: [0u8; 7],
         };
         Ok(report.to_le_bytes().to_vec())
+    }
+
+    fn memory_total_bytes(&self) -> Result<Vec<u8>, Errno> {
+        // The same figure `kernel_memory` reports, derived by the one
+        // shared helper so the ungated and gated views can never disagree.
+        // Only the installed-RAM census is read: an unprivileged caller
+        // must not be able to drive a free-memory sample, which is why
+        // this does not project the gated record.
+        let total = MemoryTotal {
+            total_bytes: usable_ram_bytes(self.usable_frames()),
+        };
+        Ok(total.to_le_bytes().to_vec())
     }
 
     fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -714,6 +746,51 @@ mod tests {
         for depth in 0..PRESSURE_BAND_COUNT {
             let band = PressureBand::from_depth(u8::try_from(depth).unwrap());
             assert_eq!(usize::from(band.depth()), depth);
+        }
+    }
+
+    use super::{usable_ram_bytes, PAGE_SIZE};
+    use tairix_abi::sysinfo::{KernelMemoryStats, MemoryTotal};
+
+    /// The ungated total and the gated kernel-memory view report one
+    /// number for one machine: both scale the same usable-frame census
+    /// through [`usable_ram_bytes`], so which capability a caller holds
+    /// can never change the size it is told.
+    #[test]
+    fn the_ungated_total_matches_the_gated_kernel_memory_total() {
+        for usable_frames in [0usize, 1, 512, 1 << 20] {
+            let bytes = usable_ram_bytes(usable_frames);
+            let gated = KernelMemoryStats {
+                total_bytes: bytes,
+                free_bytes: 0,
+                kernel_heap_bytes: 0,
+                user_resident_bytes: 0,
+                page_size: u32::try_from(PAGE_SIZE).unwrap_or(u32::MAX),
+                reserved: 0,
+            };
+            let ungated = MemoryTotal { total_bytes: bytes };
+            let gated =
+                KernelMemoryStats::from_bytes(&gated.to_le_bytes()).expect("gated round trip");
+            let ungated =
+                MemoryTotal::from_bytes(&ungated.to_le_bytes()).expect("ungated round trip");
+            assert_eq!(ungated.total_bytes, gated.total_bytes);
+        }
+    }
+
+    #[test]
+    fn usable_ram_bytes_scales_by_page_and_never_wraps() {
+        assert_eq!(usable_ram_bytes(0), 0);
+        assert_eq!(usable_ram_bytes(1), PAGE_SIZE as u64);
+        assert_eq!(usable_ram_bytes(512), 512 * PAGE_SIZE as u64);
+
+        // A census large enough to overflow the byte count reports the
+        // largest representable size, never a wrapped one that would look
+        // like a nearly-empty machine to a caller sizing a cache against
+        // it. Unreachable where `usize` is too narrow to hold such a
+        // census, so the arm is skipped rather than asserted there.
+        let overflowing = u64::MAX / PAGE_SIZE as u64 + 1;
+        if let Ok(frames) = usize::try_from(overflowing) {
+            assert_eq!(usable_ram_bytes(frames), u64::MAX);
         }
     }
 
