@@ -28,12 +28,15 @@
 //!   is refused, never composed short — the shared
 //!   [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) is the one
 //!   definition of that question.
-//! * An array brought online with any slot not present-and-current is a
-//!   **degraded start**: its generation is bumped and every surviving current
-//!   member is re-stamped at the new generation, so a member that was absent or
-//!   behind can never return masquerading as up to date. A re-stamp that
-//!   cannot be written fails the whole bring-up closed rather than serving an
-//!   array whose metadata lies.
+//! * An array brought online with a slot the composer cannot see is **fenced**:
+//!   its generation is bumped and every surviving current member is re-stamped
+//!   at the new generation, so the disk that is missing — which may still hold
+//!   a superblock claiming it is current — can never return masquerading as up
+//!   to date. A re-stamp that cannot be written fails the whole bring-up closed
+//!   rather than serving an array whose metadata lies. A slot that is present
+//!   but *behind* needs no fencing: its own superblock already records it, and
+//!   moving the array again on its account would throw away the recorded
+//!   position of the rebuild it is the target of.
 //! * An array whose composed geometry is not the geometry its members' own
 //!   metadata agree on is refused. The members' capacity is what the
 //!   composition engine actually measures, while the identity records what the
@@ -44,10 +47,18 @@
 //! Each member is composed through a [`PartitionBlock`] view that begins at
 //! [`RESERVED_METADATA_BLOCKS`], so a member's own superblock can never be
 //! read or written as array data.
+//!
+//! # A pass measured in days resumes where it left off
+//!
+//! A scrub or a rebuild of a 100 TB+ array runs for longer than the interval
+//! between reboots, so the array's position is read back from the members'
+//! maintenance records at assembly and restored into the composed device
+//! before it serves anything. A record that is missing, foreign, corrupt, or
+//! from another generation simply yields no position: the passes start over,
+//! which costs time and never correctness.
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{serve_request_recovering, BlkHealth, BlkHealthState, BLK_COMPLETION_LEN};
 use tairix_abi::driver::block::Block;
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
@@ -59,7 +70,9 @@ use tairix_raid::{
     SCRATCH_BLOCKS as DUAL_PARITY_SCRATCH_BLOCKS,
     TRIPLE_SCRATCH_BLOCKS as TRIPLE_PARITY_SCRATCH_BLOCKS, WIRE_LEN as SUPERBLOCK_WIRE_LEN,
 };
-use tairix_raidmeta::{RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK};
+use tairix_raidmeta::{
+    ArrayProgress, MaintenanceRecord, MAINTENANCE_BLOCK, RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK,
+};
 
 /// The largest logical block size a sane member reports, bounding the stack
 /// buffer superblock I/O stages one block through. Every member the composer
@@ -67,6 +80,16 @@ use tairix_raidmeta::{RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK};
 /// outside `512..=4096`; a member reporting a larger one is refused here too
 /// rather than staging it through an undersized buffer.
 const MAX_BLOCK_SIZE: usize = 4096;
+
+/// The smallest logical block size a member may have: enough to hold either
+/// metadata record whole, since each occupies a block of its own. Deriving it
+/// from both records rather than naming a number keeps a member that could
+/// hold one but not the other from being admitted at all.
+const MIN_BLOCK_SIZE: usize = if SUPERBLOCK_WIRE_LEN > MaintenanceRecord::WIRE_LEN {
+    SUPERBLOCK_WIRE_LEN
+} else {
+    MaintenanceRecord::WIRE_LEN
+};
 
 /// Logical blocks of scratch a RAID5 distributed-parity array borrows for
 /// read-modify-write and reconstruction. Its engine documents the minimum as
@@ -109,6 +132,12 @@ pub enum ServiceError {
     /// A table could not grow to hold the array's members or scratch;
     /// exhaustion is a value, never a panic.
     OutOfMemory,
+    /// The maintenance scheduler refused the array: its per-member records did
+    /// not match the array's width. The runtime sizes that buffer from the
+    /// array itself, so this cannot arise from a disk; it is refused rather
+    /// than assumed away, because a scheduler that cannot see every slot would
+    /// leave one unable to rejoin.
+    Maintenance,
 }
 
 /// Read and decode the array superblock from block 0 of `device`, failing
@@ -127,12 +156,56 @@ pub enum ServiceError {
 /// * [`ServiceError::Superblock`] — the leading bytes are not a valid
 ///   superblock.
 pub fn read_superblock<B: Block>(device: &mut B) -> Result<ArraySuperblock, ServiceError> {
-    let block_size = superblock_block_size(device)?;
+    let block_size = metadata_block_size(device)?;
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     device
         .read_blocks(SUPERBLOCK_BLOCK, &mut buf[..block_size])
         .map_err(ServiceError::Device)?;
     ArraySuperblock::decode(&buf[..block_size]).map_err(ServiceError::Superblock)
+}
+
+/// Read the array maintenance record a member carries, or [`None`] when it
+/// carries none this array can use.
+///
+/// The record is a *hint* about where an interrupted verification pass or
+/// rebuild had got to, never something the array's correctness rests on, so
+/// every way of doubting it — a device that will not answer, a block size that
+/// cannot hold the record, a blank block, a torn or corrupt one — yields
+/// [`None`] rather than an error. The array then starts its passes over, which
+/// is the direction that verifies more, never less. Whether the record belongs
+/// to *this* array at *this* generation is decided later, by
+/// [`MaintenanceRecord::progress_for`].
+pub fn read_maintenance_record<B: Block>(device: &mut B) -> Option<MaintenanceRecord> {
+    let block_size = metadata_block_size(device).ok()?;
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    device
+        .read_blocks(MAINTENANCE_BLOCK, &mut buf[..block_size])
+        .ok()?;
+    MaintenanceRecord::decode(&buf[..block_size]).ok()
+}
+
+/// Write `record` into a member's maintenance block, zero-padding the rest.
+///
+/// The block is reserved for this record alone, so the padding carries no
+/// array data. It is a block of its own, separate from the superblock,
+/// precisely so a torn write of a routine progress checkpoint can never damage
+/// the metadata reassembly depends on.
+///
+/// # Errors
+///
+/// * [`ServiceError::BlockSize`] — the device's block size cannot hold the
+///   record, or exceeds the largest a sane device reports.
+/// * [`ServiceError::Device`] — the geometry or write call failed.
+pub fn write_maintenance_record<B: Block>(
+    device: &mut B,
+    record: &MaintenanceRecord,
+) -> Result<(), ServiceError> {
+    let block_size = metadata_block_size(device)?;
+    let mut buf = [0u8; MAX_BLOCK_SIZE];
+    buf[..MaintenanceRecord::WIRE_LEN].copy_from_slice(&record.encode());
+    device
+        .write_blocks(MAINTENANCE_BLOCK, &buf[..block_size])
+        .map_err(ServiceError::Device)
 }
 
 /// Write `superblock` into block 0 of `device`, zero-padding the rest of the
@@ -151,7 +224,7 @@ pub fn write_superblock<B: Block>(
     device: &mut B,
     superblock: &ArraySuperblock,
 ) -> Result<(), ServiceError> {
-    let block_size = superblock_block_size(device)?;
+    let block_size = metadata_block_size(device)?;
     let mut buf = [0u8; MAX_BLOCK_SIZE];
     buf[..SUPERBLOCK_WIRE_LEN].copy_from_slice(&superblock.encode());
     device
@@ -160,13 +233,38 @@ pub fn write_superblock<B: Block>(
 }
 
 /// The validated block size of `device`, refusing a size that cannot hold the
-/// superblock or is larger than the staging buffer.
-fn superblock_block_size<B: Block>(device: &B) -> Result<usize, ServiceError> {
+/// array's metadata records or is larger than the staging buffer.
+fn metadata_block_size<B: Block>(device: &B) -> Result<usize, ServiceError> {
     let block_size = device.geometry().map_err(ServiceError::Device)?.block_size as usize;
-    if !(SUPERBLOCK_WIRE_LEN..=MAX_BLOCK_SIZE).contains(&block_size) {
+    if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) {
         return Err(ServiceError::BlockSize);
     }
     Ok(block_size)
+}
+
+/// Where an assembled array's self-maintenance picks up: what its members'
+/// records say it had done, and what the next record it writes must carry.
+///
+/// Read from the freshest record among the array's own members at assembly.
+/// An array with no usable record resumes as one whose history is unknown:
+/// nothing in progress, and a verification pass due at once rather than
+/// assumed unnecessary.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MaintenanceResume {
+    /// The position the array was restored to, already planted in the composed
+    /// device, or [`ArrayProgress::IDLE`] when there was none to restore.
+    pub progress: ArrayProgress,
+    /// The sequence the next record written must carry, one past the freshest
+    /// found, so a later checkpoint always outranks the records already on the
+    /// members.
+    pub sequence: u64,
+    /// When the array's last complete verification pass finished, carried
+    /// forward so a checkpoint written before the next pass completes does not
+    /// erase it.
+    pub last_scrub_completed: Option<Time64>,
+    /// How long ago that pass finished, as the maintenance scheduler seeds its
+    /// period. [`u64::MAX`] means unknown, which makes a pass due at once.
+    pub since_last_scrub_ns: u64,
 }
 
 /// An assembled array ready to be published and served.
@@ -182,9 +280,12 @@ pub struct Assembled<B: Block> {
     /// tag. Its present slots are the members now serving; its missing slots
     /// are the array's absent or held-back members.
     pub slots: Vec<SlotDisposition>,
-    /// Whether the array started degraded and its surviving members were
-    /// re-stamped at the bumped generation.
+    /// Whether the array started short of full redundancy — a slot missing, or
+    /// holding a copy the metadata proved is behind.
     pub degraded: bool,
+    /// Where the array's self-maintenance picks up, read from its members'
+    /// own records and already restored into `array`.
+    pub resume: MaintenanceResume,
 }
 
 /// Assemble the array `identity` from its members among `candidates`, taking
@@ -192,10 +293,10 @@ pub struct Assembled<B: Block> {
 ///
 /// The slot table is resolved with [`ArrayIdentity::fill_slots`] and refused
 /// unless [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) accepts
-/// it. An array with any slot missing or behind is a degraded start: the
-/// generation is bumped and each surviving current member is re-stamped at it
-/// through [`write_superblock`] before the array is composed, so a member that
-/// returns later resolves as the stale rebuild target it is. A re-stamp write
+/// it. An array with a slot the composer cannot see is fenced: the generation
+/// is bumped and each surviving current member is re-stamped at it through
+/// [`write_superblock`] before the array is composed, so the missing disk
+/// resolves as the stale rebuild target it is when it returns. A re-stamp write
 /// failure fails the whole bring-up closed. Each present device is composed
 /// through a [`PartitionBlock`] view beginning at [`RESERVED_METADATA_BLOCKS`],
 /// so its own metadata can never be exposed as array data.
@@ -227,7 +328,18 @@ pub fn assemble_array<B: Block>(
     let degraded = !slots
         .iter()
         .all(|slot| matches!(slot, SlotDisposition::Present { in_sync: true, .. }));
-    let effective = if degraded {
+    // Only a slot the composer cannot see needs fencing: that disk may still
+    // hold a superblock claiming it is current, so the survivors must move to a
+    // generation it cannot match. A slot that is present but *behind* is
+    // already fenced by its own superblock, and moving the array again on its
+    // account would cost more than it buys — the array's maintenance record
+    // names the generation it was written at, so a needless bump discards the
+    // recorded position of the very rebuild that member is the target of, and a
+    // rebuild long enough to outlive a restart would begin again every time.
+    let unfenced = slots
+        .iter()
+        .any(|slot| matches!(slot, SlotDisposition::Missing));
+    let effective = if unfenced {
         identity.bump_generation()
     } else {
         identity
@@ -238,13 +350,19 @@ pub fn assemble_array<B: Block>(
     // candidate tag so the placement bridge below maps each slot back to its
     // device.
     let mut prepared: Vec<(usize, PartitionBlock<B>)> = Vec::new();
+    let mut freshest: Option<MaintenanceRecord> = None;
     for (slot_index, slot) in slots.iter().enumerate() {
         let SlotDisposition::Present { tag, in_sync } = *slot else {
             continue;
         };
         let mut raw =
             take_raw(tag).ok_or(ServiceError::Fill(AssembleError::MissingDevice { tag }))?;
-        if degraded && in_sync {
+        if let Some(record) = read_maintenance_record(&mut raw) {
+            if freshest.is_none_or(|held| record.is_fresher_than(&held)) {
+                freshest = Some(record);
+            }
+        }
+        if unfenced && in_sync {
             let slot = u16::try_from(slot_index).map_err(|_| ServiceError::Unservable)?;
             let restamped = effective
                 .member_superblock(slot, now)
@@ -265,19 +383,53 @@ pub fn assemble_array<B: Block>(
     if array.array_geometry() != effective.geometry {
         return Err(ServiceError::GeometryMismatch);
     }
+    let resume = resume_maintenance(&mut array, freshest.as_ref(), &effective, now);
     Ok(Assembled {
         array,
         identity: effective,
         slots,
         degraded,
+        resume,
     })
+}
+
+/// Restore the position `record` holds into `array` and report where its
+/// maintenance picks up.
+///
+/// A record that is not this array's is disregarded whole: a recycled or
+/// hostile disk must be unable to inject a position into this array, and
+/// equally unable to talk it out of verifying itself with a completion that
+/// was never this array's. A cursor the composed array will not accept is
+/// dropped rather than made a reason to refuse the array: the position only
+/// says where to *resume*, so losing it costs a pass from the beginning and
+/// never correctness. The completion stamp survives that, because when the
+/// array was last verified is true whatever the cursors say.
+fn resume_maintenance<B: Block>(
+    array: &mut OwnedRaidArray<PartitionBlock<B>>,
+    record: Option<&MaintenanceRecord>,
+    identity: &ArrayIdentity,
+    now: Time64,
+) -> MaintenanceResume {
+    let record = record.filter(|record| record.belongs_to(identity));
+    let stored = record.map_or(ArrayProgress::IDLE, |record| record.progress_for(identity));
+    let progress = if stored.is_active() && array.restore_progress(stored).is_err() {
+        ArrayProgress::IDLE
+    } else {
+        stored
+    };
+    MaintenanceResume {
+        progress,
+        sequence: record.map_or(0, |record| record.sequence.saturating_add(1)),
+        last_scrub_completed: record.and_then(|record| record.last_scrub_completed),
+        since_last_scrub_ns: record.map_or(u64::MAX, |record| record.since_last_scrub_ns(now)),
+    }
 }
 
 /// Wrap `raw` in the metadata-offset window every member is composed through:
 /// a view beginning at [`RESERVED_METADATA_BLOCKS`] and spanning the rest of
 /// the device, so the member's own superblock and maintenance record sit below
 /// block 0 of the view and can never be served as array data.
-fn wrap_member<B: Block>(raw: B) -> Result<PartitionBlock<B>, ServiceError> {
+pub(crate) fn wrap_member<B: Block>(raw: B) -> Result<PartitionBlock<B>, ServiceError> {
     let block_count = raw.geometry().map_err(ServiceError::Device)?.block_count;
     let data_blocks = block_count
         .checked_sub(RESERVED_METADATA_BLOCKS)
@@ -405,143 +557,6 @@ fn try_scratch(blocks: usize, block_size: u32) -> Result<Vec<u8>, ServiceError> 
         .checked_mul(block_size as usize)
         .ok_or(ServiceError::Assembly)?;
     try_vec(len, 0u8)
-}
-
-/// One live array the composer serves: its identity, its owning composed
-/// device, its fault-recovery health, and the ids of the block-service
-/// endpoint, shared data window, and hardware-tree node it is published
-/// through.
-///
-/// It is generic over the *raw* member device `B` (a block client) and owns
-/// the composed [`OwnedRaidArray`] over each member's metadata-offset
-/// [`PartitionBlock`] view, so a returning member is placed by handing the
-/// runtime a raw device and letting it wrap it, never a pre-wrapped one.
-///
-/// An array answers block requests through the *same* shared
-/// [`serve_request_recovering`] engine a leaf device does, so it is fault-aware
-/// exactly as a disk is and no second serve path exists.
-pub struct ArrayRuntime<B: Block> {
-    identity: ArrayIdentity,
-    array: OwnedRaidArray<PartitionBlock<B>>,
-    health: BlkHealth,
-    endpoint: u64,
-    window_id: u64,
-    node_id: u32,
-}
-
-impl<B: Block> ArrayRuntime<B> {
-    /// Wrap an assembled array as a live service on `endpoint` (the
-    /// composer-created block-service call endpoint), `window_id` (its shared
-    /// data window), and `node_id` (its published hardware-tree node).
-    ///
-    /// The array is served with the most patient of its live members' device
-    /// classes — it can only answer as fast as the member it waits on — read
-    /// from the composed device itself, never an assumed envelope.
-    #[must_use]
-    pub fn new(
-        identity: ArrayIdentity,
-        array: OwnedRaidArray<PartitionBlock<B>>,
-        endpoint: u64,
-        window_id: u64,
-        node_id: u32,
-    ) -> Self {
-        let health = BlkHealth::new(array.device_class());
-        Self {
-            identity,
-            array,
-            health,
-            endpoint,
-            window_id,
-            node_id,
-        }
-    }
-
-    /// Serve one block request into `reply`, staging its data through
-    /// `window`, and return the framed reply length.
-    ///
-    /// The request funnels through the shared fault-aware engine with the
-    /// array's own [`BlkHealth`]: a member blip inside the recovery grace
-    /// window is answered reissuably and a valid answer recovers the array,
-    /// while a malformed or out-of-range request is refused health-neutrally.
-    /// The array is served read/write.
-    #[must_use]
-    pub fn serve(
-        &mut self,
-        request: &[u8],
-        window: &mut [u8],
-        reply: &mut [u8; BLK_COMPLETION_LEN],
-        now_ns: u64,
-    ) -> usize {
-        serve_request_recovering(
-            &mut self.array,
-            false,
-            request,
-            window,
-            reply,
-            &mut self.health,
-            now_ns,
-        )
-    }
-
-    /// Advance the recovery grace window on a pure time tick, so an array left
-    /// recovering with no further request still fails closed on time off a
-    /// one-shot timer rather than a busy-poll.
-    #[must_use]
-    pub fn poll(&mut self, now_ns: u64) -> BlkHealthState {
-        self.health.poll(now_ns)
-    }
-
-    /// The array's fault-recovery health, for folding the serve loop's
-    /// one-shot recovery timeout across every live array.
-    #[must_use]
-    pub const fn health(&self) -> &BlkHealth {
-        &self.health
-    }
-
-    /// The composer-created block-service endpoint this array is served on.
-    #[must_use]
-    pub const fn endpoint(&self) -> u64 {
-        self.endpoint
-    }
-
-    /// The shared data window forwarded to the array's published node.
-    #[must_use]
-    pub const fn window_id(&self) -> u64 {
-        self.window_id
-    }
-
-    /// The array's published hardware-tree node id.
-    #[must_use]
-    pub const fn node_id(&self) -> u32 {
-        self.node_id
-    }
-
-    /// The identity the array is serving at (its bumped generation for a
-    /// degraded start).
-    #[must_use]
-    pub const fn identity(&self) -> &ArrayIdentity {
-        &self.identity
-    }
-
-    /// Place a returning or late member device into a currently-absent slot of
-    /// the live array, beginning its rebuild from the survivors.
-    ///
-    /// The device is wrapped in its metadata-offset view first, so its own
-    /// superblock is never touched as array data, then installed with the
-    /// composed device's own spare-insertion path.
-    ///
-    /// # Errors
-    ///
-    /// * [`ServiceError::MemberTooSmall`] / [`ServiceError::Device`] — the
-    ///   device could not be wrapped.
-    /// * [`ServiceError::Assembly`] — the array refused the placement (the
-    ///   slot is out of range or already occupied).
-    pub fn place_member(&mut self, slot: u16, raw: B) -> Result<(), ServiceError> {
-        let view = wrap_member(raw)?;
-        self.array
-            .add_member(usize::from(slot), view)
-            .map_err(|_| ServiceError::Assembly)
-    }
 }
 
 #[cfg(test)]

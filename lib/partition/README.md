@@ -29,7 +29,11 @@ validated fail-closed against an untrusted, possibly-hostile disk
 - `PartitionBlock` — presents one partition's extent of an underlying
   `Block` device as a standalone, bounds-checked `Block`, so a
   filesystem driver mounts a partition without being able to address a
-  block outside it (`AGENTS.md` §5.4 / §24.4).
+  block outside it (`AGENTS.md` §5.4 / §24.4). The window bounds that
+  `Block` I/O, not its holder: whoever owns the adapter can still take
+  the device back (`into_inner`) or borrow it (`device_mut`), which is
+  how a RAID member's own metadata — reserved blocks below the data
+  window — is read and written.
 
 ## Trust and fail-closed behaviour
 

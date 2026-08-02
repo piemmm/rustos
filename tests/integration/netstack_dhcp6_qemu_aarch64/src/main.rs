@@ -48,33 +48,31 @@
 //!    the peer's RA has installed the on-link route — answers the host peer's
 //!    echo campaign to that leased address.
 //!
-//! ## Why PASS keys on three witnesses
+//! ## How the run completes — harness-driven, race-free
 //!
-//! The log-sink observer reports PASS once it has seen all of (each a
-//! userland `log_emit` record the kernel routes to the log sink):
-//!
-//! 1. `devmgr`'s `NETSTACK_BOUND` — the `netchan` node was handed to the
-//!    stack over the capability-gated admin surface.
-//! 2. `netstack`'s `DHCP6_LEASE_ACQUIRED` — the DHCPv6 client completed the
-//!    exchange and applied the leased address to the interface.
-//! 3. `netstack`'s `INBOUND_ECHO_SERVED` — an echo request addressed to the
-//!    interface's *leased* address was answered, so a frame crossed the
-//!    two-process boundary end to end at the DHCP-configured address.
-//!
-//! Witness 3 can only fire after 1 and 2 (and the driver's own `netchan`
-//! readiness), so the three together prove the whole chain; it gates exit so
-//! the guest stays alive until a frame has actually been answered, avoiding a
-//! race with the host peer's verdict. The harness additionally requires the
-//! peer thread's own DHCPv6-server + leased-address echo campaign to have
-//! completed, so neither side can pass alone.
+//! The guest does **not** self-terminate. It boots the production pipeline and
+//! keeps serving the host peer's leased-address echo campaign; the harness
+//! ends the run the instant the peer's out-of-guest observer confirms
+//! success — it received the guest's echo reply at the leased address. That
+//! confirmation is the *last* link in the causal chain (driver autoloaded and
+//! bound, the DHCPv6 lease acquired and applied, an inbound echo served and
+//! its reply transmitted back), so a guest that instead self-exited on an
+//! intermediate witness would tear the machine down before the reply left it
+//! and lose the race — the defect this choreography removes. The witness
+//! records (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s `DHCP6_LEASE_ACQUIRED`
+//! and `INBOUND_ECHO_SERVED`) still reach the serial transcript for
+//! diagnosis, and the peer's own DHCPv6-server + leased-address echo campaign
+//! verdict subsumes them: it cannot be met unless the lease was granted and
+//! the reply arrived. A run that never earns the peer's confirmation fails
+//! loud on the runner's inactivity/absolute deadline.
 //!
 //! ## How it differs from a production kernel
 //!
-//! It reuses the entire production aarch64 boot pipeline and only swaps in a
-//! log-sink observer. Splitting the observer behaviour into a separate bin
-//! (instead of a Cargo feature on a production crate) prevents feature
-//! unification from leaking the QEMU-exit shortcut into any production build
-//! (fail closed; the harness never decides what the kernel does next).
+//! It reuses the entire production aarch64 boot pipeline unchanged. The only
+//! difference is that it is a dedicated test bin the harness drives to
+//! completion through the peer's success gate — there is no in-kernel QEMU-exit
+//! shortcut to leak into a production build (fail closed; the harness never
+//! decides what the kernel does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -85,12 +83,10 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -112,61 +108,8 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-    /// The kernel **log** sink: it replays every record through
-    /// [`SERIAL_SINK`] and reports PASS to QEMU once all three witnesses have
-    /// appeared. All three are *userland* `log_emit` records (from the
-    /// `devmgr` and `netstack` services), which the kernel routes to the log
-    /// sink — not the audit sink — so this observer is installed there:
-    /// `devmgr`'s `NETSTACK_BOUND` (the `netchan` node was handed to the
-    /// stack), the stack's `DHCP6_LEASE_ACQUIRED` (the DHCPv6 client leased and
-    /// applied an address), and the stack's `INBOUND_ECHO_SERVED` (an inbound
-    /// echo request addressed to the leased address crossed the two-process
-    /// boundary and was answered). The guest exits only after the last, so the
-    /// host peer's verdict never races an early teardown.
-    struct NetstackDhcp6Sink {
-        netstack_bound: AtomicBool,
-        dhcp6_lease_acquired: AtomicBool,
-        echo_served: AtomicBool,
-    }
-
-    impl NetstackDhcp6Sink {
-        const fn new() -> Self {
-            Self {
-                netstack_bound: AtomicBool::new(false),
-                dhcp6_lease_acquired: AtomicBool::new(false),
-                echo_served: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl Sink for NetstackDhcp6Sink {
-        fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink so the QEMU transcript records the
-            // full boot + autoload + bind + DHCPv6 lease + echo timeline for a
-            // failing run.
-            SerialSink::new().write_event(event);
-            if event.id.0 == tairix_devmgr::events::NETSTACK_BOUND.0 {
-                self.netstack_bound.store(true, Ordering::Release);
-            } else if event.id.0 == tairix_netstack::events::DHCP6_LEASE_ACQUIRED.0 {
-                self.dhcp6_lease_acquired.store(true, Ordering::Release);
-            } else if event.id.0 == tairix_netstack::events::INBOUND_ECHO_SERVED.0 {
-                self.echo_served.store(true, Ordering::Release);
-            } else {
-                return;
-            }
-            if self.netstack_bound.load(Ordering::Acquire)
-                && self.dhcp6_lease_acquired.load(Ordering::Acquire)
-                && self.echo_served.load(Ordering::Acquire)
-            {
-                qemu_exit::exit_success();
-            }
-        }
-    }
-
-    static WITNESS_SINK: NetstackDhcp6Sink = NetstackDhcp6Sink::new();
-
-    /// Forward to the shared aarch64 panic bridge. A panic before the PASS
-    /// finisher parks the CPU, the run times out, and the harness reports
+    /// Forward to the shared aarch64 panic bridge. A panic parks the CPU; the
+    /// guest never self-exits, so the run times out and the harness reports
     /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn tairix_netstack_dhcp6_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
@@ -177,18 +120,19 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline. The witness
-    /// observer is installed as the **log** sink (the three witnesses are
-    /// userland `log_emit` records the kernel routes there), and the plain
-    /// [`SERIAL_SINK`] takes the audit stream so kernel audit records still
-    /// reach the transcript. Boot at the default `Info` filter: the three
-    /// witnesses are `Info` records.
+    /// address is forwarded to the production boot pipeline. [`SERIAL_SINK`]
+    /// takes both the log and the audit streams, so every boot/autoload/bind/
+    /// lease/echo record reaches the QEMU transcript for diagnosis. The guest
+    /// does not self-exit: the harness ends the run when the host peer
+    /// confirms the echo round-trip at the leased address (its success gate),
+    /// so teardown can never precede that confirmation. Boot at the default
+    /// `Info` filter: the witness records are `Info` records.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
-            &WITNESS_SINK,
+            &SERIAL_SINK,
             &SERIAL_SINK,
             tairix_log::Level::Info,
             &tairix_kernel::hwtree_store::HW_TREE_SOURCE,

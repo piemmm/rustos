@@ -20,6 +20,10 @@
 //!   came back stays out of the array (`AGENTS.md` §18.4).
 //! - Scrubbing an array that is mid-rebuild spends the bandwidth the rebuild
 //!   needs to restore redundancy.
+//! - A position that is never written down is a pass that starts over on every
+//!   restart, so a large array rebooted often enough is never verified and may
+//!   never finish a rebuild (`AGENTS.md` §26.5, §26.6) — while writing it down
+//!   after every chunk would burn a member's medium for nothing.
 //!
 //! So the decision lives here once, host-provable, rather than being
 //! hand-rolled per consumer (`AGENTS.md` §2.2, §27).
@@ -47,6 +51,11 @@
 //! 4. On [`MaintenanceAction::Idle`], park until the soonest of the array's
 //!    own I/O events and [`wait_deadline_ns`](ArrayMaintenance::wait_deadline_ns).
 //!
+//! The retry storage is generic so one scheduler serves both shapes of
+//! consumer: one that borrows a stack slice for the duration of a call, and a
+//! long-lived serve process that owns its arrays across turns of an event loop
+//! and so must store the scheduler beside them (`ArrayMaintenance<Vec<_>>`).
+//!
 //! Foreground traffic is reported through
 //! [`note_foreground`](ArrayMaintenance::note_foreground), and a member's
 //! demonstrated return (the recovery signal a leaf device's health or its
@@ -70,6 +79,11 @@
 //!    once full redundancy is back, rather than abandoning the work already
 //!    done or pressing on without a copy to repair from.
 //!
+//! Persisting the position ([`MaintenanceAction::Checkpoint`]) sits above both
+//! chunk kinds: it is metadata, not array bandwidth, so it neither waits behind
+//! a rebuild running flat out nor counts against the duty share the data chunks
+//! are held to.
+//!
 //! # What it deliberately does not do
 //!
 //! - It never installs or removes a device. [`RaidArray::add_member`] /
@@ -92,6 +106,7 @@ use tairix_abi::driver::block::Block;
 use crate::array::{RaidArray, RaidError};
 use crate::backoff::{RetryCadence, RetryState};
 use crate::mirror::{ArrayHealth, MemberState};
+use crate::superblock::ArrayProgress;
 
 /// How long after the last foreground request an array still counts as busy.
 ///
@@ -115,6 +130,19 @@ const FOREGROUND_IDLE_NS: u64 = 1_000_000_000;
 /// rarely arrives first.
 const SCRUB_PERIOD_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
+/// How often an advancing pass writes its position to the members by default.
+///
+/// The interval is the whole trade-off: it bounds the work an unclean stop can
+/// discard at one interval's worth of maintenance progress — itself already
+/// bounded by the duty share — while keeping the metadata cost at one small
+/// write per current member per interval, so even a pass measured in days
+/// costs a member a few thousand writes rather than one per chunk. Half a
+/// minute leaves both sides comfortably small at any array size, and like the
+/// scrub cadence it is a property of the re-work an operator tolerates rather
+/// than of the hardware, so it is one default for every class, overridable per
+/// array through [`MaintenancePolicy::checkpoint_period_ns`].
+const CHECKPOINT_PERIOD_NS: u64 = 30 * 1_000_000_000;
+
 /// What a serve loop should do next for one composed array.
 ///
 /// Returned by [`ArrayMaintenance::next_action`] and handed back to
@@ -136,6 +164,26 @@ pub enum MaintenanceAction {
     /// Advance the in-flight scrub pass by one bounded chunk
     /// ([`RaidArray::scrub_step`]).
     Scrub,
+    /// Write the array's maintenance position to its current members' on-disk
+    /// records, so a pass measured in days resumes where it left off instead of
+    /// starting over after a restart.
+    ///
+    /// The position to persist travels **in** the action rather than being
+    /// re-read by the caller: the scheduler tracks exactly what it believes is
+    /// on disk, and a caller that recorded some other reading would leave the
+    /// two disagreeing about what has been written.
+    Checkpoint {
+        /// The position to record, as of this decision.
+        progress: ArrayProgress,
+        /// Whether this write must also record that a verification pass has
+        /// finished, so the next one is not due for a full period.
+        ///
+        /// A pass that finishes leaves the position back where an idle array's
+        /// is, so the position alone cannot carry the fact that the array has
+        /// just been verified — and an array whose records never say so is
+        /// verified again on every restart.
+        pass_completed: bool,
+    },
     /// Nothing to do: the array is healthy and verified, is paced out of its
     /// next maintenance chunk, or cannot be helped autonomously. The loop
     /// parks until its own I/O or
@@ -165,6 +213,10 @@ pub struct MaintenancePolicy {
     /// How long after the last request reported to
     /// [`ArrayMaintenance::note_foreground`] the array still counts as busy.
     pub foreground_idle_ns: u64,
+    /// The shortest interval between two [`MaintenanceAction::Checkpoint`]s of
+    /// an advancing pass. It bounds both the progress an unclean stop discards
+    /// and the metadata writes a long pass costs its members.
+    pub checkpoint_period_ns: u64,
     /// The escalating cadence a faulted member is re-probed on, and the delay
     /// a failed maintenance chunk is held off by. Its base delay is the floor
     /// no recovery signal may pull an attempt below.
@@ -190,10 +242,11 @@ impl MaintenancePolicy {
     ///   share; a solid-state device absorbs a parallel background stream with
     ///   far less interference, and a paravirtual device sits between the two.
     ///
-    /// The scrub cadence and the busy window are properties of the accepted
-    /// risk and of the workload rather than of the hardware, so they are the
-    /// same for every class (see [`Self::scrub_period_ns`],
-    /// [`Self::foreground_idle_ns`]).
+    /// The scrub cadence, the busy window, and the checkpoint interval are
+    /// properties of the accepted risk and of the workload rather than of the
+    /// hardware, so they are the same for every class (see
+    /// [`Self::scrub_period_ns`], [`Self::foreground_idle_ns`],
+    /// [`Self::checkpoint_period_ns`]).
     #[must_use]
     pub const fn for_class(class: BlkDeviceClass) -> Self {
         Self {
@@ -204,6 +257,7 @@ impl MaintenancePolicy {
                 BlkDeviceClass::SolidState => 40,
             },
             foreground_idle_ns: FOREGROUND_IDLE_NS,
+            checkpoint_period_ns: CHECKPOINT_PERIOD_NS,
             readd: RetryCadence::for_class(class),
         }
     }
@@ -211,10 +265,11 @@ impl MaintenancePolicy {
 
 /// One member slot's re-add backoff state, owned by the caller.
 ///
-/// The scheduler borrows a slice of these, one per array slot, so a wide array
-/// costs no allocation and hits no fixed member ceiling (`AGENTS.md` §24.1) —
-/// the same shape the composition engines' member buffers use. The contents
-/// are the scheduler's; a caller only supplies the storage, default-initialised.
+/// The scheduler holds one of these per array slot in storage the caller
+/// supplies — a borrowed slice or an owned buffer — so a wide array hits no
+/// fixed member ceiling (`AGENTS.md` §24.1), the same shape the composition
+/// engines' member buffers use. The contents are the scheduler's; a caller only
+/// supplies the storage, default-initialised.
 ///
 /// The escalation itself is the shared [`RetryState`], so a member re-add and
 /// the member agent's registry re-offer pace themselves by one definition.
@@ -258,20 +313,34 @@ pub enum MaintenanceError {
 /// backoff has elapsed, then advance a rebuild, then advance or start a
 /// proactive scrub — the last only on a fully
 /// [`Optimal`](ArrayHealth::Optimal) array, pausing at its cursor while
-/// redundancy is reduced. The scheduler is pure and event-timed: it holds no
-/// clock, never spins, and allocates nothing (the per-member backoff records
-/// are the caller's slice). It never installs or removes a device, and drives
-/// nothing on a [`Failed`](ArrayHealth::Failed) array or a non-redundant
-/// stripe. The crate docs carry the full rationale.
-pub struct ArrayMaintenance<'a> {
+/// redundancy is reduced. Between chunks it has the caller record the position
+/// on the members ([`MaintenanceAction::Checkpoint`]), so a pass measured in
+/// days survives a restart. The scheduler is pure and event-timed: it holds no
+/// clock, never spins, and allocates nothing of its own (the per-member backoff
+/// records live in storage `R` the caller supplies — a borrowed slice, or an
+/// owned buffer for a consumer that keeps the scheduler across turns of an
+/// event loop). It never installs or removes a device, and drives nothing on a
+/// [`Failed`](ArrayHealth::Failed) array or a non-redundant stripe. The crate
+/// docs carry the full rationale.
+pub struct ArrayMaintenance<R> {
     policy: MaintenancePolicy,
-    retries: &'a mut [MemberRetry],
+    retries: R,
     /// Monotonic time the next paced maintenance chunk may run.
     next_chunk_ns: u64,
     /// Monotonic time the next proactive scrub pass may begin.
     next_scrub_ns: u64,
     /// The last foreground request the caller reported, if any.
     last_foreground_ns: Option<u64>,
+    /// The position the members' on-disk records are believed to hold. A
+    /// checkpoint is worth writing exactly when the array has moved away from
+    /// it, so a verified, idle array writes no metadata at all.
+    checkpointed: ArrayProgress,
+    /// Whether a verification pass has finished since the last write. It is
+    /// tracked apart from the position because a finished pass leaves the
+    /// position exactly where an idle array's sits.
+    completion_unwritten: bool,
+    /// Monotonic time the next checkpoint may be written.
+    next_checkpoint_ns: u64,
     /// Whether a scrub pass is running, so its completion re-arms the period.
     /// Adopted from the array at construction, because a pass resumed from the
     /// array's persisted maintenance record was started before this scheduler
@@ -281,9 +350,9 @@ pub struct ArrayMaintenance<'a> {
     wake_ns: Option<u64>,
 }
 
-impl<'a> ArrayMaintenance<'a> {
+impl<R: AsRef<[MemberRetry]> + AsMut<[MemberRetry]>> ArrayMaintenance<R> {
     /// Build a scheduler for `array`, tracking its members in the caller-owned
-    /// `retries` buffer.
+    /// `retries` storage.
     ///
     /// `since_last_scrub_ns` is how long ago the array's last scrub pass
     /// completed, as the caller knows it from the array's persisted
@@ -301,21 +370,32 @@ impl<'a> ArrayMaintenance<'a> {
     /// would go unnoticed and the already-overdue period would start it again
     /// at once, verifying the array back-to-back forever.
     ///
+    /// The array's position as it stands is taken to be the one already on the
+    /// members, so a caller restores a persisted position
+    /// ([`RaidArray::restore_progress`]) **before** building the scheduler.
+    /// Building it first is safe but wasteful: the first checkpoint then
+    /// rewrites a position the members already hold. For the same reason the
+    /// first checkpoint of a session is not due until one
+    /// [`checkpoint_period_ns`](MaintenancePolicy::checkpoint_period_ns) has
+    /// passed — nothing is owed while the array and its records agree, and a
+    /// service that restarts repeatedly never writes metadata merely for
+    /// starting.
+    ///
     /// # Errors
     ///
     /// [`MaintenanceError::WidthMismatch`] if `retries` is not exactly one
     /// record per array member.
     pub fn new<B: Block>(
         array: &RaidArray<'_, B>,
-        retries: &'a mut [MemberRetry],
+        mut retries: R,
         policy: MaintenancePolicy,
         now_ns: u64,
         since_last_scrub_ns: u64,
     ) -> Result<Self, MaintenanceError> {
-        if retries.len() != array.member_count() {
+        if retries.as_ref().len() != array.member_count() {
             return Err(MaintenanceError::WidthMismatch);
         }
-        for retry in retries.iter_mut() {
+        for retry in retries.as_mut() {
             *retry = MemberRetry::new();
         }
         let next_scrub_ns =
@@ -327,6 +407,9 @@ impl<'a> ArrayMaintenance<'a> {
             next_scrub_ns,
             last_foreground_ns: None,
             scrub_active: array.scrubbing(),
+            checkpointed: array.progress(),
+            completion_unwritten: false,
+            next_checkpoint_ns: now_ns.saturating_add(policy.checkpoint_period_ns),
             wake_ns: None,
         })
     }
@@ -349,7 +432,7 @@ impl<'a> ArrayMaintenance<'a> {
     /// array does not have, are ignored.
     pub fn note_member_returned(&mut self, member: usize, now_ns: u64) {
         let cadence = self.policy.readd;
-        if let Some(retry) = self.retries.get_mut(member) {
+        if let Some(retry) = self.retries.as_mut().get_mut(member) {
             retry.0.note_signal(cadence, now_ns);
         }
     }
@@ -374,6 +457,7 @@ impl<'a> ArrayMaintenance<'a> {
         self.sync_retries(array, now_ns);
         if self.scrub_active && !array.scrubbing() {
             self.scrub_active = false;
+            self.completion_unwritten = true;
             self.next_scrub_ns = now_ns.saturating_add(self.policy.scrub_period_ns);
         }
         if array.health() == ArrayHealth::Failed {
@@ -381,6 +465,12 @@ impl<'a> ArrayMaintenance<'a> {
         }
         if let Some(member) = self.due_readd(now_ns) {
             return MaintenanceAction::Readd { member };
+        }
+        if let Some(progress) = self.due_checkpoint(array, now_ns) {
+            return MaintenanceAction::Checkpoint {
+                progress,
+                pass_completed: self.completion_unwritten,
+            };
         }
         if let Some(chunk) = chunk_pending(array) {
             if now_ns >= self.next_chunk_ns {
@@ -418,6 +508,10 @@ impl<'a> ArrayMaintenance<'a> {
                     self.next_scrub_ns = now_ns.saturating_add(self.policy.scrub_period_ns);
                 }
             }
+            MaintenanceAction::Checkpoint {
+                progress,
+                pass_completed,
+            } => self.note_checkpoint(progress, pass_completed, now_ns, outcome),
             MaintenanceAction::Idle => {}
         }
     }
@@ -441,7 +535,7 @@ impl<'a> ArrayMaintenance<'a> {
     /// and an in-sync or resyncing one needs nothing.
     fn sync_retries<B: Block>(&mut self, array: &RaidArray<'_, B>, now_ns: u64) {
         let cadence = self.policy.readd;
-        for (index, retry) in self.retries.iter_mut().enumerate() {
+        for (index, retry) in self.retries.as_mut().iter_mut().enumerate() {
             if array.member_state(index) == Some(MemberState::Faulted) {
                 retry.0.arm(cadence, now_ns);
             } else {
@@ -454,6 +548,7 @@ impl<'a> ArrayMaintenance<'a> {
     /// lowest slot first on a tie, so the choice is deterministic.
     fn due_readd(&self, now_ns: u64) -> Option<usize> {
         self.retries
+            .as_ref()
             .iter()
             .enumerate()
             .filter_map(|(index, retry)| {
@@ -464,9 +559,52 @@ impl<'a> ArrayMaintenance<'a> {
             .map(|(_, index)| index)
     }
 
+    /// The position to record now, or [`None`] while the members' records are
+    /// already current or the interval since the last write has not elapsed.
+    fn due_checkpoint<B: Block>(
+        &self,
+        array: &RaidArray<'_, B>,
+        now_ns: u64,
+    ) -> Option<ArrayProgress> {
+        if now_ns < self.next_checkpoint_ns {
+            return None;
+        }
+        let progress = array.progress();
+        (self.records_are_stale(progress)).then_some(progress)
+    }
+
+    /// Whether the members' records no longer say what this array knows: it has
+    /// moved to a new position, or it has finished a pass they do not record.
+    fn records_are_stale(&self, progress: ArrayProgress) -> bool {
+        progress != self.checkpointed || self.completion_unwritten
+    }
+
+    /// Record what came of a checkpoint write.
+    ///
+    /// A written position becomes the one the members are believed to hold, so
+    /// nothing more is due until the array moves on again. A refused write is
+    /// held off by the class's grace window before being tried again — the same
+    /// delay a failed chunk takes, so unwell hardware is never hammered, and
+    /// the position stays unrecorded so the next attempt still carries it.
+    fn note_checkpoint(
+        &mut self,
+        progress: ArrayProgress,
+        pass_completed: bool,
+        now_ns: u64,
+        outcome: Result<(), RaidError>,
+    ) {
+        if outcome.is_ok() {
+            self.checkpointed = progress;
+            self.completion_unwritten &= !pass_completed;
+            self.next_checkpoint_ns = now_ns.saturating_add(self.policy.checkpoint_period_ns);
+        } else {
+            self.next_checkpoint_ns = now_ns.saturating_add(self.policy.readd.base_ns());
+        }
+    }
+
     fn note_readd(&mut self, member: usize, now_ns: u64, outcome: Result<(), RaidError>) {
         let cadence = self.policy.readd;
-        let Some(retry) = self.retries.get_mut(member) else {
+        let Some(retry) = self.retries.as_mut().get_mut(member) else {
             return;
         };
         if outcome.is_ok() {
@@ -502,8 +640,9 @@ impl<'a> ArrayMaintenance<'a> {
     }
 
     /// The soonest time at which [`Self::next_action`] could answer differently:
-    /// a paced-out chunk becoming runnable, the scrub period elapsing, or a
-    /// faulted member's backoff expiring.
+    /// a paced-out chunk becoming runnable, the scrub period elapsing, a
+    /// faulted member's backoff expiring, or an unrecorded position becoming
+    /// due for a checkpoint.
     ///
     /// It reads the same [`chunk_pending`] predicate the decision does, so the
     /// caller is never woken for a chunk the next decision would not run —
@@ -512,6 +651,7 @@ impl<'a> ArrayMaintenance<'a> {
     fn idle_deadline<B: Block>(&self, array: &RaidArray<'_, B>) -> Option<u64> {
         let next_retry = self
             .retries
+            .as_ref()
             .iter()
             .filter_map(|retry| retry.0.due_ns())
             .min();
@@ -522,10 +662,15 @@ impl<'a> ArrayMaintenance<'a> {
         } else {
             None
         };
-        match (next_retry, next_cycle) {
-            (Some(retry), Some(cycle)) => Some(retry.min(cycle)),
-            (retry, cycle) => retry.or(cycle),
-        }
+        // Records the array has outrun are owed a write, so the caller must be
+        // woken for it even when nothing else is pending.
+        let next_write = self
+            .records_are_stale(array.progress())
+            .then_some(self.next_checkpoint_ns);
+        [next_retry, next_cycle, next_write]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 

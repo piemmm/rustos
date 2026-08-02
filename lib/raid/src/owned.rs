@@ -364,7 +364,7 @@ impl<B: Block> OwnedRaidArray<B> {
     /// Run `op` over `view` and write the array-level scrub cursor it left
     /// back into `scrub_next_lba` before returning.
     ///
-    /// The shared tail of every [`with_view`](Self::with_view) arm but the
+    /// The shared tail of every [`with_array`](Self::with_array) arm but the
     /// stripe's (which has no scrub state, only its sticky fault flag), kept
     /// in one place so it is written once rather than once per redundant
     /// level.
@@ -386,11 +386,24 @@ impl<B: Block> OwnedRaidArray<B> {
     /// persists in the owned [`Vec`] without any write-back here; only the
     /// state a transient view does not otherwise own — the scrub position, or
     /// the stripe's own fault latch — needs to be threaded through
-    /// explicitly. Every call goes through [`from_prepared`](MirrorArray::from_prepared)
-    /// and its siblings rather than the engines' `assemble`, so a member's
-    /// recorded state is carried forward untouched instead of being
+    /// explicitly. Every call rebuilds the view from the members as they
+    /// already stand rather than through the engines' `assemble`, so a
+    /// member's recorded state is carried forward untouched instead of being
     /// re-derived from a fresh probe.
-    fn with_view<R>(&mut self, op: impl FnOnce(&mut RaidArray<'_, B>) -> R) -> R {
+    ///
+    /// This is the general seam every other method on [`OwnedRaidArray`] is
+    /// itself written in terms of, and it is exposed publicly for the same
+    /// reason: a consumer occasionally needs to run an operation none of the
+    /// wrappers above cover — handing the transient view to the
+    /// [`ArrayMaintenance`](crate::ArrayMaintenance) scheduler, or reaching a
+    /// member's own device with [`RaidArray::member_device_mut`] to write its
+    /// reserved array-metadata blocks — without the owning wrapper growing a
+    /// bespoke method for every such use. `op` only ever sees
+    /// `&mut RaidArray<'_, B>` for the duration of the call, so whatever it
+    /// borrows from the view (a member's device, the array itself) cannot
+    /// outlive this call and leak past the point where the next operation is
+    /// free to re-derive a fresh view over the same owned state.
+    pub fn with_array<R>(&mut self, op: impl FnOnce(&mut RaidArray<'_, B>) -> R) -> R {
         match self {
             Self::Mirror {
                 members,
@@ -496,50 +509,50 @@ impl<B: Block> OwnedRaidArray<B> {
     /// The RAID level this composed device implements.
     #[must_use]
     pub fn level(&mut self) -> RaidLevel {
-        self.with_view(|v| v.level())
+        self.with_array(|v| v.level())
     }
 
     /// The current [`ArrayHealth`].
     #[must_use]
     pub fn health(&mut self) -> ArrayHealth {
-        self.with_view(|v| v.health())
+        self.with_array(|v| v.health())
     }
 
     /// The number of member slots the array is defined to have.
     #[must_use]
     pub fn member_count(&mut self) -> usize {
-        self.with_view(|v| v.member_count())
+        self.with_array(|v| v.member_count())
     }
 
     /// The composed device's logical geometry.
     #[must_use]
     pub fn array_geometry(&mut self) -> BlockGeometry {
-        self.with_view(|v| v.array_geometry())
+        self.with_array(|v| v.array_geometry())
     }
 
     /// The [`MemberState`] of member `index`, or [`None`] if out of range.
     #[must_use]
     pub fn member_state(&mut self, index: usize) -> Option<MemberState> {
-        self.with_view(|v| v.member_state(index))
+        self.with_array(|v| v.member_state(index))
     }
 
     /// Whether any member is still rebuilding.
     #[must_use]
     pub fn needs_resync(&mut self) -> bool {
-        self.with_view(|v| v.needs_resync())
+        self.with_array(|v| v.needs_resync())
     }
 
     /// Whether a proactive scrub pass is in progress.
     #[must_use]
     pub fn scrubbing(&mut self) -> bool {
-        self.with_view(|v| v.scrubbing())
+        self.with_array(|v| v.scrubbing())
     }
 
     /// The scrub cursor (the next block a scrub will verify); equal to the
     /// array block count when idle.
     #[must_use]
     pub fn scrub_cursor(&mut self) -> u64 {
-        self.with_view(|v| v.scrub_cursor())
+        self.with_array(|v| v.scrub_cursor())
     }
 
     /// Begin a proactive scrub pass from block 0.
@@ -548,11 +561,11 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// * [`RaidError::NotRedundant`] for a stripe.
     // A bare `RaidArray::begin_scrub` function item fails to satisfy the
-    // higher-ranked lifetime `with_view` needs for a generic `B`, so the
+    // higher-ranked lifetime `with_array` needs for a generic `B`, so the
     // closure is not actually redundant here despite the identical body.
     #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn begin_scrub(&mut self) -> Result<(), RaidError> {
-        self.with_view(|v| v.begin_scrub())
+        self.with_array(|v| v.begin_scrub())
     }
 
     /// Verify and repair one bounded chunk of a scrub pass.
@@ -561,7 +574,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::scrub_step`].
     pub fn scrub_step(&mut self, scratch: &mut [u8]) -> Result<(), RaidError> {
-        self.with_view(|v| v.scrub_step(scratch))
+        self.with_array(|v| v.scrub_step(scratch))
     }
 
     /// Rebuild one bounded chunk of every resyncing member.
@@ -570,7 +583,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::resync_step`].
     pub fn resync_step(&mut self, scratch: &mut [u8]) -> Result<(), RaidError> {
-        self.with_view(|v| v.resync_step(scratch))
+        self.with_array(|v| v.resync_step(scratch))
     }
 
     /// Begin rebuilding a currently-faulted member from its existing device.
@@ -579,7 +592,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::readd_member`].
     pub fn readd_member(&mut self, index: usize) -> Result<(), RaidError> {
-        self.with_view(|v| v.readd_member(index))
+        self.with_array(|v| v.readd_member(index))
     }
 
     /// Remove a faulted member's device, leaving its slot absent and
@@ -589,7 +602,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::remove_member`].
     pub fn remove_member(&mut self, index: usize) -> Result<B, RaidError> {
-        self.with_view(|v| v.remove_member(index))
+        self.with_array(|v| v.remove_member(index))
     }
 
     /// Install a spare `device` into an absent slot and begin rebuilding it.
@@ -598,7 +611,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::add_member`].
     pub fn add_member(&mut self, index: usize, device: B) -> Result<(), RaidError> {
-        self.with_view(|v| v.add_member(index, device))
+        self.with_array(|v| v.add_member(index, device))
     }
 
     /// Hot-swap a faulted member's device for a fresh one.
@@ -607,13 +620,13 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::replace_member`].
     pub fn replace_member(&mut self, index: usize, device: B) -> Result<(), RaidError> {
-        self.with_view(|v| v.replace_member(index, device))
+        self.with_array(|v| v.replace_member(index, device))
     }
 
     /// The array's resumable maintenance position.
     #[must_use]
     pub fn progress(&mut self) -> ArrayProgress {
-        self.with_view(|v| v.progress())
+        self.with_array(|v| v.progress())
     }
 
     /// Resume maintenance at a previously checkpointed `progress`.
@@ -622,7 +635,7 @@ impl<B: Block> OwnedRaidArray<B> {
     ///
     /// As [`RaidArray::restore_progress`].
     pub fn restore_progress(&mut self, progress: ArrayProgress) -> Result<(), RaidError> {
-        self.with_view(|v| v.restore_progress(progress))
+        self.with_array(|v| v.restore_progress(progress))
     }
 }
 
@@ -661,18 +674,18 @@ impl<B: Block> Block for OwnedRaidArray<B> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.with_view(|v| v.read_blocks(lba, buf))
+        self.with_array(|v| v.read_blocks(lba, buf))
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        self.with_view(|v| v.write_blocks(lba, buf))
+        self.with_array(|v| v.write_blocks(lba, buf))
     }
 
     // See the comment on `begin_scrub` above: the function item does not
     // satisfy the higher-ranked lifetime bound here either.
     #[allow(clippy::redundant_closure_for_method_calls)]
     fn flush(&mut self) -> Result<(), DriverError> {
-        self.with_view(|v| v.flush())
+        self.with_array(|v| v.flush())
     }
 
     fn read_blocks_with_class(
@@ -681,7 +694,7 @@ impl<B: Block> Block for OwnedRaidArray<B> {
         buf: &mut [u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        self.with_view(|v| v.read_blocks_with_class(lba, buf, class))
+        self.with_array(|v| v.read_blocks_with_class(lba, buf, class))
     }
 
     fn write_blocks_with_class(
@@ -690,7 +703,7 @@ impl<B: Block> Block for OwnedRaidArray<B> {
         buf: &[u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        self.with_view(|v| v.write_blocks_with_class(lba, buf, class))
+        self.with_array(|v| v.write_blocks_with_class(lba, buf, class))
     }
 
     fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {

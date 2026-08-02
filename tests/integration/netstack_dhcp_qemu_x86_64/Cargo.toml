@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-netstack-dhcp-qemu-x86-64"
-description = "plans/DHCP.md D3 QEMU integration test: boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) on the q35/pc machine against the dhcp-net-root disk (whose read-only /System store carries the kernel-signed virtio-net driver bundle cross-compiled for x86_64 and a planted /System/Settings/Network/network.conf that binds the NIC by <iface>.match.node = its virtio-PCI config-window BAR base, selects ipv4.method dhcp, and disables IPv6) with a virtio-net-pci device attached and the harness-side DHCP-server peer on the QEMU dgram netdev. The virtio-PCI sibling of tairix-test-netstack-dhcp-qemu-aarch64 on the x86_64 MSI-X device-IRQ path: proves RFC 2131 dynamic IPv4 addressing end to end. devmgr autoloads the virtio-net driver into its own process (it publishes a netchan node), reads the planted network.conf, and binds the NIC to the `wan` alias by its stable bus location; netstack drives its DHCP client, which leases the interface its only address from the host DHCP-server peer, and then answers the peer's echo campaign to that leased address. PASS once the log sink has seen devmgr NETSTACK_BOUND, netstack DHCP_LEASE_ACQUIRED, and netstack INBOUND_ECHO_SERVED — the last gating exit so the guest stays alive until a frame addressed to its leased address has been answered; the peer's own verdict (it offered, acked, and got the echo reply at the leased address) is required too, so neither side can pass alone and a broken lease cannot pass on an address the guest formed itself (it forms none)."
+description = "plans/DHCP.md D3 QEMU integration test: boot the production x86_64 tairix-kernel pipeline (boot_x86_64::boot) on the q35/pc machine against the dhcp-net-root disk (whose read-only /System store carries the kernel-signed virtio-net driver bundle cross-compiled for x86_64 and a planted /System/Settings/Network/network.conf that binds the NIC by <iface>.match.node = its virtio-PCI config-window BAR base, selects ipv4.method dhcp, and disables IPv6) with a virtio-net-pci device attached and the harness-side DHCP-server peer on the QEMU dgram netdev. The virtio-PCI sibling of tairix-test-netstack-dhcp-qemu-aarch64 on the x86_64 MSI-X device-IRQ path: proves RFC 2131 dynamic IPv4 addressing end to end. devmgr autoloads the virtio-net driver into its own process (it publishes a netchan node), reads the planted network.conf, and binds the NIC to the `wan` alias by its stable bus location; netstack drives its DHCP client, which leases the interface its only address from the host DHCP-server peer, and then answers the peer's echo campaign to that leased address. The guest does not self-exit; the harness ends the run when the host peer confirms the echo round-trip at the leased address (its success gate), so teardown cannot precede the reply leaving the machine. The witness records (NETSTACK_BOUND, DHCP_LEASE_ACQUIRED, INBOUND_ECHO_SERVED) reach the serial transcript for diagnosis, and the peer's own DHCP-server + leased-address echo campaign verdict subsumes them."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,22 +20,13 @@ path = "src/main.rs"
 # network.conf selecting DHCPv4, and prove RFC 2131 dynamic addressing end to
 # end over virtio-PCI" integration test. It reuses the entire production x86_64
 # boot pipeline through `tairix-kernel`'s library half (`boot_x86_64::boot`)
-# and only swaps the log sink to report PASS on the three shared witnesses
-# (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut in a
-# dedicated bin (not a Cargo feature on a production crate) prevents feature
-# unification from leaking it into any production build (`AGENTS.md` §5.4 —
-# fail closed).
+# unchanged. The guest does not self-exit; the harness drives the run to
+# completion through the host peer's success gate, so there is no in-kernel
+# QEMU-exit shortcut to leak into any production build (fail closed).
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# The devmgr and netstack audit vocabularies: the `NETSTACK_BOUND`,
-# `DHCP_LEASE_ACQUIRED`, and `INBOUND_ECHO_SERVED` event ids the witnesses key
-# on — the shared definitions, never magic numbers (`AGENTS.md` §2.2).
-# netstack is pulled `default-features = false` so its `program` feature (the
-# `tairix-rt` freestanding runtime) never enters this bin's graph.
-tairix-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0" }
-tairix-netstack = { path = "../../../userland/net/netstack", version = "=0.0.0", default-features = false }
 
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

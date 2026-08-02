@@ -94,6 +94,11 @@ impl FaultHandle {
     fn set_write_fault(&self, e: Option<DriverError>) {
         self.0.borrow_mut().write_fault = e;
     }
+
+    /// The first byte of device-local block `lba` in the shared store.
+    fn block_byte(&self, lba: u64) -> u8 {
+        self.0.borrow().store[usize::try_from(lba).unwrap() * BS as usize]
+    }
 }
 
 impl Block for FaultBlock {
@@ -595,5 +600,37 @@ fn fail_closed_construction_refuses_exactly_as_assemble_does() {
     assert_eq!(
         OwnedRaidArray::assemble_raid10(two, CHUNK).err(),
         Some(Raid10Error::TooFewMembers)
+    );
+}
+
+// -- The transient-view seam -------------------------------------------------
+
+#[test]
+fn with_array_reaches_a_member_device_on_an_owning_array() {
+    let first = FaultBlock::new();
+    let second = FaultBlock::new();
+    let first_handle = first.handle();
+    let second_handle = second.handle();
+    let mut owned =
+        OwnedRaidArray::assemble_mirror(vec![MirrorMember::new(first), MirrorMember::new(second)])
+            .expect("assembles");
+
+    // The seam hands the transient view to the caller, so an operation the
+    // wrappers do not cover — here reaching a member's own device, where its
+    // reserved array-metadata blocks live below the array's data — needs no
+    // new method on the owning wrapper.
+    owned.with_array(|array| {
+        array
+            .member_device_mut(1)
+            .expect("slot 1 holds a device")
+            .write_blocks(2, &one_block())
+            .expect("the member's own write");
+    });
+
+    assert_eq!(second_handle.block_byte(2), 0xAB);
+    assert_eq!(
+        first_handle.block_byte(2),
+        0,
+        "the write reached only the named member's device"
     );
 }

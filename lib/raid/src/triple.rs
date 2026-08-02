@@ -163,6 +163,15 @@ impl<B: Block> TripleParityMember<B> {
     pub const fn device(&self) -> Option<&B> {
         self.device.as_ref()
     }
+
+    /// Mutably borrow the underlying device (for a caller that must reach a
+    /// member's own device — e.g. its reserved array-metadata blocks —
+    /// rather than the array's data), or [`None`] for an
+    /// [`MemberState::Absent`] slot.
+    #[must_use]
+    pub fn device_mut(&mut self) -> Option<&mut B> {
+        self.device.as_mut()
+    }
 }
 
 /// A reason a triple-parity array could not be assembled or reconfigured.
@@ -415,6 +424,16 @@ impl<'a, B: Block> TripleParityArray<'a, B> {
     #[must_use]
     pub fn member_state(&self, index: usize) -> Option<MemberState> {
         self.members.get(index).map(TripleParityMember::state)
+    }
+
+    /// Mutably borrow the device held by member `index`, or [`None`] if
+    /// `index` is out of range or the slot holds no device — the mutable
+    /// companion of [`member_state`](Self::member_state), for a caller that
+    /// must reach a member's own device (its reserved array-metadata blocks)
+    /// rather than the array's data.
+    #[must_use]
+    pub fn member_device_mut(&mut self, index: usize) -> Option<&mut B> {
+        self.members.get_mut(index)?.device_mut()
     }
 
     /// Borrow member `index` (for the serving process to inspect a member's

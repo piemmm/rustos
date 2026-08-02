@@ -896,6 +896,22 @@ above.
 - **Reconfiguration** — `readd_member` / `remove_member` / `add_member` /
   `replace_member`, the hot-swap workflow, each mapping the engine's
   composition-policy outcome onto the shared `RaidError`.
+- **A member's own device** — `member_device_mut` borrows member `index`'s
+  device mutably, the companion of `member_state`, and answers `None` for an
+  index outside the array or a slot holding no device. A member's superblock
+  and maintenance record sit *below* the data view it is composed through
+  (above), so the caller that keeps those records current needs the member's
+  whole device while the array owns it; every level answers, including the
+  stripe, whose members are never absent.
+
+The owning composed device (`OwnedRaidArray`) is written entirely in terms of
+one seam, `with_array`: it builds the transient `RaidArray` view over its owned
+members, runs the caller's operation against it, and writes the array-level
+cursor back. That seam is public, so an operation the wrappers do not
+cover — driving the maintenance scheduler below, or reaching a member's own
+device to checkpoint its record — runs against the very same view every wrapper
+method uses instead of the wrapper growing a bespoke method for each, and the
+borrow cannot outlive the closure.
 
 ### The stripe has no redundancy — the dispatch is honest about it
 
@@ -927,6 +943,10 @@ wrong is a data-integrity or availability fault, not a cosmetic one:
   stays out of the array (`AGENTS.md` §18.4).
 - Scrubbing an array that is mid-rebuild spends the bandwidth the rebuild needs
   to restore redundancy.
+- A position that is never written down is a pass that starts over on every
+  restart, so a large array rebooted often enough is never verified and may
+  never finish a rebuild — while writing it down after every chunk would burn a
+  member's medium for nothing.
 
 `ArrayMaintenance` is that one decision, defined once so the consumers cannot
 hand-roll it differently (`AGENTS.md` §2.2, §27). It is pure and **event-timed**:
@@ -934,9 +954,14 @@ it holds no clock, arms no timer, and never spins. The caller supplies the
 monotonic reading it took on every entry point, and when there is nothing to do
 `wait_deadline_ns` gives the absolute one-shot deadline the serve loop parks on
 — the same idiom the per-device health machine and the fault domain use
-(`blkio::BlkHealth::grace_deadline_ns`). It is allocation-free: the per-member
-re-add backoff records live in a caller-owned slice, exactly as the engines'
-members do, so a wide array imposes no fixed ceiling (`AGENTS.md` §24.1).
+(`blkio::BlkHealth::grace_deadline_ns`). It allocates nothing of its own: the
+per-member re-add backoff records live in storage the caller supplies, exactly
+as the engines' members do, so a wide array imposes no fixed ceiling
+(`AGENTS.md` §24.1). That storage is generic (`ArrayMaintenance<R>`) so one
+scheduler serves both shapes of consumer — a caller that borrows a stack slice
+for the duration of a call, and a long-lived serve process that owns its arrays
+across turns of an event loop and so must store the scheduler beside them
+(`ArrayMaintenance<Vec<MemberRetry>>`).
 
 The serve loop's contract per turn is: `next_action` to decide, perform the
 action against the array, `note_step` to hand back what happened (which is what
@@ -959,6 +984,12 @@ recovery signal its leaf health machine or its fault domain publishes (IO3/IO4)
    the cursor stands and resumes it once full redundancy is back, rather than
    abandoning the work already done or pressing on without a copy to repair
    from.
+
+Writing the position down (`MaintenanceAction::Checkpoint`) sits above both
+chunk kinds: it is metadata rather than array bandwidth, so it neither waits
+behind a rebuild running flat out — which on a large array would mean the
+position is not recorded for days, precisely the work a restart discards — nor
+counts against the duty share the data chunks are held to.
 
 ### Pacing — a duty share, not a fixed rate
 
@@ -994,21 +1025,51 @@ could drift from it (`AGENTS.md` §2.2):
   small share; a solid-state device absorbs a parallel background stream with
   far less interference, and a paravirtual device sits between them.
 
-The scrub period and the busy window are properties of the accepted risk and of
-the workload rather than of the hardware, so they are one default for every
-class and are overridable per array through the policy's public fields. The
-period is measured end-of-pass to start-of-pass. `ArrayMaintenance::new` takes
-how long ago the last pass completed, as the caller knows it from the array's
-persisted maintenance record; a caller with **no** record passes `u64::MAX`,
-which makes the first pass due immediately — an array whose verification history
-is unknown is verified rather than assumed clean (`AGENTS.md` §5.4, §26.5), and
-the duty pacing bounds what that costs.
+The scrub period, the busy window, and the checkpoint interval are properties of
+the accepted risk and of the workload rather than of the hardware, so they are
+one default for every class and are overridable per array through the policy's
+public fields. The period is measured end-of-pass to start-of-pass.
+`ArrayMaintenance::new` takes how long ago the last pass completed, as the
+caller knows it from the array's persisted maintenance record; a caller with
+**no** record passes `u64::MAX`, which makes the first pass due immediately — an
+array whose verification history is unknown is verified rather than assumed
+clean (`AGENTS.md` §5.4, §26.5), and the duty pacing bounds what that costs.
 
 An array handed over **mid-pass** — one whose cursor was restored from its
 maintenance record (below) — is adopted as such, so finishing that pass re-arms
 the period like any other. Were the resumed pass treated as none of the
 scheduler's doing, its completion would go unnoticed and the already-overdue
 period would start it again at once, verifying the array back-to-back forever.
+
+### Checkpointing — what is written, and when
+
+`checkpoint_period_ns` (30 s by default) is the shortest interval between two
+position writes of an advancing pass, and the interval *is* the whole trade-off:
+it bounds the progress an unclean stop can discard at one interval's worth of
+maintenance — itself already bounded by the duty share — while keeping the cost
+at one small write per current member per interval, so even a pass measured in
+days costs a member a few thousand writes rather than one per chunk.
+
+A write is due only when the members' records no longer say what the array
+knows, so a verified, idle array writes no metadata at all. Two things can make
+them stale, and the action carries both:
+
+- **The position moved.** `Checkpoint { progress }` carries the exact position
+  to record rather than leaving the caller to re-read it, so the scheduler and
+  the disks cannot end up disagreeing about what was written.
+- **A pass finished.** A completed pass returns the position to where an idle
+  array's sits, so the position alone cannot carry the fact that the array has
+  just been verified; `pass_completed` says the write must record it too.
+  Without that, an array small enough to verify itself between two checkpoints
+  would never record a completion, and every restart would read its history as
+  unknown and verify it again.
+
+The first write of a session is not due until one interval has passed: the
+caller restores the persisted position *before* building the scheduler, so the
+array and its records already agree, and a service that restarts repeatedly
+never writes metadata merely for starting. A refused write is held off by the
+class's recovery grace window — the same delay a failed chunk takes — and the
+position stays owed, so the next attempt still carries it.
 
 ### What it deliberately does not do
 

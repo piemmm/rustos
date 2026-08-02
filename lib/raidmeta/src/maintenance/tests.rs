@@ -151,6 +151,25 @@ fn progress_from_a_foreign_array_is_ignored() {
 }
 
 #[test]
+fn a_record_says_plainly_which_array_it_belongs_to() {
+    // A consumer that reads more than the cursors — the completion stamp above
+    // all — needs this before believing any of it: a foreign record claiming a
+    // recent verification would otherwise talk an array out of verifying
+    // itself, which is the same defect as injecting a cursor, in the opposite
+    // direction.
+    let mine = full_record();
+    assert!(mine.belongs_to(&identity()));
+    let mut foreign = full_record();
+    foreign.array_uuid = [0x11; 16];
+    assert!(!foreign.belongs_to(&identity()));
+    // A record of this array from another generation still belongs to it: the
+    // generation bounds the cursors, not the ownership.
+    let mut older = full_record();
+    older.generation = identity().generation - 1;
+    assert!(older.belongs_to(&identity()));
+}
+
+#[test]
 fn progress_from_an_earlier_generation_is_ignored() {
     // The record predates a membership change: a member has joined or left
     // since, so resuming its cursors could skip data the new member never

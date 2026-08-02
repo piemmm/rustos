@@ -607,7 +607,7 @@ fn run_dhcp_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -689,6 +689,16 @@ fn run_dhcp_peer(
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        // Mirror the campaign verdict into the harness completion gate the
+        // instant the guest's reply first arrives, so the QEMU runner can end
+        // the run as soon as this out-of-guest observer has its proof — the
+        // guest for this vertical is built not to self-exit, precisely so its
+        // teardown cannot precede (and lose the race to) the reply leaving the
+        // machine. Idempotent: `reply` only ever goes false -> true.
+        if reply {
+            succeeded.store(true, Ordering::Release);
         }
     }
 
@@ -1044,7 +1054,7 @@ fn run_dhcp6_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    succeeded: &AtomicBool,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -1141,6 +1151,16 @@ fn run_dhcp6_peer(
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        // Mirror the campaign verdict into the harness completion gate the
+        // instant the guest's reply first arrives, so the QEMU runner can end
+        // the run as soon as this out-of-guest observer has its proof — the
+        // guest for this vertical is built not to self-exit, precisely so its
+        // teardown cannot precede (and lose the race to) the reply leaving the
+        // machine. Idempotent: `reply` only ever goes false -> true.
+        if reply {
+            succeeded.store(true, Ordering::Release);
         }
     }
 

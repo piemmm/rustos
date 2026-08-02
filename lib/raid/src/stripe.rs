@@ -86,6 +86,14 @@ impl<B: Block> StripeMember<B> {
     pub const fn device(&self) -> &B {
         &self.device
     }
+
+    /// Mutably borrow the underlying device (for a caller that must reach a
+    /// member's own device — e.g. its reserved array-metadata blocks —
+    /// rather than the array's data).
+    #[must_use]
+    pub fn device_mut(&mut self) -> &mut B {
+        &mut self.device
+    }
 }
 
 /// A reason a stripe could not be assembled. Distinct from [`DriverError`]
@@ -254,6 +262,17 @@ impl<'a, B: Block> StripeArray<'a, B> {
     #[must_use]
     pub fn member(&self, index: usize) -> Option<&StripeMember<B>> {
         self.members.get(index)
+    }
+
+    /// Mutably borrow the device held by member `index`, for a caller that
+    /// must reach a member's own device (its reserved array-metadata blocks)
+    /// rather than the array's data — the mutable companion of
+    /// [`member`](Self::member) — or [`None`] if `index` is out of range. A
+    /// stripe member always holds a device (there is no `Absent` slot to a
+    /// stripe), so only the range check can fail.
+    #[must_use]
+    pub fn member_device_mut(&mut self, index: usize) -> Option<&mut B> {
+        Some(self.members.get_mut(index)?.device_mut())
     }
 
     /// The current [`ArrayHealth`]: [`ArrayHealth::Optimal`] while every member

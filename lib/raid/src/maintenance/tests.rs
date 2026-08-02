@@ -8,6 +8,8 @@
 
 use core::cell::Cell;
 
+use alloc::vec;
+
 use super::{
     ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,
 };
@@ -15,6 +17,7 @@ use crate::array::{RaidArray, RaidError};
 use crate::backoff::RetryCadence;
 use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorMember};
 use crate::stripe::{StripeArray, StripeMember};
+use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -34,6 +37,7 @@ const TEST_POLICY: MaintenancePolicy = MaintenancePolicy {
     scrub_period_ns: 1_000,
     busy_duty_percent: 50,
     foreground_idle_ns: 100,
+    checkpoint_period_ns: 200,
     readd: RetryCadence::new(10, 40),
 };
 
@@ -141,16 +145,41 @@ fn scheduler<'a>(
     retries: &'a mut [MemberRetry],
     now_ns: u64,
     since_last_scrub_ns: u64,
-) -> ArrayMaintenance<'a> {
+) -> ArrayMaintenance<&'a mut [MemberRetry]> {
     ArrayMaintenance::new(array, retries, TEST_POLICY, now_ns, since_last_scrub_ns)
         .expect("the retry buffer matches the array width")
+}
+
+/// Assert the scheduler asks for the array's current position to be written,
+/// record it as written, and report whether the write also had to record a
+/// completed verification pass.
+fn record_position(
+    maintenance: &mut ArrayMaintenance<&mut [MemberRetry]>,
+    array: &RaidArray<'_, FaultBlock>,
+    now_ns: u64,
+) -> bool {
+    let action = maintenance.next_action(array, now_ns);
+    let MaintenanceAction::Checkpoint {
+        progress,
+        pass_completed,
+    } = action
+    else {
+        panic!("expected the position to be written at {now_ns}, got {action:?}");
+    };
+    assert_eq!(
+        progress,
+        array.progress(),
+        "the action carries exactly the position the array is at"
+    );
+    maintenance.note_step(action, now_ns, now_ns, Ok(()));
+    pass_completed
 }
 
 /// Assert the scheduler idles at `now_ns`, and return the deadline it asks its
 /// caller to park on — checking that the deadline can never be in the past,
 /// which is what makes parking on it a wait rather than a spin.
 fn idle_at(
-    maintenance: &mut ArrayMaintenance<'_>,
+    maintenance: &mut ArrayMaintenance<&mut [MemberRetry]>,
     array: &RaidArray<'_, FaultBlock>,
     now_ns: u64,
 ) -> Option<u64> {
@@ -600,7 +629,7 @@ fn a_mis_set_duty_share_is_clamped_so_maintenance_can_never_stall() {
     let mut starved = [MemberRetry::new(); 2];
     let mut maintenance = ArrayMaintenance::new(
         &array,
-        &mut starved,
+        starved.as_mut_slice(),
         MaintenancePolicy {
             busy_duty_percent: 0,
             ..TEST_POLICY
@@ -617,7 +646,7 @@ fn a_mis_set_duty_share_is_clamped_so_maintenance_can_never_stall() {
     let mut greedy = [MemberRetry::new(); 2];
     let mut maintenance = ArrayMaintenance::new(
         &array,
-        &mut greedy,
+        greedy.as_mut_slice(),
         MaintenancePolicy {
             busy_duty_percent: 1_000,
             ..TEST_POLICY
@@ -666,8 +695,22 @@ fn a_completed_scrub_pass_rearms_the_period() {
     }
     assert_eq!(u64::from(passes), NBLK, "one block per chunk of scratch");
 
+    // The pass ran inside one checkpoint interval, so it left the position
+    // exactly where an idle array's sits — yet the members must still be told
+    // the array has been verified, or every restart would read its history as
+    // unknown and verify it all over again.
+    assert_eq!(array.progress(), ArrayProgress::IDLE);
     assert_eq!(
         idle_at(&mut maintenance, &array, 0),
+        Some(200),
+        "a finished pass is owed a write before the period matters again"
+    );
+    assert!(
+        record_position(&mut maintenance, &array, 200),
+        "the write records that the array has been verified"
+    );
+    assert_eq!(
+        idle_at(&mut maintenance, &array, 200),
         Some(1_000),
         "the next pass is a full period after this one finished"
     );
@@ -817,9 +860,201 @@ fn a_pass_resumed_from_the_records_position_still_rearms_the_period() {
         MaintenanceAction::Idle,
         "the array has just been verified, so there is nothing to do"
     );
+    assert!(record_position(&mut maintenance, &array, 200));
     assert_eq!(
-        idle_at(&mut maintenance, &array, 0),
+        idle_at(&mut maintenance, &array, 200),
         Some(1_000),
         "the next pass is a full period after the resumed one finished"
+    );
+}
+
+// -- Durable position ----------------------------------------------------
+
+#[test]
+fn an_advancing_pass_writes_its_position_down_once_an_interval_has_passed() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let mut array = mirror(&mut members);
+    let mut retries = [MemberRetry::new(); 2];
+    let mut maintenance = scheduler(&array, &mut retries, 0, u64::MAX);
+    let mut scratch = [0u8; BS as usize];
+
+    assert_eq!(
+        maintenance.next_action(&array, 0),
+        MaintenanceAction::BeginScrub
+    );
+    let outcome = array.begin_scrub();
+    maintenance.note_step(MaintenanceAction::BeginScrub, 0, 0, outcome);
+    assert_eq!(maintenance.next_action(&array, 0), MaintenanceAction::Scrub);
+    let outcome = array.scrub_step(&mut scratch);
+    maintenance.note_step(MaintenanceAction::Scrub, 0, 0, outcome);
+    assert_eq!(
+        maintenance.next_action(&array, 199),
+        MaintenanceAction::Scrub,
+        "writing the position after every chunk would burn the members for nothing"
+    );
+
+    let written = array.progress();
+    assert!(!record_position(&mut maintenance, &array, 200));
+
+    assert_eq!(
+        maintenance.next_action(&array, 399),
+        MaintenanceAction::Scrub,
+        "a position the members already hold is not written again"
+    );
+    let outcome = array.scrub_step(&mut scratch);
+    maintenance.note_step(MaintenanceAction::Scrub, 399, 399, outcome);
+    assert_ne!(array.progress(), written, "the pass moved on");
+    assert_eq!(
+        maintenance.next_action(&array, 399),
+        MaintenanceAction::Scrub,
+        "and is not written again until an interval after the last write"
+    );
+    assert!(!record_position(&mut maintenance, &array, 400));
+}
+
+#[test]
+fn a_verified_idle_array_writes_no_metadata_at_all() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+    ];
+    let array = mirror(&mut members);
+    let mut retries = [MemberRetry::new(); 2];
+    // Verified just now, so no pass is due for a full period.
+    let mut maintenance = scheduler(&array, &mut retries, 0, 0);
+
+    for now_ns in [0, 200, 500, 999] {
+        assert_eq!(
+            idle_at(&mut maintenance, &array, now_ns),
+            Some(1_000),
+            "an array whose position has not moved owes its members nothing"
+        );
+    }
+}
+
+#[test]
+fn a_rebuild_running_flat_out_still_yields_to_a_due_position_write() {
+    // An idle array paces nothing, so a rebuild chunk is runnable on every
+    // turn. Deciding the chunk first would mean the position is never written
+    // until the rebuild ends — which on a large array is days away, and is
+    // exactly the work a restart would discard.
+    let mut members = faulted_pair();
+    let mut array = rebuilding(&mut members);
+    let mut retries = [MemberRetry::new(); 2];
+    let mut maintenance = scheduler(&array, &mut retries, 0, u64::MAX);
+    let mut scratch = [0u8; BS as usize];
+
+    assert_eq!(
+        maintenance.next_action(&array, 0),
+        MaintenanceAction::Resync
+    );
+    let outcome = array.resync_step(&mut scratch);
+    maintenance.note_step(MaintenanceAction::Resync, 0, 0, outcome);
+    assert_eq!(
+        maintenance.next_action(&array, 0),
+        MaintenanceAction::Resync,
+        "the rebuild keeps the array at full speed"
+    );
+
+    record_position(&mut maintenance, &array, 200);
+    assert_eq!(
+        maintenance.next_action(&array, 200),
+        MaintenanceAction::Resync,
+        "and carries straight on afterwards"
+    );
+}
+
+#[test]
+fn a_refused_position_write_holds_off_and_still_owes_the_same_position() {
+    let mut members = faulted_pair();
+    let mut array = rebuilding(&mut members);
+    let mut retries = [MemberRetry::new(); 2];
+    let mut maintenance = scheduler(&array, &mut retries, 0, u64::MAX);
+    let mut scratch = [0u8; BS as usize];
+
+    let outcome = array.resync_step(&mut scratch);
+    maintenance.note_step(MaintenanceAction::Resync, 0, 0, outcome);
+    let owed = array.progress();
+    assert_eq!(
+        maintenance.next_action(&array, 200),
+        MaintenanceAction::Checkpoint {
+            progress: owed,
+            pass_completed: false
+        }
+    );
+    maintenance.note_step(
+        MaintenanceAction::Checkpoint {
+            progress: owed,
+            pass_completed: false,
+        },
+        200,
+        200,
+        Err(RaidError::Io(DriverError::DeviceFault)),
+    );
+
+    assert_eq!(
+        maintenance.next_action(&array, 200),
+        MaintenanceAction::Resync,
+        "asking again at once would spin the serve loop on a member that just refused"
+    );
+    assert_eq!(
+        maintenance.next_action(&array, 210),
+        MaintenanceAction::Checkpoint {
+            progress: owed,
+            pass_completed: false
+        },
+        "a position that was not recorded is still owed"
+    );
+}
+
+#[test]
+fn an_unwritten_position_wakes_a_parked_loop() {
+    // Nothing else is pending: a scrub paused behind reduced redundancy has no
+    // chunk to run and no period to wait on, and an *absent* slot arms no
+    // re-add of its own, so only the owed write can change the answer.
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = mirror(&mut members);
+    let mut retries = [MemberRetry::new(); 2];
+    let mut maintenance = scheduler(&array, &mut retries, 0, u64::MAX);
+    let mut scratch = [0u8; BS as usize];
+
+    assert_eq!(array.health(), ArrayHealth::Degraded);
+    array.begin_scrub().expect("the pass begins");
+    array.scrub_step(&mut scratch).expect("one chunk");
+    assert_eq!(
+        idle_at(&mut maintenance, &array, 100),
+        Some(200),
+        "a loop that parked past the interval would leave the position unwritten"
+    );
+}
+
+#[test]
+fn a_scheduler_can_own_its_retry_records() {
+    // A serve process keeps its scheduler beside the array it owns across
+    // turns of an event loop, so the per-member records cannot be a borrowed
+    // stack slice the way a single call's can.
+    let mut members = faulted_pair();
+    let array = rebuilding(&mut members);
+    let retries = vec![MemberRetry::new(); array.member_count()];
+    let mut maintenance = ArrayMaintenance::new(&array, retries, TEST_POLICY, 0, u64::MAX)
+        .expect("the retry buffer matches the array width");
+
+    assert_eq!(
+        maintenance.next_action(&array, 0),
+        MaintenanceAction::Resync,
+        "an owning scheduler decides exactly as a borrowing one does"
+    );
+
+    let narrow = vec![MemberRetry::new(); array.member_count() - 1];
+    assert_eq!(
+        ArrayMaintenance::new(&array, narrow, TEST_POLICY, 0, u64::MAX).err(),
+        Some(MaintenanceError::WidthMismatch),
+        "owned storage is width-checked exactly as borrowed storage is"
     );
 }

@@ -1,5 +1,5 @@
-//! Host tests for the composer's live-array half: reading a member's own
-//! metadata, assembling a resolved array, and serving it fault-aware.
+//! Host tests for the composer's assembly half: reading a member's own
+//! metadata, and turning a resolved slot table into a composed array.
 //!
 //! These prove what the composer *does* with a decision the registry next door
 //! has already made. The composition arithmetic underneath (recover, repair,
@@ -10,251 +10,25 @@
 //! can never be reached as array data, and an array that is not the one its
 //! members' metadata describes is never brought online.
 
-use alloc::rc::Rc;
-use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
-use super::{assemble_array, read_superblock, write_superblock, ArrayRuntime, ServiceError};
-
-use tairix_abi::blkio::{
-    decode_completion, BlkHealthState, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_REQUEST_LEN,
+use super::{
+    assemble_array, read_superblock, write_maintenance_record, write_superblock, Assembled,
+    ServiceError,
 };
-use tairix_abi::driver::block::{Block, BlockGeometry};
+use crate::testkit::{
+    array_geometry, candidates, identity_of, stamped, stamped_device, superblock, MemberDisk,
+    BLOCK_SIZE, DATA_BLOCKS, DEVICE_BLOCKS, NOW, UUID_A, UUID_B,
+};
+
+use tairix_abi::driver::block::Block;
 use tairix_abi::driver::DriverError;
-use tairix_abi::time::Time64;
 use tairix_raid::{
-    ArrayHealth, ArrayIdentity, ArraySuperblock, ArrayUuid, AssembleError, Candidate, MemberState,
-    RaidLevel, SuperblockError,
+    ArrayHealth, ArraySuperblock, AssembleError, MemberState, RaidLevel, SuperblockError,
 };
-use tairix_raidmeta::{MAINTENANCE_BLOCK, RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK};
-
-const UUID_A: ArrayUuid = [0xA1; 16];
-const UUID_B: ArrayUuid = [0xB2; 16];
-
-/// Logical block size every member in these tests reports.
-const BLOCK_SIZE: u32 = 512;
-
-/// Blocks each member device holds in total, its reserved metadata included.
-/// Chosen so the data region left past that metadata is a whole number of
-/// stripe chunks, which a striped level requires.
-const DEVICE_BLOCKS: u64 = 66;
-
-/// Blocks of a member left for array data once its reserved metadata is
-/// excluded — the span the composed view covers.
-const DATA_BLOCKS: u64 = DEVICE_BLOCKS - RESERVED_METADATA_BLOCKS;
-
-/// The stripe unit every striped array in these tests uses.
-const CHUNK: u32 = 8;
-
-/// When a member's metadata was last written before assembly.
-const STAMPED_AT: Time64 = Time64::from_secs(1_700_000_000);
-
-/// The instant assembly runs at, distinct from [`STAMPED_AT`] so a re-stamp is
-/// visible on the disk rather than having to be taken on trust.
-const NOW: Time64 = Time64::from_secs(1_700_000_999);
-
-/// The backing store of one member device double.
-struct DiskState {
-    bytes: Vec<u8>,
-    block_size: u32,
-    /// Reject every geometry query: a device that cannot say what it is.
-    geometry_fails: bool,
-    /// Reject every write: a disk that cannot be re-stamped.
-    write_fails: bool,
-}
-
-/// A handle to a member device double.
-///
-/// Cloning it yields a second handle to the *same* disk. Assembly moves a
-/// member device into the composed array, so that is how a test inspects what
-/// actually landed on a disk the array now owns — the on-disk re-stamp of a
-/// degraded start is the assertion that matters most here, and taking it on
-/// trust would prove nothing.
-#[derive(Clone)]
-struct MemberDisk(Rc<RefCell<DiskState>>);
-
-impl MemberDisk {
-    /// An empty device of `device_blocks` logical blocks.
-    fn new(device_blocks: u64) -> Self {
-        let len = usize::try_from(device_blocks).expect("a test device fits the host")
-            * BLOCK_SIZE as usize;
-        Self(Rc::new(RefCell::new(DiskState {
-            bytes: vec![0u8; len],
-            block_size: BLOCK_SIZE,
-            geometry_fails: false,
-            write_fails: false,
-        })))
-    }
-
-    /// Report a block size of `block_size` rather than the real one.
-    fn with_block_size(self, block_size: u32) -> Self {
-        self.0.borrow_mut().block_size = block_size;
-        self
-    }
-
-    /// Fail every geometry query from here on.
-    fn breaking_geometry(self) -> Self {
-        self.0.borrow_mut().geometry_fails = true;
-        self
-    }
-
-    /// Fail every write from here on.
-    fn refusing_writes(self) -> Self {
-        self.0.borrow_mut().write_fails = true;
-        self
-    }
-
-    /// The byte offset of device block `lba`.
-    fn offset(state: &DiskState, lba: u64) -> usize {
-        usize::try_from(lba).expect("a test lba fits the host") * state.block_size as usize
-    }
-
-    /// Fill device block `lba` with `fill`, bypassing the [`Block`] surface, so
-    /// a test can plant data at a known *device* LBA.
-    fn plant(&self, lba: u64, fill: u8) {
-        let mut state = self.0.borrow_mut();
-        let at = Self::offset(&state, lba);
-        let end = at + state.block_size as usize;
-        state.bytes[at..end].fill(fill);
-    }
-
-    /// Whether device block `lba` is entirely zero.
-    fn block_is_blank(&self, lba: u64) -> bool {
-        let state = self.0.borrow();
-        let at = Self::offset(&state, lba);
-        state.bytes[at..at + state.block_size as usize]
-            .iter()
-            .all(|&byte| byte == 0)
-    }
-
-    /// Corrupt one byte inside the sealed superblock record.
-    fn corrupt_metadata(&self) {
-        self.0.borrow_mut().bytes[16] ^= 0xFF;
-    }
-
-    /// The metadata currently on the disk, decoded exactly as a later
-    /// discovery would decode it.
-    fn on_disk_metadata(&self) -> Result<ArraySuperblock, SuperblockError> {
-        ArraySuperblock::decode(&self.0.borrow().bytes)
-    }
-}
-
-impl Block for MemberDisk {
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        let state = self.0.borrow();
-        if state.geometry_fails {
-            return Err(DriverError::DeviceOffline);
-        }
-        Ok(BlockGeometry {
-            block_size: state.block_size,
-            block_count: (state.bytes.len() / state.block_size as usize) as u64,
-        })
-    }
-
-    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let state = self.0.borrow();
-        let at = Self::offset(&state, lba);
-        let end = at.checked_add(buf.len()).ok_or(DriverError::OutOfRange)?;
-        if end > state.bytes.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        buf.copy_from_slice(&state.bytes[at..end]);
-        Ok(())
-    }
-
-    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let mut state = self.0.borrow_mut();
-        if state.write_fails {
-            return Err(DriverError::MediumError);
-        }
-        let at = Self::offset(&state, lba);
-        let end = at.checked_add(buf.len()).ok_or(DriverError::OutOfRange)?;
-        if end > state.bytes.len() {
-            return Err(DriverError::OutOfRange);
-        }
-        state.bytes[at..end].copy_from_slice(buf);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
-}
-
-/// The array geometry a `count`-member array of `level` over these member
-/// devices genuinely presents, sized through the shared capacity oracle rather
-/// than a restated literal.
-fn array_geometry(level: RaidLevel, count: u16) -> BlockGeometry {
-    BlockGeometry {
-        block_size: BLOCK_SIZE,
-        block_count: level
-            .logical_block_count(DATA_BLOCKS, u64::from(count))
-            .expect("a composable width"),
-    }
-}
-
-/// A superblock claiming `slot` of a `count`-member array of `level` at
-/// `generation`, declaring the array geometry such an array really presents.
-fn superblock(
-    level: RaidLevel,
-    array: ArrayUuid,
-    count: u16,
-    slot: u16,
-    generation: u64,
-) -> ArraySuperblock {
-    ArraySuperblock {
-        array_uuid: array,
-        raid_level: level,
-        member_count: count,
-        member_slot: slot,
-        geometry: array_geometry(level, count),
-        generation,
-        updated_at: STAMPED_AT,
-        chunk_blocks: if level.is_striped() { CHUNK } else { 0 },
-    }
-}
-
-/// A member device of the stated size carrying `superblock` in its first
-/// block, exactly as a discovered array member does.
-fn stamped_device(superblock: &ArraySuperblock, device_blocks: u64) -> MemberDisk {
-    let disk = MemberDisk::new(device_blocks);
-    write_superblock(&mut disk.clone(), superblock)
-        .expect("a fresh device accepts its own superblock");
-    disk
-}
-
-/// A full-size member device carrying `superblock`.
-fn stamped(superblock: &ArraySuperblock) -> MemberDisk {
-    stamped_device(superblock, DEVICE_BLOCKS)
-}
-
-/// The reassembly view of `members`: candidate `i` describes device `i`, which
-/// is the correspondence [`assemble_array`]'s supplier is keyed by.
-fn candidates(members: &[ArraySuperblock]) -> Vec<Candidate> {
-    members
-        .iter()
-        .enumerate()
-        .map(|(tag, superblock)| Candidate {
-            tag,
-            superblock: *superblock,
-        })
-        .collect()
-}
-
-/// The authoritative shape `members` agree on.
-fn identity_of(array: ArrayUuid, members: &[ArraySuperblock]) -> ArrayIdentity {
-    ArrayIdentity::resolve(array, &candidates(members)).expect("a claimed array resolves")
-}
-
-/// Encode one block request frame.
-fn request(op: BlkOp, lba: u64, blocks: u32) -> [u8; BLK_REQUEST_LEN] {
-    let mut frame = [0u8; BLK_REQUEST_LEN];
-    BlkRequest { op, lba, blocks }
-        .encode(&mut frame)
-        .expect("the frame is exactly wide enough");
-    frame
-}
+use tairix_raidmeta::{
+    ArrayProgress, MaintenanceRecord, MAINTENANCE_BLOCK, RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK,
+};
 
 #[test]
 fn a_members_metadata_is_read_back_from_its_own_first_block() {
@@ -365,12 +139,13 @@ fn a_complete_array_starts_clean_and_leaves_every_members_metadata_alone() {
 }
 
 #[test]
-fn a_degraded_start_records_a_new_generation_on_every_surviving_member() {
+fn a_start_that_cannot_see_a_member_fences_it_on_every_survivor() {
     // The stale-read hole this closes: a mirror brought up without one copy
     // keeps serving *and accepting writes*, so the absent copy is behind from
-    // the first write onward. Advancing the array's event count and recording
-    // it on the survivors is what makes that copy resolve as a rebuild target
-    // when it returns, instead of a copy trusted as current.
+    // the first write onward — while its own superblock still claims to be
+    // current, because it was not there to be told otherwise. Advancing the
+    // array's event count and recording it on the survivors is what makes that
+    // copy resolve as a rebuild target when it returns.
     let present = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 5);
     let away = superblock(RaidLevel::Mirror, UUID_A, 2, 1, 5);
     let survivor = stamped(&present);
@@ -385,7 +160,10 @@ fn a_degraded_start_records_a_new_generation_on_every_surviving_member() {
     .expect("a mirror serves on one copy");
 
     assert!(assembled.degraded, "a missing slot is a degraded start");
-    assert_eq!(assembled.identity.generation, 6, "the event count advanced");
+    assert_eq!(
+        assembled.identity.generation, 6,
+        "the event count advanced, fencing the disk that is not here"
+    );
     assert_eq!(assembled.array.health(), ArrayHealth::Degraded);
 
     let recorded = survivor
@@ -450,7 +228,7 @@ fn a_member_the_metadata_proved_stale_joins_as_a_rebuild_target() {
 
     assert!(
         assembled.degraded,
-        "a member that is behind makes this a degraded start"
+        "a member that is behind means the array starts short of full redundancy"
     );
     assert_eq!(
         assembled.array.member_state(0),
@@ -612,155 +390,6 @@ fn a_members_reserved_metadata_is_never_reachable_as_array_data() {
         "the record sits below the view's block 0"
     );
 }
-
-/// A live two-copy mirror runtime on stated ids, for the serving assertions.
-fn runtime() -> ArrayRuntime<MemberDisk> {
-    let members = [
-        superblock(RaidLevel::Mirror, UUID_A, 2, 0, 3),
-        superblock(RaidLevel::Mirror, UUID_A, 2, 1, 3),
-    ];
-    let mut supply = [Some(stamped(&members[0])), Some(stamped(&members[1]))];
-    let assembled = assemble_array(
-        identity_of(UUID_A, &members),
-        &candidates(&members),
-        NOW,
-        |tag| supply[tag].take(),
-    )
-    .expect("assembles");
-    ArrayRuntime::new(assembled.identity, assembled.array, 0x7001, 0x7002, 42)
-}
-
-#[test]
-fn a_live_array_answers_block_requests_through_the_shared_serve_engine() {
-    // An array is a block device like any other: the same request engine, the
-    // same completion frame, the same health fold. That it is a composition is
-    // invisible to its consumer.
-    let mut array = runtime();
-    let mut window = vec![0u8; BLOCK_SIZE as usize];
-    let mut reply = [0u8; BLK_COMPLETION_LEN];
-
-    let len = array.serve(&request(BlkOp::Geometry, 0, 0), &mut window, &mut reply, 0);
-    let geometry = decode_completion(&reply[..len]).expect("a geometry completion");
-    assert_eq!(geometry.block_size, BLOCK_SIZE);
-    assert_eq!(geometry.block_count, DATA_BLOCKS);
-
-    window.fill(0x5A);
-    let len = array.serve(&request(BlkOp::Write, 1, 1), &mut window, &mut reply, 0);
-    assert_eq!(
-        decode_completion(&reply[..len]).map(|_| ()),
-        Ok(()),
-        "the array is served read/write"
-    );
-    window.fill(0);
-    let len = array.serve(&request(BlkOp::Read, 1, 1), &mut window, &mut reply, 0);
-    assert_eq!(decode_completion(&reply[..len]).map(|_| ()), Ok(()));
-    assert!(
-        window.iter().all(|&byte| byte == 0x5A),
-        "the bytes written to the array read back from it"
-    );
-}
-
-#[test]
-fn a_malformed_request_is_refused_without_touching_the_arrays_health() {
-    // A request-level rejection says nothing about the hardware, so it must not
-    // be able to push a healthy array into recovery — otherwise any consumer
-    // could fault an array by framing nonsense at it.
-    let mut array = runtime();
-    let mut window = vec![0u8; BLOCK_SIZE as usize];
-    let mut reply = [0u8; BLK_COMPLETION_LEN];
-
-    let len = array.serve(
-        &request(BlkOp::Read, DATA_BLOCKS + 1, 1),
-        &mut window,
-        &mut reply,
-        0,
-    );
-    assert!(
-        decode_completion(&reply[..len]).is_err(),
-        "a read past the end of the array is refused"
-    );
-    assert_eq!(
-        array.health().state(),
-        BlkHealthState::Healthy,
-        "and the array is still healthy"
-    );
-    assert_eq!(
-        array.poll(u64::MAX),
-        BlkHealthState::Healthy,
-        "so no grace window was ever armed to expire"
-    );
-}
-
-#[test]
-fn a_runtime_reports_the_ids_it_was_published_on() {
-    // The serve loop keys its wait-set, its staging window, and its audit trail
-    // off these, so they are part of the runtime's contract rather than
-    // incidental bookkeeping.
-    let array = runtime();
-    assert_eq!(array.endpoint(), 0x7001);
-    assert_eq!(array.window_id(), 0x7002);
-    assert_eq!(array.node_id(), 42);
-    assert_eq!(array.identity().array_uuid, UUID_A);
-    assert_eq!(array.identity().generation, 3);
-}
-
-#[test]
-fn a_returning_member_is_placed_past_its_own_metadata_and_only_once() {
-    // A disk that came back is installed into the slot it left as a rebuild
-    // target — and through the same metadata-offset view, so its superblock is
-    // not exposed as array data. A second placement into an occupied slot is
-    // refused rather than displacing the copy already rebuilding there.
-    let present = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 5);
-    let mut supply = [Some(stamped(&present))];
-    let assembled = assemble_array(
-        identity_of(UUID_A, &[present]),
-        &candidates(&[present]),
-        NOW,
-        |tag| supply[tag].take(),
-    )
-    .expect("assembles degraded");
-    let mut array = ArrayRuntime::new(assembled.identity, assembled.array, 0x7001, 0x7002, 42);
-
-    let returning = stamped(&superblock(RaidLevel::Mirror, UUID_A, 2, 1, 5));
-    assert_eq!(array.place_member(1, returning.clone()), Ok(()));
-    assert_eq!(
-        array.place_member(1, returning),
-        Err(ServiceError::Assembly),
-        "a slot that already holds a device is not overwritten"
-    );
-}
-
-#[test]
-fn placing_a_member_outside_the_array_is_refused() {
-    // A slot the array does not have cannot be made to exist by asking for it.
-    let mut array = runtime();
-    let spare = stamped(&superblock(RaidLevel::Mirror, UUID_A, 2, 0, 3));
-    assert_eq!(array.place_member(9, spare), Err(ServiceError::Assembly));
-}
-
-#[test]
-fn placing_a_member_too_small_for_its_own_metadata_is_refused() {
-    // A replacement disk is wrapped through the same metadata-offset view as an
-    // assembled member, so one with nothing past its reserved metadata is
-    // refused there too rather than installed as a zero-length copy.
-    let present = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 5);
-    let mut supply = [Some(stamped(&present))];
-    let assembled = assemble_array(
-        identity_of(UUID_A, &[present]),
-        &candidates(&[present]),
-        NOW,
-        |tag| supply[tag].take(),
-    )
-    .expect("assembles degraded");
-    let mut array = ArrayRuntime::new(assembled.identity, assembled.array, 0x7001, 0x7002, 42);
-
-    let tiny = MemberDisk::new(RESERVED_METADATA_BLOCKS);
-    assert_eq!(
-        array.place_member(1, tiny),
-        Err(ServiceError::MemberTooSmall)
-    );
-}
-
 #[test]
 fn a_member_of_another_array_is_never_drawn_into_this_one() {
     // Two arrays' members are offered together; resolving one must place only
@@ -788,5 +417,177 @@ fn a_member_of_another_array_is_never_drawn_into_this_one() {
         assembled.slots.len(),
         2,
         "the slot table is my array's width, not the offered set's size"
+    );
+}
+
+// -- Resuming a pass the members recorded --------------------------------
+
+/// A two-copy mirror whose second copy is `behind` generations out of date.
+fn pair_behind(behind: u64) -> [ArraySuperblock; 2] {
+    [
+        superblock(RaidLevel::Mirror, UUID_A, 2, 0, 9),
+        superblock(RaidLevel::Mirror, UUID_A, 2, 1, 9 - behind),
+    ]
+}
+
+/// Plant `record` on `disk` as a previous run of the composer would have.
+fn plant(disk: &MemberDisk, record: &MaintenanceRecord) {
+    write_maintenance_record(&mut disk.clone(), record).expect("a test disk records it");
+}
+
+/// Assemble the mirror `members` describe over `disks`.
+fn assemble_over(members: &[ArraySuperblock], disks: &[MemberDisk]) -> Assembled<MemberDisk> {
+    let mut supply: Vec<Option<MemberDisk>> = disks.iter().cloned().map(Some).collect();
+    assemble_array(
+        identity_of(UUID_A, members),
+        &candidates(members),
+        NOW,
+        |tag| supply[tag].take(),
+    )
+    .expect("the members compose their array")
+}
+
+#[test]
+fn an_array_whose_members_recorded_nothing_is_verified_rather_than_assumed_clean() {
+    let members = pair_behind(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+
+    let assembled = assemble_over(&members, &disks);
+
+    assert_eq!(assembled.resume.progress, ArrayProgress::IDLE);
+    assert_eq!(
+        assembled.resume.since_last_scrub_ns,
+        u64::MAX,
+        "an unknown verification history makes a pass due at once, not never"
+    );
+    assert_eq!(
+        assembled.resume.sequence, 0,
+        "and the first record it writes starts the sequence"
+    );
+}
+
+#[test]
+fn the_freshest_record_among_the_members_is_the_one_resumed_from() {
+    // Members are written one at a time, so a stale copy of the record is
+    // normal; resuming from it would redo work the array has already done.
+    let members = pair_behind(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let identity = identity_of(UUID_A, &members);
+    let stale = MaintenanceRecord::checkpoint(
+        &identity,
+        4,
+        ArrayProgress {
+            scrub_cursor: Some(1),
+            resync_cursor: None,
+        },
+        None,
+    );
+    let fresh = MaintenanceRecord::checkpoint(
+        &identity,
+        9,
+        ArrayProgress {
+            scrub_cursor: Some(7),
+            resync_cursor: None,
+        },
+        None,
+    );
+    plant(&disks[0], &stale);
+    plant(&disks[1], &fresh);
+
+    let assembled = assemble_over(&members, &disks);
+
+    assert_eq!(assembled.resume.progress.scrub_cursor, Some(7));
+    assert_eq!(
+        assembled.resume.sequence, 10,
+        "and the next record it writes outranks the freshest already down"
+    );
+}
+
+#[test]
+fn a_record_belonging_to_another_array_is_never_resumed_from() {
+    // A disk that was part of some other array is not evidence about this one.
+    let members = pair_behind(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let foreign = identity_of(UUID_B, &[superblock(RaidLevel::Mirror, UUID_B, 1, 0, 3)]);
+    plant(
+        &disks[0],
+        &MaintenanceRecord::checkpoint(
+            &foreign,
+            6,
+            ArrayProgress {
+                scrub_cursor: Some(5),
+                resync_cursor: None,
+            },
+            Some(NOW),
+        ),
+    );
+
+    let assembled = assemble_over(&members, &disks);
+
+    assert_eq!(
+        assembled.resume.progress,
+        ArrayProgress::IDLE,
+        "another array's position says nothing about this one"
+    );
+    assert_eq!(assembled.resume.last_scrub_completed, None);
+}
+
+#[test]
+fn a_recorded_cursor_the_array_will_not_accept_is_dropped_not_refused() {
+    // The position only says where to resume, so a cursor the composed device
+    // rejects costs a pass from the beginning — never the array itself.
+    let members = pair_behind(0);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let identity = identity_of(UUID_A, &members);
+    plant(
+        &disks[0],
+        &MaintenanceRecord::checkpoint(
+            &identity,
+            2,
+            ArrayProgress {
+                scrub_cursor: Some(DATA_BLOCKS * 4),
+                resync_cursor: None,
+            },
+            None,
+        ),
+    );
+
+    let assembled = assemble_over(&members, &disks);
+
+    assert_eq!(
+        assembled.resume.progress,
+        ArrayProgress::IDLE,
+        "a cursor outside the array is refused by the engine and dropped here"
+    );
+}
+
+#[test]
+fn a_copy_already_recorded_as_behind_does_not_move_the_array_again() {
+    // Bumping the generation fences a disk the composer cannot see. A copy
+    // that is present and already behind is fenced by its own superblock, and
+    // moving the array on its account would invalidate the maintenance record
+    // of the very rebuild it is the target of — so a restart mid-rebuild would
+    // start the rebuild over every time.
+    let members = pair_behind(3);
+    let disks = [stamped(&members[0]), stamped(&members[1])];
+    let before = disks[0]
+        .on_disk_metadata()
+        .expect("the survivor is stamped");
+
+    let assembled = assemble_over(&members, &disks);
+
+    assert!(
+        assembled.degraded,
+        "the array is still short a current copy"
+    );
+    assert_eq!(
+        assembled.identity.generation,
+        identity_of(UUID_A, &members).generation,
+        "but its generation does not move"
+    );
+    assert_eq!(
+        disks[0].on_disk_metadata(),
+        Ok(before),
+        "and no member's metadata is rewritten"
     );
 }

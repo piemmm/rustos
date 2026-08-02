@@ -235,11 +235,10 @@ fn read_lba0<B: Block>(
 /// Reads and writes are expressed in the partition's own block space
 /// (LBA `0` is the partition's first block) and translated onto the inner
 /// device, so a filesystem driver mounting a partition can never address
-/// — or even name — a block outside it (every input
-/// validated; — the window is a fixed extent, not a growable
-/// capacity). The window's bounds are validated against the inner
-/// device's geometry once, at construction; every access is then bounded
-/// by the window length.
+/// — or even name — a block outside it: every input is validated, and the
+/// window is a fixed extent, not a growable capacity. The window's bounds
+/// are validated against the inner device's geometry once, at
+/// construction; every access is then bounded by the window length.
 pub struct PartitionBlock<B: Block> {
     inner: B,
     start_block: u64,
@@ -296,6 +295,20 @@ impl<B: Block> PartitionBlock<B> {
     #[must_use]
     pub fn into_inner(self) -> B {
         self.inner
+    }
+
+    /// Mutably borrow the whole underlying device — not just the blocks the
+    /// window itself addresses.
+    ///
+    /// A holder sometimes needs the I/O the window deliberately excludes: a
+    /// RAID member's own on-disk array-metadata block sits in reserved
+    /// blocks below its data area, outside any partition window built over
+    /// it. Reaching the whole device this way grants no authority
+    /// [`into_inner`](Self::into_inner) does not already give by value — a
+    /// [`PartitionBlock`] is a view onto a device, not a security boundary.
+    #[must_use]
+    pub fn device_mut(&mut self) -> &mut B {
+        &mut self.inner
     }
 
     /// Translate a window-relative request to an inner-device LBA after

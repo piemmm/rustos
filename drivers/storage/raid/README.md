@@ -48,19 +48,31 @@ one node and the composer starts whether or not any array member exists yet.
 5. It then serves every live array's block requests through the same
    fault-aware engine a leaf device is served with, so an array is as
    fault-aware as a disk and there is no second serve path.
+6. Between requests it gives each array one bounded turn of **self-maintenance**
+   — re-admitting a member whose backoff has elapsed, advancing a rebuild,
+   verifying the array, or writing down where it has got to — and records every
+   change in what the array can promise.
 
 The membership is the agent's own parked call: an accepted member's offer is
 held open and answered only when the membership ends, so no separate liveness
-protocol exists. A member the registry refuses is answered at once.
+protocol exists. A member the registry refuses is answered at once. An agent
+re-offering a device is also taken as proof that disk is back, which brings its
+re-probe forward instead of leaving it to wait out an escalated backoff — the
+commonest reason a re-offer cannot be placed is that its slot still holds that
+very device as a faulted member.
 
 Nothing polls. One wait-set carries the rendezvous and every live array's
 endpoint, and the single park's timeout is the soonest of the registry's
-settle/backoff deadline and the arrays' recovery grace windows.
+settle/backoff deadline, the arrays' maintenance deadlines, and their recovery
+grace windows. A turn that actually moved a rebuild or a verification pass
+forward comes straight back round instead of parking, so an idle array heals at
+full speed while a busy one keeps yielding to its workload — but every such turn
+does real I/O, so the loop is a worker, never a poll.
 
 ## Data-integrity rules
 
-Two failures are possible and both lose data, so the rules that avoid them live
-in one place.
+Every rule below exists because breaking it loses data silently rather than
+loudly, so they are stated in one place.
 
 - **An array that cannot answer for itself is never published.** A stripe
   missing a member, or a RAID5 missing two, has holes no redundancy can fill.
@@ -75,13 +87,23 @@ in one place.
   with `BlkDeviceClass::most_patient`), and it runs from the array's first
   member, so widening it for a slow disk can never become an indefinite
   postponement.
-- **A degraded start re-stamps its survivors.** When an array comes online with
-  any slot absent or behind, its generation is bumped and every surviving
-  current member's superblock is rewritten at the new generation before the
-  array is composed. A member that was away therefore keeps its lower
-  generation and resolves as the stale rebuild target it is — it can never come
-  back masquerading as up to date. A re-stamp that cannot be written fails the
-  whole bring-up rather than serving an array whose metadata lies.
+- **A start that cannot see a member fences it.** When an array comes online
+  with a slot missing, its generation is bumped and every surviving current
+  member's superblock is rewritten at the new generation before the array is
+  composed. The disk that is missing — which may still hold a superblock
+  claiming it is current — therefore keeps its lower generation and resolves as
+  the stale rebuild target it is when it returns. A re-stamp that cannot be
+  written fails the whole bring-up rather than serving an array whose metadata
+  lies. A slot that is *present* but behind needs no fencing: its own superblock
+  already records it, and moving the array again on its account would discard
+  the recorded position of the very rebuild it is the target of, so a restart
+  mid-rebuild would start that rebuild over every time.
+- **A finished rebuild is recorded.** The moment a member's rebuild completes,
+  its superblock is stamped current. An array whole in memory but still short a
+  copy on disk would rebuild that copy from scratch on the next start — for
+  hours, on a large array, for ever. A refused stamp is reported and the array
+  keeps serving correctly: the unrecorded member stays *behind* on disk, which
+  is the safe direction, and it simply rebuilds again later.
 - **A member's own metadata is not array data.** Every member is composed
   through a `tairix_partition::PartitionBlock` view that begins past the
   reserved metadata blocks, so no array read or write can reach the superblock
@@ -121,8 +143,8 @@ touches hardware directly and never mounts a filesystem.
 - `CAP_HW_EMIT` — publish the composed array as a storage node so the volume
   manager finds it. The node can only forward transport the composer itself
   created or was granted, so the emission widens no one's authority.
-- `CAP_LOG_EMIT` — record each admission, refusal, publication and degraded
-  start.
+- `CAP_LOG_EMIT` — record each admission, refusal, publication, fenced start,
+  maintenance failure, and change in an array's health.
 
 It is deliberately its own bundle, separate from the sibling member agent: one
 signed bundle grants its whole manifest's capability set to every instance
@@ -130,13 +152,37 @@ loaded from it, and the agent runs once per member disk, so a shared bundle
 would hand every per-disk agent this driver's privileged-bind and node-emit
 authority it has no need of.
 
+## Self-maintenance
+
+Each array heals itself under the shared `ArrayMaintenance` scheduler
+(`docs/src/lib/raid.md`), which decides turn by turn what to do and when to do
+nothing so the workload keeps the array. The composer only turns those decisions
+into transfers:
+
+- **Bounded turns.** One chunk per turn, staged through a single 64 KiB buffer
+  shared by every array — used a whole number of array blocks at a time, so one
+  buffer serves any block size. The chunk bounds how much of an array a turn
+  touches and is deliberately independent of array size: a bigger array takes
+  more turns, never a bigger buffer.
+- **Paced against the workload.** Every request served tells the scheduler the
+  array is in demand, so maintenance holds to its duty share of a busy array and
+  runs flat out only on an idle one.
+- **Durable position.** An advancing pass writes its position into every
+  *current* member's maintenance record, so a scrub or rebuild measured in days
+  survives a restart instead of beginning again. The record goes only to current
+  members, so it can never claim a generation newer than the member it sits on.
+  At assembly the freshest record among the array's own members is read back and
+  restored into the composed device before it serves a byte; a record that is
+  missing, foreign, corrupt, or from another generation simply yields no
+  position, which costs a pass from the beginning and never correctness.
+- **Observable.** An array losing redundancy, rebuilding, and becoming whole is
+  recorded in the shared block-health vocabulary every layer uses, so it reads
+  the same as a leaf disk doing the same; losing an array outright, a failed
+  maintenance turn, a resumed pass, and a verification pass completing each get
+  their own record.
+
 ## Limitations
 
-- Rebuilding a member placed into a degraded live array, and promoting it back
-  to current when the rebuild finishes, is the maintenance stage that follows
-  (`plans/FIX-IO.md` `IO6e`); a returning member is placed and rebuilt from the
-  survivors by the composition engines, but the composer does not yet drive a
-  scheduled resync pass.
 - A member is never released once admitted, so a device that vanishes leaves
   its slot held until the composer restarts.
 - Arrays are discovered from member metadata only. There is no creation or
@@ -173,11 +219,28 @@ proved stale joins as a rebuild target; an array its members cannot serve is
 never composed; a present slot whose device cannot be supplied, a member with
 nothing past its metadata, and an array that is not the size its own metadata
 records are each refused; a member's reserved metadata is never reachable as
-array data; a member of another array is never drawn into this one; and the live
-runtime answers block requests through the shared serve engine, refuses a
-malformed one without touching the array's health, reports the ids it was
-published on, and places a returning member past its own metadata exactly once,
-refusing a slot outside the array or a device too small for its own metadata.
+array data; a member of another array is never drawn into this one; an array
+whose members recorded nothing is verified rather than assumed clean; the
+freshest record among the members is the one resumed from; a record belonging to
+another array is never resumed from at all, so a recycled disk can neither
+inject a position nor talk this array out of verifying itself; a recorded cursor
+the array will not accept is dropped rather than refusing the array; and a copy
+already recorded as behind does not move the array's generation again.
+
+The live array is proven the same way (`src/runtime/tests.rs`): it answers block
+requests through the shared serve engine, refuses a malformed one without
+touching the array's health, reports the ids it was published on, and places a
+returning member past its own metadata exactly once while refusing a slot
+outside the array or a device too small for its own metadata. Its maintenance is
+proven end to end against real member disks: an array verified recently enough
+asks for no work at all yet still says when to look again; an array of unknown
+history verifies itself and the completed pass reaches its members' records; a
+rebuild records its position on current members only, leaving the copy being
+rebuilt untouched; a rebuild interrupted by a restart resumes from the recorded
+position rather than starting over, with the array's generation left alone so
+the record stays valid; a finished rebuild is recorded so the next start finds
+the copy current; a position the members refuse is reported and still owed; and
+an array that regains a copy reports rebuilding and then whole, once each.
 
 The reassembly, escalation and composition arithmetic underneath is proven once
 in `lib/raidmeta` and `lib/raid`.

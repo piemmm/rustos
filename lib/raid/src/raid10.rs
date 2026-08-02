@@ -285,6 +285,16 @@ impl<'a, B: Block> Raid10Array<'a, B> {
         self.members.get(index).map(MirrorMember::state)
     }
 
+    /// Mutably borrow the device held by member `index`, or [`None`] if
+    /// `index` is out of range or the slot holds no device — the mutable
+    /// companion of [`member_state`](Self::member_state), for a caller that
+    /// must reach a member's own device (its reserved array-metadata blocks)
+    /// rather than the array's data.
+    #[must_use]
+    pub fn member_device_mut(&mut self, index: usize) -> Option<&mut B> {
+        self.members.get_mut(index)?.device_mut()
+    }
+
     /// Borrow member `index` (for the serving process to inspect a copy's
     /// device identity, health, or rebuild cursor when logging), or [`None`]
     /// if out of range.

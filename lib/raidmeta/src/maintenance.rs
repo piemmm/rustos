@@ -278,6 +278,19 @@ impl MaintenanceRecord {
         (self.generation, self.sequence) > (other.generation, other.sequence)
     }
 
+    /// Whether this record describes `identity`'s array at all.
+    ///
+    /// Everything the record says — its cursors *and* when the array was last
+    /// verified — is about the array it names and no other, so a consumer asks
+    /// this before believing any of it. A recycled or hostile disk carrying
+    /// another array's record must be unable to inject a position into this
+    /// array, and equally unable to talk it out of verifying itself by
+    /// claiming a completion that was never this array's.
+    #[must_use]
+    pub fn belongs_to(&self, identity: &ArrayIdentity) -> bool {
+        self.array_uuid == identity.array_uuid
+    }
+
     /// The maintenance position this record can restore into `identity`, or
     /// [`ArrayProgress::IDLE`] if it cannot restore one.
     ///
@@ -291,7 +304,7 @@ impl MaintenanceRecord {
     /// §5.4, §26.5).
     #[must_use]
     pub fn progress_for(&self, identity: &ArrayIdentity) -> ArrayProgress {
-        if self.array_uuid != identity.array_uuid || self.generation != identity.generation {
+        if !self.belongs_to(identity) || self.generation != identity.generation {
             return ArrayProgress::IDLE;
         }
         self.progress

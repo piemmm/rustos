@@ -909,7 +909,7 @@ Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver
 process is detected and recovered.
 
-### Stage IO6 — RAID / mirror / ARXFS composition. **in progress**
+### Stage IO6 — RAID / mirror / ARXFS composition. **in progress** (IO6f remains)
 
 **Landed (the RAID1 mirror composition engine):** a RAID volume is a **virtual
 block device that composes child block endpoints** through the same fault-aware
@@ -1240,9 +1240,11 @@ The live consumer of all of it is the RAID array-composer driver
 (`drivers/storage/raid`), which holds client authority over the several member
 devices an array is made of through the delegation model designed in §2.6
 below and decided against the tree's real grant machinery rather than assumed.
-Remaining there — **maintenance driving and array administration** (IO6e,
-IO6f). The ARXFS-native multi-device composition consumes the same engine,
-dispatch, scheduler, and record (§2.2) and follows the same staging.
+It now drives that maintenance turn by turn and checkpoints the position to the
+members, so a pass measured in days survives a restart (IO6e). Remaining there
+— **array creation and administration** (IO6f). The ARXFS-native multi-device
+composition consumes the same engine, dispatch, scheduler, and record (§2.2)
+and follows the same staging.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`lib/raid`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size
@@ -1759,17 +1761,67 @@ the critical path and land first.
     sibling's data — silent destruction, not a fault. The index is now checked
     against the append position and a mismatch refuses the membership with the
     disk untouched.
-- **IO6e — Maintenance driving and durable checkpoints.** The composer turns
-  `ArrayMaintenance` decisions into real transfers: `note_foreground` from its
-  serve path, `note_member_returned` from the IO3/IO4 recovery signals, and its
-  wait armed from the minimum of `recovery_wait_timeout`,
-  `fault_domain_wait_timeout`, and `wait_deadline_ns` (one park, three
-  event-timed sources, never a spin). Position is restored at assembly through
-  `MaintenanceRecord::progress_for` + `RaidArray::restore_progress` and
-  checkpointed back to the members from `RaidArray::progress()` as the array
-  works, so a scrub or rebuild spanning days survives a restart (§26.6). Array
-  health is surfaced through the existing `MountAvailability` fold and the IO5
-  health-event vocabulary (`BlkHealthTransition`), never a second vocabulary.
+- **IO6e — Maintenance driving and durable checkpoints. done.** An array now
+  heals itself: the composer's `ArrayRuntime` (`drivers/storage/raid`, its own
+  `runtime` module) turns one `ArrayMaintenance` decision per turn into real
+  transfers — `note_foreground` from its serve path so maintenance holds to its
+  duty share of a busy array, `note_member_returned` when an agent re-offers a
+  device (the in-process recovery signal: the commonest reason a re-offer
+  cannot be placed is that its slot still holds that very device as a faulted
+  member), and the single park armed from the minimum of the registry deadline,
+  `recovery_wait_timeout`, and `wait_deadline_ns`. A turn that moved a pass
+  forward comes straight back round rather than parking, so an idle array heals
+  at full speed while a busy one yields — every such turn is real I/O, so it is
+  a worker, never a poll (§2.23). One 64 KiB buffer serves every array, used a
+  whole number of *that* array's blocks at a time; the chunk bounds what a turn
+  touches and is deliberately independent of array size (§24.1). Array health
+  edges are reported through the shared IO5 vocabulary
+  (`MountAvailability::health_transition` → `BlkHealthTransition`), with the
+  fail-closed "array lost" edge its own event, and the new ids continuing the
+  driver's own run (`RAID_* 4198–4204`).
+
+  **Durable position.** The scheduler gained the one decision that was missing:
+  `MaintenanceAction::Checkpoint { progress, pass_completed }`, ranked above
+  both chunk kinds (metadata is not array bandwidth, so it never waits behind a
+  rebuild running flat out), due only when the members' records no longer say
+  what the array knows, and paced by `MaintenancePolicy::checkpoint_period_ns`
+  (30 s — one small write per current member per interval bounds both the
+  discarded re-work and the write wear). The action *carries* the position, so
+  the scheduler and the disks cannot disagree about what was written;
+  `pass_completed` carries the fact a verification pass finished, which the
+  position alone cannot (a completed pass returns the cursors to idle, so a
+  small array would otherwise never record a completion and would re-verify on
+  every restart). Its retry storage is now generic (`ArrayMaintenance<R>`) so a
+  long-lived serve process can own the scheduler beside its array. The runtime
+  writes the record to **current members only** (a record can then never claim
+  a generation newer than the member it sits on), and `assemble_array` reads
+  the freshest back, restores it with `RaidArray::restore_progress`, and
+  reports it as `MaintenanceResume`.
+
+  **Two defects this stage necessarily uncovered, both fixed here (§2.18).**
+  (1) *Every* degraded start bumped the array generation, but the maintenance
+  record is bound to the generation it was written at — so a restart during a
+  rebuild invalidated its own cursor and the rebuild began again, every time, on
+  exactly the multi-day rebuilds this stage exists to make resumable. The bump
+  is what **fences** a disk the composer cannot see; a member that is *present*
+  and already recorded as behind is fenced by its own superblock, so the bump is
+  now taken only when a slot is `Missing`. (2) A rebuild that *completed* was
+  never recorded: the array was whole in memory and still short a copy on disk,
+  so the next assembly rebuilt it from scratch. The runtime now stamps every
+  in-sync member's superblock current the moment a rebuild finishes. A third,
+  smaller one: a maintenance record belonging to *another* array handed over its
+  "last verified" stamp, so a recycled or hostile disk could talk an array out of
+  verifying itself for a week — the ownership test is now the one shared
+  `MaintenanceRecord::belongs_to` that `progress_for` itself uses.
+
+  Supporting seams added for it: `RaidArray::member_device_mut` (+ the per-engine
+  and per-member-type accessors) and `PartitionBlock::device_mut`, which is how a
+  member's *own* metadata blocks are reached while the array owns the device, and
+  `OwnedRaidArray::with_array` made public as the general transient-view seam.
+
+  Remaining: driving maintenance from a *fault-domain* recovery signal
+  (`fault_domain_wait_timeout` folded into the park) waits on the composer
+  owning fault domains for its members, which is IO4 wiring, not IO6e.
 - **IO6f — Array creation and administration.** An array must be *created*
   before it can be discovered: a system command app (§16.2, §16.7 — `mdadm` is
   the reference surface) that writes member superblocks through the composer's
@@ -1805,8 +1857,9 @@ escalating, and the array forgotten when its last member leaves. Host-side,
 first block; a device that cannot report its geometry neither read nor written;
 a block size that cannot stage the record failing closed; a device with no valid
 metadata refused rather than guessed at; a complete array starting clean and
-leaving every member's metadata alone; a degraded start recording a new
-generation on every surviving member; a survivor that cannot be re-stamped
+leaving every member's metadata alone; a start that cannot see a member fencing
+it with a new generation on every surviving member; a survivor that cannot be
+re-stamped
 failing the whole bring-up closed; a member the metadata proved stale joining as
 a rebuild target; an array its members cannot serve never composed; a present
 slot whose device cannot be supplied, a member with nothing past its metadata,
@@ -1816,7 +1869,24 @@ array never drawn into this one; and the runtime answering block requests
 through the shared serve engine, refusing a malformed one without touching the
 array's health, reporting the ids it was published on, and placing a returning
 member past its own metadata exactly once while refusing a slot outside the
-array or a device too small for its own metadata. Still to come
+array or a device too small for its own metadata. Host-side, **landed with
+IO6e**: in the scheduler, an advancing pass writing its position down only once
+an interval has passed, a verified idle array writing no metadata at all, a
+rebuild running flat out still yielding to a due write, a refused write holding
+off and still owing the same position, a pass beginning and ending between two
+writes still recording that it finished, an unwritten position waking a parked
+loop, and an owning scheduler deciding exactly as a borrowing one does; in the
+driver, an array verified recently enough asking for no work yet still saying
+when to look again, an array of unknown history verifying itself with the
+completed pass reaching its members' records, a rebuild recording its position
+on current members only, a rebuild interrupted by a restart resuming from the
+recorded position with the array's generation left alone, a finished rebuild
+recorded so the next start finds the copy current, a position the members refuse
+reported and still owed, an array regaining a copy reporting rebuilding then
+whole exactly once, a record belonging to another array never resumed from at
+all, a recorded cursor the array will not accept dropped rather than refusing
+the array, and a copy already recorded as behind not moving the array's
+generation again. Still to come
 with their stages — the QEMU vertical: several emulated members
 discovered, one array assembled and published, a filesystem inside it mounted
 through the unmodified `volmgr` path, a member pulled (array degrades, mount
@@ -1849,14 +1919,14 @@ submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
 HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
 composition **engine** (`lib/raid`) is independent of ARXFS and has
-landed host-side; what remains is the array service's maintenance and
-administration, whose authority model
+landed host-side; what remains is the array service's creation and
+administration surface, whose authority model
 is decided and staged in §2.6 (IO6a–IO6f). That reaches further than the stages
 above — it adds a syscall (`call_grant`), fixes the defects in the kernel's
 grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
 bootstrap — so it is staged the same way. IO6a–IO6b, the security
-prerequisites, have landed, as has IO6c (the shared `lib/raid` hoist, the
-composition protocol, the emitted member node, and the member agent) and IO6d
+prerequisites, have landed, as have IO6c (the shared `lib/raid` hoist, the
+composition protocol, the emitted member node, and the member agent), IO6d
 (the assembly decisions, the live array service, and the published
-`tairix,raid-array` node `volmgr` mounts through); IO6e–IO6f remain, each stage
-complete and green on its own.
+`tairix,raid-array` node `volmgr` mounts through), and IO6e (maintenance
+driving and durable checkpoints); IO6f remains, complete and green on its own.

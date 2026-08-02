@@ -450,3 +450,29 @@ fn device_health_is_unavailable_without_member_telemetry() {
         DeviceHealth::Unavailable
     );
 }
+
+#[test]
+fn member_device_mut_reaches_the_named_members_own_device() {
+    let mut m = members();
+    let mut array = StripeArray::assemble(&mut m, CHUNK).unwrap();
+
+    // The borrowed device is the member's whole disk, below the stripe's data
+    // view: a write through it lands on that member alone, which is how a
+    // caller reaches a member's reserved array-metadata blocks.
+    array
+        .member_device_mut(2)
+        .expect("a stripe member always holds a device")
+        .write_blocks(1, &[0x5A; BS as usize])
+        .unwrap();
+    assert_eq!(array.member(2).unwrap().device().block_byte(1), 0x5A);
+    assert_eq!(
+        array.member(0).unwrap().device().block_byte(1),
+        0,
+        "the write reached only the named member's device"
+    );
+
+    assert!(
+        array.member_device_mut(MEMBERS).is_none(),
+        "an index outside the array has no member"
+    );
+}

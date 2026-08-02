@@ -442,6 +442,33 @@ fn window_translates_and_bounds_accesses() {
 }
 
 #[test]
+fn device_mut_reaches_a_block_outside_the_window_view() {
+    let dev = VecBlock::new(512, 64);
+    let mut win = PartitionBlock::new(dev, 10, 4).expect("window fits");
+
+    // Block 0 lies below the window's start (device block 10), so it is
+    // outside anything the window's own addressing can reach.
+    win.device_mut()
+        .write_blocks(0, &[0xcd; 512])
+        .expect("writes below the window through the whole device");
+
+    // The window's own view is unaffected: its LBA 0 still maps to device
+    // block 10, still zeroed.
+    let mut in_window = [0u8; 512];
+    win.read_blocks(0, &mut in_window)
+        .expect("reads window LBA 0");
+    assert_eq!(in_window, [0u8; 512]);
+
+    // The write landed on the device, reachable only by going around the
+    // window.
+    let mut below_window = [0u8; 512];
+    win.device_mut()
+        .read_blocks(0, &mut below_window)
+        .expect("reads the device directly");
+    assert_eq!(below_window, [0xcd; 512]);
+}
+
+#[test]
 fn window_rejects_an_extent_past_the_device() {
     let dev = VecBlock::new(512, 64);
     assert_eq!(

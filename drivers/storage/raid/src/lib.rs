@@ -20,6 +20,11 @@
 //! array may be published without serving data it cannot vouch for — while the
 //! composition arithmetic beneath it is the shared `tairix_raid` crate.
 //!
+//! An array does not merely serve: [`ArrayRuntime`] also drives its
+//! self-maintenance between requests — re-admitting a returning member,
+//! rebuilding it, verifying the array, and writing the position of a pass that
+//! outlives a reboot into its members' own records.
+//!
 //! # Why the member agent is a sibling crate, not a second role here
 //!
 //! One signed bundle grants its whole manifest's capability set to every
@@ -37,11 +42,16 @@
 extern crate alloc;
 
 mod compose;
+mod runtime;
 mod service;
+#[cfg(test)]
+mod testkit;
 
 pub use compose::{Admission, ComposerAction, HeldMember, MemberRegistry, MemberStanding};
+pub use runtime::{ArrayHealthEvent, ArrayRuntime, MaintenanceStep};
 pub use service::{
-    assemble_array, read_superblock, write_superblock, ArrayRuntime, Assembled, ServiceError,
+    assemble_array, read_maintenance_record, read_superblock, write_maintenance_record,
+    write_superblock, Assembled, MaintenanceResume, ServiceError,
 };
 
 use tairix_abi::{DriverBindKey, HwMatchKey, HW_VIRTUAL_BUS_COMPATIBLE};

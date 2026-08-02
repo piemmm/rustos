@@ -804,3 +804,49 @@ fn a_restored_cursor_outside_the_array_is_refused_and_changes_nothing() {
         .expect("the last block is a valid position");
     assert_eq!(array.scrub_cursor(), MB - 1);
 }
+
+#[test]
+fn member_device_mut_reaches_the_named_members_own_device() {
+    let mut m = [
+        DualParityMember::new(MemBlock::new()),
+        DualParityMember::new(MemBlock::new()),
+        DualParityMember::new(MemBlock::new()),
+        DualParityMember::absent(),
+    ];
+    let mut s = scratch();
+    let mut array = DualParityArray::assemble(&mut m, &mut s, CHUNK).unwrap();
+
+    // The borrowed device is the member's whole disk, below the array's data
+    // view: a write through it lands on that member alone, which is how a
+    // caller reaches a member's reserved array-metadata blocks.
+    array
+        .member_device_mut(1)
+        .expect("slot 1 holds a device")
+        .write_blocks(2, &[0x5A; BS as usize])
+        .unwrap();
+    let mut buf = [0u8; BS as usize];
+    array
+        .member_device_mut(1)
+        .unwrap()
+        .read_blocks(2, &mut buf)
+        .unwrap();
+    assert_eq!(buf, [0x5A; BS as usize]);
+    array
+        .member_device_mut(0)
+        .unwrap()
+        .read_blocks(2, &mut buf)
+        .unwrap();
+    assert_eq!(
+        buf, [0u8; BS as usize],
+        "the write reached only the named member's device"
+    );
+
+    assert!(
+        array.member_device_mut(3).is_none(),
+        "an absent slot holds no device"
+    );
+    assert!(
+        array.member_device_mut(MEMBERS).is_none(),
+        "an index outside the array has no slot"
+    );
+}

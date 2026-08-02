@@ -1639,3 +1639,37 @@ fn the_reported_rebuild_position_is_the_least_advanced_copy() {
         }
     }
 }
+
+#[test]
+fn member_device_mut_reaches_the_named_slots_own_device() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");
+
+    // A write through the borrowed device is the member's own I/O, not the
+    // array's: it lands on that one copy and nowhere else, which is how a
+    // caller reaches a member's reserved array-metadata blocks.
+    array
+        .member_device_mut(1)
+        .expect("slot 1 holds a device")
+        .write_blocks(3, &block(0x5A))
+        .expect("the member's own write");
+    assert_eq!(&dev(&array, 1).store[3 * 512..4 * 512], &block(0x5A));
+    assert_eq!(
+        &dev(&array, 0).store[3 * 512..4 * 512],
+        &block(0),
+        "the write reached only the named slot's device"
+    );
+
+    assert!(
+        array.member_device_mut(2).is_none(),
+        "an absent slot holds no device"
+    );
+    assert!(
+        array.member_device_mut(3).is_none(),
+        "an index outside the array has no slot"
+    );
+}

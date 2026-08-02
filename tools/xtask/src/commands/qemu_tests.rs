@@ -4615,16 +4615,18 @@ static TESTS: &[QemuTest] = &[
     // `netchan` node), reads the planted config, and binds the NIC to `wan`
     // by its resolved bus location; `netstack` assigns the config's static
     // IPv6 address and answers the peer's campaign to that static address.
-    // PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`,
-    // `netstack`'s `INTERFACE_CONFIG_APPLIED`, and `netstack`'s
-    // `INBOUND_ECHO_SERVED` — the last gating exit so the guest stays alive
-    // until a frame addressed to its *static* address has been answered; the
-    // peer's own campaign verdict (a reply at the static address, never the
-    // link-local the guest also forms) is required too, so neither side can
-    // pass alone and a `match.node` mis-bind cannot pass. A 240-second budget
-    // covers boot + autoload + service bring-up + the bind + the config apply
-    // + the paced static-address echo campaign on QEMU TCG; single CPU like
-    // the other full-boot verticals.
+    // The guest does not self-exit: the harness ends the run the instant the
+    // peer's out-of-guest observer confirms it received the guest's reply at
+    // the *static* address — the last link in the causal chain, so teardown
+    // can never precede (and lose the race to) that reply leaving the
+    // machine. The witness records (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `INTERFACE_CONFIG_APPLIED` and `INBOUND_ECHO_SERVED`) still reach the
+    // serial transcript for diagnosis, and the peer's own campaign verdict
+    // subsumes them, so a `match.node` mis-bind (answered on the link-local
+    // instead) cannot pass. A 240-second budget covers boot + autoload +
+    // service bring-up + the bind + the config apply + the paced
+    // static-address echo campaign on QEMU TCG; single CPU like the other
+    // full-boot verticals.
     QemuTest {
         package: "tairix-test-netstack-static-qemu-aarch64",
         binary: "tairix-test-netstack-static-qemu-aarch64",
@@ -4656,17 +4658,19 @@ static TESTS: &[QemuTest] = &[
     // `netstack` drives the DHCP client, which broadcasts DISCOVER, accepts
     // the peer's OFFER, REQUESTs it, and applies the peer's ACK — leasing the
     // interface its only address. The peer then pings the guest at that leased
-    // address and the guest answers. PASS once the log sink has seen
-    // `devmgr`'s `NETSTACK_BOUND`, `netstack`'s `DHCP_LEASE_ACQUIRED` (the
-    // lease was granted and applied), and `netstack`'s `INBOUND_ECHO_SERVED` —
-    // the last gating exit so the guest stays alive until a frame addressed to
-    // its *leased* address has been answered; the peer's own verdict (it
-    // offered, acked, and got the echo reply at the leased address) is
-    // required too, so a broken lease cannot pass on an address the guest
-    // formed itself (it forms none). A 240-second budget covers boot +
-    // autoload + service bring-up + the bind + the DHCP exchange + the paced
-    // echo campaign on QEMU TCG; single CPU like the other full-boot
-    // verticals.
+    // address and the guest answers. The guest does not self-exit: the
+    // harness ends the run the instant the peer's out-of-guest observer
+    // confirms it received the guest's reply at the *leased* address — the
+    // last link in the causal chain, so teardown can never precede (and lose
+    // the race to) that reply leaving the machine. The witness records
+    // (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s `DHCP_LEASE_ACQUIRED` and
+    // `INBOUND_ECHO_SERVED`) still reach the serial transcript for diagnosis,
+    // and the peer's own verdict (it offered, acked, and got the echo reply
+    // at the leased address) subsumes them, so a broken lease cannot pass on
+    // an address the guest formed itself (it forms none). A 240-second budget
+    // covers boot + autoload + service bring-up + the bind + the DHCP
+    // exchange + the paced echo campaign on QEMU TCG; single CPU like the
+    // other full-boot verticals.
     QemuTest {
         package: "tairix-test-netstack-dhcp-qemu-aarch64",
         binary: "tairix-test-netstack-dhcp-qemu-aarch64",
@@ -4743,13 +4747,15 @@ static TESTS: &[QemuTest] = &[
     // autoloads the virtio-net driver into its own process (it publishes a
     // `netchan` node), reads the planted config, and binds the NIC to `wan` by
     // its resolved BAR base; `netstack` assigns the static address and answers
-    // the peer's campaign. PASS once the log sink has seen `devmgr`'s
-    // `NETSTACK_BOUND`, `netstack`'s `INTERFACE_CONFIG_APPLIED`, and
-    // `netstack`'s `INBOUND_ECHO_SERVED` — the last gating exit so the guest
-    // stays alive until a frame addressed to its *static* address has been
-    // answered; the peer's own campaign verdict (a reply at the static
-    // address, never the link-local the guest also forms) is required too, so
-    // a `match.node` mis-bind cannot pass. Single CPU and the same 240-second
+    // the peer's campaign. The guest does not self-exit: the harness ends the
+    // run the instant the peer's out-of-guest observer confirms it received
+    // the guest's reply at the *static* address — the last link in the causal
+    // chain, so teardown can never precede (and lose the race to) that reply
+    // leaving the machine. The witness records (`devmgr`'s `NETSTACK_BOUND`,
+    // `netstack`'s `INTERFACE_CONFIG_APPLIED` and `INBOUND_ECHO_SERVED`) still
+    // reach the serial transcript for diagnosis, and the peer's own campaign
+    // verdict subsumes them, so a `match.node` mis-bind (answered on the
+    // link-local instead) cannot pass. Single CPU and the same 240-second
     // budget as its siblings.
     QemuTest {
         package: "tairix-test-netstack-static-qemu-x86-64",
@@ -4784,12 +4790,15 @@ static TESTS: &[QemuTest] = &[
     // driver into its own process (it publishes a `netchan` node), reads the
     // planted config, and binds the NIC to `wan` by its resolved BAR base;
     // `netstack` drives its DHCP client, which broadcasts DISCOVER, accepts the
-    // peer's OFFER, REQUESTs it, and applies the peer's ACK. PASS once the log
-    // sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
-    // `DHCP_LEASE_ACQUIRED`, and `netstack`'s `INBOUND_ECHO_SERVED` — the last
-    // gating exit so the guest stays alive until a frame addressed to its
-    // *leased* address has been answered; the peer's own verdict (it offered,
-    // acked, and got the echo reply at the leased address) is required too, so
+    // peer's OFFER, REQUESTs it, and applies the peer's ACK. The guest does
+    // not self-exit: the harness ends the run the instant the peer's
+    // out-of-guest observer confirms it received the guest's reply at the
+    // *leased* address — the last link in the causal chain, so teardown can
+    // never precede (and lose the race to) that reply leaving the machine.
+    // The witness records (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP_LEASE_ACQUIRED` and `INBOUND_ECHO_SERVED`) still reach the serial
+    // transcript for diagnosis, and the peer's own verdict (it offered,
+    // acked, and got the echo reply at the leased address) subsumes them, so
     // a broken lease cannot pass on an address the guest formed itself (it
     // forms none). Single CPU and the same 240-second budget as its siblings.
     QemuTest {
@@ -4864,14 +4873,16 @@ static TESTS: &[QemuTest] = &[
     // `devmgr` autoloads the virtio-net driver into its own process (it
     // publishes a `netchan` node), reads the planted config, and binds the NIC
     // to `wan` by its resolved slot base; `netstack` assigns the static
-    // address and answers the peer's campaign. PASS once the log sink has seen
-    // `devmgr`'s `NETSTACK_BOUND`, `netstack`'s `INTERFACE_CONFIG_APPLIED`, and
-    // `netstack`'s `INBOUND_ECHO_SERVED` — the last gating exit so the guest
-    // stays alive until a frame addressed to its *static* address has been
-    // answered; the peer's own campaign verdict (a reply at the static
-    // address, never the link-local the guest also forms) is required too, so
-    // a `match.node` mis-bind cannot pass. Single CPU and the same 240-second
-    // budget as its siblings.
+    // address and answers the peer's campaign. The guest does not self-exit:
+    // the harness ends the run the instant the peer's out-of-guest observer
+    // confirms it received the guest's reply at the *static* address — the
+    // last link in the causal chain, so teardown can never precede (and lose
+    // the race to) that reply leaving the machine. The witness records
+    // (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s `INTERFACE_CONFIG_APPLIED`
+    // and `INBOUND_ECHO_SERVED`) still reach the serial transcript for
+    // diagnosis, and the peer's own campaign verdict subsumes them, so a
+    // `match.node` mis-bind (answered on the link-local instead) cannot pass.
+    // Single CPU and the same 240-second budget as its siblings.
     QemuTest {
         package: "tairix-test-netstack-static-qemu-riscv64",
         binary: "tairix-test-netstack-static-qemu-riscv64",
@@ -4906,12 +4917,15 @@ static TESTS: &[QemuTest] = &[
     // driver into its own process (it publishes a `netchan` node), reads the
     // planted config, and binds the NIC to `wan` by its resolved slot base;
     // `netstack` drives its DHCP client, which broadcasts DISCOVER, accepts the
-    // peer's OFFER, REQUESTs it, and applies the peer's ACK. PASS once the log
-    // sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
-    // `DHCP_LEASE_ACQUIRED`, and `netstack`'s `INBOUND_ECHO_SERVED` — the last
-    // gating exit so the guest stays alive until a frame addressed to its
-    // *leased* address has been answered; the peer's own verdict (it offered,
-    // acked, and got the echo reply at the leased address) is required too, so
+    // peer's OFFER, REQUESTs it, and applies the peer's ACK. The guest does
+    // not self-exit: the harness ends the run the instant the peer's
+    // out-of-guest observer confirms it received the guest's reply at the
+    // *leased* address — the last link in the causal chain, so teardown can
+    // never precede (and lose the race to) that reply leaving the machine.
+    // The witness records (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP_LEASE_ACQUIRED` and `INBOUND_ECHO_SERVED`) still reach the serial
+    // transcript for diagnosis, and the peer's own verdict (it offered,
+    // acked, and got the echo reply at the leased address) subsumes them, so
     // a broken lease cannot pass on an address the guest formed itself (it
     // forms none). Single CPU. Budgeted at 360 s — not the 240 s its
     // aarch64/x86_64 siblings use: riscv64 is the slowest TCG target, and the
@@ -4954,16 +4968,18 @@ static TESTS: &[QemuTest] = &[
     // on-link prefix, the peer also emits Router Advertisements naming the
     // shared `/64` on-link (non-autonomous) so the guest can route back; the
     // peer then pings the guest at the leased address and the guest answers.
-    // PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`, `netstack`'s
-    // `DHCP6_LEASE_ACQUIRED` (the lease was granted and applied), and
-    // `netstack`'s `INBOUND_ECHO_SERVED` — the last gating exit so the guest
-    // stays alive until a frame addressed to its *leased* address has been
-    // answered; the peer's own verdict (it advertised, replied, and got the
-    // echo reply at the leased address) is required too, so a broken lease
-    // cannot pass on an address the guest formed itself (it forms none). A
-    // 240-second budget covers boot + autoload + service bring-up + the bind +
-    // the DHCPv6 exchange + the paced echo campaign on QEMU TCG; single CPU
-    // like the other full-boot verticals.
+    // The guest does not self-exit: the harness ends the run the instant the
+    // peer's out-of-guest observer confirms it received the guest's reply at
+    // the *leased* address — the last link in the causal chain, so teardown
+    // can never precede (and lose the race to) that reply leaving the
+    // machine. The witness records (`devmgr`'s `NETSTACK_BOUND`, `netstack`'s
+    // `DHCP6_LEASE_ACQUIRED` and `INBOUND_ECHO_SERVED`) still reach the serial
+    // transcript for diagnosis, and the peer's own verdict (it advertised,
+    // replied, and got the echo reply at the leased address) subsumes them,
+    // so a broken lease cannot pass on an address the guest formed itself (it
+    // forms none). A 240-second budget covers boot + autoload + service
+    // bring-up + the bind + the DHCPv6 exchange + the paced echo campaign on
+    // QEMU TCG; single CPU like the other full-boot verticals.
     QemuTest {
         package: "tairix-test-netstack-dhcp6-qemu-aarch64",
         binary: "tairix-test-netstack-dhcp6-qemu-aarch64",
@@ -5508,10 +5524,10 @@ static TESTS: &[QemuTest] = &[
     // provisions the channel and auto-configures the interface's EUI-64
     // link-local (no IPv4). PASS once the audit sink has seen `devmgr`'s
     // `NETSTACK_BOUND`, `netstack`'s `DRIVER_BOUND`, and `netstack`'s
-    // `INBOUND_ECHO_SERVED` — the last gating exit so the guest stays
-    // alive until a frame has crossed the two-process boundary and been
-    // answered; the peer's own v6 echo verdict is required too, so neither
-    // side can pass alone. Booted as a **display world** (`ramfb`): the
+    // `INBOUND_ECHO_SERVED` in the transcript. The guest does not
+    // self-exit: the run ends on the peer's completion gate — it received
+    // the guest's reply, the last link in the chain — so teardown can never
+    // precede the reply leaving the machine. Booted as a **display world** (`ramfb`): the
     // framebuffer boot console is the primary console, so the login TUI
     // renders to the framebuffer and the UART carries only the debug log —
     // exactly as `autoload_input`. That frees the single CPU for the
@@ -5558,10 +5574,10 @@ static TESTS: &[QemuTest] = &[
     // `devmgr` service calls `netstack` `BindDriver`, and `netstack` provisions
     // the channel and auto-configures the interface's EUI-64 link-local (no
     // IPv4). PASS once the log sink has seen `devmgr`'s `NETSTACK_BOUND`,
-    // `netstack`'s `DRIVER_BOUND`, and `netstack`'s `INBOUND_ECHO_SERVED` — the
-    // last gating exit so the guest stays alive until a frame has crossed the
-    // two-process boundary and been answered; the peer's own v6 echo verdict is
-    // required too, so neither side can pass alone. Single CPU (PID 1, the
+    // `netstack`'s `DRIVER_BOUND`, and `netstack`'s `INBOUND_ECHO_SERVED` in
+    // the transcript. The guest does not self-exit: the run ends on the peer's
+    // completion gate — it received the guest's reply, the last link in the
+    // chain — so teardown can never precede the reply leaving the machine. Single CPU (PID 1, the
     // unlock/store kthread, the autoloaded driver, `netstack`, and `devmgr`
     // share the boot hart, alongside the NULL-console `login` fast-respawn),
     // with the same 240-second budget as its aarch64 sibling covering boot +
@@ -5601,12 +5617,12 @@ static TESTS: &[QemuTest] = &[
     // and `netstack` provisions the channel and auto-configures the interface's
     // EUI-64 link-local (no IPv4). PASS once the log sink has seen `devmgr`'s
     // `NETSTACK_BOUND`, `netstack`'s `DRIVER_BOUND`, and `netstack`'s
-    // `INBOUND_ECHO_SERVED` — the last gating exit so the guest stays alive
-    // until a frame has crossed the two-process boundary and been answered; the
-    // peer's own v6 echo verdict is required too, so neither side can pass
-    // alone. Single CPU, with the same 240-second budget as its siblings
-    // covering boot + autoload + service bring-up + the bind + the paced echo
-    // campaign on QEMU TCG.
+    // `INBOUND_ECHO_SERVED` in the transcript. The guest does not self-exit:
+    // the run ends on the peer's completion gate — it received the guest's
+    // reply, the last link in the chain — so teardown can never precede that
+    // reply leaving the machine. Single CPU, with the same 240-second budget
+    // as its siblings covering boot + autoload + service bring-up + the bind
+    // + the paced echo campaign on QEMU TCG.
     QemuTest {
         package: "tairix-test-netstack-autoload-qemu-x86-64",
         binary: "tairix-test-netstack-autoload-qemu-x86-64",
@@ -7388,15 +7404,26 @@ fn attach_net_peer(
             let peer_sock = sock_base.with_extension("peer.sock");
             let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock)
                 .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
-            // The two-process autoload verticals (V6LinkLocal) prove success
-            // through the peer's inbound echo campaign, whose confirming event —
-            // the peer receiving the guest's reply — is the *last* link in the
-            // causal chain. Their guest bins are built not to self-exit, so the
-            // run is ended by the peer's completion gate rather than by a guest
-            // debug-exit that would race, and lose to, the reply leaving the
-            // machine. Every other single-wire role keeps a guest-driven exit,
-            // so its gate stays unset here.
-            if t.netstack_peer == NetPeerMode::V6LinkLocal {
+            // These four roles all prove success through the peer's inbound
+            // echo campaign, whose confirming event — the peer receiving the
+            // guest's reply — is the *last* link in the causal chain. Their
+            // guest bins are built not to self-exit, so the run is ended by
+            // the peer's completion gate rather than by a guest debug-exit
+            // that would race, and lose to, the reply leaving the machine.
+            // The TCP roles are safe with a guest-driven exit instead: the
+            // peer has already received the whole transfer before the guest
+            // can conclude, so there is no race to lose. V6PingResponder is
+            // guest-active — the guest is the pinger and the last link in its
+            // chain is inside the guest itself — so it too keeps a
+            // guest-driven exit. Every other single-wire role falls into one
+            // of those two safe shapes, so its gate stays unset here.
+            if matches!(
+                t.netstack_peer,
+                NetPeerMode::V6LinkLocal
+                    | NetPeerMode::V6StaticEcho
+                    | NetPeerMode::V4DhcpEcho
+                    | NetPeerMode::V6Dhcp6Echo
+            ) {
                 spec = spec.with_completion_gate(started.success_gate());
             }
             peer = Some(started);

@@ -13,12 +13,19 @@
 //! 2. does what the registry's [`ComposerAction`] says — assemble and publish
 //!    a ready array, place a returning member into a live one, or wait;
 //! 3. serves every live array's queued block requests through the shared
-//!    fault-aware engine; and
-//! 4. parks until the soonest of the registry's settle/backoff deadline and
-//!    the arrays' recovery grace windows, or until any endpoint signals.
+//!    fault-aware engine;
+//! 4. gives each array one bounded turn of self-maintenance — re-admitting a
+//!    returning member, advancing a rebuild, verifying the array, or writing
+//!    down where it has got to; and
+//! 5. parks until the soonest of the registry's settle/backoff deadline, the
+//!    arrays' recovery grace windows, and their maintenance deadlines, or
+//!    until any endpoint signals.
 //!
 //! Nothing here spins: every wait is a one-shot timeout or a wait-set wake, so
-//! a quiet composer costs a quiet core.
+//! a quiet composer costs a quiet core. A turn that actually moved a rebuild
+//! or a scrub forward comes straight back round instead of parking, so an idle
+//! array heals at full speed while a busy one keeps yielding to its workload —
+//! but every such turn does real I/O, so the loop is never a poll.
 //!
 //! # A member node is a pointer to look, never a datum to believe
 //!
@@ -41,17 +48,19 @@ use tairix_abi::raid_ipc::{
     MemberOffer, RAID_ARRAY_COMPATIBLE, RAID_MAX_REQUEST, RAID_REGISTRY_ENDPOINT,
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::time::Time64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_raid::{
-    assemble_array, read_superblock, Admission, ArrayRuntime, ComposerAction, MemberRegistry,
+    assemble_array, read_superblock, Admission, ArrayHealthEvent, ArrayRuntime, ComposerAction,
+    MaintenanceStep, MemberRegistry,
 };
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
-use tairix_raid::ArraySuperblock;
+use tairix_raid::{ArraySuperblock, MaintenanceAction};
 use tairix_rt::LogSink;
 use tairix_util::fmt::format_hex_u64;
 
@@ -89,14 +98,44 @@ const RAID_ARRAY_PUBLISHED: EventId = EventId(4194);
 /// created); the registry backs off before retrying.
 const RAID_ARRAY_FAILED: EventId = EventId(4195);
 
-/// Diagnostic event id: an array started **degraded** — a slot was absent or
-/// behind, so its generation was bumped and the survivors re-stamped, and a
-/// member that returns now rejoins as the rebuild target it is.
+/// Diagnostic event id: an array started short of full redundancy — a slot was
+/// absent, or held a copy its own metadata proved is behind. A slot the
+/// composer could not see is additionally fenced: the array's generation is
+/// bumped and the survivors re-stamped, so that disk rejoins as the rebuild
+/// target it is rather than as a copy trusted to be current.
 const RAID_ARRAY_DEGRADED: EventId = EventId(4196);
 
 /// Diagnostic event id: a returning or late member was placed into its live
 /// array to be rebuilt from the survivors.
 const RAID_MEMBER_JOINED: EventId = EventId(4197);
+
+/// Diagnostic event id: an array resumed a verification pass or a rebuild its
+/// members' records had recorded, rather than starting the pass over.
+const RAID_ARRAY_RESUMED: EventId = EventId(4198);
+
+/// Diagnostic event id: a maintenance turn failed — a re-add refused, a
+/// rebuild or verification chunk that the members would not serve, or a
+/// position the members would not record. The scheduler backs off before
+/// trying again.
+const RAID_MAINTENANCE_FAILED: EventId = EventId(4199);
+
+/// Diagnostic event id: a verification pass completed over the whole array,
+/// closing the window in which a latent media error could have sat undetected.
+const RAID_SCRUB_COMPLETED: EventId = EventId(4200);
+
+/// Diagnostic event id: an array lost redundancy but keeps serving.
+const RAID_HEALTH_DEGRADED: EventId = EventId(4201);
+
+/// Diagnostic event id: an array is rebuilding a member back into itself.
+const RAID_HEALTH_RECOVERING: EventId = EventId(4202);
+
+/// Diagnostic event id: an array is whole again — every member current.
+const RAID_HEALTH_RECOVERED: EventId = EventId(4203);
+
+/// Diagnostic event id: an array can no longer serve; too many members are
+/// gone for its level to reconstruct what they held. Its consumers now get
+/// typed fail-closed answers rather than data the array cannot vouch for.
+const RAID_ARRAY_LOST: EventId = EventId(4204);
 
 /// Outstanding-membership capacity of the reserved rendezvous. Each admitted
 /// member holds its offer call open for the life of its membership, so this
@@ -111,6 +150,18 @@ const REGISTRY_CAPACITY: usize = 256;
 /// blocks on its reply); a small queue absorbs a re-submit racing the previous
 /// reply. It mirrors a leaf block driver's per-unit endpoint.
 const ARRAY_ENDPOINT_CAPACITY: usize = 4;
+
+/// The shared buffer one array's maintenance chunk is staged through.
+///
+/// It bounds how much of an array a single rebuild or verification turn
+/// touches, so it is deliberately independent of how large the arrays are: a
+/// bigger array takes more turns, never a bigger buffer, and one buffer serves
+/// every array the composer holds because each turn uses as many whole blocks
+/// of it as that array's geometry allows. Sixty-four kibibytes is large enough
+/// that the per-turn overhead disappears against the transfer and small enough
+/// to sit unnoticed on a machine with a gibibyte of memory serving several
+/// arrays at once.
+const MAINTENANCE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Base of the id block the composer's per-array block-service endpoints are
 /// bound in (`b"RAY\0"`-tagged, mirroring the leaf drivers' tagged endpoint
@@ -182,6 +233,10 @@ struct Composer {
     /// An endpoint and window bound for an array whose publish did not finish,
     /// kept for the next attempt rather than stranded.
     pending: Option<PendingResources>,
+    /// The one buffer every array's maintenance chunk is staged through. Empty
+    /// only if it could not be allocated at startup, which leaves the arrays
+    /// serving but unmaintained rather than taking the whole composer down.
+    scratch: Vec<u8>,
 }
 
 /// The capability set the driver host re-checks up front; the kernel is the
@@ -217,6 +272,39 @@ fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static
             }],
         },
     );
+}
+
+/// Record a maintenance turn worth an operator's attention.
+///
+/// A rebuild or verification chunk is not logged per chunk — a pass is
+/// thousands of them, and the array's health edges already mark where one
+/// began and ended. What is recorded is a turn that *failed*, and the moment a
+/// verification pass's completion reaches the members' records, which is when
+/// the array can be said to have been verified durably.
+fn log_maintenance_step(step: &MaintenanceStep, endpoint: u64) {
+    match (step.action, step.outcome) {
+        (_, Err(_)) => log_hex_event(
+            RAID_MAINTENANCE_FAILED,
+            Level::Warn,
+            "raid: array maintenance turn refused by the members; backing off",
+            "endpoint_hex",
+            endpoint,
+        ),
+        (
+            MaintenanceAction::Checkpoint {
+                pass_completed: true,
+                ..
+            },
+            Ok(()),
+        ) => log_hex_event(
+            RAID_SCRUB_COMPLETED,
+            Level::Info,
+            "raid: array verified end to end and the pass recorded on its members",
+            "endpoint_hex",
+            endpoint,
+        ),
+        _ => {}
+    }
 }
 
 /// Answer an offer call, ending that one membership with a refusal.
@@ -373,8 +461,9 @@ fn place_returning_member(
 }
 
 impl Composer {
-    /// A composer serving on `set` and driving its members over `member_set`.
-    fn new(set: u64, member_set: u64) -> Self {
+    /// A composer serving on `set`, driving its members over `member_set`, and
+    /// staging its arrays' maintenance chunks through `scratch`.
+    fn new(set: u64, member_set: u64, scratch: Vec<u8>) -> Self {
         Self {
             registry: MemberRegistry::new(),
             members: Vec::new(),
@@ -383,6 +472,7 @@ impl Composer {
             member_set,
             endpoint_counter: 0,
             pending: None,
+            scratch,
         }
     }
 
@@ -546,7 +636,7 @@ impl Composer {
                     member,
                     slot,
                     in_sync: _,
-                } => self.join_member(array_uuid, member, slot),
+                } => self.join_member(array_uuid, member, slot, now_ns),
                 ComposerAction::Wait { deadline_ns } => return deadline_ns,
             }
         }
@@ -653,18 +743,48 @@ impl Composer {
             log_hex_event(
                 RAID_ARRAY_DEGRADED,
                 Level::Warn,
-                "raid: array started degraded; survivors re-stamped at bumped generation",
+                "raid: array started short of full redundancy",
                 "endpoint_hex",
                 endpoint,
             );
         }
-        let runtime = ArrayRuntime::new(
+        let resumed = assembled.resume.progress.is_active();
+        let runtime = match ArrayRuntime::new(
             assembled.identity,
             assembled.array,
             endpoint,
             window_id,
             node_id,
-        );
+            assembled.resume,
+            now_ns,
+        ) {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                // The node is already published but nothing will serve it, so
+                // withdraw it rather than leave the volume manager driving an
+                // endpoint with no server behind it.
+                let _ = tairix_rt::hw_remove_node(node_id);
+                hand_back();
+                registry.note_assembly_failed(array_uuid, now_ns);
+                log_hex_event(
+                    RAID_ARRAY_FAILED,
+                    Level::Warn,
+                    "raid: array runtime could not be built; backing off",
+                    "endpoint_hex",
+                    endpoint,
+                );
+                return;
+            }
+        };
+        if resumed {
+            log_hex_event(
+                RAID_ARRAY_RESUMED,
+                Level::Info,
+                "raid: array resumed the maintenance pass its members had recorded",
+                "endpoint_hex",
+                endpoint,
+            );
+        }
         registry.note_composed(array_uuid, &assembled.slots);
         arrays.push(LiveArray { runtime, window });
         let _ = tairix_rt::waitset_ctl(
@@ -691,7 +811,13 @@ impl Composer {
     /// be reconnected, or the array refuses the slot — is still marked placed
     /// and logged, so a member that cannot join does not drive a hot re-offer
     /// loop; resuming its rebuild is later maintenance work.
-    fn join_member(&mut self, array_uuid: [u8; 16], member: usize, slot: u16) {
+    ///
+    /// Either way the array is told the device has demonstrably returned: the
+    /// commonest reason a placement is refused is that the slot still *holds*
+    /// that device as a faulted member, and the fresh offer is exactly the
+    /// evidence that re-probing it now is worth doing rather than waiting out
+    /// an escalated backoff.
+    fn join_member(&mut self, array_uuid: [u8; 16], member: usize, slot: u16, now_ns: u64) {
         let placed = place_returning_member(
             &self.members,
             &mut self.arrays,
@@ -700,6 +826,13 @@ impl Composer {
             member,
             slot,
         );
+        if let Some(live) = self
+            .arrays
+            .iter_mut()
+            .find(|live| live.runtime.identity().array_uuid == array_uuid)
+        {
+            live.runtime.note_member_returned(slot, now_ns);
+        }
         self.registry.note_joined(member);
         if placed {
             log_hex_event(
@@ -752,18 +885,91 @@ impl Composer {
         }
     }
 
+    /// Give every live array one bounded turn of self-maintenance, reporting
+    /// whether any of them did work.
+    ///
+    /// A turn that did work means the next chunk may already be due, so the
+    /// caller comes back round — draining any request that arrived meanwhile —
+    /// rather than parking. Each turn is real I/O against the members, so that
+    /// is a worker running, never a poll: the moment the foreground workload
+    /// or the duty share says to wait, the scheduler answers idle and the loop
+    /// parks on its deadline.
+    fn maintain_arrays(&mut self, now_wall: Time64) -> bool {
+        let Self {
+            arrays, scratch, ..
+        } = self;
+        if scratch.is_empty() {
+            return false;
+        }
+        let mut clock = tairix_rt::clock_get;
+        let mut worked = false;
+        for live in arrays.iter_mut() {
+            let Some(step) = live.runtime.maintain(scratch, now_wall, &mut clock) else {
+                continue;
+            };
+            worked = true;
+            log_maintenance_step(&step, live.runtime.endpoint());
+        }
+        worked
+    }
+
+    /// Record every live array's change of health, so an operator sees a
+    /// degrade, a rebuild, and a recovery as they happen rather than only in
+    /// the mount table.
+    fn report_health(&mut self) {
+        for live in &mut self.arrays {
+            let Some(event) = live.runtime.health_event() else {
+                continue;
+            };
+            let endpoint = live.runtime.endpoint();
+            let (id, level, message) = match event {
+                ArrayHealthEvent::Health(BlkHealthTransition::Degraded) => (
+                    RAID_HEALTH_DEGRADED,
+                    Level::Warn,
+                    "raid: array lost redundancy and is serving degraded",
+                ),
+                ArrayHealthEvent::Health(BlkHealthTransition::Recovering) => (
+                    RAID_HEALTH_RECOVERING,
+                    Level::Warn,
+                    "raid: array is rebuilding a member back into itself",
+                ),
+                ArrayHealthEvent::Health(BlkHealthTransition::Recovered) => (
+                    RAID_HEALTH_RECOVERED,
+                    Level::Info,
+                    "raid: array is whole again; every member current",
+                ),
+                ArrayHealthEvent::Lost => (
+                    RAID_ARRAY_LOST,
+                    Level::Error,
+                    "raid: array can no longer serve; too many members gone to reconstruct",
+                ),
+            };
+            log_hex_event(id, level, message, "endpoint_hex", endpoint);
+        }
+    }
+
     /// The soonest relative timeout to park on: the nearest of the registry's
-    /// absolute settle/backoff deadline and the arrays' recovery grace
-    /// windows, or "no timeout" when neither arms one.
+    /// absolute settle/backoff deadline, the arrays' maintenance deadlines,
+    /// and their recovery grace windows, or "no timeout" when none of them
+    /// arms one.
     fn park_timeout(&self, wait_deadline_ns: Option<u64>, now_ns: u64) -> u64 {
-        let settle = wait_deadline_ns.map(|deadline| deadline.saturating_sub(now_ns));
+        let maintenance = self
+            .arrays
+            .iter()
+            .filter_map(|live| live.runtime.maintenance_deadline_ns())
+            .min();
+        let absolute = [wait_deadline_ns, maintenance]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|deadline| deadline.saturating_sub(now_ns));
         let recovery =
             recovery_wait_timeout(self.arrays.iter().map(|live| live.runtime.health()), now_ns);
-        match (settle, recovery) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(only), None) | (None, Some(only)) => only,
-            (None, None) => u64::MAX,
-        }
+        [absolute, recovery]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -808,7 +1014,7 @@ fn main() -> i32 {
         RAID_REGISTRY_ENDPOINT,
     );
 
-    let mut composer = Composer::new(set, member_set);
+    let mut composer = Composer::new(set, member_set, maintenance_scratch());
     loop {
         let now_ns = tairix_rt::clock_get();
         let now_wall = tairix_rt::wall_time()
@@ -818,12 +1024,44 @@ fn main() -> i32 {
         composer.drain_offers(now_ns);
         let wait_deadline_ns = composer.drive_actions(now_ns, now_wall);
         composer.serve_arrays(now_ns);
+        let maintained = composer.maintain_arrays(now_wall);
+        composer.report_health();
+
+        // Maintenance moves real bytes, so the reading taken at the top of the
+        // turn is stale by now; the grace windows and the park must both be
+        // measured against the clock as it stands.
+        let now_ns = tairix_rt::clock_get();
         composer.poll_arrays(now_ns);
+        if maintained {
+            continue;
+        }
 
         let timeout_ns = composer.park_timeout(wait_deadline_ns, now_ns);
         let mut token = 0u64;
         let _ = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
     }
+}
+
+/// The one buffer every array's maintenance chunk is staged through, or an
+/// empty one when it could not be allocated.
+///
+/// Failing to reserve it is reported and survived rather than fatal: an array
+/// that serves but cannot rebuild is a great deal better than no arrays at
+/// all, and on a machine this short of memory a restart would fare no better.
+fn maintenance_scratch() -> Vec<u8> {
+    let mut scratch = Vec::new();
+    if scratch.try_reserve(MAINTENANCE_CHUNK_BYTES).is_err() {
+        log_hex_event(
+            RAID_MAINTENANCE_FAILED,
+            Level::Error,
+            "raid: no memory for the maintenance buffer; arrays serve but cannot self-heal",
+            "bytes_hex",
+            MAINTENANCE_CHUNK_BYTES as u64,
+        );
+        return scratch;
+    }
+    scratch.resize(MAINTENANCE_CHUNK_BYTES, 0);
+    scratch
 }
 
 tairix_rt::entry!(main);

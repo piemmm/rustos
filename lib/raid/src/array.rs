@@ -258,6 +258,23 @@ impl<B: Block> RaidArray<'_, B> {
         }
     }
 
+    /// Mutably borrow the device held by member `index` — the mutable
+    /// companion of [`member_state`](Self::member_state), for a caller that
+    /// must reach a member's own device (its reserved array-metadata blocks)
+    /// rather than the array's data — or [`None`] if `index` is out of range
+    /// or the slot holds no device.
+    #[must_use]
+    pub fn member_device_mut(&mut self, index: usize) -> Option<&mut B> {
+        match self {
+            Self::Mirror(a) => a.member_device_mut(index),
+            Self::Stripe(a) => a.member_device_mut(index),
+            Self::Parity(a) => a.member_device_mut(index),
+            Self::DualParity(a) => a.member_device_mut(index),
+            Self::TripleParity(a) => a.member_device_mut(index),
+            Self::Raid10(a) => a.member_device_mut(index),
+        }
+    }
+
     /// Whether any member is still rebuilding (i.e.
     /// [`resync_step`](Self::resync_step) has work to do). Always `false` for a
     /// stripe, which never rebuilds.

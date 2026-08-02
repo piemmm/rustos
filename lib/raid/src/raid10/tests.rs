@@ -718,3 +718,39 @@ fn a_restored_cursor_outside_the_array_is_refused_and_changes_nothing() {
         .expect("the last block is a valid position");
     assert_eq!(array.scrub_cursor(), NBLK - 1);
 }
+
+#[test]
+fn member_device_mut_reaches_the_named_slots_own_device() {
+    let mut members = [
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::new(FaultBlock::new(0)),
+        MirrorMember::absent(),
+    ];
+    let mut array = Raid10Array::assemble(&mut members, CHUNK).expect("assembles degraded");
+
+    // The borrowed device is the member's whole disk, below the array's data
+    // view: a write through it lands on that copy alone, which is how a
+    // caller reaches a member's reserved array-metadata blocks.
+    let bs = BS as usize;
+    array
+        .member_device_mut(2)
+        .expect("slot 2 holds a device")
+        .write_blocks(1, &block(0x5A))
+        .expect("the member's own write");
+    assert_eq!(&dev(&array, 2).store[bs..2 * bs], &block(0x5A));
+    assert_eq!(
+        &dev(&array, 0).store[bs..2 * bs],
+        &block(0),
+        "the write reached only the named slot's device"
+    );
+
+    assert!(
+        array.member_device_mut(3).is_none(),
+        "an absent slot holds no device"
+    );
+    assert!(
+        array.member_device_mut(4).is_none(),
+        "an index outside the array has no slot"
+    );
+}
