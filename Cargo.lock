@@ -4343,6 +4343,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-taskbar-pin-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-taskpins",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-test-tcpecho"
 version = "0.0.0"
 dependencies = [
@@ -4845,6 +4862,8 @@ dependencies = [
  "tairix-fwcfg",
  "tairix-geometry",
  "tairix-help",
+ "tairix-icon",
+ "tairix-input",
  "tairix-itest-harness",
  "tairix-kernel-ipc",
  "tairix-kernel-syscall",
@@ -4854,6 +4873,7 @@ dependencies = [
  "tairix-proglib",
  "tairix-qemu",
  "tairix-reclaim",
+ "tairix-switchboard",
  "tairix-syshelp",
  "tairix-taskbar",
  "tairix-terminal",
@@ -4863,6 +4883,7 @@ dependencies = [
  "tairix-test-fat32-image",
  "tairix-test-memsoak",
  "tairix-test-netstack-wire",
+ "tairix-test-taskbar-pin-qemu-aarch64",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
  "tairix-theme",

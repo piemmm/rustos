@@ -87,7 +87,7 @@ pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayReadoutLayout};
 pub use library::{folder_label, LibraryFocus, LibraryLayout, LibraryPopup, LibraryRow};
-pub use menu::{BarMenu, MenuLayout, MenuSubject};
+pub use menu::{BarMenu, MenuLayout, MenuSubject, MENU_OPEN_ROW, MENU_PIN_ROW};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };

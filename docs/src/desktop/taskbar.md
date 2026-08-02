@@ -579,3 +579,19 @@ readout's "Open Switchboard" action and its inert press claim away from it,
 scroll cycling and the middle-click previous-task switch with their
 fail-closed cases, and pixel probes of the capsule, rail, seam, and badge
 tones across themes.
+
+Those tests all run the model headless. What only a real machine can show
+is that the bar is wired to the volume and to the services around it, and
+`tests/integration/taskbar_pin_qemu_aarch64` proves that on the aarch64
+`virt` board: it boots the graphical session, opens the program library,
+raises an entry's context menu with a secondary press, chooses *Pin to
+taskbar*, opens the Switchboard from its capsule, and clicks the pin the
+gesture created. Its coordinates are not hand-copied — the host script
+drives this very crate's `TaskbarInput` with the events the guest will
+receive and reads the rectangles back out of `Taskbar::layout`,
+`Taskbar::menu_layout`, and `Menu::row_rect` — and it passes only when the
+pin store's directory is created on disk, the Switchboard panel is served
+and painted, and the *pinned bundle* is loaded. Two scan-out readbacks
+check the bar itself: the first pin slot is uniformly the bar's own plate
+colour before anything is pinned, and carries the shortcut's glyph
+afterwards with the panel beside it.

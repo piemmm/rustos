@@ -87,15 +87,19 @@ pub(crate) enum MenuOutcome {
 /// The row index of *Open* in a pinned-shortcut or program-library-entry
 /// context menu.
 ///
-/// [`rows_for`] builds both menus in one fixed order — *Open* first, the pin
-/// affordance second — and [`BarMenu::choose`] reads the activated row back
-/// through these same two definitions, so the order is stated once and a
-/// reordering cannot silently re-map what a row does.
-const MENU_OPEN_ROW: usize = 0;
+/// `rows_for` builds both menus in one fixed order — *Open* first, the pin
+/// affordance second — and the menu's own `choose` reads the activated row
+/// back through these same two definitions, so the order is stated once and
+/// a reordering cannot silently re-map what a row does. They are public
+/// because aiming *at* a row is the same fact as reading one back: the
+/// desktop's QEMU vertical clicks the pin affordance through
+/// [`Menu::row_rect`], and must name the row from this one definition
+/// rather than restating its position.
+pub const MENU_OPEN_ROW: usize = 0;
 
 /// The row index of the pin affordance in those same menus (see
 /// [`MENU_OPEN_ROW`]).
-const MENU_PIN_ROW: usize = 1;
+pub const MENU_PIN_ROW: usize = 1;
 
 /// The computed geometry of the open context menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

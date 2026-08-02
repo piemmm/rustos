@@ -1,0 +1,59 @@
+[package]
+name = "tairix-test-taskbar-pin-qemu-aarch64"
+description = "plans/NEW-TASKBAR.md T15 QEMU integration test: boot the graphical desktop on the aarch64 virt board, pin a program-library entry to the taskbar through its context menu, open the Switchboard panel, and launch the pinned application from its new bar slot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared interaction contract (src/lib.rs): the pinned
+# application, the window-endpoint call position that means "the panel is
+# painted", and the marker the guest emits there — all read by both the
+# freestanding PASS gate and the host runner's script. `no_std` consts only,
+# host-buildable.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-taskbar-pin-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop, pin an application from
+# the program library, and launch it from the pin" integration test. It runs
+# the entire production boot pipeline through `tairix-kernel`'s library half
+# (`boot_aarch64::boot`) — bootstrap-floor virtio-MMIO discovery, the unlock
+# kthread, driver autoload, the display service, and the desktop session — and
+# only swaps the audit sink for the PASS witnesses. Keeping the QEMU-exit
+# shortcut in a dedicated bin (not a Cargo feature on a production crate)
+# prevents feature unification from leaking it into any production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The kernel/core audit vocabulary: the `FsNodeMutated` event id whose `op`
+# and `path` fields witness the pin store's directory being created.
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+# The kernel/ipc audit vocabulary: the `CallReplied` event id whose
+# `endpoint` field attributes a served reply to the window channel.
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# field names the loaded bundle — the pin's launch witness.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+# The reserved `WINDOW_ENDPOINT` id and the system app store / bundle suffix
+# spellings the witnesses are composed from.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The pin store's own directory name — the one definition the session's
+# writer creates and this witness recognises.
+tairix-taskpins = { path = "../../../lib/taskpins", version = "=0.0.0" }
+# `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
+# the endpoint witness compares the exact on-wire spelling.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

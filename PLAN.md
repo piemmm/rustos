@@ -3225,12 +3225,17 @@ scheduler surface behind "Lower priority": `SchedulerPolicy::set_priority`/
 `priority` across all three policies + conformance, syscall 104
 `sched_set_priority` (signal's target rule + a `CAP_PROC_CONTROL` raise
 gate, audit event 4037), the `ProcessRecord.priority` field, and the
-regenerated C headers (`plans/NEW-TASKBAR.md` T12). Next: the T13 System
-menu (session controls, light/dark toggle, System Settings) — its power/
-lock half is blocked on a session power/lock interface that does not exist
-yet — and the panel's services list, blocked on a System Information API
-service-enumeration query, so the panel leaves those honestly empty rather
-than fabricating rows.
+regenerated C headers (`plans/NEW-TASKBAR.md` T12) — and, completing the
+stage (T13–T15), the **System quick-actions menu** (session controls, the
+live Light/Dark toggle, System Settings; the screen lock re-authenticates
+through the per-console elevation broker and the relayed power transitions
+go through a trusted confirmation prompt), the T14 interaction-fidelity
+pass, and T15's docs + **QEMU pin vertical**
+(`tests/integration/taskbar_pin_qemu_aarch64`: boot the desktop, pin a
+program-library entry through its context menu, open the Switchboard, and
+launch the app from its new bar slot, with the bar read back out of the
+scan-out). The panel's services list stays honestly empty pending a System
+Information API service-enumeration query rather than fabricating rows.
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending

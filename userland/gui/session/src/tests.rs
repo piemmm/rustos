@@ -3750,18 +3750,19 @@ impl OwnerWindow for FakeOwnerWindows {
     }
 }
 
-/// A recording [`SwitchboardMailbox`]: every command the session sent, in
-/// order, addressed to the instance it named. The live seam's send either
-/// lands or is dropped, never retried, so counting sends here is exactly
-/// the guarantee under test.
+/// A recording [`SwitchboardMailbox`] whose every send lands: each command
+/// the session sent, in order, addressed to the instance it named. The
+/// live seam makes one attempt per event, never a retry loop, so counting
+/// sends here is exactly the guarantee under test.
 #[derive(Default)]
 struct RecordingMailbox {
     sent: Vec<(u64, SwitchboardCommand)>,
 }
 
 impl SwitchboardMailbox for RecordingMailbox {
-    fn send(&mut self, pid: u64, command: SwitchboardCommand) {
+    fn send(&mut self, pid: u64, command: SwitchboardCommand) -> bool {
         self.sent.push((pid, command));
+        true
     }
 }
 
@@ -4158,24 +4159,26 @@ fn the_seat_report_is_sent_only_on_change_and_tells_the_whole_truth() {
     assert_eq!(mailbox.sent.len(), 1);
 }
 
-/// A send the instance's mailbox refuses is dropped, never retried: the
+/// A mailbox whose every send is refused — the instance is gone, or is
+/// still starting and has not bound one — counting the attempts the
+/// session made.
+#[derive(Default)]
+struct RefusingMailbox {
+    attempts: usize,
+}
+
+impl SwitchboardMailbox for RefusingMailbox {
+    fn send(&mut self, _pid: u64, _command: SwitchboardCommand) -> bool {
+        self.attempts += 1;
+        false
+    }
+}
+
+/// A refused send is attempted exactly once, never retried in place: the
 /// seam is one attempt per event, so a wedged monitor cannot spin the
 /// desktop.
 #[test]
-fn a_refused_mailbox_send_is_dropped_rather_than_retried() {
-    /// A mailbox whose every send is refused (full or gone), counting the
-    /// attempts the session made.
-    #[derive(Default)]
-    struct RefusingMailbox {
-        attempts: usize,
-    }
-
-    impl SwitchboardMailbox for RefusingMailbox {
-        fn send(&mut self, _pid: u64, _command: SwitchboardCommand) {
-            self.attempts += 1;
-        }
-    }
-
+fn a_refused_mailbox_send_is_attempted_once_rather_than_retried() {
     let mut mailbox = RefusingMailbox::default();
     let mut pending = None;
 
@@ -4190,7 +4193,72 @@ fn a_refused_mailbox_send_is_dropped_rather_than_retried() {
 
     maybe_send_seat_report(true, Some(MONITOR_PID), 1, &[11], &mut mailbox);
     assert_eq!(mailbox.attempts, 2, "one change is one attempt");
-    assert_eq!(pending, None, "a live instance leaves nothing pending");
+}
+
+/// A press that lands while the monitor is still starting is held, not
+/// lost, and the instance's own first publish carries it through.
+///
+/// The gap is real and wide: the launch table names the instance from the
+/// moment it is spawned, but the process binds its command mailbox only
+/// once its bundle has loaded and its program runs — whole seconds on a
+/// cold boot. A press in that gap used to be sent to a mailbox that did
+/// not exist yet and silently vanish, so the capsule did nothing.
+#[test]
+fn a_press_while_the_monitor_is_still_starting_opens_on_its_first_publish() {
+    let mut starting = RefusingMailbox::default();
+    let mut pending = None;
+
+    let revived = open_tray(
+        &mut pending,
+        CommandSection::Recovery,
+        Some(MONITOR_PID),
+        &mut starting,
+        || panic!("a live instance is never revived; it is about to publish"),
+    );
+    assert_eq!(revived, None);
+    assert_eq!(starting.attempts, 1, "the press is attempted once");
+    assert_eq!(
+        pending,
+        Some(CommandSection::Recovery),
+        "the refused gesture is held, section and all"
+    );
+
+    // The instance finishes starting and publishes its first summary.
+    let mut ready = RecordingMailbox::default();
+    deliver_pending_open(&mut pending, MONITOR_PID, &mut ready);
+    assert_eq!(
+        ready.sent,
+        vec![(
+            MONITOR_PID,
+            SwitchboardCommand::OpenPanel {
+                section: CommandSection::Recovery
+            }
+        )],
+        "the held press opens the section the user asked for"
+    );
+    assert_eq!(pending, None, "delivered once, never re-sent");
+}
+
+/// A pending open the monitor's mailbox refuses is put back rather than
+/// dropped, so back-pressure delays the panel by one publish instead of
+/// losing the press.
+#[test]
+fn a_pending_open_refused_by_a_full_mailbox_survives_to_the_next_publish() {
+    let mut full = RefusingMailbox::default();
+    let mut pending = Some(CommandSection::Jobs);
+
+    deliver_pending_open(&mut pending, MONITOR_PID, &mut full);
+    assert_eq!(full.attempts, 1, "one publish is one attempt");
+    assert_eq!(
+        pending,
+        Some(CommandSection::Jobs),
+        "a refused delivery keeps the press pending"
+    );
+
+    let mut drained = RecordingMailbox::default();
+    deliver_pending_open(&mut pending, MONITOR_PID, &mut drained);
+    assert_eq!(drained.sent.len(), 1, "the next publish delivers it");
+    assert_eq!(pending, None);
 }
 
 // --- The system quick-actions menu's session half (T13) -----------------
@@ -4393,6 +4461,27 @@ fn a_confirmation_with_no_live_holder_sends_nothing_and_says_why() {
         "the diagnosis says the machine is untouched: {reason}"
     );
     assert!(mailbox.sent.is_empty(), "and nothing was relayed");
+}
+
+/// A confirmed transition the holder's mailbox refuses says so, rather
+/// than passing for success. A shutdown the user confirmed and the machine
+/// then ignored in silence is the worst outcome this prompt has.
+#[test]
+fn a_confirmation_the_holder_refuses_says_why_rather_than_passing_silently() {
+    let mut mailbox = RefusingMailbox::default();
+
+    let reason = relay_power(
+        Answer::Confirmed(PowerAction::Restart),
+        Some(MONITOR_PID),
+        &mut mailbox,
+    )
+    .expect("a reason to state");
+
+    assert!(
+        reason.contains("nothing was done"),
+        "the diagnosis says the machine is untouched: {reason}"
+    );
+    assert_eq!(mailbox.attempts, 1, "attempted once, not retried");
 }
 
 /// A theme switch behind a showing prompt redraws it, so nothing on screen

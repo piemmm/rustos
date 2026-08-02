@@ -37,8 +37,8 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`in progress` — **T1–T14 done**, and T15's documentation deliverable with
-them; the one outstanding item is T15's QEMU pin + Switchboard vertical.
+`done` — **T1–T15 complete**, including T15's documentation deliverable and
+its QEMU pin + Switchboard vertical.
 Each stage's done-state section below records what it now guarantees. The
 **Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
@@ -1315,38 +1315,66 @@ of the fixed shape — so the very first per-user write of any kind failed
 fixture all read, so a pin written in the guest lands on a home shaped like a
 real one.
 
-**Remaining: the QEMU vertical.** Boot the graphical session, open the
-library, launch an app, **pin it**, open the Switchboard, and
-screendump-verify the bar + Switchboard render (the D7-style host-side
-proof). The existing `autoload_input_qemu_aarch64` vertical already covers
-boot → library → launch with a host-reconstructed screendump assertion; the
-pin and Switchboard stages are the gap. Notes for whoever lands it:
-- The pin gesture is a **secondary** press on a library-popup entry row
-  (`Taskbar::open_entry_menu` → `MenuSubject::Entry`), then the menu's *Pin
-  to taskbar* row; its geometry comes from `Taskbar::menu_layout` +
-  `Menu::row_rect`, reconstructed host-side exactly as the popup rows already
-  are (`reconstructed_library`).
-- The witness for "the pin launched its app" is the `APP_LOADED` record's
-  `bundle` field (uniquely attributable); `PROCESS_SPAWNED` carries only an
-  entry address and cannot attribute a bundle. Pin an app the earlier stages
-  do **not** launch, so the record is unambiguous.
-- `BarLayout.pins` is empty until a pin exists, so slot 0's rect is only
-  reconstructable after the pin is persisted — gate the pin press on the
-  store write, not on a fixed count.
-- The Switchboard capsule press relays `OpenPanel` to the already-spawned
-  `/System/Services/switchboard.app`; its window is `WIN_WIDTH`×`WIN_HEIGHT`
-  at the next `cascade_origin_for` slot, and its creation shows up as one
-  further window-frame map (`sc=shm_map`).
-- D20 applies: this is a fourth stage on an already long blind pointer
-  choreography. Prefer a **dedicated short vertical** over lengthening the
-  existing one, so a gate mis-count in one stage cannot wedge the other.
+**QEMU vertical: done.** `tests/integration/taskbar_pin_qemu_aarch64` is a
+dedicated short vertical rather than a fourth stage on the already long
+`autoload_input_qemu_aarch64` choreography, so a gate mis-count in one
+cannot wedge the other (D20). It boots the same graphical world (the
+`AutoloadRootDisk` image, unlock → login → `desktop`), then opens the
+program library, secondary-presses an entry row to raise its context menu,
+chooses *Pin to taskbar*, spends one press dismissing the modal popup,
+opens the Switchboard from its capsule, and clicks the pin it created.
+
+What holds it together:
+- **Every coordinate is the product's own.** The script drives a host
+  `DesktopShell` with the very events the guest will receive — through
+  `TaskbarInput`, over a `Catalog` rebuilt from the same manifests the image
+  plants (`reconstructed_library`) — so the menu it clicks is the menu the
+  model opened, its pin row comes from `Menu::row_rect` at the exported
+  `MENU_PIN_ROW`, and the pin slot from `Taskbar::layout` with one
+  `PinView`. Nothing is a hand-copied pixel.
+- **Three PASS witnesses, each attributable to one act**: the audited
+  `mkdir` of the pin store's own directory (`PINS_SETTINGS_SUBDIR`, which a
+  provisioned home does not carry), the window endpoint serving the panel's
+  create *and* first present, and an `APP_LOADED` naming the pinned bundle
+  — `widgets`, which no other stage of any vertical launches, and which
+  needs no picker, no filesystem, and no ambient authority.
+- **The pin click is gated causally, not by a timer.** Serving a
+  window-endpoint call is a different wake of the session's serve loop from
+  the input wake that pinned, and the session re-resolves its pin strip
+  before parking at the end of every wake — so the guest's
+  panel-presented marker cannot appear until the pin is live in the bar the
+  guest hit-tests, under any host load. (Every earlier step keys on the
+  display service's first-present witness alone: the guest applies injected
+  events in device order, and the capsule's rect is independent of the
+  strip's length.)
+- **Two dumps read the bar itself.** The first proves the first pin slot is
+  *uniformly* the bar's own plate colour before anything is pinned; the
+  second that it now carries the pin's class glyph, that the panel covers
+  its cascade slot, and that the column beside the panel is bare desktop.
+  The second deliberately does not require the desktop colour to dominate
+  the frame — a 760×560 panel covers more than half this output, so that
+  would assert something untrue.
+
+**Defect found and fixed by this vertical.** The capsule press relays
+`OpenPanel` to the pid the launch table names, but a process exists from
+the moment it is *spawned* while it binds its command mailbox only once its
+bundle has loaded — whole seconds on a cold boot. A press in that gap was
+sent to a mailbox that did not exist and vanished, so the capsule silently
+did nothing; the diagnostic even blamed a full mailbox for what was a
+missing one. `SwitchboardMailbox::send` now answers whether the instance
+took the command: `open_tray` holds a refused gesture as the single pending
+open (the instance's own first publish carries it through — no retry loop),
+`deliver_pending_open` puts a back-pressured one back rather than dropping
+it, `relay_power` reports a refused confirmation instead of letting a
+confirmed shutdown pass for success, and the production seam names the
+kernel's actual reason.
 
 **Gate**: `cargo fmt --all`, `cargo xtask ci` (once), `cargo xtask fuzz
 --secs 5`, and `tools/ci/soak.sh both --secs 20`; any failure is fixed in the
 same change.
 
-**Done when**: docs current (done), the integration vertical green, and the
-whole-project gate green.
+**Done when**: docs current, the integration vertical green, and the
+whole-project gate green — all three met.
 
 ---
 

@@ -380,6 +380,26 @@ fn sweep_action(signal: Signal) -> &'static str {
 /// title bar and the window the session registers for it.
 pub const PANEL_TITLE: &str = "Switchboard";
 
+/// The overview window's initial client width in physical pixels.
+///
+/// The panel's size envelope lives beside the panel itself — the service
+/// binary opens and resizes the window with it, and the QEMU vertical's
+/// host-side scan-out assertion measures the panel's region against it —
+/// so the drawn window and the pixels a test looks at cannot disagree.
+pub const WIN_WIDTH: u32 = 760;
+
+/// The overview window's initial client height in physical pixels (see
+/// [`WIN_WIDTH`]).
+pub const WIN_HEIGHT: u32 = 560;
+
+/// The narrowest client width the panel is laid out for; a resize below it
+/// is clamped up rather than drawn into a box the sections cannot fit.
+pub const MIN_WIN_WIDTH: u32 = 320;
+
+/// The shortest client height the panel is laid out for (see
+/// [`MIN_WIN_WIDTH`]).
+pub const MIN_WIN_HEIGHT: u32 = 240;
+
 /// The refusal notice for `action` refused with `refusal`, as one line
 /// ready for the diagnostic stream.
 ///

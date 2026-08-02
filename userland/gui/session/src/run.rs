@@ -235,16 +235,6 @@ mod program {
     /// queue stays tiny (a fail-closed memory bound).
     const SWITCHBOARD_CAPACITY: usize = 4;
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-ret`); an unrecognised code fails closed as
-    /// [`Errno::NotImplemented`] rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::NotImplemented)
-    }
-
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main` to return.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -280,7 +270,7 @@ mod program {
 
     impl DisplayTransport for RtDisplayTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(errno_from)
+            tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -293,7 +283,7 @@ mod program {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             let ret = tairix_rt::pointer_read(SEAT_PRIMARY, buf);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             // A count the address width cannot hold is refused, never
             // truncated into a shorter, decodable-looking record.
@@ -310,7 +300,7 @@ mod program {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             let ret = tairix_rt::keyboard_read(SEAT_PRIMARY, buf);
             if ret < 0 {
-                return Err(errno_from(ret));
+                return Err(Errno::from_syscall(ret));
             }
             // A count the address width cannot hold is refused, never
             // truncated into a shorter, decodable-looking record.
@@ -357,7 +347,7 @@ mod program {
         fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno> {
             let mut buf = [0u8; ORIGIN_WIRE_LEN];
             let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
-                .map_err(errno_from)?;
+                .map_err(Errno::from_syscall)?;
             let origin = Origin::from_bytes(&buf[..len])?;
             self.peers.insert(origin.pid(), origin.proc_id());
             Ok(origin.proc_id())
@@ -429,7 +419,7 @@ mod program {
                 self.changed |= self.vigil.note_delivered(endpoint);
                 Ok(())
             } else {
-                let error = errno_from(ret);
+                let error = Errno::from_syscall(ret);
                 self.changed |= self
                     .vigil
                     .note_refused(endpoint, error, tairix_rt::clock_get());
@@ -566,8 +556,8 @@ mod program {
         request: &[u8],
     ) -> Result<(), Errno> {
         let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len =
-            tairix_rt::call_peer_origin(NOTIFY_ENDPOINT, ticket, &mut buf).map_err(errno_from)?;
+        let len = tairix_rt::call_peer_origin(NOTIFY_ENDPOINT, ticket, &mut buf)
+            .map_err(Errno::from_syscall)?;
         let origin = Origin::from_bytes(&buf[..len])?;
         let request = NotifyRequest::from_bytes(request)?;
         shell.apply_notify(compositor, origin.pid(), request);
@@ -593,7 +583,7 @@ mod program {
     ) -> Result<SwitchboardOutcome, Errno> {
         let mut buf = [0u8; ORIGIN_WIRE_LEN];
         let len = tairix_rt::call_peer_origin(SWITCHBOARD_ENDPOINT, ticket, &mut buf)
-            .map_err(errno_from)?;
+            .map_err(Errno::from_syscall)?;
         let origin = Origin::from_bytes(&buf[..len])?;
         serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
             let msg = refusal.reason();
@@ -620,19 +610,30 @@ mod program {
     /// The production [`SwitchboardMailbox`]: one non-blocking `ipc_send`
     /// to the live monitor's own per-instance command mailbox.
     ///
-    /// The send never parks the desktop. A refusal — `WouldBlock`
-    /// back-pressure because the monitor has not drained its mailbox, or
-    /// `NotFound` because the instance exited — is stated on `stderr` and
-    /// the command dropped: the panel missing an advisory open or seat
-    /// report is not worth stalling the session for, and a retry loop here
-    /// would be the busy-wait the desktop must never run.
+    /// The send never parks the desktop and never retries in a loop: it
+    /// makes one attempt and answers whether the mailbox took it, leaving
+    /// the caller to decide whether the command is worth holding for the
+    /// monitor's next publish.
+    ///
+    /// A refusal is stated on `stderr` with the kernel's own reason rather
+    /// than a guess — `WouldBlock` is back-pressure from a mailbox the
+    /// monitor has not drained, while `NotFound` is an instance that has
+    /// exited or has not bound its mailbox yet, and calling the second one
+    /// "full" would send a reader looking for a problem that is not there.
     struct RtSwitchboardMailbox;
 
     impl SwitchboardMailbox for RtSwitchboardMailbox {
-        fn send(&mut self, pid: u64, command: SwitchboardCommand) {
-            if tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes()) != 0 {
-                io::write_stderr_line("desktop: switchboard command dropped: mailbox full");
+        fn send(&mut self, pid: u64, command: SwitchboardCommand) -> bool {
+            let ret = tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes());
+            if ret == 0 {
+                return true;
             }
+            let _ = writeln!(
+                Stderr,
+                "desktop: switchboard command dropped: {}",
+                Errno::from_syscall(ret)
+            );
+            false
         }
     }
 
@@ -1016,7 +1017,7 @@ mod program {
             .unwrap_or_default();
         let mut picker = SessionPicker::new(|| {
             VfsDirectorySource::new(|path: &str| {
-                tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+                tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
             })
         })
         .starting_at(picker_start);

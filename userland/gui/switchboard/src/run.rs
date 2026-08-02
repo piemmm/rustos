@@ -84,19 +84,11 @@ mod program {
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
-        RenderInputs, Service, ServiceHost, WaitToken, PANEL_TITLE,
+        RenderInputs, Service, ServiceHost, WaitToken, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{WindowClient, WindowTransport};
-
-    /// The overview window's initial client width in physical pixels.
-    const WIN_WIDTH: u32 = 760;
-    /// The overview window's initial client height in physical pixels.
-    const WIN_HEIGHT: u32 = 560;
-    /// The narrowest client width the panel is laid out for.
-    const MIN_WIN_WIDTH: u32 = 320;
-    /// The shortest client height the panel is laid out for.
-    const MIN_WIN_HEIGHT: u32 = 240;
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so

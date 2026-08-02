@@ -182,11 +182,19 @@ pub fn serve_switchboard_request(
 /// One non-blocking send of a command to a live Switchboard instance's own
 /// mailbox: `ipc_send` in production, a recording fake under test. The
 /// desktop never spins or blocks waiting for the panel to catch up, so a
-/// refused send (a full or absent mailbox) is the implementation's own
-/// `stderr` diagnosis to make, never a reason for the caller to retry.
+/// refused send (a full mailbox, or an instance that has started but not
+/// yet bound one) is the implementation's own `stderr` diagnosis to make,
+/// never a reason for the caller to retry in a loop.
 pub trait SwitchboardMailbox {
-    /// Send `command` to the instance named by `pid`.
-    fn send(&mut self, pid: u64, command: SwitchboardCommand);
+    /// Send `command` to the instance named by `pid`, answering whether
+    /// the instance's mailbox took it.
+    ///
+    /// The answer is load-bearing rather than advisory: a spawned instance
+    /// is not a *ready* one, so a caller relaying a user's gesture must be
+    /// able to tell a delivered command from one that fell on the floor
+    /// and act on the difference.
+    #[must_use]
+    fn send(&mut self, pid: u64, command: SwitchboardCommand) -> bool;
 }
 
 /// The wire section naming the panel section the taskbar's own gesture
@@ -206,15 +214,24 @@ pub const fn command_section(section: Section) -> CommandSection {
 }
 
 /// Handle the taskbar's request to open the Switchboard window at
-/// `section`: either send `OpenPanel` to the live instance named by
-/// `live`, or — when none is live — remember the section as the one
-/// pending open (replacing any earlier one, never queueing a second) for
-/// `revive` to spawn a fresh instance to receive it on its first publish.
+/// `section`: send `OpenPanel` to the live instance named by `live`, or —
+/// when none is live, or the live one could not take the command —
+/// remember the section as the one pending open (replacing any earlier
+/// one, never queueing a second) for the next publish to deliver, spawning
+/// a fresh instance through `revive` when there is none to publish.
 ///
 /// Returns the pid of an instance `revive` spawned, if it spawned one.
 ///
-/// The gesture itself is the demand for a live instance: it is never left
-/// unanswered merely because none happened to be running yet.
+/// The gesture itself is the demand for a live instance, so it is never
+/// left unanswered merely because none happened to be running yet — nor,
+/// crucially, because one had been *spawned* but was still starting. A
+/// process exists from the moment it is spawned but binds its command
+/// mailbox only once its program runs, a gap of whole seconds while a
+/// bundle loads, and a press landing in that gap used to vanish: the send
+/// was refused and nothing remembered it. Holding the refused gesture as
+/// the pending open closes that window without a retry loop, because the
+/// instance's own first publish — which it can only make once it is up —
+/// carries it through.
 pub fn open_tray(
     pending_open: &mut Option<CommandSection>,
     section: CommandSection,
@@ -223,24 +240,38 @@ pub fn open_tray(
     revive: impl FnOnce() -> Option<u64>,
 ) -> Option<u64> {
     if let Some(pid) = live {
-        mailbox.send(pid, SwitchboardCommand::OpenPanel { section });
-        None
-    } else {
+        if mailbox.send(pid, SwitchboardCommand::OpenPanel { section }) {
+            return None;
+        }
+        // The instance is alive but not listening yet. Hold the gesture
+        // rather than reviving: a second instance would not be the one the
+        // launch table names, and this one is about to publish.
         *pending_open = Some(section);
-        revive()
+        return None;
     }
+    *pending_open = Some(section);
+    revive()
 }
 
 /// Deliver the pending open, if any, to `pid`'s mailbox on a successful
-/// publish — one command, and the pending open is cleared so it is never
-/// re-sent on a later publish from the same or any other instance.
+/// publish — one command per publish, and the pending open is cleared so
+/// it is never re-sent on a later publish from the same or any other
+/// instance.
+///
+/// A publish proves the instance is up and attested, so a send refused
+/// here can only be back-pressure from a mailbox it has not drained. The
+/// gesture is put back rather than dropped: the next publish delivers it,
+/// which is one attempt per publish the instance itself paces, never a
+/// retry loop of the desktop's own.
 pub fn deliver_pending_open(
     pending_open: &mut Option<CommandSection>,
     pid: u64,
     mailbox: &mut dyn SwitchboardMailbox,
 ) {
     if let Some(section) = pending_open.take() {
-        mailbox.send(pid, SwitchboardCommand::OpenPanel { section });
+        if !mailbox.send(pid, SwitchboardCommand::OpenPanel { section }) {
+            *pending_open = Some(section);
+        }
     }
 }
 
@@ -257,6 +288,10 @@ pub fn deliver_pending_open(
 /// prefix or trailing newline the caller adds in its own house style —
 /// when a confirmed transition could not be relayed, and `None` when the
 /// command was sent or the user declined.
+///
+/// A confirmed shutdown that silently went nowhere is the worst possible
+/// outcome of this prompt, so a refused send is reported exactly like an
+/// absent holder rather than passing for success.
 #[must_use]
 pub fn relay_power(
     answer: Answer,
@@ -269,8 +304,10 @@ pub fn relay_power(
     let Some(pid) = live else {
         return Some("system service is not running; nothing was done");
     };
-    mailbox.send(pid, SwitchboardCommand::Power { action });
-    None
+    if mailbox.send(pid, SwitchboardCommand::Power { action }) {
+        return None;
+    }
+    Some("system service did not accept the request; nothing was done")
 }
 
 /// Fold one responsiveness-tracker change into a seat-report send: sends
@@ -284,6 +321,11 @@ pub fn relay_power(
 /// invariant violation rather than a caller mistake to recover from: the
 /// send is dropped rather than shipping a report this session cannot
 /// vouch for.
+///
+/// Unlike a user's gesture, a refused report is genuinely nothing to hold:
+/// it is an observation of a state the tracker still holds, so the next
+/// change re-sends a *fresher* one. Re-delivering this stale one later
+/// would be worse than dropping it.
 pub fn maybe_send_seat_report(
     changed: bool,
     live: Option<u64>,
@@ -299,6 +341,6 @@ pub fn maybe_send_seat_report(
     };
     let bounded = &owners[..owners.len().min(SEAT_REPORT_OWNERS_MAX)];
     if let Ok(report) = SeatReport::new(total, bounded) {
-        mailbox.send(pid, SwitchboardCommand::SeatReport { report });
+        let _ = mailbox.send(pid, SwitchboardCommand::SeatReport { report });
     }
 }

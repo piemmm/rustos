@@ -292,22 +292,33 @@ the taskbar and launcher already use (`AGENTS.md` §2.2).
 The session sends to the instance's own mailbox,
 `command_endpoint_for(<the service pid the launch table holds>)`, as a
 **non-blocking** send — the desktop loop never blocks or spins on a panel
-that is slow to drain, so a send refused with the kernel's `WouldBlock`
-back-pressure signal (or a `NotFound` refusal for an absent mailbox) is
-reported on `stderr` and dropped, never retried (`AGENTS.md` §2.23). Two
-commands travel it:
+that is slow to drain (`AGENTS.md` §2.23). The send makes exactly one
+attempt and answers whether the instance took it, and a refusal is reported
+on `stderr` with the kernel's own reason: `WouldBlock` is back-pressure
+from a mailbox the monitor has not drained, while `NotFound` is an instance
+that has exited or has not bound its mailbox yet, and the two must not be
+confused for one another. Two commands travel it:
 
 - **`OpenPanel { section }`** — the capsule gesture. The bar decides the
   section (a quick press its running-task list, a press held past the bar's
   long-press threshold its recovery list) and emits it as
   `TaskbarResponse::OpenSwitchboard { section }`; the session only maps that
   choice onto the wire vocabulary, so the section a user asked for is never
-  re-decided a second time. With **no instance live** the press is
-  itself the demand for one: the session revives the service through the
-  same bring-up path and holds the section as *one* pending open —
-  replaced, never queued — which is delivered on that instance's first
-  publish (the proof it is up and listening) and cleared, so it is never
-  re-sent on a later publish.
+  re-decided a second time. A press is **never lost**, whatever state the
+  service is in. With no instance live the press is itself the demand for
+  one: the session revives the service through the same bring-up path and
+  holds the section as *one* pending open — replaced, never queued — which
+  is delivered on that instance's first publish (the proof it is up and
+  listening) and cleared, so it is never re-sent on a later publish. An
+  instance that is live but has not yet *bound* its mailbox refuses the
+  send, and the press is held exactly the same way rather than dropped:
+  this gap is real and wide, because the launch table names the service
+  from the moment it is spawned while the process binds its mailbox only
+  once its bundle has loaded — whole seconds on a cold boot, precisely when
+  a user is most likely to reach for the capsule. Holding the gesture costs
+  no retry loop: the instance's own publish, which it can only make once it
+  is up, carries it through. A pending open the mailbox refuses through
+  back-pressure is put back for the next publish rather than dropped.
 - **`SeatReport { report }`** — the unresponsive-owner view of this seat,
   from the session's own delivery evidence above. It is sent **only when
   the tracked set actually changes** (the vigil's change latch, drained
@@ -708,10 +719,13 @@ on all three requests with the model untouched; `ActivateOwner` raising the
 right window and an unknown owner refused `NotFound`; `RestartOwner`
 re-launching the recorded bundle and an unknown owner refused `NotFound`; a
 malformed frame refused; a capsule gesture sending exactly one `OpenPanel` at
-the section the bar chose; a pending open delivered on the next successful
+the section the bar chose; a press refused by a still-starting instance held
+and opened on its first publish; a pending open the mailbox refuses put back
+for the next one; a confirmed power transition the holder refuses reported
+rather than passing for success; a pending open delivered on the next successful
 publish and never re-sent; a seat report sent only when the unresponsive set
 changes, carrying the truthful total when more owners are hung than the frame
-can name; and a refused mailbox send dropped without a retry. The `vigil`
+can name; and a refused mailbox send attempted exactly once. The `vigil`
 tests cover the flagging threshold, the clearing delivery, reap forgetting,
 and the bounded `unresponsive_owners` enumeration.
 
