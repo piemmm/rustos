@@ -49,7 +49,7 @@ mod program {
     use tairix_abi::fs::{DirEntry, OpenFlags};
     use tairix_abi::{Errno, InputMode, TerminalSize, STDOUT};
     use tairix_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, StdInfo, Stdin, Stdout, Write};
     use tairix_sandbox::helpdoc::HelpService;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -197,7 +197,7 @@ mod program {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             // The shared short-write loop; a stream that stops accepting
             // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
+            Stdout.write_all(bytes).map_err(io::Error::as_errno)
         }
 
         fn info(&self, record: &[u8]) {
@@ -212,10 +212,8 @@ mod program {
 
         fn read_key(&self) -> Result<Option<u8>, Errno> {
             let mut buf = [0u8; 1];
-            // Parks in the kernel until a byte arrives; zero means the
-            // input stream ended.
-            let read = tairix_rt::stdin(&mut buf);
-            Ok(if read == 0 { None } else { Some(buf[0]) })
+            let n = Stdin.read(&mut buf).map_err(io::Error::as_errno)?;
+            Ok(if n == 0 { None } else { Some(buf[0]) })
         }
     }
 

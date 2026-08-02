@@ -3007,26 +3007,27 @@ added to the file-map verticals.
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 
-**Status: done — the library (IO1–IO3) and userland adoption (IO4) are
-landed.**
+**Status: done — the library (IO1–IO3), userland adoption (IO4), and the
+one-descriptor-path unification (IO5) are landed. IO6 (descriptor-honest ABI
+names) is planned.**
 
 The ergonomic `std::io`-equivalent library lives in `lib/rt/src/io.rs` (module
 `tairix_rt::io`): one fd-generic `Read`/`Write` trait pair with looping
 `read_exact`/`write_all`/`write_fmt`, buffering (`BufReader` with
 `read_until`/`read_line`/`lines`, `BufWriter` coalescing small writes over a
 const-generic inline buffer), and the four well-known standard streams
-(`Stdin`/`Stdout`/`Stderr`/`StdInfo`) plus a non-owning `Stream` over any
-inherited descriptor. It is a pure layer over the existing `abi-v1`
+(`Stdin`/`Stdout`/`Stderr`/`StdInfo`) plus a borrowed `Stream` over any
+descriptor and the owning `File`. It is a pure layer over the existing `abi-v1`
 `stream_read`/`stream_write` traps — **no** ABI surface, syscall, or capability
 (`AGENTS.md` §5.4) — `no_std` + fail-closed (§2.9). The standard streams and any
 file / resource-reference / tty / pipe fd a sibling plan later opens share this
 one definition (§2.2, proved by a test exercising a `Stream` over a non-standard
 fd through the identical trap path). `StdInfo` (fd 3) writes are best-effort
 (§20.1); opening a *new* fd stays a capability-checked operation owned by
-`plans/DRIVES.md` / `plans/ALIAS.md`, never invented here. Deliberately **no**
-owning/close-on-drop handle yet: `abi-v1` has no generic descriptor-close trap,
-so it would be a speculative interface (§2.4) — it lands with the
-descriptor-producing/closing ABI. TAIRiX builds **no** system-wide C `stdio`
+`plans/DRIVES.md` / `plans/ALIAS.md`, never invented here. `File` is the one
+**owning** descriptor handle for every backing (path, resource reference, pipe
+end, pty end — the close trap is backing-generic), so no second owning fd type
+exists (§2.2). TAIRiX builds **no** system-wide C `stdio`
 (§16.4, `plans/CCOMPAT.md`). **IO4 done:** the in-tree callers
 (`userland/shell/elsh`, `userland/system/init`, `userland/apps/top`, and the
 `sysinfo`/`ps`/`top` output path shared through `lib/procinfo`) write through
@@ -3035,7 +3036,40 @@ loops are deleted (§2.14) — one `Write::write_all` loop in userland. The
 bounded/edit-aware line readers (the REPL's `MAX_LINE` `LineReader` and
 login's prompt reads, both over the shared `tairix_vt::line::LineEditor`)
 are retained as a security bound (§24.4), not the unbounded
-`BufReader`. See `plans/IO.md` (binding under `AGENTS.md`).
+`BufReader`.
+
+**IO5 done — one descriptor I/O path, files in the vocabulary, honest
+failures.** The kernel carried the byte-movement path twice — `fs_read`/
+`fs_write` (explicit offset) and a standard-stream-only `wired_stream_read`/
+`wired_stream_write` (shared cursor) were near-verbatim copies that had already
+drifted on the pipe read timeout. They are now one `descriptor_read`/
+`descriptor_write` parameterised by a `StreamPos` (`At(offset)` positional,
+`Cursor` sequential), with the caller-owned and delegated path arms sharing one
+`read_path_backing` helper, so the direction gate, capability checks, and
+copy-in/copy-out boundary exist once (§2.2). `stream_read`/`stream_write` no
+longer stop at `STD_STREAM_COUNT`: they serve **any** descriptor the caller
+holds, so a pipe end, pty end, resource, or file at fd ≥ 4 is finally readable
+and writable sequentially; the console table stays the fallback for a standard
+descriptor with no open entry, and no authority widens (the caller already held
+the descriptor and could already reach it positionally). In userland the
+primitives surface the kernel's `Errno` as `io::Error::Os` instead of collapsing
+a refusal to a count of `0` — a fail-*open* read loop that silently truncated
+(§2.24, §5.4) — so `Ok(0)` now means end-of-input and nothing else, `stdinfo`
+excepted by its §20.1 contract. `File` implements the same `Read`/`Write` as
+every other descriptor (sequential, at the shared description cursor) and its
+positional `read_at`/`write_at` reuse the one `read_fill`/`write_drain` transfer
+loop, so userland has one loop rather than three; the lossy
+`tairix_rt::{stdin, stdout, stderr, stdinfo, stdin_timeout}` free functions are
+deleted (§2.14) and every caller moved onto the traits.
+
+**IO6 planned — descriptor-honest ABI names.** `fs_close` releases *any*
+descriptor and `fs_read`/`fs_write` serve every backing, so the `fs_` prefix
+reads as a filesystem gate that is not there; the rename to the `fd_*`/
+positional-`stream_*` family (with the syscall-table hash and C header
+regenerated) is its own landing because it touches ~40 files and the ABI
+surface. Recorded, not silently deferred (§2.18).
+
+See `plans/IO.md` (binding under `AGENTS.md`).
 
 ---
 

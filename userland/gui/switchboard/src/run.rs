@@ -81,6 +81,7 @@ mod program {
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
+    use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
         RenderInputs, Service, ServiceHost, WaitToken, PANEL_TITLE,
@@ -125,17 +126,10 @@ mod program {
     /// deaf monitor is worse than one that says why it stopped.
     const EXIT_NO_COMMANDS: i32 = 4;
 
-    /// Write one line to `stderr`.
-    fn say(line: &str) {
-        let _ = tairix_rt::stderr(line.as_bytes());
-    }
-
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        say("switchboard: ");
-        say(reason);
-        say("\n");
+        let _ = writeln!(Stderr, "switchboard: {reason}");
         code
     }
 
@@ -143,9 +137,7 @@ mod program {
     /// has no purpose without a session to report to, so this is not a
     /// failure, merely a stated reason for stopping.
     fn clean_exit(reason: &str) -> i32 {
-        say("switchboard: ");
-        say(reason);
-        say("\n");
+        let _ = writeln!(Stderr, "switchboard: {reason}");
         0
     }
 
@@ -507,7 +499,7 @@ mod program {
         }
 
         fn report_refusal(&mut self, action: &str, refusal: Errno) {
-            say(&refusal_notice(action, refusal));
+            io::write_stderr_line(&refusal_notice(action, refusal));
         }
 
         fn note_degradation(&mut self, field: DegradedField) {
@@ -522,9 +514,7 @@ mod program {
                     "notice: the memory-pressure gauge is unavailable; memory pressure is degraded"
                 }
             };
-            say("switchboard: ");
-            say(reason);
-            say("\n");
+            let _ = writeln!(Stderr, "switchboard: {reason}");
         }
     }
 
@@ -717,11 +707,13 @@ mod program {
                 return;
             };
             if !from_identity(&sender, server) {
-                say("switchboard: dropped a window event from an unattested sender\n");
+                io::write_stderr_line(
+                    "switchboard: dropped a window event from an unattested sender",
+                );
                 continue;
             }
             let Ok(event) = WindowEvent::from_bytes(&frame[..len]) else {
-                say("switchboard: dropped a malformed window event\n");
+                io::write_stderr_line("switchboard: dropped a malformed window event");
                 continue;
             };
             apply_window_event(service, host, authority, &event);
@@ -748,15 +740,19 @@ mod program {
                 return;
             };
             let Some(session) = host.session() else {
-                say("switchboard: dropped a command received before any session was attested\n");
+                io::write_stderr_line(
+                    "switchboard: dropped a command received before any session was attested",
+                );
                 continue;
             };
             match authenticate_command(&frame[..len], &sender, session) {
                 Ok(command) => service.command(host, command, authority),
                 Err(Errno::PermissionDenied) => {
-                    say("switchboard: dropped a command from a sender that is not the session\n");
+                    io::write_stderr_line(
+                        "switchboard: dropped a command from a sender that is not the session",
+                    );
                 }
-                Err(_) => say("switchboard: dropped a malformed command\n"),
+                Err(_) => io::write_stderr_line("switchboard: dropped a malformed command"),
             }
         }
     }
@@ -783,7 +779,7 @@ mod program {
             Ok(len) => Some(len),
             Err(ret) if Errno::from_syscall(ret) == Errno::WouldBlock => None,
             Err(ret) => {
-                say(&refusal_notice(action, Errno::from_syscall(ret)));
+                io::write_stderr_line(&refusal_notice(action, Errno::from_syscall(ret)));
                 None
             }
         }
@@ -925,9 +921,8 @@ mod program {
             match WaitToken::from_u64(token) {
                 Some(WaitToken::Signal) => {
                     let drained = tairix_rt::signal_intake(SignalIntakeOp::Take);
-                    say("switchboard: received a ");
-                    say(signal_name(drained));
-                    say(" signal; exiting\n");
+                    let name = signal_name(drained);
+                    let _ = writeln!(Stderr, "switchboard: received a {name} signal; exiting");
                     return 0;
                 }
                 Some(WaitToken::Command) => drain_commands(&mut service, &mut host, &authority),

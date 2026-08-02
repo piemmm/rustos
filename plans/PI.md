@@ -910,18 +910,18 @@ on its own before the next.
     (`admit_init`, `admit_process`) install `DescriptorTable::standard()`, so
     a process's fd 0 reads / fd 1/2/3 write the discovered console the boot
     path installed (the P6e-1/P6e-2 UART backing **reused behind the
-    stream**, not exposed). `lib/rt` now exposes `stdout`/`stderr`/`stdinfo`/
-    `stdin` (over fd 0/1/2/3, `console_*` removed); `lib/abi-sys` exports
-    `tairix_sys_stream_write`/`tairix_sys_stream_read`; `init` + the `Shell`
-    session write their banner via `tairix_rt::stdout`. C header regenerated
+    stream**, not exposed). `lib/rt` exposes the standard streams over fd
+    0/1/2/3 through its `io` trait layer (`console_*` removed); `lib/abi-sys`
+    exports `tairix_sys_stream_write`/`tairix_sys_stream_read`; `init` + the
+    `Shell` session write their banner via `tairix_rt::io::Stdout`. C header regenerated
     (`TAIRIX_SYS_STREAM_WRITE`/`_READ`) and `SYSCALL_TABLE_HASH` recomputed
     (`1cfbad…`); the abi-check + c-header drift guards are green. Proven
     host-side (the `lib/abi` descriptor-table tests, the `aspace` stream-map
     tests, the 11 reworked + 3 new `kernel/core` handler gate tests, the
     rt/abi-sys fd-marshalling tests) and on `-M virt`: the
     `spawn_session_qemu_aarch64` vertical now proves a spawned child writes
-    fd 1 over the discovered-UART backing (the shell banner lands via
-    `stdout`). Whole-project gate (fmt / `cargo xtask ci` / `fuzz --secs 5`
+    fd 1 over the discovered-UART backing (the shell banner lands on fd 1).
+    Whole-project gate (fmt / `cargo xtask ci` / `fuzz --secs 5`
     / `soak.sh both` / `cargo xtask test --qemu`) **green on this host**.
     Real UART **RX** over fd 0 on silicon remains an on-metal item (no
     deterministic `-M virt` serial-RX injection, consistent with P6e-2).
@@ -936,7 +936,7 @@ on its own before the next.
       banner and exits: it runs the sibling `tairix-elsh` interpreter as a
       read-eval-print loop (the new `repl` lib module) over its **inherited
       standard streams** (`AGENTS.md` §20). `repl::run` reads command lines
-      from fd 0 (`tairix_rt::stdin`, reassembling lines across reads,
+      from fd 0 (`tairix_rt::io::Stdin`, reassembling lines across reads,
       stripping CRLF, capping a line at 4 KiB and discarding an over-length
       line), runs each through `Shell::run_line`, writes the prompt + output
       to fd 1/2 through the `RtConsole` seam, and emits one `omission`
@@ -952,11 +952,12 @@ on its own before the next.
       dynamic descriptors, fd ≥ 10, stay refused closed).
       `lib/abi` gained a tested `Errno::from_i32` decoder
       (single source of truth, §2.2; no C-header/hash impact — a method, not
-      an ABI type change) and `tairix_rt::stdin` now clamps a negative
-      `-errno` to a zero-length read and clamps the count to `buf.len()`
+      an ABI type change); the shared `lib/rt` read primitive surfaces a
+      negative `-errno` as its typed `Errno` (never as a zero-length read that
+      would read as end of input) and clamps the count to `buf.len()`
       (defence in depth, §5.4). Host-proven (6 new `repl` tests over scripted
-      stdin/stdinfo + `Console`/`ProcessHost` fixtures; 3 new `lib/rt` stdin
-      tests; the `Errno::from_i32` round-trip test) and freestanding-built on
+      stdin/stdinfo + `Console`/`ProcessHost` fixtures; the `lib/rt` stream
+      primitive tests; the `Errno::from_i32` round-trip test) and freestanding-built on
       all three bare-metal targets; the `spawn_session_qemu_aarch64` vertical
       proves the interactive loop (the session blocks at its prompt and the
       runner types a scripted `exit\n` at the guest's serial input). Docs:

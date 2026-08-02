@@ -21,7 +21,7 @@ use tairix_abi::{
     CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_procinfo::{for_each_mount, IpcTransport};
-use tairix_rt::io::{write_stderr_line, Stdout, Write};
+use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
     completion_line, dispatch_line, refusal_line, run_scratch_paths, size_targets, summary_record,
     Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec, USAGE, WORKER_FLAG,
@@ -168,7 +168,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     let mut buf = [0u8; 512];
     let len = summary_record(&machine.tally(), code, elapsed_secs, &mut buf);
     if len > 0 {
-        let _ = tairix_rt::stdinfo(&buf[..len]);
+        let _ = StdInfo.write_all(&buf[..len]);
     }
     code
 }

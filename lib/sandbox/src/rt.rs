@@ -19,6 +19,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FdWire, SpawnAttach, STDIN, STDOUT, STD_STREAM_COUNT};
+use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Write};
 
 use crate::host::Launcher;
 use crate::proto::Channel;
@@ -56,16 +57,18 @@ impl Channel for StdioChannel {
         // A zero timeout waits indefinitely; the pipe backing parks the
         // worker until bytes arrive or every write end closes (then
         // end-of-stream, 0).
-        tairix_rt::stdin_timeout(buf, 0).map_err(errno_from)
+        Stdin.read(buf).map_err(IoError::as_errno)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        match tairix_rt::stdout(buf) {
-            // `stdout` folds every failure to zero accepted bytes; with a
-            // pipe backing that means the parent is gone, which the
-            // framing's zero-progress rule reports as the peer closed.
-            0 if !buf.is_empty() => Err(Errno::BrokenPipe),
-            accepted => Ok(accepted),
+        match Stdout.write(buf) {
+            // `Stdout::write` reports a kernel refusal through the error
+            // channel; with a pipe backing that means the parent is gone,
+            // which the framing's zero-progress rule reports as the peer
+            // closed.
+            Ok(0) if !buf.is_empty() => Err(Errno::BrokenPipe),
+            Ok(accepted) => Ok(accepted),
+            Err(e) => Err(e.as_errno()),
         }
     }
 }

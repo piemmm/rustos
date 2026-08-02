@@ -53,6 +53,7 @@ mod program {
     };
     use tairix_font::BitmapFont;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+    use tairix_rt::io::{Stderr, Write};
     use tairix_terminal::grid::MAX_DIMENSION;
     use tairix_terminal::render::render;
     use tairix_terminal::{
@@ -186,9 +187,7 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = tairix_rt::stderr(b"terminal: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "terminal: {reason}");
         code
     }
 

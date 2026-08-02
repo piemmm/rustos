@@ -25,8 +25,10 @@ A program is `#![no_std]`, `#![no_main]`, declares its `main`, and hands it to
 #![no_std]
 #![no_main]
 
+use tairix_rt::io::{Stdout, Write};
+
 fn main() -> i32 {
-    tairix_rt::stdout(b"hello\n");
+    let _ = Stdout.write_all(b"hello\n");
     0
 }
 
@@ -72,16 +74,25 @@ arena and metadata bases are fixed virtual addresses documented in
 
 `tairix_rt::io` is the ergonomic `std::io`-style layer a program programs
 against instead of hand-marshalling byte slices: one fd-generic `Read`/`Write`
-trait pair (with looping `read_exact`/`write_all`/`write_fmt`), the buffering
-built on them (`BufReader` with `read_line`/`read_until`/`lines`, `BufWriter`
-coalescing small writes), and the four well-known standard streams (`Stdin`,
-`Stdout`, `Stderr`, `StdInfo`) plus a non-owning `Stream` over any inherited
-descriptor. It is a pure layer over the existing `stream_read`/`stream_write`
-traps — no new syscall, capability, or `lib/abi` type — so the standard streams
-today and any file / pipe / tty / resource-reference fd a sibling subsystem
-later opens all share one I/O vocabulary (`AGENTS.md` §2.2). `StdInfo` (fd 3)
-writes are best-effort per `AGENTS.md` §20.1; every path is fail-closed, never a
-panic. See `docs/src/lib/rt-io.md` and `plans/IO.md`.
+trait pair (the `read_fill`/`write_drain` transfer loops every other helper —
+`read_exact`, `write_all`, `write_fmt`, and `File`'s positional helpers — is
+built on), the buffering built on them (`BufReader` with
+`read_line`/`read_until`/`lines`, `BufWriter` coalescing small writes), and the
+four well-known standard streams (`Stdin`, `Stdout`, `Stderr`, `StdInfo`) plus
+a borrowed `Stream` over any descriptor and the owning `File`. It is a pure
+layer over the existing `stream_read`/`stream_write` traps — no new syscall,
+capability, or `lib/abi` type — so the standard streams, opened files, pipe and
+pty ends, and resource references all share one I/O vocabulary (`AGENTS.md`
+§2.2).
+
+A kernel refusal is reported as `Error::Os(Errno)` carrying the kernel's own
+code, never folded into a zero-length read: `Ok(0)` means end-of-input and
+nothing else, so a consumer can never silently truncate what it read because a
+capability was revoked or a pipe broke. `Error::as_errno` converts back for an
+interface that speaks the kernel's vocabulary. `StdInfo` (fd 3) is the one
+deliberate exception — its writes are best-effort and ignorable per `AGENTS.md`
+§20.1. Every path is fail-closed, never a panic. See `docs/src/lib/rt-io.md`
+and `plans/IO.md`.
 
 ## Filesystem (`File`, `Dir`)
 
@@ -91,10 +102,18 @@ thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
 `abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
 which relative paths resolve, `.junie/PREREQUISITES2.md` P2), plus the
 ergonomic `File` and `Dir` handles a program normally uses.
-`File` owns its descriptor and releases it with `fs_close` on `Drop`, so a
-handle is never leaked; `File::read_at` / `write_at` split a transfer larger
-than `tairix_abi::FS_IO_MAX` across successive syscalls. A program names a
-descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
+`File` is the one **owning** descriptor handle, whatever its backing (a path, a
+resource reference, a pipe end, a pty end — the close trap releases any of
+them), and it releases the descriptor on `Drop`, so a handle is never leaked.
+It implements `tairix_rt::io::Read`/`Write`, which read and write at the shared
+open-file-description cursor: two handles cloned from one description (a spawn
+wire, a delegation) walk the file together instead of each restarting it, and a
+file is streamed with exactly the same code a program uses on standard input.
+`File::read_at` / `write_at` are the **positional** pair — they take an explicit
+offset, leave that shared cursor untouched, and split a transfer larger than
+`tairix_abi::FS_IO_MAX` across successive syscalls through the same
+`read_fill`/`write_drain` loop rather than a second copy of it. A program names
+a descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
 refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free
 functions are the common-case openers (read-only, write+create+truncate, and

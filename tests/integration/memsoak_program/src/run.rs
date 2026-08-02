@@ -49,7 +49,7 @@
 mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, SysinfoQueryId};
     use tairix_procinfo::{call, for_each_process, IpcTransport, Transport};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdin, Stdout, Write};
     use tairix_test_memsoak::{
         report_line, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS, MEASURED_CYCLES, WARMUP_CYCLES,
     };
@@ -88,10 +88,10 @@ mod program {
         }
         // The timed park: the bound elapsing with no input is the expected
         // outcome (nobody types during the soak), so the elapsed-bound
-        // error is absorbed; the park itself — arming the one-shot and
+        // result is absorbed; the park itself — arming the one-shot and
         // being woken by it — is the behaviour under test.
         let mut scratch = [0u8; 1];
-        let _ = tairix_rt::stdin_timeout(&mut scratch, CYCLE_PARK_NANOS);
+        let _ = Stdin.read_timeout(&mut scratch, CYCLE_PARK_NANOS);
         for_each_process(transport, false, |_| Ok(()))
             .map_err(|_| "memsoak: self process-list walk failed")?;
         Ok(())

@@ -43,7 +43,7 @@ mod program {
     use tairix_abi::Errno;
     use tairix_cp::{parse, run, Entry, EntryKind, FileSystem, Output, Prompt, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
 
     /// Initial byte size of the directory-listing buffer: one page covers a
@@ -271,14 +271,12 @@ mod program {
         fn confirm(&self, question: &str) -> Result<bool, Errno> {
             Stderr
                 .write_all(format!("cp: {question} ").as_bytes())
-                .map_err(|_| Errno::NotImplemented)?;
+                .map_err(io::Error::as_errno)?;
             let mut first: Option<u8> = None;
             let mut buf = [0u8; REPLY_MAX];
             loop {
-                let n = tairix_rt::stdin(&mut buf);
+                let n = Stdin.read(&mut buf).map_err(io::Error::as_errno)?;
                 if n == 0 {
-                    // End of input (or an unreadable stream): no consent was
-                    // given, so the answer is a decline — never an assumed yes.
                     break;
                 }
                 for &byte in &buf[..n] {
@@ -301,7 +299,7 @@ mod program {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             // The shared short-write loop; a stream that stops accepting
             // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
+            Stdout.write_all(bytes).map_err(io::Error::as_errno)
         }
     }
 

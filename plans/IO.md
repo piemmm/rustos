@@ -17,14 +17,12 @@ its sibling plans, not invented here (§4, §5).
 
 ## 0. Why this exists
 
-Today every text program (the shell, `init`, `sysinfo`, the CLI utilities,
-system services) does I/O by calling the thin `lib/rt` syscall wrappers
-directly — `tairix_rt::stdout(bytes)`, `tairix_rt::stderr(bytes)`,
-`tairix_rt::stdinfo(bytes)`, `tairix_rt::stdin(&mut buf)` — passing raw byte
-slices over the `abi-v1` `stream_write` / `stream_read` traps (`AGENTS.md`
-§20). That floor is correct and stays: §20 already forbids reaching for a
-console/UART/framebuffer device, and software must keep doing I/O over
-inherited fd 0/1/2/3 only.
+Before this plan every text program (the shell, `init`, `sysinfo`, the CLI
+utilities, system services) did I/O by calling thin per-stream `lib/rt` syscall
+wrappers directly, passing raw byte slices over the `abi-v1` `stream_write` /
+`stream_read` traps (`AGENTS.md` §20). That floor is correct and stays: §20
+already forbids reaching for a console/UART/framebuffer device, and software
+must keep doing I/O over inherited descriptors only.
 
 What is **missing** is the ergonomic *library* on top of those wrappers — the
 TAIRiX equivalent of the `std::io` surface that real shells and tools program
@@ -75,9 +73,11 @@ done items):
   (fd 3) unattached and the kernel discards its writes best-effort, so
   advisory records never reach the terminal. Current backings are the
   discovered text consoles (video + UART) only.
-- **DONE — `lib/rt` thin wrappers.** `tairix_rt::{stdin, stdout, stderr,
-  stdinfo, set_input_mode}` marshal byte slices over the traps. `lib/rt` registers
-  the process heap (`AGENTS.md` §25), so `alloc` is available to this layer.
+- **DONE — the `lib/rt` transfer primitives.** One `read`/`write` pair marshals
+  a byte slice over each trap and reports a kernel refusal as a typed `Errno`;
+  the four standard streams are `Stream` constants over them, not four
+  hand-written wrappers. `lib/rt` registers the process heap (`AGENTS.md` §25),
+  so `alloc` is available to this layer.
 - **DONE — `stdinfo` framing.** The `StdInfoRecord` JSONL model lives in
   `lib/abi` (`stdinfo.rs`, `AGENTS.md` §20.1). This layer carries the bytes; it
   does not redefine the record.
@@ -103,18 +103,22 @@ done items):
   `tairix_vt::line::LineEditor` — are a deliberate security bound,
   not the duplication IO4 removes, so they stay as their own readers over the
   `read` primitive.
-- **DECIDED — no owning/close-on-drop handle yet.** IO1 deliberately ships a
-  *non-owning* `Stream` (a view of an fd the process already owns), not an
-  owning RAII closer: `abi-v1` has no generic descriptor-close trap (only the
-  filesystem's `File`, which closes via `fs_close`), so a close-on-drop handle
-  would be a speculative interface bound to a syscall that does not exist
-  (`AGENTS.md` §2.4). It lands with the descriptor-producing/closing ABI that
-  will own it (`plans/DRIVES.md` / `plans/ALIAS.md`).
-- **NOT STARTED, OWNED ELSEWHERE — the descriptor-*producing* ABI.** The
-  syscall(s) that resolve a file path or a resource reference to a *new* fd, and
-  the closed `sys:` stream-backing enum, are unimplemented and are owned by
-  `plans/DRIVES.md` (files), `plans/ALIAS.md` + `plans/SHELL.md` (resource
-  references). This plan depends on them but must not invent them (§5).
+- **DECIDED — `Stream` stays non-owning; `File` is the owning handle.** The
+  I/O layer offers exactly two fd shapes and no third: a **borrowed** `Stream`
+  (a view of a descriptor whose lifetime someone else owns — the four inherited
+  standard streams, or an fd handed in by a sibling plan) and the **owning**
+  `File`, which releases its descriptor on drop. An `OwnedStream` alongside
+  `File` would be a second owning fd type for the same kernel object — the
+  §2.2 duplication this plan exists to prevent — so it is not added. Every
+  descriptor-producing call therefore hands back a `File`, whatever the backing
+  (path, resource reference, pipe end, pty end): the close trap is
+  backing-generic, so one owner type suffices.
+- **DONE — the descriptor-*producing* ABI landed in the sibling plans.** Opening
+  a path (`fs_open`), resolving a resource reference (`resource_open`), creating
+  a pipe (`pipe_create`) or a pseudo-terminal (`pty_create`), and delegating a
+  descriptor (`fd_grant` / `fd_redeem`) all mint descriptors in the one
+  per-process table, and the close trap releases any of them. This plan
+  consumes those fds; it still invents no producer ABI (§5).
 
 ## 1. Scope and decisions (binding for this plan)
 
@@ -260,6 +264,59 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   bound rather than remove duplication. Verified by the existing
   shell/init/utility host tests and the `spawn_session_qemu_aarch64` vertical
   (a child's fd-1 output).
+- **IO5 — one descriptor I/O path, files in the vocabulary, honest failures.**
+  The stage that closes §0's groundwork promise now that the descriptor
+  producers exist. Three defects, one landing:
+  1. **The kernel carried the byte-movement path twice.** `fs_read`/`fs_write`
+     (explicit offset) and the standard-stream-only `wired_stream_read`/
+     `wired_stream_write` (shared cursor) were near-verbatim copies of the same
+     backing match, capability gates, and copy-in/copy-out boundaries, and had
+     already drifted (the handle path passed a pipe read no timeout; the stream
+     path passed the caller's). They collapse into **one**
+     `descriptor_read`/`descriptor_write` parameterised by a `StreamPos`
+     (`At(offset)` positional, `Cursor` sequential), so the two traps are two
+     *positions* over one path and can never diverge again.
+  2. **Sequential I/O was fenced off to fd 0–3.** `stream_read`/`stream_write`
+     only consulted the open-file table below `STD_STREAM_COUNT`, so a pipe
+     end, pty end, resource or file at fd ≥ 4 could not be read or written
+     sequentially at all — the one thing that forced `File` to be a positional
+     island and would have forced a second vocabulary. The traps now resolve
+     **any** descriptor the caller holds through the same table, with the same
+     per-backing checks; the console table stays the fallback for a standard
+     descriptor with no open entry. No authority widens: the caller already
+     holds the descriptor and could already reach it positionally.
+  3. **The trait layer reported failure as end-of-input.** The primitives
+     collapsed a negative kernel result to a count of `0`, so a revoked
+     capability, a broken pipe, or a faulting buffer was indistinguishable from
+     clean EOF — a fail-*open* read loop that silently truncates (§2.24 "fail
+     loud", §5.4). `Error` gains an `Os(Errno)` variant carrying the kernel's
+     own code, and every primitive surfaces it; `Ok(0)` now means EOF and
+     nothing else. `stdinfo` keeps swallowing, by §20.1 contract.
+
+  With those in place `File` implements the **same** `Read`/`Write` as every
+  other descriptor (sequential, at the shared open-file-description cursor, so
+  two dup'd handles interleave instead of overwriting), and its hand-rolled
+  fill/drain loops are deleted in favour of the one `read_fill`/`write_all`
+  loop — which the positional `read_at`/`write_at` also reuse through a
+  positional adapter, so there is one loop in the whole userland, not three.
+  The remaining direct callers of the lossy byte-slice wrappers
+  (`tairix_rt::{stdin, stdout, stderr, stdinfo}`) move onto the traits and the
+  wrappers stop being a public parallel surface. Tests: sequential read/write
+  on a non-standard descriptor advancing the shared cursor, direction refusal,
+  positional and sequential agreeing on one path, the delegated-identity arm,
+  and the trait layer surfacing a kernel refusal instead of EOF.
+- **IO6 — descriptor-honest ABI names.** `fs_close` releases *any* descriptor
+  (path, resource, pipe end, pty end, delegated) and is deliberately ungated
+  for that reason, and `fs_read`/`fs_write` likewise serve every backing: the
+  `fs_` prefix on the descriptor-generic operations is a misnomer that reads as
+  a filesystem gate that is not there. Rename to the descriptor family already
+  established by `fd_grant`/`fd_redeem` — `fd_close`, and the positional pair
+  to match the sequential `stream_*` traps — regenerating the syscall-table
+  hash and the C header. Deliberately its own landing: it touches ~40 files and
+  the frozen-on-release ABI surface, and mixing a mechanical rename into IO5's
+  behavioural change would make neither reviewable. **Recorded, not deferred
+  silently** (§2.18): the names are wrong today and the fix is scheduled, not
+  optional.
 
 ## 4. How the siblings plug in (groundwork, no IO.md ABI)
 

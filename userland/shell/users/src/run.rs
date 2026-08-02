@@ -40,7 +40,7 @@ mod program {
 
     use tairix_abi::{InputMode, OpenFlags};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_users::{Salt, SALT_LEN};
     use tairix_users_cli::{
         parse, run_session, AdminChannel, Command, SaltSource, SessionConfig, ToolIo, USAGE,
@@ -57,7 +57,7 @@ mod program {
         fn read_raw_line(out: &mut Vec<u8>) -> bool {
             loop {
                 let mut byte = [0u8; 1];
-                let read = tairix_rt::stdin(&mut byte);
+                let read = Stdin.read(&mut byte).unwrap_or(0);
                 if read == 0 {
                     return !out.is_empty();
                 }
@@ -74,17 +74,17 @@ mod program {
         fn write_line(&mut self, line: &str) {
             // Terminal output is best-effort: a dropped tail must not abort
             // the session, so the accepted counts are discarded.
-            let _ = tairix_rt::stdout(line.as_bytes());
-            let _ = tairix_rt::stdout(b"\n");
+            let _ = Stdout.write_all(line.as_bytes());
+            let _ = Stdout.write_all(b"\n");
         }
 
         fn error_line(&mut self, line: &str) {
-            let _ = tairix_rt::stderr(line.as_bytes());
-            let _ = tairix_rt::stderr(b"\n");
+            let _ = Stderr.write_all(line.as_bytes());
+            let _ = Stderr.write_all(b"\n");
         }
 
         fn read_line(&mut self, prompt: &str) -> Option<String> {
-            let _ = tairix_rt::stdout(prompt.as_bytes());
+            let _ = Stdout.write_all(prompt.as_bytes());
             let mut raw = Vec::new();
             if !Self::read_raw_line(&mut raw) {
                 return None;
@@ -93,7 +93,7 @@ mod program {
         }
 
         fn read_secret(&mut self, prompt: &str) -> Option<Vec<u8>> {
-            let _ = tairix_rt::stdout(prompt.as_bytes());
+            let _ = Stdout.write_all(prompt.as_bytes());
             // The secret discipline for the credential (echo off, the
             // activity indicator shown instead); the cooked default is
             // restored regardless of outcome, and the terminal newline the
@@ -102,7 +102,7 @@ mod program {
             let mut raw = Vec::new();
             let ok = Self::read_raw_line(&mut raw);
             let _ = tairix_rt::set_input_mode(InputMode::Cooked);
-            let _ = tairix_rt::stdout(b"\n");
+            let _ = Stdout.write_all(b"\n");
             if ok {
                 Some(raw)
             } else {

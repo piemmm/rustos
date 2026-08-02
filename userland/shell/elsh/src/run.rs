@@ -58,7 +58,7 @@ mod program {
         ResolvedCommand, Shell, Signal, WaitOutcome, USAGE,
     };
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
     /// and standard error (fd 2) through the shared `tairix_rt::io` layer — the
@@ -85,12 +85,21 @@ mod program {
 
     impl ReplInput for RtInput {
         fn read(&mut self, buf: &mut [u8]) -> usize {
-            tairix_rt::stdin(buf)
+            match Stdin.read(buf) {
+                Ok(read) => read,
+                Err(err) => {
+                    // The input channel failed rather than ended. The REPL
+                    // has no continuation either way, but a session that
+                    // vanishes must say why before it does.
+                    let _ = writeln!(Stderr, "elsh: standard input failed: {}", err.as_errno());
+                    0
+                }
+            }
         }
 
         fn write_info(&mut self, bytes: &[u8]) {
             // fd 3 is best-effort and ignorable: discard the accepted count.
-            let _ = tairix_rt::stdinfo(bytes);
+            let _ = StdInfo.write_all(bytes);
         }
 
         fn set_mode(&mut self, mode: InputMode) -> Result<(), Errno> {
@@ -659,17 +668,20 @@ mod program {
     impl RtElevator {
         /// Read one edited input line (without its terminator) from standard
         /// input — the read line discipline's **buffer** half
-        /// ([`tairix_vt::line::LineEditor`]) over `tairix_rt::stdin`, exactly
-        /// as the REPL reads a command line. A zero-length read means the
-        /// stream closed and fails closed; a line longer than `buf` is
-        /// refused, never truncated.
+        /// ([`tairix_vt::line::LineEditor`]) over the shared standard-input
+        /// reader, exactly as the REPL reads a command line. A zero-length
+        /// read means the stream closed and fails closed, and a refusal
+        /// surfaces its own reason; a line longer than `buf` is refused,
+        /// never truncated.
         fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
             let mut editor = tairix_vt::line::LineEditor::new();
             let mut len = 0;
             let mut byte = [0u8; 1];
             loop {
-                if tairix_rt::stdin(&mut byte) == 0 {
-                    return Err(Errno::NotFound);
+                match Stdin.read(&mut byte) {
+                    Ok(0) => return Err(Errno::NotFound),
+                    Ok(_) => {}
+                    Err(err) => return Err(err.as_errno()),
                 }
                 match editor.push(buf, &mut len, byte[0]) {
                     // This reader never drives `resolve_escape`, so a bare

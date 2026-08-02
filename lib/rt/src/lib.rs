@@ -65,8 +65,8 @@ use tairix_abi::{
     BootFacts, BootId, CapabilityId, Errno, FileStat, HwNode, InputMode, LimitKind, MapFlags,
     OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal,
     SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDERR, STDIN,
-    STDINFO, STDOUT, TERMINAL_SIZE_WIRE_LEN,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -417,28 +417,34 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
-/// Write `bytes` to the calling process's standard stream `fd`
-/// (`SyscallNumber::STREAM_WRITE`), returning the number of bytes the
-/// kernel accepted.
+/// Write `bytes` to the descriptor `fd` (`SyscallNumber::STREAM_WRITE`),
+/// returning the number of bytes the kernel accepted or the [`Errno`] it
+/// refused with.
 ///
-/// The shared core of [`stdout`], [`stderr`], and [`stdinfo`]: the
-/// program names only the inherited descriptor, never a device, so the
-/// same binary works whatever the spawner backed the stream with (device independence is a property of the stream layer). The kernel
-/// resolves `fd` against the caller's descriptor table and validates the
-/// `(buf, len)` pair against the caller's address space before reading it; a short write (fewer than `bytes.len()`) is valid,
-/// so the caller loops.
+/// The one write primitive the whole userland runtime is built on: the
+/// program names only a descriptor it already holds, never a device, so the
+/// same binary works whatever the spawner backed the stream with (device
+/// independence is a property of the stream layer, not the program). The
+/// kernel resolves `fd` against the caller's descriptor table and validates
+/// the `(buf, len)` pair against the caller's address space before reading
+/// it; a short write (fewer than `bytes.len()`) is valid, so the caller
+/// loops.
 ///
-/// The kernel encodes a failure as a negative register (`-errno`) — e.g. a
-/// missing `CAP_CONSOLE_WRITE`, or `fd` is not a writable stream. A writer
-/// handed a `&[u8]` has no way to surface an `Errno`, so a failure is
-/// reported as a zero-length write and the caller's short-write loop fails
-/// closed instead of spinning. The count is also clamped to `bytes.len()`
-/// as defence in depth, so a buggy kernel count can never drive an
-/// out-of-bounds slice in the caller — exactly as [`stream_read`] clamps.
+/// A refusal — a missing `CAP_CONSOLE_WRITE`, a descriptor opened read-only,
+/// a broken pipe, a faulting buffer — is surfaced as its `Errno` rather than
+/// collapsed to a zero count, so a caller can never mistake a failure for a
+/// stream that simply accepted nothing. The count is clamped to
+/// `bytes.len()` as defence in depth, so a buggy kernel count can never
+/// drive an out-of-bounds slice in the caller — exactly as
+/// [`stream_read_result`] clamps.
+///
+/// # Errors
+///
+/// The [`Errno`] the kernel encoded in its negative result.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `bytes.len()`.
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-write encoding (count ≥ 0, else -errno).
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-write encoding (count >= 0, else -errno).
 #[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above; the cast runs only when `written >= 0`.
-fn stream_write(fd: u32, bytes: &[u8]) -> usize {
+pub(crate) fn stream_write_result(fd: u32, bytes: &[u8]) -> Result<usize, Errno> {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(buf, len)` against the caller's address space before touching it. `bytes` is a live shared `&[u8]` for the duration
@@ -450,135 +456,50 @@ fn stream_write(fd: u32, bytes: &[u8]) -> usize {
         )
     } as i64;
     if written < 0 {
-        return 0;
+        return Err(Errno::from_syscall(written));
     }
-    (written as usize).min(bytes.len())
+    Ok((written as usize).min(bytes.len()))
 }
 
-/// Write `bytes` to standard output (fd 1), returning the
-/// number of bytes the kernel accepted. The program's primary data
-/// output; a short write is valid, so the caller loops.
-#[must_use]
-pub fn stdout(bytes: &[u8]) -> usize {
-    stream_write(STDOUT, bytes)
-}
-
-/// Write `bytes` to standard error (fd 2): errors,
-/// warnings, and diagnostics. Returns the number of bytes accepted.
-#[must_use]
-pub fn stderr(bytes: &[u8]) -> usize {
-    stream_write(STDERR, bytes)
-}
-
-/// Write `bytes` to the standard information stream (fd 3): optional, ignorable structured advisory metadata. Returns the
-/// number of bytes accepted (zero when no consumer is attached — fd 3 is
-/// best-effort and must never affect correctness).
-#[must_use]
-pub fn stdinfo(bytes: &[u8]) -> usize {
-    stream_write(STDINFO, bytes)
-}
-
-/// Read up to `buf.len()` bytes from standard input (fd 0) into `buf` (`SyscallNumber::STREAM_READ`), returning the number of
-/// bytes read.
+/// Read up to `buf.len()` bytes from the descriptor `fd`
+/// (`SyscallNumber::STREAM_READ`) into `buf`, waiting at most `timeout_ns`
+/// nanoseconds (`0` waits indefinitely), and return the number of bytes read
+/// or the [`Errno`] the kernel refused with.
 ///
-/// The kernel resolves fd 0 against the caller's descriptor table and
-/// validates the `(buf, len)` pair against the caller's address space
-/// before writing it. The stream *backing* owns
-/// blocking: a read with no pending input parks the caller in the
-/// kernel until input arrives, so a successful read returns at least one
-/// byte. A short read (fewer bytes than `buf.len()`) is valid, so the
-/// caller loops for more.
+/// The one read primitive the whole userland runtime is built on: the same
+/// code path serves fd 0 and any file / pipe / tty / resource-backed
+/// descriptor the process holds. The kernel resolves `fd` against the
+/// caller's descriptor table and validates the `(buf, len)` pair against the
+/// caller's address space before writing it; the stream *backing* owns
+/// blocking, so a read with no pending input parks the caller rather than
+/// spinning. A short read (fewer than `buf.len()`) is valid, so the caller
+/// loops for more.
 ///
-/// The kernel encodes a failure as a negative register (`-errno`, the
-/// standard `abi-v1` convention) — e.g. fd 0 is not a readable stream, or
-/// the buffer pointer faults. A reader handed a `&mut [u8]` has no way to
-/// surface an `Errno`, and an unread input stream is indistinguishable from
-/// end-of-input from the program's side (the *backing* owns blocking),
-/// so this reports a failure as a zero-length read. The count is also
-/// clamped to `buf.len()` as defence in depth, so a buggy kernel count can
-/// never drive an out-of-bounds slice in the caller.
-#[must_use]
-pub fn stdin(buf: &mut [u8]) -> usize {
-    stream_read(STDIN, buf)
-}
-
-/// Read up to `buf.len()` bytes from standard input (fd 0) into `buf`,
-/// waiting at most `timeout_ns` nanoseconds for input to arrive
-/// (`SyscallNumber::STREAM_READ` with its `timeout_ns` argument).
-///
-/// The bounded companion of [`stdin`]: the stream backing parks the caller
-/// until input arrives or the bound elapses, so a full-screen program can
-/// refresh a clock or status figure on a cadence without a busy poll. A
-/// `timeout_ns` of `0` waits indefinitely, exactly as [`stdin`] does.
+/// `Ok(0)` therefore means end-of-input and nothing else: a refusal (fd not
+/// readable, a faulted buffer, [`Errno::TimedOut`] when a bound elapsed with
+/// no input) is surfaced as its `Errno`, so a consumer can never silently
+/// truncate its input on a failure it mistook for EOF. The count is clamped
+/// to `buf.len()` as defence in depth.
 ///
 /// # Errors
 ///
-/// Returns the raw negative kernel result (`-errno`) on failure —
-/// [`tairix_abi::Errno::TimedOut`] when the bound elapsed with no input,
-/// or the same refusals [`stdin`] folds to a zero-length read (fd 0 not a
-/// readable stream, a faulted buffer, no console backing). Surfacing the
-/// errno lets the caller tell a refresh tick from a dead console.
-pub fn stdin_timeout(buf: &mut [u8], timeout_ns: u64) -> Result<usize, i64> {
-    let len = buf.len() as u64;
-    let ptr = buf.as_mut_ptr() as usize as u64;
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // the `(buf, len)` pair against the caller's address space before
-    // writing to it. `buf` is a live exclusive `&mut [u8]` for the
-    // duration of the call, so the pair denotes writable memory the kernel
-    // may fill.
-    #[allow(clippy::cast_possible_wrap)]
-    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
-    let ret = unsafe {
-        raw_syscall(
-            NUM_STREAM_READ,
-            [u64::from(STDIN), ptr, len, timeout_ns, 0, 0],
-        )
-    } as i64;
-    if ret < 0 {
-        return Err(ret);
-    }
-    // Defence in depth: clamp the kernel's count to the buffer so a buggy
-    // count can never drive an out-of-bounds slice in the caller, exactly
-    // as `stdin` clamps.
-    #[allow(clippy::cast_possible_truncation)]
-    #[allow(clippy::cast_sign_loss)]
-    Ok((ret as usize).min(buf.len()))
-}
-
-/// Read up to `buf.len()` bytes from the calling process's standard stream
-/// `fd` (`SyscallNumber::STREAM_READ`) into `buf`, returning the number of
-/// bytes read.
-///
-/// The shared core of [`stdin`] and the fd-generic [`io`] reader: the program
-/// names only an inherited descriptor, never a device, so the same code path
-/// serves fd 0 and any pipe / tty / resource-backed fd a spawner wired in. The
-/// kernel resolves `fd` against the caller's descriptor table and validates
-/// the `(buf, len)` pair against the caller's address space before writing it;
-/// the stream *backing* owns blocking, so a read with no pending input parks
-/// the caller until input arrives. A short read (fewer than `buf.len()`) is
-/// valid, so the caller loops for more.
-///
-/// The kernel encodes a failure as a negative register (`-errno`). A reader
-/// handed a `&mut [u8]` has no way to surface an `Errno`, and an unread stream
-/// is indistinguishable from end-of-input from the program's side, so a
-/// failure is reported as a zero-length read. The count is clamped to
-/// `buf.len()` as defence in depth, so a buggy kernel count can never drive an
-/// out-of-bounds slice in the caller.
+/// The [`Errno`] the kernel encoded in its negative result.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `buf.len()`.
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-read encoding (count ≥ 0, else -errno).
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-read encoding (count >= 0, else -errno).
 #[allow(clippy::cast_sign_loss)] // The negative (`-errno`) case returns early above; the cast runs only when `read >= 0`.
-fn stream_read(fd: u32, buf: &mut [u8]) -> usize {
+pub(crate) fn stream_read_result(fd: u32, buf: &mut [u8], timeout_ns: u64) -> Result<usize, Errno> {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(buf, len)` against the caller's address space before touching it. `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable
     // memory the kernel may fill.
-    let read = unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(fd), ptr, len, 0, 0, 0]) } as i64;
+    let read =
+        unsafe { raw_syscall(NUM_STREAM_READ, [u64::from(fd), ptr, len, timeout_ns, 0, 0]) } as i64;
     if read < 0 {
-        return 0;
+        return Err(Errno::from_syscall(read));
     }
-    (read as usize).min(buf.len())
+    Ok((read as usize).min(buf.len()))
 }
 
 /// Set the read line discipline of standard input (fd 0)
@@ -586,7 +507,7 @@ fn stream_read(fd: u32, buf: &mut [u8]) -> usize {
 /// (`0` on success, else `-errno`).
 ///
 /// The console defaults to [`InputMode::Cooked`], so an interactive user
-/// sees what they type at a [`stdin`] read. A program reading a secret it
+/// sees what they type at an [`io::Stdin`] read. A program reading a secret it
 /// must not render selects [`InputMode::Secret`] (echo suppressed, the
 /// activity indicator shown instead — login's password read); a full-screen
 /// program that paints its own display selects [`InputMode::Raw`] (echo
@@ -3309,7 +3230,8 @@ pub fn sysinfo_introspect(domain: u32, arg: u64, buf: &mut [u8]) -> Result<usize
 /// Read the character-cell geometry of the text console backing standard
 /// stream `fd` (`SyscallNumber::TERMINAL_SIZE`; P-C — the `top` terminal UI).
 ///
-/// `fd` is a standard descriptor the caller owns (typically [`STDOUT`]).
+/// `fd` is a standard descriptor the caller owns (typically
+/// [`tairix_abi::STDOUT`]).
 /// Unprivileged, like [`clock_get`]: a program may always ask how big its own
 /// terminal is.
 ///
@@ -3691,7 +3613,7 @@ pub fn park_forever() -> i64 {
 /// register (count ≥ 0, else `-errno`). A negative value is surfaced as the
 /// raw `Err(-errno)`; a non-negative value is clamped to `cap` so a buggy or
 /// hostile kernel count can never drive an out-of-bounds slice in the caller
-/// (the same posture [`stdin`] and [`users_db_read`] take).
+/// (the same posture the [`io`] stream primitives and [`users_db_read`] take).
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_sign_loss)]
@@ -4326,15 +4248,7 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the first failing
     /// [`fs_read`].
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
-        let mut done = 0;
-        while done < buf.len() {
-            let n = fs_read(self.fd, offset + done as u64, &mut buf[done..])?;
-            if n == 0 {
-                break;
-            }
-            done += n;
-        }
-        Ok(done)
+        io::Read::read_fill(&mut PositionalIo::new(self, offset), buf).map_err(positional_errno)
     }
 
     /// Write the whole of `data` starting at byte `offset` (or appending, if
@@ -4350,15 +4264,7 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the first failing
     /// [`fs_write`].
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize, i64> {
-        let mut done = 0;
-        while done < data.len() {
-            let n = fs_write(self.fd, offset + done as u64, &data[done..])?;
-            if n == 0 {
-                break;
-            }
-            done += n;
-        }
-        Ok(done)
+        io::Write::write_drain(&mut PositionalIo::new(self, offset), data).map_err(positional_errno)
     }
 
     /// Report this handle's structural metadata.
@@ -4414,6 +4320,90 @@ impl Drop for File {
         // way), so the result is intentionally discarded.
         let _ = fs_close(self.fd);
     }
+}
+
+impl io::Read for File {
+    /// Read from the **shared open-file-description cursor**, advancing it —
+    /// the same sequential vocabulary every other descriptor speaks. Two
+    /// handles cloned from one description (a spawn wire, a delegation)
+    /// therefore walk the file together rather than each restarting it.
+    ///
+    /// Use [`File::read_at`] for a positional read that leaves the cursor
+    /// alone.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        io::Stream::new(self.fd).read(buf)
+    }
+}
+
+impl io::Write for File {
+    /// Write at the shared open-file-description cursor, advancing it (or at
+    /// the end of file, for a handle opened with [`OpenFlags::APPEND`]).
+    ///
+    /// Use [`File::write_at`] for a positional write that leaves the cursor
+    /// alone.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        io::Stream::new(self.fd).write(buf)
+    }
+}
+
+/// A [`io::Read`] / [`io::Write`] view of a [`File`] at an explicit,
+/// self-advancing byte position.
+///
+/// This is what lets the positional helpers ([`File::read_at`],
+/// [`File::write_at`]) reuse the one fill/drain loop in [`io::Read`] /
+/// [`io::Write`] instead of carrying a second copy of it: the loop calls
+/// back through the positional traps, and the adapter — not the loop — keeps
+/// track of where the next chunk goes. It never touches the descriptor's
+/// shared cursor.
+struct PositionalIo<'a> {
+    file: &'a File,
+    offset: u64,
+}
+
+impl<'a> PositionalIo<'a> {
+    /// A view of `file` starting at byte `offset`.
+    const fn new(file: &'a File, offset: u64) -> Self {
+        Self { file, offset }
+    }
+
+    /// Account `n` transferred bytes. Saturating: a position at the end of
+    /// the 64-bit range stops advancing rather than wrapping onto the start
+    /// of the file, and the caller's loop then makes no further progress and
+    /// ends.
+    fn advance(&mut self, n: usize) {
+        self.offset = self.offset.saturating_add(n as u64);
+    }
+}
+
+impl io::Read for PositionalIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = fs_read(self.file.fd, self.offset, buf).map_err(syscall_io_error)?;
+        self.advance(n);
+        Ok(n)
+    }
+}
+
+impl io::Write for PositionalIo<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = fs_write(self.file.fd, self.offset, buf).map_err(syscall_io_error)?;
+        self.advance(n);
+        Ok(n)
+    }
+}
+
+/// Wrap a raw negative kernel result (`-errno`) as the I/O layer's error.
+fn syscall_io_error(ret: i64) -> io::Error {
+    io::Error::Os(Errno::from_syscall(ret))
+}
+
+/// Unwrap an I/O-layer error back to the raw negative kernel result
+/// (`-errno`) the positional [`File`] helpers report.
+///
+/// Only a kernel refusal can reach here — the positional adapter raises
+/// nothing else and the fill/drain loops add no error of their own — so the
+/// kernel's own code always survives the round trip.
+fn positional_errno(err: io::Error) -> i64 {
+    -i64::from(err.as_errno().as_i32())
 }
 
 /// An open directory handle wrapping a [`File`] opened with
@@ -4587,69 +4577,99 @@ mod tests {
         seam::last_call().expect("the wrapper must issue exactly one trap")
     }
 
+    /// The negative register the kernel encodes `errno` as.
+    fn refusal(errno: Errno) -> u64 {
+        u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
     #[test]
-    fn stdout_marshals_fd_pointer_and_len() {
+    fn stream_write_marshals_fd_pointer_and_len() {
         let buffer = *b"hello\n";
         let (number, args) = capture(6, || {
-            assert_eq!(stdout(&buffer), 6);
+            assert_eq!(stream_write_result(tairix_abi::STDOUT, &buffer), Ok(6));
         });
         assert_eq!(number, NUM_STREAM_WRITE);
-        assert_eq!(args[0], u64::from(STDOUT));
+        assert_eq!(args[0], u64::from(tairix_abi::STDOUT));
         assert_eq!(args[1], buffer.as_ptr() as usize as u64);
         assert_eq!(args[2], 6);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
-    fn stderr_and_stdinfo_marshal_their_fd() {
+    fn stream_write_marshals_whichever_descriptor_it_is_given() {
         let buffer = *b"warn\n";
         let (number, args) = capture(5, || {
-            assert_eq!(stderr(&buffer), 5);
+            assert_eq!(stream_write_result(tairix_abi::STDERR, &buffer), Ok(5));
         });
         assert_eq!(number, NUM_STREAM_WRITE);
-        assert_eq!(args[0], u64::from(STDERR));
-        let (number, args) = capture(0, || {
-            // fd 3 is best-effort: a zero return (no consumer) is valid.
-            assert_eq!(stdinfo(&buffer), 0);
+        assert_eq!(args[0], u64::from(tairix_abi::STDERR));
+        // An ordinary descriptor takes the identical path: one vocabulary.
+        let (number, args) = capture(5, || {
+            assert_eq!(stream_write_result(7, &buffer), Ok(5));
         });
         assert_eq!(number, NUM_STREAM_WRITE);
-        assert_eq!(args[0], u64::from(STDINFO));
+        assert_eq!(args[0], 7);
     }
 
     #[test]
-    fn stdout_returns_the_kernel_accepted_count() {
+    fn stream_write_surfaces_the_kernel_refusal_rather_than_a_zero_count() {
+        // A refused write (missing `CAP_CONSOLE_WRITE`, a read-only
+        // descriptor, a broken pipe) must reach the caller as its own code:
+        // reporting `0` would make the failure indistinguishable from a sink
+        // that merely accepted nothing, and `write_all` would report the
+        // wrong reason.
         let buffer = [0u8; 16];
-        let (_, _) = capture(10, || {
-            assert_eq!(stdout(&buffer), 10);
+        let (_, _) = capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(
+                stream_write_result(tairix_abi::STDOUT, &buffer),
+                Err(Errno::PermissionDenied)
+            );
+        });
+        let (_, _) = capture(refusal(Errno::BrokenPipe), || {
+            assert_eq!(stream_write_result(9, &buffer), Err(Errno::BrokenPipe));
         });
     }
 
     #[test]
-    fn stdout_reports_a_negative_errno_as_a_zero_length_write() {
-        // A refused write (missing `CAP_CONSOLE_WRITE`, non-writable fd) is
-        // encoded as a negative register; a `&[u8]` writer cannot carry an
-        // `Errno`, so it surfaces as a zero-length write — never a huge count
-        // that would slice out of bounds in a `write_all` loop.
-        let buffer = [0u8; 16];
-        let neg = u64::from_ne_bytes(
-            (-i64::from(tairix_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
-        );
-        let (_, _) = capture(neg, || {
-            assert_eq!(stdout(&buffer), 0);
+    fn stream_read_surfaces_the_kernel_refusal_rather_than_end_of_input() {
+        // The defect this replaces: a failure reported as `Ok(0)` reads as
+        // clean end-of-input, so a consumer silently truncates its input.
+        let mut buffer = [0u8; 16];
+        let (number, args) = capture(refusal(Errno::NotFound), || {
+            assert_eq!(stream_read_result(4, &mut buffer, 0), Err(Errno::NotFound));
         });
-        let (_, _) = capture(neg, || {
-            assert_eq!(stderr(&buffer), 0);
+        assert_eq!(number, NUM_STREAM_READ);
+        assert_eq!(args[0], 4);
+        // A genuine end-of-input is still an honest zero-length read.
+        let (_, _) = capture(0, || {
+            assert_eq!(stream_read_result(4, &mut buffer, 0), Ok(0));
         });
     }
 
     #[test]
-    fn stdout_clamps_an_oversized_count_to_the_buffer_length() {
+    fn stream_read_marshals_its_timeout_bound() {
+        let mut buffer = [0u8; 8];
+        let (number, args) = capture(3, || {
+            assert_eq!(stream_read_result(0, &mut buffer, 250), Ok(3));
+        });
+        assert_eq!(number, NUM_STREAM_READ);
+        assert_eq!(args[3], 250);
+    }
+
+    #[test]
+    fn stream_transfers_clamp_an_oversized_count_to_the_buffer_length() {
         // Defence in depth: a count larger than the buffer (a buggy kernel)
-        // is clamped so the caller can never index past `bytes.len()`,
-        // exactly as `stdin` clamps.
+        // is clamped so the caller can never index past the slice it owns.
         let buffer = [0u8; 4];
         let (_, _) = capture(93, || {
-            assert_eq!(stdout(&buffer), 4);
+            assert_eq!(stream_write_result(tairix_abi::STDOUT, &buffer), Ok(4));
+        });
+        let mut inbound = [0u8; 4];
+        let (_, _) = capture(93, || {
+            assert_eq!(
+                stream_read_result(tairix_abi::STDIN, &mut inbound, 0),
+                Ok(4)
+            );
         });
     }
 
@@ -4796,49 +4816,17 @@ mod tests {
     }
 
     #[test]
-    fn stdin_marshals_fd_pointer_and_len() {
+    fn stream_read_marshals_fd_pointer_and_len() {
         let mut buffer = [0u8; 16];
         let ptr = buffer.as_mut_ptr() as usize as u64;
         let (number, args) = capture(7, || {
-            assert_eq!(stdin(&mut buffer), 7);
+            assert_eq!(stream_read_result(STDIN, &mut buffer, 0), Ok(7));
         });
         assert_eq!(number, NUM_STREAM_READ);
         assert_eq!(args[0], u64::from(STDIN));
         assert_eq!(args[1], ptr);
         assert_eq!(args[2], 16);
         assert_eq!(&args[3..], &[0, 0, 0]);
-    }
-
-    #[test]
-    fn stdin_returns_the_kernel_reported_count() {
-        let mut buffer = [0u8; 16];
-        let (_, _) = capture(3, || {
-            assert_eq!(stdin(&mut buffer), 3);
-        });
-    }
-
-    #[test]
-    fn stdin_reports_a_negative_errno_as_end_of_input() {
-        // A failure (fd 0 not readable, faulting buffer) is encoded as a
-        // negative register; a `&mut [u8]` reader cannot carry an `Errno`, so
-        // it surfaces as a zero-length read (end of input), never a huge
-        // count that would slice out of bounds.
-        let mut buffer = [0u8; 16];
-        let neg =
-            u64::from_ne_bytes((-i64::from(tairix_abi::Errno::NotFound.as_i32())).to_ne_bytes());
-        let (_, _) = capture(neg, || {
-            assert_eq!(stdin(&mut buffer), 0);
-        });
-    }
-
-    #[test]
-    fn stdin_clamps_an_oversized_count_to_the_buffer_length() {
-        // Defence in depth: a count larger than the buffer (a buggy kernel)
-        // is clamped so the caller can never index past `buf.len()`.
-        let mut buffer = [0u8; 16];
-        let (_, _) = capture(99, || {
-            assert_eq!(stdin(&mut buffer), 16);
-        });
     }
 
     #[test]

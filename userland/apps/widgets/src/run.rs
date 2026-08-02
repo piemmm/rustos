@@ -41,6 +41,7 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+    use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
@@ -78,9 +79,7 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
     /// `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = tairix_rt::stderr(b"widgets: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "widgets: {reason}");
         code
     }
 

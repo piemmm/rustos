@@ -111,7 +111,7 @@ mod program {
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::IpcTransport;
     use tairix_reclaim::PressureBand;
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
@@ -248,9 +248,7 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main` to return.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = tairix_rt::stderr(b"desktop: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "desktop: {reason}");
         code
     }
 
@@ -598,7 +596,8 @@ mod program {
             .map_err(errno_from)?;
         let origin = Origin::from_bytes(&buf[..len])?;
         serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
-            let _ = tairix_rt::stderr(alloc::format!("desktop: {}\n", refusal.reason()).as_bytes());
+            let msg = refusal.reason();
+            let _ = writeln!(Stderr, "desktop: {msg}");
             refusal.errno()
         })
     }
@@ -632,7 +631,7 @@ mod program {
     impl SwitchboardMailbox for RtSwitchboardMailbox {
         fn send(&mut self, pid: u64, command: SwitchboardCommand) {
             if tairix_rt::ipc_send(command_endpoint_for(pid), &command.to_le_bytes()) != 0 {
-                let _ = tairix_rt::stderr(b"desktop: switchboard command dropped: mailbox full\n");
+                io::write_stderr_line("desktop: switchboard command dropped: mailbox full");
             }
         }
     }
@@ -1191,7 +1190,7 @@ mod program {
                         }
                     },
                     |line| {
-                        let _ = tairix_rt::stderr(line.as_bytes());
+                        let _ = write!(Stderr, "{line}");
                     },
                     |pid| {
                         if let Some(client) = identity.take_by_pid(pid) {
@@ -1418,7 +1417,7 @@ mod program {
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let (store, warning) = SessionPins::load(&mut VfsFileReader, home);
         if let Some(warning) = warning {
-            let _ = tairix_rt::stderr(warning.as_bytes());
+            let _ = write!(Stderr, "{warning}");
         }
         PinPanel {
             service: PinService::new(VfsFileReader, VfsFileWriter, store),
@@ -1940,18 +1939,14 @@ mod program {
                 // nothing and says why. The dirty latch re-resolves the
                 // strip before the next present.
                 if let Err(err) = pins.service.unpin(index) {
-                    let _ = tairix_rt::stderr(
-                        alloc::format!("desktop: unpin refused: {err}\n").as_bytes(),
-                    );
+                    let _ = writeln!(Stderr, "desktop: unpin refused: {err}");
                 }
             }
             ShellOutcome::Taskbar(TaskbarResponse::PinEntry { entry }) => {
                 // Pin a program-library entry from its context menu and
                 // persist; a refused edit changes nothing and says why.
                 if let Err(err) = pins.service.pin_entry(entry) {
-                    let _ = tairix_rt::stderr(
-                        alloc::format!("desktop: pin refused: {err}\n").as_bytes(),
-                    );
+                    let _ = writeln!(Stderr, "desktop: pin refused: {err}");
                 }
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard { section }) => {
@@ -1989,9 +1984,7 @@ mod program {
                 // believing the screen is secured.
                 confirm.abandon(shell, compositor);
                 if !lock.engage(account, shell, compositor) {
-                    let _ = tairix_rt::stderr(
-                        b"desktop: could not lock the screen; it is still open\n",
-                    );
+                    io::write_stderr_line("desktop: could not lock the screen; it is still open");
                 }
             }
             ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
@@ -2007,8 +2000,8 @@ mod program {
                 // consequence to the user first. A prompt that cannot be
                 // shown asks nothing and relays nothing.
                 if !confirm.ask(action, shell, compositor) {
-                    let _ = tairix_rt::stderr(
-                        b"desktop: could not ask for confirmation; nothing was done\n",
+                    io::write_stderr_line(
+                        "desktop: could not ask for confirmation; nothing was done",
                     );
                 }
             }
@@ -2036,7 +2029,7 @@ mod program {
     /// state loudly why nothing happened when it could not be relayed.
     fn report_power_relay(answer: Answer, switchboard: Option<u64>) {
         if let Some(reason) = relay_power(answer, switchboard, &mut RtSwitchboardMailbox) {
-            let _ = tairix_rt::stderr(alloc::format!("desktop: {reason}\n").as_bytes());
+            let _ = writeln!(Stderr, "desktop: {reason}");
         }
     }
 
@@ -2058,12 +2051,10 @@ mod program {
             return;
         };
         let Some(run_path) = pin.run_path.as_deref() else {
-            let _ = tairix_rt::stderr(
-                alloc::format!(
-                    "desktop: pin '{}' no longer resolves to an application\n",
-                    pin.label
-                )
-                .as_bytes(),
+            let name = &pin.label;
+            let _ = writeln!(
+                Stderr,
+                "desktop: pin '{name}' no longer resolves to an application"
             );
             return;
         };
@@ -2094,13 +2085,13 @@ mod program {
         match decision {
             None | Some(PinDecision::Pinned) => {}
             Some(PinDecision::AlreadyPinned) => {
-                let _ = tairix_rt::stderr(b"desktop: pin drop: already pinned\n");
+                io::write_stderr_line("desktop: pin drop: already pinned");
             }
             Some(PinDecision::Full) => {
-                let _ = tairix_rt::stderr(b"desktop: pin drop: the pin strip is full\n");
+                io::write_stderr_line("desktop: pin drop: the pin strip is full");
             }
             Some(PinDecision::Refused) => {
-                let _ = tairix_rt::stderr(b"desktop: pin drop refused\n");
+                io::write_stderr_line("desktop: pin drop refused");
             }
         }
     }
@@ -2158,12 +2149,9 @@ mod program {
             // The popup only reports entries from the catalog it was
             // handed, so a miss means the catalog changed underneath the
             // click; refuse loudly rather than spawning a guessed path.
-            let _ = tairix_rt::stderr(
-                alloc::format!(
-                    "desktop: library entry {} is no longer catalogued\n",
-                    entry.as_str()
-                )
-                .as_bytes(),
+            let _ = writeln!(
+                Stderr,
+                "desktop: library entry {entry} is no longer catalogued"
             );
             return;
         };
@@ -2179,7 +2167,7 @@ mod program {
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let loaded = load_library(&mut VfsFileReader, home);
         for warning in &loaded.warnings {
-            let _ = tairix_rt::stderr(warning.as_bytes());
+            let _ = write!(Stderr, "{warning}");
         }
         shell.set_library(compositor, loaded.catalog);
     }
@@ -2289,8 +2277,7 @@ mod program {
     /// denied optional launch never ends the session.
     fn record_launch(launched: &mut LaunchTable, ret: i64, label: &str, run_path: &str) {
         if ret < 0 {
-            let _ =
-                tairix_rt::stderr(alloc::format!("desktop: {label} launch refused\n").as_bytes());
+            let _ = writeln!(Stderr, "desktop: {label} launch refused");
         } else {
             #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
             launched.record(ret as u64, label, run_path);
@@ -2322,7 +2309,7 @@ mod program {
                 if let Some(handle) = delegate(&path, window_id, server, identity) {
                     WindowEvent::FilePicked { window_id, handle }
                 } else {
-                    let _ = tairix_rt::stderr(b"desktop: picker delegation refused\n");
+                    io::write_stderr_line("desktop: picker delegation refused");
                     WindowEvent::PickCancelled { window_id }
                 }
             }
@@ -2402,7 +2389,7 @@ mod program {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let bytes = own_short_help(&BundleHelp::new("desktop"), locale, "desktop")
             .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
+        match io::Stdout.write_all(&bytes) {
             Ok(()) => 0,
             Err(_) => 1,
         }
@@ -2432,14 +2419,14 @@ mod program {
         // vector is a usage error, reported rather than guessed at, and
         // the reserved short-help switches never touch the seat.
         let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
+            io::write_stderr_line(USAGE);
             return 2;
         };
         match parse(&arguments) {
             Ok(Command::Run) => {}
             Ok(Command::Help) => return short_help(),
             Err(CliError::Usage) => {
-                write_stderr_line(USAGE);
+                io::write_stderr_line(USAGE);
                 return 2;
             }
         }

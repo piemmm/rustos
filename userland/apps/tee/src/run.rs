@@ -40,7 +40,7 @@ mod program {
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
     use tairix_tee::{parse, run, FileSink, Input, Output, USAGE};
 
@@ -52,9 +52,7 @@ mod program {
 
     impl Input for RtStdin {
         fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            // The stream backing reports end-of-input as a zero-length read;
-            // there is no error channel on the wrapper.
-            Ok(tairix_rt::stdin(buf))
+            Stdin.read(buf).map_err(io::Error::as_errno)
         }
     }
 
@@ -127,7 +125,7 @@ mod program {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             // The shared short-write loop; a stream that stops accepting
             // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
+            Stdout.write_all(bytes).map_err(io::Error::as_errno)
         }
     }
 
@@ -137,7 +135,7 @@ mod program {
 
     impl Output for RtErrors {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
+            Stderr.write_all(bytes).map_err(io::Error::as_errno)
         }
     }
 

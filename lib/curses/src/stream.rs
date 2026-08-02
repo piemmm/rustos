@@ -12,6 +12,8 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use tairix_rt::io::{Read, Stdin, Stdout, Write};
+
 use crate::error::{CursesError, Result};
 use crate::screen::Tty;
 
@@ -38,13 +40,10 @@ pub struct StreamTty;
 
 impl Tty for StreamTty {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        use tairix_rt::io::Write as _;
         // `write_all` loops over short writes and fails closed (never
         // spins) if the backing stops accepting bytes, which the seam
         // reports as an I/O error.
-        tairix_rt::io::Stdout
-            .write_all(bytes)
-            .map_err(|_| CursesError::Io)
+        Stdout.write_all(bytes).map_err(|_| CursesError::Io)
     }
 
     fn read(&mut self) -> Result<Vec<u8>> {
@@ -53,12 +52,12 @@ impl Tty for StreamTty {
 
     fn read_blocking(&mut self) -> Result<Vec<u8>> {
         let mut buf = [0u8; INPUT_CHUNK];
-        // `tairix_rt::stdin` parks the task in the kernel until at least
-        // one byte arrives, then returns the count read. A zero-length
-        // return means the stream ended: the session's input is gone,
+        // The read parks the task in the kernel until at least one byte
+        // arrives. A zero-length return means the stream ended and a
+        // refusal means it failed: the session's input is gone either way,
         // reported as an error so the tool ends loudly instead of spinning
         // on a dead channel.
-        let read = tairix_rt::stdin(&mut buf);
+        let read = Stdin.read(&mut buf).map_err(|_| CursesError::Io)?;
         if read == 0 {
             return Err(CursesError::Io);
         }
@@ -72,18 +71,14 @@ impl Tty for StreamTty {
         // caller's wait. The backing parks the task until input arrives or
         // the bound elapses.
         let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX).max(1);
-        match tairix_rt::stdin_timeout(&mut buf, timeout_ns) {
+        match Stdin.read_timeout(&mut buf, timeout_ns) {
             // A successful zero-length read is the closed stream, reported
             // loudly (below an elapsed bound is Ok-with-no-bytes, so a
             // closed channel must not masquerade as a tick).
             Ok(0) => Err(CursesError::Io),
             Ok(read) => Ok(buf[..read.min(buf.len())].to_vec()),
             Err(err) => {
-                let timed_out = i32::try_from(-err)
-                    .ok()
-                    .and_then(tairix_abi::Errno::from_i32)
-                    .is_some_and(|errno| errno == tairix_abi::Errno::TimedOut);
-                if timed_out {
+                if err.errno() == Some(tairix_abi::Errno::TimedOut) {
                     // An elapsed bound is not an error: it is the caller's
                     // tick, reported as "no bytes yet".
                     Ok(Vec::new())

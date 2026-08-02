@@ -96,6 +96,7 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+    use tairix_rt::io::{self, Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
 
@@ -228,9 +229,7 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = tairix_rt::stderr(b"files: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "files: {reason}");
         code
     }
 
@@ -1633,11 +1632,7 @@ mod program {
     /// no path prefix beyond the leaf name the user already sees.
     fn report_trash_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
-        let _ = tairix_rt::stderr(b"files: could not move ");
-        let _ = tairix_rt::stderr(name.as_bytes());
-        let _ = tairix_rt::stderr(b" to Trash: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "files: could not move {name} to Trash: {reason}");
     }
 
     /// Poll (non-blocking) the app's event mailbox for one genuine session
@@ -1717,9 +1712,7 @@ mod program {
     /// leaf name the user already sees.
     fn report_delete_refused(path: &[String]) {
         let name = path.last().map_or("", String::as_str);
-        let _ = tairix_rt::stderr(b"files: could not delete ");
-        let _ = tairix_rt::stderr(name.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "files: could not delete {name}");
     }
 
     /// State a `files:`-prefixed diagnosis on `stderr` — the one fail-loud
@@ -1727,9 +1720,7 @@ mod program {
     /// unspellable path, a rejected paste plan, an internal step error) states
     /// its reason through, shared by the delete and paste drives (§2.2).
     fn report_error(reason: &str) {
-        let _ = tairix_rt::stderr(b"files: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "files: {reason}");
     }
 
     /// One clipboard verb the keyboard invokes in navigation mode.
@@ -2326,11 +2317,7 @@ mod program {
     /// beyond the leaf name the user already sees.
     fn report_paste_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
-        let _ = tairix_rt::stderr(b"files: could not paste ");
-        let _ = tairix_rt::stderr(name.as_bytes());
-        let _ = tairix_rt::stderr(b": ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "files: could not paste {name}: {reason}");
     }
 
     /// The window-local [`Point`] of a primary-button press, or `None` for any
@@ -2907,16 +2894,16 @@ mod program {
         viewport: Rect,
     ) -> (bool, bool) {
         let Some(home) = home_components() else {
-            let _ = tairix_rt::stderr(b"files: no home directory, so no Trash\n");
+            io::write_stderr_line("files: no home directory, so no Trash");
             return (false, false);
         };
         if home.is_empty() {
-            let _ = tairix_rt::stderr(b"files: no home directory, so no Trash\n");
+            io::write_stderr_line("files: no home directory, so no Trash");
             return (false, false);
         }
         let trash = trash_dir(&home);
         if !ensure_trash_dir(&trash) {
-            let _ = tairix_rt::stderr(b"files: the Trash folder is unavailable\n");
+            io::write_stderr_line("files: the Trash folder is unavailable");
             return (false, false);
         }
         match browser.navigate_to(trash) {
@@ -2927,7 +2914,7 @@ mod program {
             // Already in the Trash, or (fail closed) it could not be listed.
             Ok(false) => (false, false),
             Err(_) => {
-                let _ = tairix_rt::stderr(b"files: the Trash folder could not be opened\n");
+                io::write_stderr_line("files: the Trash folder could not be opened");
                 (false, false)
             }
         }
@@ -2962,7 +2949,7 @@ mod program {
             return (false, false);
         }
         let Ok(children) = read_children(&trash) else {
-            let _ = tairix_rt::stderr(b"files: could not read the Trash folder\n");
+            io::write_stderr_line("files: could not read the Trash folder");
             return (false, false);
         };
         match empty_trash_plan(&trash, &children) {
@@ -2981,9 +2968,8 @@ mod program {
             // nothing (never an error).
             Ok(None) => (false, false),
             Err(err) => {
-                let _ = tairix_rt::stderr(b"files: ");
-                let _ = tairix_rt::stderr(err.message().as_bytes());
-                let _ = tairix_rt::stderr(b"\n");
+                let msg = err.message();
+                let _ = writeln!(Stderr, "files: {msg}");
                 (false, false)
             }
         }
@@ -3018,9 +3004,8 @@ mod program {
         }) {
             Ok(()) => begin_rename(browser, rename, font, theme, viewport),
             Err(err) => {
-                let _ = tairix_rt::stderr(b"files: ");
-                let _ = tairix_rt::stderr(err.message().as_bytes());
-                let _ = tairix_rt::stderr(b"\n");
+                let msg = err.message();
+                let _ = writeln!(Stderr, "files: {msg}");
                 (false, false)
             }
         }
@@ -3072,7 +3057,7 @@ mod program {
             *properties = Some(props);
             (true, false)
         } else {
-            let _ = tairix_rt::stderr(b"files: properties unavailable for that item\n");
+            io::write_stderr_line("files: properties unavailable for that item");
             (false, false)
         }
     }
@@ -3152,9 +3137,8 @@ mod program {
                 (true, false)
             }
             Err(err) => {
-                let _ = tairix_rt::stderr(b"files: ");
-                let _ = tairix_rt::stderr(err.message().as_bytes());
-                let _ = tairix_rt::stderr(b"\n");
+                let msg = err.message();
+                let _ = writeln!(Stderr, "files: {msg}");
                 (false, false)
             }
         }

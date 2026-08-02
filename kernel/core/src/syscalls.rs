@@ -84,15 +84,16 @@ use tairix_abi::sysinfo::{
     UserDirectoryRecord, VolumeIoHealthRecord, CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
-    decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, DescriptorTable, DirEntry,
-    Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain, IrqHandle, LimitKind, MapFlags,
-    OpenFlags, PortName, PowerAction, ProcId, ProcessStart, RandomFlags, ResourceLimit,
-    SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize,
-    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
-    FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
-    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
+    DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
+    IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, PowerAction, ProcId, ProcessStart,
+    RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode,
+    SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
+    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -518,6 +519,44 @@ enum StreamWriteStep {
     Broken,
     /// The ring is full but a peer is still live: park and retry.
     Full,
+}
+
+/// Where one descriptor transfer takes its byte position from — the single
+/// difference between the positional and sequential entry points onto
+/// [`KernelSyscallHandlers::descriptor_read`] /
+/// [`KernelSyscallHandlers::descriptor_write`].
+///
+/// Only a path-backed descriptor has a position at all; a resource, pipe, or
+/// pty backing is a positionless byte stream and ignores this.
+#[derive(Clone, Copy)]
+enum StreamPos {
+    /// An explicit caller-supplied byte offset (`fs_read` / `fs_write`). The
+    /// open-file description's shared cursor is neither read nor advanced,
+    /// so concurrent positional callers never contend over one position.
+    At(u64),
+    /// The open-file description's shared cursor (`stream_read` /
+    /// `stream_write`), advanced by exactly what the transfer moved. Two
+    /// descriptors cloned from one description — a spawn wire, a delegation
+    /// — therefore walk the file together instead of overwriting each other.
+    Cursor,
+}
+
+impl StreamPos {
+    /// The byte offset this transfer starts at.
+    fn offset(self, entry: &crate::aspace::OpenFile) -> u64 {
+        match self {
+            Self::At(offset) => offset,
+            Self::Cursor => entry.cursor(),
+        }
+    }
+
+    /// Account `n` transferred bytes against the shared cursor, which a
+    /// positional transfer leaves untouched.
+    fn advance(self, entry: &crate::aspace::OpenFile, n: u64) {
+        if matches!(self, Self::Cursor) {
+            entry.advance_cursor(n);
+        }
+    }
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -2824,18 +2863,25 @@ where
         })
     }
 
-    /// Serve a `stream_read` against a **wired** standard-stream open entry
-    /// (a spawn attach block placed a file, resource, or pipe end behind
-    /// the caller's fd 0–3, `plans/SPAWN.md` SP10).
+    /// Move bytes *from* the descriptor `entry` into the caller's buffer —
+    /// the one descriptor read path, whatever the backing and whichever
+    /// trap the caller arrived through.
     ///
-    /// The entry's own open flags gate the direction (the same rule
-    /// `fs_read` applies); a path-backed stream reads at the shared
-    /// open-file-description cursor and advances it, so successive stream
-    /// reads walk the file exactly as a sequential consumer expects.
-    fn wired_stream_read(
+    /// `pos` is the only difference between the two entry points:
+    /// [`StreamPos::At`] serves the positional `fs_read` (an explicit
+    /// offset, no shared cursor touched) and [`StreamPos::Cursor`] serves
+    /// the sequential `stream_read` (the open-file description's cursor,
+    /// advanced by what was transferred). Keeping them one function is what
+    /// stops the positional and sequential paths drifting apart in their
+    /// direction gate, capability checks, or copy boundary.
+    ///
+    /// `timeout_ns` bounds a parking backing (pipe, pty); `0` waits
+    /// indefinitely, which is what a positional caller always asks for.
+    fn descriptor_read(
         &self,
         caller: &CallerContext<'_>,
         entry: &crate::aspace::OpenFile,
+        pos: StreamPos,
         buf: u64,
         len: usize,
         timeout_ns: u64,
@@ -2843,78 +2889,121 @@ where
         if !entry.flags.is_read() {
             return Err(Errno::PermissionDenied);
         }
+        // Cap the per-call transfer at the staging bound so a hostile `len`
+        // cannot force an arbitrarily large kernel buffer (the `lib/rt`
+        // wrapper splits a larger request into successive calls).
         let len = len.min(FS_IO_MAX);
         if len == 0 {
             return Ok(0);
         }
         match &entry.backing {
+            // A filesystem-backed descriptor: the coarse `CAP_FS_ACCESS`
+            // gate is applied here (it is not a blanket dispatcher check, so
+            // a resource or pipe read is not forced to hold it), then the
+            // read routes through the secured VFS under the caller's own
+            // real credentials.
             OpenBacking::Path(path) => {
-                // The coarse filesystem gate applies exactly as it does on
-                // the `fs_read` path (one rule, two entry points).
                 if !caller.caps.has(CapabilityId::FS_ACCESS) {
                     return Err(Errno::PermissionDenied);
                 }
                 let uid = caller.caps.owner().0;
-                let mut data = vec![0u8; len];
-                let offset = entry.cursor();
-                let n =
-                    self.filesystem
-                        .read(uid, caller.caps.effective(), path, offset, &mut data)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-                }) {
-                    Some(Ok(())) => {
-                        // Advance only after the bytes reached the caller,
-                        // so a faulting buffer re-reads rather than skips.
-                        entry.advance_cursor(n as u64);
-                        Ok(n as u64)
-                    }
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.read_path_backing(
+                    caller,
+                    entry,
+                    pos,
+                    uid,
+                    caller.caps.effective(),
+                    path,
+                    buf,
+                    len,
+                )
             }
+            // A resource-backed descriptor was authorised at open; its read
+            // routes to the named subsystem. A resource is a sequential byte
+            // source with no position, so it ignores `pos` entirely.
             OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
+            // A pipe or pty end has no position either; the read parks while
+            // the ring is empty with a live peer.
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, timeout_ns),
-            // A delegated descriptor wired behind a standard stream reads
-            // under the *grantor's* captured identity at the shared
-            // description cursor — the same authority rule as the
-            // `fs_read` delegated arm, the same cursor rule as the
-            // path-backed stream arm.
+            // A delegated descriptor reads under the *grantor's* captured
+            // identity — the delegation is the authority, established by the
+            // grantor's user-mediated choice — so the holder needs no
+            // filesystem capability of its own. The same coarse gate the
+            // grantor's own read would face is applied against the captured
+            // set, and the secured VFS re-authorises the path under the
+            // captured uid on every read, so a permission change for the
+            // grantor revokes the delegation's reach too.
             OpenBacking::Delegated(file) => {
                 if !file.caps.contains(CapabilityId::FS_ACCESS) {
                     return Err(Errno::PermissionDenied);
                 }
-                let mut data = vec![0u8; len];
-                let offset = entry.cursor();
-                let n = self
-                    .filesystem
-                    .read(file.uid, &file.caps, &file.path, offset, &mut data)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-                }) {
-                    Some(Ok(())) => {
-                        // Advance only after the bytes reached the caller,
-                        // so a faulting buffer re-reads rather than skips.
-                        entry.advance_cursor(n as u64);
-                        Ok(n as u64)
-                    }
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
+                self.read_path_backing(
+                    caller, entry, pos, file.uid, &file.caps, &file.path, buf, len,
+                )
             }
         }
     }
 
-    /// Serve a `stream_write` against a **wired** standard-stream open
-    /// entry (`plans/SPAWN.md` SP10). The path-backed arm writes at the
-    /// shared description cursor (honouring `APPEND`), so two dup'd sinks
-    /// interleave at one position instead of overwriting each other.
-    fn wired_stream_write(
+    /// Read a path-backed descriptor under the supplied identity and copy
+    /// the bytes out — the arm the caller-owned and delegated backings
+    /// share, so their authority differs in the credential passed in and in
+    /// nothing else.
+    ///
+    /// The description cursor advances only once the bytes have reached the
+    /// caller, so a faulting destination buffer re-reads rather than
+    /// silently skipping the data it never received.
+    // Mirrors the descriptor read path's own shape: the credential is two
+    // values (uid + capability set) precisely because the delegated arm
+    // supplies the grantor's, not the caller's.
+    #[allow(clippy::too_many_arguments)]
+    fn read_path_backing(
         &self,
         caller: &CallerContext<'_>,
         entry: &crate::aspace::OpenFile,
+        pos: StreamPos,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        let mut data = vec![0u8; len];
+        let n = self
+            .filesystem
+            .read(uid, caps, path, pos.offset(entry), &mut data)?;
+        // `n <= len` by the service contract; copy exactly what was read out
+        // through the validated boundary.
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
+        }) {
+            Some(Ok(())) => {
+                pos.advance(entry, n as u64);
+                Ok(n as u64)
+            }
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            // A caller with no registered address space (a kernel task, or
+            // one withdrawn on `exit`) fails closed with the same
+            // `BadAddress` an actual fault produces.
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    /// Move bytes *to* the descriptor `entry` from the caller's buffer —
+    /// the one descriptor write path, whatever the backing and whichever
+    /// trap the caller arrived through.
+    ///
+    /// `pos` distinguishes the positional `fs_write` from the sequential
+    /// `stream_write` exactly as it does for [`Self::descriptor_read`]. A
+    /// path-backed sequential write lands at the shared description cursor
+    /// (honouring `APPEND`), so two descriptors cloned from one description
+    /// interleave at one position instead of overwriting each other.
+    fn descriptor_write(
+        &self,
+        caller: &CallerContext<'_>,
+        entry: &crate::aspace::OpenFile,
+        pos: StreamPos,
         buf: u64,
         len: usize,
     ) -> SyscallResult {
@@ -2930,22 +3019,29 @@ where
                 if !caller.caps.has(CapabilityId::FS_ACCESS) {
                     return Err(Errno::PermissionDenied);
                 }
+                // Stage the caller's bytes in through the validated boundary
+                // *before* touching the filesystem (a faulting buffer writes
+                // nothing).
                 let mut data = vec![0u8; len];
                 self.copy_in_user(caller, buf, &mut data)?;
                 let uid = caller.caps.owner().0;
+                // An append handle writes at the current end of file,
+                // ignoring the position entirely (the journal-append
+                // posture).
                 let append = entry.flags.contains(OpenFlags::APPEND);
-                let offset = entry.cursor();
                 let n = self.filesystem.write(
                     uid,
                     caller.caps.effective(),
                     path,
-                    offset,
+                    pos.offset(entry),
                     append,
                     &data,
                 )?;
-                entry.advance_cursor(n as u64);
+                pos.advance(entry, n as u64);
                 Ok(n as u64)
             }
+            // A resource-, pipe-, or pty-backed descriptor has no position;
+            // the write routes to its backing and ignores `pos`.
             OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
             OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
@@ -4297,24 +4393,25 @@ where
         buf: u64,
         len: usize,
     ) -> SyscallResult {
-        // A **wired** standard descriptor (a spawn attach block placed a
-        // file, resource, or pipe end behind fd 0–3, `plans/SPAWN.md`
-        // SP10) routes to its open entry — exactly one authority backs
-        // each descriptor, and the wiring left the console table slot
+        // Any descriptor the caller holds — a file, resource, pipe end, or
+        // pty end, at a standard number (a spawn attach block wired it,
+        // `plans/SPAWN.md` SP10) or an ordinary one an open/create call
+        // minted — routes to its open entry and writes sequentially at the
+        // shared description position. Exactly one authority backs each
+        // descriptor: wiring a standard number leaves the console table slot
         // Closed, so the two resolutions can never race or disagree.
-        // The entry is an owner-checked *clone* bound before the wired
+        // The entry is an owner-checked *clone* bound before the
         // call, so the registry read guard drops here and is never held
         // across a blocking pipe write — a writer parked on a full ring
         // holding this lock would wedge every registry writer (`mem_map`,
         // a sibling spawn) on the non-preemptible kernel.
-        if (fd as usize) < tairix_abi::STD_STREAM_COUNT {
-            let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
-            if let Some(entry) = entry {
-                return self.wired_stream_write(caller, &entry, buf, len);
-            }
+        let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+        if let Some(entry) = entry {
+            return self.descriptor_write(caller, &entry, StreamPos::Cursor, buf, len);
         }
-        // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state: the inherited
+        // Otherwise the descriptor can only be a console-backed standard
+        // stream. Resolve `fd` against the caller's per-process descriptor
+        // table *before* touching any state: the inherited
         // descriptor, not an ambient device, is the authority. An
         // `fd` that is not a writable inherited stream fails closed with
         // `NotFound` (its stream backing does not exist for this caller),
@@ -4389,21 +4486,21 @@ where
         len: usize,
         timeout_ns: u64,
     ) -> SyscallResult {
-        // A **wired** standard descriptor routes to its open entry, as in
-        // `stream_write` (`plans/SPAWN.md` SP10). The entry is bound
-        // before the wired call so the registry read guard drops here and
+        // Any descriptor the caller holds routes to its open entry and
+        // reads sequentially at the shared description position, as in
+        // `stream_write`. The entry is bound
+        // before the call so the registry read guard drops here and
         // is never held across a blocking pipe read — a reader parked on
         // an empty ring holding this lock would wedge every registry
         // writer (`mem_map`, a sibling spawn) on the non-preemptible
         // kernel.
-        if (fd as usize) < tairix_abi::STD_STREAM_COUNT {
-            let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
-            if let Some(entry) = entry {
-                return self.wired_stream_read(caller, &entry, buf, len, timeout_ns);
-            }
+        let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+        if let Some(entry) = entry {
+            return self.descriptor_read(caller, &entry, StreamPos::Cursor, buf, len, timeout_ns);
         }
-        // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state: an `fd`
+        // Otherwise the descriptor can only be a console-backed standard
+        // stream. Resolve `fd` against the caller's per-process descriptor
+        // table *before* touching any state: an `fd`
         // that is not a readable inherited stream fails closed with
         // `NotFound`, never leaking which case occurred. An unregistered
         // caller resolves to the all-`Closed` default and fails here too.
@@ -8264,6 +8361,14 @@ where
         Ok(u64::from(fd))
     }
 
+    /// Serve the **positional** read trap: the caller names both the
+    /// descriptor and the byte offset, and the open-file description's
+    /// shared cursor is left untouched, so two positional readers of one
+    /// description never contend over a position.
+    ///
+    /// The transfer itself is the one shared descriptor read path, so a
+    /// positional and a sequential read of the same descriptor apply
+    /// identical direction, capability, and copy-boundary rules.
     fn fs_read(
         &self,
         caller: &CallerContext<'_>,
@@ -8273,83 +8378,21 @@ where
         len: usize,
     ) -> SyscallResult {
         // Resolve the handle (owner-checked clone, no lock held across the
-        // read). A handle not opened for reading fails closed before the
-        // filesystem is touched.
+        // read) before any state is touched; an unopened descriptor fails
+        // closed with `NotFound`.
         let handle = self
             .aspaces
             .read()
             .open_file_entry(caller.task_id, fd)
             .ok_or(Errno::NotFound)?;
-        if !handle.flags.is_read() {
-            return Err(Errno::PermissionDenied);
-        }
-        // Cap the per-call transfer at the staging bound (the `lib/rt`
-        // wrapper splits a larger read into successive calls).
-        let len = len.min(FS_IO_MAX);
-        if len == 0 {
-            return Ok(0);
-        }
-        match &handle.backing {
-            // A filesystem-backed descriptor: the coarse `CAP_FS_ACCESS` gate
-            // is applied here (it is no longer a blanket dispatcher check, so
-            // a resource read is not forced to hold it), then the read routes
-            // through the secured VFS under the caller's real credentials.
-            OpenBacking::Path(path) => {
-                if !caller.caps.has(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                let uid = caller.caps.owner().0;
-                let mut data = vec![0u8; len];
-                let n =
-                    self.filesystem
-                        .read(uid, caller.caps.effective(), path, offset, &mut data)?;
-                // `n <= len` by the service contract; copy exactly what was
-                // read out through the validated boundary.
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-                }) {
-                    Some(Ok(())) => Ok(n as u64),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
-            }
-            // A resource-backed descriptor was authorised at open; its read
-            // routes to the named subsystem, ignoring the (meaningless) file
-            // offset since a resource is a sequential stream.
-            OpenBacking::Resource(backing) => self.resource_read(caller, *backing, buf, len),
-            // A pipe end ignores the offset too; the read parks while the
-            // pipe is empty with a live writer (no timeout on the handle
-            // path — the reader waits for its producer).
-            OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, 0),
-            OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, 0),
-            OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, 0),
-            // A delegated descriptor reads under the *grantor's* captured
-            // identity — the delegation is the authority, established by
-            // the grantor's user-mediated choice — so the holder needs no
-            // filesystem capability of its own. The same coarse gate the
-            // grantor's own read would face is applied against the
-            // captured set, and the secured VFS re-authorises the path
-            // under the captured uid on every read (a permission change
-            // for the grantor revokes the delegation's reach too).
-            OpenBacking::Delegated(file) => {
-                if !file.caps.contains(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                let mut data = vec![0u8; len];
-                let n = self
-                    .filesystem
-                    .read(file.uid, &file.caps, &file.path, offset, &mut data)?;
-                match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
-                }) {
-                    Some(Ok(())) => Ok(n as u64),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                }
-            }
-        }
+        // A positional read of a parking backing waits for its producer
+        // rather than timing out: the reader asked for bytes, not a poll.
+        self.descriptor_read(caller, &handle, StreamPos::At(offset), buf, len, 0)
     }
 
+    /// Serve the **positional** write trap, the counterpart of
+    /// [`Self::fs_read`]: an explicit offset that leaves the shared cursor
+    /// untouched, over the one shared descriptor write path.
     fn fs_write(
         &self,
         caller: &CallerContext<'_>,
@@ -8363,55 +8406,7 @@ where
             .read()
             .open_file_entry(caller.task_id, fd)
             .ok_or(Errno::NotFound)?;
-        if !handle.flags.is_write() {
-            return Err(Errno::PermissionDenied);
-        }
-        let len = len.min(FS_IO_MAX);
-        if len == 0 {
-            return Ok(0);
-        }
-        match &handle.backing {
-            OpenBacking::Path(path) => {
-                // The coarse `CAP_FS_ACCESS` gate is applied here (no longer a
-                // blanket dispatcher check).
-                if !caller.caps.has(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                // Stage the caller's bytes in through the validated boundary
-                // *before* touching the filesystem (a faulting buffer writes
-                // nothing).
-                let mut data = vec![0u8; len];
-                self.copy_in_user(caller, buf, &mut data)?;
-                let uid = caller.caps.owner().0;
-                // An append handle writes at the current end of file, ignoring
-                // the supplied offset (the journal-append posture).
-                let append = handle.flags.contains(OpenFlags::APPEND);
-                let n = self.filesystem.write(
-                    uid,
-                    caller.caps.effective(),
-                    path,
-                    offset,
-                    append,
-                    &data,
-                )?;
-                Ok(n as u64)
-            }
-            // A resource-backed descriptor was authorised at open; its write
-            // routes to the named subsystem.
-            OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
-            // A pipe end ignores the offset; the write parks while the ring
-            // is full with a live reader and fails closed with `BrokenPipe`
-            // when none remains.
-            OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
-            // A pty end ignores the offset too: a master write feeds the
-            // input discipline, a slave write cooks program output.
-            OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
-            OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
-            // Unreachable by construction — a delegation is minted
-            // read-only, so the `is_write` gate above already refused —
-            // but fail closed rather than trust the construction.
-            OpenBacking::Delegated(_) => Err(Errno::PermissionDenied),
-        }
+        self.descriptor_write(caller, &handle, StreamPos::At(offset), buf, len)
     }
 
     fn fs_readdir(
@@ -30197,6 +30192,158 @@ mod tests {
             h.fs_write(&ctx, ro, 0, 0x1000, 2),
             Err(Errno::PermissionDenied)
         );
+    }
+
+    /// Sequential `stream_read` serves an **ordinary** descriptor, not only
+    /// a wired standard one, walking the shared open-file-description cursor
+    /// while the positional `fs_read` leaves that cursor untouched — the two
+    /// traps are two positions over one descriptor path.
+    #[test]
+    fn stream_read_walks_the_cursor_of_a_non_standard_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Deliberately *no* `CAP_CONSOLE_READ`: a file-backed sequential read
+        // must not be gated on console authority.
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"abc".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        assert!(
+            fd as usize >= tairix_abi::STD_STREAM_COUNT,
+            "an opened descriptor is an ordinary number, not a standard one"
+        );
+
+        // Two successive sequential reads walk the description cursor.
+        assert_eq!(h.stream_read(&ctx, fd, 0x1000, 3, 0), Ok(3));
+        assert_eq!(h.stream_read(&ctx, fd, 0x1000, 3, 0), Ok(3));
+        // A positional read of the same descriptor reads where it was told
+        // and leaves the cursor where it was.
+        assert_eq!(h.fs_read(&ctx, fd, 100, 0x1000, 3), Ok(3));
+        assert_eq!(h.stream_read(&ctx, fd, 0x1000, 3, 0), Ok(3));
+        let offsets: Vec<String> = fs
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("read "))
+            .collect();
+        assert!(
+            offsets.iter().map(String::as_str).eq([
+                "read uid=1000 path=/f off=0 len=3",
+                "read uid=1000 path=/f off=3 len=3",
+                "read uid=1000 path=/f off=100 len=3",
+                "read uid=1000 path=/f off=6 len=3",
+            ]),
+            "sequential reads advance the shared cursor and the positional \
+             read neither reads nor moves it: {offsets:?}"
+        );
+
+        // Direction is enforced on the ordinary descriptor exactly as it is
+        // on the positional path.
+        let wo = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
+                .expect("open write-only"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.stream_read(&ctx, wo, 0x1000, 3, 0),
+            Err(Errno::PermissionDenied)
+        );
+        // An ordinary number that names no open descriptor falls through to
+        // the console table, where it is closed, and fails closed.
+        assert_eq!(
+            h.stream_read(&ctx, 4096, 0x1000, 3, 0),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// Sequential `stream_write` serves an ordinary descriptor at the shared
+    /// cursor, needs no console authority for a file backing, and refuses a
+    /// read-only descriptor.
+    #[test]
+    fn stream_write_appends_at_the_cursor_of_a_non_standard_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"AB");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No `CAP_CONSOLE_WRITE`: a file-backed sequential write must not be
+        // gated on console authority.
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd =
+            u32::try_from(h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE).expect("open")).unwrap();
+        assert_eq!(h.stream_write(&ctx, fd, 0x1000, 2), Ok(2));
+        assert_eq!(h.stream_write(&ctx, fd, 0x1000, 2), Ok(2));
+        let writes: Vec<String> = fs
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("write "))
+            .collect();
+        assert!(
+            writes.iter().map(String::as_str).eq([
+                "write uid=1000 path=/AB off=0 append=false data=[65, 66]",
+                "write uid=1000 path=/AB off=2 append=false data=[65, 66]",
+            ]),
+            "sequential writes land at, and advance, the shared cursor: {writes:?}"
+        );
+
+        let ro = u32::try_from(
+            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+                .expect("open ro"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.stream_write(&ctx, ro, 0x1000, 2),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.stream_write(&ctx, 4096, 0x1000, 2), Err(Errno::NotFound));
     }
 
     /// `fs_readdir` packs the service's entries into the `DirEntry` stream;

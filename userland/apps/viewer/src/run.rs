@@ -50,6 +50,7 @@ mod program {
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
     };
+    use tairix_rt::io::{Stderr, Write};
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
         content_lines, render_lines, render_status, visible_cols_for, visible_rows_for, ScrollView,
@@ -96,9 +97,7 @@ mod program {
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = tairix_rt::stderr(b"viewer: ");
-        let _ = tairix_rt::stderr(reason.as_bytes());
-        let _ = tairix_rt::stderr(b"\n");
+        let _ = writeln!(Stderr, "viewer: {reason}");
         code
     }
 

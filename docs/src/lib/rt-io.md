@@ -16,33 +16,64 @@ There is exactly one `Read` / `Write` definition for the whole of userland, so
 no program re-implements the short-write loop or "read until newline" logic
 (`AGENTS.md` §2.2):
 
-- `Read` provides the primitive `read` plus a looping `read_exact`.
-- `Write` provides the primitive `write` plus looping `write_all`, a `flush`,
-  and `write_fmt` (so `write!` / `writeln!` work), rendering through a fixed
-  adapter that surfaces a formatting failure as a typed `Error::Fmt` rather than
-  a panic.
+- `Read` provides the primitive `read`, the transfer loop `read_fill` (read
+  until the buffer is full or the input ends, reporting how much arrived), and
+  `read_exact` on top of it.
+- `Write` provides the primitive `write`, the transfer loop `write_drain` (write
+  until the buffer is drained or the sink stalls, reporting how much was taken),
+  `write_all` on top of it, a `flush`, and `write_fmt` (so `write!` / `writeln!`
+  work), rendering through a fixed adapter that surfaces a formatting failure as
+  a typed `Error::Fmt` rather than a panic.
+
+`read_fill` and `write_drain` are **the** two transfer loops in userland.
+`read_exact`, `write_all`, and `File`'s positional `read_at` / `write_at` are
+all expressed over them rather than carrying their own copy, so a short-read or
+short-write bug can only exist in one place.
 
 Every fd backing shares this one vocabulary. The four standard streams
-(`Stdin`, `Stdout`, `Stderr`, `StdInfo`) and a `Stream` over an arbitrary
-descriptor go through the **identical** code path — the shared `stream_read` /
-`stream_write` primitives. When files, pipes, tty backings, or resource
-references land, they reuse this layer instead of forcing a second I/O surface.
+(`Stdin`, `Stdout`, `Stderr`, `StdInfo`), a `Stream` over an arbitrary
+descriptor, and an owning `File` — whether it is a path, a resource reference, a
+pipe end, or a pty end — all go through the **identical** code path: the shared
+`stream_read` / `stream_write` primitives. There is no separate "file I/O"
+trait, because the kernel resolves every descriptor the process holds through
+one table.
 The module also carries the one `write_stderr_line` helper every command app's
 `Run` binary reports diagnostics through (best-effort, never the data stream),
 so the line-to-fd-2 loop is written once.
 
-## fd-generic, non-owning
+## fd-generic: one borrowed view, one owning handle
 
 `Stream::new` views a descriptor the process already owns (a standard stream, or
-a pipe / tty / resource-reference fd a spawner wired in). It is **non-owning**
-and does not close the descriptor: `abi-v1` has no generic descriptor-close
-trap, so an fd-generic close-on-drop handle would be a speculative interface
-bound to a syscall that does not exist. Descriptor lifetime is the concern of
-whichever subsystem minted the fd (the filesystem's own `File` closes its
-descriptor on drop). Obtaining a *new* fd — opening a file under a capability,
-resolving a resource reference — is owned by the filesystem and
-resource-reference subsystems, not this layer; it exposes no `open` / `resolve`
-and so cannot widen authority.
+a file / pipe / tty / resource-reference fd a spawner wired in or a subsystem
+opened). It is **borrowed** and does not close the descriptor.
+
+`File` is the **owning** handle and releases its descriptor on drop, whatever
+the backing — the close trap is descriptor-generic, so one owner type covers
+paths, resource references, pipe ends, and pty ends alike. A second owning fd
+type alongside it would be the duplication this layer exists to prevent, so
+there is no `OwnedStream`.
+
+Obtaining a *new* fd — opening a file under a capability, resolving a resource
+reference, creating a pipe — is owned by the filesystem and resource-reference
+subsystems, not this layer; the trait module exposes no `open` / `resolve` and
+so cannot widen authority.
+
+## Sequential and positional
+
+`File`'s `Read` / `Write` are **sequential**: they transfer at the shared
+open-file-description cursor and advance it, so successive reads walk the file
+and two descriptors cloned from one description (a spawn wire, a delegation)
+interleave at one position instead of overwriting each other. This is the same
+`stream_read` / `stream_write` trap the standard streams use, which is why a
+file, a pipe, and a terminal are indistinguishable to a program that just wants
+bytes.
+
+`File::read_at` / `write_at` are **positional**: they take an explicit byte
+offset and leave the shared cursor untouched, so two positional callers of one
+description never contend over a position. The kernel serves both from a single
+descriptor I/O path parameterised only by where the position comes from, so the
+direction gate, capability checks, and copy boundaries cannot drift between
+them.
 
 ## Buffering
 
@@ -66,13 +97,31 @@ bytes the kernel accepted. It never surfaces a short write that could stall
 `StdInfoRecord` framing itself lives in `lib/abi`; this layer only carries the
 bytes.
 
-## Fail closed
+## Fail closed, fail loud
 
 No path panics or uses `unwrap` / `expect`. A short read or write is looped over
-by the provided helpers, end-of-input is reported honestly as a zero-length
-read, `write_all` fails closed with `Error::WriteZero` if a sink stops accepting
-bytes (never an infinite loop), and `read_exact` fails closed with
-`Error::UnexpectedEof`.
+by the provided helpers, `write_all` fails closed with `Error::WriteZero` if a
+sink stops accepting bytes (never an infinite loop), and `read_exact` fails
+closed with `Error::UnexpectedEof`.
+
+A **kernel refusal is never disguised as end-of-input.** `Error::Os` carries the
+kernel's own `Errno` — a descriptor that is not open in the requested direction,
+a missing capability, a broken pipe, a faulted buffer, an elapsed read bound —
+so `Ok(0)` from a read means end-of-input and nothing else. This matters because
+the universal shape of a consumer is "read until it returns zero": folding a
+failure into a zero-length read would make a revoked capability look like a
+complete input and let the consumer silently truncate what it processed, which
+is precisely the quiet, wrong-answer failure the charter's fail-loud rule
+forbids. `Error::as_errno` converts back for an interface that speaks the
+kernel's vocabulary, keeping the kernel's code when there is one; a condition
+this layer raised on its own reports `NotImplemented` rather than borrowing an
+unrelated code that would misdescribe the kernel.
+
+`Stream::read_timeout` / `Stdin::read_timeout` are the bounded companions of
+`read`, so a full-screen program parks on its input and still refreshes on a
+cadence instead of busy-polling; an elapsed bound arrives as
+`Error::Os(Errno::TimedOut)` and is therefore distinguishable from a dead
+console.
 
 ## Not a log path, not a C `stdio`
 

@@ -27,28 +27,40 @@
 //! fd is *handed in* by the owning subsystem's open/resolve call. It therefore
 //! exposes no `open`/`resolve` and cannot widen authority.
 //!
-//! There is deliberately no owning, close-on-drop stream handle here yet:
-//! `abi-v1` has no generic descriptor-close trap (only the filesystem's own
-//! `File`, which closes via `fs_close` on drop), so an fd-generic RAII closer
-//! would be a speculative interface bound to a syscall that does not exist. It
-//! lands with the descriptor-producing/closing ABI that will own it.
+//! There is deliberately no *owning* stream handle here: [`crate::File`] is
+//! the one owning descriptor handle, whatever its backing (a path, a resource
+//! reference, a pipe end, a pty end) — the close trap releases any of them —
+//! and it implements these same traits. A second owning fd type alongside it
+//! would be the duplication this layer exists to prevent. [`Stream`] is the
+//! *borrowed* view, for a descriptor whose lifetime someone else owns.
 //!
-//! # Fail closed
+//! # Fail closed, fail loud
 //!
 //! No path panics or uses `unwrap`/`expect`. A short read or write is a value
-//! the provided helpers loop over, end-of-input is reported honestly as a
-//! zero-length read, and a formatting failure surfaces as [`Error::Fmt`].
+//! the provided helpers loop over, and a formatting failure surfaces as
+//! [`Error::Fmt`]. A kernel refusal is surfaced as [`Error::Os`] carrying the
+//! kernel's own [`Errno`] — never folded into a zero-length read, which would
+//! make a revoked capability, a broken pipe, or a faulted buffer
+//! indistinguishable from clean end-of-input and let a consumer silently
+//! truncate what it read. `Ok(0)` from a read means end-of-input and nothing
+//! else.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{STDERR, STDIN, STDINFO, STDOUT};
+use tairix_abi::{Errno, STDERR, STDIN, STDINFO, STDOUT};
 
 /// The error type for this layer. Small and fail-closed; `abi-v1` is not
 /// frozen, so it is extended in place as real callers need distinctions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
+    /// The kernel refused the transfer, carrying the [`Errno`] it refused
+    /// with — a descriptor that is not open in the requested direction, a
+    /// missing capability, a broken pipe, a faulted buffer, an elapsed read
+    /// bound. Surfaced rather than folded into a zero-length read so a
+    /// failure can never be mistaken for end-of-input.
+    Os(Errno),
     /// A [`Write::write`] reported zero bytes accepted while bytes still
     /// remained to be written, so [`Write::write_all`] cannot make progress.
     /// Reported rather than looped forever (fail closed).
@@ -62,6 +74,45 @@ pub enum Error {
     Fmt,
 }
 
+impl Error {
+    /// The kernel [`Errno`] this error carries, or `None` for one this layer
+    /// raised on its own bookkeeping ([`WriteZero`](Error::WriteZero),
+    /// [`UnexpectedEof`](Error::UnexpectedEof), [`InvalidUtf8`](Error::InvalidUtf8),
+    /// [`Fmt`](Error::Fmt)).
+    #[must_use]
+    pub const fn errno(self) -> Option<Errno> {
+        match self {
+            Self::Os(errno) => Some(errno),
+            _ => None,
+        }
+    }
+
+    /// This error as a kernel [`Errno`], for an interface that speaks the
+    /// kernel's vocabulary rather than this layer's.
+    ///
+    /// A kernel refusal keeps its own code, so *why* the transfer failed
+    /// survives the conversion — that is the whole point of carrying it. The
+    /// conditions this layer raises on its own bookkeeping have no kernel
+    /// code and report [`Errno::NotImplemented`] rather than borrowing an
+    /// unrelated one that would tell the caller something untrue about the
+    /// kernel.
+    #[must_use]
+    pub const fn as_errno(self) -> Errno {
+        match self {
+            Self::Os(errno) => errno,
+            Self::WriteZero | Self::InvalidUtf8 | Self::UnexpectedEof | Self::Fmt => {
+                Errno::NotImplemented
+            }
+        }
+    }
+}
+
+impl From<Errno> for Error {
+    fn from(errno: Errno) -> Self {
+        Self::Os(errno)
+    }
+}
+
 /// The result type for this layer.
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -73,25 +124,55 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub trait Read {
     /// Read some bytes into `buf`, returning how many were read.
     ///
-    /// A return of `0` means end-of-input (or, for the standard streams, that
-    /// the backing reported a failure it cannot express as an `Errno`). A
-    /// short read (fewer than `buf.len()`) is normal; the caller loops.
+    /// A return of `0` means end-of-input and nothing else; a failure is an
+    /// [`Error::Os`] carrying the kernel's own code. A short read (fewer than
+    /// `buf.len()`) is normal; the caller loops.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying source reports — for a descriptor-backed
+    /// source, [`Error::Os`] with the kernel's [`Errno`].
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+
+    /// Read until `buf` is full or the input ends, returning how many bytes
+    /// were placed in it.
+    ///
+    /// **The** short-read loop: [`read_exact`](Read::read_exact) and every
+    /// positional file helper are expressed over this one definition, so no
+    /// caller re-implements it.
+    ///
+    /// # Errors
+    ///
+    /// The first failure the underlying [`read`](Read::read) reports; the
+    /// bytes already placed in `buf` are then not reported, so a caller that
+    /// needs a partial result reads in smaller steps.
+    fn read_fill(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = self.read(&mut buf[done..])?;
+            if n == 0 {
+                break;
+            }
+            // Clamp against the remaining room: a source that over-reports
+            // cannot be allowed to run the cursor past the buffer.
+            done += n.min(buf.len() - done);
+        }
+        Ok(done)
+    }
 
     /// Read exactly `buf.len()` bytes, looping over short reads.
     ///
     /// # Errors
     ///
     /// [`Error::UnexpectedEof`] if end-of-input is reached before `buf` is
-    /// filled (fail closed, never an infinite loop).
-    fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
-        while !buf.is_empty() {
-            match self.read(buf)? {
-                0 => return Err(Error::UnexpectedEof),
-                n => buf = &mut buf[n..],
-            }
+    /// filled (fail closed, never an infinite loop), or the first failure
+    /// [`read_fill`](Read::read_fill) reports.
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        if self.read_fill(buf)? == buf.len() {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedEof)
         }
-        Ok(())
     }
 }
 
@@ -116,20 +197,44 @@ pub trait Write {
         Ok(())
     }
 
+    /// Write as much of `buf` as the sink accepts, returning how many bytes
+    /// it took — stopping early if a write makes no progress, so a stalled
+    /// sink never loops forever.
+    ///
+    /// **The** short-write loop, the counterpart of
+    /// [`read_fill`](Read::read_fill): [`write_all`](Write::write_all) and
+    /// every positional file helper are expressed over this one definition.
+    ///
+    /// # Errors
+    ///
+    /// The first failure the underlying [`write`](Write::write) reports.
+    fn write_drain(&mut self, buf: &[u8]) -> Result<usize> {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = self.write(&buf[done..])?;
+            if n == 0 {
+                break;
+            }
+            // Clamp against the bytes still pending: a sink that over-reports
+            // cannot be allowed to run the cursor past the buffer.
+            done += n.min(buf.len() - done);
+        }
+        Ok(done)
+    }
+
     /// Write all of `buf`, looping over short writes.
     ///
     /// # Errors
     ///
     /// [`Error::WriteZero`] if the stream stops accepting bytes before `buf`
-    /// is fully written (fail closed, never an infinite loop).
-    fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
-        while !buf.is_empty() {
-            match self.write(buf)? {
-                0 => return Err(Error::WriteZero),
-                n => buf = &buf[n..],
-            }
+    /// is fully written (fail closed, never an infinite loop), or the first
+    /// failure [`write_drain`](Write::write_drain) reports.
+    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        if self.write_drain(buf)? == buf.len() {
+            Ok(())
+        } else {
+            Err(Error::WriteZero)
         }
-        Ok(())
     }
 
     /// Write formatted output (`write!` / `writeln!` support).
@@ -170,40 +275,61 @@ impl<W: Write + ?Sized> core::fmt::Write for FmtAdapter<'_, W> {
     }
 }
 
-/// An fd-generic, **non-owning** view of a stream descriptor.
+/// An fd-generic, **borrowed** view of a stream descriptor.
 ///
 /// A `Stream` names a descriptor the process already owns (a standard stream,
-/// or a pipe / tty / resource-reference fd a spawner wired in) and moves bytes
-/// over the shared `stream_read` / `stream_write` primitives — the identical
-/// code path the standard streams use. It does **not** own or close the fd:
-/// `abi-v1` has no generic descriptor-close trap, and lifetime is the concern
-/// of whichever subsystem minted the fd (the filesystem's `File` closes its
-/// own descriptor on drop). Constructing a `Stream` grants no authority: the
-/// kernel resolves the fd against the caller's descriptor table on every call
-/// and rejects one the process does not hold.
+/// or a file / pipe / tty / resource-reference fd a spawner wired in or a
+/// subsystem opened) and moves bytes over the shared `stream_read` /
+/// `stream_write` primitives — the identical code path the standard streams
+/// use. It does **not** own or close the fd: that is [`crate::File`]'s job,
+/// the one owning descriptor handle. Constructing a `Stream` grants no
+/// authority: the kernel resolves the fd against the caller's descriptor
+/// table on every call and rejects one the process does not hold.
 #[derive(Debug, Clone, Copy)]
 pub struct Stream {
     fd: u32,
 }
 
 impl Stream {
-    /// View descriptor `fd` as a stream. Non-owning: the caller (or the
+    /// View descriptor `fd` as a stream. Borrowed: the caller (or the
     /// subsystem that opened `fd`) remains responsible for its lifetime.
     #[must_use]
     pub const fn new(fd: u32) -> Self {
         Self { fd }
     }
+
+    /// The descriptor this stream names.
+    #[must_use]
+    pub const fn fd(self) -> u32 {
+        self.fd
+    }
+
+    /// Read some bytes into `buf`, waiting at most `timeout_ns` nanoseconds
+    /// for input (`0` waits indefinitely, exactly as [`Read::read`] does).
+    ///
+    /// The bounded companion of [`Read::read`]: a full-screen program parks
+    /// on its input and still refreshes a clock or status figure on a
+    /// cadence, instead of busy-polling for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Os`] with [`Errno::TimedOut`] when the bound elapsed with no
+    /// input, or whatever else the kernel refused with — a timed-out refresh
+    /// tick is therefore distinguishable from a dead console.
+    pub fn read_timeout(&mut self, buf: &mut [u8], timeout_ns: u64) -> Result<usize> {
+        crate::stream_read_result(self.fd, buf, timeout_ns).map_err(Error::Os)
+    }
 }
 
 impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        Ok(crate::stream_read(self.fd, buf))
+        self.read_timeout(buf, 0)
     }
 }
 
 impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        Ok(crate::stream_write(self.fd, buf))
+        crate::stream_write_result(self.fd, buf).map_err(Error::Os)
     }
 }
 
@@ -225,31 +351,53 @@ pub struct Stderr;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StdInfo;
 
+impl Stdin {
+    /// Standard input as a [`Stream`], for the descriptor-level operations
+    /// the [`Read`] trait does not carry.
+    #[must_use]
+    pub const fn stream(self) -> Stream {
+        Stream::new(STDIN)
+    }
+
+    /// Read some bytes from standard input, waiting at most `timeout_ns`
+    /// nanoseconds — see [`Stream::read_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Os`] with [`Errno::TimedOut`] when the bound elapsed with no
+    /// input, or whatever else the kernel refused with.
+    pub fn read_timeout(&mut self, buf: &mut [u8], timeout_ns: u64) -> Result<usize> {
+        self.stream().read_timeout(buf, timeout_ns)
+    }
+}
+
 impl Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        Ok(crate::stream_read(STDIN, buf))
+        Stream::new(STDIN).read(buf)
     }
 }
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        Ok(crate::stream_write(STDOUT, buf))
+        Stream::new(STDOUT).write(buf)
     }
 }
 
 impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        Ok(crate::stream_write(STDERR, buf))
+        Stream::new(STDERR).write(buf)
     }
 }
 
 impl Write for StdInfo {
     /// Emit `buf` to fd 3 best-effort and report it fully consumed regardless
-    /// of how many bytes the kernel accepted. fd 3 is ignorable (there may be
-    /// no consumer), so it must never surface a short write that would stall
-    /// [`Write::write_all`] or turn into an error a program depends on.
+    /// of how many bytes the kernel accepted, or whether it refused at all.
+    /// fd 3 is ignorable by contract (there may be no consumer), so it must
+    /// never surface a short write that would stall [`Write::write_all`] or
+    /// an error a program depends on — the one deliberate exception to this
+    /// layer's fail-loud rule.
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        let _ = crate::stream_write(STDINFO, buf);
+        let _ = Stream::new(STDINFO).write(buf);
         Ok(buf.len())
     }
 }
@@ -752,16 +900,23 @@ mod tests {
     }
 
     #[test]
-    fn write_all_fails_closed_on_a_refused_or_bogus_kernel_count() {
+    fn write_all_reports_a_refusal_by_its_kernel_code_not_write_zero() {
         // Regression test: a refused write (`-errno`, e.g. a missing
-        // `CAP_CONSOLE_WRITE`) folds to a zero-length write, so `write_all`
-        // reports `WriteZero` instead of slicing out of bounds — previously
-        // the raw negative register became a huge count and `&buf[n..]`
-        // panicked here, turning a panic report into a panic storm.
-        let neg = u64::from_ne_bytes(
-            (-i64::from(tairix_abi::Errno::PermissionDenied.as_i32())).to_ne_bytes(),
-        );
+        // `CAP_CONSOLE_WRITE`) reaches the caller as that code. Reporting
+        // `WriteZero` would say "the sink stopped accepting bytes" for what
+        // is really "you were not allowed to write at all", and the raw
+        // negative register must never become a huge count that slices out
+        // of bounds — which once turned a panic report into a panic storm.
+        let neg = u64::from_ne_bytes((-i64::from(Errno::PermissionDenied.as_i32())).to_ne_bytes());
         seam::arm(neg);
+        assert_eq!(
+            Stderr.write_all(b"report"),
+            Err(Error::Os(Errno::PermissionDenied))
+        );
+
+        // A sink that genuinely accepts nothing — no refusal, just no room —
+        // is the case `WriteZero` names.
+        seam::arm(0);
         assert_eq!(Stderr.write_all(b"report"), Err(Error::WriteZero));
 
         // A positive count larger than the written buffer (a buggy or
@@ -771,6 +926,82 @@ mod tests {
         Stderr
             .write_all(b"tail")
             .expect("a clamped over-count completes the write loop");
+    }
+
+    #[test]
+    fn a_read_refusal_is_never_mistaken_for_end_of_input() {
+        // The defect this layer exists to prevent: a consumer looping on
+        // `read` until it returns zero would treat a revoked capability or a
+        // faulted buffer as a complete, clean input and silently truncate
+        // what it processed.
+        let neg = u64::from_ne_bytes((-i64::from(Errno::NotFound.as_i32())).to_ne_bytes());
+        seam::arm(neg);
+        let mut buf = [0u8; 8];
+        assert_eq!(Stdin.read(&mut buf), Err(Error::Os(Errno::NotFound)));
+        assert_eq!(
+            Stdin.read_exact(&mut buf),
+            Err(Error::Os(Errno::NotFound)),
+            "the fill loop propagates the refusal rather than reporting a short read"
+        );
+
+        // A genuine end-of-input is still an honest zero, and `read_exact`
+        // still calls that out as an unexpected end.
+        seam::arm(0);
+        assert_eq!(Stdin.read(&mut buf), Ok(0));
+        assert_eq!(Stdin.read_exact(&mut buf), Err(Error::UnexpectedEof));
+    }
+
+    #[test]
+    fn read_fill_and_write_drain_report_the_partial_transfer() {
+        // The two loops every other helper is built on: they stop at the end
+        // of input / a stalled sink and report how much moved, rather than
+        // erroring — that is what lets the positional file helpers reuse them.
+        seam::arm(0);
+        let mut buf = [0u8; 4];
+        assert_eq!(Stdin.read_fill(&mut buf), Ok(0));
+        assert_eq!(Stdout.write_drain(b"data"), Ok(0));
+
+        // A source that fills the buffer in one step needs no second call.
+        seam::arm(4);
+        assert_eq!(Stdin.read_fill(&mut buf), Ok(4));
+        assert_eq!(Stdout.write_drain(b"data"), Ok(4));
+    }
+
+    #[test]
+    fn a_bounded_read_marshals_its_timeout_and_surfaces_the_elapsed_bound() {
+        seam::arm(2);
+        let mut buf = [0u8; 8];
+        assert_eq!(Stdin.read_timeout(&mut buf, 1_000), Ok(2));
+        let (number, args) = seam::last_call().expect("one trap");
+        assert_eq!(number, crate::NUM_STREAM_READ);
+        assert_eq!(args[0], u64::from(STDIN));
+        assert_eq!(args[3], 1_000);
+
+        // An elapsed bound is distinguishable from a dead console.
+        let neg = u64::from_ne_bytes((-i64::from(Errno::TimedOut.as_i32())).to_ne_bytes());
+        seam::arm(neg);
+        assert_eq!(
+            Stdin.read_timeout(&mut buf, 1_000),
+            Err(Error::Os(Errno::TimedOut))
+        );
+    }
+
+    #[test]
+    fn an_ordinary_descriptor_takes_the_identical_trap_path_as_stdout() {
+        // One vocabulary: a `Stream` over a file / pipe / pty descriptor
+        // issues the same trap, with the same shape, as the standard streams.
+        seam::arm(3);
+        assert_eq!(Stream::new(11).write(b"abc"), Ok(3));
+        let (number, args) = seam::last_call().expect("one trap");
+        assert_eq!(number, crate::NUM_STREAM_WRITE);
+        assert_eq!(args[0], 11);
+
+        seam::arm(3);
+        let mut buf = [0u8; 3];
+        assert_eq!(Stream::new(11).read(&mut buf), Ok(3));
+        let (number, args) = seam::last_call().expect("one trap");
+        assert_eq!(number, crate::NUM_STREAM_READ);
+        assert_eq!(args[0], 11);
     }
 
     #[test]

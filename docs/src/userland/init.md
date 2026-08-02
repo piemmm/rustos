@@ -382,7 +382,7 @@ idiomatic syscall wrappers; `tairix_rt::entry!` names the program's
 model; a kernel that installed no facts
 degrades the banner to the version line with the reason on fd 2, never a
 fabricated machine shape — and writes it to its inherited standard
-output (fd 1) through `tairix_rt::stdout` — the `abi-v1` `stream_write`
+output (fd 1) through `tairix_rt::io::Stdout` — the `abi-v1` `stream_write`
 syscall (`AGENTS.md` §20; `init` binds to the inherited stream, never an
 ambient device) — then **supervises** the user's session (see below). The
 runtime routes `main`'s return value through the `exit` syscall. (Both the
