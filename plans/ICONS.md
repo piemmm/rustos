@@ -40,7 +40,9 @@ guarantees.
 - **A bundle's own icon is its identity, not a launcher detail.** The
   manifest's `library-icon` is independent of its `library` listing: every
   command app declares an icon and none of them is listed in the program
-  library. The two were coupled once; the coupling is gone.
+  library. The two were coupled once; the coupling is gone. Declaring one is
+  **mandatory** for every launchable app, SVG by preference — that rule is
+  `plans/APPS.md` §14 and this plan does not restate it.
 - **One vocabulary.** `IconKind` (`lib/icon`) is the single closed icon
   vocabulary. A file-class kind and a chrome glyph are the same kind of
   thing to every draw site; the difference is only which tier resolves.
@@ -79,20 +81,24 @@ an `IconKind::asset_id()`, so a typo cannot ship: `tools/syshelp`'s build
 script fails the build on an unrecognised name, an oversize file, or a
 duplicate id.
 
-**Each bundle's own icon** — `<crate>/Resources/<name>.png`, declared as
-`library-icon` in that bundle's `AppInfo.toml` and planted inside the bundle.
-Every command app and every GUI app under the three app roots the resource
-walk covers (`userland/apps`, `userland/shell`, `userland/gui`) carries one,
-so browsing `/System/Apps` shows fifty distinct pictures rather than fifty
-copies of the generic bundle icon. Services outside those roots keep the
-service-bundle class artwork, which is the honest picture for them.
+**Each bundle's own icon** — `<crate>/Resources/<name>.svg` (the preferred
+form) or `<name>.png`, declared as `library-icon` in that bundle's
+`AppInfo.toml` and planted inside the bundle. Every command app and every GUI
+app under the three app roots the resource walk covers (`userland/apps`,
+`userland/shell`, `userland/gui`) carries one, so browsing `/System/Apps` shows
+fifty distinct pictures rather than fifty copies of the generic bundle icon.
+Services outside those roots keep the service-bundle class artwork, which is
+the honest picture for them.
 
-Both families are square, straight-alpha, at least `MIN_ARTWORK_SIDE`
-(256×256) and within `MAX_ARTWORK_BYTES` (256 KiB), and both are *authored
-artwork*: adding or replacing one is dropping a PNG on disk, never editing a
-list. The image build proves every one of them decodes through the desktop's
-own decoder (below), so "the icon is broken" is a build failure rather than a
-silent glyph on someone's desktop.
+A **raster** master (what both families ship today) is square, straight-alpha
+and at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it.
+A **vector** master has no pixel side at all: the decoder requires its design
+box to be square and the desktop rasterises it at the side it is about to
+draw. Either form stays within `MAX_ARTWORK_BYTES` (256 KiB), and both are
+*authored artwork*: adding or replacing one is dropping the file on disk, never
+editing a list. The image build proves every one of them is artwork the desktop
+will really draw (below), so "the icon is broken" is a build failure rather
+than a silent glyph on someone's desktop.
 
 Masters that no live consumer can select are **not** shipped. They live in
 `artwork/` (reference art, not shipped) and return to `lib/icon/assets/` in
@@ -140,8 +146,10 @@ The same stage closed a live defect: a bundle could declare a
 `library-icon` larger than the desktop will ever decode, and would then
 silently render as a glyph forever with nothing telling the author. The
 image build now refuses it, naming the bundle, the file, its size, and the
-bound — and, since I7, refuses one that is not decodable, not square, or
-under the master side as well.
+bound — and, since I7, refuses any icon that is not artwork the desktop could
+draw at all: the format is decided from the bytes as the runtime decides it, a
+raster master must be square and at least the master side, and either form
+must actually draw something.
 
 ## 5. I4 — the taskbar and the program library — **done**
 
@@ -186,9 +194,10 @@ where the generic glyph is already the right picture.
 The last stage closed the gap the tiers implied but nothing supplied: the
 system shipped one picture for *all* applications. Now:
 
-- Every command and GUI bundle ships a 256×256 master in its own
-  `Resources/` and declares it in its manifest. The set is one visual family
-  — a bevelled plate, a chrome motif, an orange accent — with the plate tint
+- Every command and GUI bundle ships its own icon in its `Resources/` and
+  declares it in its manifest — mandatory for any new app (`plans/APPS.md`
+  §14). The shipped set is one visual family of 256×256 raster masters — a
+  bevelled plate, a chrome motif, an orange accent — with the plate tint
   grouping a bundle by what it does (files and shell, text utilities,
   network, process and monitoring, storage and devices, users and security),
   so a strip of them reads as one system rather than fifty unrelated images.
@@ -201,10 +210,13 @@ system shipped one picture for *all* applications. Now:
   stays demand-driven (only the tiles on screen), and a bundle is keyed in
   the cache by its *directory*, so its manifest is read once and a bundle
   with no icon of its own remembers that too.
-- The image build decodes every icon it is about to plant — class artwork and
-  bundle icon alike — through `lib/image` under the same limits the sandboxed
-  rasteriser applies, and refuses anything that is not square, is under
-  `MIN_ARTWORK_SIDE`, or is not decodable artwork at all.
+- The image build proves every icon it is about to plant — class artwork and
+  bundle icon alike — is artwork the desktop will draw, deciding the format
+  from the bytes exactly as the runtime does: a PNG through `lib/image` under
+  the same limits the sandboxed rasteriser applies, else the supported SVG
+  subset through `lib/svg`. A raster master must be square and at least
+  `MIN_ARTWORK_SIDE`, and either form must draw something — an empty document
+  or a wholly transparent master would ship as an invisible icon.
 - A bundle's manifest is untrusted at that boundary: the icon name is
   accepted only as a plain file name and resolved *inside* the bundle's own
   directory, so a hostile `library-icon` cannot aim the desktop at a file
@@ -216,7 +228,7 @@ system shipped one picture for *all* applications. Now:
   resolved from the theme; a raster master would be the wrong source format
   for them and the charter says so.
 - **Animated formats (GIF playback), JPEG, and ICO decoding.** The shipped
-  masters are PNG; the file-class artwork for a JPEG or GIF *file* is a
+  raster masters are PNG; the file-class artwork for a JPEG or GIF *file* is a
   static icon, which needs no decoder for that format. A decoder is added
   when something actually needs to display such a file's contents, in the
   plan that owns that viewer — never speculatively here.

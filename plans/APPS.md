@@ -266,7 +266,8 @@ same bundle shape scales up: a larger app adds `Code/`, `Libraries/`,
 
 This applies to every present and future command-line program. A new CLI tool
 is added as its own `<Name>.app` bundle (§16.5), never as a loose binary in a
-shared directory.
+shared directory, and it ships its own icon inside that bundle (§14 —
+mandatory, for graphical apps and text tools alike).
 
 ### 1.1 Command surface follows GNU coreutils (`AGENTS.md` §16.7)
 
@@ -328,6 +329,9 @@ entry, `Help/` (the former `Documentation/`, merged into it):
 ├── DefaultSettings/   # Read-only defaults copied to the user on first launch.
 └── Help/              # Internationalised Markdown help (this doc).
 ```
+
+`Resources/` carries, among the bundle's other authored data, the one asset
+every launchable app MUST ship: its own icon, named by the manifest (§14).
 
 `Help/` is the bundle's **only** documentation mechanism — one
 internationalised, structured-Markdown tree, so there is no second,
@@ -1374,3 +1378,60 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   the curated `/System/Libraries/` set and the syscall ABI. Rationale logged
   in `PLAN.md` "Charter Amendments"; the code migration off the kernel-baked
   spawn registry is deliverable 8 above.
+- **§10 (an app's own icon — mandatory, SVG preferred)** — **done**: §10 now
+  states that every command-line and graphical app ships its own icon inside
+  its bundle, authored as SVG (**preferred** — one vector file serves every
+  slot and every scale) or, where the artwork is a rendered picture, as a
+  raster master under the existing raster rule, and that a declared icon the
+  desktop could not draw fails the build closed. The rule itself is §14 below;
+  rationale logged in `PLAN.md` "Charter Amendments".
+
+## 14. Every app ships its own icon — mandatory
+
+A new command-line or GUI app is **not complete until it ships its own icon.**
+Every bundle a user can launch authors one icon file inside its own bundle and
+names it in its manifest:
+
+```
+example.app/
+├── AppInfo            # library-icon = "example.svg"
+└── Resources/
+    └── example.svg    # this bundle's own icon
+```
+
+**Why it is mandatory.** The icon is the bundle's identity, not a launcher
+decoration: the taskbar, the program-library popup, the desktop, and the file
+manager all draw it, and it is independent of whether the bundle is listed in
+the program library. A bundle that declares none resolves to the one generic
+application picture — so an app that skips its icon makes a store of fifty
+programs look like fifty copies of the same one.
+
+**SVG is the preferred form.** One authored vector file serves every slot and
+every DPI/UI scale exactly, because the desktop rasterises it at the pixel side
+it is about to draw. It must be a flat document on a **square** design grid
+within the supported subset (`lib/svg`).
+
+**A raster master (PNG) is accepted** where the artwork is a rendered picture
+rather than a scalable silhouette (`AGENTS.md` §10): square, straight-alpha, and
+at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it rather
+than blurring it up. Either form is at most `MAX_ARTWORK_BYTES` (256 KiB) — a
+fixed validation bound on untrusted input, not a capacity to raise (§24.4).
+
+**The build proves it, fail closed.** The bundle composer refuses a declared
+icon that is absent from the bundle's own `Resources/`, over-long, neither a
+decodable PNG nor an in-subset SVG, a non-square or undersized raster master, or
+one that decodes but draws nothing at all. The format is decided from the
+*bytes*, exactly as the sandboxed rasteriser decides it at runtime, never from
+the file name. "The icon is broken" is therefore a build failure naming the
+bundle and the file, never a silent fallback glyph on a user's desktop.
+
+**Scope.** The rule binds every launchable bundle (`kind = "command"`), windowed
+app and text tool alike. A service bundle (`kind = "service"`) and a
+resource-only bundle (§10) MAY declare an icon — it is drawn identically — but
+neither is required to: the service-bundle class picture is the honest artwork
+for something the user does not launch.
+
+Adding an icon is dropping the file in the bundle's own `Resources/` and naming
+it in `AppInfo.toml`; there is no list anywhere to edit (§16.5). The artwork
+pipeline itself — the resolution tiers, the sandboxed decode, the shared cache —
+is `plans/ICONS.md`, which this section does not restate.

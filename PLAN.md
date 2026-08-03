@@ -6473,6 +6473,24 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-08-03 — An app's own icon is mandatory, and SVG is the preferred
+  form.** Amended §10 (owner decision) to say plainly what the previous
+  amendment left implicit: every command-line and graphical app **must** ship
+  its own icon inside its bundle, and it is authored as SVG wherever the
+  artwork can be expressed in the supported subset — one vector file then
+  serves every slot and UI scale exactly — with a raster master reserved for
+  an app whose identity is a rendered picture. Without the mandate an app
+  could legitimately ship no icon and resolve to the one generic application
+  picture, which is what made a store of fifty programs look like fifty copies
+  of the same one; without the format sentence §10 read as *requiring* PNG for
+  an application icon, so a vector master was refused by the image build even
+  though the sandboxed rasteriser has always decoded SVG. The build now sniffs
+  the format from the bytes exactly as the runtime does and refuses a declared
+  icon it could not draw — absent, over-long, undecodable, a non-square or
+  undersized raster master, or one that draws nothing — so a broken icon fails
+  the build instead of degrading silently to a glyph. The rule is
+  `plans/APPS.md` §14; the pipeline stays `plans/ICONS.md`.
+
 - **2026-08-02 — Raster masters are a canonical source for illustrative icon
   artwork.** Amended §10 (owner decision) after the desktop's application,
   file-class, and device icons arrived as rendered pictures with no vector

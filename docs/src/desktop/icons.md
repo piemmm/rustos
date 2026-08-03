@@ -56,6 +56,12 @@ asset fails closed, so the caller substitutes a `builtin_icon` glyph rather
 than crashing (`AGENTS.md` §2.9). See [SVG asset decoding](./svg-assets.md).
 The built-in glyphs remain the always-present fallback.
 
+SVG is likewise the preferred form for an **application bundle's own** icon,
+which every app must ship (`plans/APPS.md` §14) and which decodes through this
+same path. The complete order a request resolves through — a thing's own icon,
+then its class's raster master, then the class vector asset, then the built-in
+glyph — is described under [tairix-icon](../lib/icon.md).
+
 ## In the taskbar
 
 The taskbar's notification area holds an ordered list of status icons, each

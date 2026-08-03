@@ -29,7 +29,7 @@
 use std::sync::OnceLock;
 
 use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
-use tairix_image::DecodeLimits;
+use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_itest_harness::app_image::{
     compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
     APP_MANIFEST_SOURCE,
@@ -723,15 +723,14 @@ fn verify_library_icon<'a>(
 
 /// Verify one icon master is artwork the desktop will actually draw.
 ///
-/// `label` names the artefact in the build error. The bytes must:
-///
-/// * be at most [`tairix_icon::MAX_ARTWORK_BYTES`] — the same bound the
-///   desktop refuses artwork against *before* it decodes it,
-/// * decode through [`tairix_image`] under the same limits the sandboxed
-///   rasteriser applies, so the build accepts exactly what the runtime would,
-/// * be square, because every slot draws icons in a square, and
-/// * be at least [`tairix_icon::MIN_ARTWORK_SIDE`] on a side, so a slot only
-///   ever downscales a master rather than blurring it up.
+/// `label` names the artefact in the build error. An icon master is either
+/// **vector** artwork (SVG — the preferred form, since it is resolution
+/// independent) or a high-resolution **raster** master (PNG). Which one it is
+/// is decided from the bytes exactly as the sandboxed rasteriser decides it at
+/// runtime — a PNG signature, else the supported SVG subset — never from the
+/// file name, so the build accepts precisely what the desktop would draw.
+/// Either form must be at most [`tairix_icon::MAX_ARTWORK_BYTES`], the same
+/// bound the desktop refuses artwork against *before* it decodes it.
 ///
 /// Checking the decode here rather than trusting the file extension is what
 /// makes "the icon is broken" a build failure instead of a silent glyph on
@@ -751,6 +750,24 @@ fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
             tairix_icon::MAX_ARTWORK_BYTES
         ));
     }
+    if tairix_image::sniff(bytes) == Some(ImageFormat::Png) {
+        verify_raster_master(label, bytes)
+    } else {
+        verify_vector_master(label, bytes)
+    }
+}
+
+/// Verify a raster icon master: it must decode through [`tairix_image`] under
+/// the same limits the sandboxed rasteriser applies, be square (every slot
+/// draws icons in a square), be at least [`tairix_icon::MIN_ARTWORK_SIDE`] on
+/// a side so a slot only ever downscales a master rather than blurring it up,
+/// and carry at least one pixel that is not fully transparent.
+///
+/// # Errors
+///
+/// Returns an actionable build-error message naming `label` and the geometry
+/// or decode problem.
+fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
     let limits = DecodeLimits::new(
         tairix_icon::MAX_ARTWORK_SIDE,
         tairix_icon::MAX_ARTWORK_SIDE,
@@ -771,6 +788,49 @@ fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
             tairix_icon::MIN_ARTWORK_SIDE
         ));
     }
+    if image
+        .pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|px| px[3] == 0)
+    {
+        return Err(format!(
+            "image: {label} decodes but every pixel is fully transparent; an \
+             icon master must draw something"
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a vector icon master: it must decode through the desktop's own SVG
+/// subset ([`tairix_icon::decode_svg`]) and actually draw something.
+///
+/// A vector master carries no pixel geometry to check: it is resolution
+/// independent, so the raster rules above do not apply to it, and the decoder
+/// already refuses a design box that is not square (the desktop's vector forms
+/// are authored on a square grid). What is left to prove is that the document
+/// is inside the supported subset and paints visible area — an empty or wholly
+/// transparent document decodes happily and would ship as an invisible icon.
+///
+/// # Errors
+///
+/// Returns an actionable build-error message naming `label` and why the bytes
+/// are not artwork the desktop can draw.
+fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+    let icon = tairix_icon::decode_svg(bytes).map_err(|e| {
+        format!("image: {label} is neither a PNG nor an SVG the desktop can decode: {e:?}")
+    })?;
+    let side = tairix_icon::MIN_ARTWORK_SIDE;
+    let surface = icon.rasterise(side).ok_or_else(|| {
+        format!("image: {label} decodes but cannot be rasterised at {side} pixels")
+    })?;
+    if surface.pixels().iter().all(|pixel| pixel.a == 0) {
+        return Err(format!(
+            "image: {label} decodes but draws nothing; an icon master must draw \
+             something"
+        ));
+    }
     Ok(())
 }
 
@@ -778,15 +838,16 @@ fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::{verify_icon_master, verify_library_icon};
 
-    /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG.
+    /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG,
+    /// opaque white, or grey+alpha at `alpha` when one is given.
     ///
     /// Built here rather than committed as a fixture so a test can ask for
-    /// exactly the geometry it wants to be refused. The `IDAT` zlib stream is
-    /// a run of stored (uncompressed) DEFLATE blocks, which is legal and
-    /// keeps this to arithmetic the reader can check by eye; greyscale keeps
-    /// a master-sized image comfortably inside the artwork byte bound without
-    /// needing a compressor here.
-    fn png(width: u32, height: u32) -> Vec<u8> {
+    /// exactly the geometry — or the transparency — it wants to be refused.
+    /// The `IDAT` zlib stream is a run of stored (uncompressed) DEFLATE
+    /// blocks, which is legal and keeps this to arithmetic the reader can
+    /// check by eye; greyscale keeps a master-sized image comfortably inside
+    /// the artwork byte bound without needing a compressor here.
+    fn png(width: u32, height: u32, alpha: Option<u8>) -> Vec<u8> {
         fn crc32(bytes: &[u8]) -> u32 {
             let mut crc = 0xFFFF_FFFFu32;
             for byte in bytes {
@@ -807,12 +868,16 @@ mod tests {
             out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
         }
 
-        // One filter byte per row, then `width` opaque white samples.
-        let mut raw = Vec::new();
-        for _ in 0..height {
-            raw.push(0u8);
-            raw.extend(core::iter::repeat_n(0xFFu8, width as usize));
-        }
+        // One white sample per pixel, followed by its alpha sample when the
+        // caller asked for an alpha channel; a row is the filter byte plus
+        // `width` of those samples, and the raw image is `height` such rows.
+        let sample: &[u8] = match alpha {
+            Some(alpha) => &[0xFF, alpha],
+            None => &[0xFF],
+        };
+        let mut row = vec![0u8];
+        row.extend_from_slice(&sample.repeat(width as usize));
+        let raw = row.repeat(height as usize);
 
         // RFC 1950 envelope over RFC 1951 stored blocks (each at most the
         // 16-bit block length the format allows).
@@ -838,10 +903,13 @@ mod tests {
         }
         zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
 
+        // Colour type 4 (grey+alpha) when an alpha channel was asked for,
+        // else 0 (grey).
+        let colour_type = if alpha.is_some() { 4 } else { 0 };
         let mut ihdr = Vec::new();
         ihdr.extend_from_slice(&width.to_be_bytes());
         ihdr.extend_from_slice(&height.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        ihdr.extend_from_slice(&[8, colour_type, 0, 0, 0]);
 
         let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         chunk(&mut out, *b"IHDR", &ihdr);
@@ -860,9 +928,56 @@ mod tests {
     /// accepted.
     #[test]
     fn a_square_master_at_the_shipped_side_passes() {
-        let master = png(tairix_icon::MIN_ARTWORK_SIDE, tairix_icon::MIN_ARTWORK_SIDE);
+        let master = png(
+            tairix_icon::MIN_ARTWORK_SIDE,
+            tairix_icon::MIN_ARTWORK_SIDE,
+            None,
+        );
         let resources: [(&str, &[u8]); 2] = [("other.bin", &[0u8; 4]), ("terminal.png", &master)];
         assert!(verify_library_icon("terminal.app", Some("terminal.png"), resources).is_ok());
+    }
+
+    /// A vector master is accepted, and needs no pixel side: SVG is
+    /// resolution independent, so the raster master's geometry rules do not
+    /// apply to it. This is the preferred form for a new app's icon.
+    #[test]
+    fn a_square_vector_master_passes() {
+        let master: &[u8] =
+            br##"<svg viewBox="0 0 32 32"><polygon points="2,2 30,2 30,30 2,30" fill="#3070f0"/></svg>"##;
+        let resources: [(&str, &[u8]); 1] = [("files.svg", master)];
+        assert!(verify_library_icon("files.app", Some("files.svg"), resources).is_ok());
+    }
+
+    /// A vector master whose design box is not square is refused: the
+    /// desktop's vector forms are authored on a square grid, so a rectangular
+    /// one would be squashed into every square slot.
+    #[test]
+    fn a_non_square_vector_master_is_refused() {
+        let master: &[u8] =
+            br##"<svg viewBox="0 0 32 16"><polygon points="0,0 32,0 32,16 0,16" fill="#3070f0"/></svg>"##;
+        let err = verify_icon_master("x.app icon", master)
+            .expect_err("a rectangular vector master must be refused");
+        assert!(err.contains("NonSquareViewBox"), "{err}");
+    }
+
+    /// A vector master that decodes but paints nothing is refused: it would
+    /// ship as an invisible icon rather than a picture, which is exactly the
+    /// silent failure this check exists to turn into a build error.
+    #[test]
+    fn a_vector_master_that_draws_nothing_is_refused() {
+        let err = verify_icon_master("x.app icon", br#"<svg viewBox="0 0 32 32"></svg>"#)
+            .expect_err("a vector master that draws nothing must be refused");
+        assert!(err.contains("draws nothing"), "{err}");
+    }
+
+    /// A raster master that decodes but is wholly transparent is refused for
+    /// the same reason: the slot would draw an empty square.
+    #[test]
+    fn a_fully_transparent_raster_master_is_refused() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        let err = verify_icon_master("x.app icon", &png(side, side, Some(0)))
+            .expect_err("a fully transparent master must be refused");
+        assert!(err.contains("transparent"), "{err}");
     }
 
     /// A declared icon that is not present in `Resources/` is refused, and
@@ -907,7 +1022,7 @@ mod tests {
     #[test]
     fn a_non_square_master_is_refused() {
         let side = tairix_icon::MIN_ARTWORK_SIDE;
-        let err = verify_icon_master("x.app icon", &png(side, side / 2))
+        let err = verify_icon_master("x.app icon", &png(side, side / 2, None))
             .expect_err("a rectangular master must be refused");
         assert!(err.contains("square"), "{err}");
     }
@@ -917,7 +1032,7 @@ mod tests {
     #[test]
     fn an_undersized_master_is_refused() {
         let small = tairix_icon::MIN_ARTWORK_SIDE / 2;
-        let err = verify_icon_master("x.app icon", &png(small, small))
+        let err = verify_icon_master("x.app icon", &png(small, small, None))
             .expect_err("an undersized master must be refused");
         assert!(
             err.contains(&tairix_icon::MIN_ARTWORK_SIDE.to_string()),

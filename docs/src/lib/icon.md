@@ -21,8 +21,10 @@ draw site always gets something:
 0. **The thing's own icon (preferred, where it has one).** An application
    bundle names an icon inside its own `Resources/` in its signed `AppInfo`
    manifest, so `ls.app` draws `ls`'s picture and not the generic
-   every-application picture. This tier is asked for by naming the thing in
-   the request (see below); everything without an icon of its own starts at
+   every-application picture. Every app ships one — an SVG by preference, else
+   a raster master (`plans/APPS.md` §14) — and the format is decided from the
+   bytes, never from the file name. This tier is asked for by naming the thing
+   in the request (see below); everything without an icon of its own starts at
    tier 1.
 1. **Raster artwork (next).** A pre-rasterised master shipped by the OS
    at `/System/Graphics/Icons/<asset-id>.png` (`icon_artwork_path(kind)`).
@@ -63,10 +65,12 @@ library or in the renderer that consumes it (`AGENTS.md` §19.5):
   over-long input against this same one definition, so the bound cannot
   diverge between the two crates (`AGENTS.md` §2.2).
 - `MAX_ARTWORK_SIDE` (2048) is the source side an icon is ever decoded at,
-  and `MIN_ARTWORK_SIDE` (256) the side a *shipped* master is authored at so a
-  slot only ever downscales it. Both are one definition: the sandboxed
-  rasteriser bounds its decode by the first, and the image build refuses
-  first-party artwork that fails either.
+  and `MIN_ARTWORK_SIDE` (256) the side a *shipped raster* master is authored
+  at so a slot only ever downscales it — a vector master has no pixel side,
+  being rasterised at the side it is drawn. Both are one definition: the
+  sandboxed rasteriser bounds its decode by the first, and the image build
+  refuses a first-party raster master that fails either, an icon of either
+  format that will not decode, and one that decodes but draws nothing.
 - `artwork_kind_for_file(name)` accepts exactly `<asset-id>.png` for a known
   kind and refuses anything else (an unknown id, a wrong extension, an empty
   name, or a directory-bearing path-traversal attempt), so the image build can
