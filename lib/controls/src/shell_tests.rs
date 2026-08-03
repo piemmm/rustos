@@ -237,12 +237,103 @@ fn task_surface(item: &TaskbarItem, theme: &Theme, scale: Scale) -> Surface {
 }
 
 #[test]
-fn taskbar_item_renders_identity_in_both_themes() {
+fn taskbar_item_rests_bare_on_the_bar_and_marks_its_presence() {
     for theme in [Theme::dark(), Theme::light()] {
         let item = TaskbarItem::new("Editor", IconKind::Generic);
         let s = task_surface(&item, &theme, Scale::ONE);
+        // Its identity is drawn...
         assert!(has_pixel(&s, premul(theme.palette().on_surface)));
-        assert!(has_pixel(&s, premul(theme.palette().surface_raised)));
+        // ...and nothing else is. A resting item is seated *in* the bar, so it
+        // paints neither a plate nor a rim and the bar shows through untouched
+        // (this surface starts empty, so an unpainted pixel is a transparent
+        // one).
+        assert!(
+            !has_pixel(&s, premul(theme.palette().surface_raised)),
+            "{}: a resting item must not plate itself",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&s, premul(theme.palette().rim)),
+            "{}: a bar-seated item wears no rim",
+            theme.name()
+        );
+        // A running window states itself with a short muted mark on the lower
+        // edge instead — the only thing that tells it from a closed pin.
+        assert!(
+            region_has(
+                &s,
+                (TW / 3, TW - TW / 3),
+                (TH - 3, TH - 1),
+                premul(theme.palette().on_surface_muted)
+            ),
+            "{}: a running item shows its presence mark",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn taskbar_item_presence_mark_tells_running_from_closed_and_active() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let lower = (TH - 3, TH - 1);
+    let leading = (0, TW / 4);
+
+    // A closed pin marks nothing at all: no window, no presence.
+    let closed = task_surface(
+        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Closed),
+        &theme,
+        Scale::ONE,
+    );
+    assert!(!region_has(
+        &closed,
+        (0, TW),
+        lower,
+        premul(palette.on_surface_muted)
+    ));
+    assert!(!region_has(&closed, (0, TW), lower, premul(palette.accent)));
+
+    // A running window's mark is short and centred, so the leading end of the
+    // lower edge stays clear — the active window's full-width seam does not.
+    let running = task_surface(
+        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Running),
+        &theme,
+        Scale::ONE,
+    );
+    assert!(!region_has(
+        &running,
+        leading,
+        lower,
+        premul(palette.on_surface_muted)
+    ));
+    let active = task_surface(
+        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Active),
+        &theme,
+        Scale::ONE,
+    );
+    assert!(region_has(&active, leading, lower, premul(palette.accent)));
+}
+
+#[test]
+fn taskbar_item_washes_its_plate_under_the_pointer_without_an_edge() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let hovered = task_surface(
+            &TaskbarItem::new("Editor", IconKind::Generic)
+                .with_state(ControlState::idle().with_pointer(PointerState::Hover)),
+            &theme,
+            Scale::ONE,
+        );
+        assert!(
+            has_pixel(&hovered, premul(palette.surface_hover)),
+            "{}: hover raises the plate as a wash",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&hovered, premul(palette.rim_active)),
+            "{}: and never as an edge",
+            theme.name()
+        );
     }
 }
 
@@ -466,11 +557,42 @@ fn tray_surface(sig: &TraySignal, theme: &Theme) -> Surface {
 }
 
 #[test]
-fn tray_signal_renders_calm_capsule_in_both_themes() {
+fn tray_signal_rests_bare_on_the_bar_in_both_themes() {
     for theme in [Theme::dark(), Theme::light()] {
         let sig = TraySignal::new(IconKind::Network, "Network");
         let s = tray_surface(&sig, &theme);
-        assert!(has_pixel(&s, premul(theme.palette().rim)));
+        // The capsule is seated in the bar like every other icon on it: a calm
+        // signal is its glyph alone, with no perimeter and no plate of its own.
+        assert!(has_pixel(&s, premul(theme.palette().on_surface)));
+        assert!(
+            !has_pixel(&s, premul(theme.palette().rim)),
+            "{}: the capsule wears no rim",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&s, premul(theme.palette().surface_raised)),
+            "{}: nor a plate while it is calm",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn tray_signal_washes_its_plate_under_the_pointer_without_an_edge() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let sig = TraySignal::new(IconKind::Network, "Network")
+            .with_state(ControlState::idle().with_pointer(PointerState::Hover));
+        let s = tray_surface(&sig, &theme);
+        assert!(
+            has_pixel(&s, premul(theme.palette().surface_hover)),
+            "{}: hover raises the plate as a wash",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&s, premul(theme.palette().rim_active)),
+            "{}: and never as an edge",
+            theme.name()
+        );
     }
 }
 

@@ -153,8 +153,10 @@ impl Theme {
     /// The tokens are the Reactive Alloy design boards (`plans/desktop1.png`,
     /// `plans/desktop2a.png`) measured rather than invented: near-black cool
     /// surfaces, one alloy-orange accent family (a burnt-orange plate fill
-    /// under a bright signal edge), and the semantic signal hues the boards'
-    /// own legend fixes.
+    /// under a bright signal edge), the semantic signal hues the boards' own
+    /// legend fixes, and a hover plate one measured step above the bar fill —
+    /// the boards draw a hovered icon on the taskbar as a bare wash roughly
+    /// nine levels lighter than the bar behind it.
     #[must_use]
     pub fn dark() -> Self {
         Self::new(
@@ -170,6 +172,7 @@ impl Theme {
                 accent: Rgba::rgb(0xd1, 0x55, 0x0f),
                 on_accent: ON_ACCENT,
                 border: Rgba::rgb(0x1c, 0x23, 0x27),
+                surface_hover: Rgba::rgb(0x1e, 0x25, 0x2a),
                 surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
                 rim: Rgba::rgb(0x23, 0x2b, 0x30),
                 rim_active: Rgba::rgb(0xff, 0x60, 0x00),
@@ -220,6 +223,7 @@ impl Theme {
                 accent: Rgba::rgb(0xc8, 0x50, 0x0c),
                 on_accent: ON_ACCENT,
                 border: Rgba::rgb(0xdd, 0xd6, 0xce),
+                surface_hover: Rgba::rgb(0xee, 0xea, 0xe5),
                 surface_pressed: Rgba::rgb(0xe9, 0xe4, 0xde),
                 rim: Rgba::rgb(0xcf, 0xc7, 0xbf),
                 rim_active: Rgba::rgb(0xd2, 0x54, 0x0b),

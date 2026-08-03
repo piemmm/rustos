@@ -49,9 +49,10 @@ Rust: `ControlKind`/`ControlRole`, `ControlState` built from small typed fields
 (`FocusState`/`PointerState`/`SelectionState`/`ValidationState`/`AuthorityState`/
 `ActivityState`/`PressureState`/`RecoveryState`), the derived `ControlDisposition`
 that keeps an authority denial distinct from a plain disabled control (spec §13),
-and the window-furniture states (`WindowControlKind`/`WindowActivationState`/
-`WindowSizeState`/`WindowFurnitureState`). Illegal states are unrepresentable and
-`ProgressValue` clamps out-of-range input.
+the `PlateSeating` a control is drawn with (below), and the window-furniture
+states (`WindowControlKind`/`WindowActivationState`/`WindowSizeState`/
+`WindowFurnitureState`). Illegal states are unrepresentable and `ProgressValue`
+clamps out-of-range input.
 
 The **button family** (`button`) is the first drawn control family: `Button`,
 `IconButton`, and `SplitButton`. Each resolves every colour, metric, and corner
@@ -110,6 +111,36 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 The shared chevron and focus-ring/cell-outline primitives live once in the
 private `paint` module (`ChevronDir`/`paint_chevron`, `draw_outline`), so no
 family carries its own triangle or outline recipe.
+
+## Plate seating: a panel or a bar
+
+`PlateSeating` says where a control is seated, which decides whether it wears
+chrome of its own. It is a property of the *surface behind the control*, never
+of what the control is or what it is doing:
+
+- `Panel` (the default) — the control always wears its Alloy Plate and Signal
+  Rim, reading as a plate raised above the window or panel behind it.
+- `Bar` — the control wears **no** rim in any state, and no plate at all while
+  it has nothing of its own to state, so a run of icons reads as one continuous
+  bar instead of a row of boxed buttons.
+
+One state model, one renderer, and one resolved set of colours serve both
+seatings; the whole consequence is a single shared rule
+(`paint::FrameColors::face`), so no family can grow its own idea of a flat
+control. Nothing is discarded, only moved off the edge: a hover raises the
+shared pointer wash (`surface_hover`) and a press compresses it — the only
+pointer feedback a rimless control has, which is why `tairix-theme` guarantees
+the wash a visible step from the bar's fill — keyboard focus keeps the resting
+fill and still draws its ring (a bare frame is by construction never a focused
+one), and a denied/failed/pending/disabled control states itself on its glyph
+tint and shape-coded bead rather than a coloured edge. Focus Field membership is
+the one signal a bar-seated control cannot make, since membership is drawn only
+as a rim lift; the icon strip has no such groups.
+
+`IconButton` carries the choice (`IconButton::seated`) because it is the only
+family that appears on both a window toolbar and the desktop's icon strip.
+`shell::TaskbarItem` and `shell::TraySignal` exist only on the bar and are
+bar-seated by construction; every other family is panel-seated.
 
 ## Owner-supplied icon artwork
 

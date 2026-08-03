@@ -37,6 +37,15 @@ pub struct Palette {
     pub border: Rgba,
 
     // --- Reactive Alloy control roles -----------------------------------
+    /// The inner plate of a control while the pointer rests on it.
+    ///
+    /// A hovered control lightens its plate rather than only its edge, which
+    /// is the only feedback available to a control that wears no perimeter of
+    /// its own — an icon seated in the taskbar. It is therefore one clear step
+    /// away from [`surface_raised`](Self::surface_raised), in whichever
+    /// direction the appearance requires: brighter on a dark theme, deeper on
+    /// a light one.
+    pub surface_hover: Rgba,
     /// The inner plate of a control while it is pressed (darker than
     /// [`surface`](Self::surface)).
     pub surface_pressed: Rgba,

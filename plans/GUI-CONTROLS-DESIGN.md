@@ -332,7 +332,7 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, active and inactive window-frame roles, scroll track, and scroll thumb. |
+| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, active and inactive window-frame roles, scroll track, and scroll thumb. |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
 | Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, and invisible hit slop. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
@@ -374,6 +374,7 @@ A theme may map multiple semantic roles to the same hue only if it also provides
 | Term | Meaning |
 |---|---|
 | Alloy Plate | The base matte control surface. |
+| Plate Seating | Whether a control wears an Alloy Plate and Signal Rim of its own, or is seated *in* a bar and wears neither. |
 | Signal Rim | The one-pixel or scaled reactive perimeter. |
 | Heat Seam | A progress or activity line on an edge. |
 | Pressure Rail | A side indicator showing resource pressure. |
@@ -490,6 +491,53 @@ ControlBounds
 - Focus rings are visible in every theme and do not rely on color alone.
 - Destructive controls remain readable before and during confirmation.
 
+### Plate seating: panel or bar
+
+Where a control sits decides whether it wears chrome of its own. Seating is a
+property of the *surface behind the control*, never of what the control is or
+what it is doing, and it changes nothing else: one state model, one renderer,
+and one resolved set of colours serve both seatings.
+
+| Seating | Rendering |
+|---|---|
+| Panel | The control always wears its Alloy Plate and Signal Rim, so it reads as a plate raised above the window, dialog, or panel behind it. This is the default for every control. |
+| Bar | The control wears **no** Signal Rim in any state, and no plate at all while it has nothing of its own to state. A run of icons therefore reads as one continuous bar instead of a row of boxed buttons. |
+
+A bar-seated control is not a control with its feedback removed. Everything a
+plated control would say on its edge, it says inside its own slot:
+
+- **Hover** raises the plate as the shared pointer wash (`surface_hover`), one
+  clear step away from the bar's own fill; **press** compresses it
+  (`surface_pressed`). The wash is the *only* pointer feedback such a control
+  has, which is why the theme owes it a visible step (§6).
+- **Keyboard focus** keeps the resting fill and draws the ordinary focus ring
+  inside the plate, so focus is never confused with hover and is never dropped.
+- **A role colour** (a primary or recovery fill) still fills the plate; on an
+  icon strip of peers, though, no single icon is "the" primary action, so a
+  role fill is the exception rather than the rule there.
+- **A disposition** — denied, failed-closed, pending, disabled — states itself
+  on the glyph tint and on its shape-coded Signal Bead (§13, §15) instead of on
+  a coloured edge, so it stays legible without colour vision.
+- **Presence, activity, and pressure** state themselves on the marks a control
+  already owns: the presence mark (§11.26), the Heat Seam, the Pressure Rail,
+  and the Signal Bead.
+- **Focus Field membership** (§15) is the one signal a bar-seated control
+  cannot make, because membership is drawn *only* as a lift of the rim. Nothing
+  is lost: a Focus Field groups a row with its own actions inside a panel, and
+  the icon strip has no such groups — a bar-seated control that holds the
+  keyboard still draws the ring, which is the signal that matters.
+
+Under a **high-contrast** theme a bar-seated control does not grow a rim back:
+the strip's legibility is the theme's to strengthen, in the palette rather than
+in code. Such a theme widens the gap between its bar fill and its
+`surface_hover` / `surface_pressed` plates, exactly as it deepens every other
+role; the shape-coded beads, presence marks, and the focus ring are unchanged
+because none of them relies on an edge in the first place.
+
+The icon strip — launchers, pinned shortcuts, running-task buttons, and the
+status capsule — is bar-seated. A toolbar inside a window is not: it sits on a
+panel and keeps its plates.
+
 ### Window furniture anatomy
 
 The order below is illustrative. A theme may place or reorder the command group while preserving command identity.
@@ -541,7 +589,7 @@ Buttons are Alloy Plates with a Signal Rim and optional Heat Seam.
 | State | Rendering |
 |---|---|
 | Idle | Matte plate, quiet rim, readable label. |
-| Hover | Slight edge brightening, no layout movement. |
+| Hover | Plate wash plus edge brightening, no layout movement. |
 | Pressed | Firm compression, darker inner plate, label stable. |
 | Primary | Accent rim, no broad glow unless focused. |
 | Recommended | Action Warmth on the leading or lower edge. |
@@ -554,6 +602,11 @@ A button should not use a spinner unless the action itself owns the work. If the
 ### 11.2 IconButton
 
 Icon buttons use the same state model as buttons. The icon must come from a theme-aware glyph source and must support high-contrast rendering.
+
+The icon button is the one control that appears on both kinds of surface — a
+window toolbar and the desktop's icon strip — so it carries its plate seating
+(§10). Seating changes only how the plate is worn; the state model, hit
+testing, and every signal the button reports are identical either way.
 
 Persistent badges sit on the trailing top corner. Transient beads charge from the nearest rim and settle into the badge position.
 
@@ -662,7 +715,9 @@ Tabs use a lower seam for selected state.
 
 Rows are controls. They can be selected, focused, inspected, dragged, or linked to actions.
 
-- Hover uses a quiet plate tint.
+- Hover uses the shared pointer wash (`surface_hover`), which is deliberately
+  *not* the raised fill a selected row lifts to — the pointer never imitates
+  selection.
 - Selection uses a left rail plus background tint.
 - Live activity uses a Heat Seam at the bottom of the row.
 - Resource pressure uses a semantic rail on the leading edge.
@@ -806,7 +861,10 @@ Notifications use cards with semantic beads. They should remain compact and acti
 ### 11.26 TaskbarItem
 
 Taskbar items combine application identity (icon and label), activity,
-attention, and window-visibility state on one Alloy Plate.
+attention, and window-visibility state on one Alloy Plate. They are **bar
+seated** (§10): an item wears no Signal Rim, and rests with no plate at all, so
+a strip of pins and tasks reads as one bar and every state is stated inside the
+slot.
 
 #### Presentation
 
@@ -820,15 +878,24 @@ A taskbar item supports two presentations ([`TaskbarPresentation`]):
 
 #### Visibility states
 
-A taskbar item's window-visibility state ([`TaskVisibility`]):
+A taskbar item's window-visibility state ([`TaskVisibility`]) is stated by the
+**presence mark** on the lower edge: whether the item has a window at all, and
+whether that window is the active one. Presence and activation differ in
+*length* as well as in hue, so they are distinguishable without colour vision
+and on a bar where nothing wears an edge.
 
-- **Running** — visible but not the active window. Plate visible.
-- **Active** — the focused window. Shown with a lower accent seam.
-- **Minimized** — recessed plate and a distinct non-color mark (short muted
-  tick on the leading edge).
-- **Closed** — a pinned shortcut whose application is not running. The plate
-  stays quiet (bar-coloured, no rim) until hovered or focused, so a
-  launcher-only slot never masquerades as a running task.
+- **Running** — visible but not the active window. A short muted presence mark
+  (a fraction of the slot width, centred) on the lower edge.
+- **Active** — the focused window. The full-width accent seam on the lower edge.
+- **Minimized** — the presence mark plus a recessed plate and a distinct
+  non-color mark (short muted tick on the leading edge).
+- **Closed** — a pinned shortcut whose application is not running. No presence
+  mark and no plate: only its icon sits on the bar until hovered or focused, so
+  a launcher-only slot never masquerades as a running task.
+
+The presence mark is what tells a running application from a closed launcher
+pin, so it is never dropped: in a slot too narrow for its proportion it rounds
+up to one pixel rather than vanishing.
 
 #### Anatomy and artwork
 
@@ -838,17 +905,21 @@ The control never parses image bytes; [`icon_side`] exposes the exact pixel
 geometry (sized off the text line for labelled items, or the plate for
 icon-only items) so owners rasterise at exactly the drawn size.
 
-#### Statusfurniture
+#### Status furniture
 
-Background work shows a Heat Seam on the lower edge (just above the active
-seam if present). An attention request or recovery/denied state shows a
-shape-coded Signal Bead on the top-trailing corner.
+Background work shows a Heat Seam on the lower edge (just above the presence
+mark when there is one, so both read at once). An attention request or
+recovery/denied state shows a shape-coded Signal Bead on the top-trailing
+corner.
 
 ### 11.27 TraySignal
 
-A tray signal is a compact live status capsule.
+A tray signal is a compact live status capsule. Like every other icon on the
+strip it is **bar seated** (§10): the always-rightmost system control point
+wears no rim and rests with no plate, so it reads as part of the bar and states
+itself entirely through its own marks — its badge, beads, seam, and rail.
 
-- Normal: calm glyph and quiet rim.
+- Normal: calm glyph on the bar, no rim and no plate.
 - Background work: lower Heat Seam.
 - Pressure: side rail in semantic role.
 - Recovery: recovery bead.

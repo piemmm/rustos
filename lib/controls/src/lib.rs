@@ -208,9 +208,9 @@ pub use shell::{
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
-    FocusState, PointerState, PressureKind, PressureState, ProgressValue, RecoveryState,
-    SelectionState, SizeAction, ValidationState, WindowActivationState, WindowControlKind,
-    WindowFurnitureState, WindowSizeState,
+    FocusState, PlateSeating, PointerState, PressureKind, PressureState, ProgressValue,
+    RecoveryState, SelectionState, SizeAction, ValidationState, WindowActivationState,
+    WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 pub use switchboard::{
     ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, JobControl, JobSummary,

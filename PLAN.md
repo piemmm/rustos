@@ -3876,17 +3876,24 @@ per-app recipes (§2.2).
   client + rim/attention, grabber drag/escape/non-overlap, scroll corner).
 - **Drawn controls: shell surfaces — DONE.** `lib/controls::shell` draws
   `Notification`, `TaskbarItem`, and `TraySignal` over the shared paint core.
+  `TaskbarItem` and `TraySignal` live only on the taskbar and are **bar-seated**
+  (`PlateSeating::Bar`, the one shared seating rule in `paint::FrameColors`):
+  they wear no rim in any state and no plate at all while resting, so the icon
+  strip reads as one bar; `IconButton` carries the choice (`seated`) because it
+  is the only family that appears on both a panel and the bar.
   `Notification` composes a `Card` plus a source attribution: informational
   (quiet rim), background job (Heat Seam), warning (warning rail via the shared
   `dominant_color`), recovery (bead), and denied (Authority Mark beside the
   source) all read from its composed state; its actions are footer `Button`s
   (typed `NotificationAction`). `TaskbarItem` combines an icon+label identity
-  with a `TaskVisibility` (Running/Active/Minimized) window state — active shows
-  a lower accent seam, minimized recesses the plate + a non-colour tick — plus
-  the activity Heat Seam and an attention/recovery/denied Signal Bead, failing
-  closed on a denied click (typed `TaskbarItemAction`). `TraySignal` is a calm
-  glyph capsule that stacks severity-ordered mini beads (denied > recovery >
-  warning > complete), shows a leading pressure rail and lower Heat Seam, and
+  with a `TaskVisibility` (Closed/Running/Active/Minimized) window state, stated
+  by the lower **presence mark** — full-width accent seam for the active window,
+  a short muted mark for one merely running, nothing for a closed pin; minimized
+  adds a recessed plate + a non-colour tick — plus the activity Heat Seam and an
+  attention/recovery/denied Signal Bead, failing closed on a denied click (typed
+  `TaskbarItemAction`). `TraySignal` is a calm glyph capsule that stacks
+  severity-ordered mini beads (denied > recovery > warning > complete), shows a
+  leading pressure rail and lower Heat Seam, and
   expands on hover/focus to an instrument readout (state name, value, one safe
   action) the owner positions (typed `TraySignalAction`). 26 host tests.
 - **Drawn controls: decision surfaces — DONE.** `lib/controls::decision` draws

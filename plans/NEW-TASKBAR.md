@@ -493,11 +493,14 @@ What now stands:
   fail-closed to `Rect::EMPTY` on a degenerate screen — never hit);
   `Hit::Library`/`Hit::Files` and the typed
   `TaskbarResponse::OpenLibrary`/`OpenFiles` route a primary press. The
-  buttons are `lib/controls` `IconButton`s — Library is the accent-filled
-  `Primary` invoker carrying the new `lib/icon` `Library` glyph (a
-  three-by-three tile grid), pressed-in while its popup is open; Files is a
-  quiet `Neutral` folder glyph — with hover feedback driven through the
-  bar's per-surface repaint latch (`Taskbar::take_repaint` →
+  buttons are `lib/controls` `IconButton`s, both `Neutral` and both
+  `PlateSeating::Bar` — quiet peers seated *in* the bar, because on an icon
+  strip no single icon is the primary action of the surface. Library carries
+  the `lib/icon` `Library` glyph (a three-by-three tile grid) and compresses
+  its plate while its popup is open; Files carries the folder glyph. Neither
+  wears a role fill or a perimeter: they rest as bare glyphs on the bar and
+  wash to `surface_hover` under the pointer, with that hover feedback driven
+  through the bar's per-surface repaint latch (`Taskbar::take_repaint` →
   `TaskbarRepaint`), so a hover repaints only the surface it changed and
   never a per-frame present. The bar owns a copy of the active `Theme`
   (layout/hit/paint read one definition) and the renderer signature dropped

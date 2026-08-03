@@ -2364,37 +2364,106 @@ fn background_is_the_raised_surface_colour() {
 }
 
 #[test]
-fn library_button_paints_the_accent_plate_and_files_stays_quiet() {
+fn both_leading_launchers_rest_bare_on_the_bar() {
     let bar = bottom_bar();
     let theme = Theme::dark();
+    let palette = theme.palette();
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
-    let frame = bar.layout(Scale::ONE).bar;
     let layout = bar.layout(Scale::ONE);
+    let frame = layout.bar;
 
-    // The Library button is the accent-filled primary invoker; its plate
-    // colour appears inside its slot.
+    // Neither launcher is "the" primary action of an icon strip: both are
+    // quiet peers seated in the bar. Each inks its glyph straight onto the
+    // bar's own fill, with no role colour and no perimeter of its own — so the
+    // strip reads as one bar rather than a row of boxes.
+    for (label, slot) in [("library", layout.library), ("files", layout.files)] {
+        assert!(
+            region_has_role_ink(
+                &surface,
+                frame,
+                slot,
+                palette.on_surface,
+                role(palette.surface_raised),
+            ),
+            "the {label} glyph inks the ordinary foreground on the bar"
+        );
+        assert!(
+            !region_has_pixel(&surface, frame, slot, role(palette.accent)),
+            "the {label} slot carries no role fill"
+        );
+        assert!(
+            !region_has_pixel(&surface, frame, slot, role(palette.rim)),
+            "the {label} slot carries no rim"
+        );
+        assert!(
+            !region_has_pixel(&surface, frame, slot, role(palette.rim_active)),
+            "the {label} slot carries no reactive edge at rest"
+        );
+    }
+}
+
+#[test]
+fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
+    let mut bar = bottom_bar();
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let layout = bar.layout(Scale::ONE);
+    bar.track_hover(centre_of(layout.library), Scale::ONE);
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+
+    // The pointer's only mark is a lighter grey wash under the icon it is on.
     assert!(region_has_pixel(
         &surface,
-        frame,
+        layout.bar,
         layout.library,
-        role(theme.palette().accent)
+        role(palette.surface_hover)
     ));
-    // The quiet Files button draws no accent; its folder glyph inks the
-    // ordinary foreground over the raised plate.
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.library,
+            role(palette.rim_active)
+        ),
+        "a hovered bar icon never grows an edge"
+    );
+    // Its neighbour is untouched: the wash belongs to one slot, not the strip.
     assert!(!region_has_pixel(
         &surface,
-        frame,
+        layout.bar,
         layout.files,
-        role(theme.palette().accent)
+        role(palette.surface_hover)
     ));
-    assert!(region_has_role_ink(
+}
+
+#[test]
+fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
+    let mut bar = bottom_bar();
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let layout = bar.layout(Scale::ONE);
+    bar.open_library();
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+
+    // Held open compresses the plate rather than outlining it, so the state is
+    // legible on a bar where nothing wears an edge.
+    assert!(region_has_pixel(
         &surface,
-        frame,
+        layout.bar,
+        layout.library,
+        role(palette.surface_pressed)
+    ));
+    assert!(!region_has_pixel(
+        &surface,
+        layout.bar,
         layout.files,
-        theme.palette().on_surface,
-        role(theme.palette().surface_raised),
+        role(palette.surface_pressed)
     ));
 }
 
@@ -3097,12 +3166,14 @@ fn hovered_and_current_rows_show_their_states() {
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
 
-    // The hovered row raises its fill.
+    // The hovered row takes the pointer wash — the shared hover fill, not the
+    // raised fill a *selected* row lifts to, so the pointer never imitates
+    // selection.
     assert!(region_has_pixel(
         &surface,
         layout.panel,
         layout.rows[1].1,
-        role(theme.palette().surface_raised)
+        role(theme.palette().surface_hover)
     ));
     // The current (selected) row draws the accent selection rail in its
     // leading gutter.

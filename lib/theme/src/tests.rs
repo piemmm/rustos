@@ -43,6 +43,7 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.border, l.border);
     // The Reactive Alloy control roles and semantic signals also differ per
     // appearance, so a theme switch retunes them consistently.
+    assert_ne!(d.surface_hover, l.surface_hover);
     assert_ne!(d.surface_pressed, l.surface_pressed);
     assert_ne!(d.rim, l.rim);
     assert_ne!(d.rim_active, l.rim_active);
@@ -103,6 +104,54 @@ fn accent_labels_stay_legible_on_the_accent_fill() {
 /// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
 fn luma(c: Rgba) -> u32 {
     (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
+}
+
+#[test]
+fn pointer_plates_step_away_from_the_bar_fill_in_the_appearance_direction() {
+    // A control seated in the taskbar wears no perimeter, so its plate is the
+    // *only* thing that can report hover or press: a hover that resolved to
+    // the bar's own fill would leave such an icon with no feedback at all.
+    // Both plates must therefore separate from `surface_raised` (the bar) and
+    // from each other, and the hover must move in the direction the
+    // appearance calls for — brighter on a dark theme, deeper on a light one.
+    // The light band is the tighter of the two, so the floor is the smallest
+    // step that still reads rather than a flattering number.
+    const MIN_STEP: u32 = 4;
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        let (bar, hover, pressed) = (
+            luma(p.surface_raised),
+            luma(p.surface_hover),
+            luma(p.surface_pressed),
+        );
+        assert!(
+            hover.abs_diff(bar) >= MIN_STEP,
+            "{}: hover plate too close to the bar fill",
+            theme.name()
+        );
+        assert!(
+            hover.abs_diff(pressed) >= MIN_STEP,
+            "{}: hover plate too close to the pressed plate",
+            theme.name()
+        );
+        assert!(
+            pressed < bar,
+            "{}: a press must read as compression, never as lift",
+            theme.name()
+        );
+        match theme.appearance() {
+            Appearance::Dark => assert!(
+                hover > bar,
+                "{}: a dark hover lifts off the bar",
+                theme.name()
+            ),
+            Appearance::Light => assert!(
+                hover < bar,
+                "{}: a light hover deepens into the bar",
+                theme.name()
+            ),
+        }
+    }
 }
 
 #[test]
@@ -394,6 +443,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             accent: Rgba::rgb(80, 140, 255),
             on_accent: Rgba::rgb(0, 0, 0),
             border: Rgba::rgb(60, 60, 60),
+            surface_hover: Rgba::rgb(30, 30, 30),
             surface_pressed: Rgba::rgb(5, 5, 5),
             rim: Rgba::rgb(70, 70, 70),
             rim_active: Rgba::rgb(120, 170, 255),

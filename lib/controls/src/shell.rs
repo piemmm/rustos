@@ -28,7 +28,8 @@ use crate::paint::{
     seam_thickness, seam_width, surface_rect, to_i32, BeadShape, PlateStyle, RenderInvariant,
 };
 use crate::state::{
-    ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState, ValidationState,
+    ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
+    ValidationState,
 };
 
 // --- Notification ------------------------------------------------------
@@ -245,17 +246,39 @@ pub enum TaskbarItemAction {
 /// unrepresentable).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum TaskVisibility {
-    /// No window: a pinned shortcut whose application is not running. The
-    /// plate stays quiet (bar-coloured) until hovered or focused, so a
-    /// launcher-only slot never masquerades as a running task.
+    /// No window: a pinned shortcut whose application is not running. It shows
+    /// nothing but its icon until hovered or focused, so a launcher-only slot
+    /// never masquerades as a running task.
     Closed,
-    /// Running and visible, but not the active window.
+    /// Running and visible, but not the active window — shown with a short
+    /// muted presence mark on the lower edge.
     #[default]
     Running,
-    /// The active (focused) window — shown with a lower accent seam.
+    /// The active (focused) window — shown with a full-width accent seam on
+    /// the lower edge, so it differs from a merely running window in length as
+    /// well as in hue.
     Active,
-    /// Minimized — a recessed plate and a non-colour mark, still restorable.
+    /// Minimized — a recessed plate and a non-colour mark alongside the
+    /// presence mark, still restorable.
     Minimized,
+}
+
+/// How much of a slot's lower edge a *running* item's presence mark covers, in
+/// permille of the plate width.
+///
+/// Short enough to read as a mark rather than an edge, so the active window's
+/// full-width accent seam is distinguishable from it at a glance and by length
+/// alone.
+const PRESENCE_MARK_PERMILLE: u64 = 380;
+
+/// The width of a running item's presence mark inside an `inner_w`-wide plate:
+/// [`PRESENCE_MARK_PERMILLE`] of the plate, rounded up to one pixel so presence
+/// is never silently dropped in a narrow slot, and never wider than the plate
+/// itself.
+#[must_use]
+fn presence_mark_width(inner_w: u32) -> u32 {
+    let scaled = u64::from(inner_w) * PRESENCE_MARK_PERMILLE / 1000;
+    u32::try_from(scaled).unwrap_or(inner_w).max(1).min(inner_w)
 }
 
 /// How a [`TaskbarItem`] presents its application identity.
@@ -264,7 +287,7 @@ pub enum TaskVisibility {
 /// compact square slot (a pinned shortcut) shows only the icon, centred and
 /// sized off the plate like an icon button. The label stays part of the
 /// model either way — context surfaces and accessibility read it — only the
-/// painted content changes. Status furniture (the active seam, Heat Seam,
+/// painted content changes. Status furniture (the presence mark, Heat Seam,
 /// minimized tick, and Signal Bead) is identical in both presentations.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum TaskbarPresentation {
@@ -278,13 +301,17 @@ pub enum TaskbarPresentation {
 /// A taskbar entry for one application/window (spec §11.26).
 ///
 /// A taskbar item combines application identity (an icon and a label), live
-/// activity, attention, and window-visibility state on one Alloy Plate. A
-/// running item shows its plate; the *active* window's item shows a lower accent
-/// seam; a minimized window's item recesses its plate and shows a distinct
-/// non-colour mark while remaining restorable; background work shows a Heat
-/// Seam; an attention request or a recovery/denied state shows a shape-coded
-/// Signal Bead (spec §13, §15). It renders state and reports
-/// [`TaskbarItemAction`]; the owner performs the window operation.
+/// activity, attention, and window-visibility state on one Alloy Plate. It is
+/// always seated in the bar ([`PlateSeating::Bar`]), so it wears no perimeter
+/// and shows no plate at all while it rests: a run of pins and tasks reads as
+/// one bar rather than a row of boxes, and every state is stated *inside* the
+/// slot. An item with a window shows a lower presence mark — a short muted one
+/// while merely running, the full-width accent seam for the *active* window; a
+/// minimized window's item recesses its plate and shows a distinct non-colour
+/// mark while remaining restorable; background work shows a Heat Seam; an
+/// attention request or a recovery/denied state shows a shape-coded Signal Bead
+/// (spec §13, §15). It renders state and reports [`TaskbarItemAction`]; the
+/// owner performs the window operation.
 ///
 /// Equal items draw the same pixels, so a taskbar may use `==` as its repaint
 /// gate: the label, icon, presentation, window visibility, attention flag, and
@@ -463,24 +490,20 @@ impl TaskbarItem {
         let radius = scale.scale_length(metrics.control_corner_radius);
         let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
 
-        // A closed (not-running) pin rests without a plate at all — only the
-        // icon sits on the bar — so a launcher-only slot never reads as a
-        // running task; hover, press, or keyboard focus raise the plate as
-        // usual. A minimized item recesses its plate (a flatter fill than the
-        // raised resting plate) so it reads as put-away without relying on
-        // colour.
-        let resting_closed = self.visibility == TaskVisibility::Closed
-            && self.state.pointer == PointerState::None
-            && !self.state.focus.focused
-            && self.state.disposition() == ControlDisposition::Interactive;
-        if !resting_closed {
-            let plate = if self.visibility == TaskVisibility::Minimized
-                && self.state.disposition() != ControlDisposition::DisabledByState
-            {
-                Color::from(palette.surface)
-            } else {
-                frame.plate
-            };
+        // An item rests without a plate at all — only its icon and its presence
+        // mark sit on the bar — so a strip of pins and tasks reads as one bar
+        // and a launcher-only slot never masquerades as a running task; hover,
+        // press, or keyboard focus raise the plate as a wash. A minimized item
+        // instead recesses its plate deliberately (a flatter fill than the bar)
+        // so it reads as put-away without relying on colour.
+        let recessed = self.visibility == TaskVisibility::Minimized
+            && self.state.disposition() != ControlDisposition::DisabledByState;
+        let frame = if recessed {
+            frame.with_plate(Color::from(palette.surface))
+        } else {
+            frame
+        };
+        if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
             paint_plate(
                 surface,
                 (x, y, w, h),
@@ -488,7 +511,7 @@ impl TaskbarItem {
                     radius,
                     border,
                     plate,
-                    rim: frame.rim,
+                    rim,
                     focused: frame.focused,
                     ring: Color::from(palette.rim_active),
                 },
@@ -567,8 +590,28 @@ impl TaskbarItem {
         paint_icon_slot(surface, x, y, side, self.icon, tint, artwork);
     }
 
-    /// Paint the item's status edges and marks: the active-window accent seam,
-    /// the activity Heat Seam above it, the minimized non-colour tick, and the
+    /// The presence mark an item with a window shows on its lower edge: the
+    /// full-width accent seam for the active window, a short muted mark for a
+    /// running or minimized one, and nothing for a pinned shortcut that is not
+    /// running.
+    ///
+    /// This is what tells a running application from a closed launcher pin on a
+    /// bar where no control wears a perimeter, so the two differ in *length* as
+    /// well as in hue and stay legible without colour vision.
+    fn presence_mark(&self, inner_w: u32, theme: &Theme) -> Option<(Color, u32)> {
+        let palette = theme.palette();
+        match self.visibility {
+            TaskVisibility::Closed => None,
+            TaskVisibility::Active => Some((Color::from(palette.accent), inner_w)),
+            TaskVisibility::Running | TaskVisibility::Minimized => Some((
+                Color::from(palette.on_surface_muted),
+                presence_mark_width(inner_w),
+            )),
+        }
+    }
+
+    /// Paint the item's status edges and marks: the lower presence mark, the
+    /// activity Heat Seam above it, the minimized non-colour tick, and the
     /// top-trailing Signal Bead.
     fn paint_status(
         &self,
@@ -581,17 +624,17 @@ impl TaskbarItem {
     ) {
         let (inner_x, inner_y, inner_w, inner_h) = inner;
         let palette = theme.palette();
-        // Bottom edge: the active-window accent seam sits on the very bottom;
-        // the activity Heat Seam sits just above it so both read at once.
+        // Bottom edge: the presence mark sits on the very bottom; the activity
+        // Heat Seam sits just above it so both read at once.
         let seam_h = seam_thickness(theme, scale).min(inner_h);
         let mut seam_floor = inner_y + inner_h;
-        if self.visibility == TaskVisibility::Active {
+        if let Some((color, mark_w)) = self.presence_mark(inner_w, theme) {
             surface.fill_rect(
-                inner_x,
+                inner_x + (inner_w.saturating_sub(mark_w)) / 2,
                 seam_floor - seam_h,
-                inner_w,
+                mark_w,
                 seam_h,
-                Color::from(palette.accent),
+                color,
             );
             seam_floor = seam_floor.saturating_sub(seam_h);
         }
@@ -746,8 +789,11 @@ impl TrayBadge {
 
 /// A compact live status capsule in the notification area (spec §11.27).
 ///
-/// A tray signal is a small glyph capsule with a calm rim: background work adds
-/// a lower Heat Seam, a resource pressure adds a leading semantic rail, an
+/// A tray signal is a small glyph capsule seated in the bar
+/// ([`PlateSeating::Bar`]): it wears no perimeter of its own and rests with no
+/// plate at all, so the always-rightmost system control point reads as part of
+/// the bar and states itself entirely through its own marks. Background work
+/// adds a lower Heat Seam, a resource pressure adds a leading semantic rail, an
 /// optional [`TrayBadge`] shows a live count or alert on the top-trailing
 /// corner, and one or more alert states stack as severity-ordered mini Signal
 /// Beads starting after it (so several states read at once without colour,
@@ -937,18 +983,20 @@ impl TraySignal {
         let border = plate_border(theme, scale);
         let radius = scale.scale_length(metrics.control_corner_radius);
         let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
-        paint_plate(
-            surface,
-            (x, y, w, h),
-            &PlateStyle {
-                radius,
-                border,
-                plate: frame.plate,
-                rim: frame.rim,
-                focused: frame.focused,
-                ring: Color::from(palette.rim_active),
-            },
-        );
+        if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
+            paint_plate(
+                surface,
+                (x, y, w, h),
+                &PlateStyle {
+                    radius,
+                    border,
+                    plate,
+                    rim,
+                    focused: frame.focused,
+                    ring: Color::from(palette.rim_active),
+                },
+            );
+        }
 
         let inner_x = x + border;
         let inner_y = y + border;

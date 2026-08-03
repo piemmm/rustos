@@ -23,7 +23,9 @@ use crate::paint::{
     pointer_activation, resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape,
     ChevronDir, PlateStyle, RenderInvariant,
 };
-use crate::state::{ActivityState, ControlDisposition, ControlRole, ControlState, PointerState};
+use crate::state::{
+    ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
+};
 
 /// What a button displays: a label, an icon, or an icon with a label.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,8 +76,9 @@ enum SeamExtent {
 /// icon, or split — reads the same way and an authority denial never collapses
 /// into a plain disabled look.
 struct Resolved {
-    plate: Color,
-    rim: Color,
+    /// The plate and rim the button wears, or `None` when its seating leaves it
+    /// bare and the surface behind it shows through.
+    face: Option<(Color, Color)>,
     label: Color,
     seam: Option<(Color, SeamExtent)>,
     rail: Option<Color>,
@@ -83,12 +86,18 @@ struct Resolved {
     focused: bool,
 }
 
-/// Resolve the button's colours and edge signals for one theme and state.
+/// Resolve the button's colours and edge signals for one theme, state, and
+/// seating.
 ///
 /// The plate/rim/label/rail/bead come from the shared control resolvers so
 /// every family reads identically; only the button-specific Heat Seam (the
 /// activity/progress trace) is resolved here.
-fn resolve(theme: &Theme, role: ControlRole, state: ControlState) -> Resolved {
+fn resolve(
+    theme: &Theme,
+    role: ControlRole,
+    state: ControlState,
+    seating: PlateSeating,
+) -> Resolved {
     let palette = theme.palette();
     let disposition = state.disposition();
     let frame = resolve_frame(theme, role, state);
@@ -108,8 +117,7 @@ fn resolve(theme: &Theme, role: ControlRole, state: ControlState) -> Resolved {
     };
 
     Resolved {
-        plate: frame.plate,
-        rim: frame.rim,
+        face: frame.face(seating),
         label: frame.label,
         seam: seam.map(|(c, e)| (Color::from(c), e)),
         rail: resolve_rail(theme, state),
@@ -137,19 +145,20 @@ fn paint_frame(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme,
     let radius = scale.scale_length(metrics.control_corner_radius);
     let border = plate_border(theme, scale);
 
-    let ring = Color::from(theme.palette().rim_active);
-    paint_plate(
-        surface,
-        (x, y, w, h),
-        &PlateStyle {
-            radius,
-            border,
-            plate: res.plate,
-            rim: res.rim,
-            focused: res.focused,
-            ring,
-        },
-    );
+    if let Some((plate, rim)) = res.face {
+        paint_plate(
+            surface,
+            (x, y, w, h),
+            &PlateStyle {
+                radius,
+                border,
+                plate,
+                rim,
+                focused: res.focused,
+                ring: Color::from(theme.palette().rim_active),
+            },
+        );
+    }
 
     paint_signals(surface, (x, y, w, h), scale, theme, res);
 }
@@ -387,7 +396,7 @@ impl Button {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        let res = resolve(theme, self.role, self.state);
+        let res = resolve(theme, self.role, self.state, PlateSeating::Panel);
         paint_frame(surface, bounds, scale, theme, &res);
         if let Some(rect) = surface_rect(bounds) {
             paint_content(surface, rect, scale, theme, &res, &self.content, font);
@@ -419,15 +428,18 @@ impl Button {
 /// An action plate whose content is a single themed icon glyph (spec §11.2).
 ///
 /// It shares the button state model, rendering, and interaction; only its
-/// content differs (an [`IconKind`] rather than a label).
+/// content differs (an [`IconKind`] rather than a label) and it carries a
+/// [`PlateSeating`], because an icon button is the one control that appears
+/// both on a panel and in the taskbar's icon strip ([`Self::seated`]).
 ///
 /// Its equality is the render-equivalence relation [`Button`] documents: the
-/// icon, role, and visible state are compared; the pointer coordinate and
-/// press latch behind it are not.
+/// icon, role, seating, and visible state are compared; the pointer coordinate
+/// and press latch behind it are not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IconButton {
     icon: IconKind,
     role: ControlRole,
+    seating: PlateSeating,
     state: ControlState,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
@@ -436,16 +448,31 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    /// An icon button with the given glyph and role, in the resting state.
+    /// An icon button with the given glyph and role, in the resting state,
+    /// seated on a panel.
     #[must_use]
     pub fn new(icon: IconKind, role: ControlRole) -> Self {
         Self {
             icon,
             role,
+            seating: PlateSeating::Panel,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
         }
+    }
+
+    /// The same button seated as given.
+    ///
+    /// The icon button is the one family that appears on both kinds of surface
+    /// — a window toolbar and the taskbar's icon strip — so it is the one that
+    /// carries the choice. It changes only how the plate is worn
+    /// ([`PlateSeating`]); the state model, hit testing, and every signal the
+    /// button reports are identical either way.
+    #[must_use]
+    pub fn seated(mut self, seating: PlateSeating) -> Self {
+        self.seating = seating;
+        self
     }
 
     /// The button's icon.
@@ -458,6 +485,12 @@ impl IconButton {
     #[must_use]
     pub fn role(&self) -> ControlRole {
         self.role
+    }
+
+    /// Where the button is seated.
+    #[must_use]
+    pub fn seating(&self) -> PlateSeating {
+        self.seating
     }
 
     /// The button's current composed state.
@@ -512,7 +545,7 @@ impl IconButton {
         artwork: Option<&Surface>,
     ) {
         let _ = font;
-        let res = resolve(theme, self.role, self.state);
+        let res = resolve(theme, self.role, self.state, self.seating);
         paint_frame(surface, bounds, scale, theme, &res);
         if let Some((x, y, w, h)) = surface_rect(bounds) {
             let side = icon_content_side(w, h, plate_border(theme, scale));
@@ -663,6 +696,7 @@ impl SplitButton {
             theme,
             self.role,
             combined_state(self.primary, self.disclosure),
+            PlateSeating::Panel,
         );
         paint_frame(surface, bounds, scale, theme, &res);
         let (primary_rect, disclosure_rect) = split_regions(bounds, scale, theme);

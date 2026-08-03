@@ -12,6 +12,8 @@
 //!
 //! - [`ControlKind`] and [`ControlRole`] — what a control *is* and the
 //!   intent it carries.
+//! - [`PlateSeating`] — where a control sits, the one fact that decides
+//!   whether it wears a plate and a perimeter of its own.
 //! - [`ControlState`] — the composed run-time state of one control, built
 //!   from [`FocusState`], [`PointerState`], [`SelectionState`],
 //!   [`ValidationState`], [`AuthorityState`], [`ActivityState`],
@@ -94,6 +96,32 @@ pub enum ControlKind {
     TraySignal,
     /// A card-shaped transient message.
     Notification,
+}
+
+/// Where a control is seated, which decides whether it wears a plate and a
+/// perimeter of its own.
+///
+/// This is a property of the *surface the control sits on*, never of what the
+/// control is or what it is doing: the same [`IconButton`](crate::IconButton)
+/// is a machined plate in a window's toolbar and a bare glyph in the taskbar's
+/// icon strip, with one state model and one renderer behind both. The colour
+/// consequences are resolved in exactly one place, so no family can grow its
+/// own idea of a flat control.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum PlateSeating {
+    /// Seated on a window, dialog, or panel surface: the control always wears
+    /// its Alloy Plate and Signal Rim, so it reads as a plate raised above the
+    /// surface behind it.
+    #[default]
+    Panel,
+    /// Seated *in* a bar — the taskbar's icon strip: the control wears no
+    /// Signal Rim at any state, and no plate at all while it has nothing of
+    /// its own to state, so a run of icons reads as one continuous bar instead
+    /// of a row of boxed buttons. A hover or press raises the plate as a wash,
+    /// keyboard focus still draws its ring, and everything else a control
+    /// reports — a denial, a job, a pressure — states itself on the plate, the
+    /// glyph tint, and the beads and seams rather than on an edge.
+    Bar,
 }
 
 /// The intent a control carries, which drives its default emphasis.

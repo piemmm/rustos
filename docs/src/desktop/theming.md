@@ -22,9 +22,10 @@ bundles, under a stable `ThemeId`:
 - `Palette` — semantic `Rgba` colour roles: the surface/foreground base
   (`desktop`, `surface`, `surface_raised`, `on_surface`, `on_surface_muted`,
   `accent`, `on_accent`, `border`), the Reactive Alloy control roles
-  (`surface_pressed`, `rim`, `rim_active`, `danger`), the signal roles the
-  boards' legend fixes (the `*_pressure` set, `network_activity`, `recovery`,
-  `success`, `warning`, `denied`), and the scroll and window-frame roles
+  (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
+  signal roles the boards' legend fixes (the `*_pressure` set,
+  `network_activity`, `recovery`, `success`, `warning`, `denied`), and the
+  scroll and window-frame roles
   (`scroll_track`, `scroll_thumb`, `frame_active`, `frame_inactive`). The
   roles are named fields, not a free-form map, so a theme can never omit a
   role and a consumer can never request one that does not exist
@@ -32,6 +33,13 @@ bundles, under a stable `ThemeId`:
   signal becomes a colour. The window manager, the taskbar, and the apps all
   read these same roles, which is what makes a theme switch apply
   consistently everywhere.
+  - `surface_hover` and `surface_pressed` are the pointer plates, and they are
+    what makes a **bar-seated** control legible: an icon in the taskbar wears
+    no perimeter of its own, so its plate is the only thing that can report
+    hover or press. The hover role therefore steps *away* from
+    `surface_raised` (the bar fill) in the direction its appearance calls for —
+    brighter on dark, deeper on light — and the tests assert that separation on
+    both appearances rather than trusting the authored numbers.
   - The two frame roles are *neutral* tones, not the accent: a focused window
     takes the brighter grey and an unfocused one the dimmer, so the accent
     stays reserved for a chosen action and focus is read from the frame's tone
@@ -165,13 +173,14 @@ ask for the appearance already in use. See
 `cargo test -p tairix-theme` covers the built-in palettes (every
 appearance-dependent role differs between dark and light, `on_accent` is shared
 and stays legible on the accent fill, body and muted text clear their own
-minimum contrast, surfaces are opaque and distinct), the type ladder (every
-role's size and weight, the descending order, the base-size clamp at both
-ends, and the monospace role being the only one on the fixed-width family),
-the shared metrics/fonts/cursors, cursor lookup for every kind, and the
-registry: the dark default, runtime dark↔light switching, custom-theme
-registration and
-activation, and the fail-closed `UnknownTheme`/`DuplicateId` paths. The
+minimum contrast, the hover and pressed plates each separate from the bar fill
+in their appearance's direction, surfaces are opaque and distinct), the type
+ladder (every role's size and weight, the descending order, the base-size clamp
+at both ends, and the monospace role being the only one on the fixed-width
+family), the shared metrics/fonts/cursors, cursor lookup for every kind, and
+the registry: the dark default, runtime dark↔light switching, custom-theme
+registration and activation, and the fail-closed `UnknownTheme`/`DuplicateId`
+paths. The
 window manager's `cargo test -p tairix-wm` adds the integration tests that
 source the compositor background and a window's corner radius from the active
 theme and verify a dark→light switch changes the cleared screen. The

@@ -94,9 +94,12 @@ owns:
   Both use the familiar click-to-activate / minimise-restore rule. Both pins
   and tasks are rendered as `TaskbarItem` controls. `PinView` matched running
   windows and per-application artwork are handed in by the session.
-  `set_focused` mirrors focus into the highlight. `TaskVisibility::Closed`
-  renders a pinned application that is not running: its plate rests quiet
-  (bar-coloured) until hovered or focused.
+  `set_focused` mirrors focus into the highlight. A slot's `TaskVisibility`
+  states itself with the presence mark on its lower edge: the full-width accent
+  seam for the active window, a short muted mark for one merely running, and
+  nothing at all for `TaskVisibility::Closed` — a pinned application that is
+  not running rests as its bare icon on the bar until hovered or focused, so it
+  can never masquerade as a running task.
 - **The context menu** — `BarMenu`, the bar's one right-click surface. A
   secondary press on a pin or a library entry opens this menu. Choosing a row
   reports a typed `TaskbarResponse` (`ActivatePin`, `Unpin`, `PinEntry`, or
@@ -128,11 +131,17 @@ owns:
   `AGENTS.md` §5.4).
 - **Rendering** — `TaskbarRenderer::render` paints the bar into a
   `tairix-raster` `Surface` using the taskbar's own theme, taking the caller's
-  `tairix_icon::IconArtwork` lookup as its last argument: the leading
+  `tairix_icon::IconArtwork` lookup as its last argument: the two leading
   `IconButton`s draw with their live hover state over the shipped `Library`
   and `Folder` artwork, then each **pin** and **task slot** is drawn as a
   shared `TaskbarItem` (pins use the `Icon` presentation; tasks
-  `IconAndLabel`). Each remaining region is filled with its theme role, then
+  `IconAndLabel`). Every icon on the bar is **bar-seated**
+  (`tairix_controls::PlateSeating::Bar`): it wears no perimeter in any state and
+  no plate at all while it has nothing of its own to state, so the strip reads
+  as one bar rather than a row of boxed buttons, and a hover shows as the shared
+  pointer wash under that one slot. The rule itself lives in `lib/controls`; the
+  bar only chooses the seating (`AGENTS.md` §2.2). Each remaining region is
+  filled with its theme role, then
   the notification icons, clock, and titles are drawn on top. `pin_icon_side`
   exposes the exact pixel geometry so owners rasterise at the drawn size. The
   surface is rectangular — the window manager rounds it

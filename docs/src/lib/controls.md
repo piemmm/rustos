@@ -32,6 +32,51 @@ owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 
+## Plate seating: a panel or a bar
+
+Where a control sits decides whether it wears chrome of its own.
+`state::PlateSeating` is that one fact, and it is a property of the *surface
+behind the control* — never of what the control is or what it is doing:
+
+- `Panel` (the default) — the control always wears its Alloy Plate and Signal
+  Rim, so it reads as a plate raised above the window or panel behind it.
+- `Bar` — the control wears **no** rim in any state, and no plate at all while
+  it has nothing of its own to state. A run of icons therefore reads as one
+  continuous bar rather than a row of boxed buttons.
+
+One state model, one renderer, and one resolved set of colours serve both. The
+whole consequence is a single shared rule (`paint::FrameColors::face`), so no
+family can grow its own idea of a flat control: a bar-seated control's rim
+collapses onto its plate, and the quiet *resting* frame — the one frame in which
+a control carries no role colour, no disposition, no pointer and no keyboard —
+drops the plate entirely.
+
+Nothing about the control's feedback is discarded, only moved off the edge:
+
+- A **hover** raises the plate as the shared pointer wash (`surface_hover`), and
+  a **press** compresses it (`surface_pressed`). For a rimless control the wash
+  is the *only* pointer feedback there is, which is why `lib/theme` owes it a
+  visible step away from the bar's own fill and asserts that separation on both
+  appearances.
+- **Keyboard focus** keeps the resting fill and takes the ordinary focus ring,
+  so focus never reads as hover — and a bare frame is by construction never a
+  focused one, so the ring can never be dropped along with the plate.
+- A **disposition** (denied, failed-closed, pending, disabled) states itself on
+  the glyph tint and its shape-coded Signal Bead rather than a coloured edge, so
+  it stays legible without colour vision.
+- Presence, activity, and pressure use the marks the control already owns: the
+  `TaskbarItem` presence mark, the Heat Seam, the Pressure Rail, the bead.
+- Focus Field membership (below) is the one signal a bar-seated control cannot
+  make, because membership is drawn only as a lift of the rim. A Focus Field
+  groups a row with its own actions inside a panel, and the icon strip has no
+  such groups.
+
+`IconButton` is the only family that carries the choice (`IconButton::seated`),
+because it is the only one that appears on both kinds of surface — a window
+toolbar and the desktop's icon strip. `shell::TaskbarItem` and
+`shell::TraySignal` exist only on the bar and are bar-seated by construction;
+everything else is panel-seated.
+
 ## Owner-supplied icon artwork
 
 Four controls draw an icon whose artwork their owner may already hold

@@ -76,13 +76,14 @@ fn paint_row(
         SelectionState::Selected | SelectionState::Mixed
     );
 
-    // Background tint: a pressed row recesses; a selected or hovered row lifts
-    // to the raised surface (selection is further distinguished by its accent
-    // rail below); a resting row is the base surface.
+    // Background tint: a pressed row recesses; a selected row lifts to the
+    // raised surface (and is further distinguished by its accent rail below); a
+    // hovered row takes the shared pointer wash, so the pointer never imitates
+    // selection; a resting row is the base surface.
     let fill = match state.pointer {
         crate::state::PointerState::Pressed => palette.surface_pressed,
         _ if selected => palette.surface_raised,
-        crate::state::PointerState::Hover => palette.surface_raised,
+        crate::state::PointerState::Hover => palette.surface_hover,
         _ => palette.surface,
     };
     surface.fill_rect(x, y, w, h, Color::from(fill));

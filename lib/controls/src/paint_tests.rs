@@ -12,7 +12,8 @@ use tairix_theme::{Rgba, Theme};
 
 use crate::paint::{resolve_frame, FrameColors};
 use crate::state::{
-    AuthorityState, ControlRole, ControlState, FocusState, PointerState, ValidationState,
+    AuthorityState, ControlRole, ControlState, FocusState, PlateSeating, PointerState,
+    ValidationState,
 };
 use crate::testkit::high_contrast;
 
@@ -21,6 +22,76 @@ fn pointer(pointer: PointerState) -> ControlState {
         pointer,
         ..ControlState::idle()
     }
+}
+
+/// Every role in the vocabulary, so a seating invariant is asserted across the
+/// whole set rather than a sample of it.
+const EVERY_ROLE: [ControlRole; 7] = [
+    ControlRole::Neutral,
+    ControlRole::Primary,
+    ControlRole::Recommended,
+    ControlRole::Destructive,
+    ControlRole::Recovery,
+    ControlRole::Navigation,
+    ControlRole::System,
+];
+
+/// Every state that changes how a frame resolves: each disposition crossed
+/// with each pointer relationship and each focus relationship.
+///
+/// The seating rules are absolutes ("never an edge on the bar", "never hide a
+/// focus ring"), so they are checked exhaustively rather than on the handful of
+/// states a renderer happens to produce today.
+fn every_state() -> impl Iterator<Item = ControlState> {
+    let dispositions = [
+        ControlState::idle(),
+        ControlState {
+            enabled: false,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::Denied,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::NeedsCapability,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::FailedClosed,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::NeedsConfirmation,
+            ..ControlState::idle()
+        },
+        ControlState {
+            validation: ValidationState::Pending,
+            ..ControlState::idle()
+        },
+    ];
+    let pointers = [
+        PointerState::None,
+        PointerState::Hover,
+        PointerState::Pressed,
+        PointerState::DragSource,
+        PointerState::DragTarget,
+    ];
+    let focuses = [(false, false), (true, false), (false, true)];
+    dispositions.into_iter().flat_map(move |base| {
+        pointers.into_iter().flat_map(move |pointer| {
+            focuses
+                .into_iter()
+                .map(move |(focused, in_focus_field)| ControlState {
+                    pointer,
+                    focus: FocusState {
+                        focused,
+                        in_focus_field,
+                    },
+                    ..base
+                })
+        })
+    })
 }
 
 /// A resting control that belongs to a highlighted Focus Field but does not
@@ -162,11 +233,16 @@ fn press_colours_a_quiet_control_edge_and_label() {
 }
 
 #[test]
-fn hover_lifts_a_quiet_rim_without_colouring_its_label() {
+fn hover_washes_a_quiet_plate_and_lifts_its_rim_without_colouring_its_label() {
     let theme = Theme::dark();
     let palette = theme.palette();
+    let rest = resolve_frame(&theme, ControlRole::Neutral, ControlState::idle());
     let frame = resolve_frame(&theme, ControlRole::Neutral, pointer(PointerState::Hover));
-    assert_eq!(frame.plate, rgb(palette.surface_raised));
+    assert_eq!(frame.plate, rgb(palette.surface_hover));
+    assert_ne!(
+        frame.plate, rest.plate,
+        "the plate itself washes, so a control with no rim still reports the pointer"
+    );
     assert_eq!(frame.rim, rgb(palette.rim_active));
     assert_eq!(frame.label, rgb(palette.on_surface));
 }
@@ -395,6 +471,134 @@ fn failed_closed_outlines_the_recovery_role_and_pending_the_active_rim() {
     let frame = resolve_frame(&theme, ControlRole::Primary, checking);
     assert_eq!(frame.rim, rgb(palette.rim_active));
     assert_eq!(frame.label, rgb(palette.rim_active));
+}
+
+#[test]
+fn a_panel_seated_control_always_wears_its_resolved_plate_and_rim() {
+    let theme = Theme::dark();
+    for state in every_state() {
+        for role in EVERY_ROLE {
+            let frame = resolve_frame(&theme, role, state);
+            assert_eq!(
+                frame.face(PlateSeating::Panel),
+                Some((frame.plate, frame.rim)),
+                "{role:?} on a panel is a plate with a rim in every state"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bar_seated_control_never_wears_a_rim_in_any_state() {
+    // The bar is one surface: an icon on it may wash, tint, bead, or seam, but
+    // it may never draw a perimeter of its own in *any* state, or a strip of
+    // icons reads as a row of boxes.
+    let theme = Theme::dark();
+    for state in every_state() {
+        for role in EVERY_ROLE {
+            let frame = resolve_frame(&theme, role, state);
+            if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
+                assert_eq!(
+                    rim,
+                    plate,
+                    "{role:?}/{:?} put an edge on a bar-seated control",
+                    state.disposition()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_bar_seated_control_is_bare_only_while_it_has_nothing_to_state() {
+    let theme = Theme::dark();
+    let quiet_rest = resolve_frame(&theme, ControlRole::Neutral, ControlState::idle());
+    assert_eq!(
+        quiet_rest.face(PlateSeating::Bar),
+        None,
+        "a resting quiet icon is the bar it sits in"
+    );
+
+    // Anything the control has to say raises its plate: the pointer, the
+    // keyboard, a role colour, or a disposition.
+    let speaking = [
+        pointer(PointerState::Hover),
+        pointer(PointerState::Pressed),
+        ControlState {
+            focus: FocusState {
+                focused: true,
+                in_focus_field: false,
+            },
+            ..ControlState::idle()
+        },
+        ControlState {
+            enabled: false,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::Denied,
+            ..ControlState::idle()
+        },
+        ControlState {
+            authority: AuthorityState::FailedClosed,
+            ..ControlState::idle()
+        },
+        ControlState {
+            validation: ValidationState::Pending,
+            ..ControlState::idle()
+        },
+    ];
+    for state in speaking {
+        assert!(
+            resolve_frame(&theme, ControlRole::Neutral, state)
+                .face(PlateSeating::Bar)
+                .is_some(),
+            "{:?} must be visible on the bar",
+            state.disposition()
+        );
+    }
+    for role in [
+        ControlRole::Primary,
+        ControlRole::Recovery,
+        ControlRole::Recommended,
+        ControlRole::Destructive,
+    ] {
+        assert!(
+            resolve_frame(&theme, role, ControlState::idle())
+                .face(PlateSeating::Bar)
+                .is_some(),
+            "{role:?} carries a colour, so it is never bare"
+        );
+    }
+}
+
+#[test]
+fn a_bare_bar_seated_control_never_hides_a_focus_ring() {
+    // `face` returning `None` skips the plate painter, and the focus ring is
+    // drawn inside the plate — so a bare frame must never be a focused one.
+    let theme = Theme::dark();
+    for state in every_state() {
+        for role in EVERY_ROLE {
+            let frame = resolve_frame(&theme, role, state);
+            assert!(
+                frame.face(PlateSeating::Bar).is_some() || !frame.focused,
+                "{role:?} would drop the focus ring of a focused control"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deliberate_plate_is_worn_even_on_a_bar() {
+    let theme = Theme::dark();
+    let recessed = rgb(theme.palette().surface);
+    let frame =
+        resolve_frame(&theme, ControlRole::Neutral, ControlState::idle()).with_plate(recessed);
+    assert_eq!(
+        frame.face(PlateSeating::Bar),
+        Some((recessed, recessed)),
+        "a chosen fill is a statement, and still wears no rim"
+    );
 }
 
 #[test]

@@ -22,8 +22,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, Theme};
 
 use crate::state::{
-    ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, PressureKind,
-    PressureState, RecoveryState, ValidationState,
+    ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
+    PressureKind, PressureState, RecoveryState, ValidationState,
 };
 
 /// A value the renderer never reads, wrapped so it cannot make two controls
@@ -332,6 +332,59 @@ pub(crate) struct FrameColors {
     pub label: Color,
     /// Whether the control draws its focus ring.
     pub focused: bool,
+    /// Whether this is the *quiet resting* frame: the control carries no role
+    /// colour, no disposition to report, and neither the pointer nor the
+    /// keyboard is on it, so it has nothing of its own to state. Kept private
+    /// because it is not a colour a renderer paints — it is the one fact
+    /// [`FrameColors::face`] needs to decide whether a bar-seated control
+    /// wears a plate at all.
+    resting: bool,
+}
+
+impl FrameColors {
+    /// The Alloy Plate fill and Signal Rim a control of this `seating` wears,
+    /// or `None` when it wears neither.
+    ///
+    /// This is the one definition of what seating changes, so no family can
+    /// grow its own idea of a flat control:
+    ///
+    /// - [`PlateSeating::Panel`]: the resolved plate and rim, always. The
+    ///   control is a machined plate raised above the surface behind it.
+    /// - [`PlateSeating::Bar`]: the resolved plate with its rim collapsed onto
+    ///   it, so the control never wears a perimeter of its own at any state —
+    ///   and `None` in the quiet resting frame, so the bar's own fill shows
+    ///   through and a strip of icons reads as one bar rather than a row of
+    ///   boxes. Hover, press, focus, a role colour, or a disposition all leave
+    ///   the resting frame and so raise the plate.
+    ///
+    /// A bar-seated control therefore states everything on its plate wash, its
+    /// label tint, and its beads/seams/rails — never on an edge. Nothing is
+    /// lost by dropping the rim: the disposition an outlined frame would have
+    /// put on the edge stays on the label *and* on the non-colour Signal Bead
+    /// shape ([`resolve_bead`]), and a bare frame is by construction never the
+    /// focused one, so the focus ring is never suppressed.
+    #[must_use]
+    pub(crate) fn face(&self, seating: PlateSeating) -> Option<(Color, Color)> {
+        match seating {
+            PlateSeating::Panel => Some((self.plate, self.rim)),
+            PlateSeating::Bar if self.resting => None,
+            PlateSeating::Bar => Some((self.plate, self.plate)),
+        }
+    }
+
+    /// The same frame wearing `plate` instead of its resolved fill.
+    ///
+    /// A deliberate fill is a statement, so the frame stops being the quiet
+    /// resting one: a bar-seated control that recesses its plate to read as
+    /// put-away paints that recess rather than dropping the plate entirely.
+    #[must_use]
+    pub(crate) fn with_plate(self, plate: Color) -> Self {
+        Self {
+            plate,
+            resting: false,
+            ..self
+        }
+    }
 }
 
 /// How strongly a control's role is stated on its surface.
@@ -458,34 +511,63 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         }
     };
 
-    let (plate, rim, label) = match emphasis {
+    // The fourth element marks the *quiet resting* frame: the single arm in
+    // which a control states nothing of its own, and so the only one in which
+    // a bar-seated control wears no plate ([`FrameColors::face`]). It is
+    // carried out of the match rather than re-derived from the guards, which
+    // could silently drift from them.
+    let (plate, rim, label, resting) = match emphasis {
         Emphasis::Filled(color) => {
             let fill = filled_plate(color, pointer);
-            (fill, fill, palette.on_accent)
+            (fill, fill, palette.on_accent, false)
         }
         // A press promotes an outlined control to a filled one: the colour it
         // was stating on its edge takes the plate, edge included.
         Emphasis::Outlined(color) if pointer == PointerState::Pressed => {
             let fill = filled_plate(color, pointer);
-            (fill, fill, palette.on_accent)
+            (fill, fill, palette.on_accent, false)
         }
-        Emphasis::Outlined(color) => (palette.surface_raised, color, color),
-        Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => {
-            (palette.surface, palette.border, palette.on_surface_muted)
-        }
+        Emphasis::Outlined(color) => (palette.surface_raised, color, color, false),
+        Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => (
+            palette.surface,
+            palette.border,
+            palette.on_surface_muted,
+            false,
+        ),
         // A quiet control has no colour of its own, so a press borrows the
         // active rim for both its edge and its label.
         Emphasis::Quiet if pointer == PointerState::Pressed => (
             palette.surface_pressed,
             palette.rim_active,
             palette.rim_active,
+            false,
         ),
-        Emphasis::Quiet if pointer == PointerState::Hover || state.focus.focused => (
+        // A hover lightens the plate as well as lifting the rim. The wash is
+        // the whole of the feedback for a control that wears no rim at all, and
+        // on a plated one it reads as the plate warming under the pointer.
+        Emphasis::Quiet if pointer == PointerState::Hover => (
+            palette.surface_hover,
+            palette.rim_active,
+            palette.on_surface,
+            false,
+        ),
+        // Keyboard focus states itself on the rim and the ring, never on the
+        // plate: the wash belongs to the pointer, so a control the keyboard is
+        // merely resting on is not mistaken for one under the cursor. It is
+        // still not *resting*, so a bar-seated control keeps a plate to draw
+        // its ring inside.
+        Emphasis::Quiet if state.focus.focused => (
             palette.surface_raised,
             palette.rim_active,
             palette.on_surface,
+            false,
         ),
-        Emphasis::Quiet => (palette.surface_raised, palette.rim, palette.on_surface),
+        Emphasis::Quiet => (
+            palette.surface_raised,
+            palette.rim,
+            palette.on_surface,
+            true,
+        ),
     };
 
     // A disposition that owns the rim outranks the Focus Field. A disabled,
@@ -509,6 +591,7 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         rim: Color::from(rim),
         label: Color::from(label),
         focused: state.focus.focused,
+        resting,
     }
 }
 
@@ -601,7 +684,12 @@ pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), sty
         return;
     };
     let inner_radius = style.radius.saturating_sub(style.border);
-    surface.fill_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
+    // A rimless plate — one seated in a bar, whose rim is its own fill — is a
+    // single fill: the perimeter pass has already painted every pixel the
+    // inner pass would, so repeating it is pure waste on a repaint path.
+    if style.plate != style.rim {
+        surface.fill_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
+    }
 
     if style.focused {
         let gap = style.border;

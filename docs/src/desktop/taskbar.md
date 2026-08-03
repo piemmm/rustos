@@ -48,11 +48,13 @@ code is otherwise orientation-agnostic.
 
 From the leading end to the trailing end:
 
-- **Library button** — the first of the two permanent leading launchers:
-  the accent-filled invoker that opens the program-library popup.
-- **Files button** — the second permanent launcher: a quiet folder-glyph
-  button that opens the file manager. The two leading buttons are fixed —
-  never reordered, never removable (`plans/NEW-TASKBAR.md` T4).
+- **Library button** — the first of the two permanent leading launchers: the
+  nine-tile-glyph invoker that opens the program-library popup.
+- **Files button** — the second permanent launcher: a folder-glyph button that
+  opens the file manager. The two leading buttons are fixed — never reordered,
+  never removable (`plans/NEW-TASKBAR.md` T4) — and they are quiet peers: on an
+  icon strip no single icon is the primary action of the surface, so neither
+  carries a role fill.
 - **Pin strip** — one compact square slot per user-pinned application
   shortcut, in the user's stored order, between the launchers and the task
   list (`plans/NEW-TASKBAR.md` T6). Zero-length (but still positioned) when
@@ -193,21 +195,31 @@ colour role from the `Palette`. Its last argument is the caller's
 `NoArtwork` on a system that has none (see *Icon artwork*, below):
 
 - the bar background is the **raised surface** colour;
+- every icon on the bar is **bar-seated** (`PlateSeating::Bar`): it wears no
+  perimeter in any state, and no plate at all while it has nothing of its own to
+  state, so the strip reads as one bar rather than a row of boxed buttons. A
+  hover raises the shared pointer wash (`surface_hover`, one clear step from the
+  bar's own fill), a press compresses it (`surface_pressed`), and keyboard focus
+  keeps the resting fill and draws its ring inside the slot. The rule itself
+  lives in `tairix-controls` (`plans/GUI-CONTROLS-DESIGN.md` §10), not here — the
+  bar chooses the seating and nothing else;
 - the **Library button** is the shared `tairix-controls` `IconButton` in the
-  `Primary` role — the accent-filled plate carrying the shipped `Library`
-  artwork over its nine-tile glyph — pressed in while its popup is open,
-  hover-lit under the pointer;
-- the **Files button** is a quiet (`Neutral`) `IconButton` carrying the
+  quiet `Neutral` role, carrying the shipped `Library` artwork over its
+  nine-tile glyph — compressed while its popup is open, washed under the
+  pointer;
+- the **Files button** is the same quiet (`Neutral`) `IconButton` carrying the
   shipped `Folder` artwork over its folder glyph;
 - each **pin slot** and each **task slot** is one shared `tairix-controls`
   `TaskbarItem` — the bar's application buttons have exactly one visual
   recipe (`AGENTS.md` §2.2). A pin uses the icon-only presentation (a
   centred icon sized off the plate); a task shows its icon beside the
-  truncated window title. The item's `TaskVisibility` paints the state: the
-  **active** window's item shows the lower accent seam, a **minimised** one
-  recesses its plate and shows the muted tick, a running one rests on its
-  plate, and a **closed** pin (its application not running) rests without a
-  plate at all — only the icon sits on the bar — until hovered;
+  truncated window title. The item's `TaskVisibility` paints the state through
+  the **presence mark** on the lower edge: the **active** window's item takes
+  the full-width accent seam, a merely **running** one a short centred muted
+  mark (so presence and activation differ in length as well as in hue), a
+  **minimised** one that same mark plus a recessed plate and the muted leading
+  tick, and a **closed** pin (its application not running) no mark and no plate
+  at all — only the icon sits on the bar — until hovered;
 - a pin's per-application **artwork** (its bundle icon, read and rasterised by
   the session through the sandboxed icon pipeline — see
   [the session](session.md)) is blitted through the control in place of the
@@ -216,9 +228,10 @@ colour role from the `Palette`. Its last argument is the caller's
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour;
 - the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
-  drawn in its slot — the mixer-glyph plate with its live badge, seam, rail,
-  and beads — and `TaskbarRenderer::render_tray_readout` paints the expanded
-  instrument readout as its own popover surface, rounded by the window
+  drawn in its slot — the mixer glyph with its live badge, seam, rail, and
+  beads, bar-seated like every other icon on the strip, so it carries no
+  outline of its own — and `TaskbarRenderer::render_tray_readout` paints the
+  expanded instrument readout as its own popover surface, rounded by the window
   manager with `TrayReadoutLayout::corner_radius`.
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
@@ -638,9 +651,9 @@ first drop, appends past the last slot, vertical bars), the live visibility
 derivation (running / active / minimised / closed / stale match), pin
 activation (launch vs the task click rule), the context menu's rows,
 modality, keyboard path, click-away, entry pin/unpin verb switch, menu
-geometry on every edge, and the rendered pin plates — artwork override,
-built-in glyph fallback, a focused pin's accent seam, and a task borrowing
-its pin's artwork.
+geometry on every edge, and the rendered pin slots — artwork override,
+built-in glyph fallback, a focused pin's full-width accent seam, and a task
+borrowing its pin's artwork.
 The popup model tests cover taxonomy-ordered folders with name-sorted
 entries, hidden empty folders, folder labels, the calm empty and no-match
 placeholders, the deterministic reopen state, case-insensitive filtering with
@@ -656,12 +669,15 @@ a drop that launches neither the pressed row nor the row it ended over and
 leaves the popup open, `Escape` withdraws and keeps the popup open (the
 release that follows drops nothing and a second `Escape` dismisses as ever),
 and a folder header arms nothing.
-The rendering tests probe painted pixels for the bar
-regions, the accent Library plate and quiet Files glyph, focused / unfocused
-/ minimised task fills, notification glyphs (including the unknown-asset
-fallback and cache retint on theme switch), clock and truncated task-title
-text, and the popup's panel, rows, hover/selection states, placeholder ink,
-scrollbar, and dark / light / high-contrast rendering.
+The rendering tests probe painted pixels for the bar regions; both launchers
+resting bare on the bar (glyph ink on the bar's own fill, with no role fill,
+no rim, and no reactive edge); the hover wash appearing under the pointer
+in that slot alone and never as an edge; the Library button compressed while
+its popup is open; focused / unfocused / minimised task fills; notification
+glyphs (including the unknown-asset fallback and cache retint on theme
+switch); clock and truncated task-title text; and the popup's panel, rows,
+hover/selection states, placeholder ink, scrollbar, and dark / light /
+high-contrast rendering.
 The icon-artwork tests drive `render` with a recording lookup: the two
 launcher buttons ask for the `Library` and `Folder` kinds at their drawn side
 and blit what comes back, an application slot with no artwork of its own

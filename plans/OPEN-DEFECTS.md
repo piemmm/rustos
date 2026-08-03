@@ -337,6 +337,8 @@ The open items, in priority order:
   root-unlock independence are both cleared by code inspection, and its
   budget was already once enlarged for this same reason — so the fix is
   bounded guest concurrency or a real completion signal, never a third bump.
+  Reproduced again under a whole-project `ci`; the same run measures the
+  lone-run cost at ~30 s, bounding the gap at >12× (detail below).
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -1263,6 +1265,17 @@ shape) or *genuinely stalled at a fixed point*. The transcript cannot
 distinguish them: the harness persists whatever serial output existed when it
 killed the guest, and this vertical is silent-by-design after boot — it waits
 for the host peer's echo campaign rather than narrating.
+
+**Bound on the gap (measured).** Run alone on the same 22-thread host the
+enrolment completes in **~30 s** of guest time (`cargo xtask test --qemu --only
+netstack-dhcp-qemu-riscv64`, 36 s wall including its build). Inside the full
+pipeline it exceeds **360 s**. Any starvation explanation therefore has to
+account for a **>12×** slowdown while the matrix admits at most three
+uniprocessor guests (weight 2 each) against a budget of 7 — so either the rest
+of the pipeline loads the host far beyond what `qemu_host_budget_for` assumes,
+or the slowdown is not proportional and the guest is stalled. This narrows the
+two candidates but does not yet choose between them; the per-event timestamp
+comparison below is still the evidence that settles it.
 
 **Evidence that would settle it.** Re-run the full pipeline capturing
 wall-clock timestamps per boot-audit event, and compare the guest's logical

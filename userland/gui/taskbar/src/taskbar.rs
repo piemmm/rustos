@@ -20,7 +20,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_controls::{
-    ControlRole, IconButton, PointerState, TaskbarItem, TaskbarPresentation, TraySignalAction,
+    ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TaskbarPresentation,
+    TraySignalAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -150,15 +151,24 @@ impl Taskbar {
     /// Build a taskbar for `config`, adopting `theme` as its active theme.
     ///
     /// The two permanent leading buttons are seeded here: the Library button
-    /// (accent-filled — the desktop's one primary invoker) and the quiet
-    /// Files button. They are fixed: nothing can reorder or remove them.
+    /// and the Files button. They are fixed: nothing can reorder or remove
+    /// them.
+    ///
+    /// Both are ordinary quiet peers seated *in* the bar
+    /// ([`PlateSeating::Bar`]): on an icon strip no single icon is the primary
+    /// action of the surface, so neither wears a role fill or a perimeter of
+    /// its own. They rest as bare glyphs on the bar, wash lighter under the
+    /// pointer, and — for the Library button — read as held down while its
+    /// popup is open.
     #[must_use]
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
             theme: theme.clone(),
-            library_button: IconButton::new(IconKind::Library, ControlRole::Primary),
-            files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral),
+            library_button: IconButton::new(IconKind::Library, ControlRole::Neutral)
+                .seated(PlateSeating::Bar),
+            files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral)
+                .seated(PlateSeating::Bar),
             library: LibraryPopup::new(),
             pins: PinStrip::new(),
             menu: BarMenu::new(),
