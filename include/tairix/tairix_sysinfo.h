@@ -93,6 +93,14 @@
 #define TAIRIX_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
 #define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
 #define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
+/* Storage medium of the block device backing a mount (uint8_t).
+   UNKNOWN covers both a mount with no block backing and a class this
+   ABI does not define: the record never guesses a medium. */
+#define TAIRIX_MOUNT_MEDIUM_UNKNOWN ((uint8_t)0u)
+#define TAIRIX_MOUNT_MEDIUM_ROTATIONAL ((uint8_t)1u)
+#define TAIRIX_MOUNT_MEDIUM_SOLID_STATE ((uint8_t)2u)
+#define TAIRIX_MOUNT_MEDIUM_REMOVABLE ((uint8_t)3u)
+#define TAIRIX_MOUNT_MEDIUM_VIRTUAL ((uint8_t)4u)
 #define TAIRIX_USER_DIRECTORY_NAME_MAX 32u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
@@ -104,7 +112,7 @@
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define TAIRIX_MOUNT_LIST_REQUEST_WIRE_LEN 8u
-#define TAIRIX_MOUNT_RECORD_WIRE_LEN 216u
+#define TAIRIX_MOUNT_RECORD_WIRE_LEN 224u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_REQUEST_WIRE_LEN 8u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -201,6 +209,9 @@ typedef struct tairix_mount_list_request {
 /* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);
 * its flag bits are defined by the filesystem driver ABI. `availability` is
 * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).
+* `medium` is the storage medium of the block device backing the mount, a
+* TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block
+* device backs it or its class was not recognised -- never a guess.
 * `usage` is the backing volume's space accounting (all-zero when none is
 * known). `volume_id` is the volume's stable published identity (all-zero
 * when the mount has none), the identity a volume_detach request names.
@@ -212,6 +223,8 @@ typedef struct tairix_mount_record {
     uint8_t target_len;
     uint8_t fstype_len;
     uint8_t availability;
+    uint8_t medium;
+    uint8_t reserved0[7];
     tairix_volume_stats_t usage;
     uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];
     uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];

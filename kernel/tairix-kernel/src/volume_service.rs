@@ -78,6 +78,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
@@ -94,7 +95,9 @@ use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::{BlkClient, VolumeHealthSource};
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
-use tairix_kernel_core::{Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService};
+use tairix_kernel_core::{
+    Metadata, Mode, MountBacking, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
+};
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
@@ -593,13 +596,17 @@ fn open_filesystem(
 }
 
 /// Mount the volume served by `handle` at `/Storage/<name>` with the
-/// removable-media flags (the device's write policy carried as `ro`),
-/// returning the mount `Path` for the caller's unwind. Fails closed with
-/// the `(cause, errno)` pair the attach path audits.
+/// removable-media flags, returning the mount `Path` for the caller's
+/// unwind. Fails closed with the `(cause, errno)` pair the attach path
+/// audits.
+///
+/// The mount takes both the write policy it carries as `ro` and the storage
+/// medium it reports from `device`, so the two facts of the one drive can
+/// never be sourced from different places.
 fn mount_storage_volume(
     vfs: &Vfs,
     name: &str,
-    read_only: bool,
+    device: &SharedDevice,
     handle: DriverHandle,
     map_gid: Option<GroupId>,
 ) -> Result<Path, (&'static str, Errno)> {
@@ -608,8 +615,8 @@ fn mount_storage_volume(
     vfs.mounts_write()
         .mount_with_template(
             path.clone(),
-            mount_flags(read_only),
-            handle,
+            mount_flags(device.read_only),
+            MountBacking::new(handle, device.class),
             mount_template(map_gid),
         )
         .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
@@ -664,6 +671,11 @@ struct SharedDevice {
     device: Arc<SharedBlock<BlkClient>>,
     /// The device's write policy, read once at connect.
     read_only: bool,
+    /// The storage medium the device declared at connect, carried onto every
+    /// mount that lives on it so a volume reports the drive it is really on.
+    /// `None` is a device whose declared class this build does not recognise,
+    /// which the mount reports as unknown rather than as a guessed medium.
+    class: Option<BlkDeviceClass>,
     /// The device's reported-health overlay, folded once for every volume
     /// on the device.
     health: VolumeHealthSource,
@@ -699,6 +711,7 @@ fn connect_device(
     let client = BlkClient::connect(request.endpoint, hold, wiring.audit)
         .map_err(|err| ("endpoint_unusable", err))?;
     let read_only = client.read_only();
+    let class = client.declared_class();
     let health = client.health_source();
     // Wrapping caches the geometry, so the shared device answers it
     // lock-free; a device whose geometry cannot be read is never wrapped.
@@ -708,6 +721,7 @@ fn connect_device(
         window: request.window,
         device: Arc::new(device),
         read_only,
+        class,
         health,
     })
 }
@@ -912,7 +926,6 @@ impl VolumeService for RuntimeVolumeService {
             .shared_device(request, wiring)
             .map_err(|(cause, errno)| refused(cause, errno))?;
         validate_extent(request, &device).map_err(|(cause, errno)| refused(cause, errno))?;
-        let read_only = device.read_only;
         let block_size = device.block_size();
         let mut disk = device.window();
 
@@ -947,7 +960,7 @@ impl VolumeService for RuntimeVolumeService {
         let opened = open_filesystem(
             window,
             request.fstype,
-            read_only,
+            device.read_only,
             map_gid,
             wiring,
             handle_raw,
@@ -958,7 +971,7 @@ impl VolumeService for RuntimeVolumeService {
 
         // Mount under the catalog view location with the removable-media
         // flags; the device's write policy is carried as `ro`.
-        let path = mount_storage_volume(vfs, name, read_only, handle, map_gid)
+        let path = mount_storage_volume(vfs, name, &device, handle, map_gid)
             .map_err(|(cause, errno)| refused(cause, errno))?;
 
         // Register the live driver, then publish the identity last; each
@@ -1471,7 +1484,7 @@ impl RuntimeVolumeService {
                 .mount_with_template(
                     target.path.clone(),
                     mount_flags(read_only),
-                    target.handle,
+                    MountBacking::new(target.handle, device.class),
                     mount_template(map_gid),
                 )
                 .is_err()

@@ -43,6 +43,7 @@
 
 extern crate alloc;
 
+pub mod artwork;
 pub mod glyph;
 pub mod load;
 pub mod svg;
@@ -51,7 +52,12 @@ pub mod vector;
 #[cfg(test)]
 mod tests;
 
-pub use glyph::{builtin_icon, IconKind};
+pub use artwork::{
+    artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
+    ArtworkRasteriser, ArtworkReader, CachedArtwork, IconArtwork, IconArtworkSource, NoArtwork,
+    ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR, MAX_ARTWORK_BYTES,
+};
+pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use svg::decode as decode_svg;
 pub use vector::{IconLayer, VectorIcon};

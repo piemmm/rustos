@@ -92,8 +92,10 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     budget: IoBudget,
     /// The class the device declared, kept so a composition layered over this
     /// client reports the real hardware's envelope rather than the
-    /// unclassified default.
-    class: BlkDeviceClass,
+    /// unclassified default. `None` is a device that declared a class word
+    /// this build does not recognise, held distinct from every named class so
+    /// nothing above reports a medium the device never declared.
+    declared_class: Option<BlkDeviceClass>,
 }
 
 impl<'w, C: BlkCall> RemoteBlock<'w, C> {
@@ -144,8 +146,8 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             // Until the device answers there is nothing to classify it by, so
             // the geometry query itself runs on the bounded unclassified
             // envelope; the device's own class is adopted below.
-            class: BlkDeviceClass::Virtual,
-            budget: BlkDeviceClass::Virtual.budget(),
+            declared_class: None,
+            budget: BlkDeviceClass::served_as(None).budget(),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -173,8 +175,8 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             block_count: completion.block_count,
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
-        client.class = completion.class;
-        client.budget = completion.class.budget();
+        client.declared_class = completion.class;
+        client.budget = BlkDeviceClass::served_as(completion.class).budget();
         Ok(client)
     }
 
@@ -254,10 +256,12 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
 }
 
 impl<C: BlkCall> Block for RemoteBlock<'_, C> {
-    /// The class the served device declared, so a composition layered over
-    /// this client inherits the real hardware's envelope.
+    /// The class this client *serves* the device as, so a composition layered
+    /// over it inherits the real hardware's envelope. A device whose declared
+    /// class word this build does not recognise is served the bounded
+    /// unclassified envelope, which buys it no extra patience.
     fn device_class(&self) -> BlkDeviceClass {
-        self.class
+        BlkDeviceClass::served_as(self.declared_class)
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

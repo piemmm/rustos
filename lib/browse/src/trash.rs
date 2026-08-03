@@ -38,9 +38,9 @@
 //! per-name length limit, and a search that cannot find a free name within
 //! [`MAX_TRASH_NAME_ATTEMPTS`] (§5.4).
 //!
-//! The extension split reuses the one shared [`crate::icon`] extension rule, so
-//! the disambiguation lands before the same extension the icon and "Open With…"
-//! classifiers recognise (§2.2).
+//! The extension split reuses the one shared [`crate::media`] extension rule, so
+//! the disambiguation lands before the same extension the content-type registry
+//! classifies icons and "Open With…" associations by.
 //!
 //! # Emptying the Trash
 //!
@@ -63,7 +63,7 @@ use tairix_path::validate_file_name;
 
 use crate::delete::DeletePlan;
 use crate::execute::VolumeId;
-use crate::icon::extension;
+use crate::media::extension;
 
 /// How a single delete target must be removed: a cheap recoverable move into
 /// Trash, or the irreversible unlink.

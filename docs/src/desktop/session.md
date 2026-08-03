@@ -82,24 +82,137 @@ session never decodes them in its own address space. Instead, they go to the
 re-entered as a capability-empty worker ([the sandbox
 page](../security/sandbox.md)). The rasterised RGBA pixels are verified and
 cached per `(asset path, pixel side)`, including refusals; a missing or bad
-icon falls back to the shared application-class glyph. `Taskbar::pin_icon_side`
-exposes the exact geometry so the session rasterises artwork at the drawn size.
+icon falls back to the shipped application-bundle artwork and then to the
+shared application-class glyph. `Taskbar::pin_icon_side` exposes the exact
+geometry so the session rasterises artwork at the drawn size.
 
 Running-window matches are recomputed cheaply each loop wake from the attested
 launch table and window ownership records, never from window titles.
 
+### One artwork store for the whole desktop
+
+The pins are not the only thing on the bar with an icon, so the read, the
+sandboxed decode, and the cache are **not** the pin module's private
+machinery: they are the shared two-tier artwork layer (`lib/icon`'s
+`ArtworkCache` plus its `ArtworkReader` / `ArtworkRasteriser` seams), and the
+`DesktopShell` owns exactly one of each for the seat (`AGENTS.md` §2.2).
+
+- `DesktopShell::set_artwork_source(reader, rasteriser)` installs the live
+  seams — on a running system the VFS reader and the sandbox worker, in tests
+  a pair of fakes. A shell that is never given them starts with seams that
+  find and decode nothing, so a bare shell draws built-in glyphs rather than
+  failing.
+- `DesktopShell::artwork_parts` hands out the cache and both seams together,
+  which is how the embedder resolves pin views without borrowing the shell
+  three times.
+- The same cache answers the bar's `IconArtwork` lookup (through
+  `IconArtworkSource`) for the shipped raster masters under
+  `/System/Graphics/Icons`, so the launcher buttons, a pin, a running task,
+  and a library row all draw out of one store and one budget.
+
+Every lookup is keyed by `(asset path, pixel side)`, and a refusal is cached
+like a success, so an application whose icon will not decode costs one read
+and one sandbox round trip — not one per frame.
+
+### The library popup's per-row icons
+
+A program-library row shows its own application's icon through exactly the
+pin resolution above, driven off what the popup says it is showing:
+`resolve_library_icons` asks the popup for its
+[visible icon requests](taskbar.md#each-applications-own-icon), resolves each
+row's bundle icon at that row's own pixel side, and files the answer back.
+A row whose entry declares no icon — or whose asset is absent, over the read
+bound, or undecodable — falls back to the shipped `AppBundle` artwork, and
+then to the row's built-in glyph, so a row is never blank.
+
+It runs at the top of `DesktopShell::present`, before the paint, so a row
+that has just scrolled into view is drawn with its icon in the same frame; a
+row that already holds right-sized artwork is skipped, and a closed popup
+resolves nothing. Filing artwork deliberately does **not** latch a repaint:
+latching from inside the pre-paint resolution would ask for another present
+every frame, forever.
+
 ### Pin service and window-channel bridge
 
-`PinService` manages the live store, the armed drag offer, and a dirty latch
-the loop drains to re-resolve views before its next present. It implements the
-window-channel bridge (`PinBridge`) through which apps ask to be pinned: a
-`PinBundle` request is validated (store-shaped path, decodable manifest) and
-applied fail-closed.
+`PinService` manages the live store, the one armed drag offer, and a dirty
+latch the loop drains to re-resolve views before its next present. It
+implements the window-channel bridge (`PinBridge`) through which apps ask to
+be pinned: a `PinBundle` request is validated (store-shaped path, decodable
+manifest) and applied fail-closed.
 
-`DragOffer` and `DragWithdraw` arm and disarm the one permitted app-reference
-drag. `resolve_pin_drop` resolves the gesture: a primary release from the
-offering served window over the pin band pins at the drop index; the offer is
-consumed either way.
+A drag can start from either of two origins, named by `DragOrigin`: a served
+application window (`Window`, offering its own bundle path over the window
+channel) or the taskbar's program-library popup (`Library`, offering a
+catalogued entry it is dragged out of — see [Dragging a library entry to pin
+it](taskbar.md#dragging-a-library-entry-to-pin-it)). `offer_drag` /
+`withdraw_drag` arm and disarm the one live `DragOffer`, and `take_drag_for`
+consumes it only for the origin that armed it, so a release from one origin
+can never claim or withdraw a drag another origin started. `resolve_pin_drop`
+resolves the gesture: a primary release from the offering origin over the pin
+band re-validates the target through `pin_target_at` — a bundle path against
+its manifest, a library entry against the live catalog, so an application
+uninstalled between the drag and the drop is refused rather than pinned
+unlaunchable — and pins at the drop index; the offer is consumed either way.
+
+## The desktop icon surface
+
+`Desktop<S: DirectorySource>` (`userland/gui/session::desktop`) is the user's
+own `Desktop` folder shown as a column of icons down the screen's trailing
+edge, drawn into the window manager's own [desktop layer](wm.md#the-desktop-layer)
+— beneath every window and reachable through no window id. It is a
+*directory view*, not a new kind of surface: it lists the folder through the
+same `DirectorySource` seam the trusted file picker uses, orders the listing
+with the shared `sort_entries`, classifies each child with the shared
+content-type registry (see [File-type classification](apps.md#file-type-classification--the-one-content-type-registry)),
+and lays its tiles out with the shared `GridView` under
+`GridFlow::ColumnsFromTrailing` — the file manager's own grid flows rows from
+the leading edge; the desktop's column hugs the trailing edge and grows a new
+column inward as it fills, but both share one cell geometry and one hit-test
+(`lib/browse::layout`). It paints through the same public `grid_tile` /
+`grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
+shows the shipped folder artwork and a file its content-class artwork,
+falling back to built-in glyphs exactly as the file manager's grid does.
+
+**Pointer and keyboard.** A primary press selects the icon under it (or
+clears the selection on an empty desktop) and arms the shared
+`DoubleClickTracker`, so a second press within its window activates the icon
+— the desktop can never disagree with the file manager about what a gesture
+means. Motion drives hover feedback and, on arrival from elsewhere, the
+gesture-driven re-list below. While the desktop holds the keyboard, the
+arrows move the selection (down/up one icon, left/right one whole column),
+`Enter` activates it, and `Escape` clears it.
+
+**Activation** resolves by entry kind: a directory opens the file manager
+*at that path* (passed as the program's own first argument, which the file
+manager now honours); an application bundle launches directly; a plain file
+resolves its association through the catalog the session holds and launches
+that application with the file as its argument; and a file nothing is
+associated with is refused, stating the reason on the error stream rather
+than failing silently. Every launch rides the session's existing
+[asynchronous launch path](#launch-bookkeeping), so the compositor never
+blocks on one.
+
+**Re-listing is gesture-driven, never timed.** There is no
+filesystem-change notification in this system, so the desktop re-lists at
+bring-up, after a session action that could have touched the folder, and on
+pointer arrival from elsewhere — rate-limited by `RELIST_MIN_INTERVAL_NS` so
+sweeping the pointer on and off the desktop cannot turn a gesture into a
+re-listing loop. There is deliberately **no timer and no polling loop**: a
+periodically-waking desktop would keep a core busy to discover nothing
+(`AGENTS.md` §2.23). A re-list that actually changed the folder also
+refreshes the library catalog and the file associations
+(`DesktopOutcome::relisted`), so an application installed after bring-up is
+picked up without a restart.
+
+**Why the desktop is not a pin-drag source.** An installed application lives
+only in an application store — machine-wide, or the user's own — so a
+`.app` directory a user drops on their `Desktop` folder is a directory
+*shaped like* an application rather than an installed one, and
+`BundlePath`'s store rule correctly refuses it. Offering a pin gesture that
+could never succeed would be a promise the system cannot keep, not a
+feature; the pin drag source is the program-library popup instead (see *Pin
+service and window-channel bridge*, above), whose every row is a catalogued
+entry by construction.
 
 ## Resolving taskbar responses
 
@@ -649,15 +762,16 @@ each channel drained from the kernel's owner-gated seat channels.
 ## Giving memory back under pressure
 
 The desktop holds the largest reclaimable allocations on a graphical system:
-rasterised cursors and notification glyphs, rendered window furniture, and
-every window's content pixels. The kernel's memory-pressure band is one more
-member of the session's wait set, so a deepened band **wakes** the loop rather
-than being discovered by polling (`AGENTS.md` §2.23); the woken branch runs one
-`DesktopShell::trim_caches`, which is the single place the desktop's whole
-answer lives:
+rasterised cursors and notification glyphs, decoded icon artwork, rendered
+window furniture, and every window's content pixels. The kernel's
+memory-pressure band is one more member of the session's wait set, so a
+deepened band **wakes** the loop rather than being discovered by polling
+(`AGENTS.md` §2.23); the woken branch runs one `DesktopShell::trim_caches`,
+which is the single place the desktop's whole answer lives:
 
-- the cursor, notification-glyph, and window-furniture `ReclaimCache`s each
-  shrink to their pressure-derived target, wiping what they release, and
+- the cursor, notification-glyph, icon-artwork, and window-furniture
+  `ReclaimCache`s each shrink to their pressure-derived target, wiping what
+  they release, and
 - `Compositor::release_content_under_pressure` runs the content ladder for the
   window the session's own router currently focuses (see [Releasable window
   content](./wm.md#releasable-window-content)).
@@ -675,6 +789,19 @@ client would redraw — keep their pixels at every band.
 
 Logout or seat loss runs `teardown`, which tears every cache down and wipes
 each window's content: a session's retained pixels never outlive the session.
+
+### Read the band before building the caches
+
+A reclaimable cache admits **nothing** while the reported band is the
+fail-closed *unknown* it starts in — refusing to charge memory it has not
+been told the machine can spare is the right default, and it is why the live
+session asks for the band once *before* it constructs its caches rather than
+only on the first pressure wake. Skip that first read and the desktop is
+correct but permanently cold: every cursor, glyph, and icon lookup misses, so
+the bar draws built-in glyphs for the whole life of a session on a machine
+with memory to spare. The later read, after the wait-set member is
+registered, is a different job — it closes the race with a band that changed
+while the session was still coming up, because the kernel reports *changes*.
 
 ## Tests
 
@@ -698,15 +825,26 @@ absent stores silent and empty, parsed stores, the user overlay's per-field
 override winning, and malformed / oversized / non-UTF-8 stores each yielding an
 empty catalog/list plus one warning line. It covers `SessionPins` persistence
 and the refusing writer (memory and disk stay in step). It covers pin
-resolution (catalog, manifest, and unresolvable fallback) and `IconCache`
-(rasterised artwork, refusals cached, verified pixel shape).
+resolution (catalog, manifest, and unresolvable fallback) and the shared
+artwork store (rasterised artwork reaching a pin, refusals cached, verified
+pixel shape, one read and one decode per asset and side, the budget honoured,
+and a trim then a teardown giving the pixels back). It covers the library
+popup's per-row icons: a row drawing its own bundle's icon, an absent /
+over-long / undecodable asset and an entry declaring no icon all falling back
+to the shipped app-bundle artwork rather than blanking, only the rows the
+viewport shows being resolved at all, and — with a reader that serves nothing
+whatsoever — the bar and popup drawing pixel-for-pixel what the glyph-only
+desktop draws.
 
 It covers `DesktopShell`: `pump` opening the popup from a press on the Library
 button and presenting it, `set_library`/`set_pins` handing catalog/pins over
 and refreshing open views, the full launch flow, `raise_window` restoring and
 focusing a minimised task, hover latching a present of the bar, fault
 propagation, `begin_move` arming a grab, `set_icons` installing a loaded set,
-and `teardown`. It covers `PinService` decisions, drag management, the
+and `teardown`. It covers `PinService` decisions, drag management for both
+`DragOrigin` values (a release from the origin that armed the offer
+consuming it, a release from the other origin claiming nothing), the
+`pin_target_at` admission for a bundle and for a catalogued entry, the
 `resolve_pin_drop` policy, and `TaskBridge` end to end through the shell:
 `open_window` listing, focusing, and presenting a new task; `close_window`
 removing the task and dropping focus; clicking a task slot minimising/restoring
@@ -742,3 +880,15 @@ key press from the in-memory seat reader; a drained channel yielding `None`;
 a one-shot reader fault propagating then recovering; and the fail-closed
 paths — a partial record refused as `LengthOutOfRange` and a whole-length but
 structurally invalid record surfacing `BadMagic`.
+
+`desktop_tests.rs` covers the `Desktop` model: hover feedback and
+click-on-empty-desktop clearing the selection; the shared double-click
+tracker activating an icon on its second press; keyboard arrows moving the
+selection by one icon and by one whole column, wrapping at the ends, `Enter`
+activating, and `Escape` clearing; every activation branch (a directory
+opening the file manager at its path, a bundle launching, a plain file
+resolving its association and launching with the file as its argument, and
+an unassociated file refused with a stated reason); the rate-limited
+pointer-arrival re-list (due, not yet due, and a re-list the source refuses
+leaving the listing exactly as it was); and the selection following a
+renamed-or-reordered entry by name across a re-list rather than by index.

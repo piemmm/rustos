@@ -48,6 +48,11 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The grid-artwork tests build the shared reclaim-governed artwork cache the
+# file manager builds, so they need the pressure gauge it is budgeted against
+# and the discarding audit sink a test wires it to.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 [lints]
 workspace = true

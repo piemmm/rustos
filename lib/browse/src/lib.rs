@@ -61,10 +61,15 @@
 //!   [`CopyCursor`] streaming single-file copy, and the depth-first,
 //!   depth-bounded [`CopyWalk`] recursive directory-copy cursor the management
 //!   verbs run (`plans/NEW-FILEMANAGER.md` `FM7b`).
-//! * [`icon`](mod@icon) — the one file-type [`IconKind`](tairix_icon::IconKind)
-//!   classifier the manager and picker share (a display hint, never authority).
+//! * [`media`](mod@media) — the one closed content-type [`MediaType`] registry
+//!   the manager and picker share: it drives both the file-type
+//!   [`IconKind`](tairix_icon::IconKind) glyph and the "Open With…" association
+//!   vocabulary (a display hint, never authority), and names each type's
+//!   broader type ([`MediaType::parent`]) so association matching can widen.
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
-//!   model ([`applications_for`]) over the injected [`BundleSource`] seam.
+//!   model ([`applications_for`]) over the injected [`BundleSource`] seam,
+//!   resolving a file's type through [`media`](mod@media) and matching along
+//!   its subclass chain, most specific declaration first.
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
 //! * [`trash`](mod@trash) — the recoverable-delete model: the
 //!   [`trash_strategy`] same-volume move-vs-unlink decision, the
@@ -76,7 +81,9 @@
 //! * [`browser`] — the [`Browser`] navigation model.
 //! * [`layout`](mod@layout) — the [`ListView`]/[`GridView`] item-view geometry
 //!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
-//!   definition the renderer and the pointer hit-test share), plus [`ViewMode`].
+//!   definition the renderer and the pointer hit-test share), plus [`ViewMode`]
+//!   and the [`GridFlow`] that also lays the desktop's trailing-edge icon
+//!   column out of the very same grid.
 //! * [`format`](mod@format) — the size/date column formatting and the
 //!   properties view's date-and-time spelling.
 //! * [`properties`](mod@properties) — the [`Properties`] view model: the
@@ -94,6 +101,9 @@
 //! * [`progress`](mod@progress) — the [`ProgressModel`] progress + latched-cancel
 //!   state of a long delete/copy the file manager drives interleaved with its
 //!   event loop (`plans/NEW-FILEMANAGER.md` `FM7b`).
+//! * [`places`](mod@places) — the places/devices rail model: the user's fixed
+//!   shortcuts plus the mounted volumes, each carrying the storage medium it
+//!   really sits on, validated and ordered without touching the filesystem.
 //! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
 //!   rename model the file manager's first write operation is built on.
 //! * [`render`](mod@render) — painting the current directory into a
@@ -124,12 +134,13 @@ pub mod entry;
 pub mod error;
 pub mod execute;
 pub mod format;
-pub mod icon;
 pub mod layout;
+pub mod media;
 pub mod mkdir;
 pub mod mode_edit;
 pub mod open_with;
 pub mod owner_edit;
+pub mod places;
 pub mod progress;
 pub mod properties;
 pub mod rename;
@@ -160,18 +171,17 @@ pub use execute::{
     PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 pub use format::{format_date, format_datetime, format_size};
-pub use icon::{icon_for, icon_for_name};
-pub use layout::{GridView, ListView, ViewLayout, ViewMode};
+pub use layout::{GridFlow, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+pub use media::{media_for_entry, media_for_name, MediaType};
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
-pub use open_with::{
-    applications_for, association_from_appinfo, mime_for_name, AppAssociation, BundleSource,
-};
+pub use open_with::{applications_for, association_from_appinfo, AppAssociation, BundleSource};
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
+pub use places::{Place, PlaceKind, Places, Volume, MAX_PLACE_LABEL, WIDEST_FIXED_LABEL};
 pub use progress::{ProgressModel, ProgressOp};
 pub use properties::Properties;
 pub use rename::{validate_new_name, RenameError};
-pub use render::render;
+pub use render::{render, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::DirectorySource;

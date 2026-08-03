@@ -22,11 +22,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
-use tairix_icon::{IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, GRAPHICS_DIR, ICON_KINDS};
 use tairix_theme::{CursorKind, CursorSet};
-
-/// The directory the desktop's SVG graphics assets live under.
-pub const GRAPHICS_DIR: &str = "/System/Graphics";
 
 /// The desktop session's file-reading seam.
 ///
@@ -113,14 +110,6 @@ fn cursor_path(asset_id: &str) -> String {
     format!("{GRAPHICS_DIR}/Cursors/{asset_id}.svg")
 }
 
-/// The on-disk path of the icon asset named `asset_id`.
-///
-/// The asset id is [`IconKind::asset_id`]; icons live in the `Icons`
-/// subdirectory of [`GRAPHICS_DIR`].
-fn icon_path(asset_id: &str) -> String {
-    format!("{GRAPHICS_DIR}/Icons/{asset_id}.svg")
-}
-
 /// Build a cursor set from the on-disk SVG assets named by `cursors`.
 ///
 /// Reads one asset per [`CursorKind`] through `reader` and lets `lib/cursor`
@@ -155,7 +144,7 @@ where
 {
     let mut assets = Vec::new();
     for kind in ICON_KINDS {
-        if let Ok(bytes) = reader.read(&icon_path(kind.asset_id())) {
+        if let Ok(bytes) = reader.read(&icon_vector_path(kind)) {
             assets.push((kind, bytes));
         }
     }

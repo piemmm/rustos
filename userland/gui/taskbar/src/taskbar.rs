@@ -27,6 +27,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_proglib::EntryId;
+use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
 use crate::clock::Clock;
@@ -234,6 +235,21 @@ impl Taskbar {
     /// that changes no pixel must repaint nothing.
     pub(crate) fn library_routing_mut(&mut self) -> &mut LibraryPopup {
         &mut self.library
+    }
+
+    /// Hand the popup the owner-resolved icon artwork for one of the rows it
+    /// shows ([`LibraryPopup::set_row_artwork`]), for the session that
+    /// resolved it from the entry's own bundle.
+    ///
+    /// Unlike [`library_mut`](Self::library_mut) this latches nothing, and
+    /// deliberately so: the session resolves a shown row's icon immediately
+    /// *before* painting a popup that some real change has already latched,
+    /// so latching here would re-dirty the popup on every frame it is drawn
+    /// and repaint it forever. The artwork is on the surface the same frame
+    /// because it is set before the paint, not because it asked for another
+    /// one.
+    pub fn set_library_row_artwork(&mut self, row: usize, artwork: Option<Surface>) {
+        self.library.set_row_artwork(row, artwork);
     }
 
     /// The pin strip.

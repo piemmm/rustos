@@ -557,7 +557,8 @@ tairix/
 │   ├── glob/            # Shared filename-glob matcher.
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
-│   ├── icon/            # Shared desktop icons.
+│   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
+│   │                    #   and the shipped raster masters in `assets/`.
 │   ├── image/           # Fail-closed raster-image decoding (PNG).
 │   ├── input/           # Shared pointer input-event vocabulary.
 │   ├── kalloc/          # Freeing kernel heap allocator.
@@ -646,7 +647,8 @@ tairix/
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
 │   ├── mkimage/         # Image builders per platform.
-│   ├── syshelp/         # Build-discovered system app-store Help payload.
+│   ├── syshelp/         # Build-discovered shipped payload: bundle Help/Resources
+│   │                    #   trees and the desktop's icon artwork.
 │   ├── cc/              # Host-only C toolchain wrapper for the C-ABI test.
 │   ├── qemu/            # QEMU run scripts.
 │   └── ci/              # CI/build-host orchestration (thin xtask wrappers).
@@ -1012,19 +1014,39 @@ an update to this section.
   driving colours, corner radii, fonts, and cursors for the WM, taskbar, and
   default apps through one shared theme definition; adding a theme is data,
   not new code.
-- Graphical assets are SVG-first. SVG is the canonical, scalable **source**
-  format for every WM/desktop asset (cursors, icons, notification glyphs,
-  window chrome, theme decorations), so one asset stays crisp at any DPI/UI
-  scale. SVG is never parsed or drawn on the hot compositing path: each asset
-  is rasterised/converted **once** at the active `tairix_geometry::Scale` into
-  the fast-draw form the compositor blits, cached, and re-rendered only when
-  the scale or theme changes. There is exactly one rasterisation/blend path
-  (`lib/raster`); a second is forbidden (§2.2). SVG is untrusted input: it is
-  decoded through the curated §16.4 image-decoding library in a §19.5
-  minimum-capability sandbox, never an ad-hoc parser, and a malformed asset
-  fails closed to a fallback rather than crashing the compositor (§2.9).
-  Pre-rasterised bitmaps may exist as a cache/fallback but never as the only
-  path.
+- Graphical assets are **scalable-first**, and every asset resolves through
+  one total, three-tier rule. SVG is the canonical source format for
+  *chrome* — cursors, notification and status glyphs, window furniture,
+  theme decorations — where a monochrome, theme-tinted silhouette is the
+  artwork, so it stays crisp at any DPI/UI scale and re-themes as data.
+  **Illustrative icon artwork** (application, file-class, and device icons,
+  whose visual identity is a rendered picture rather than a tintable
+  silhouette) is authored as a high-resolution **raster master** instead: a
+  square, straight-alpha PNG whose native resolution exceeds every slot the
+  desktop draws it in, so downscaling — never upscaling — is what a slot
+  needs. A raster master is a legitimate canonical source *only* for that
+  class, and never for chrome.
+  - **The built-in vector glyph is mandatory for every icon, always.** An
+    icon that exists only as a raster asset is forbidden: each kind carries a
+    first-party built-in glyph, so resolution is total — raster artwork if
+    the system ships and can decode it, else the on-disk vector asset, else
+    the built-in glyph. A missing, oversize, corrupt, or refused asset
+    therefore degrades to a meaningful icon and can never blank a surface
+    (§2.9, §5.4).
+  - Neither format is parsed or drawn on the hot compositing path: each asset
+    is decoded and rasterised/converted **once** per (asset, pixel side) at
+    the active `tairix_geometry::Scale` into the fast-draw form the
+    compositor blits, cached under the memory-pressure model, and re-rendered
+    only when the scale or theme changes. There is exactly one
+    rasterisation/blend path (`lib/raster`) and one decode-and-fit path; a
+    second is forbidden (§2.2).
+  - Both formats are untrusted input: they are decoded through the curated
+    §16.4 image-decoding libraries in a §19.5 minimum-capability sandbox,
+    never an ad-hoc parser, under a fixed input-byte and output-side bound
+    (§24.4), and a malformed asset fails closed to the tier below it rather
+    than crashing the compositor. This binds a system asset as firmly as a
+    third-party bundle's own icon: the desktop trusts pixels it has
+    validated, never a file.
 - Variable DPI is a first-class, **settable** desktop property. Every desktop
   length — corner radii, border thicknesses, font sizes, taskbar extents,
   window chrome — is authored in *logical* pixels at a fixed reference density
@@ -1321,6 +1343,7 @@ You are not exempt from any rule above. In addition:
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
@@ -1438,8 +1461,9 @@ Authoritative subdirectories:
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.
-├── Graphics/    # WM/compositor assets: SVG sources (cursors, icons,
-│             #   chrome) plus their rasterised caches (§10).
+├── Graphics/    # WM/compositor assets: SVG chrome sources (cursors, status
+│             #   glyphs) and raster icon masters, plus their rasterised
+│             #   caches (§10). Icons live in `Icons/<asset-id>.{png,svg}`.
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.
 ├── Security/    # Users, Groups, machine-id, capability authority, keys, policy.

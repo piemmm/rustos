@@ -95,11 +95,14 @@ knows what the hardware is — the driver that binds it — declares it:
   patient, so a device whose driver says nothing about itself still fails
   closed promptly when it wedges.
 - The class travels to the consumer in the **geometry completion**
-  (`BlkCompletion::class`), alongside the device's size and write policy, and
-  the consumer adopts it for every subsequent request: its per-request
-  deadline, reissue budget, and the driver's grace window all derive from that
-  one shared `BlkDeviceClass::budget` policy for *this* device (`AGENTS.md`
-  §2.2, §24.1). Until the device answers, the geometry probe itself runs on the
+  (`BlkCompletion::class`, an `Option<BlkDeviceClass>` so "the driver named a
+  class this ABI does not define" stays a state of its own), alongside the
+  device's size and write policy, and the consumer adopts it for every
+  subsequent request: its per-request deadline, reissue budget, and the
+  driver's grace window all derive from that one shared
+  `BlkDeviceClass::budget` policy for *this* device (`AGENTS.md` §2.2, §24.1),
+  reached for an unknown through the single `BlkDeviceClass::served_as`
+  patience policy. Until the device answers, the geometry probe itself runs on the
   bounded unclassified envelope, so an endpoint that never answers fails closed
   promptly rather than being granted a spinning disk's patience on nothing but
   hope.
@@ -108,8 +111,14 @@ knows what the hardware is — the driver that binds it — declares it:
   authority, and is bounded by the widest class budget either way. A driver
   that overstates its patience only delays its own deadline; one that
   understates it only fails itself sooner. An unrecognised class word on the
-  wire decodes to the bounded unclassified envelope rather than being trusted
+  wire is served the bounded unclassified envelope rather than being trusted
   with a wider one — and never discards an otherwise well-formed completion.
+  It is not rewritten to `Virtual` on the way in, though: the decode keeps it
+  unknown, so "the driver said something I cannot read" stays distinct from
+  "this is a paravirtual device" wherever a consumer *reports* the medium
+  rather than merely sizing patience with it. The mount table publishes that
+  unknown to userland as such (see [the System Information
+  API](../abi/sysinfo.md)) instead of naming a medium nobody declared.
 - **A device that wraps another reports what it wraps.** A partition window, a
   block cache, the kernel's disk-sharing boundary, the retained-writes
   journal, and the remote block clients all forward their inner device's

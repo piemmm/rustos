@@ -32,6 +32,32 @@ owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 
+## Owner-supplied icon artwork
+
+Four controls draw an icon whose artwork their owner may already hold
+rasterised: a `shell::TaskbarItem`, a `collection::Card` tile, a
+`collection::ListRow`, and a `button::IconButton`. Each offers the same pair —
+one query and one parameter:
+
+- `icon_side(bounds, scale, theme, font) -> u32` reports the exact pixel side
+  the control's icon slot will be drawn into, and `0` when the geometry leaves
+  room for none. An owner asks its cache for artwork at precisely that size
+  rather than guessing one and rescaling at draw time.
+- `render(…, artwork: Option<&Surface>)` blits that artwork centred in the
+  slot when it is supplied and rasterises the control's built-in vector glyph
+  when it is not, so a missing, refused, or undecodable asset always degrades
+  to a meaningful icon instead of a blank slot (`AGENTS.md` §10).
+
+The rule lives once, in the crate's shared paint recipe
+(`paint::paint_icon_slot`), so the four controls cannot drift apart
+(`AGENTS.md` §2.2). Artwork whose surface does not match the slot is centred
+on it rather than pinned to a corner, so a size mismatch reads as an even
+margin instead of a lopsided drawing; a control that reserves no icon slot
+ignores the parameter entirely. A control never decodes an image — artwork
+reaches it already decoded and rasterised through the desktop's sandboxed
+asset path (`AGENTS.md` §19.5), so a malformed file can only fail to produce
+artwork, never reach a drawing path.
+
 ## Grouped focus and anchored edges
 
 Two of the design language's reactive state patterns describe a *relationship

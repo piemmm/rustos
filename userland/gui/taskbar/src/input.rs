@@ -86,8 +86,26 @@ pub enum TaskbarResponse {
     OpenLibrary,
     /// The program-library popup closed without launching anything — the
     /// Library button toggled it shut, a press outside dismissed it, or
-    /// `Escape` was pressed.
+    /// `Escape` was pressed. The popup is also the pin drag source, so any
+    /// offer it had made is over with it: the embedder withdraws one if it
+    /// holds it.
     LibraryDismissed,
+    /// A press on a program-library row has been dragged beyond the shared
+    /// threshold: the user is dragging this application out of the popup to
+    /// pin it. The embedder arms its pin offer for this catalogued entry;
+    /// exactly one offer fires per gesture.
+    PinDragOffered {
+        /// The catalog identifier of the dragged entry.
+        entry: EntryId,
+    },
+    /// The dragged application was released. The embedder resolves the drop
+    /// against the bar's pin band: a release over the band pins the offered
+    /// entry at the drop index, a release anywhere else simply ends the
+    /// gesture. Either way the offer is consumed.
+    PinDragDropped,
+    /// `Escape` abandoned the drag before it was dropped. The embedder
+    /// withdraws its offer; the popup stays open.
+    PinDragWithdrawn,
     /// A bundle was chosen to launch — an entry in the program-library
     /// popup (closing it), or a launch row of the system quick-actions menu.
     /// The embedder resolves the entry's bundle and launches it. Both
@@ -728,6 +746,9 @@ impl TaskbarInput {
                 taskbar.close_library();
                 TaskbarResponse::LibraryLaunch { entry }
             }
+            PopupOutcome::DragOffered(entry) => TaskbarResponse::PinDragOffered { entry },
+            PopupOutcome::DragDropped => TaskbarResponse::PinDragDropped,
+            PopupOutcome::DragWithdrawn => TaskbarResponse::PinDragWithdrawn,
             PopupOutcome::Dismiss => {
                 taskbar.close_library();
                 TaskbarResponse::LibraryDismissed

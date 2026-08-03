@@ -666,8 +666,10 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-log",
  "tairix-path",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-theme",
 ]
 
@@ -1314,8 +1316,14 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-help",
+ "tairix-icon",
  "tairix-input",
+ "tairix-path",
+ "tairix-procinfo",
+ "tairix-reclaim",
  "tairix-rt",
+ "tairix-sandbox",
  "tairix-theme",
  "tairix-window",
 ]
@@ -1482,7 +1490,10 @@ dependencies = [
 name = "tairix-icon"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
+ "tairix-log",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-svg",
 ]
 
@@ -2258,6 +2269,7 @@ name = "tairix-syshelp"
 version = "0.0.0"
 dependencies = [
  "tairix-help",
+ "tairix-icon",
 ]
 
 [[package]]
@@ -2309,6 +2321,7 @@ name = "tairix-taskbar"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-browse",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",

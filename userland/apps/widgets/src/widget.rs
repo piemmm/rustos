@@ -153,7 +153,9 @@ impl DemoWidget {
     ) {
         match self {
             DemoWidget::Button(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::IconButton(w) => w.render(surface, rect, scale, theme, font),
+            // The gallery shows the built-in glyph: it is a control catalogue,
+            // not an application with icon artwork of its own to supply.
+            DemoWidget::IconButton(w) => w.render(surface, rect, scale, theme, font, None),
             DemoWidget::SplitButton(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Toggle(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Checkbox(w) => w.render(surface, rect, scale, theme, font),
@@ -170,12 +172,12 @@ impl DemoWidget {
                 }
             }
             DemoWidget::Menu(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, font, None),
             DemoWidget::TableRow(w) => {
                 let columns = equal_columns(w.cells().len(), rect.width);
                 w.render(surface, rect, scale, theme, font, &columns);
             }
-            DemoWidget::Card(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::Card(w) => w.render(surface, rect, scale, theme, font, None),
             DemoWidget::Panel(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme, font),

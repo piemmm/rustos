@@ -256,38 +256,20 @@ pub fn build_system_partition(
         plant_nested_file(&mut fs, root, components, bytes)
             .map_err(MkimageError::SystemPartition)?;
     }
-    // The system app store's bundle data ships on every image through the
-    // same planter: each command app's internationalised `Help/` tree,
-    // discovered from the bundle's own on-disk `Help/` source
-    // (`tairix_syshelp`) — never a hand-maintained per-bundle list here, so a
-    // new command app's help ships without editing this file, and image and
-    // source cannot drift.
-    for doc in tairix_syshelp::HELP_FILES {
-        let components: [&[u8]; 5] = [
-            b"Apps",
-            doc.bundle.as_bytes(),
-            b"Help",
-            doc.locale.as_bytes(),
-            doc.file.as_bytes(),
-        ];
-        plant_nested_file(&mut fs, root, &components, doc.bytes)
-            .map_err(MkimageError::SystemPartition)?;
-    }
-    // Each command app's bundle resources (e.g. `lspci`'s compiled
-    // ID-database table) ship through the same discovered-from-disk path as
-    // its `Help/` tree: read from the bundle's own on-disk `Resources/`
-    // source, never a per-bundle list here. The signed `AppInfo` content
-    // hash covers them, so a tampered resource fails the load gate closed.
-    for res in tairix_syshelp::RESOURCE_FILES {
-        let components: [&[u8]; 4] = [
-            b"Apps",
-            res.bundle.as_bytes(),
-            b"Resources",
-            res.file.as_bytes(),
-        ];
-        plant_nested_file(&mut fs, root, &components, res.bytes)
-            .map_err(MkimageError::SystemPartition)?;
-    }
+    // The system payload ships on every image through the one shared walk
+    // (`tairix_syshelp::plant_system_payload`): each command app's
+    // internationalised `Help/` tree and its `Resources/` files, discovered
+    // from the bundle's own on-disk sources, plus the desktop's graphics
+    // assets (the raster icon masters) planted under `Graphics/`. Driving the
+    // walk here — and, identically, in the QEMU image fixture — from one
+    // definition means the two planters can never lay down a different set of
+    // files, and a new help document, resource, or icon ships without editing
+    // this file (never a hand-maintained per-bundle list). The signed
+    // `AppInfo` content hash covers a bundle's help and resources, so a
+    // tampered one fails the load gate closed.
+    tairix_syshelp::plant_system_payload(|components, bytes| {
+        plant_nested_file(&mut fs, root, components, bytes).map_err(MkimageError::SystemPartition)
+    })?;
     // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
     // (`Apps/<name>.app/…`, `Services/<name>.app/…`), making every bundle a
     // complete, self-contained on-disk directory. The files are composed and

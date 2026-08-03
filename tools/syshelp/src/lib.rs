@@ -1,33 +1,46 @@
-//! Build-discovered system app-store bundle payload (Help documents and
-//! `Resources/` files) for image authoring.
+//! Build-discovered system payload (command-app Help documents and
+//! `Resources/` files, plus the desktop's graphics assets) for image
+//! authoring.
 //!
 //! TAIRiX ships each command app's internationalised command help as a
 //! structured-Markdown `Help/` tree on the read-only `/System` volume, at
 //! `/System/Apps/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`), and
 //! each app's bundle resources (e.g. `lspci`'s compiled ID-database table,
-//! `plans/DEVICES.md`) at `/System/Apps/<name>.app/Resources/<file>`. The
-//! image builder (`tools/mkimage`) and the QEMU image fixture must plant
-//! both onto the volume they author.
+//! `plans/DEVICES.md`) at `/System/Apps/<name>.app/Resources/<file>`. It also
+//! ships the desktop's graphics assets — the raster icon masters — under
+//! `/System/Graphics`. The image builder
+//! (`tools/mkimage`) and the QEMU image fixture must plant all of these onto
+//! the volume they author.
 //!
-//! The source of truth for the payload is the bundle's own on-disk `Help/`
-//! and `Resources/` directories. This crate's build script walks the
-//! command-app source roots (`userland/apps`, `userland/gui`,
-//! `userland/shell`; each bundle named by its crate's `AppInfo.toml`,
-//! never the crate directory), finds every
-//! help document and resource file, and embeds each as a row in
-//! [`HELP_FILES`] / [`RESOURCE_FILES`], so the image builder plants the
-//! payload by iterating discovered data — **never** a hand-maintained
-//! per-bundle list that a new bundle would force an edit to (the duplication
-//! the charter forbids). Adding a bundle's payload is dropping files under
-//! `<root>/<name>/Help/<locale>/` or `<root>/<name>/Resources/`; the next
-//! build rediscovers them. Bundle payload is therefore authored in exactly
-//! one place — the bundle — and never hardcoded into an app binary or copied
-//! into the image builder.
+//! The source of truth for each family is its own on-disk directory. This
+//! crate's build script walks the command-app source roots (`userland/apps`,
+//! `userland/gui`, `userland/shell`; each bundle named by its crate's
+//! `AppInfo.toml`, never the crate directory) for `Help/` and `Resources/`,
+//! and walks `lib/icon/assets/` for the desktop icon masters, embedding each
+//! discovered file as a row in [`HELP_FILES`] / [`RESOURCE_FILES`] /
+//! [`GRAPHICS_FILES`]. The planters iterate that discovered data — **never** a
+//! hand-maintained list that a new file would force an edit to (the
+//! duplication the charter forbids). Adding a bundle's payload is dropping
+//! files under `<root>/<name>/Help/<locale>/` or `<root>/<name>/Resources/`,
+//! and adding an icon is dropping a `<asset-id>.png` under `lib/icon/assets/`;
+//! the next build rediscovers them. Payload is therefore authored in exactly
+//! one place and never hardcoded into a binary or copied into the image
+//! builder.
 //!
-//! The payload is `&'static [u8]` document bytes embedded at build time, so
-//! this crate is `no_std` and depends on no app crate: both the host image
-//! builder and the freestanding QEMU fixture (which also links into the
-//! aarch64 guest tail) consume it unchanged.
+//! The graphics assets are additionally validated against the desktop's own
+//! icon contract (`tairix_icon`) as they are discovered, so a name the
+//! desktop could never resolve or an over-large file fails the build closed
+//! rather than shipping artwork that would silently render as a fallback
+//! glyph.
+//!
+//! [`plant_system_payload`] is the single walk both planters drive their own
+//! `plant_nested_file` from, so they can never lay down a different set of
+//! files or spell a path differently.
+//!
+//! The payload is `&'static [u8]` bytes embedded at build time, so this crate
+//! is `no_std` and depends on no app crate: both the host image builder and
+//! the freestanding QEMU fixture (which also links into the aarch64 guest
+//! tail) consume it unchanged.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -91,6 +104,89 @@ pub struct ResourceFile {
 pub const RESOURCE_FILES: &[ResourceFile] =
     &include!(concat!(env!("OUT_DIR"), "/resource_files.rs"));
 
+/// One shipped desktop graphics asset, ready to plant at
+/// `/System/Graphics/<dir>/<file>` on the read-only `/System` volume.
+///
+/// Unlike a [`HelpFile`] or a [`ResourceFile`] a graphics asset is not
+/// per-bundle: it is desktop-wide artwork the window manager and file manager
+/// resolve by asset id. Today the only family is the raster icon masters
+/// (`dir == "Icons"`, one `<asset-id>.png` per icon kind); carrying the `dir`
+/// as data means a future cursor or chrome family plants through this same
+/// table and loop rather than a second one.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphicsFile {
+    /// The subdirectory of `/System/Graphics` the asset is planted in.
+    pub dir: &'static str,
+    /// The asset's file name, which is its stable asset id plus extension.
+    pub file: &'static str,
+    /// The asset's bytes.
+    pub bytes: &'static [u8],
+}
+
+/// Every desktop graphics asset, discovered from `lib/icon/assets/` at build
+/// time and validated against the desktop's icon contract as it is discovered
+/// (a name the desktop could not resolve, an over-large file, or a duplicate
+/// asset id fails the build).
+///
+/// Rows are ordered deterministically (by file name), so the planted store
+/// and any reproducible image are stable across builds and hosts.
+pub const GRAPHICS_FILES: &[GraphicsFile] =
+    &include!(concat!(env!("OUT_DIR"), "/graphics_files.rs"));
+
+/// Invoke `plant` once for every discovered system payload file — each
+/// command app's [`HelpFile`] and [`ResourceFile`], and every desktop
+/// [`GraphicsFile`] — passing the file's `/System`-volume-relative path
+/// components and its bytes.
+///
+/// The image builder (`tools/mkimage`) and the QEMU whole-disk image fixture
+/// (`tests/integration/encrypted_root_image`) both lay these files onto the
+/// read-only `/System` volume, each with its own `plant_nested_file` and its
+/// own error type. Driving both from this one walk is the single definition
+/// of *which* files ship and *where* they land, so the two planters can never
+/// list a different payload set (the duplication the charter forbids). It
+/// takes a closure rather than returning owned paths so it needs no
+/// allocation and stays `no_std`; `plant` returns the caller's own error on
+/// failure, which stops the walk.
+///
+/// # Errors
+///
+/// Returns the first error `plant` reports, failing the whole planting closed
+/// rather than shipping a partial payload.
+pub fn plant_system_payload<E>(
+    mut plant: impl FnMut(&[&[u8]], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    for doc in HELP_FILES {
+        plant(
+            &[
+                b"Apps",
+                doc.bundle.as_bytes(),
+                b"Help",
+                doc.locale.as_bytes(),
+                doc.file.as_bytes(),
+            ],
+            doc.bytes,
+        )?;
+    }
+    for res in RESOURCE_FILES {
+        plant(
+            &[
+                b"Apps",
+                res.bundle.as_bytes(),
+                b"Resources",
+                res.file.as_bytes(),
+            ],
+            res.bytes,
+        )?;
+    }
+    for asset in GRAPHICS_FILES {
+        plant(
+            &[b"Graphics", asset.dir.as_bytes(), asset.file.as_bytes()],
+            asset.bytes,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -151,5 +247,78 @@ mod tests {
             .collect();
         let violations = lint_help_trees(&docs);
         assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+
+    /// The discovered desktop graphics assets are non-empty and every one
+    /// satisfies the desktop's icon contract: a legal `<asset-id>.png` name,
+    /// within the artwork byte bound, planted under `Graphics/Icons`, and
+    /// with a unique asset id. This mirrors the fail-closed checks
+    /// `build.rs` applies — the emitted table and the desktop resolver share
+    /// the one `tairix_icon` definition, so neither can drift.
+    #[test]
+    fn every_discovered_graphics_asset_satisfies_the_icon_contract() {
+        use super::GRAPHICS_FILES;
+
+        assert!(
+            !GRAPHICS_FILES.is_empty(),
+            "at least one desktop graphics asset must be discovered"
+        );
+        let mut ids: BTreeSet<&str> = BTreeSet::new();
+        for asset in GRAPHICS_FILES {
+            assert_eq!(
+                asset.dir, "Icons",
+                "the icon masters plant under Graphics/Icons"
+            );
+            let kind = tairix_icon::artwork_kind_for_file(asset.file)
+                .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
+            assert!(
+                asset.bytes.len() <= tairix_icon::MAX_ARTWORK_BYTES,
+                "`{}` is within the artwork byte bound",
+                asset.file
+            );
+            assert!(
+                ids.insert(kind.asset_id()),
+                "asset id `{}` is claimed by more than one file",
+                kind.asset_id()
+            );
+        }
+    }
+
+    /// The shared payload walk yields every discovered file exactly once,
+    /// at its `/System`-volume-relative path: a help document under
+    /// `Apps/<bundle>/Help/<locale>/`, a resource under
+    /// `Apps/<bundle>/Resources/`, and an icon under `Graphics/Icons/`. Both
+    /// planters drive their own `plant_nested_file` from this one walk, so
+    /// this pins the count and the path spelling they share.
+    #[test]
+    fn the_shared_walk_visits_every_payload_file_at_its_planted_path() {
+        use super::{plant_system_payload, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
+
+        let mut visited: Vec<Vec<Vec<u8>>> = Vec::new();
+        let outcome: Result<(), core::convert::Infallible> =
+            plant_system_payload(|components, _bytes| {
+                visited.push(components.iter().map(|c| c.to_vec()).collect());
+                Ok(())
+            });
+        assert!(
+            outcome.is_ok(),
+            "the walk never errors when planting cannot"
+        );
+
+        assert_eq!(
+            visited.len(),
+            HELP_FILES.len() + RESOURCE_FILES.len() + GRAPHICS_FILES.len(),
+            "every discovered file is visited exactly once"
+        );
+        // The known folder-icon lands at Graphics/Icons/folder.png.
+        assert!(
+            visited.iter().any(|c| c
+                == &[
+                    b"Graphics".to_vec(),
+                    b"Icons".to_vec(),
+                    b"folder.png".to_vec()
+                ]),
+            "the folder icon is planted at Graphics/Icons/folder.png"
+        );
     }
 }

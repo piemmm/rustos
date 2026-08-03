@@ -46,13 +46,32 @@ cursor re-blend on top unchanged — and returns `false` without damaging
 anything when the colour is already in effect, so a caller can skip a
 redundant present.
 
+## The desktop layer
+
+`Compositor::set_desktop` installs an optional `Surface` — the session's own
+wallpaper-and-icons layer — anchored at the screen origin and composited
+directly over the opaque background fill but beneath every window
+(`clear_desktop` takes it down again; `desktop_bounds` reports the footprint
+either answers, or `None` when none is installed). It deliberately carries
+no `WindowId`: that is exactly why it can never be raised, focused, moved,
+or restacked through the ordinary window z-order, and why nothing in that
+z-order can ever end up beneath it by accident either. A surface smaller
+than the screen simply leaves the root fill showing where it does not
+reach, and one larger is clipped — the layer is never a reason to fail a
+frame. Installing, replacing, or clearing it damages exactly its old and
+new footprints, precisely as any other surface replacement does.
+
+Pointer and keyboard input that resolves to no window is reported to the
+desktop layer's owner rather than swallowed: see *Input routing*, below.
+
 ## Hardware acceleration
 
 When the display driver exposes the optional
 `AcceleratedDisplay` seam (`AGENTS.md` §10),
 `Compositor::present_accelerated` lets the hardware composite the scene
 instead of the CPU. It encodes the scene back-to-front as one solid
-background layer, one `AccelLayer` per visible window (its surface baked
+background layer, the desktop layer (when one is installed) directly on
+top of it, one `AccelLayer` per visible window (its surface baked
 with that window's opacity and rounded-corner coverage through the same
 `sample_local` path the software compositor uses, so the hardware result
 matches pixel-for-pixel), and the cursor on top, then hands the stack to
@@ -111,6 +130,18 @@ actions, reporting each through `InputResponse`:
   `Activated { window, local }` with the press position in the window's
   surface coordinates. A press on the desktop background clears focus
   (`DesktopPressed`).
+- **Input that lands on nothing is reported, not swallowed** — the desktop
+  layer beneath the window stack is a real surface with a real owner, so
+  pointer motion that resolves to no window and starts no grab comes back
+  as `DesktopPointerMoved`, and a key event while focus rests on the
+  desktop (rather than a window) comes back as
+  `DesktopKey { key, modifiers, pressed }`. `DesktopPointerMoved` carries
+  **no position of its own**: the motion has already updated the router's
+  own `pointer()`, which is where the desktop layer's owner reads the
+  position from, so the response need not duplicate it. The router takes
+  no action of its own for either — it only names where the input landed,
+  leaving the desktop layer's owner to interpret it (hover feedback,
+  moving a selection, a drag it started itself).
 - **Move-grabs** — dragging a window is an explicit grab started by
   `InputRouter::begin_move` (which decorations call when a press lands on
   a window's move handle, e.g. a title bar), not a behaviour armed on
@@ -502,9 +533,13 @@ a path or any browsing authority of its own.
 framebuffer: premultiplied-alpha correctness (fully-opaque and
 fully-transparent edge cases), per-region alpha blending, rounded-corner
 masking, z-order and raise, window move/hide/remove with damage repaint,
-channel-order encoding, the `Display` present seam, the accelerated
-layer-encoding present path (background + window layers, hidden-window
-omission, and the over-budget / over-size software fallbacks), and input
-routing (hit-testing, click-to-activate focus and raise,
-desktop-clears-focus, move-grab drag, and the fail-closed grab edge
-cases).
+channel-order encoding, the `Display` present seam, the desktop layer
+(drawing over the background and under every window, a smaller-than-screen
+layer leaving the background showing, and installing/replacing/clearing
+each damaging exactly its footprint), the accelerated
+layer-encoding present path (background + desktop + window layers,
+hidden-window omission, and the over-budget / over-size software
+fallbacks), and input routing (hit-testing, click-to-activate focus and
+raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position of
+its own and `DesktopKey` reporting focus-on-desktop, move-grab drag, and
+the fail-closed grab edge cases).

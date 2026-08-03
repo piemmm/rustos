@@ -274,7 +274,7 @@ impl Toolbar {
 
         for (entry, rect) in self.entries.iter().zip(rects.iter()) {
             match &entry.tool {
-                Tool::Icon(b) => b.render(surface, *rect, scale, theme, font),
+                Tool::Icon(b) => b.render(surface, *rect, scale, theme, font, None),
                 Tool::Split(b) => b.render(surface, *rect, scale, theme, font),
             }
             if entry.active {

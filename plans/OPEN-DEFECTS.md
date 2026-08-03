@@ -315,16 +315,33 @@ The open items, in priority order:
     click-choreography artefact or a real present path issue is unresolved and
     left for a compositor/display vertical to investigate.
 
+- **D21 — a layered block device republishes an unreadable member class as
+  `Virtual`, so the mount table can report a medium nobody declared — OPEN
+  (structural fix staged).** The block-service publish site wraps the
+  *served* class in `Some(...)` (`lib/abi/src/blkio.rs` `serve`:
+  `let class = Some(device.device_class());`), and `Block::device_class()` is
+  concrete by definition — its trait default is `BlkDeviceClass::Virtual` —
+  so a layer over a device whose class word was unreadable publishes
+  `Some(Virtual)`, a fabricated identity indistinguishable from a genuine
+  paravirtual device. That now reaches userland: the mount medium threads
+  from the completion through `MountBacking` to
+  `MountRecord::medium()`, so the System Information API can assert a medium
+  no driver reported. Noticed while landing that mount-medium path (which
+  fixed the *decode* half: an undefined class word stays `None` end to end),
+  recorded here rather than fixed inline because the remaining half widens
+  the block trait across every implementor. Detail below.
+
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
 is a rustdoc/docs-build failure, D10 was a fragile QEMU-harness
 readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
-(closed), and D19/D20 were the `autoload-input-qemu-aarch64` count-drift
+(closed), D19/D20 were the `autoload-input-qemu-aarch64` count-drift
 (closed: marker-based sequencing + file-manager choreography moved to host
-tests). Do not collapse the open items into one change; land each on its own
-whole-project-green gate (§7).
+tests), and D21 is an ABI-honesty gap — a layer asserting a hardware fact
+nobody reported. Do not collapse the open items into one change; land each on
+its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -1123,6 +1140,72 @@ pending a user boot.
 metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer
 wedges on metal + the QEMU stress vertical. (The FIQ and EDPCSR samplers remain
 the standing masked-section observers for any *future* wedge.)
+
+---
+
+## D21 — a layered block device republishes an unreadable member class as `Virtual` (OPEN)
+
+**State:** the mount-medium path is honest end to end *except* across a
+republishing layer. Discovered while landing the storage medium on
+`MountRecord`; the decode half was fixed in that change, the trait half is
+staged here because it touches every implementor of the block trait.
+
+**Mechanism.** Three facts compose into a fabricated hardware claim:
+
+- `blkio::decode_outcome` now yields `Option<BlkDeviceClass>`, so a class
+  word the ABI does not define stays an explicit unknown rather than being
+  rewritten to `Virtual`. `BlkDeviceClass::served_as(None)` is the single
+  patience policy: an unknown is *served* `Virtual`'s bounded envelope
+  without ever being *called* `Virtual`. That half is correct.
+- `Block::device_class()` is concrete by construction — its trait default
+  returns `BlkDeviceClass::Virtual`, and both clients document their result
+  as the **served** class. There is no way for an implementor to say "the
+  device told me something I cannot read".
+- `blkio::serve` publishes that concrete value straight back onto the wire
+  (`let class = Some(device.device_class());`). So a layer over a device
+  whose class word was unreadable — the block-service seam re-serving a
+  `RemoteBlock`, a partition window, the block cache, a RAID array folding
+  members through `BlkDeviceClass::most_patient` — republishes
+  `Some(Virtual)`: an identity indistinguishable from a genuine paravirtual
+  device, asserted by a layer that was never told it.
+
+That value is no longer confined to budget sizing. It threads from the
+completion through `BlkClient::declared_class()` → `MountBacking` →
+`MountPoint::medium()` → `MountRecord::medium()`, so the System Information
+API can report a storage medium no driver ever declared. Sizing a cautious
+I/O budget from an unknown is right; *naming* the unknown is not.
+
+**Blast radius today (small, and only by luck).** The single user-visible
+consumer of `MountRecord::medium()` is the drive icon, and
+`tairix_icon::disk_icon` maps both `Some(Virtual)` and `None` to the same
+generic `Disk` glyph — so nothing is currently misdrawn. Nothing else reads
+the field yet. The gap is therefore latent, not cosmetic: the first consumer
+that distinguishes "paravirtual" from "unknown" (a medium column in `df` or
+`mount`, a volume-properties panel, a policy that treats virtual disks
+differently) reads a fabricated fact with no way to tell.
+
+**Structural fix.** Widen the accessor, keep the one patience policy:
+
+- `Block::device_class()` returns `Option<BlkDeviceClass>`, defaulting to
+  `None` (an implementor that knows nothing says nothing) rather than to a
+  class it invented.
+- Every implementor and forwarding layer carries the `Option` through: the
+  partition window, the block cache, the retained journal, `SharedBlock`,
+  the six RAID array kinds, USB mass storage, and both clients
+  (`lib/blkclient`, `kernel/core/src/fs/blkclient.rs`) with their fixtures.
+- `most_patient` folds `Option`s, so a composition with one unreadable
+  member reports its medium as unknown — which it is — while still being
+  *served* the widest envelope through `served_as`. Patience behaviour is
+  unchanged at every call site; only the published identity becomes honest.
+- `blkio::serve` then publishes what the device actually said, and the
+  unknown reaches `MountRecord::medium() == None`, where the generic drive
+  icon is the right answer *by design* instead of by coincidence.
+
+**Done when:** no layer can publish a class its device did not declare; a
+regression test composes an array over a member with an unreadable class
+word and asserts both halves — the composition is served the cautious
+envelope, and its mount reports `medium() == None`; and `served_as` remains
+the only place an unknown is turned into a concrete envelope (§2.2).
 
 ---
 

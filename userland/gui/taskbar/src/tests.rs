@@ -13,7 +13,7 @@ use tairix_controls::{
     TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconKind, IconSet};
+use tairix_icon::{IconArtwork, IconKind, IconSet, NoArtwork};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
@@ -1541,11 +1541,218 @@ fn clicking_an_entry_launches_it() {
     };
 
     let centre = centre_of(rect);
+    // The press arms the drag rather than launching, so the click concludes
+    // on the release that ends it without travelling.
     assert_eq!(
         press_at(&mut input, &mut bar, centre.x, centre.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(bar.library().is_open(), "the press alone launches nothing");
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::LibraryLaunch { entry: id }
     );
     assert!(!bar.library().is_open(), "a launch closes the popup");
+}
+
+/// Open the popup and press the visible "Chess" entry row, returning its
+/// catalog identifier and the press point — the start of every pin-drag
+/// gesture the tests below drive.
+fn press_chess_row(input: &mut TaskbarInput, bar: &mut Taskbar) -> (EntryId, Point) {
+    open_library(input, bar);
+    let (index, rect) = visible_row_where(
+        bar,
+        |row| matches!(row, LibraryRow::Entry { name, .. } if name == "Chess"),
+    )
+    .expect("Chess is visible");
+    let LibraryRow::Entry { id, .. } = bar.library().rows()[index].clone() else {
+        panic!("expected an entry row");
+    };
+    let centre = centre_of(rect);
+    assert_eq!(
+        press_at(input, bar, centre.x, centre.y),
+        TaskbarResponse::Ignored
+    );
+    (id, centre)
+}
+
+/// A point far enough from `from` that the shared drag detector must treat
+/// the motion as a drag.
+fn beyond_drag_threshold(from: Point) -> Point {
+    let travel = i32::try_from(tairix_browse::DRAG_THRESHOLD_PX).expect("small") + 1;
+    Point::new(from.x, from.y + travel)
+}
+
+#[test]
+fn dragging_a_library_row_offers_that_entry_for_pinning() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (id, press) = press_chess_row(&mut input, &mut bar);
+
+    let away = beyond_drag_threshold(press);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, away, NOW_NS),
+        TaskbarResponse::PinDragOffered { entry: id }
+    );
+    // Exactly one offer per gesture: further travel adds nothing.
+    assert_eq!(
+        moved_at(&mut input, &mut bar, beyond_drag_threshold(away), NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert!(
+        bar.library().is_open(),
+        "the popup stays up while the drag is in flight"
+    );
+}
+
+#[test]
+fn releasing_a_dragged_library_row_reports_the_drop() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (id, press) = press_chess_row(&mut input, &mut bar);
+
+    assert_eq!(
+        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
+        TaskbarResponse::PinDragOffered { entry: id }
+    );
+    // The release is the drop; where it landed is the session's to resolve,
+    // and a dragged row is never also launched.
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::PinDragDropped
+    );
+    assert!(bar.library().is_open(), "a drag never launches the row");
+}
+
+#[test]
+fn escape_during_a_library_drag_withdraws_it_and_keeps_the_popup() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (id, press) = press_chess_row(&mut input, &mut bar);
+
+    assert_eq!(
+        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
+        TaskbarResponse::PinDragOffered { entry: id }
+    );
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
+        TaskbarResponse::PinDragWithdrawn
+    );
+    assert!(
+        bar.library().is_open(),
+        "abandoning the drag keeps the popup"
+    );
+    // The gesture is over: the release that follows drops nothing, and a
+    // second Escape means what it always did.
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
+        TaskbarResponse::LibraryDismissed
+    );
+}
+
+#[test]
+fn a_press_that_barely_moves_is_still_a_click() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (id, press) = press_chess_row(&mut input, &mut bar);
+
+    // Jitter within the shared threshold is not a drag.
+    assert_eq!(
+        moved_at(
+            &mut input,
+            &mut bar,
+            Point::new(press.x + 1, press.y),
+            NOW_NS
+        ),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::LibraryLaunch { entry: id }
+    );
+}
+
+#[test]
+fn a_release_away_from_the_pressed_row_launches_nothing() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (_, press) = press_chess_row(&mut input, &mut bar);
+
+    // Far enough to be a drag, so the release is a drop rather than a
+    // launch — and the row the pointer ended over is not launched either.
+    let away = beyond_drag_threshold(press);
+    assert!(matches!(
+        moved_at(&mut input, &mut bar, away, NOW_NS),
+        TaskbarResponse::PinDragOffered { .. }
+    ));
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::PinDragDropped
+    );
+    assert!(bar.library().is_open());
+}
+
+#[test]
+fn a_rebuild_under_a_held_press_offers_nothing() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let (id, press) = press_chess_row(&mut input, &mut bar);
+
+    // Typing filters the list while the button is still down, so the row the
+    // press was keyed to is gone. The armed gesture must go with it: a motion
+    // past the threshold now would otherwise offer whatever moved into that
+    // position, which is not the program the user pressed.
+    press_key(&mut input, &mut bar, Key::Char('w'));
+    assert_eq!(bar.library().search_text(), "w");
+    assert!(
+        !bar.library()
+            .rows()
+            .iter()
+            .any(|row| matches!(row, LibraryRow::Entry { id: row_id, .. } if *row_id == id)),
+        "the filter dropped the pressed entry"
+    );
+
+    assert_eq!(
+        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
+        TaskbarResponse::Ignored,
+        "a rebuilt list has no armed press to turn into an offer"
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::Ignored,
+        "and nothing to drop or launch on release"
+    );
+}
+
+#[test]
+fn a_folder_header_arms_no_drag() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let (_, rect) = visible_row_where(&bar, |row| {
+        matches!(row, LibraryRow::Folder { category, .. } if *category == LibraryCategory::Office)
+    })
+    .expect("the Office folder is visible");
+
+    // A header acts on the press (it folds), so there is nothing armed for a
+    // later motion to turn into an offer.
+    let centre = centre_of(rect);
+    assert_eq!(
+        press_at(&mut input, &mut bar, centre.x, centre.y),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        moved_at(&mut input, &mut bar, beyond_drag_threshold(centre), NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        release_at(&mut input, &mut bar, NOW_NS),
+        TaskbarResponse::Ignored
+    );
 }
 
 #[test]
@@ -2138,7 +2345,7 @@ fn rendered_surface_matches_bar_dimensions() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert_eq!(surface.width(), layout.bar.width);
     assert_eq!(surface.height(), layout.bar.height);
@@ -2148,7 +2355,7 @@ fn rendered_surface_matches_bar_dimensions() {
 fn background_is_the_raised_surface_colour() {
     let bar = bottom_bar();
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert_eq!(
         pixel_at(&surface, bar.layout(Scale::ONE).bar, 500, 780),
@@ -2161,7 +2368,7 @@ fn library_button_paints_the_accent_plate_and_files_stays_quiet() {
     let bar = bottom_bar();
     let theme = Theme::dark();
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     let frame = bar.layout(Scale::ONE).bar;
     let layout = bar.layout(Scale::ONE);
@@ -2201,7 +2408,7 @@ fn focused_task_shows_the_accent_seam_and_others_stay_quiet() {
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     // The focused task's shared control draws the lower accent seam…
     let seam = Rect::new(
@@ -2235,7 +2442,7 @@ fn minimised_task_recedes_into_the_bar() {
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     // The minimised task's shared control recesses its plate to the flat
     // surface colour, distinct from the raised bar background, and marks it
@@ -2264,7 +2471,7 @@ fn status_signal_glyph_draws_in_the_muted_role() {
     )]);
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert!(region_has_role_ink(
         &surface,
@@ -2292,12 +2499,16 @@ fn a_glyph_is_rasterised_once_per_epoch_and_retained() {
     let bar = bar_with_status_signals();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
 
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     let after_first = renderer.cache_len();
     assert!(after_first > 0, "glyphs must be retained across frames");
     let rasterisations = renderer.cache_stats().misses();
 
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert_eq!(renderer.cache_len(), after_first);
     assert_eq!(
         renderer.cache_stats().misses(),
@@ -2310,12 +2521,16 @@ fn a_glyph_is_rasterised_once_per_epoch_and_retained() {
 fn a_scale_change_invalidates_every_cached_glyph() {
     let bar = bar_with_status_signals();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     let rasterisations = renderer.cache_stats().misses();
     assert!(rasterisations > 0);
 
     let doubled = Scale::from_percent(200).expect("scale");
-    let _ = renderer.render(&bar, doubled).expect("bar renders");
+    let _ = renderer
+        .render(&bar, doubled, &mut NoArtwork)
+        .expect("bar renders");
     assert_eq!(
         renderer.cache_stats().invalidations(),
         1,
@@ -2328,11 +2543,15 @@ fn a_scale_change_invalidates_every_cached_glyph() {
 fn installing_a_different_icon_set_invalidates_every_cached_glyph() {
     let bar = bar_with_status_signals();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert!(renderer.cache_len() > 0);
 
     renderer.set_icons(IconSet::builtin());
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert_eq!(renderer.cache_stats().invalidations(), 1);
 }
 
@@ -2346,7 +2565,9 @@ fn the_glyph_cache_never_exceeds_its_derived_budget() {
     // distinct glyphs through the one cache.
     for percent in 50..250u32 {
         let scale = Scale::from_percent(percent).expect("scale");
-        let _ = renderer.render(&bar, scale).expect("bar renders");
+        let _ = renderer
+            .render(&bar, scale, &mut NoArtwork)
+            .expect("bar renders");
         assert!(
             renderer.cache_bytes() <= hard,
             "the cache must stay inside its budget at every step"
@@ -2359,7 +2580,9 @@ fn mild_pressure_drops_the_glyph_cache_and_refuses_growth() {
     static GAUGE: ReportedPressure = ReportedPressure::unknown();
     let bar = bar_with_status_signals();
     let mut renderer = pressured_renderer(&GAUGE);
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert!(renderer.cache_len() > 0);
 
     GAUGE.report(PressureBand::Mild);
@@ -2369,7 +2592,9 @@ fn mild_pressure_drops_the_glyph_cache_and_refuses_growth() {
 
     // The bar still paints correctly; the glyphs are simply rasterised
     // on demand instead of retained.
-    let surface = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let surface = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert_eq!(surface.width(), bar.layout(Scale::ONE).bar.width);
     assert_eq!(renderer.cache_len(), 0, "no growth while pressure holds");
 }
@@ -2378,7 +2603,9 @@ fn mild_pressure_drops_the_glyph_cache_and_refuses_growth() {
 fn teardown_releases_every_rasterised_glyph() {
     let bar = bar_with_status_signals();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
-    let _ = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let _ = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     assert!(renderer.cache_len() > 0);
 
     renderer.teardown();
@@ -2391,9 +2618,13 @@ fn teardown_releases_every_rasterised_glyph() {
 fn theme_switch_repaints_the_bar() {
     let mut bar = bottom_bar();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
-    let dark = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let dark = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     bar.apply_theme(&Theme::light());
-    let light = renderer.render(&bar, Scale::ONE).expect("bar renders");
+    let light = renderer
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
     let frame = bar.layout(Scale::ONE).bar;
     assert_ne!(
         pixel_at(&dark, frame, 500, 780),
@@ -2432,7 +2663,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
     let mut bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
     let empty = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert!(
         !region_has_role_ink(
@@ -2447,7 +2678,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
 
     bar.clock_mut().set_label("12:34");
     let drawn = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert!(region_has_role_ink(
         &drawn,
@@ -2466,7 +2697,7 @@ fn long_task_title_never_spills_its_slot() {
         .add(TaskId(1), "An enormously long window title that cannot fit");
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     // The empty bar beyond the only task's slot carries no text ink: the
     // over-long title was truncated inside the slot, never spilled past it.
@@ -2497,7 +2728,7 @@ fn pins_render_artwork_or_fallback_glyph() {
     ]);
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
     // Pin 0 shows the magenta artwork.
@@ -2531,7 +2762,7 @@ fn active_pin_shows_the_accent_seam() {
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
     // The pin slot (not just the task slot) shows the accent seam.
@@ -2555,7 +2786,7 @@ fn task_borrows_artwork_from_pin() {
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
     // The task slot shows the borrowed magenta artwork.
@@ -2565,6 +2796,169 @@ fn task_borrows_artwork_from_pin() {
         layout.tasks[0],
         magenta
     ));
+}
+
+/// A stand-in for the shipped `/System/Graphics` icon set: it answers the
+/// kinds it was built with as a flat-coloured square and records every
+/// question the renderer asks, so a test can assert both *which* kinds the
+/// bar looks up and that what came back reached the pixels.
+struct FakeArtwork {
+    held: Vec<(IconKind, Surface)>,
+    asked: Vec<(IconKind, u32)>,
+}
+
+impl FakeArtwork {
+    /// A store holding one flat-coloured square per listed kind.
+    fn new(held: &[(IconKind, Color)]) -> Self {
+        Self {
+            held: held
+                .iter()
+                .filter_map(|&(kind, colour)| {
+                    Surface::filled(16, 16, colour.premultiply()).map(|art| (kind, art))
+                })
+                .collect(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// Whether the renderer asked for `kind` at a slot of non-zero size.
+    fn asked_for(&self, kind: IconKind) -> bool {
+        self.asked
+            .iter()
+            .any(|&(asked, side)| asked == kind && side > 0)
+    }
+}
+
+impl IconArtwork for FakeArtwork {
+    fn artwork(&mut self, kind: IconKind, side: u32) -> Option<&Surface> {
+        self.asked.push((kind, side));
+        self.held
+            .iter()
+            .find(|(held, _)| *held == kind)
+            .map(|(_, art)| art)
+    }
+}
+
+#[test]
+fn the_launcher_buttons_draw_their_shipped_artwork() {
+    let bar = bottom_bar();
+    let library_colour = Color::rgb(255, 0, 255);
+    let files_colour = Color::rgb(0, 255, 255);
+    let mut artwork = FakeArtwork::new(&[
+        (IconKind::Library, library_colour),
+        (IconKind::Folder, files_colour),
+    ]);
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut artwork)
+        .expect("bar renders");
+
+    assert!(
+        artwork.asked_for(IconKind::Library),
+        "the Library button resolves the library artwork"
+    );
+    assert!(
+        artwork.asked_for(IconKind::Folder),
+        "the Files button resolves the folder artwork"
+    );
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.library,
+        library_colour.premultiply()
+    ));
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.files,
+        files_colour.premultiply()
+    ));
+}
+
+#[test]
+fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
+    let mut bar = bottom_bar();
+    let own = Color::rgb(255, 0, 255);
+    let bundle = Color::rgb(0, 255, 0);
+    let task_id = TaskId(2);
+    bar.set_pins(alloc::vec![
+        PinView::new("Own", IconKind::AppBundle)
+            .with_artwork(Surface::filled(16, 16, own.premultiply()).expect("artwork")),
+        PinView::new("Shipped", IconKind::AppBundle).with_window(task_id),
+    ]);
+    bar.tasks_mut().add(task_id, "Shipped");
+    let mut artwork = FakeArtwork::new(&[(IconKind::AppBundle, bundle)]);
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut artwork)
+        .expect("bar renders");
+
+    // A pin carrying its application's own icon keeps it: the shipped
+    // class artwork is the fallback, never an override.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.pins[0],
+        own.premultiply()
+    ));
+    // The pin with no icon of its own, and the running task that borrows
+    // from it, both show the shipped app-bundle artwork.
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.pins[1],
+        bundle.premultiply()
+    ));
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.tasks[0],
+        bundle.premultiply()
+    ));
+}
+
+#[test]
+fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
+    let theme = Theme::dark();
+    let mut bar = bar_with_status_signals();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    bar.tasks_mut().add(TaskId(1), "Task");
+    bar.clock_mut().set_label("12:34");
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+
+    // Every slot the bar draws carries ink: with no shipped assets at all
+    // the built-in glyphs keep a freshly installed system usable.
+    for (label, rect) in [
+        ("library", layout.library),
+        ("files", layout.files),
+        ("pin", layout.pins[0]),
+        ("task", layout.tasks[0]),
+        ("status signal", layout.notifications[0]),
+        ("clock", layout.clock),
+    ] {
+        assert!(
+            region_has_role_ink(
+                &surface,
+                layout.bar,
+                rect,
+                theme.palette().on_surface,
+                role(theme.palette().surface_raised),
+            ) || region_has_role_ink(
+                &surface,
+                layout.bar,
+                rect,
+                theme.palette().on_surface_muted,
+                role(theme.palette().surface_raised),
+            ),
+            "the {label} slot must never be blank without artwork"
+        );
+    }
 }
 
 #[test]
@@ -2821,6 +3215,183 @@ fn popup_repaints_after_a_theme_switch() {
         pixel_at(&dark, layout.panel, inside.x, inside.y),
         pixel_at(&light, layout.panel, inside.x, inside.y)
     );
+}
+
+/// An open popup over `count` Utilities entries on a short screen, so the
+/// list overflows its viewport and only some rows are shown.
+fn overflowing_library(count: usize) -> Taskbar {
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 300), &Theme::dark());
+    let mut cat = Catalog::new();
+    for index in 0..count {
+        cat.insert(entry(
+            &format!("app{index:02}"),
+            &format!("App {index:02}"),
+            LibraryCategory::Utilities,
+        ))
+        .expect("fits");
+    }
+    bar.library_mut().set_catalog(cat);
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    bar
+}
+
+/// The rows the popup's viewport currently shows that are launchable
+/// entries — exactly the rows that may want owner-supplied artwork.
+fn shown_entry_rows(bar: &Taskbar) -> Vec<usize> {
+    bar.library_layout(Scale::ONE)
+        .rows
+        .iter()
+        .filter(|&&(index, _)| {
+            matches!(
+                bar.library().rows().get(index),
+                Some(LibraryRow::Entry { .. })
+            )
+        })
+        .map(|&(index, _)| index)
+        .collect()
+}
+
+/// The rows the popup asks the owner to resolve artwork for.
+fn requested_rows(bar: &Taskbar) -> Vec<usize> {
+    bar.library()
+        .visible_icon_requests(&bar.library_layout(Scale::ONE), Scale::ONE, &Theme::dark())
+        .iter()
+        .map(|req| req.row)
+        .collect()
+}
+
+#[test]
+fn the_popup_asks_for_artwork_only_for_the_entry_rows_it_shows() {
+    let bar = overflowing_library(30);
+    let layout = bar.library_layout(Scale::ONE);
+    assert!(
+        layout.visible_rows < bar.library().rows().len(),
+        "the fixture overflows the viewport"
+    );
+
+    let requests = bar
+        .library()
+        .visible_icon_requests(&layout, Scale::ONE, &Theme::dark());
+    let shown = shown_entry_rows(&bar);
+    assert!(!shown.is_empty(), "the fixture shows entry rows");
+    assert_eq!(
+        requests.iter().map(|req| req.row).collect::<Vec<_>>(),
+        shown,
+        "one request per shown entry row, and none for a row off screen"
+    );
+    assert!(
+        requests.iter().all(|req| req.side > 0),
+        "every request names the pixel side its row draws at"
+    );
+    // The request carries the entry the row launches, so the owner resolves
+    // the right bundle's icon.
+    for req in &requests {
+        let Some(LibraryRow::Entry { id, .. }) = bar.library().rows().get(req.row) else {
+            panic!("a request must name an entry row");
+        };
+        assert_eq!(&req.entry, id);
+    }
+}
+
+#[test]
+fn scrolling_the_popup_asks_only_for_the_newly_shown_rows() {
+    let mut bar = overflowing_library(30);
+    let before = requested_rows(&bar);
+
+    let mut input = TaskbarInput::new();
+    input.handle(
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+
+    let after = requested_rows(&bar);
+    assert_ne!(before, after, "scrolling changes which rows are shown");
+    assert_eq!(
+        after,
+        shown_entry_rows(&bar),
+        "after a scroll the requests still track the viewport exactly"
+    );
+    let newly: Vec<usize> = after
+        .iter()
+        .copied()
+        .filter(|row| !before.contains(row))
+        .collect();
+    assert_eq!(
+        newly.len(),
+        1,
+        "one row scrolled into view, so exactly one is newly asked for"
+    );
+    assert!(
+        newly[0] > *before.last().expect("rows were requested"),
+        "the newly asked-for row is the one that came into view below"
+    );
+}
+
+#[test]
+fn a_rebuild_drops_stale_row_artwork() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.library_mut()
+        .set_row_artwork(1, Surface::filled(16, 16, magenta));
+    assert!(bar.library().row_artwork(1).is_some());
+
+    // Re-cataloguing re-indexes the rows, so artwork keyed to the old
+    // indices must not survive and draw the wrong application's icon.
+    bar.library_mut().set_catalog(office_and_games());
+    assert!(bar.library().row_artwork(1).is_none());
+
+    // An index past the end is ignored rather than panicking.
+    bar.library_mut()
+        .set_row_artwork(9_999, Surface::filled(16, 16, magenta));
+    assert!(bar.library().row_artwork(9_999).is_none());
+}
+
+#[test]
+fn a_popup_row_draws_its_artwork_and_a_row_without_it_draws_the_glyph() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    let (row, _) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
+        .expect("an entry row is shown");
+    bar.library_mut()
+        .set_row_artwork(row, Surface::filled(16, 16, magenta));
+
+    let layout = bar.library_layout(Scale::ONE);
+    let rect = layout
+        .rows
+        .iter()
+        .find(|&&(index, _)| index == row)
+        .map(|&(_, rect)| rect)
+        .expect("the row is laid out");
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render_library(&bar, Scale::ONE)
+        .expect("popup renders");
+    assert!(region_has_pixel(&surface, layout.panel, rect, magenta));
+
+    // Every other shown row still inks its built-in glyph, so a library
+    // with no resolved artwork is never a column of blank slots.
+    for &(index, other) in &layout.rows {
+        if index == row {
+            continue;
+        }
+        assert!(
+            region_has_role_ink(
+                &surface,
+                layout.panel,
+                other,
+                theme.palette().on_surface,
+                role(theme.palette().surface),
+            ),
+            "row {index} must draw without artwork"
+        );
+    }
 }
 
 // ---- notification popover -------------------------------------------
@@ -3774,7 +4345,7 @@ fn capsule_paints_in_its_slot() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert!(
         region_is_varied(&surface, layout.bar, layout.switchboard),
@@ -3791,7 +4362,7 @@ fn pressure_paints_the_dominant_kind_rail() {
     bar.set_tray_summary(Some(summary));
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     assert!(region_has_pixel(
         &surface,
@@ -3808,7 +4379,7 @@ fn jobs_paint_the_heat_seam_along_the_slot_bottom() {
     bar.set_tray_summary(Some(tray_summary(2, 0, 0)));
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE)
+        .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
     // The working seam runs across the slot's lower edge — probe only the
     // bottom band, well away from the top-corner badge.
@@ -3867,7 +4438,7 @@ fn badge_tones_follow_the_dominant_state() {
     ] {
         let layout = bar.layout(Scale::ONE);
         let surface = TaskbarRenderer::new(test_icon_cache())
-            .render(bar, Scale::ONE)
+            .render(bar, Scale::ONE, &mut NoArtwork)
             .expect("bar renders");
         assert!(
             region_has_pixel(&surface, layout.bar, layout.switchboard, role(want)),
@@ -3893,7 +4464,7 @@ fn capsule_renders_across_themes_and_high_contrast() {
         bar.set_tray_summary(Some(summary));
         let layout = bar.layout(Scale::ONE);
         let surface = TaskbarRenderer::new(test_icon_cache())
-            .render(&bar, Scale::ONE)
+            .render(&bar, Scale::ONE, &mut NoArtwork)
             .expect("bar renders");
         assert!(
             region_is_varied(&surface, layout.bar, layout.switchboard),

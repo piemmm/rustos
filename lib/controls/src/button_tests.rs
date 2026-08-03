@@ -264,6 +264,7 @@ fn icon_button_paints_and_activates() {
         Scale::ONE,
         &theme,
         font(),
+        None,
     );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 
@@ -305,6 +306,64 @@ fn icon_only_glyph_fills_the_plate_not_the_text_inset() {
         side <= plate,
         "icon side {side} overflows the plate {plate}"
     );
+}
+
+/// A solid square of `color` — the stand-in for an owner's rasterised icon
+/// artwork, which a control blits without ever decoding image bytes.
+fn artwork(side: u32, color: Color) -> Surface {
+    let mut art = Surface::new(side, side).expect("artwork surface");
+    art.fill(color);
+    art
+}
+
+/// A colour no theme palette uses, so finding it in a render can only mean the
+/// supplied artwork reached the surface.
+const ART: Color = Color::rgb(255, 0, 255);
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` of `want` in `surface`.
+fn bbox(surface: &Surface, want: Pixel) -> Option<(u32, u32, u32, u32)> {
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..surface.height() {
+        for x in 0..surface.width() {
+            if surface.get(x, y) == Some(want) {
+                found = Some(match found {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
+    let theme = Theme::dark();
+    let button = IconButton::new(IconKind::Library, ControlRole::Primary);
+    let bounds = Rect::new(0, 0, H, H);
+    let side = button.icon_side(bounds, Scale::ONE, &theme, font());
+    assert!(side > 0, "the button reserves an icon slot");
+
+    // Slot-sized artwork fills exactly the slot the button advertised.
+    let mut with_art = Surface::new(H, H).expect("surface");
+    button.render(
+        &mut with_art,
+        bounds,
+        Scale::ONE,
+        &theme,
+        font(),
+        Some(&artwork(side, ART)),
+    );
+    let drawn = bbox(&with_art, ART.premultiply()).expect("artwork drawn");
+    assert_eq!(drawn.2 + 1 - drawn.0, side);
+    assert_eq!(drawn.3 + 1 - drawn.1, side);
+
+    // Without artwork the same button draws its built-in glyph instead — the
+    // supplied colour never appears, so a missing icon can never blank it.
+    let mut glyph = Surface::new(H, H).expect("surface");
+    button.render(&mut glyph, bounds, Scale::ONE, &theme, font(), None);
+    assert!(!has_pixel(&glyph, ART.premultiply()));
+    assert!(has_pixel(&glyph, premul(theme.palette().on_accent)));
 }
 
 // --- SplitButton --------------------------------------------------------
@@ -524,8 +583,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b);
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font(), None)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font(), None)),
     );
 
     let mut a = SplitButton::new(

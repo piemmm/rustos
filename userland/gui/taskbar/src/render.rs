@@ -56,7 +56,7 @@ use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{ControlRole, ControlState, PointerState, TaskVisibility, TaskbarItem};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconKind, IconSet};
+use tairix_icon::{IconArtwork, IconKind, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
@@ -232,12 +232,27 @@ impl TaskbarRenderer {
 
     /// Paint `taskbar` into a [`Surface`] using its own theme's palette.
     ///
+    /// `artwork` is the desktop's shipped raster-icon lookup: the two leading
+    /// launchers draw the [`Library`](IconKind::Library) and
+    /// [`Folder`](IconKind::Folder) artwork, and a pinned shortcut or running
+    /// task draws its application's own artwork when it has one, its kind's
+    /// shipped artwork otherwise. Every one of those falls back to its
+    /// built-in glyph when the lookup returns `None` — the shared icon slot
+    /// does that itself — so a system with no `/System/Graphics` is fully
+    /// usable ([`NoArtwork`](tairix_icon::NoArtwork) resolves entirely to
+    /// glyphs).
+    ///
     /// Returns `None` only if the bar's pixel dimensions cannot be allocated
     /// (a surface that could never exist), so the caller fails closed rather
     /// than panicking. The window manager presents the
     /// returned surface and rounds it with [`BarLayout::corner_radius`].
     #[must_use]
-    pub fn render(&mut self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+    pub fn render(
+        &mut self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        artwork: &mut dyn IconArtwork,
+    ) -> Option<Surface> {
         let theme = taskbar.theme();
         let layout = taskbar.layout(scale);
         let mut icons = IconContext {
@@ -250,20 +265,17 @@ impl TaskbarRenderer {
         let origin = layout.bar.origin;
 
         surface.fill(theme.palette().surface_raised.into());
-        for (button, rect) in [
-            (taskbar.library_button(), layout.library),
-            (taskbar.files_button(), layout.files),
+        for (button, rect, kind) in [
+            (taskbar.library_button(), layout.library, IconKind::Library),
+            (taskbar.files_button(), layout.files, IconKind::Folder),
         ] {
             if rect.is_empty() {
                 continue;
             }
-            button.render(
-                &mut surface,
-                local_rect(rect, origin),
-                scale,
-                theme,
-                fonts.text,
-            );
+            let bounds = local_rect(rect, origin);
+            let side = button.icon_side(bounds, scale, theme, fonts.text);
+            let art = artwork.artwork(kind, side);
+            button.render(&mut surface, bounds, scale, theme, fonts.text, art);
         }
 
         let strip = taskbar.pins();
@@ -274,15 +286,12 @@ impl TaskbarRenderer {
             let Some(item) = strip.item(index, taskbar.tasks()) else {
                 continue;
             };
-            let artwork = strip.get(index).and_then(PinView::artwork);
-            item.render(
-                &mut surface,
-                local_rect(*slot, origin),
-                scale,
-                theme,
-                fonts.text,
-                artwork,
-            );
+            let view = strip.get(index);
+            let kind = view.map_or(IconKind::AppBundle, PinView::icon);
+            let bounds = local_rect(*slot, origin);
+            let side = item.icon_side(bounds, scale, theme, fonts.text);
+            let art = slot_artwork(view.and_then(PinView::artwork), kind, side, artwork);
+            item.render(&mut surface, bounds, scale, theme, fonts.text, art);
         }
 
         for (index, (slot, entry)) in layout
@@ -311,18 +320,13 @@ impl TaskbarRenderer {
             // application shows one icon on the bar.
             let pin = strip.view_for_window(entry.id);
             let icon = pin.map_or(IconKind::AppBundle, PinView::icon);
-            let artwork = pin.and_then(PinView::artwork);
-            TaskbarItem::new(entry.title.clone(), icon)
+            let item = TaskbarItem::new(entry.title.clone(), icon)
                 .with_visibility(visibility)
-                .with_state(ControlState::idle().with_pointer(pointer))
-                .render(
-                    &mut surface,
-                    local_rect(*slot, origin),
-                    scale,
-                    theme,
-                    fonts.text,
-                    artwork,
-                );
+                .with_state(ControlState::idle().with_pointer(pointer));
+            let bounds = local_rect(*slot, origin);
+            let side = item.icon_side(bounds, scale, theme, fonts.text);
+            let art = slot_artwork(pin.and_then(PinView::artwork), icon, side, artwork);
+            item.render(&mut surface, bounds, scale, theme, fonts.text, art);
         }
 
         paint_trailing(
@@ -419,6 +423,7 @@ impl TaskbarRenderer {
                 scale,
                 theme,
                 font,
+                popup.row_artwork(index),
             );
         }
 
@@ -670,6 +675,25 @@ fn draw_icon(
     let x = to_i32(local(rect.left(), origin.x).saturating_add(x_offset));
     let y = to_i32(local(rect.top(), origin.y).saturating_add(y_offset));
     surface.blit(x, y, &image);
+}
+
+/// Resolve the artwork an application slot (a pinned shortcut or a running
+/// task) draws: its own application artwork when it has one, else its kind's
+/// shipped artwork at `side`, else `None` for the control's built-in glyph.
+///
+/// One rule for both slot kinds so a pin and the task that matches it can
+/// never resolve their icon two different ways. The final glyph fallback is
+/// the shared icon slot's own, so `None` here is not a blank slot.
+fn slot_artwork<'a>(
+    app: Option<&'a Surface>,
+    kind: IconKind,
+    side: u32,
+    artwork: &'a mut dyn IconArtwork,
+) -> Option<&'a Surface> {
+    match app {
+        Some(surface) => Some(surface),
+        None => artwork.artwork(kind, side),
+    }
 }
 
 /// Translate a screen-space rectangle into surface-local space.

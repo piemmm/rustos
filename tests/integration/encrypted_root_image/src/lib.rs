@@ -308,34 +308,18 @@ fn try_build_system_partition(
     for (components, bytes) in drivers {
         root_image::plant_nested_file(&mut fs, root, components, bytes)?;
     }
-    // The system app store's bundle data, exactly as `tools/mkimage` plants
-    // it: each command app's internationalised Help/ tree, discovered from
-    // the bundle's own on-disk `Help/` source (`tairix_syshelp`) — never a
-    // hand-maintained list here — so the session vertical reads the same
-    // bytes a real image ships.
-    for doc in tairix_syshelp::HELP_FILES {
-        let components: [&[u8]; 5] = [
-            b"Apps",
-            doc.bundle.as_bytes(),
-            b"Help",
-            doc.locale.as_bytes(),
-            doc.file.as_bytes(),
-        ];
-        root_image::plant_nested_file(&mut fs, root, &components, doc.bytes)?;
-    }
-    // Each command app's bundle resources (e.g. `lspci`'s compiled
-    // ID-database table), exactly as `tools/mkimage` plants them: read from
-    // the bundle's own on-disk `Resources/` source, never a per-bundle list
-    // here, so the signed content hash the load gate recomputes matches.
-    for res in tairix_syshelp::RESOURCE_FILES {
-        let components: [&[u8]; 4] = [
-            b"Apps",
-            res.bundle.as_bytes(),
-            b"Resources",
-            res.file.as_bytes(),
-        ];
-        root_image::plant_nested_file(&mut fs, root, &components, res.bytes)?;
-    }
+    // The system payload, planted through the exact same one shared walk
+    // `tools/mkimage` drives (`tairix_syshelp::plant_system_payload`): each
+    // command app's internationalised Help/ tree and its Resources/ files,
+    // discovered from the bundle's own on-disk sources, plus the desktop's
+    // graphics assets (the raster icon masters) under Graphics/ — every
+    // intermediate directory (including Graphics/Icons) created on demand.
+    // Sharing the walk with mkimage means the session vertical reads the same
+    // bytes a real image ships and the two planters cannot list a different
+    // payload set (there is no third, hand-mirrored copy of the loops here).
+    tairix_syshelp::plant_system_payload(|components, bytes| {
+        root_image::plant_nested_file(&mut fs, root, components, bytes)
+    })?;
     // Each program's signed `AppInfo` + `Run` land beside its `Help/` tree
     // (`Apps/<name>.app/…`, `Services/<name>.app/…`), exactly as
     // `tools/mkimage` plants them, so every on-disk bundle the vertical

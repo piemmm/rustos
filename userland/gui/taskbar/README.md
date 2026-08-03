@@ -127,22 +127,39 @@ owns:
   release, and a press dragged off the capsule opens nothing (fail closed,
   `AGENTS.md` §5.4).
 - **Rendering** — `TaskbarRenderer::render` paints the bar into a
-  `tairix-raster` `Surface` using the taskbar's own theme: the leading
-  `IconButton`s draw with their live hover state, then each **pin** and **task
-  slot** is drawn as a shared `TaskbarItem` (pins use the `Icon` presentation;
-  tasks `IconAndLabel`). Each item blits its artwork (rasterised by the session
-  through its sandbox) or its built-in glyph. Each remaining region is filled
-  with its theme role, then the notification icons, clock, and titles are drawn
-  on top. `pin_icon_side` exposes the exact pixel geometry so owners rasterise
-  at the drawn size. The surface is rectangular — the window manager rounds it
+  `tairix-raster` `Surface` using the taskbar's own theme, taking the caller's
+  `tairix_icon::IconArtwork` lookup as its last argument: the leading
+  `IconButton`s draw with their live hover state over the shipped `Library`
+  and `Folder` artwork, then each **pin** and **task slot** is drawn as a
+  shared `TaskbarItem` (pins use the `Icon` presentation; tasks
+  `IconAndLabel`). Each remaining region is filled with its theme role, then
+  the notification icons, clock, and titles are drawn on top. `pin_icon_side`
+  exposes the exact pixel geometry so owners rasterise at the drawn size. The
+  surface is rectangular — the window manager rounds it
   — and the colour/blit algebra is reused from `lib/*` (`AGENTS.md` §2.2).
   The renderer holds a `tairix-reclaim` `ReclaimCache` of the rasterised
   notification glyphs across frames, built by `icon_cache` from the shared
   desktop cache policy (`tairix_reclaim::desktop::disposable_ui_cache`,
   `plans/SMARTRAM.md` SMART5): owned by the seat, bounded by a budget
   derived from the real framebuffer byte size, dropped under memory
-  pressure, and wiped on release. `render_library` paints the open popup,
-  and `render_menu` paints the open context menu.
+  pressure, and wiped on release. `render_library` paints the open popup —
+  each entry row drawing the artwork the session resolved for it — and
+  `render_menu` paints the open context menu.
+- **Icon artwork** — every icon the bar draws resolves through one rule,
+  expressed once in `render`: the application's own artwork when the owner
+  supplied it, else the artwork the lookup holds for the slot's `IconKind`,
+  else the control's built-in vector glyph. The bar never reads or decodes a
+  file; it asks the lookup the session owns, at exactly the pixel side the
+  slot will be drawn at (`pin_icon_side`, the controls' `icon_side`). A
+  lookup that answers nothing — `tairix_icon::NoArtwork`, a machine with no
+  `/System/Graphics`, a store under memory pressure — therefore renders every
+  element from glyphs rather than leaving a blank slot.
+- **The popup's per-row artwork** — `LibraryPopup::visible_icon_requests`
+  reports the rows the viewport actually shows, each with its entry id and
+  pixel side, so the session decodes only icons a user can see;
+  `set_row_artwork` files the answers and `row_artwork` serves them to the
+  renderer. A rebuild clears them, so a stale index can never draw another
+  application's icon.
 - **Notification icon set** — the renderer draws each notification glyph from
   a `tairix-icon` `IconSet`: the built-in glyph set until `set_icons` installs
   one decoded from the on-disk `/System/Graphics` SVG assets

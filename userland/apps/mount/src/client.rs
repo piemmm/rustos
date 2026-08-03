@@ -73,7 +73,8 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        MountAvailability, MountListRequest, MountRecord, MountVolumeState, SysinfoQueryId,
+        SysinfoRequestHeader,
     };
     use tairix_abi::Errno;
     use tairix_procinfo::{Output, Transport};
@@ -197,8 +198,11 @@ mod tests {
             target,
             fstype,
             flags,
-            VolumeStats::default(),
-            MountAvailability::Available,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
             [0u8; 16],
         )
         .expect("record")

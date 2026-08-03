@@ -20,6 +20,15 @@
 //!   named: no other process can feed it forged input (fail closed).
 //! * The `WindowClient` calls (create / present / close) over `ipc_call`
 //!   and the `WindowEvents` typed wait over the parked source.
+//! * The grid's icon artwork: the shared reclaim-governed decode cache
+//!   (`tairix_icon::artwork`) bound to a bounded VFS read and to the
+//!   sandboxed icon rasteriser. The artwork is untrusted input, so it is
+//!   decoded by a capability-empty worker this binary re-enters itself as
+//!   — never in this process — and a missing, over-long, or disbelieved
+//!   asset falls back to the built-in glyph rather than a blank tile. The
+//!   same wait-set carries a memory-pressure member, so the retained
+//!   pixels are trimmed when the machine's band deepens and released when
+//!   the app ends.
 //!
 //! Keyboard navigation drives the browser (`Down`/`Up` select, `Enter`
 //! activates the selection — it descends into a directory or launches a
@@ -49,8 +58,10 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
-#[cfg(freestanding)]
 extern crate alloc;
+
+pub mod command;
+pub mod sidebar;
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
@@ -65,6 +76,7 @@ mod program {
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
+    use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, Origin, ProcId, SpawnAttach, UnlinkFlags,
@@ -85,20 +97,33 @@ mod program {
         Activation, AppAssociation, Browser, BundleDrag, BundleSource, ClickKind, Clipboard,
         ClipboardOp, ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk,
         DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource,
-        DoubleClickTracker, Entry, EntryKind, ManagerTool, ManagerToolModel, OwnerChange,
-        PasteItem, PasteStrategy, ProgressModel, ProgressOp, Properties, RenameError,
-        ToolbarCommand, TrashStrategy, VfsDirectorySource, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_WIDTH,
+        DoubleClickTracker, Entry, EntryKind, ManagerChrome, ManagerTool, ManagerToolModel,
+        OwnerChange, PasteItem, PasteStrategy, Places, ProgressModel, ProgressOp, Properties,
+        RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_controls::Menu;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
+    use tairix_help::{own_short_help, BundleHelp};
+    use tairix_icon::{
+        artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
+        MAX_ARTWORK_BYTES,
+    };
     use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-    use tairix_rt::io::{self, Stderr, Write};
+    use tairix_procinfo::IpcTransport;
+    use tairix_reclaim::PressureBand;
+    use tairix_rt::io::{self, Stderr, Stdout, Write};
+    use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+
+    use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
+    use crate::sidebar::{self, press_point};
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -123,6 +148,12 @@ mod program {
     /// (the session went away). A reserved, fail-closed value.
     const EXIT_CHANNEL_LOST: i32 = 84;
 
+    /// Exit code for a command line the program cannot act on: an unrecognised
+    /// option, a second operand, or an argument vector that is not UTF-8. The
+    /// conventional usage status the other command apps return, so a script
+    /// sees the familiar value rather than one reserved to this app.
+    const EXIT_USAGE: i32 = 2;
+
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads),
     /// so a single frame is race-free; the constant names the choice.
@@ -135,6 +166,13 @@ mod program {
     /// launched has exited, so it is reaped promptly (never left a zombie,
     /// and never a busy-poll — the member is drained the instant it wakes).
     const CHILD_TOKEN: u64 = 2;
+
+    /// The wait-set token of the memory-pressure member: the kernel wakes the
+    /// park when the machine's pressure band changes, so the decoded grid
+    /// artwork is handed back as memory tightens instead of being held until
+    /// something else is starved. The wake is the notification — nothing here
+    /// polls or times the band.
+    const PRESSURE_TOKEN: u64 = 3;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -258,6 +296,23 @@ mod program {
         client: &'a mut WindowClient<T>,
         /// The window the channel opened — the one every verb names.
         window: u64,
+    }
+
+    /// The window surface one present writes into, threaded through the
+    /// present path as one value: the channel half and the window the frame is
+    /// presented over, the mapped frame bytes, and the pixel layout those
+    /// bytes are shaped as. Bundling them keeps a frame inseparable from the
+    /// mode that describes it and the window it belongs to — the same shape
+    /// [`SessionLink`] uses for the app's outbound verbs.
+    struct FrameTarget<'a, T: WindowTransport> {
+        /// The app half of the window channel the present goes out over.
+        client: &'a mut WindowClient<T>,
+        /// The window the frame belongs to — the one the present names.
+        window: u64,
+        /// The mapped shared-memory bytes of the frame being painted.
+        frame: &'a mut [u8],
+        /// The pixel layout `frame` is shaped as.
+        mode: &'a DisplayMode,
     }
 
     /// The file manager's launched children: the application bundles it
@@ -511,22 +566,27 @@ mod program {
     fn read_bundle_association(bundle_path: &str) -> Option<AppAssociation> {
         let mut manifest_path = String::from(bundle_path);
         manifest_path.push_str("/AppInfo");
-        let bytes = read_bounded_file(manifest_path.as_bytes())?;
+        let bytes = read_bounded_file(manifest_path.as_bytes(), APPINFO_READ_MAX)?;
         association_from_appinfo(bundle_path, &bytes)
     }
 
-    /// Read up to [`APPINFO_READ_MAX`] bytes of the file at `path` (opened
-    /// read-only), or `None` on any refusal. Bounded so a manifest path that
-    /// resolves to an unexpectedly huge file is skipped rather than read
-    /// without limit (§24.1); the descriptor is closed either way.
-    fn read_bounded_file(path: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    /// Read up to `max` bytes of the file at `path` (opened read-only), or
+    /// `None` on any refusal. Bounded so a path that resolves to an
+    /// unexpectedly huge file is refused rather than read without limit; the
+    /// descriptor is closed either way.
+    ///
+    /// The one bounded read every consumer here shares — the bundle-manifest
+    /// scan and the icon-artwork reader differ only in their ceiling, so
+    /// neither carries its own copy of the open/read/close loop.
+    fn read_bounded_file(path: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
         let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
         let mut content = alloc::vec::Vec::new();
-        // A modest heap read buffer: a manifest is small, and a stack array of
-        // the full per-call I/O maximum would be a large-stack-array defect.
+        // A modest heap read buffer: the files read here are small, and a stack
+        // array of the full per-call I/O maximum would be a large-stack-array
+        // defect.
         let mut chunk = alloc::vec![0u8; FS_IO_MAX];
-        while content.len() < APPINFO_READ_MAX {
-            let want = chunk.len().min(APPINFO_READ_MAX - content.len());
+        while content.len() < max {
+            let want = chunk.len().min(max - content.len());
             let Ok(got) = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]) else {
                 let _ = tairix_rt::fs_close(fd);
                 return None;
@@ -540,6 +600,127 @@ mod program {
         Some(content)
     }
 
+    /// Bound on one icon-artwork read: a single byte past the shared artwork
+    /// ceiling, so an asset that exceeds it is *detected* as over-long rather
+    /// than silently truncated into a decodable-looking one. The shared cache
+    /// refuses anything longer before a byte of it reaches the decoder.
+    const ARTWORK_READ_MAX: usize = MAX_ARTWORK_BYTES + 1;
+
+    /// Read the machine's current memory-pressure band and publish it to the
+    /// process gauge the artwork cache consults, reporting whether the band
+    /// actually moved.
+    ///
+    /// The band comes from the shared System Information client (the ungated
+    /// band-only query, which takes no free-memory reading), so the app obeys
+    /// the same band every other cache on the machine does. A refused or
+    /// failed read publishes nothing: the gauge keeps the band it already had
+    /// rather than assuming the machine is comfortable, which costs cache hits
+    /// and never correctness.
+    fn refresh_pressure_band() -> bool {
+        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
+            return false;
+        };
+        // The wire decode already refuses a depth outside the known set, and
+        // the shared model reads anything unrecognised as the deepest band —
+        // shrink everything — never as normal.
+        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
+    }
+
+    /// The grid's [`ArtworkReader`]: one shipped icon asset read through the
+    /// app's own capability-checked filesystem access, under its own identity
+    /// and with no authority beyond it.
+    ///
+    /// The read is bounded by [`ARTWORK_READ_MAX`], so an asset larger than the
+    /// artwork ceiling comes back over-long and is refused before any decode;
+    /// a missing or unreadable asset simply reads as `None`. Either way the
+    /// tile falls back to its built-in glyph, so a tile is never blank.
+    struct VfsArtworkReader;
+
+    impl ArtworkReader for VfsArtworkReader {
+        fn read(&mut self, path: &str) -> Option<alloc::vec::Vec<u8>> {
+            read_bounded_file(path.as_bytes(), ARTWORK_READ_MAX)
+        }
+    }
+
+    /// The grid's [`ArtworkRasteriser`]: the decode runs in a
+    /// minimum-capability sandbox worker, never in this process.
+    ///
+    /// Icon artwork is a file on a volume — untrusted input — so its bytes go
+    /// to the shared icon-rasterisation service running in a capability-empty
+    /// child this binary re-enters itself as, and only validated pixels come
+    /// back. A refusing, crashed, or replaced worker reports `None`, which the
+    /// tile draws as its built-in glyph.
+    struct SandboxRasteriser {
+        /// The parser-sandbox seam: one worker, started on the first decode and
+        /// replaced by the seam if it ever fails.
+        sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+    }
+
+    impl ArtworkRasteriser for SandboxRasteriser {
+        fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+            rasterise_icon(&mut self.sandbox, side, bytes).ok()
+        }
+    }
+
+    /// The grid's icon-artwork pipeline: the reclaim-governed decode cache and
+    /// the two seams it resolves a tile's artwork through.
+    ///
+    /// The cache is built through the one shared constructor with this app's
+    /// real seat, frame size, pressure gauge, and audit sink, so it is
+    /// classified and budgeted by the same desktop policy the session's caches
+    /// obey rather than by numbers picked here. It is trimmed when the machine
+    /// reports a deeper pressure band and torn down when the window closes, so
+    /// one user's decoded artwork never outlives their session in reusable
+    /// heap.
+    struct IconPipeline {
+        /// The retained decode outcomes, keyed by asset path and pixel side.
+        cache: ArtworkCache,
+        /// Where an asset's encoded bytes come from.
+        reader: VfsArtworkReader,
+        /// Where the pixels come from.
+        rasteriser: SandboxRasteriser,
+    }
+
+    impl IconPipeline {
+        /// Build the pipeline for a window whose frame is `frame_bytes` long,
+        /// so the artwork it may retain scales with the surface it draws on.
+        fn new(frame_bytes: usize) -> Self {
+            // The reclaim bookkeeping's audit sink. The shared constructor
+            // takes a `'static` borrow, and the runtime sink is a unit value
+            // that owns nothing.
+            static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+            Self {
+                cache: artwork_cache(
+                    "files.icon-artwork",
+                    SEAT_PRIMARY,
+                    frame_bytes,
+                    tairix_rt::pressure::gauge(),
+                    &LOG_SINK,
+                ),
+                reader: VfsArtworkReader,
+                rasteriser: SandboxRasteriser {
+                    sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                },
+            }
+        }
+
+        /// The lookup a render is handed: the cache bound to its two seams.
+        fn source(&mut self) -> IconArtworkSource<'_, VfsArtworkReader, SandboxRasteriser> {
+            IconArtworkSource::new(&mut self.cache, &mut self.reader, &mut self.rasteriser)
+        }
+    }
+
+    impl Drop for IconPipeline {
+        /// Release every retained decode, overwriting the artwork first.
+        ///
+        /// The window closing and every fail-loud exit alike end the
+        /// pipeline's scope, so the pixels are given back on *every* way out of
+        /// the app rather than on the ones a future edit remembers to spell.
+        fn drop(&mut self) {
+            self.cache.teardown();
+        }
+    }
+
     /// The production [`EventSource`]: drain the app's own event
     /// mailbox, parking on the wait-set whenever it is empty, and accept
     /// only events whose kernel-attested sender is the desktop session
@@ -549,7 +730,10 @@ mod program {
     /// The same wait-set carries the any-child member ([`CHILD_TOKEN`]): a
     /// launched bundle exiting wakes the park, and the source reaps it in place
     /// before re-parking, so a child is never left a zombie and the wake never
-    /// degrades into a busy-poll.
+    /// degrades into a busy-poll. It also carries the memory-pressure member
+    /// ([`PRESSURE_TOKEN`]): a band change wakes the park and the retained
+    /// artwork is trimmed there and then, so memory goes back when the machine
+    /// asks for it rather than at whatever later moment the user next types.
     struct RtEventSource<'a> {
         /// The app's event-mailbox endpoint id.
         endpoint: u64,
@@ -560,6 +744,9 @@ mod program {
         /// The launched-bundle bookkeeping reaped on a [`CHILD_TOKEN`] wake,
         /// shared with the activation path that spawns.
         launcher: &'a RefCell<Launcher>,
+        /// The grid's artwork pipeline, trimmed on a [`PRESSURE_TOKEN`] wake,
+        /// shared with the present path that draws through it.
+        icons: &'a RefCell<IconPipeline>,
     }
 
     /// Whether a received mailbox frame is a genuine event from the desktop
@@ -598,6 +785,13 @@ mod program {
                         // the park (it is drained the instant it fires).
                         if token == CHILD_TOKEN {
                             self.launcher.borrow_mut().reap();
+                        } else if token == PRESSURE_TOKEN && refresh_pressure_band() {
+                            // The machine's band moved: give back whatever the
+                            // new band says the decoded artwork may no longer
+                            // keep, here at the wake rather than at the next
+                            // user input. A band that did not really move costs
+                            // one read and no eviction work.
+                            let _ = self.icons.borrow_mut().cache.trim();
                         }
                     }
                     Err(err) => return Err(errno_from(err)),
@@ -793,11 +987,10 @@ mod program {
     fn present_frame<S, T>(
         browser: &Browser<S>,
         overlays: &Overlays,
+        places: &Places,
         theme: &Theme,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frame: &mut [u8],
-        mode: &DisplayMode,
+        target: &mut FrameTarget<'_, T>,
+        icons: &RefCell<IconPipeline>,
     ) -> Result<(), Errno>
     where
         S: DirectorySource,
@@ -807,16 +1000,36 @@ mod program {
         let properties = overlays.properties.as_ref();
         let owner = overlays.owner.as_ref();
         let can_chown = overlays.can_chown;
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let mode = target.mode;
+        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
         let font = ui_font(theme);
-        let mut surface = render(
-            browser,
-            theme,
-            font,
-            viewport,
-            MANAGER_TOOLS,
-            manager_tool_model(browser),
-        )
+        // The rail owns the window's leading edge, so every overlay drawn over
+        // the view is placed within what is left — the one shared inset the
+        // pointer hit-tests resolve through, so a dialog is never centred over
+        // the rail it does not belong to.
+        let viewport = tairix_browse::render::content_area(window, theme, font, Some(places));
+        // Each visible grid tile resolves its icon through the artwork
+        // pipeline: the shipped raster master for the entry's content type,
+        // read bounded and decoded in the sandbox once per (asset, pixel side)
+        // and retained, falling back to the built-in glyph whenever no artwork
+        // resolves. Only the tiles the grid actually draws are asked for, so
+        // nothing scrolled out of view is ever decoded. The borrow is taken for
+        // the render alone; the parked event source holds it only to trim.
+        let mut surface = {
+            let mut pipeline = icons.borrow_mut();
+            render(
+                browser,
+                theme,
+                font,
+                window,
+                &ManagerChrome {
+                    tools: MANAGER_TOOLS,
+                    tool_model: manager_tool_model(browser),
+                    sidebar: Some(places),
+                },
+                &mut pipeline.source(),
+            )
+        }
         .ok_or(Errno::LengthOutOfRange)?;
         // In rename mode, overlay the inline editor exactly over the selected
         // item's row through the shared selection geometry, so the field sits
@@ -873,12 +1086,13 @@ mod program {
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
-            let Some(slot) = frame.get_mut(at..at + 4) else {
+            let Some(slot) = target.frame.get_mut(at..at + 4) else {
                 return Err(Errno::LengthOutOfRange);
             };
             slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
         }
-        client.present(window, 0, DamageRect::full(mode))
+        let window = target.window;
+        target.client.present(window, 0, DamageRect::full(mode))
     }
 
     /// Apply one delivered event to the browser, reporting whether the
@@ -893,13 +1107,18 @@ mod program {
     fn apply_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        places: &mut Places,
         link: &mut SessionLink<'_, T>,
         theme: &Theme,
         mode: &DisplayMode,
         event: &WindowEvent,
     ) -> (bool, bool) {
         let font = ui_font(theme);
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+        // Everything below the rail lays out in what the rail leaves, resolved
+        // through the one shared inset the renderer paints with, so a click
+        // lands on exactly the control the user saw.
+        let viewport = tairix_browse::render::content_area(window, theme, font, Some(places));
 
         // A close request ends the app whatever mode it is in; an open rename
         // edit or properties overlay is simply abandoned (nothing was written).
@@ -973,6 +1192,44 @@ mod program {
             };
         }
 
+        // The user asked the window to re-read what is there, so the rail
+        // re-reads the mount table in the same gesture. The kernel publishes no
+        // mount-change notification today, so this — not a poll — is how a
+        // newly attached volume appears; nothing here spins waiting for one.
+        if sidebar::is_refresh_request(browser, theme, viewport, event) {
+            let (home, volumes) = places_source();
+            sidebar::refresh_places(places, &home, &volumes);
+        }
+
+        // The rail owns the window's leading edge: its hover highlight tracks
+        // every motion that reaches here, and it consumes the presses and keys
+        // that belong to it. Whatever it does not consume routes to the view,
+        // carrying any repaint the highlight alone owed.
+        let hover_moved = sidebar::track_hover(places, theme, font, window, event);
+        if let Some(outcome) = sidebar::apply_event(browser, places, theme, font, window, event) {
+            if let Some(reason) = &outcome.refused {
+                report_error(reason);
+            }
+            return (outcome.changed || hover_moved, false);
+        }
+
+        let (changed, close) =
+            apply_nav_event(browser, overlays, link, font, theme, viewport, event);
+        (changed || hover_moved, close)
+    }
+
+    /// Route one event in plain navigation mode — no overlay is open, and the
+    /// places rail did not claim it — reporting whether the view changed and
+    /// whether the window should close.
+    fn apply_nav_event<S: DirectorySource, T: WindowTransport>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        link: &mut SessionLink<'_, T>,
+        font: BitmapFont,
+        theme: &Theme,
+        viewport: Rect,
+        event: &WindowEvent,
+    ) -> (bool, bool) {
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
@@ -1056,6 +1313,46 @@ mod program {
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. } => (false, false),
         }
+    }
+
+    /// The mounted volumes offered to the places rail, read from the live
+    /// mount table through the shared System Information client.
+    ///
+    /// Only volumes this session can actually navigate to are offered: a mount
+    /// that is not serving I/O (a surprise-removed device) or whose target is
+    /// not valid text is left out rather than shown as a row that would fail
+    /// on the first click. A refused or failed query yields no volumes at all,
+    /// so the rail falls back to the user's own places rather than guessing
+    /// what is mounted. The rail itself then re-validates every row.
+    fn mounted_volumes() -> alloc::vec::Vec<Volume> {
+        let mut volumes = alloc::vec::Vec::new();
+        let _ = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
+            if record.availability() != tairix_abi::sysinfo::MountAvailability::Available {
+                return Ok(());
+            }
+            let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
+                return Ok(());
+            };
+            let Some(label) = target.rsplit('/').find(|part| !part.is_empty()) else {
+                return Ok(());
+            };
+            volumes.push(Volume {
+                label: String::from(label),
+                target: String::from(target),
+                medium: record.medium(),
+            });
+            Ok(())
+        });
+        volumes
+    }
+
+    /// Everything the places rail is built from, read from the live system:
+    /// the logged-in user's home and whatever is mounted right now.
+    ///
+    /// The one place the rail's inputs are gathered, so the first build and
+    /// every later refresh read exactly the same sources.
+    fn places_source() -> (alloc::vec::Vec<String>, alloc::vec::Vec<Volume>) {
+        (home_components().unwrap_or_default(), mounted_volumes())
     }
 
     /// Route one pointer event in navigation mode, reporting whether the view
@@ -2339,20 +2636,6 @@ mod program {
         let _ = writeln!(Stderr, "files: could not paste {name}: {reason}");
     }
 
-    /// The window-local [`Point`] of a primary-button press, or `None` for any
-    /// other pointer action. The one place the primary-press gate and the
-    /// wire-coordinate conversion live, shared by the write-tool dispatch and
-    /// the read-only [`apply_pointer`] routing so they cannot disagree (§2.2).
-    fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
-        if action != PointerAction::Pressed(PointerButtonCode::Primary) {
-            return None;
-        }
-        Some(Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        ))
-    }
-
     /// Translate a wire [`PointerAction`] into the shared [`InputEvent`] the
     /// interactive scrollbar consumes, or `None` for an action the scrollbar
     /// never handles (a secondary/middle button — those belong to the content).
@@ -3494,6 +3777,21 @@ mod program {
         {
             return Err(fail(EXIT_NO_EVENTS, "child wait refused"));
         }
+        // The memory-pressure member: the kernel wakes the park when the
+        // machine's band changes, so the decoded grid artwork is handed back as
+        // memory tightens instead of held until something else is starved. This
+        // is the app's only pressure notification — it neither polls nor times
+        // the band.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::MemoryPressure,
+            0,
+            PRESSURE_TOKEN,
+        ) != 0
+        {
+            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wait refused"));
+        }
         Ok((event_endpoint, set))
     }
 
@@ -3521,16 +3819,110 @@ mod program {
         }
     }
 
+    /// Render `files`'s own short help (`NAME` + `SYNOPSIS` + compact
+    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
+    /// engine; when no document can be served (a build without the bundle's
+    /// documents) the usage banner stands in — the program's own text, not
+    /// fabricated help content — so `-h` never fails.
+    fn short_help() -> i32 {
+        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let bytes = own_short_help(&BundleHelp::new("files"), locale, "files")
+            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
+        match Stdout.write_all(&bytes) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        }
+    }
+
+    /// State a command line the program cannot act on — the reason, then the
+    /// usage banner — and hand back the usage exit code for `main`.
+    fn usage_error(reason: &str) -> i32 {
+        report_error(reason);
+        let _ = writeln!(Stderr, "{USAGE}");
+        EXIT_USAGE
+    }
+
+    /// The live directory listing seam the browser reads through: one
+    /// `read_dir_all` under the launching user's own identity, so every
+    /// listing is an ordinary permission-checked read and the app holds no
+    /// authority of its own.
+    fn list_directory(path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
+        tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
+    }
+
+    /// The browser's live directory source. Named so a fresh one can be built
+    /// per open attempt: opening consumes its source, so a refused attempt
+    /// cannot hand the same one to the next.
+    type LiveSource = VfsDirectorySource<fn(&str) -> Result<alloc::vec::Vec<u8>, Errno>>;
+
+    /// One live source over [`list_directory`].
+    fn live_source() -> LiveSource {
+        VfsDirectorySource::new(list_directory)
+    }
+
+    /// Open the browser at the first location that actually lists: the one the
+    /// command line named, then the launching user's home, then the root view.
+    ///
+    /// Degrades rather than dies — a location that cannot be listed is stated
+    /// on `stderr` and the next one tried, so a caller naming a folder that is
+    /// gone, is not a directory, or that this user may not read still gets a
+    /// usable window. `None` only when even the root view cannot be listed,
+    /// which `main` exits fail-loud on.
+    fn open_browser(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
+        if let Some(components) = location {
+            match Browser::open_at(live_source(), components.clone()) {
+                Ok(browser) => return Some(browser),
+                Err(_) => report_error(&unlistable_reason(&components)),
+            }
+        }
+        if let Some(home) = home_components() {
+            match Browser::open_at(live_source(), home) {
+                Ok(browser) => return Some(browser),
+                Err(_) => report_error("could not list the home directory; opening the root view"),
+            }
+        }
+        Browser::open_root(live_source()).ok()
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the flow.
     fn main() -> i32 {
-        // --- The browser over the live, capability-checked listing call.
-        let source = VfsDirectorySource::new(|path: &str| {
-            tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
-        });
-        let Ok(mut browser) = Browser::open_root(source) else {
+        // --- The sandbox-worker role, before any other argument handling: the
+        // grid's icon artwork is untrusted input, so it is decoded by a
+        // capability-empty child this same binary is re-entered as with the
+        // reserved role argument. That child serves rasterisation requests over
+        // its wired standard streams and nothing else — it never becomes the
+        // file manager.
+        if worker_role() {
+            let mut service = IconRasterService;
+            return match serve_stdio(&mut service) {
+                ServeEnd::Finished => 0,
+                ServeEnd::Failed(_) => 1,
+            };
+        }
+
+        // --- The command line: an optional starting directory, the reserved
+        // short-help switches, and nothing else. A location the program cannot
+        // accept is stated and recovered from below; a command line it cannot
+        // act on at all is refused here.
+        let parsed = tairix_rt::args()
+            .ok_or(UsageError::NotUtf8)
+            .and_then(|arguments| command::parse(&arguments));
+        let start = match parsed {
+            Ok(Command::Open(start)) => start,
+            Ok(Command::Help) => return short_help(),
+            Err(err) => return usage_error(&alloc::format!("{err}")),
+        };
+
+        // --- The browser over the live, capability-checked listing call,
+        // opened where the command line asked (or at the home directory when
+        // it asked for nowhere reachable).
+        if let Some(reason) = &start.refused {
+            report_error(reason);
+        }
+        let Some(mut browser) = open_browser(start.location) else {
             return fail(EXIT_NO_LISTING, "root directory listing refused");
         };
 
@@ -3594,14 +3986,40 @@ mod program {
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
         let mut overlays = initial_overlays();
+        // The places rail: the user's own shortcuts plus whatever is mounted
+        // right now, read once here and re-read whenever the user refreshes.
+        let mut places = {
+            let (home, volumes) = places_source();
+            Places::new(&home, &volumes)
+        };
+
+        // --- The grid's icon artwork: the reclaim-governed decode cache and
+        // the read/rasterise seams it resolves through, budgeted from this
+        // window's frame size. Shared between the present path (which draws
+        // through it) and the parked event source (which trims it when the
+        // machine reports a deeper memory-pressure band); dropping it releases
+        // the retained pixels.
+        let icons = RefCell::new(IconPipeline::new(frame_len));
+        // Start from the band in force now: the wait-set member reports only
+        // *changes*, so without this read the cache would run on the gauge's
+        // fail-closed unknown state — retaining nothing, and so decoding every
+        // tile every frame — until the machine happened to move band. A read
+        // that fails leaves the gauge closed, which costs cache hits and
+        // nothing else.
+        refresh_pressure_band();
+
         if present_frame(
             &browser,
             &overlays,
+            &places,
             theme,
-            &mut client,
-            window,
-            frames,
-            &mode,
+            &mut FrameTarget {
+                client: &mut client,
+                window,
+                frame: &mut *frames,
+                mode: &mode,
+            },
+            &icons,
         )
         .is_err()
         {
@@ -3621,6 +4039,7 @@ mod program {
             set,
             server,
             launcher: &launcher,
+            icons: &icons,
         });
         loop {
             // A running long operation (a recursive delete, or a copy/move
@@ -3638,11 +4057,15 @@ mod program {
                 if present_frame(
                     &browser,
                     &overlays,
+                    &places,
                     theme,
-                    &mut client,
-                    window,
-                    frames,
-                    &mode,
+                    &mut FrameTarget {
+                        client: &mut client,
+                        window,
+                        frame: &mut *frames,
+                        mode: &mode,
+                    },
+                    &icons,
                 )
                 .is_err()
                 {
@@ -3661,11 +4084,15 @@ mod program {
                     if present_frame(
                         &browser,
                         &overlays,
+                        &places,
                         theme,
-                        &mut client,
-                        window,
-                        frames,
-                        &mode,
+                        &mut FrameTarget {
+                            client: &mut client,
+                            window,
+                            frame: &mut *frames,
+                            mode: &mode,
+                        },
+                        &icons,
                     )
                     .is_err()
                     {
@@ -3731,11 +4158,15 @@ mod program {
                     if present_frame(
                         &browser,
                         &overlays,
+                        &places,
                         theme,
-                        &mut client,
-                        window,
-                        frames,
-                        &mode,
+                        &mut FrameTarget {
+                            client: &mut client,
+                            window,
+                            frame: &mut *frames,
+                            mode: &mode,
+                        },
+                        &icons,
                     )
                     .is_err()
                     {
@@ -3747,6 +4178,7 @@ mod program {
             let (changed, close) = apply_event(
                 &mut browser,
                 &mut overlays,
+                &mut places,
                 &mut SessionLink {
                     launcher: &launcher,
                     client: &mut client,
@@ -3765,11 +4197,15 @@ mod program {
                 && present_frame(
                     &browser,
                     &overlays,
+                    &places,
                     theme,
-                    &mut client,
-                    window,
-                    frames,
-                    &mode,
+                    &mut FrameTarget {
+                        client: &mut client,
+                        window,
+                        frame: &mut *frames,
+                        mode: &mode,
+                    },
+                    &icons,
                 )
                 .is_err()
             {

@@ -6455,6 +6455,22 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-08-02 — Raster masters are a canonical source for illustrative icon
+  artwork.** Amended §10 (owner decision) after the desktop's application,
+  file-class, and device icons arrived as rendered pictures with no vector
+  equivalent: "SVG-first for *every* WM/desktop asset" would have discarded
+  them or demanded a fake SVG wrapping a bitmap. §10 now splits by what the
+  artwork *is* — SVG stays canonical for tintable chrome (cursors, status
+  glyphs, window furniture), while illustrative icons are authored as
+  high-resolution square straight-alpha PNG masters that only ever downscale
+  — and makes resolution explicitly total and three-tier: raster artwork,
+  else the on-disk vector asset, else a **mandatory** first-party built-in
+  glyph, so no icon can exist as a raster asset alone and no missing or
+  corrupt file can blank a surface. The decode-once-per-(asset, side), one
+  blend path, sandboxed-and-bounded rules are unchanged and now bind a system
+  asset exactly as they bind a third-party bundle's icon. §3 and §16.2 were
+  updated to say where the masters live.
+
 - **2026-07-28 — Arch HAL `MachineTakeover` slice (optional).** Amended §17.2
   to enumerate a new closed Arch HAL slice, `MachineTakeover`
   (`kernel/arch/api/src/takeover.rs`), the irreducibly per-architecture

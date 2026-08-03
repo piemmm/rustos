@@ -28,8 +28,15 @@ over a resolution-independent design grid, so the same glyph is
   commands nav-back, nav-forward, nav-up, refresh, view-toggle, sort,
   new-folder, trash, and empty-trash; and a generic fallback),
   `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
-  `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`), and
-  `builtin_icon`.
+  `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`),
+  `builtin_icon`, and `disk_icon`.
+- The drive kinds are `Disk` (the generic drive), `DiskHard`,
+  `DiskSolidState`, and `DiskUsb`; they share one built-in disk glyph.
+  `disk_icon(medium)` maps the `BlkDeviceClass` a mounted volume reports —
+  rotational, solid-state, removable — onto its kind, and resolves a
+  paravirtual device and an unknown medium alike to the generic `Disk`
+  rather than guessing. The mapping lives here, beside the vocabulary, so
+  every desktop consumer draws the same icon for the same medium.
 - `svg` — `VectorIcon::from_svg` and `decode_svg(bytes)`: build an icon from a
   decoded `lib/svg` `SvgImage` (the SVG-first asset rule, `AGENTS.md` §10). A
   malformed or out-of-subset asset fails closed, so the caller substitutes a
@@ -46,6 +53,32 @@ over a resolution-independent design grid, so the same glyph is
   entry, never a new field (`AGENTS.md` §2.2). `IconSet::builtin()` (also
   `Default`) is the all-fallback set the desktop draws before any asset
   loads, so a complete icon set always exists.
+- `artwork` — the shared "resolve an icon to drawable pixels" layer, used by
+  both the desktop session and the file manager. It adds a preferred **raster
+  artwork** tier over the vector glyph: `ArtworkReader` (a capability-gated
+  read) and `ArtworkRasteriser` (the parser sandbox) are injected seams, so
+  the crate stays `no_std` and the untrusted decode never runs here (`AGENTS.md`
+  §19.5). `icon_artwork_path`/`icon_vector_path` name a kind's
+  `/System/Graphics/Icons/<id>.png` / `.svg` asset; `artwork_kind_for_file`
+  validates a shipped-artwork file name; `MAX_ARTWORK_BYTES` is the one fixed
+  validation bound on an artwork file (the sandboxed rasteriser refuses
+  over-long input against this same definition, `AGENTS.md` §2.2 / §24.4).
+  `ArtworkCache` (built by `artwork_cache`, over `lib/reclaim`) retains each
+  decode — success or refusal — keyed by path and pixel side, returning a
+  **borrow** so a grid draws many icons a frame without copying; a bad, absent,
+  oversize, or wrong-shaped asset yields a cached `None` (`AGENTS.md` §2.9).
+  `IconArtworkSource` hands a renderer a plain `IconArtwork` lookup, and
+  `NoArtwork` is the all-glyph lookup a headless build or a test uses.
+
+## Two-tier asset model
+
+An icon resolves through two on-disk tiers over an always-present built-in
+floor: raster artwork (`<id>.png`) preferred, vector SVG (`<id>.svg`) next, and
+the built-in `builtin_icon` glyph always last, so resolution is total even on a
+system that ships no artwork at all (`AGENTS.md` §2.9). A fine-grained
+file-class kind (an HTML or Rust text file, a PNG or SVG image, a specific disk
+medium) names its own asset id but shares its broad family's built-in glyph, so
+a system without the raster artwork still shows a meaningful icon.
 
 ## Where it sits
 

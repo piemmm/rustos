@@ -10,8 +10,9 @@ notification-area / Switchboard-tray state machines, the bar's right-click
 and painting those regions — including the clock label and task-title
 **text** — into a themed pixel surface, plus **routing** pointer, scroll,
 and key events into taskbar actions and drawing **notification-icon
-artwork** (scalable, themeable vector glyphs) and per-application **pin
-artwork** (rasterised by the session, blitted here).
+artwork** (scalable, themeable vector glyphs) and the desktop's **icon
+artwork** (the shipped raster masters and each application's own bundle
+icon, read and decoded by the session and blitted here).
 
 ## Where it sits
 
@@ -57,7 +58,7 @@ From the leading end to the trailing end:
   list (`plans/NEW-TASKBAR.md` T6). Zero-length (but still positioned) when
   nothing is pinned; `BarLayout::pin_drop_index` maps a drop point in the
   strip-plus-task band to the pin-list insertion index for the
-  drag-to-taskbar gesture (T7).
+  drag-to-taskbar gesture (see *Dragging a library entry to pin it*).
 - **Task list** — the flexible middle region, between the pin strip
   and the notification area, holding one fixed-width slot per running task.
 - **Notification area** — status/notification icons, packed immediately
@@ -187,14 +188,17 @@ everything.
 
 `TaskbarRenderer::render` paints the taskbar into a `tairix-raster` `Surface`
 sized to the bar using the taskbar's own theme, filling each region with a
-colour role from the `Palette`:
+colour role from the `Palette`. Its last argument is the caller's
+`tairix_icon::IconArtwork` lookup — the session's decoded artwork, or
+`NoArtwork` on a system that has none (see *Icon artwork*, below):
 
 - the bar background is the **raised surface** colour;
 - the **Library button** is the shared `tairix-controls` `IconButton` in the
-  `Primary` role — the accent-filled plate carrying the nine-tile library
-  glyph — pressed in while its popup is open, hover-lit under the pointer;
+  `Primary` role — the accent-filled plate carrying the shipped `Library`
+  artwork over its nine-tile glyph — pressed in while its popup is open,
+  hover-lit under the pointer;
 - the **Files button** is a quiet (`Neutral`) `IconButton` carrying the
-  folder glyph;
+  shipped `Folder` artwork over its folder glyph;
 - each **pin slot** and each **task slot** is one shared `tairix-controls`
   `TaskbarItem` — the bar's application buttons have exactly one visual
   recipe (`AGENTS.md` §2.2). A pin uses the icon-only presentation (a
@@ -204,8 +208,8 @@ colour role from the `Palette`:
   recesses its plate and shows the muted tick, a running one rests on its
   plate, and a **closed** pin (its application not running) rests without a
   plate at all — only the icon sits on the bar — until hovered;
-- a pin's per-application **artwork** (its bundle icon, rasterised by the
-  session through the sandboxed icon pipeline — see
+- a pin's per-application **artwork** (its bundle icon, read and rasterised by
+  the session through the sandboxed icon pipeline — see
   [the session](session.md)) is blitted through the control in place of the
   built-in glyph, and a running task whose window matches a pin **borrows**
   that same artwork, so one application shows one icon everywhere;
@@ -242,6 +246,27 @@ bounded by a budget derived from the real framebuffer byte size, dropped
 under memory pressure, and wiped on release. The renderer is the right home
 for that state: the `Taskbar` model stays pure data. `render_library` (the
 popup painter) needs no cache of its own, so it stays a `&self` method.
+
+## Icon artwork
+
+Every application icon the bar draws resolves through **one** rule, written
+once in `render` rather than restated per slot (`AGENTS.md` §2.2):
+
+1. the artwork its owner already supplied for that specific application (a
+   `PinView`'s bundle icon, a library row's own icon), else
+2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
+   shipped raster master under `/System/Graphics/Icons`, else
+3. the control's built-in vector glyph.
+
+The bar reads no file and decodes no image: it *asks* the lookup the session
+owns, at exactly the pixel side the slot will be drawn at (`pin_icon_side`,
+and the controls' own `icon_side`), so nothing is ever rescaled at draw time.
+Because the third rung always exists, resolution is **total**: a lookup that
+answers nothing — `tairix_icon::NoArtwork`, a machine with no
+`/System/Graphics`, or a cache that is giving memory back under pressure —
+still renders every element, so a headless-graphics or freshly-installed
+system stays fully usable rather than showing blank slots (`AGENTS.md` §10,
+§2.9).
 
 ## Notification icons
 
@@ -330,13 +355,35 @@ an empty list all change nothing (`AGENTS.md` §2.9).
 `TaskbarRenderer::render_library` paints the open popup: the `Panel` chrome
 (anchored back at the Library button), the search field, the visible rows —
 a folder row carries the open/closed folder glyph, its label, and a trailing
-entry count; an entry row is indented beneath its folder with the app-bundle
-glyph; the hovered row raises its fill, and the keyboard cursor row shows the
-shared selection rail and focus ring — the calm placeholder when nothing is
-listed, and the scrollbar when the rows overflow. Like the bar it is a
-rectangular surface the window manager places and rounds with
-`LibraryLayout::corner_radius`, and it returns `None` while the popup is
-closed (`AGENTS.md` §2.9).
+entry count; an entry row is indented beneath its folder and draws **the
+application's own icon** (below) over the app-bundle glyph; the hovered row
+raises its fill, and the keyboard cursor row shows the shared selection rail
+and focus ring — the calm placeholder when nothing is listed, and the
+scrollbar when the rows overflow. Like the bar it is a rectangular surface
+the window manager places and rounds with `LibraryLayout::corner_radius`, and
+it returns `None` while the popup is closed (`AGENTS.md` §2.9).
+
+### Each application's own icon
+
+An entry row shows the icon its bundle ships, and the popup carries that
+artwork the same way the pin strip does: the owner resolves it, the bar only
+draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
+
+- `LibraryPopup::visible_icon_requests(layout, scale, theme)` reports one
+  `LibraryIconRequest { row, side, entry }` per entry row **the viewport
+  actually shows**, each carrying the exact pixel side that row's slot will
+  draw at. A hundred-entry library therefore costs the session a read and a
+  decode per *visible* row, never per catalogued application, and scrolling
+  asks only for the rows that just came into view.
+- `set_row_artwork(row, artwork)` files an answer; an out-of-range index is
+  ignored rather than mis-filed.
+- `row_artwork(row)` is what `render_library` blits.
+
+Any rebuild of the row list (a new catalog, a changed filter, a folder folded
+or expanded) clears the filed artwork, so a stale index can never draw one
+application's icon on another's row. A row with no artwork draws the
+app-bundle glyph, which is why a library still lists legibly on a system with
+no artwork at all.
 
 ## Task list
 
@@ -358,9 +405,9 @@ ids, so a clash signals a bug rather than a benign retry.
 (`plans/NEW-TASKBAR.md` T6): pins are per-user configuration (the
 [`tairix-taskpins`](../lib/taskpins.md) store, read and written by the
 session under the user's own identity), and the bar receives one `PinView`
-per pin — a display label, the class glyph, optional rasterised artwork,
-the program-library entry it references (when it is an `entry` pin), and
-the running desktop window it currently matches, if any
+per pin — a display label, the class glyph, its optional rasterised bundle
+artwork, the program-library entry it references (when it is an `entry`
+pin), and the running desktop window it currently matches, if any
 (`Taskbar::set_pins`). The strip derives each pin's live `TaskVisibility`
 from the `TaskList` at paint time — Active when its matched window is
 focused, Minimized when minimised, Running otherwise, and Closed when it
@@ -373,6 +420,44 @@ no window reports `ActivatePin { index }` and the session launches the
 pinned bundle. `Taskbar::pin_icon_side` exposes the exact pixel side a pin
 icon paints at (through the same control geometry the renderer uses), so
 the session rasterises artwork at exactly the drawn size.
+
+## Dragging a library entry to pin it
+
+A pin is created by dragging a program out of the **program-library popup**
+and releasing it over the bar's pin band (`plans/NEW-TASKBAR.md` T7). The
+popup is the drag source because every row it lists is a *catalogued entry*
+by construction, so the gesture names an `EntryId` the store can record
+directly — nothing is guessed from a path, and nothing the catalog cannot
+vouch for can be pinned.
+
+The gesture is the shared `lib/browse` `BundleDrag` threshold detector, the
+same one the file manager uses to drag a bundle out of a window, so there is
+one definition of "this press became a drag" on the desktop
+(`AGENTS.md` §2.2):
+
+- a primary press on an **entry row** arms the detector instead of launching
+  at once (a folder header has nothing to drag and still toggles on the
+  press);
+- motion past the shared threshold reports `PinDragOffered { entry }` — once
+  per gesture, never repeatedly as the pointer keeps moving;
+- the release that ends the press reports `PinDragDropped`; where it landed
+  is the session's to resolve, and the popup stays open;
+- a press-and-release that never travelled is an ordinary click and
+  launches, so the gesture costs the click nothing;
+- `Escape` mid-drag reports `PinDragWithdrawn` and keeps the popup open, so
+  backing out of a drag does not also cost the user the listing;
+- a fresh press always supersedes an earlier arming, an offer whose row no
+  longer names an entry is abandoned rather than guessed at, and dismissing
+  the popup mid-drag withdraws the offer session-side, so a gesture never
+  outlives the popup it started in.
+
+The popup reports these as `PopupOutcome::{DragOffered, DragDropped,
+DragWithdrawn}` and the router surfaces them as the corresponding
+`TaskbarResponse`. The bar performs nothing: the session arms, withdraws, and
+resolves the offer, re-checking the entry against the live catalog at the
+drop and mapping the drop point through `BarLayout::pin_drop_index` (see
+[the session's pin service](session.md#pin-service-and-window-channel-bridge)).
+An entry already pinned is not duplicated.
 
 ## The context menu
 
@@ -436,8 +521,11 @@ While the popup is **open** the router treats it as modal and consumes the
 whole event stream — presses, releases, scroll, and keys all route into the
 popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
 
-- a primary press on a row activates it (a folder toggles, an entry reports
-  `LibraryLaunch { entry }` and closes the popup);
+- a primary press on a **folder header** toggles it at once; a primary press
+  on an **entry row** arms the drag gesture instead, and the release that
+  ends the press launches the entry (`LibraryLaunch { entry }`, closing the
+  popup) unless the pointer travelled far enough to become a drag (see
+  *Dragging a library entry to pin it*);
 - a primary press on the **Library button** toggles the popup shut
   (`LibraryDismissed`);
 - a press **anywhere else** — any button — dismisses the popup without
@@ -561,12 +649,27 @@ movement, folder fold/expand from both pointer and keyboard, focus cycling
 with type-to-filter, and cursor-follows-view scrolling. The input tests cover
 both buttons' presses, click-away dismissal that activates nothing beneath,
 secondary-press dismissal, wheel scrolling of an overflowing popup, and hover
-repaint latching. The rendering tests probe painted pixels for the bar
+repaint latching. The drag-to-pin tests cover the whole gesture: a press that
+barely moves is still a click and launches, travel past the shared threshold
+offers the entry exactly once however far the pointer goes on, the release is
+a drop that launches neither the pressed row nor the row it ended over and
+leaves the popup open, `Escape` withdraws and keeps the popup open (the
+release that follows drops nothing and a second `Escape` dismisses as ever),
+and a folder header arms nothing.
+The rendering tests probe painted pixels for the bar
 regions, the accent Library plate and quiet Files glyph, focused / unfocused
 / minimised task fills, notification glyphs (including the unknown-asset
 fallback and cache retint on theme switch), clock and truncated task-title
 text, and the popup's panel, rows, hover/selection states, placeholder ink,
 scrollbar, and dark / light / high-contrast rendering.
+The icon-artwork tests drive `render` with a recording lookup: the two
+launcher buttons ask for the `Library` and `Folder` kinds at their drawn side
+and blit what comes back, an application slot with no artwork of its own
+falls back to its kind's artwork before the glyph, the popup asks only for
+the entry rows the viewport shows (and, after a scroll, only for the rows
+that just appeared), a rebuild drops stale row artwork, and a bar rendered
+through `NoArtwork` still draws every element from its built-in glyphs — the
+property that keeps a machine with no `/System/Graphics` fully usable.
 The Switchboard tray tests cover the slot's trailing-most placement on every
 edge (and its survival order on degenerate screens), the summary→state derive
 matrix (absent service, calm top-task preview, jobs, every pressure kind,

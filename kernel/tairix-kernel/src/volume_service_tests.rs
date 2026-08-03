@@ -23,12 +23,12 @@ use std::vec;
 use std::vec::Vec;
 
 use tairix_abi::blkio::{
-    encode_error_completion, BlkCompletion, BlkOp, BlkRequest, BLK_COMPLETION_LEN, BLK_DATA_LEN,
-    BLK_REQUEST_LEN,
+    encode_error_completion, BlkCompletion, BlkDeviceClass, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
+    BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use tairix_abi::sysinfo::MountAvailability;
+use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use tairix_caps::CapabilitySet;
@@ -150,6 +150,13 @@ impl RamBlock {
 }
 
 impl Block for RamBlock {
+    fn device_class(&self) -> BlkDeviceClass {
+        // These scenarios attach a removable stick, so the fixture declares
+        // that medium rather than leaving the trait's paravirtual default:
+        // a mount that reports it can only have learned it from here.
+        BlkDeviceClass::Removable
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(BlockGeometry {
             block_size: BLOCK_SIZE_U32,
@@ -186,8 +193,8 @@ impl Block for RamBlock {
     }
 }
 
-/// The served device: image bytes, a flush counter, and a count of the
-/// geometry queries served.
+/// The served device: image bytes, the storage medium its geometry reply
+/// declares, a flush counter, and a count of the geometry queries served.
 ///
 /// The geometry count is how many times a consumer *connected* to this
 /// device: connecting is the only thing that asks for the geometry, so the
@@ -196,8 +203,33 @@ impl Block for RamBlock {
 /// (`plans/FIX-IO.md`).
 struct ServedDevice {
     block: RamBlock,
+    class: Option<BlkDeviceClass>,
     flushes: usize,
     geometries: usize,
+}
+
+impl ServedDevice {
+    /// A device whose geometry reply declares the medium its block backing
+    /// reports.
+    fn new(block: RamBlock) -> Self {
+        Self {
+            class: Some(block.device_class()),
+            block,
+            flushes: 0,
+            geometries: 0,
+        }
+    }
+
+    /// A device whose geometry reply carries a class word this ABI does not
+    /// define — a driver naming a medium the client cannot recognise.
+    fn unclassified(block: RamBlock) -> Self {
+        Self {
+            class: None,
+            block,
+            flushes: 0,
+            geometries: 0,
+        }
+    }
 }
 
 /// Serve blkio requests over `endpoint` against `device`, moving data
@@ -229,7 +261,7 @@ fn serve(
                                 block_size: geometry.block_size,
                                 block_count: geometry.block_count,
                                 flags: 0,
-                                class: device.block.device_class(),
+                                class: device.class,
                             }
                             .encode(&mut reply)
                             .unwrap()
@@ -366,6 +398,16 @@ fn fat32_image(serial: u32, payload: &[u8]) -> (RamBlock, [u8; 16]) {
     (image, identity)
 }
 
+/// The mount-table record the System Information mount list publishes for
+/// the volume attached under `source`.
+fn mount_record(source: &[u8]) -> MountRecord {
+    FS_SERVICE
+        .mount_snapshot()
+        .into_iter()
+        .find(|record| record.source_bytes() == source)
+        .unwrap_or_else(|| std::panic!("no mount snapshot record for {source:?}"))
+}
+
 /// The storage-group identity map governs ordinary users on the attached
 /// volume: every node appears system-owned under the storage group, files
 /// `rw-rw-r--`, so a member reads and writes, a non-member reads but is
@@ -452,11 +494,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // --- The served block service. ---
     let endpoint_id = 0xB1D0_5E17_0000_0001_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_0001);
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: image,
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -502,13 +540,16 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
 
     // The mount snapshot reports the live volume as available and carries
     // its stable identity — the facts the unmount tooling resolves by.
-    let record = FS_SERVICE
-        .mount_snapshot()
-        .into_iter()
-        .find(|r| r.source_bytes() == b"usb1")
-        .expect("the attached volume appears in the mount snapshot");
+    let record = mount_record(b"usb1");
     assert_eq!(record.availability(), MountAvailability::Available);
     assert_eq!(record.volume_id(), expected_identity);
+    // ...and the storage medium the served device declared, which is how a
+    // file manager picks a drive icon without guessing one.
+    assert_eq!(
+        record.medium(),
+        Some(device.lock().unwrap().block.device_class()),
+        "the mount reports the medium the block device declared"
+    );
 
     assert_identity_mapped_access();
 
@@ -546,6 +587,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     verified_reinsert_replays_scenario(window_ptr, facility);
     mutated_reinsert_conflicts_scenario(window_ptr, facility);
     sibling_volumes_share_one_client_scenario(window_ptr, facility);
+    unrecognised_medium_mounts_as_unknown_scenario(window_ptr, facility);
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -571,11 +613,7 @@ fn attach_then_yank(
     let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: image,
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -751,11 +789,7 @@ fn dirty_yank_round(
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let pristine = image.data.clone();
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: image,
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -815,11 +849,7 @@ fn reinsert(
 ) -> ReinsertRound {
     let endpoint = register_endpoint(endpoint_id, owner);
     let blocks = (image.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: RamBlock { data: image },
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(RamBlock { data: image })));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -1009,11 +1039,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
     let endpoint = register_endpoint(endpoint_id, 0x70_1006);
     let (image, identity) = fat32_image(0x0D15_C004, b"healthy force payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: image,
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -1109,11 +1135,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
 
     let endpoint_id = 0xB1D0_5E17_0000_0007_u64;
     let endpoint = register_endpoint(endpoint_id, 0x70_1007);
-    let device = StdArc::new(Mutex::new(ServedDevice {
-        block: disk,
-        flushes: 0,
-        geometries: 0,
-    }));
+    let device = StdArc::new(Mutex::new(ServedDevice::new(disk)));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -1194,4 +1216,61 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
 
     stop.store(true, Ordering::Relaxed);
     server.join().expect("sibling scenario server thread");
+}
+
+/// A device whose geometry reply names a storage medium this ABI does not
+/// define mounts as *unknown*, and still serves.
+///
+/// The mount record is what a file manager picks a drive icon from, so
+/// answering with a class nobody declared would put a specific medium on
+/// screen on the strength of a word the client could not read. Unknown is
+/// the honest answer, and it resolves to the generic drive icon. The medium
+/// is advisory, so failing to read it never costs the volume its mount.
+fn unrecognised_medium_mounts_as_unknown_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C009, b"unclassified payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let endpoint_id = 0xB1D0_5E17_0000_0009_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_1009);
+    let device = StdArc::new(Mutex::new(ServedDevice::unclassified(image)));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0009), 8).expect("region");
+
+    VOLUME_SERVICE
+        .attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"odd1",
+        })
+        .expect("attach the volume whose class word is unreadable");
+
+    assert_eq!(
+        mount_record(b"odd1").medium(),
+        None,
+        "an unreadable class word is reported unknown, never guessed"
+    );
+    assert_volume_reads("/Storage/odd1/hello.txt", b"unclassified payload");
+
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        })
+        .expect("detach the volume whose class word is unreadable");
+
+    stop.store(true, Ordering::Relaxed);
+    server
+        .join()
+        .expect("unrecognised-medium scenario server thread");
 }

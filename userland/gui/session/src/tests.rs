@@ -17,7 +17,10 @@ use tairix_abi::{
 };
 use tairix_controls::{PointerState, Section};
 use tairix_cursor::CursorTheme;
-use tairix_icon::{IconKind, IconSet};
+use tairix_icon::{
+    artwork_cache, icon_artwork_path, ArtworkCache, IconArtworkSource, IconKind, IconSet,
+    NoArtwork, MAX_ARTWORK_BYTES,
+};
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
     user_library_path, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory,
@@ -28,6 +31,7 @@ use tairix_taskbar::{
     icon_cache, ActivateOutcome, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
     TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
 };
+use tairix_taskpins::PinTarget;
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
     chrome_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse, Key,
@@ -36,13 +40,14 @@ use tairix_wm::{
 };
 
 use crate::{
-    artwork_cache, command_section, deliver_pending_open, load_icon_set, load_library,
-    maybe_send_seat_report, open_tray, serve_switchboard_request, DesktopSession, DesktopShell,
-    IconCache, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
-    PinBridge, PinEditError, PinIconSource, PinService, ScreenLock, SessionFileReader,
-    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome,
-    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
-    TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
+    build_pin_views, command_section, deliver_pending_open, load_icon_set, load_library,
+    maybe_send_seat_report, open_tray, resolve_library_icons, serve_switchboard_request,
+    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, IconRasteriser,
+    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
+    PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
+    SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
+    Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -60,12 +65,12 @@ const MALFORMED_SVG: &[u8] = b"this is not an SVG document";
 /// An in-memory [`SessionFileReader`]: a path→bytes table standing in for
 /// the VFS, returning [`Errno::NotFound`] for any path it does not hold.
 #[derive(Default)]
-struct MemoryAssets {
+pub(crate) struct MemoryAssets {
     files: Vec<(String, Vec<u8>)>,
 }
 
 impl MemoryAssets {
-    fn with(mut self, path: &str, bytes: &[u8]) -> Self {
+    pub(crate) fn with(mut self, path: &str, bytes: &[u8]) -> Self {
         self.files.push((String::from(path), bytes.to_vec()));
         self
     }
@@ -84,7 +89,7 @@ impl SessionFileReader for MemoryAssets {
 /// An in-memory [`SessionFileWriter`]: a path→bytes table recording writes,
 /// with an optional forced error to exercise the refusal paths.
 #[derive(Default)]
-struct MemoryWriter {
+pub(crate) struct MemoryWriter {
     files: BTreeMap<String, Vec<u8>>,
     force_error: Option<Errno>,
 }
@@ -391,6 +396,7 @@ fn present_adds_a_bar_window_placed_and_rounded() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
 
     let id = presenter.bar_window().expect("the bar was presented");
@@ -416,6 +422,7 @@ fn presenting_twice_reuses_the_bar_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     let first = presenter.bar_window().expect("first present");
     presenter.present(
@@ -423,6 +430,7 @@ fn presenting_twice_reuses_the_bar_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     let second = presenter.bar_window().expect("second present");
 
@@ -454,6 +462,7 @@ fn presenting_an_empty_latch_repaints_nothing() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     comp.composite();
     assert!(!comp.has_damage(), "the first paint has been drained");
@@ -463,6 +472,7 @@ fn presenting_an_empty_latch_repaints_nothing() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::NONE,
+        &mut NoArtwork,
     );
 
     assert!(
@@ -489,6 +499,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     comp.composite();
     let popup = presenter.popup_window().expect("the popup is presented");
@@ -502,6 +513,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
             library: true,
             ..TaskbarRepaint::NONE
         },
+        &mut NoArtwork,
     );
 
     assert_eq!(
@@ -523,6 +535,7 @@ fn a_surface_with_no_window_is_presented_however_empty_the_latch() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::NONE,
+        &mut NoArtwork,
     );
 
     assert!(
@@ -543,6 +556,7 @@ fn a_density_change_repaints_every_surface() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     comp.composite();
     let bar = presenter.bar_window().expect("the bar is presented");
@@ -554,6 +568,7 @@ fn a_density_change_repaints_every_surface() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::NONE,
+        &mut NoArtwork,
     );
 
     let after = window_rect(&comp, bar);
@@ -582,6 +597,7 @@ fn opening_the_popup_presents_a_popup_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
 
     let popup = presenter.popup_window().expect("the popup was presented");
@@ -612,6 +628,7 @@ fn closing_the_popup_removes_the_popup_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     let popup = presenter.popup_window().expect("the popup is open");
 
@@ -630,6 +647,7 @@ fn closing_the_popup_removes_the_popup_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
 
     assert!(
@@ -660,6 +678,7 @@ fn teardown_removes_every_window() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     assert_eq!(comp.window_count(), 2);
 
@@ -681,6 +700,7 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     let first = presenter.bar_window().expect("first present");
 
@@ -690,6 +710,7 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
 
     let second = presenter.bar_window().expect("the bar was re-created");
@@ -713,6 +734,7 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
     let id = presenter.bar_window().expect("the bar was presented");
     let dark_radius = session.taskbar().layout(Scale::ONE).corner_radius;
@@ -729,6 +751,7 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         &mut renderer,
         session.taskbar(),
         TaskbarRepaint::ALL,
+        &mut NoArtwork,
     );
 
     let light_radius = session.taskbar().layout(Scale::ONE).corner_radius;
@@ -1012,7 +1035,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
 }
 
 #[test]
-fn motion_updates_the_pointer_and_is_otherwise_ignored() {
+fn motion_updates_the_pointer_and_reaches_the_desktop_when_it_hits_no_window() {
     let mut session = session();
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
@@ -1026,7 +1049,13 @@ fn motion_updates_the_pointer_and_is_otherwise_ignored() {
         0,
     );
 
-    assert_eq!(response, SessionInputResponse::Ignored);
+    // Motion that lands on no window is the desktop's: it reaches the
+    // session rather than being swallowed, which is what lets the desktop's
+    // icons take a hover.
+    assert_eq!(
+        response,
+        SessionInputResponse::WindowManager(InputResponse::DesktopPointerMoved)
+    );
     assert_eq!(router.pointer(), Point::new(640, 480));
 }
 
@@ -1280,7 +1309,7 @@ fn pump_opens_the_popup_and_presents_it() {
     assert_eq!(
         outcomes,
         [
-            ShellOutcome::Ignored,
+            ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary),
         ]
     );
@@ -1549,12 +1578,18 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
     let bar = shell.presenter().bar_window().expect("the bar is painted");
     comp.composite();
 
-    // Motion over the empty desktop (far from the bar).
+    // Motion over the empty desktop (far from the bar). It reaches the
+    // session as the desktop's own motion — the bar draws nothing for it.
     let outcomes = shell
         .pump(&mut MemoryInput::new(&[moved(900, 500)]), &mut comp, 0)
         .expect("source does not fault");
 
-    assert_eq!(outcomes, [ShellOutcome::Ignored]);
+    assert_eq!(
+        outcomes,
+        [ShellOutcome::WindowManager(
+            InputResponse::DesktopPointerMoved
+        )]
+    );
     let bar_rect = window_rect(&comp, bar);
     assert!(
         comp.composite().bounds().intersection(&bar_rect).is_empty(),
@@ -2696,10 +2731,16 @@ fn full_launch_flow() {
         )
     };
 
+    // A press on a program row arms the pin drag; the launch is the
+    // release that follows without the pointer leaving the row.
     let at = row_at(&shell, "Calc");
     let outcome = shell.handle(moved(at.x, at.y), &mut comp, 0);
     assert_eq!(outcome, ShellOutcome::Ignored);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Ignored
+    );
+    let outcome = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
 
     let ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) = outcome else {
         panic!("expected launch, got {outcome:?}");
@@ -2794,13 +2835,13 @@ fn edit_persistence_and_refusal() {
     let res = pins_no_home.pin_entry(&mut writer, EntryId::new("any").unwrap());
     assert_eq!(res, Err(PinEditError::NoHome));
 
-    // (f) pin_bundle_at clamps index
+    // (f) pin_at clamps an out-of-range index to the end
     let (mut pins, _) = SessionPins::load(&mut MemoryAssets::default(), Some(home));
     let index = pins
-        .pin_bundle_at(
+        .pin_at(
             &mut writer,
             99,
-            BundlePath::new("/Apps/editor.app").unwrap(),
+            PinTarget::Bundle(BundlePath::new("/Apps/editor.app").unwrap()),
         )
         .expect("pinned");
     assert_eq!(index, 0);
@@ -2966,20 +3007,41 @@ fn pin_service_drag_management() {
     assert!(service.drag_armed());
 
     // different window leaves armed
-    assert_eq!(service.take_drag_for(9), None);
+    assert_eq!(service.take_drag_for(DragOrigin::Window(9)), None);
+    assert!(service.drag_armed());
+
+    // the program library is a different origin too, and claims nothing a
+    // window offered
+    assert_eq!(service.take_drag_for(DragOrigin::Library), None);
     assert!(service.drag_armed());
 
     // same window consumes
-    assert_eq!(service.take_drag_for(7), Some(bundle.clone()));
+    assert_eq!(
+        service.take_drag_for(DragOrigin::Window(7)),
+        Some(PinTarget::Bundle(bundle))
+    );
     assert!(!service.drag_armed());
 
     // second offer replaces
     service.drag_offered(7, "/Apps/one.app");
     service.drag_offered(7, "/Apps/two.app");
     assert_eq!(
-        service.take_drag_for(7),
-        Some(BundlePath::new("/Apps/two.app").unwrap())
+        service.take_drag_for(DragOrigin::Window(7)),
+        Some(PinTarget::Bundle(BundlePath::new("/Apps/two.app").unwrap()))
     );
+
+    // a library drag arms and is consumed on the same terms, carrying the
+    // catalogued entry rather than a path guessed from a row label
+    let entry = EntryId::new("os.tairix.editor").unwrap();
+    service.offer_drag(DragOrigin::Library, PinTarget::Entry(entry.clone()));
+    assert!(service.drag_armed());
+    service.withdraw_drag(DragOrigin::Window(7)); // no effect
+    assert!(service.drag_armed());
+    assert_eq!(
+        service.take_drag_for(DragOrigin::Library),
+        Some(PinTarget::Entry(entry))
+    );
+    assert!(!service.drag_armed());
 
     // withdraw
     service.drag_offered(7, path);
@@ -3015,16 +3077,27 @@ fn resolve_pin_drop_pins_on_the_band_and_ends_the_gesture_elsewhere() {
             SessionPins::load(&mut MemoryAssets::default(), Some("/Users/alice")).0
         })
     };
+    let library = catalog(&[("editor", "Editor", LibraryCategory::Office)]);
+    let dragged_entry = EntryId::new("os.tairix.editor").unwrap();
 
     // Nothing armed: a release is never a drop.
     let mut idle = service();
-    assert_eq!(resolve_pin_drop(&mut idle, Some(7), &layout, on_band), None);
+    assert_eq!(
+        resolve_pin_drop(
+            &mut idle,
+            Some(DragOrigin::Window(7)),
+            &library,
+            &layout,
+            on_band
+        ),
+        None
+    );
 
     // A release from an unserved window leaves the offer armed.
     let mut unserved = service();
     assert!(unserved.drag_offered(7, "/Apps/editor.app"));
     assert_eq!(
-        resolve_pin_drop(&mut unserved, None, &layout, on_band),
+        resolve_pin_drop(&mut unserved, None, &library, &layout, on_band),
         None
     );
     assert!(unserved.drag_armed());
@@ -3034,23 +3107,348 @@ fn resolve_pin_drop_pins_on_the_band_and_ends_the_gesture_elsewhere() {
     let mut landing = service();
     assert!(landing.drag_offered(7, "/Apps/editor.app"));
     assert_eq!(
-        resolve_pin_drop(&mut landing, Some(7), &layout, on_band),
+        resolve_pin_drop(
+            &mut landing,
+            Some(DragOrigin::Window(7)),
+            &library,
+            &layout,
+            on_band
+        ),
         Some(PinDecision::Pinned)
     );
     assert!(!landing.drag_armed());
     assert_eq!(landing.pins().list().len(), 1);
     assert!(landing.take_dirty());
 
+    // A program dragged out of the library popup pins on exactly the same
+    // terms: one drop path, whichever surface the gesture started on.
+    let mut dragged = service();
+    dragged.offer_drag(DragOrigin::Library, PinTarget::Entry(dragged_entry.clone()));
+    assert_eq!(
+        resolve_pin_drop(
+            &mut dragged,
+            Some(DragOrigin::Window(7)),
+            &library,
+            &layout,
+            on_band
+        ),
+        None,
+        "a window's release cannot claim the library's drag"
+    );
+    assert!(dragged.drag_armed());
+    assert_eq!(
+        resolve_pin_drop(
+            &mut dragged,
+            Some(DragOrigin::Library),
+            &library,
+            &layout,
+            on_band
+        ),
+        Some(PinDecision::Pinned)
+    );
+    assert_eq!(
+        dragged.pins().list().get(0),
+        Some(&PinTarget::Entry(dragged_entry)),
+        "the store records the catalogued entry, not a guessed path"
+    );
+
     // A release from the offering window away from the band ends the
     // gesture without pinning (the offer is consumed either way).
     let mut stray = service();
     assert!(stray.drag_offered(7, "/Apps/editor.app"));
     assert_eq!(
-        resolve_pin_drop(&mut stray, Some(7), &layout, Point::new(2, 2)),
+        resolve_pin_drop(
+            &mut stray,
+            Some(DragOrigin::Window(7)),
+            &library,
+            &layout,
+            Point::new(2, 2)
+        ),
         None
     );
     assert!(!stray.drag_armed());
     assert_eq!(stray.pins().list().len(), 0);
+}
+
+/// Open the library popup and press the row labelled `label`, returning the
+/// entry that row names and the point pressed. Mirrors the user gesture:
+/// the Library button, then the row itself.
+fn press_library_row(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    label: &str,
+) -> (EntryId, Point) {
+    shell.handle(moved(24, 1060), comp, 0);
+    shell.handle(PRIMARY_PRESS, comp, 0);
+    shell.handle(PRIMARY_RELEASE, comp, 0);
+    let layout = shell.session().taskbar().library_layout(Scale::ONE);
+    let index = shell
+        .session()
+        .taskbar()
+        .library()
+        .rows()
+        .iter()
+        .position(|row| matches!(row, LibraryRow::Entry { name, .. } if name.as_str() == label))
+        .expect("a row with that label");
+    let LibraryRow::Entry { id, .. } = shell.session().taskbar().library().rows()[index].clone()
+    else {
+        panic!("expected a program row");
+    };
+    let (_, rect) = layout
+        .rows
+        .iter()
+        .find(|(shown, _)| *shown == index)
+        .expect("the row is on screen");
+    let at = Point::new(
+        rect.left() + i32::try_from(rect.width / 2).expect("fits"),
+        rect.top() + i32::try_from(rect.height / 2).expect("fits"),
+    );
+    shell.handle(moved(at.x, at.y), comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, comp, 0),
+        ShellOutcome::Ignored,
+        "a press only arms the gesture"
+    );
+    (id, at)
+}
+
+/// A point far enough from `from` that the shared drag detector must call
+/// the motion a drag rather than a click.
+fn past_drag_threshold(from: Point) -> Point {
+    let travel = i32::try_from(tairix_browse::DRAG_THRESHOLD_PX).expect("small") + 1;
+    Point::new(from.x, from.y + travel)
+}
+
+/// The centre of the bar's pin band — where a drop pins.
+fn on_the_pin_band(shell: &DesktopShell) -> Point {
+    let layout = shell.session().taskbar().layout(Scale::ONE);
+    Point::new(
+        layout.task_list.left() + 10,
+        layout.task_list.top() + i32::try_from(layout.task_list.height / 2).expect("fits"),
+    )
+}
+
+/// A pin service over the in-memory seams with an empty store.
+fn library_pin_service() -> PinService<MemoryAssets, MemoryWriter> {
+    PinService::new(
+        MemoryAssets::default(),
+        MemoryWriter::default(),
+        SessionPins::load(&mut MemoryAssets::default(), Some("/Users/alice")).0,
+    )
+}
+
+/// Apply one shell outcome to `service` exactly as the live event loop
+/// does, so the host test drives the same glue the running desktop does.
+fn route_pin_drag(
+    outcome: &ShellOutcome,
+    shell: &DesktopShell,
+    service: &mut PinService<MemoryAssets, MemoryWriter>,
+    catalog: &Catalog,
+    pointer: Point,
+) -> Option<PinDecision> {
+    match outcome {
+        ShellOutcome::Taskbar(TaskbarResponse::PinDragOffered { entry }) => {
+            service.offer_drag(DragOrigin::Library, PinTarget::Entry(entry.clone()));
+            None
+        }
+        ShellOutcome::Taskbar(TaskbarResponse::PinDragDropped) => {
+            let layout = shell.session().taskbar().layout(Scale::ONE);
+            crate::pins::resolve_pin_drop(
+                service,
+                Some(DragOrigin::Library),
+                catalog,
+                &layout,
+                pointer,
+            )
+        }
+        ShellOutcome::Taskbar(
+            TaskbarResponse::PinDragWithdrawn | TaskbarResponse::LibraryDismissed,
+        ) => {
+            service.withdraw_drag(DragOrigin::Library);
+            None
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn dragging_a_program_out_of_the_library_onto_the_pin_band_pins_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let library = office_and_games();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(library.clone());
+    let mut service = library_pin_service();
+
+    let (id, press) = press_library_row(&mut shell, &mut comp, "Chess");
+    let dragging = past_drag_threshold(press);
+    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
+    assert_eq!(
+        offered,
+        ShellOutcome::Taskbar(TaskbarResponse::PinDragOffered { entry: id.clone() })
+    );
+    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+    assert!(service.drag_armed());
+
+    let band = on_the_pin_band(&shell);
+    shell.handle(moved(band.x, band.y), &mut comp, 0);
+    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(
+        dropped,
+        ShellOutcome::Taskbar(TaskbarResponse::PinDragDropped)
+    );
+    assert_eq!(
+        route_pin_drag(&dropped, &shell, &mut service, &library, band),
+        Some(PinDecision::Pinned)
+    );
+
+    // The store records the catalogued entry itself, so the pin references
+    // an application the library can vouch for rather than a guessed path.
+    assert_eq!(
+        service.pins().list().get(0),
+        Some(&PinTarget::Entry(id)),
+        "the pin names the entry that was dragged"
+    );
+    assert!(!service.drag_armed(), "the gesture is fully unwound");
+}
+
+#[test]
+fn a_library_drag_released_away_from_the_pin_band_pins_nothing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let library = office_and_games();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(library.clone());
+    let mut service = library_pin_service();
+
+    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
+    let dragging = past_drag_threshold(press);
+    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
+    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+
+    // Released over the desktop, nowhere near the bar.
+    shell.handle(moved(600, 300), &mut comp, 0);
+    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(
+        route_pin_drag(
+            &dropped,
+            &shell,
+            &mut service,
+            &library,
+            Point::new(600, 300)
+        ),
+        None
+    );
+    assert!(service.pins().list().is_empty());
+    assert!(
+        !service.drag_armed(),
+        "one gesture, one decision: the offer never lingers"
+    );
+}
+
+#[test]
+fn dragging_a_program_that_is_already_pinned_does_not_duplicate_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let library = office_and_games();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(library.clone());
+    let mut service = library_pin_service();
+    let chess = EntryId::new("os.tairix.chess").unwrap();
+    assert_eq!(
+        service.pin_target_at(0, PinTarget::Entry(chess.clone()), &library),
+        PinDecision::Pinned
+    );
+
+    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
+    let dragging = past_drag_threshold(press);
+    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
+    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+
+    let band = on_the_pin_band(&shell);
+    shell.handle(moved(band.x, band.y), &mut comp, 0);
+    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(
+        route_pin_drag(&dropped, &shell, &mut service, &library, band),
+        Some(PinDecision::AlreadyPinned)
+    );
+    assert_eq!(service.pins().list().len(), 1, "still pinned exactly once");
+}
+
+#[test]
+fn a_drag_of_a_program_that_left_the_catalog_is_refused_and_pins_nothing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let library = office_and_games();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(library.clone());
+    let mut service = library_pin_service();
+
+    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
+    let dragging = past_drag_threshold(press);
+    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
+    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+
+    // The program is uninstalled while the pointer is still down: the drop
+    // re-checks the catalog, so a pin that could never launch is refused.
+    let without_chess = catalog(&[
+        ("write", "Write", LibraryCategory::Office),
+        ("calc", "Calc", LibraryCategory::Office),
+    ]);
+    let band = on_the_pin_band(&shell);
+    shell.handle(moved(band.x, band.y), &mut comp, 0);
+    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(
+        route_pin_drag(&dropped, &shell, &mut service, &without_chess, band),
+        Some(PinDecision::Refused)
+    );
+    assert!(service.pins().list().is_empty());
+}
+
+#[test]
+fn dismissing_the_popup_mid_drag_withdraws_the_offer() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let library = office_and_games();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(library.clone());
+    let mut service = library_pin_service();
+
+    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
+    let dragging = past_drag_threshold(press);
+    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
+    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+    assert!(service.drag_armed());
+
+    let escape = key_press(Key::Named(NamedKey::Escape));
+    let withdrawn = shell.handle(escape, &mut comp, 0);
+    assert!(matches!(
+        withdrawn,
+        ShellOutcome::Taskbar(
+            TaskbarResponse::PinDragWithdrawn | TaskbarResponse::LibraryDismissed
+        )
+    ));
+    route_pin_drag(&withdrawn, &shell, &mut service, &library, dragging);
+    assert!(
+        !service.drag_armed(),
+        "a withdrawn drag can never pin later"
+    );
+    assert!(service.pins().list().is_empty());
 }
 
 #[test]
@@ -3155,7 +3553,7 @@ fn pin_slot_point(shell: &DesktopShell, index: usize) -> Point {
     centre(*slot)
 }
 
-fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
+pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
     let mut h = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
@@ -5116,63 +5514,65 @@ fn artwork_source(bundle: &str) -> PinIconSource {
     }
 }
 
-fn artwork_assets(bundles: &[&str]) -> MemoryAssets {
+fn artwork_assets(bundles: &[&str]) -> ArtworkFileReader<MemoryAssets> {
     let mut assets = MemoryAssets::default();
     for bundle in bundles {
         assets = assets.with(&artwork_source(bundle).path(), VALID_SVG);
     }
-    assets
+    ArtworkFileReader(assets)
+}
+
+/// The shared decode cache, built through the one desktop policy the
+/// session itself uses, so these tests exercise the shipping budget.
+fn test_artwork_cache(gauge: &'static ReportedPressure, output_bytes: usize) -> ArtworkCache {
+    artwork_cache(
+        "session.test-artwork",
+        TEST_SEAT,
+        output_bytes,
+        gauge,
+        &TEST_SINK,
+    )
 }
 
 #[test]
 fn pin_artwork_is_decoded_once_per_path_and_side() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    let mut cache = IconCache::new(artwork_cache(
-        TEST_SEAT,
-        TEST_FRAME_BYTES,
-        &NORMAL_PRESSURE,
-        &TEST_SINK,
-    ));
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/One.app"]);
-    let mut rasteriser = CountingRasteriser::working();
-    let source = artwork_source("/Apps/One.app");
+    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
+    let path = artwork_source("/Apps/One.app").path();
 
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_some());
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_some());
-    assert_eq!(rasteriser.calls, 1, "the second lookup is a cache hit");
+    assert_eq!(rasteriser.0.calls, 1, "the second lookup is a cache hit");
 
     // A different side is a different entry: the artwork is rasterised
     // again at the new geometry rather than scaled from the old one.
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 32)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 32)
         .is_some());
-    assert_eq!(rasteriser.calls, 2);
+    assert_eq!(rasteriser.0.calls, 2);
 }
 
 #[test]
 fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    let mut cache = IconCache::new(artwork_cache(
-        TEST_SEAT,
-        TEST_FRAME_BYTES,
-        &NORMAL_PRESSURE,
-        &TEST_SINK,
-    ));
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/Bad.app"]);
-    let mut rasteriser = CountingRasteriser::refusing();
-    let source = artwork_source("/Apps/Bad.app");
+    let mut rasteriser = ArtworkSandbox(CountingRasteriser::refusing());
+    let path = artwork_source("/Apps/Bad.app").path();
 
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_none());
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_none());
-    assert_eq!(rasteriser.calls, 1, "the refusal is remembered");
+    assert_eq!(rasteriser.0.calls, 1, "the refusal is remembered");
 }
 
 #[test]
@@ -5183,22 +5583,17 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let tiny_output_bytes = 320 * 240 * 4;
     let hard = tairix_reclaim::CacheBudget::from_backing(tiny_output_bytes).hard();
-    let mut cache = IconCache::new(artwork_cache(
-        TEST_SEAT,
-        tiny_output_bytes,
-        &NORMAL_PRESSURE,
-        &TEST_SINK,
-    ));
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, tiny_output_bytes);
     let bundles: Vec<String> = (0..64).map(|i| format!("/Apps/App{i}.app")).collect();
     let refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
     let mut reader = artwork_assets(&refs);
-    let mut rasteriser = CountingRasteriser::working();
+    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
 
     for bundle in &bundles {
-        let source = artwork_source(bundle);
+        let path = artwork_source(bundle).path();
         assert!(
             cache
-                .artwork(&mut reader, &mut rasteriser, &source, 32)
+                .path_artwork(&mut reader, &mut rasteriser, &path, 32)
                 .is_some(),
             "every pin still gets its artwork, cached or not"
         );
@@ -5222,18 +5617,13 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     // shared one other tests hold at normal.
     static PRESSURED: ReportedPressure = ReportedPressure::unknown();
     PRESSURED.report(PressureBand::Normal);
-    let mut cache = IconCache::new(artwork_cache(
-        TEST_SEAT,
-        TEST_FRAME_BYTES,
-        &PRESSURED,
-        &TEST_SINK,
-    ));
+    let mut cache = test_artwork_cache(&PRESSURED, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/One.app"]);
-    let mut rasteriser = CountingRasteriser::working();
-    let source = artwork_source("/Apps/One.app");
+    let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
+    let path = artwork_source("/Apps/One.app").path();
 
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_some());
     assert!(cache.charged_bytes() > 0);
 
@@ -5241,16 +5631,18 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     assert!(cache.trim() > 0, "mild pressure releases disposable UI");
     assert_eq!(cache.charged_bytes(), 0);
 
-    // The artwork is still served while pressure holds — correctness never
-    // depended on the cache — it is simply rasterised again each time.
+    // A lookup while pressure holds retains nothing, so it hands back no
+    // artwork and the draw site falls back to its built-in glyph:
+    // correctness never depended on the artwork, and answering pressure by
+    // re-acquiring the pixels it just released would defeat the release.
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
-        .is_some());
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .is_none());
     assert_eq!(cache.charged_bytes(), 0, "no growth under pressure");
 
     PRESSURED.report(PressureBand::Normal);
     assert!(cache
-        .artwork(&mut reader, &mut rasteriser, &source, 16)
+        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
         .is_some());
     assert!(cache.charged_bytes() > 0, "retention resumes when it may");
 
@@ -5260,4 +5652,437 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
         0,
         "a seat's rendered artwork does not outlive its session"
     );
+}
+
+/// The tint the fake rasteriser paints an application's *own* bundle icon
+/// in, so a test can prove a slot came from the bundle and not the shipped
+/// fallback.
+const BUNDLE_TINT: u8 = 0xB1;
+
+/// The tint it paints the shipped application-bundle master in.
+const SHIPPED_TINT: u8 = 0x5A;
+
+/// Rasterises a solid square tinted by the asset's first byte, so a test
+/// can tell which asset a slot was painted from. Alpha is opaque, so the
+/// tint survives premultiplication unchanged.
+struct TaggedRasteriser {
+    calls: usize,
+}
+
+impl TaggedRasteriser {
+    const fn new() -> Self {
+        Self { calls: 0 }
+    }
+}
+
+impl IconRasteriser for TaggedRasteriser {
+    fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
+        self.calls += 1;
+        let tag = *icon.first()?;
+        let area = (side as usize).checked_mul(side as usize)?;
+        let mut pixels = Vec::with_capacity(area.checked_mul(4)?);
+        for _ in 0..area {
+            pixels.extend_from_slice(&[tag, tag, tag, 0xFF]);
+        }
+        Some(pixels)
+    }
+}
+
+/// A [`SessionFileReader`] that counts every read, so a test can prove the
+/// shared cache read an asset once and served the rest from memory.
+struct CountingAssets {
+    assets: MemoryAssets,
+    reads: usize,
+}
+
+impl CountingAssets {
+    const fn new(assets: MemoryAssets) -> Self {
+        Self { assets, reads: 0 }
+    }
+}
+
+impl SessionFileReader for CountingAssets {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.reads += 1;
+        self.assets.read(path)
+    }
+}
+
+/// A catalog entry for `/Apps/<stem>.app` declaring its own icon asset, so
+/// the library popup has an application icon to resolve.
+fn entry_with_icon(stem: &str, name: &str, asset: Option<&str>) -> LibraryEntry {
+    LibraryEntry::new(
+        EntryId::new(&format!("os.tairix.{stem}")).expect("id"),
+        DisplayName::new(name).expect("name"),
+        BundlePath::new(&format!("/Apps/{stem}.app")).expect("bundle"),
+        LibraryCategory::Utilities,
+        asset.map(|asset| IconAsset::new(asset).expect("asset")),
+    )
+}
+
+/// The shipped application-bundle master, so the fallback rung has
+/// something to resolve to.
+fn shipped_app_bundle_master(assets: MemoryAssets) -> MemoryAssets {
+    assets.with(&icon_artwork_path(IconKind::AppBundle), &[SHIPPED_TINT])
+}
+
+/// A session showing an open library popup over `catalog`.
+fn open_library_over(catalog: Catalog) -> (DesktopSession, Compositor) {
+    let mut session = session();
+    session.taskbar_mut().library_mut().set_catalog(catalog);
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+    (session, comp)
+}
+
+/// The rows the open popup currently shows that are launchable entries —
+/// exactly the rows that may carry an application's own artwork.
+fn shown_entry_rows(session: &DesktopSession) -> Vec<usize> {
+    let bar = session.taskbar();
+    bar.library_layout(Scale::ONE)
+        .rows
+        .iter()
+        .filter(|&&(index, _)| {
+            matches!(
+                bar.library().rows().get(index),
+                Some(LibraryRow::Entry { .. })
+            )
+        })
+        .map(|&(index, _)| index)
+        .collect()
+}
+
+/// The opaque tint a resolved row was painted in, or `None` when the row
+/// carries no artwork at all and the shared slot draws its built-in glyph.
+fn row_tint(session: &DesktopSession, row: usize) -> Option<u8> {
+    session
+        .taskbar()
+        .library()
+        .row_artwork(row)
+        .and_then(|art| art.pixels().first().copied())
+        .map(|pixel| pixel.r)
+}
+
+#[test]
+fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
+    // Two pushes of the same strip must cost one read and one decode: the
+    // pins and the library share the one cache the shell owns, so a
+    // re-resolve before a paint is a lookup, not a fresh decode of the
+    // same file.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let source = artwork_source("/Apps/One.app");
+    let mut reader = ArtworkFileReader(CountingAssets::new(
+        MemoryAssets::default().with(&source.path(), &[BUNDLE_TINT]),
+    ));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let resolved = vec![ResolvedPin {
+        label: String::from("One"),
+        entry: None,
+        run_path: Some(String::from("/Apps/One.app/Run")),
+        icon: Some(source),
+    }];
+
+    let first = build_pin_views(
+        &resolved,
+        &[None],
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+        24,
+    );
+    let again = build_pin_views(
+        &resolved,
+        &[None],
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+        24,
+    );
+
+    assert_eq!(reader.0.reads, 1, "the asset is read once, then cached");
+    assert_eq!(rasteriser.0.calls, 1, "and decoded once");
+    let tint = |views: &[PinView]| {
+        views
+            .first()
+            .and_then(PinView::artwork)
+            .and_then(|art| art.pixels().first().copied())
+            .map(|pixel| pixel.r)
+    };
+    assert_eq!(tint(&first), Some(BUNDLE_TINT));
+    assert_eq!(
+        tint(&again),
+        Some(BUNDLE_TINT),
+        "the reused entry is the same artwork, not an empty slot"
+    );
+}
+
+#[test]
+fn a_library_row_draws_its_own_applications_icon() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
+        .expect("fits");
+    let (mut session, _comp) = open_library_over(cat);
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(
+        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
+    ));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+
+    resolve_library_icons(
+        session.taskbar_mut(),
+        Scale::ONE,
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+    );
+
+    let rows = shown_entry_rows(&session);
+    assert_eq!(rows.len(), 1, "one entry, one row");
+    assert_eq!(
+        row_tint(&session, rows[0]),
+        Some(BUNDLE_TINT),
+        "the row shows the application's own icon, not the shipped master"
+    );
+}
+
+#[test]
+fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
+    // Three ways an application's own icon can fail — the file is absent,
+    // it is over the artwork read bound, and it will not decode — and all
+    // three land on the shipped application-bundle artwork rather than
+    // leaving a hole in the popup.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    for (stem, name) in [("gone", "Gone"), ("huge", "Huge"), ("junk", "Junk")] {
+        cat.insert(entry_with_icon(stem, name, Some("icon.svg")))
+            .expect("fits");
+    }
+    let (mut session, _comp) = open_library_over(cat);
+    let oversize = vec![BUNDLE_TINT; MAX_ARTWORK_BYTES + 1];
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(
+        MemoryAssets::default()
+            .with("/Apps/huge.app/Resources/icon.svg", &oversize)
+            .with("/Apps/junk.app/Resources/icon.svg", &[]),
+    ));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+
+    resolve_library_icons(
+        session.taskbar_mut(),
+        Scale::ONE,
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+    );
+
+    let rows = shown_entry_rows(&session);
+    assert_eq!(rows.len(), 3, "three entries, three rows");
+    for row in rows {
+        assert_eq!(
+            row_tint(&session, row),
+            Some(SHIPPED_TINT),
+            "row {row} falls back to the shipped artwork rather than blanking"
+        );
+    }
+}
+
+#[test]
+fn a_library_row_with_no_declared_icon_falls_back_to_the_shipped_artwork() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    cat.insert(entry_with_icon("plain", "Plain", None))
+        .expect("fits");
+    let (mut session, _comp) = open_library_over(cat);
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(MemoryAssets::default()));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+
+    resolve_library_icons(
+        session.taskbar_mut(),
+        Scale::ONE,
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+    );
+
+    let rows = shown_entry_rows(&session);
+    assert_eq!(
+        row_tint(&session, rows[0]),
+        Some(SHIPPED_TINT),
+        "an application that declares no icon still shows one"
+    );
+}
+
+#[test]
+fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
+    // A big library must not decode an icon nobody is looking at: only the
+    // rows inside the popup's viewport are resolved, and the decode count
+    // is exactly the shown rows.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    let mut assets = MemoryAssets::default();
+    for index in 0..MAX_CATALOG_LEN.min(96) {
+        let stem = format!("app{index:02}");
+        cat.insert(entry_with_icon(
+            &stem,
+            &format!("App {index:02}"),
+            Some("icon.svg"),
+        ))
+        .expect("fits");
+        assets = assets.with(
+            &format!("/Apps/{stem}.app/Resources/icon.svg"),
+            &[BUNDLE_TINT],
+        );
+    }
+    let (mut session, _comp) = open_library_over(cat);
+    let mut reader = ArtworkFileReader(CountingAssets::new(shipped_app_bundle_master(assets)));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+
+    let shown = shown_entry_rows(&session);
+    let total = session.taskbar().library().rows().len();
+    assert!(
+        shown.len() < total,
+        "the fixture must overflow its viewport: {} shown of {total}",
+        shown.len()
+    );
+
+    resolve_library_icons(
+        session.taskbar_mut(),
+        Scale::ONE,
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+    );
+
+    assert_eq!(
+        rasteriser.0.calls,
+        shown.len(),
+        "one decode per shown row, none for the rest"
+    );
+    assert_eq!(reader.0.reads, shown.len(), "and one read per shown row");
+    for row in 0..total {
+        let resolved = row_tint(&session, row).is_some();
+        assert_eq!(
+            resolved,
+            shown.contains(&row),
+            "row {row} resolved={resolved} but shown={}",
+            shown.contains(&row)
+        );
+    }
+}
+
+#[test]
+fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
+    // The freshly-installed and headless-graphics case: nothing under the
+    // shipped graphics store, no bundle icons, nothing readable at all.
+    // Every surface the bar and its popup draw must still be the one the
+    // built-in glyph path produces — no blank slot anywhere.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
+        .expect("fits");
+    let (mut session, mut comp) = open_library_over(cat);
+    let mut reader = ArtworkFileReader(MemoryAssets::default());
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+
+    // The pin strip: a pin whose bundle declares an icon nothing will
+    // serve still yields a view, so the strip keeps its slot.
+    let resolved = vec![ResolvedPin {
+        label: String::from("One"),
+        entry: None,
+        run_path: Some(String::from("/Apps/one.app/Run")),
+        icon: Some(artwork_source("/Apps/one.app")),
+    }];
+    let views = build_pin_views(
+        &resolved,
+        &[None],
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+        24,
+    );
+    assert_eq!(views.len(), 1, "the pin is still shown");
+    assert!(
+        views[0].artwork().is_none(),
+        "with nothing to read there is no artwork — the slot draws its glyph"
+    );
+
+    session.taskbar_mut().tasks_mut().add(TaskId(1), "Editor");
+    resolve_library_icons(
+        session.taskbar_mut(),
+        Scale::ONE,
+        &mut reader,
+        &mut rasteriser,
+        &mut cache,
+    );
+    for row in shown_entry_rows(&session) {
+        assert_eq!(row_tint(&session, row), None, "row {row} has no artwork");
+    }
+
+    // Present the whole bar and popup twice: once through the seams that
+    // can serve nothing, once through the do-nothing lookup. Identical
+    // pixels means the empty-store desktop is exactly the glyph desktop,
+    // and a bar drawn from glyphs is not a blank bar.
+    session.taskbar_mut().set_pins(views);
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut presenter = TaskbarPresenter::new();
+    let mut source = IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser);
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut source,
+    );
+    let drawn: Vec<(Vec<_>, Vec<_>)> = [presenter.bar_window(), presenter.popup_window()]
+        .into_iter()
+        .map(|id| {
+            let content = comp
+                .window(id.expect("presented"))
+                .expect("live")
+                .content()
+                .expect("content is retained")
+                .pixels()
+                .to_vec();
+            let uniform: Vec<_> = content.iter().take(1).copied().collect();
+            (content, uniform)
+        })
+        .collect();
+    for (content, uniform) in &drawn {
+        assert!(
+            content.iter().any(|pixel| Some(pixel) != uniform.first()),
+            "a bar or popup drawn from glyphs is not one flat colour"
+        );
+    }
+
+    let mut glyphs = TaskbarPresenter::new();
+    let mut plain = compositor();
+    glyphs.present(
+        &mut plain,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+    for (index, id) in [glyphs.bar_window(), glyphs.popup_window()]
+        .into_iter()
+        .enumerate()
+    {
+        let content = plain
+            .window(id.expect("presented"))
+            .expect("live")
+            .content()
+            .expect("content is retained")
+            .pixels();
+        assert_eq!(
+            drawn[index].0.as_slice(),
+            content,
+            "an unreadable artwork store draws exactly the glyph desktop"
+        );
+    }
 }

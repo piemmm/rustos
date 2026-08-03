@@ -1076,7 +1076,7 @@ fn key_is_delivered_to_the_focused_window() {
 }
 
 #[test]
-fn key_without_focus_is_ignored() {
+fn key_without_focus_goes_to_the_desktop_not_to_a_window() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
@@ -1084,12 +1084,16 @@ fn key_without_focus_is_ignored() {
     assert_eq!(router.focused(), None);
     assert_eq!(
         router.handle(key_pressed(Key::Char('a')), &mut c),
-        InputResponse::Ignored
+        InputResponse::DesktopKey {
+            key: Key::Char('a'),
+            modifiers: Modifiers::default(),
+            pressed: true,
+        }
     );
 }
 
 #[test]
-fn key_to_a_vanished_focus_is_ignored_and_drops_focus() {
+fn key_to_a_vanished_focus_falls_back_to_the_desktop_and_drops_focus() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::ORIGIN, opaque(10, 10, RED));
     let mut router = InputRouter::new();
@@ -1098,7 +1102,11 @@ fn key_to_a_vanished_focus_is_ignored_and_drops_focus() {
     assert!(c.remove(win), "the focused window is removed");
     assert_eq!(
         router.handle(key_pressed(Key::Char('a')), &mut c),
-        InputResponse::Ignored
+        InputResponse::DesktopKey {
+            key: Key::Char('a'),
+            modifiers: Modifiers::default(),
+            pressed: true,
+        }
     );
     assert_eq!(
         router.focused(),
@@ -1161,7 +1169,10 @@ fn move_grab_drags_focused_window() {
         InputResponse::MoveEnded { window: win }
     );
     assert!(!router.is_moving());
-    assert_eq!(router.handle(moved(60, 60), &mut c), InputResponse::Ignored);
+    assert_eq!(
+        router.handle(moved(60, 60), &mut c),
+        InputResponse::DesktopPointerMoved
+    );
     assert_eq!(
         c.window(win).map(super::window::Window::origin),
         Some(Point::new(30, 18))
@@ -1211,8 +1222,12 @@ fn client_hover_moves_route_to_the_window_under_the_pointer() {
             local: Point::new(5, 2),
         }
     );
-    // A hover over the desktop belongs to no client.
-    assert_eq!(router.handle(moved(50, 50), &mut c), InputResponse::Ignored);
+    // A hover over the desktop belongs to no client — it belongs to the
+    // desktop layer's owner, which is told rather than left guessing.
+    assert_eq!(
+        router.handle(moved(50, 50), &mut c),
+        InputResponse::DesktopPointerMoved
+    );
 }
 
 #[test]
@@ -1278,8 +1293,9 @@ fn client_grab_ends_if_grabbed_window_removed() {
     router.handle(moved(15, 15), &mut c);
     router.handle(press_primary(), &mut c);
     assert!(c.remove(win));
-    // With the grabbed window gone, the drag fails closed to Ignored rather
-    // than naming a window that no longer exists.
+    // With the grabbed window gone, the drag fails closed rather than naming
+    // a window that no longer exists: neither the motion nor the release
+    // names a recipient.
     assert_eq!(router.handle(moved(20, 20), &mut c), InputResponse::Ignored);
     assert_eq!(
         router.handle(release_primary(), &mut c),
@@ -3846,4 +3862,89 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
     CONTENT_PRESSURE.report(PressureBand::Normal);
     assert!(c.window(session_painted).expect("window").has_content());
     assert!(c.pending_redraws().is_empty());
+}
+
+// --- The desktop layer ----------------------------------------------------
+
+#[test]
+fn the_desktop_layer_draws_over_the_background_and_under_every_window() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.set_desktop(opaque(20, 20, GREEN));
+    let win = c.add_window(Point::new(0, 0), opaque(4, 4, RED));
+    c.composite();
+
+    // Under the window the window wins; everywhere else the desktop layer
+    // covers the background entirely.
+    assert_eq!(frame_pixel(&c, 1, 1), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255]);
+
+    // Raising or hiding a window cannot put anything beneath the layer: the
+    // layer has no place in the z-order at all.
+    assert!(c.set_visible(win, false));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 1, 1), [0, 255, 0, 255]);
+}
+
+#[test]
+fn a_desktop_layer_smaller_than_the_screen_leaves_the_background_showing() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.set_desktop(opaque(8, 8, GREEN));
+    assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 8, 8)));
+    c.composite();
+
+    assert_eq!(frame_pixel(&c, 4, 4), [0, 255, 0, 255]);
+    assert_eq!(frame_pixel(&c, 12, 4), [0, 0, 255, 255], "past its width");
+    assert_eq!(frame_pixel(&c, 4, 12), [0, 0, 255, 255], "past its height");
+}
+
+#[test]
+fn setting_and_clearing_the_desktop_layer_damages_exactly_what_it_covered() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.composite();
+    assert!(!c.has_damage());
+
+    c.set_desktop(opaque(8, 8, GREEN));
+    assert!(c.has_damage(), "installing a layer repaints its footprint");
+    c.composite();
+    assert_eq!(frame_pixel(&c, 4, 4), [0, 255, 0, 255]);
+
+    // Replacing it damages both the old footprint and the new one, so a
+    // shrinking layer cannot leave its old pixels behind.
+    c.set_desktop(opaque(4, 4, RED));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 2, 2), [255, 0, 0, 255]);
+    assert_eq!(
+        frame_pixel(&c, 6, 6),
+        [0, 0, 255, 255],
+        "the old layer is gone"
+    );
+
+    assert!(c.clear_desktop(), "a layer was installed");
+    c.composite();
+    assert_eq!(frame_pixel(&c, 2, 2), [0, 0, 255, 255]);
+    assert!(!c.clear_desktop(), "clearing twice changes nothing");
+    assert!(!c.has_damage());
+}
+
+#[test]
+fn the_accelerated_scene_carries_the_desktop_layer_beneath_the_windows() {
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    c.set_desktop(opaque(16, 16, GREEN));
+    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    let mut display = MockAccel::new(mode(16, 16), generous_caps());
+
+    c.present_accelerated(&mut display)
+        .expect("accelerated present");
+
+    // Back to front: background, the desktop layer, then the window — the
+    // same order the software path blends them in.
+    assert_eq!(display.layers.len(), 3, "background + desktop + window");
+    let desktop = &display.layers[1];
+    assert_eq!(
+        (desktop.width, desktop.height, desktop.dst_x, desktop.dst_y),
+        (16, 16, 0, 0)
+    );
+    assert_eq!(layer_pixel(desktop, 8, 8), [0, 255, 0, 255]);
+    let win = &display.layers[2];
+    assert_eq!((win.width, win.height, win.dst_x, win.dst_y), (4, 4, 2, 2));
 }

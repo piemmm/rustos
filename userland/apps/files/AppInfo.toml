@@ -7,12 +7,16 @@
 # fail-loud stderr diagnostics, CAP_FS_ACCESS for the directory listings
 # it browses (every read is still permission-checked per inode under the
 # launching user's identity), CAP_SHM to create and grant the zero-copy
-# window frame region the desktop session maps, and CAP_PROC_SPAWN to
-# launch an activated <Name>.app bundle through the ordinary signed
-# app-load gate (double-click / Enter on a bundle spawns its own Run —
-# never a private path; plans/NEW-FILEMANAGER.md FM6b). The launched
-# process receives this set intersected with the launching user's
-# grants, never more.
+# window frame region the desktop session maps, and CAP_PROC_SPAWN for
+# the app's two spawns: launching an activated <Name>.app bundle through
+# the ordinary signed app-load gate (double-click / Enter on a bundle
+# spawns its own Run — never a private path; plans/NEW-FILEMANAGER.md
+# FM6b), and hosting the icon-rasterisation sandbox worker the grid's
+# artwork is decoded in — a restricted spawn of this same binary in its
+# worker role, which the kernel brands capability-empty, so the untrusted
+# decode never runs in the file manager and needs no capability of its
+# own. The launched process receives this set intersected with the
+# launching user's grants, never more.
 id = "os.tairix.files"
 name = "files"
 version = "0.1.0"

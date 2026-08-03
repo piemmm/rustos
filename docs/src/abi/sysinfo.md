@@ -305,14 +305,32 @@ testable against in-memory fixtures.
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
   the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
-  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`), and the volume's
-  space accounting as a `VolumeStats` usage block (block size plus 64-bit
-  total/free/available block and inode counts) — the figures `df` renders.
-  Both the flag field and the usage block reuse the filesystem-driver
-  ABI's types rather than re-declaring them (`AGENTS.md` §2.2); a mount
-  with no live backing volume carries the all-zero usage (the honest "no
-  capacity known"), and a decode refuses an internally inconsistent usage
-  (available exceeding free, or free exceeding total) whole.
+  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`), the volume's live
+  [`MountAvailability`] (so a surprise-removed volume never reads as
+  healthy), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
+  all-zero when the mount publishes none — the identity a `volume_detach`
+  request names), the storage `medium` of the block device backing it, and
+  the volume's space accounting as a `VolumeStats` usage block (block size
+  plus 64-bit total/free/available block and inode counts) — the figures
+  `df` renders. Both the flag field and the usage block reuse the
+  filesystem-driver ABI's types rather than re-declaring them
+  (`AGENTS.md` §2.2); a mount with no live backing volume carries the
+  all-zero usage (the honest "no capacity known"), and a decode refuses an
+  internally inconsistent usage (available exceeding free, or free
+  exceeding total) whole.
+
+  The medium is the [`BlkDeviceClass`] the backing block device declared,
+  read through the typed [`MountRecord::medium`] accessor rather than as a
+  raw byte, so a consumer such as the file manager can show a
+  medium-appropriate drive icon instead of guessing one. It reuses the
+  block ABI's own class vocabulary rather than a second one
+  (`AGENTS.md` §2.2) and is `None` — *unknown* — for a mount with no block
+  backing (a synthetic or view mount), for a device whose class word this
+  ABI does not define, and for a wire byte a decoder does not recognise:
+  the record never fabricates a medium nobody reported. On the wire the
+  medium is one byte after `availability`, `0` meaning unknown and a known
+  class its discriminant plus one; the seven bytes that follow it are
+  reserved-must-be-zero and a decode refuses a record that sets them.
 - [`ResourceLimitRecord`] — one row of the `RESOURCE_LIMITS` response: a
   resource's `kind` ([`LimitKind`]), its effective [`ResourceLimit`]
   (soft/hard), and the caller's current live `usage`. The query takes no
@@ -354,10 +372,14 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`HOSTNAME_MAX`]: ../../tairix_abi/sysinfo/constant.HOSTNAME_MAX.html
 [`MountListRequest`]: ../../tairix_abi/sysinfo/struct.MountListRequest.html
 [`MountRecord`]: ../../tairix_abi/sysinfo/struct.MountRecord.html
+[`MountRecord::medium`]: ../../tairix_abi/sysinfo/struct.MountRecord.html#method.medium
+[`MountAvailability`]: ../../tairix_abi/sysinfo/enum.MountAvailability.html
 [`MOUNT_SOURCE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
 [`MOUNT_TARGET_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
 [`MOUNT_FSTYPE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
+[`MOUNT_VOLUME_ID_LEN`]: ../../tairix_abi/sysinfo/constant.MOUNT_VOLUME_ID_LEN.html
 [`MountFlags`]: ../../tairix_abi/driver/filesystem/struct.MountFlags.html
+[`BlkDeviceClass`]: ../../tairix_abi/blkio/enum.BlkDeviceClass.html
 [`ResourceLimitRecord`]: ../../tairix_abi/sysinfo/struct.ResourceLimitRecord.html
 [`RESOURCE_LIMITS_REPORT_LEN`]: ../../tairix_abi/sysinfo/constant.RESOURCE_LIMITS_REPORT_LEN.html
 [`LimitKind`]: ../../tairix_abi/rlimit/enum.LimitKind.html

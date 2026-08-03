@@ -63,6 +63,7 @@
   - [`tairix-font`](./lib/font.md)
   - [`tairix-help`](./lib/help.md)
   - [`tairix-hid`](./lib/hid.md)
+  - [`tairix-icon`](./lib/icon.md)
   - [`tairix-image`](./lib/image.md)
   - [`tairix-keymap`](./lib/keymap.md)
   - [`tairix-log`](./lib/log.md)

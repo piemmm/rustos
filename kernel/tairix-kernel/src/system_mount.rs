@@ -73,8 +73,8 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::DriverHandle;
 use tairix_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
 use tairix_kernel_core::{
-    CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
-    VolumeForest,
+    CachedFs, LateFilesystem, MountBacking, MountedFilesystemService, Path, SleepLock, Vfs,
+    VfsError, VolumeForest,
 };
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -296,14 +296,22 @@ fn system_vfs() -> Result<Vfs, VfsError> {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).map_err(|_| VfsError::Io)?;
     let root_handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
+    // The bootstrap-floor volumes are brought up before any classified block
+    // client exists, so their storage medium is recorded as unknown rather
+    // than assumed from the disk they happen to boot from.
+    let root_backing = MountBacking::new(root_handle, None);
     {
         let mut mounts = vfs.mounts_write();
         // The encrypted, writable root volume *is* `/`.
-        mounts.back_root(root_handle)?;
+        mounts.back_root(root_backing)?;
         // The read-only `/System` volume shadows `/` at `/System`; its
         // content is the volume's own root, so it is a whole-volume mount
         // (no rebasing).
-        mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
+        mounts.set_backing(
+            &Path::parse("/System")?,
+            MountBacking::new(system_handle, None),
+            Vec::new(),
+        )?;
         // The writable `/System` exceptions and the flag-bearing top-level
         // subtrees are the *same* writable root volume, each rebased onto
         // its own same-named path there so the one driver resolves from its
@@ -317,7 +325,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
         ] {
             let path = Path::parse(sub)?;
             let subtree = path.components().to_vec();
-            mounts.set_backing(&path, root_handle, subtree)?;
+            mounts.set_backing(&path, root_backing, subtree)?;
         }
     }
     Ok(vfs)

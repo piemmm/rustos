@@ -27,7 +27,9 @@ which the drift guard enforces.
 
 ## Status
 
-`done` — FM1–FM12 plus a UI-polish increment are all landed. **The UI-polish
+`done` — FM1–FM13 plus a UI-polish increment are all landed. FM13 is the
+places/devices rail; the grid view's file-class artwork it draws comes from
+`plans/ICONS.md`. **The UI-polish
 increment (latest)** makes the browser window **resizable/maximizable**
 (`files.app` opens `resizable` and re-maps its zero-copy frame region on a
 `WindowEvent::Resized`, laying the shared renderer out to the new viewport;
@@ -237,9 +239,9 @@ a menu command shared with the read-only picker.
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven) is done, and
 so now is **FM6b's pure type→bundle "open with" association model** (the
-`lib/browse::open_with` module — the `BundleSource` enumeration seam, the
-extension→MIME `mime_for_name` classifier, and `applications_for`, host-proven
-like FM6a). **FM6b's app-side bundle launch is now done too**: `Enter` on the
+`lib/browse::open_with` module — the `BundleSource` enumeration seam and
+`applications_for` over the shared `lib/browse::media` content-type registry,
+host-proven like FM6a). **FM6b's app-side bundle launch is now done too**: `Enter` on the
 selection dispatches through `Browser::activate_selected`, and a `LaunchBundle`
 spawns the `<Name>.app` bundle's own `Run` through the ordinary signed load
 gate under the `CAP_PROC_SPAWN` grant this stage added (async and
@@ -422,24 +424,34 @@ speaker for a *storage* volume would be a semantic defect, so a storage-volume
 icon is deferred to the stage that actually draws one (FM4 breadcrumb/root
 view), not forced onto the audio kind here.
 
-Kind→icon is the pure `lib/browse::icon` classifier (`icon_for(entry)` /
-`icon_for_name(name)`): by `EntryKind` first (directory→`Folder`,
-bundle→`AppBundle`), then a small, documented, ASCII-case-insensitive
-filename-extension table (text/image/archive/executable) with the generic
-`File` glyph as the fallback for an unknown/extensionless/dotfile name — one
-definition shared by manager and picker (§2.2). It is a display *hint* only; it
-gates no operation (authority stays in the VFS and the launcher, §4/§5.4). The
+Kind→icon is the shared `lib/browse::media` registry
+(`media_for_entry(entry, parent).icon()`): by `EntryKind` first
+(directory→`inode/directory`→`Folder`, bundle→`application/x-tairix-service`
+under the system service store and `application/x-tairix-app` elsewhere), then
+a documented, ASCII-case-insensitive filename-extension table, with
+`application/octet-stream`→`File` as the fallback for an
+unknown/extensionless/dotfile name — one classification shared by manager and
+picker, and the same one the "Open With…" association reads (§2.2). It is a
+display *hint* only; it gates no operation (authority stays in the VFS and the
+launcher, §4/§5.4). The
 glyph is now drawn: `lib/controls::Card` gained an optional `with_icon`
 identifying glyph rendered above a centred title (a card with no icon is
 unchanged, so notification/resource cards are unaffected), and `render`'s grid
-tile sets it from the classifier — so the FM2b grid tile is complete.
+tile sets it from the registry — so the FM2b grid tile is complete. The tile
+also takes the owner-supplied artwork seam: `render`'s trailing
+`&mut dyn tairix_icon::IconArtwork` is asked for each tile's kind at exactly
+the side `Card::icon_side` reserves, and the tile blits what it returns or
+draws the built-in glyph, so real icon artwork lands without a second draw
+path (the manager and the picker pass `NoArtwork` until their caches land).
 
 Host-tested: `lib/icon` (the new glyphs draw, `index`↔`ICON_KINDS` round-trip,
 `for_asset` mappings, per-kind SVG load/fallback over the full set),
-`lib/controls` (a card icon draws above the label, no-icon card unchanged), and
-`lib/browse` (classifier: kind-before-extension, known extensions per class,
-case-insensitivity, unknown/extensionless/dotfile/trailing-dot → generic,
-last-extension-wins). Docs: `docs/src/desktop/apps.md`,
+`lib/controls` (a card icon draws above the label, no-icon card unchanged,
+artwork blitted / glyph fallback / off-size artwork centred), and
+`lib/browse` (the registry: every extension→type→icon row, spelling
+round-trip, kind-before-extension, case-insensitivity,
+unknown/extensionless/dotfile/trailing-dot → generic, last-extension-wins).
+Docs: `docs/src/desktop/apps.md`,
 `plans/GUI-CONTROLS-DESIGN.md` §11.15, `lib/icon`/`lib/browse` README + rustdoc.
 
 ### FM4a — the engine navigation model: history + breadcrumb `[x]`
@@ -682,18 +694,24 @@ and delegation wiring the pure engine model does not.
 
 **The pure association model is done** (§2.19): the `lib/browse::open_with`
 module lands the type→bundle "open with" model host-proven ahead of the app
-wiring, exactly as FM6a landed the activation decision. `mime_for_name` derives
-a file's content type from its filename extension (recognising exactly the
-extensions the `icon` classifier draws a typed glyph for, sharing one
-`extension` split, §2.2), `BundleSource` is the injected installed-bundle
+wiring, exactly as FM6a landed the activation decision. `media_for_name`
+derives a file's content type from its filename extension through the one
+`lib/browse::media` registry the icon is drawn from (one table, one `extension`
+split, §2.2), `BundleSource` is the injected installed-bundle
 enumeration seam mirroring `DirectorySource`, and `applications_for(name,
 bundles)` returns the `AppAssociation`s whose declared `AppInfo` MIME set
-handles the file's type, in source order — no match being an honest empty
+handles the file's type or any broader type it subclasses
+(`MediaType::parent`, the shared-mime-info relation — an editor declaring
+`text/plain` opens a `.rs` file), most specific claim first and source order
+within a claim — no match being an honest empty
 answer (§2.24), never a fabricated default. The type decision is a display
 hint only; the load gate still verifies and capability-checks the picked
-bundle, and the engine never spawns. Host-tested (classifier per class,
-case-insensitivity, unknown/dotfile fail-closed, `handles`, match / single /
-none / unrecognised, seam refusal). Docs: `docs/src/desktop/apps.md`,
+bundle, and the engine never spawns. Host-tested (the registry's type per
+name, case-insensitivity, unknown/dotfile fail-closed, `handles`, match /
+single / none / unrecognised, seam refusal, the subclass chain terminating for
+every type, a generic `text/plain` application matching a refined extension,
+and a specific declaration outranking a generic one). Docs:
+`docs/src/desktop/apps.md`,
 `lib/browse/README.md` + rustdoc.
 
 **The app-side bundle launch is done.** The `files.app` `Run` binary now
@@ -1555,6 +1573,54 @@ drives it (§2.4).
   clean cross-compiled. Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md`
   + rustdoc.
 
+### FM13 — the places / devices sidebar `[x]`
+
+Done. The vertical shortcuts rail down the left of the manager's window that
+`plans/desktop1.png` shows, listing the user's own places and every mounted
+volume with an icon matching the **real** storage medium.
+
+- **The model `[x]`.** `lib/browse::places` is pure: `Place`/`PlaceKind`/
+  `Volume`/`Places`, built from the caller's home components plus a list of
+  volumes — never I/O. One deterministic order (Home, Desktop, Documents,
+  Apps, System, a separation, then volumes sorted stably by label). A volume
+  is validated fail closed and simply dropped when its label is empty,
+  over-long, or holds a control character, when its target is not an
+  absolute parseable path, or when it duplicates another; a stale row is
+  never fabricated. Interaction state (cursor, focus, hover, unavailable)
+  lives on the model so every state the shared `ListRow` offers is
+  reachable.
+- **The geometry `[x]`.** `layout::SidebarView` is the one definition of the
+  rail's width (derived from the theme/font metrics, clamped to a third of
+  the window), its row rectangles, its separator, and the hit-test that
+  inverts them — shared by paint and hit-test, never computed twice. The
+  content area (toolbar, path bar, list/grid, scrollbar) is inset by the
+  rail; with no rail the frame is exactly what it was. Building it exposed
+  and fixed a latent defect: `ListView`/`GridView`'s `index_at` were not
+  origin-aware while their rect builders were, so both now invert through
+  one shared helper.
+- **The medium is data, not a guess `[x]`.** The app reads the ungated
+  `MOUNT_LIST` sysinfo query through `lib/procinfo`, keeps the available
+  mounts, and maps each record's `medium()` through
+  `tairix_icon::disk_icon` — rotational, solid-state and removable to their
+  shipped artwork, paravirtual **or unknown** to the generic drive glyph.
+  Threading that medium from the block device through the kernel mount
+  table onto the record is `plans/ICONS.md` I6.
+- **The behaviour `[x]`.** Pointer press focuses the rail and navigates;
+  Tab moves focus between rail and file view; arrows move the cursor
+  (clamped) and Enter navigates; Escape leaves the rail; keys the rail must
+  not steal (unfocused arrows, key releases, Ctrl+Tab) fall through. A
+  place that will not list states the reason on `stderr`, marks that row
+  unavailable, and leaves the browser exactly where it was. The routing is
+  host-visible (`userland/apps/files/src/sidebar.rs`) and host-tested rather
+  than stranded in the freestanding module.
+- **Refresh `[x]`.** There is no mount-change event in the system, so the
+  rail rebuilds on a user gesture (F5 or the Refresh tool), preserving focus
+  and cursor. No timer and no polling loop was added.
+- The trusted picker composes the same renderer with no rail
+  (`ManagerChrome::none()`): it is a read-only one-shot over a caller-chosen
+  start location, and a machine-wide device rail is neither its job nor
+  within the authority it is given.
+
 ## 2. Sequencing and dependencies
 
 FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
@@ -1573,7 +1639,9 @@ Trash), and FM11 gives the way back — emptying the Trash (FM11a the pure model
 FM11b the app verb + navigable Trash view, FM11c the QEMU witness), each split
 the same way and depending on the FM7 delete walk it reuses (§2.2). FM12 adds
 the pointer double-click gesture (the pointer pass FM6b deferred), reusing the
-FM6 `activate` dispatch so pointer and keyboard never diverge. Each lands
+FM6 `activate` dispatch so pointer and keyboard never diverge. FM13 adds the
+places/devices rail, depending on FM3's classification for its artwork and on
+the storage medium `plans/ICONS.md` I6 threads onto the mount record. Each lands
 fully gated; a stage that turns out larger than one clean increment is split and
 staged here, never shipped half-done "for now" (§2.19).
 

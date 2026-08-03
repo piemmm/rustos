@@ -715,7 +715,7 @@ mod tests {
     use crate::events;
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use core::cell::RefCell;
-    use tairix_abi::blkio::BlkHealthCounters;
+    use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
@@ -728,12 +728,12 @@ mod tests {
         CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
         IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
         MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
-        ProcessListRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
-        ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
-        VolumeIoHealthRecord, VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED,
-        SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
+        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
+        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+        UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED,
+        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
+        SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
@@ -944,8 +944,11 @@ mod tests {
                         b"/",
                         b"arxfs",
                         MountFlags::READ_ONLY,
-                        VolumeStats::default(),
-                        MountAvailability::Available,
+                        MountVolumeState {
+                            usage: VolumeStats::default(),
+                            availability: MountAvailability::Available,
+                            medium: Some(BlkDeviceClass::SolidState),
+                        },
                         [0u8; 16],
                     )
                     .unwrap(),
@@ -954,8 +957,11 @@ mod tests {
                         b"/Storage/data",
                         b"arxfs",
                         MountFlags::NOSUID.union(MountFlags::NODEV),
-                        VolumeStats::default(),
-                        MountAvailability::Available,
+                        MountVolumeState {
+                            usage: VolumeStats::default(),
+                            availability: MountAvailability::Available,
+                            medium: None,
+                        },
                         [0u8; 16],
                     )
                     .unwrap(),
@@ -1622,6 +1628,13 @@ mod tests {
         let first = MountRecord::from_bytes(&resp[..MountRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.target_bytes(), b"/");
         assert!(first.flags().contains(MountFlags::READ_ONLY));
+        // The medium the source reported is relayed unchanged, and a volume
+        // whose backing medium is unknown stays unknown rather than guessed.
+        assert_eq!(first.medium(), Some(BlkDeviceClass::SolidState));
+        let second =
+            MountRecord::from_bytes(&resp[MountRecord::WIRE_LEN..2 * MountRecord::WIRE_LEN])
+                .unwrap();
+        assert_eq!(second.medium(), None);
         // The mount table is not audited.
         assert!(sink.events.borrow().as_slice().is_empty());
 

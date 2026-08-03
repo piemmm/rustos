@@ -62,11 +62,60 @@ icon-rasterisation service** (the session's own binary re-entered as a
 capability-empty worker), come back as verified RGBA pixels, and are cached
 per `(path, pixel-side)`.
 
-`PinService` manages the live store, the armed drag offer, and a dirty latch
-the loop drains to re-resolve views. It implements the window-channel bridge
-(`PinBridge`): an app's `PinBundle` request is validated and applied
-fail-closed. `resolve_pin_drop` resolves a primary release over the pin band
-as a drop gesture, pins at the drop index, and consumes the offer.
+`PinService` manages the live store, the one armed drag offer, and a dirty
+latch the loop drains to re-resolve views. It implements the window-channel
+bridge (`PinBridge`): an app's `PinBundle` request is validated and applied
+fail-closed. A drag can start from either of two origins —
+`DragOrigin::Window` (a served application window offering its own bundle
+path) or `DragOrigin::Library` (the taskbar's program-library popup offering
+a catalogued entry, dragged out with `lib/browse`'s shared drag-threshold
+detector) — and `offer_drag`/`withdraw_drag`/`take_drag_for` ensure a release
+can only consume or withdraw the offer that armed it. `resolve_pin_drop`
+resolves a primary release from the offering origin over the pin band as a
+drop gesture: `pin_target_at` re-validates the target against the live
+catalog or the bundle's manifest (so an entry uninstalled mid-drag is
+refused rather than pinned unlaunchable) and pins at the drop index either
+way, consuming the offer.
+
+That read, decode, and cache are the shared artwork layer's, not this
+module's: `DesktopShell` owns exactly one `tairix_icon::ArtworkCache` for the
+seat plus the two seams it resolves through (`ArtworkReader` /
+`ArtworkRasteriser`), and every icon on the bar comes out of it — a pin, a
+running task, a program-library row, and the shipped raster masters behind
+the two launcher buttons (`AGENTS.md` §2.2).
+
+- `set_artwork_source(reader, rasteriser)` installs the live seams; the
+  thin `ArtworkFileReader` / `ArtworkSandbox` wrappers adapt the session's
+  own `SessionFileReader` and `IconRasteriser` to them, so there is one
+  reading seam and one sandbox, not two.
+- A shell that is never given them keeps seams that find and decode nothing,
+  so a bare shell is a working desktop drawn from built-in glyphs.
+- `artwork_parts()` lends the cache and both seams in one borrow — how
+  `build_pin_views` resolves a strip without borrowing the shell three times.
+- `trim_caches` shrinks it under memory pressure and `teardown` wipes it, on
+  the same path as the cursor and glyph caches.
+
+`resolve_library_icons` gives the program-library popup the same treatment,
+driven off the rows the popup says it is showing: it asks for the visible
+rows' icon requests, resolves each row's bundle icon at that row's own pixel
+side, and files the answer back with `set_row_artwork`. A row whose entry
+declares no icon — or whose asset is absent, oversize, or undecodable — falls
+back to the shipped `AppBundle` artwork and then to the row's built-in glyph,
+so a row is never blank. It runs at the top of `present`, before the paint,
+skips a row that already holds right-sized artwork, and does nothing while
+the popup is closed. Filing artwork deliberately does **not** latch a
+repaint: latching from inside the pre-paint resolution would demand another
+present every frame, forever.
+
+**Read the pressure band before building the caches.** A reclaimable cache
+admits nothing while the reported band is the fail-closed *unknown* it starts
+in, so the `Run` binary asks for the band once *before* it constructs the
+shell's caches. Skip that and the desktop is correct but permanently cold —
+every cursor, glyph, and icon lookup misses and the bar draws built-in glyphs
+for the whole life of the session on a machine with memory to spare. The
+second read, after the pressure wait-set member is registered, is a different
+job: it closes the race with a band that changed during bring-up, because the
+kernel reports *changes*.
 
 ## Launch bookkeeping
 
@@ -105,6 +154,70 @@ Both are **total and fail-closed per kind** (`AGENTS.md` §2.9): a kind whose
 asset is missing, unreadable, malformed, or out of subset keeps its built-in
 artwork, so a corrupt or absent `/System/Graphics` can never blank the
 pointer or a status icon — it simply yields the built-in set.
+
+The shipped **raster** icon masters in the same store
+(`/System/Graphics/Icons/<asset-id>.png`) are not loaded as a set: they are
+resolved one at a time, on demand, at the exact pixel side a slot draws at,
+through the shell's artwork cache above. The path spelling is
+`tairix_icon`'s (`GRAPHICS_DIR`, `icon_artwork_path`, `icon_vector_path`), so
+this crate names the store's layout nowhere of its own.
+
+## The desktop icon surface
+
+`Desktop<S: DirectorySource>` (`src/desktop.rs`) is the user's own `Desktop`
+folder shown as a column of icons down the screen's trailing edge, composited
+by the window manager's own desktop layer (`Compositor::set_desktop`) —
+beneath every window and reachable through no window id. It is a *directory
+view*, not a new kind of surface: it lists the folder through the same
+`DirectorySource` seam the trusted file picker uses, orders the listing with
+the shared `sort_entries`, classifies each child with the shared content-type
+registry, and lays its tiles out with the shared `GridView` under
+`GridFlow::ColumnsFromTrailing` — the same cell geometry and hit-test the file
+manager's row-major grid uses, just anchored to the trailing edge and growing
+a new column inward as it fills (`lib/browse::layout`). It paints through the
+shared `grid_tile`/`grid_metrics` and the shell's own icon-artwork lookup, so
+a folder shows the shipped folder artwork and a file its content-class
+artwork, falling back to built-in glyphs exactly as the file manager's grid
+does.
+
+**Pointer and keyboard.** A primary press selects the icon under it (or
+clears the selection on empty desktop) and arms the shared
+`DoubleClickTracker`, so a second press within its window activates the icon
+— the desktop can never disagree with the file manager about what a gesture
+means. Motion drives hover feedback and, on arrival from elsewhere, the
+gesture-driven re-list below. While the desktop holds the keyboard, the
+arrows move the selection (down/up one icon, left/right one whole column),
+`Enter` activates it, and `Escape` clears it.
+
+**Activation** resolves by entry kind: a directory opens the file manager
+*at that path* (passed as the program's own first argument, which the file
+manager now honours); an application bundle launches directly; a plain file
+resolves its association through the catalog the session holds and launches
+that application with the file as its argument; and a file nothing is
+associated with is refused, stating the reason on the error stream rather
+than failing silently. Every launch rides the session's existing
+asynchronous launch path, so the compositor never blocks on one.
+
+**Re-listing is gesture-driven, never timed.** There is no
+filesystem-change notification in this system, so the desktop re-lists at
+bring-up, after a session action that could have touched the folder, and on
+pointer arrival from elsewhere — rate-limited by `RELIST_MIN_INTERVAL_NS` so
+sweeping the pointer on and off the desktop cannot turn a gesture into a
+re-listing loop. There is deliberately **no timer and no polling loop**: a
+periodically-waking desktop would keep a core busy to discover nothing. A
+re-list that actually changed the folder also refreshes the library catalog
+and the file associations (`DesktopOutcome::relisted`), so an application
+installed after bring-up is picked up without a restart.
+
+**Why the desktop is not a pin-drag source.** An installed application lives
+only in an application store — machine-wide, or the user's own — so a
+`.app` directory a user drops on their `Desktop` folder is a directory
+*shaped like* an application rather than an installed one, and
+`BundlePath`'s store rule correctly refuses it. Offering a pin gesture that
+could never succeed would be a promise the system cannot keep, not a
+feature; the pin drag source is the program-library popup instead (see
+*Pin service and window-channel bridge*, above), whose every row is a
+catalogued entry by construction.
 
 ## Presenting the taskbar through the window manager
 
@@ -469,8 +582,9 @@ block (`AGENTS.md` §2.10).
 ## Still to come (Stage 7, `plans/NEW-TASKBAR.md`)
 
 The interactive light/dark switch in the Switchboard's System menu (T13),
-relaying the active theme to apps over live IPC, and the VFS-backed asset reads
-for `/System/Graphics` in the `Run` binary (the in-memory-tested loaders and
-their fallbacks exist; the `Run` binary installs the built-in artwork until
-then — its `SessionFileReader` today serves the program-library and pin
-stores).
+relaying the active theme to apps over live IPC, and the VFS-backed reads of
+the **SVG cursor and notification-icon sets** in the `Run` binary (the
+in-memory-tested loaders and their fallbacks exist; the `Run` binary installs
+the built-in sets until then). The raster **icon artwork** is already live
+there: the `Run` binary binds the shell's artwork seams to the VFS reader and
+the sandbox worker at bring-up.

@@ -41,6 +41,7 @@
 
 use std::path::Path;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
@@ -1493,6 +1494,42 @@ fn sysinfo_emit_query_ids(out: &mut String) {
     out.push('\n');
 }
 
+/// Emit the storage-medium discriminants a mount record carries.
+///
+/// Each value is read from the ABI's own encoder rather than re-typed here,
+/// so the C view cannot drift from the Rust definition it publishes.
+fn sysinfo_emit_mount_media(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* Storage medium of the block device backing a mount (uint8_t).\n\
+         \x20  UNKNOWN covers both a mount with no block backing and a class this\n\
+         \x20  ABI does not define: the record never guesses a medium. */\n",
+    );
+    let mount_media = [
+        ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
+        (
+            "TAIRIX_MOUNT_MEDIUM_ROTATIONAL",
+            Some(BlkDeviceClass::Rotational),
+        ),
+        (
+            "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
+            Some(BlkDeviceClass::SolidState),
+        ),
+        (
+            "TAIRIX_MOUNT_MEDIUM_REMOVABLE",
+            Some(BlkDeviceClass::Removable),
+        ),
+        ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkDeviceClass::Virtual)),
+    ];
+    for (name, medium) in mount_media {
+        let _ = writeln!(
+            out,
+            "#define {name} ((uint8_t){}u)",
+            MountRecord::medium_to_wire(medium)
+        );
+    }
+}
+
 /// Emit the inline-buffer capacities and the per-record packed wire sizes.
 fn sysinfo_emit_record_sizes(out: &mut String) {
     use std::fmt::Write as _;
@@ -1528,6 +1565,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     for (name, state) in mount_availabilities {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
     }
+    sysinfo_emit_mount_media(out);
     let _ = writeln!(
         out,
         "#define TAIRIX_USER_DIRECTORY_NAME_MAX {USER_DIRECTORY_NAME_MAX}u"
@@ -1669,6 +1707,9 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
          * its flag bits are defined by the filesystem driver ABI. `availability` is\n\
          * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).\n\
+         * `medium` is the storage medium of the block device backing the mount, a\n\
+         * TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block\n\
+         * device backs it or its class was not recognised -- never a guess.\n\
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
          * known). `volume_id` is the volume's stable published identity (all-zero\n\
          * when the mount has none), the identity a volume_detach request names.\n\
@@ -1680,6 +1721,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t target_len;\n\
          \x20   uint8_t fstype_len;\n\
          \x20   uint8_t availability;\n\
+         \x20   uint8_t medium;\n\
+         \x20   uint8_t reserved0[7];\n\
          \x20   tairix_volume_stats_t usage;\n\
          \x20   uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];\n\
          \x20   uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];\n\
@@ -3812,6 +3855,48 @@ mod tests {
         }
     }
 
+    /// A mount record's storage-medium byte is only readable from C if the
+    /// header publishes its encoding, so every value is pinned against the
+    /// `lib/abi` encoder the generator reads — including the unknown a
+    /// backing-less mount and an unrecognised class both take — and the byte
+    /// is pinned to its place between the availability state and the usage
+    /// block.
+    #[test]
+    fn sysinfo_header_publishes_the_mount_medium_encoding() {
+        let h = body("tairix_sysinfo.h");
+        for (macro_name, medium) in [
+            ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
+            (
+                "TAIRIX_MOUNT_MEDIUM_ROTATIONAL",
+                Some(BlkDeviceClass::Rotational),
+            ),
+            (
+                "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
+                Some(BlkDeviceClass::SolidState),
+            ),
+            (
+                "TAIRIX_MOUNT_MEDIUM_REMOVABLE",
+                Some(BlkDeviceClass::Removable),
+            ),
+            ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkDeviceClass::Virtual)),
+        ] {
+            let line = format!(
+                "#define {macro_name} ((uint8_t){}u)",
+                MountRecord::medium_to_wire(medium)
+            );
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+        assert!(
+            h.contains(concat!(
+                "    uint8_t availability;\n",
+                "    uint8_t medium;\n",
+                "    uint8_t reserved0[7];\n",
+                "    tairix_volume_stats_t usage;\n",
+            )),
+            "mount record medium placement: {h}"
+        );
+    }
+
     /// The naturally-aligned `#[repr(C)]` in-memory pins for the sysinfo
     /// wire types (the separate `*_WIRE_LEN` macros give the packed wire
     /// size), shared by `sysinfo_header_struct_layout_matches_lib_abi`.
@@ -3874,7 +3959,7 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                216,
+                224,
                 core::mem::align_of::<MountRecord>(),
                 8,
             ),
@@ -4142,7 +4227,7 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("tairix_sysinfo.h", "} tairix_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
-            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 216, align_of::<MountRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 224, align_of::<MountRecord>(), 8),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("tairix_driver.h", "} tairix_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),

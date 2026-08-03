@@ -16,13 +16,29 @@ can never diverge in navigation semantics, listing policy, or look.
   file/directory split with the one distinction a manager must make
   structurally: a `<Name>.app` directory is a `Bundle` — a sealed unit the
   user launches, not a folder to descend into.
-- **File-type icons** (`icon`): `icon_for(entry)` / `icon_for_name(name)` —
-  the one classifier both views share, mapping an entry to a `lib/icon`
-  `IconKind` by kind first (folder / app-bundle) then a small, documented
-  filename-extension table (text / image / archive / executable) with the
-  generic file glyph as the fail-closed fallback. A **display hint only**: it
-  decides a glyph, never an operation; authority stays in the VFS and the
-  launcher.
+- **Content-type registry** (`media`): the one closed registry both the drawn
+  file-type icon and the "Open With…" association vocabulary read, so the two
+  can never drift apart. `MediaType` names a type by its IANA (or TAIRiX
+  vendor) media-type spelling (`as_str` / `from_media_str`, round-tripping
+  case-insensitively); `media_for_name(name)` maps a filename extension
+  (ASCII-case-insensitive, allocating nothing) and `media_for_entry(entry,
+  parent)` classifies a listed entry — `inode/directory` for a directory
+  whatever its name, `application/x-tairix-service` for a `<Name>.app` listed
+  from the system service store (`tairix_abi::SYSTEM_SERVICE_STORE`) and
+  `application/x-tairix-app` elsewhere, and the extension's type for a regular
+  file, falling closed to `application/octet-stream`. `MediaType::icon` is the
+  `lib/icon` `IconKind` drawn for the type: deliberately **many-to-one** and
+  the only part of the registry allowed to be, so two types are never merged
+  merely because they draw alike (an application declaring the vanished type
+  would silently stop matching its own files). `MediaType::parent` is the
+  **subclass relation** the freedesktop.org shared-mime-info database models
+  (`text/x-csrc` is a subclass of `text/plain`): every readable-text type names
+  `text/plain` as its broader type — `image/svg+xml` reaches it through
+  `application/xml` — while everything binary names none, the chain is finite
+  and acyclic, and association matching walks it, so naming a format precisely
+  never narrows what can open it. The whole registry is a **display and offer
+  hint only**: it decides a glyph and which applications are *offered*, never
+  an operation; authority stays in the VFS and the launcher.
 - **Sort** (`SortMode`/`sort_entries`): the one listing order both views
   share — directories first, then a `Name`/`Size`/`Modified` key with a
   direction, with a case-insensitive name tiebreak so the result never
@@ -128,20 +144,24 @@ can never diverge in navigation semantics, listing policy, or look.
   activation itself.
 - **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
   the pure type→bundle model behind offering a file to a chosen application.
-  `mime_for_name` derives a file's content type from its filename extension —
-  the one bridge from a name to the MIME vocabulary a bundle declares its
-  associations in, recognising exactly the extensions the `icon` classifier
-  draws a typed glyph for. `BundleSource` is the injected installed-bundle
-  enumeration seam (the "Open With…" analogue of `DirectorySource`), and
-  `applications_for` selects the `AppAssociation`s whose declared MIME set
-  handles a file's type, in the source's order. No match is an honest empty
-  answer — a "no application" notice, never a fabricated default — and the type
-  decision is a display hint only: the load gate still verifies and
-  capability-checks whichever bundle the user picks. The engine never spawns.
-  The renderer draws the candidate list as the `build_open_with_menu` chooser
-  and resolves a click through `open_with_index_at` (sharing the context menu's
-  placement and row geometry), so the files app can offer the full list where
-  the default open picks the first.
+  A file's content type is the shared registry's (`media_for_name`), so the
+  association vocabulary is exactly the one the drawn glyph comes from.
+  `BundleSource` is the injected installed-bundle enumeration seam (the "Open
+  With…" analogue of `DirectorySource`), and `applications_for` selects the
+  `AppAssociation`s whose declared MIME set handles the file's type **or any
+  broader type it is a subclass of** (`MediaType::parent`) — an editor
+  declaring `text/plain` is offered for a `.rs` file. Candidates are ordered by
+  how specifically they claim it (a bundle declaring `text/x-rust` before one
+  declaring `text/plain`), and bundles claiming at the same level keep the
+  source's enumeration order, so no existing ordering is disturbed. No match is
+  an honest empty answer — a "no application" notice, never a fabricated
+  default — and the type decision is a display hint only: the load gate still
+  verifies and capability-checks whichever bundle the user picks. The engine
+  never spawns. The renderer draws the candidate list as the
+  `build_open_with_menu` chooser and resolves a click through
+  `open_with_index_at` (sharing the context menu's placement and row geometry),
+  so the files app can offer the full list where the default open picks the
+  first.
   `association_from_appinfo(bundle_path, appinfo)` is the pure, fail-closed
   decode a running-system `BundleSource` uses per bundle: it reads a manifest's
   header and declared MIME table (the same body layout the loader reads) into an
@@ -261,7 +281,7 @@ can never diverge in navigation semantics, listing policy, or look.
   volume identity `execute::paste_strategy` compares. `trash_dest_path` resolves
   a collision-free home inside the Trash directory: the original leaf when free,
   otherwise the smallest ` (n)` disambiguation inserted before the extension
-  (`notes (2).txt`), reusing the one shared `icon` extension split. It is fail
+  (`notes (2).txt`), reusing the registry's one extension split. It is fail
   closed — it never overwrites an existing trashed item and refuses a root Trash
   dir (`RootTrash`), an invalid original name (`InvalidName`), a disambiguation
   past the per-name limit (`TooLong`), or a search past `MAX_TRASH_NAME_ATTEMPTS`
@@ -306,6 +326,73 @@ can never diverge in navigation semantics, listing policy, or look.
   supplies the non-clashing placeholder name (`New Folder`, then `New Folder 2`,
   …) the manager creates with before opening the inline rename — bounded by the
   listing (pigeonhole), never an arbitrary cap.
+- **Places / devices rail** (`places`, `layout::SidebarView`,
+  `plans/NEW-FILEMANAGER.md`): the shortcut column down the leading edge of a
+  file-manager window — the user's own places above, every mounted volume
+  below. `Places::new(home, volumes)` is **pure**: it takes the home
+  directory's path components and the volumes the caller has already learned
+  about and returns an ordered, validated, deduplicated list, so the model
+  cannot open, stat, or list anything and is host-proven without a kernel.
+  Reading the live mount table is the composing app's job — the file manager
+  reads `MOUNT_LIST` through `lib/procinfo` and offers only mounts reporting
+  themselves available, so a surprise-removed device is never drawn as a row
+  that would fail on the first click.
+  - **One fixed order**, so the rail never reshuffles between two paints of
+    the same state: Home, Desktop, Documents, the application root, the system
+    root — the fixed user places, offered whether or not their directories
+    exist, since the model does no I/O and a shortcut that silently vanishes is
+    less honest than one that says why it cannot open — then a drawn
+    separation at `volume_start`, then the accepted volumes sorted stably by
+    label. They are sorted *before* deduplication, so which row survives a
+    duplicated target depends only on the set of volumes, never on the order
+    the mount table happened to page them out in. An empty `home` drops the
+    three home-derived rows rather than spelling a row that navigates nowhere.
+  - **Fail closed on every offered volume.** A mount record is text this
+    process did not author, so `Volume` is validated, never trusted: an empty
+    label, one longer than `MAX_PLACE_LABEL`, or one carrying a control
+    character is dropped; a target that is not absolute or does not parse into
+    components is dropped; a target an already-accepted row (fixed or volume)
+    covers is dropped. A malformed volume is never repaired, truncated, or
+    guessed at into a row that would navigate somewhere else, and no stale
+    volume row is ever fabricated.
+  - **The medium is real data.** Each volume carries the storage medium its
+    backing device actually reports (the mount record's `BlkDeviceClass`), and
+    `tairix_icon::disk_icon` maps it to the shipped artwork — rotational,
+    solid-state, and removable each draw their own drive icon, while a
+    paravirtual or absent class draws the generic drive glyph. A USB stick can
+    never masquerade as an internal disk, and nothing here classifies a device
+    by its name or by guesswork.
+  - **Geometry defined once** (`layout::SidebarView`): the rail's width is
+    derived from the theme metrics and the active font — the padded row height
+    plus the measured `WIDEST_FIXED_LABEL`, clamped to a third of the window —
+    never a magic constant, so every fixed label fits at any UI density.
+    `rail_rect`, `row_rect`, and `separator_rect` place the paint and
+    `index_at` inverts exactly those rectangles, so the row drawn and the row a
+    click resolves to can never disagree; a point outside the rail, past the
+    last row, or on the separation band resolves to nothing.
+  - **Drawn through the shared control.** Each row is a `lib/controls`
+    `ListRow`, so it inherits the artwork seam (a volume shows its medium's
+    shipped artwork and falls back to the built-in glyph) and every state the
+    control offers is real: hover from the pointer, focus from the rail's own
+    keyboard cursor while the rail holds the focus field, selected for the row
+    matching the browser's current location (`index_of`, an **exact** component
+    match — standing inside a subdirectory of a place highlights nothing rather
+    than claiming the user is at the place itself), and disabled for a row
+    `set_unavailable` marked after a navigation to it was actually refused,
+    never a row assumed dead in advance.
+  - **The interaction state lives on the model** (`cursor` / `move_cursor`,
+    which clamps rather than wraps so a held arrow cannot cycle the rail
+    endlessly; `is_focused` / `set_focused`; `hovered` / `set_hovered`), so the
+    paint, the hit-test, and the app's key routing all read one state. There is
+    **no mount-change notification** to subscribe to, so the volume rows are
+    rebuilt when the user asks the window to re-read what is there — never by a
+    poll or a timer.
+  - The trusted file picker passes no rail (`ManagerChrome::none`), and that
+    emptiness is deliberate rather than unfinished: the picker's whole purpose
+    is bounded to the directory tree the requesting application was authorised
+    to be shown, so a rail offering one-click jumps to arbitrary mounted
+    volumes would widen the pick beyond what was asked for. With no rail the
+    window is laid out exactly as it is with no sidebar at all.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
@@ -422,10 +509,17 @@ can never diverge in navigation semantics, listing policy, or look.
   a clickable breadcrumb trail (ancestors in the accent colour, the current
   directory drawn solid and inert) over the `breadcrumb` placement, list
   entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
-  grid entries as shared `Card` tiles, each tile carrying its `icon`-classified
-  file-type glyph above the label — so the file manager and the trusted
-  picker render one coherent themed surface, the selected item carrying the
-  shared selection state. A vertical `lib/controls` `ScrollBar` is drawn in
+  grid entries as shared `Card` tiles, each tile carrying the icon of its
+  registry-classified type above the label — so the file manager and the
+  trusted picker render one coherent themed surface, the selected item carrying
+  the shared selection state. `render`'s trailing `artwork: &mut dyn
+  tairix_icon::IconArtwork` is the draw-site icon lookup: for each grid tile it
+  is asked for the classified `IconKind` at exactly the side `Card::icon_side`
+  reserves, and the tile blits what it returns or draws the built-in vector
+  glyph when it returns `None` — so a missing, oversize, or refused asset
+  degrades to a meaningful icon and can never blank the tile. A caller with no
+  cache passes `tairix_icon::NoArtwork`; the list view is text-only and never
+  consults the lookup. A vertical `lib/controls` `ScrollBar` is drawn in
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
   keeps the selection visible, and `entry_index_at` is the shared item point
@@ -438,13 +532,16 @@ can never diverge in navigation semantics, listing policy, or look.
   tools live in a separate `chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`,
   `ManagerTool::icon`): New Folder, the Trash location (go to the user's Trash),
   and Empty Trash (permanently remove the Trash's contents). A write-capable
-  consumer hands `render` its tools *and* a `chrome::ManagerToolModel` enable
-  snapshot (the file manager passes `MANAGER_TOOLS` and a live model, the picker
-  `&[]` and `ManagerToolModel::none()`); the tools draw in their own toolbar
-  group after the read-only commands, each rendered disabled (muted, never
-  hidden) when the model reports it inactive — Empty Trash is offered only when
-  the current directory is the user's non-empty Trash, a fact the file manager
-  computes from `HOME` and threads in. `manager_tool_at` is their mirror
+  consumer hands `render` a `ManagerChrome`: its tools, a
+  `chrome::ManagerToolModel` enable snapshot, and its places rail (the file
+  manager passes `MANAGER_TOOLS`, a live model, and its `Places`; the picker
+  passes `ManagerChrome::none()`), grouped into one value so a caller cannot
+  draw a rail's rows while hit-testing a window that has none. The tools draw
+  in their own toolbar group after the read-only commands, each rendered
+  disabled (muted, never hidden) when the model reports it inactive — Empty
+  Trash is offered only when the current directory is the user's non-empty
+  Trash, a fact the file manager computes from `HOME` and threads in.
+  `manager_tool_at` is their mirror
   hit-test, resolving only an *enabled* tool (fail closed), so the picker can
   neither draw nor resolve a write tool. `chrome_height` (the toolbar strip
   plus the path bar) is the one header offset the item views, the scrollbar
@@ -461,7 +558,14 @@ can never diverge in navigation semantics, listing policy, or look.
   shared `PermGrid` geometry placing both);
   `draw_owner_control` (`owner_field_at` its hit-test) likewise makes the owner
   row's uid/gid values editable, drawn only for a `CAP_FS_CHOWN` holder.
-  `WIN_WIDTH`/`WIN_HEIGHT` are the one
+  When the chrome carries a places rail, `render` paints the rail down the
+  leading edge first and lays everything else out inside `content_area`: the
+  toolbar, the path bar, the list or grid, and the scrollbar gutter are all
+  inset by the rail, and every hit-test (`toolbar_command_at`, `crumb_at`,
+  `entry_index_at`, the scrollbar) resolves against that same inset area, with
+  `sidebar_index_at` the rail's own mirror. With no rail `content_area` is the
+  viewport unchanged, so a window without one is pixel-for-pixel what it was
+  before the rail existed. `WIN_WIDTH`/`WIN_HEIGHT` are the one
   browser-view geometry the files app, the picker, and the QEMU vertical's
   host-side assertions share; the files app opens its window `resizable` and
   re-maps this surface on a `WindowEvent::Resized`, laying the same renderer out

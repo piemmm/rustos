@@ -16,6 +16,7 @@ use core::ops::{Deref, DerefMut};
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
+use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, Theme};
@@ -213,6 +214,36 @@ fn track_thickness(theme: &Theme, scale: Scale, logical: u32) -> u32 {
 #[must_use]
 pub(crate) fn to_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
+}
+
+/// Paint a content icon at `(x, y)` into a `side`-pixel square slot: the
+/// owner-supplied `artwork` when present, else the built-in class glyph for
+/// `kind` tinted `tint`.
+///
+/// This is the one place every collection control — a taskbar item, a card, a
+/// list row — applies the "blit centred artwork, else rasterise the built-in
+/// glyph" rule, so the three can never draw it differently. The artwork is
+/// blitted centred in the slot: a stale cache entry from mid-scale-change, or
+/// a surface sized differently from `side`, is placed in the middle rather
+/// than overflowing the slot from its corner. The built-in glyph rasterises to
+/// fill the slot exactly. Artwork is decoded and rasterised by the owner long
+/// before it reaches here — a control never parses image bytes.
+pub(crate) fn paint_icon_slot(
+    surface: &mut Surface,
+    x: u32,
+    y: u32,
+    side: u32,
+    kind: IconKind,
+    tint: Color,
+    artwork: Option<&Surface>,
+) {
+    if let Some(art) = artwork {
+        let ax = to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2;
+        let ay = to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2;
+        surface.blit(ax, ay, art);
+    } else if let Some(image) = builtin_icon(kind, tint).rasterise(side) {
+        surface.blit(to_i32(x), to_i32(y), &image);
+    }
 }
 
 /// Update `state`/`armed` from one pointer event and return whether the

@@ -11,10 +11,17 @@
 //!
 //! Each view is a fixed-height header (the path bar) followed by the scrolling
 //! item area. The scroll offset — a *desired first visible line*, in the view's
-//! own line unit (list rows or grid rows) — is owned by the [`Browser`] and
-//! clamped here through the shared [`ScrollRange`] geometry, so the browser and
-//! every other viewport agree on the offset math; [`reveal`](ListView::reveal)
-//! is the one rule that keeps the selection on screen.
+//! own line unit (list rows, or whichever axis the grid's [`GridFlow`] scrolls
+//! along) — is owned by the [`Browser`] and clamped here through the shared
+//! [`ScrollRange`] geometry, so the browser and every other viewport agree on
+//! the offset math; [`reveal`](ListView::reveal) is the one rule that keeps the
+//! selection on screen.
+//!
+//! The grid is deliberately not a *file manager* grid: a [`GridFlow`] chooses
+//! whether tiles wrap along a row from the leading edge (the manager's
+//! scrolling view) or down a column from the trailing edge (the desktop's icon
+//! column, which grows a new column inward as it fills). Both are the same cell
+//! maths and the same hit-test, so the desktop needs no second grid.
 //!
 //! All arithmetic saturates and every accessor is total: a degenerate viewport
 //! (too short for even one row, too narrow for even one tile, or a zero cell
@@ -161,19 +168,24 @@ impl ListView {
             .checked_add(self.row_height.checked_mul(step)?)?;
         Some(Rect::new(
             self.viewport.origin.x,
-            i32::try_from(y).unwrap_or(i32::MAX),
+            self.viewport.origin.y.saturating_add_unsigned(y),
             self.viewport.width,
             self.row_height,
         ))
     }
 
-    /// The index of the entry at view-local pixel `(x, y)` for the desired
+    /// The index of the entry at window-local pixel `(x, y)` for the desired
     /// scroll `offset`, or `None` for the header, the empty space below the
     /// last entry, the scrollbar gutter (any `x` at or past the content
     /// width), and any coordinate outside the viewport.
+    ///
+    /// The point is taken in the same space [`Self::row_rect`] returns its
+    /// rectangles in, so a viewport placed at a non-zero origin (the item area
+    /// inset by the places rail) hit-tests exactly where it paints.
     #[must_use]
     pub fn index_at(&self, offset: u64, x: u32, y: u32) -> Option<usize> {
         let visible = self.visible_rows();
+        let (x, y) = view_local(self.viewport, x, y)?;
         if self.row_height == 0 || visible == 0 || x >= self.viewport.width {
             return None;
         }
@@ -211,18 +223,49 @@ fn reveal_line(offset: u64, selected: Option<usize>, visible: usize) -> u64 {
     }
 }
 
+/// The order a [`GridView`] fills its tiles in, and the edge its first tile
+/// is anchored to.
+///
+/// The two icon views in this system differ *only* in this: the file
+/// manager's grid reads like text and scrolls vertically, while the desktop's
+/// column hugs the screen's trailing edge and grows a new column inward. Both
+/// therefore share one set of cell maths and one hit-test, parameterised
+/// here, rather than a second grid written beside the first.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum GridFlow {
+    /// Fill a row left-to-right from the leading edge, then wrap down onto
+    /// the next row; the scroll axis is vertical, counted in rows. The file
+    /// manager's grid.
+    #[default]
+    RowsFromLeading,
+    /// Fill a column top-to-bottom, then start a new column one pitch
+    /// *inward* from the trailing edge; the scroll axis is horizontal,
+    /// counted in columns. The desktop's icon column.
+    ColumnsFromTrailing,
+}
+
+impl GridFlow {
+    /// Whether tiles wrap down a column (rather than along a row) — the one
+    /// place the two flows' axis assignment is decided.
+    const fn wraps_down_a_column(self) -> bool {
+        matches!(self, Self::ColumnsFromTrailing)
+    }
+}
+
 /// The layout of the wrapped icon grid within a content viewport.
 ///
-/// Tiles of `cell_width`×`cell_height` pixels are laid out left-to-right,
-/// wrapping into as many columns as fit the content width, below a
-/// `header_height`-pixel header, separated by a uniform `gap` on both axes.
-/// Like [`ListView`] it holds no selection or scroll state: the desired
-/// scroll offset (in *grid-row* units) is passed to the accessors that need
-/// it, so the browser stays the single owner of that cursor.
+/// Tiles of `cell_width`×`cell_height` pixels are laid out below a
+/// `header_height`-pixel header, separated by a uniform `gap` on both axes,
+/// wrapping into as many *lines* as the viewport holds. A [`GridFlow`] picks
+/// which axis a line runs along and which edge the first line is anchored to,
+/// so the file manager's scrolling row-major grid and the desktop's
+/// trailing-edge column-major one are the same geometry with one parameter
+/// changed. Like [`ListView`] it holds no selection or scroll state: the
+/// desired scroll offset (in *line* units) is passed to the accessors that
+/// need it, so the view's owner stays the single owner of that cursor.
 ///
-/// All arithmetic saturates and every accessor is total: a viewport too
-/// narrow for even one column, or too short for even one row, simply has no
-/// visible tiles rather than panicking.
+/// All arithmetic saturates and every accessor is total: a viewport too small
+/// for even one tile simply has no visible tiles rather than panicking.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct GridView {
     viewport: Rect,
@@ -231,12 +274,13 @@ pub struct GridView {
     gap: u32,
     header_height: u32,
     entry_count: usize,
+    flow: GridFlow,
 }
 
 impl GridView {
     /// Lay `entry_count` tiles of `cell_width`×`cell_height` pixels out below
     /// a `header_height`-pixel header within `viewport`, separated by `gap`
-    /// pixels on both axes.
+    /// pixels on both axes, flowing as `flow` describes.
     #[must_use]
     pub const fn new(
         viewport: Rect,
@@ -245,6 +289,7 @@ impl GridView {
         gap: u32,
         header_height: u32,
         entry_count: usize,
+        flow: GridFlow,
     ) -> Self {
         Self {
             viewport,
@@ -253,6 +298,7 @@ impl GridView {
             gap,
             header_height,
             entry_count,
+            flow,
         }
     }
 
@@ -278,139 +324,214 @@ impl GridView {
         self.cell_height.saturating_add(self.gap)
     }
 
-    /// How many tile columns fit the content width (at least one whenever a
-    /// single tile fits, zero when not even one does).
-    #[must_use]
-    pub fn columns(&self) -> usize {
-        if self.cell_width == 0 || self.viewport.width < self.cell_width {
+    /// How many whole tiles fit an `extent`-pixel run at `cell`-pixel tiles on
+    /// a `pitch`-pixel stride: zero when not even one fits, otherwise one plus
+    /// however many further pitches the remainder holds.
+    fn tiles_in(extent: u32, cell: u32, pitch: u32) -> usize {
+        if cell == 0 || pitch == 0 || extent < cell {
             return 0;
         }
-        // One tile always fits here; each further column costs one pitch.
-        let extra = (self.viewport.width - self.cell_width) / self.col_pitch();
-        usize::try_from(extra)
+        usize::try_from((extent - cell) / pitch)
             .unwrap_or(usize::MAX)
             .saturating_add(1)
     }
 
-    /// The total number of grid rows the entries occupy (ceiling division by
-    /// the column count).
+    /// How many tiles one line holds — tiles down a column for the desktop's
+    /// flow, tiles across a row for the file manager's.
     #[must_use]
-    pub fn rows_total(&self) -> usize {
-        let columns = self.columns();
-        if columns == 0 {
-            return 0;
+    pub fn cells_per_line(&self) -> usize {
+        if self.flow.wraps_down_a_column() {
+            Self::tiles_in(self.list_height(), self.cell_height, self.row_pitch())
+        } else {
+            Self::tiles_in(self.viewport.width, self.cell_width, self.col_pitch())
         }
-        self.entry_count.div_ceil(columns)
     }
 
-    /// How many whole grid rows fit in the tile area at once.
+    /// The total number of lines the entries occupy (ceiling division by the
+    /// tiles one line holds).
     #[must_use]
-    pub fn visible_rows(&self) -> usize {
-        if self.cell_height == 0 || self.columns() == 0 {
+    pub fn lines_total(&self) -> usize {
+        let per_line = self.cells_per_line();
+        if per_line == 0 {
             return 0;
         }
-        let height = self.list_height();
-        if height < self.cell_height {
-            return 0;
-        }
-        // One row always fits here; each further row costs one pitch.
-        let extra = (height - self.cell_height) / self.row_pitch();
-        usize::try_from(extra)
-            .unwrap_or(usize::MAX)
-            .saturating_add(1)
+        self.entry_count.div_ceil(per_line)
     }
 
-    /// The clamped scroll window in grid-row units (content rows, visible
-    /// rows, offset), through the same [`ScrollRange`] normalisation the list
-    /// uses.
+    /// How many whole lines fit in the tile area at once — grid rows down the
+    /// viewport for the file manager's flow, icon columns across it for the
+    /// desktop's.
+    #[must_use]
+    pub fn visible_lines(&self) -> usize {
+        if self.cells_per_line() == 0 {
+            return 0;
+        }
+        if self.flow.wraps_down_a_column() {
+            Self::tiles_in(self.viewport.width, self.cell_width, self.col_pitch())
+        } else {
+            Self::tiles_in(self.list_height(), self.cell_height, self.row_pitch())
+        }
+    }
+
+    /// The clamped scroll window in line units (content lines, visible lines,
+    /// offset), through the same [`ScrollRange`] normalisation the list uses.
     #[must_use]
     pub fn scroll_range(&self, offset: u64) -> ScrollRange {
         ScrollRange::new(
-            u64::try_from(self.rows_total()).unwrap_or(u64::MAX),
-            u64::try_from(self.visible_rows()).unwrap_or(u64::MAX),
+            u64::try_from(self.lines_total()).unwrap_or(u64::MAX),
+            u64::try_from(self.visible_lines()).unwrap_or(u64::MAX),
             offset,
         )
     }
 
-    /// The first grid row drawn for the desired `offset` (the clamped offset).
+    /// The first line drawn for the desired `offset` (the clamped offset).
     #[must_use]
     pub fn first_visible(&self, offset: u64) -> usize {
         usize::try_from(self.scroll_range(offset).offset()).unwrap_or(usize::MAX)
     }
 
+    /// The half-open range of entry indices currently drawn for the desired
+    /// scroll `offset` — the one definition a renderer iterates, so it never
+    /// re-derives the wrap arithmetic and can never disagree with
+    /// [`cell_rect`](Self::cell_rect) about which tiles are on screen.
+    #[must_use]
+    pub fn visible_range(&self, offset: u64) -> core::ops::Range<usize> {
+        let per_line = self.cells_per_line();
+        let visible = self.visible_lines();
+        if per_line == 0 || visible == 0 {
+            return 0..0;
+        }
+        let start = self.first_visible(offset).saturating_mul(per_line);
+        let end = self
+            .first_visible(offset)
+            .saturating_add(visible)
+            .saturating_mul(per_line)
+            .min(self.entry_count);
+        start..end.max(start)
+    }
+
     /// The scroll offset that keeps the tile at `selected` visible while
-    /// moving the least, in grid-row units (the selection's row is
-    /// `selected / columns`).
+    /// moving the least, in line units (the selection's line is
+    /// `selected / cells_per_line`).
     #[must_use]
     pub fn reveal(&self, offset: u64, selected: Option<usize>) -> u64 {
-        let columns = self.columns();
-        let row = selected.and_then(|sel| (columns != 0).then_some(sel / columns));
-        reveal_line(self.scroll_range(offset).offset(), row, self.visible_rows())
+        let per_line = self.cells_per_line();
+        let line = selected.and_then(|sel| (per_line != 0).then_some(sel / per_line));
+        reveal_line(
+            self.scroll_range(offset).offset(),
+            line,
+            self.visible_lines(),
+        )
+    }
+
+    /// The view-local pixel offsets of the tile at line `line` (already
+    /// screen-relative) and slot `slot` within it: `(x, y)` from the
+    /// viewport's origin. The single place the two flows' anchoring differs —
+    /// the trailing-edge flow measures `x` inward from the viewport's right
+    /// edge, so its first column hugs the screen edge whatever the width is.
+    fn tile_offsets(&self, line: usize, slot: usize) -> Option<(u32, u32)> {
+        let along = self.row_pitch().checked_mul(
+            u32::try_from(if self.flow.wraps_down_a_column() {
+                slot
+            } else {
+                line
+            })
+            .ok()?,
+        )?;
+        let across = self.col_pitch().checked_mul(
+            u32::try_from(if self.flow.wraps_down_a_column() {
+                line
+            } else {
+                slot
+            })
+            .ok()?,
+        )?;
+        let y = self.list_top().checked_add(along)?;
+        let x = if self.flow.wraps_down_a_column() {
+            self.viewport
+                .width
+                .checked_sub(across.checked_add(self.cell_width)?)?
+        } else {
+            across
+        };
+        Some((x, y))
     }
 
     /// The rectangle the tile at `index` occupies for the desired scroll
     /// `offset`, or `None` when it is out of range or not currently visible.
     #[must_use]
     pub fn cell_rect(&self, offset: u64, index: usize) -> Option<Rect> {
-        let columns = self.columns();
-        let visible = self.visible_rows();
-        if columns == 0 || visible == 0 || index >= self.entry_count {
+        let per_line = self.cells_per_line();
+        let visible = self.visible_lines();
+        if per_line == 0 || visible == 0 || index >= self.entry_count {
             return None;
         }
-        let row = index / columns;
-        let col = index % columns;
-        let screen_row = row.checked_sub(self.first_visible(offset))?;
-        if screen_row >= visible {
+        let screen_line = (index / per_line).checked_sub(self.first_visible(offset))?;
+        if screen_line >= visible {
             return None;
         }
-        let y = self.list_top().checked_add(
-            self.row_pitch()
-                .checked_mul(u32::try_from(screen_row).ok()?)?,
-        )?;
-        let x = self.col_pitch().checked_mul(u32::try_from(col).ok()?)?;
+        let (x, y) = self.tile_offsets(screen_line, index % per_line)?;
         Some(Rect::new(
             self.viewport.origin.x.saturating_add_unsigned(x),
-            i32::try_from(y).unwrap_or(i32::MAX),
+            self.viewport.origin.y.saturating_add_unsigned(y),
             self.cell_width,
             self.cell_height,
         ))
     }
 
-    /// The index of the tile at view-local pixel `(x, y)` for the desired
+    /// The index of the tile at window-local pixel `(x, y)` for the desired
     /// scroll `offset`, or `None` for the header, a gap between tiles, the
     /// empty space past the last tile, and any coordinate outside the tile
     /// area.
+    ///
+    /// The point is taken in the same space [`Self::cell_rect`] returns its
+    /// rectangles in, so a viewport placed at a non-zero origin (the item area
+    /// inset by the places rail) hit-tests exactly where it paints.
     #[must_use]
     pub fn index_at(&self, offset: u64, x: u32, y: u32) -> Option<usize> {
-        let columns = self.columns();
-        let visible = self.visible_rows();
-        if columns == 0 || visible == 0 {
+        let per_line = self.cells_per_line();
+        let visible = self.visible_lines();
+        if per_line == 0 || visible == 0 {
             return None;
         }
+        let (x, y) = view_local(self.viewport, x, y)?;
         let top = self.list_top();
         if y < top || y >= self.viewport.height || x >= self.viewport.width {
             return None;
         }
         // Reject the inter-tile gaps so a click resolves only to a tile the
-        // user actually saw, never the empty space between them.
-        let col = column_at(x, self.col_pitch(), self.cell_width)?;
-        if col >= columns {
+        // user actually saw, never the empty space between them. The
+        // trailing-edge flow measures its columns inward from the right edge,
+        // exactly as it paints them.
+        let from_edge = if self.flow.wraps_down_a_column() {
+            self.viewport.width.checked_sub(x)?.checked_sub(1)?
+        } else {
+            x
+        };
+        let col = tile_at(from_edge, self.col_pitch(), self.cell_width)?;
+        let row = tile_at(y - top, self.row_pitch(), self.cell_height)?;
+        let (line, slot) = if self.flow.wraps_down_a_column() {
+            (col, row)
+        } else {
+            (row, col)
+        };
+        if line >= visible || slot >= per_line {
             return None;
         }
-        let screen_row = row_at(y - top, self.row_pitch(), self.cell_height)?;
-        if screen_row >= visible {
-            return None;
-        }
-        let row = self.first_visible(offset).checked_add(screen_row)?;
-        let index = row.checked_mul(columns)?.checked_add(col)?;
+        let index = self
+            .first_visible(offset)
+            .checked_add(line)?
+            .checked_mul(per_line)?
+            .checked_add(slot)?;
         (index < self.entry_count).then_some(index)
     }
 }
 
-/// The tile column a within-area coordinate `pos` falls in, or `None` when it
-/// lands in the gap after a tile. `pitch` is tile-plus-gap and `cell` the tile
-/// size along that axis.
-fn column_at(pos: u32, pitch: u32, cell: u32) -> Option<usize> {
+/// The tile a within-area coordinate `pos` falls in along one axis, or `None`
+/// when it lands in the gap after a tile. `pitch` is tile-plus-gap and `cell`
+/// the tile size along that axis; the rule is identical on both axes, so it
+/// has one definition.
+fn tile_at(pos: u32, pitch: u32, cell: u32) -> Option<usize> {
     if pitch == 0 {
         return None;
     }
@@ -419,12 +540,6 @@ fn column_at(pos: u32, pitch: u32, cell: u32) -> Option<usize> {
         return None;
     }
     usize::try_from(pos / pitch).ok()
-}
-
-/// The tile row a within-area coordinate `pos` falls in, or `None` in a gap
-/// (the vertical twin of [`column_at`]).
-fn row_at(pos: u32, pitch: u32, cell: u32) -> Option<usize> {
-    column_at(pos, pitch, cell)
 }
 
 /// One of the two item-view geometries, chosen by the browser's [`ViewMode`].
@@ -484,20 +599,177 @@ impl ViewLayout {
         }
     }
 
-    /// How many whole lines (list rows or grid rows) are visible at once — the
-    /// natural page step for wheel and scrollbar paging.
+    /// How many whole lines (list rows, or the grid's own line unit) are
+    /// visible at once — the natural page step for wheel and scrollbar paging.
     #[must_use]
     pub fn visible_rows(&self) -> usize {
         match self {
             Self::List(v) => v.visible_rows(),
-            Self::Grid(v) => v.visible_rows(),
+            Self::Grid(v) => v.visible_lines(),
         }
+    }
+}
+
+/// Convert the window-local pixel `(x, y)` into `viewport`'s own coordinate
+/// space, or `None` when the point lies above or to the left of it.
+///
+/// Every view here places its rectangles at the viewport's origin, so a
+/// hit-test must remove that origin before it can invert the placement. One
+/// definition, shared by all three views, so a point can never mean one thing
+/// to the painter and another to the hit-test.
+fn view_local(viewport: Rect, x: u32, y: u32) -> Option<(u32, u32)> {
+    let origin_x = u32::try_from(viewport.origin.x).ok()?;
+    let origin_y = u32::try_from(viewport.origin.y).ok()?;
+    Some((x.checked_sub(origin_x)?, y.checked_sub(origin_y)?))
+}
+
+/// Pure geometry of the places rail: the fixed-width column of shortcut rows
+/// down the window's leading edge, and the hit-test that inverts it.
+///
+/// The rail does not scroll — it holds a handful of rows, not a listing — so
+/// its geometry is a simple stack: equal-height rows from the top, with one
+/// separator band inserted where the mounted volumes begin. A window too short
+/// for every row simply draws the ones that fit, and both
+/// [`row_rect`](Self::row_rect) and [`index_at`](Self::index_at) agree about
+/// which those are, so a click can never land on a row the user could not see.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SidebarView {
+    viewport: Rect,
+    width: u32,
+    row_height: u32,
+    separator_height: u32,
+    row_count: usize,
+    volume_start: Option<usize>,
+}
+
+impl SidebarView {
+    /// Lay `row_count` rows of `row_height` pixels out down the leading
+    /// `width` pixels of `viewport`, with a `separator_height` band before the
+    /// row at `volume_start` (the first mounted volume; `None` when nothing is
+    /// mounted and there is nothing to separate).
+    #[must_use]
+    pub const fn new(
+        viewport: Rect,
+        width: u32,
+        row_height: u32,
+        separator_height: u32,
+        row_count: usize,
+        volume_start: Option<usize>,
+    ) -> Self {
+        Self {
+            viewport,
+            width,
+            row_height,
+            separator_height,
+            row_count,
+            volume_start,
+        }
+    }
+
+    /// The rail's drawn width: the requested width, clamped so a window
+    /// narrower than the rail is filled rather than overrun.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width.min(self.viewport.width)
+    }
+
+    /// The whole rail's rectangle — the band the content area is inset by.
+    #[must_use]
+    pub fn rail_rect(&self) -> Rect {
+        Rect::new(
+            self.viewport.origin.x,
+            self.viewport.origin.y,
+            self.width(),
+            self.viewport.height,
+        )
+    }
+
+    /// The top of row `index` in rail-local pixels, including the separator
+    /// band once the volumes begin.
+    fn row_top(&self, index: usize) -> Option<u32> {
+        let step = u32::try_from(index).ok()?;
+        let base = self.row_height.checked_mul(step)?;
+        match self.volume_start {
+            Some(first) if index >= first => base.checked_add(self.separator_height),
+            _ => Some(base),
+        }
+    }
+
+    /// The rectangle row `index` occupies, or `None` when there is no such row
+    /// or the window is too short to draw it in full.
+    #[must_use]
+    pub fn row_rect(&self, index: usize) -> Option<Rect> {
+        if self.row_height == 0 || index >= self.row_count {
+            return None;
+        }
+        let top = self.row_top(index)?;
+        if top.checked_add(self.row_height)? > self.viewport.height {
+            return None;
+        }
+        Some(Rect::new(
+            self.viewport.origin.x,
+            self.viewport.origin.y.saturating_add_unsigned(top),
+            self.width(),
+            self.row_height,
+        ))
+    }
+
+    /// The separator band between the user's own places and the mounted
+    /// volumes, or `None` when nothing is mounted or the band does not fit.
+    #[must_use]
+    pub fn separator_rect(&self) -> Option<Rect> {
+        let first = self.volume_start?;
+        if self.separator_height == 0 || first >= self.row_count {
+            return None;
+        }
+        let top = self.row_height.checked_mul(u32::try_from(first).ok()?)?;
+        if top.checked_add(self.separator_height)? > self.viewport.height {
+            return None;
+        }
+        Some(Rect::new(
+            self.viewport.origin.x,
+            self.viewport.origin.y.saturating_add_unsigned(top),
+            self.width(),
+            self.separator_height,
+        ))
+    }
+
+    /// The row at window-local pixel `(x, y)`, or `None` for a point outside
+    /// the rail, inside the separator band, or below the last drawn row.
+    ///
+    /// The exact inverse of [`row_rect`](Self::row_rect): a point resolves to a
+    /// row only when that row's own rectangle would contain it, so the drawn
+    /// rail and the hit-test cannot disagree.
+    #[must_use]
+    pub fn index_at(&self, x: u32, y: u32) -> Option<usize> {
+        if self.row_height == 0 {
+            return None;
+        }
+        let (local_x, local_y) = view_local(self.viewport, x, y)?;
+        if local_x >= self.width() || local_y >= self.viewport.height {
+            return None;
+        }
+        let index = match self.volume_start {
+            Some(first) => {
+                let split = self.row_height.checked_mul(u32::try_from(first).ok()?)?;
+                if local_y < split {
+                    usize::try_from(local_y / self.row_height).ok()?
+                } else {
+                    // Subtracting the band yields nothing for a point inside
+                    // it, so the separation itself is never a row.
+                    let below = local_y.checked_sub(split.checked_add(self.separator_height)?)?;
+                    first.checked_add(usize::try_from(below / self.row_height).ok()?)?
+                }
+            }
+            None => usize::try_from(local_y / self.row_height).ok()?,
+        };
+        self.row_rect(index).is_some().then_some(index)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GridView, ListView};
+    use super::{GridFlow, GridView, ListView};
     use tairix_geometry::Rect;
 
     const ROW: u32 = 10;
@@ -595,33 +867,82 @@ mod tests {
     const GAP: u32 = 10;
 
     /// A grid `cols` columns wide and `rows` rows tall (plus a one-`CELL`
-    /// header) holding `count` tiles. Width fits exactly `cols` columns:
-    /// `cols` tiles plus `cols - 1` gaps.
+    /// header) holding `count` tiles, flowing as the file manager's does.
+    /// Width fits exactly `cols` columns: `cols` tiles plus `cols - 1` gaps.
     fn grid(cols: u32, rows: u32, count: usize) -> GridView {
+        grid_flowing(cols, rows, count, GridFlow::RowsFromLeading)
+    }
+
+    /// The same grid under an explicit `flow`.
+    fn grid_flowing(cols: u32, rows: u32, count: usize, flow: GridFlow) -> GridView {
         let width = CELL * cols + GAP * cols.saturating_sub(1);
         let height = CELL + (CELL + GAP) * rows;
-        GridView::new(Rect::new(0, 0, width, height), CELL, CELL, GAP, CELL, count)
+        GridView::new(
+            Rect::new(0, 0, width, height),
+            CELL,
+            CELL,
+            GAP,
+            CELL,
+            count,
+            flow,
+        )
     }
 
     #[test]
     fn grid_columns_and_rows_wrap_the_entries() {
         let g = grid(3, 2, 7);
-        assert_eq!(g.columns(), 3);
+        assert_eq!(g.cells_per_line(), 3);
         // Seven tiles across three columns need three rows (ceil).
-        assert_eq!(g.rows_total(), 3);
+        assert_eq!(g.lines_total(), 3);
         // The header plus two row pitches leaves room for two whole rows.
-        assert_eq!(g.visible_rows(), 2);
+        assert_eq!(g.visible_lines(), 2);
     }
 
     #[test]
     fn a_grid_too_narrow_or_short_shows_nothing() {
-        let narrow = GridView::new(Rect::new(0, 0, CELL - 1, 500), CELL, CELL, GAP, CELL, 5);
-        assert_eq!(narrow.columns(), 0);
-        assert_eq!(narrow.visible_rows(), 0);
+        let narrow = GridView::new(
+            Rect::new(0, 0, CELL - 1, 500),
+            CELL,
+            CELL,
+            GAP,
+            CELL,
+            5,
+            GridFlow::RowsFromLeading,
+        );
+        assert_eq!(narrow.cells_per_line(), 0);
+        assert_eq!(narrow.visible_lines(), 0);
         assert_eq!(narrow.cell_rect(0, 0), None);
         assert_eq!(narrow.index_at(0, 0, CELL), None);
-        let short = GridView::new(Rect::new(0, 0, 500, CELL), CELL, CELL, GAP, CELL, 5);
-        assert_eq!(short.visible_rows(), 0);
+        assert_eq!(narrow.visible_range(0), 0..0);
+        let short = GridView::new(
+            Rect::new(0, 0, 500, CELL),
+            CELL,
+            CELL,
+            GAP,
+            CELL,
+            5,
+            GridFlow::RowsFromLeading,
+        );
+        assert_eq!(short.visible_lines(), 0);
+    }
+
+    #[test]
+    fn a_desktop_grid_too_narrow_or_short_shows_nothing() {
+        let narrow = grid_flowing(0, 3, 5, GridFlow::ColumnsFromTrailing);
+        assert_eq!(narrow.visible_lines(), 0);
+        assert_eq!(narrow.cell_rect(0, 0), None);
+        assert_eq!(narrow.index_at(0, 0, CELL), None);
+        let short = GridView::new(
+            Rect::new(0, 0, 500, CELL),
+            CELL,
+            CELL,
+            GAP,
+            CELL,
+            5,
+            GridFlow::ColumnsFromTrailing,
+        );
+        assert_eq!(short.cells_per_line(), 0);
+        assert_eq!(short.visible_range(0), 0..0);
     }
 
     #[test]
@@ -679,12 +1000,87 @@ mod tests {
             GAP,
             CELL,
             9,
+            GridFlow::RowsFromLeading,
         );
-        assert_eq!(g.columns(), 3);
-        assert_eq!(g.visible_rows(), 1);
+        assert_eq!(g.cells_per_line(), 3);
+        assert_eq!(g.visible_lines(), 1);
         // Tile 8 sits on grid row 2; revealing it scrolls to offset 2.
         assert_eq!(g.reveal(0, Some(8)), 2);
         // A tile already on the visible row does not move the window.
         assert_eq!(g.reveal(1, Some(4)), 1);
+    }
+
+    #[test]
+    fn the_visible_range_is_exactly_the_tiles_with_rects() {
+        for flow in [GridFlow::RowsFromLeading, GridFlow::ColumnsFromTrailing] {
+            let g = grid_flowing(3, 2, 7, flow);
+            for offset in 0..3 {
+                let range = g.visible_range(offset);
+                for index in 0..7 {
+                    assert_eq!(
+                        g.cell_rect(offset, index).is_some(),
+                        range.contains(&index),
+                        "{flow:?} offset {offset} index {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    // --- The desktop's trailing-edge icon column ------------------------
+
+    #[test]
+    fn the_desktop_column_fills_downward_from_the_trailing_edge() {
+        // Three columns' worth of width, two tiles per column, five icons.
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing);
+        assert_eq!(g.cells_per_line(), 2, "two icons fit down one column");
+        assert_eq!(g.visible_lines(), 3, "three columns fit across");
+        assert_eq!(g.lines_total(), 3, "five icons need three columns");
+        let width = CELL * 3 + GAP * 2;
+        let right = i32::try_from(width - CELL).unwrap();
+        let header = i32::try_from(CELL).unwrap();
+        // The first icon hugs the trailing edge, below the header.
+        assert_eq!(
+            g.cell_rect(0, 0),
+            Some(Rect::new(right, header, CELL, CELL))
+        );
+        // The second falls directly beneath it, in the same column.
+        assert_eq!(
+            g.cell_rect(0, 1),
+            Some(Rect::new(
+                right,
+                header + i32::try_from(CELL + GAP).unwrap(),
+                CELL,
+                CELL
+            ))
+        );
+        // The third starts a new column one pitch further inward.
+        assert_eq!(
+            g.cell_rect(0, 2),
+            Some(Rect::new(
+                right - i32::try_from(CELL + GAP).unwrap(),
+                header,
+                CELL,
+                CELL
+            ))
+        );
+    }
+
+    #[test]
+    fn the_desktop_hit_test_mirrors_its_tile_rects_and_rejects_gaps() {
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing);
+        for index in 0..5 {
+            let rect = g.cell_rect(0, index).expect("every icon is on screen");
+            let x = u32::try_from(rect.origin.x).unwrap() + CELL / 2;
+            let y = u32::try_from(rect.origin.y).unwrap() + CELL / 2;
+            assert_eq!(g.index_at(0, x, y), Some(index));
+        }
+        let width = CELL * 3 + GAP * 2;
+        // The gap between the trailing column and the one inside it.
+        assert_eq!(g.index_at(0, width - CELL - GAP / 2, CELL + CELL / 2), None);
+        // The header band above the first icon.
+        assert_eq!(g.index_at(0, width - CELL / 2, 0), None);
+        // The empty slot past the last icon (column 2 holds only icon 4).
+        assert_eq!(g.index_at(0, CELL / 2, CELL + CELL + GAP + CELL / 2), None);
     }
 }

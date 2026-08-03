@@ -151,7 +151,7 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountListRequest, MountRecord, SysinfoRequestHeader,
+        MountAvailability, MountListRequest, MountRecord, MountVolumeState, SysinfoRequestHeader,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
@@ -281,8 +281,11 @@ mod tests {
             target,
             b"fat32",
             MountFlags::NOSUID,
-            VolumeStats::default(),
-            availability,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability,
+                medium: None,
+            },
             volume_id,
         )
         .expect("record")

@@ -22,9 +22,20 @@
 //! *which* window has the keyboard ([`InputRouter::focused`]) and routes a
 //! [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] to it as an
 //! [`InputResponse::Key`], leaving the bytes-on-the-wire encoding to
-//! `tairix_abi`'s `KeyInput`. A key with no focused window
-//! (focus on the desktop, or the focused window since gone) is ignored
-//! rather than misdelivered.
+//! `tairix_abi`'s `KeyInput`. A key with no focused window (focus on the
+//! desktop, or the focused window since gone) is never misdelivered to some
+//! other window: it is reported as an [`InputResponse::DesktopKey`] for the
+//! desktop layer's owner to interpret.
+//!
+//! Input that lands on nothing is likewise reported rather than swallowed.
+//! The desktop beneath the window stack is a real surface with a real owner
+//! ([`Compositor::set_desktop`](crate::Compositor::set_desktop)), so a press
+//! and a motion that resolve to no window come back as [`DesktopPressed`] and
+//! [`DesktopPointerMoved`]. The router still takes no action of its own for
+//! them — it only names where they landed.
+//!
+//! [`DesktopPressed`]: InputResponse::DesktopPressed
+//! [`DesktopPointerMoved`]: InputResponse::DesktopPointerMoved
 
 use tairix_controls::{
     FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation, TitleBarEvent,
@@ -74,6 +85,23 @@ pub enum InputResponse {
     /// A primary press landed on the desktop background; focus, if any,
     /// was cleared.
     DesktopPressed,
+    /// Pointer motion resolved to the desktop background — no window lies
+    /// under it and no grab is in flight — so the desktop layer's owner
+    /// interprets it (hover feedback, a drag it started itself). The
+    /// position is the router's own [`pointer`](InputRouter::pointer), which
+    /// this motion has already updated.
+    DesktopPointerMoved,
+    /// A key event while focus rests on the desktop rather than a window.
+    /// The router takes no action of its own; the desktop's owner decides
+    /// what the key means (moving its selection, activating, clearing it).
+    DesktopKey {
+        /// The key that changed state.
+        key: Key,
+        /// The modifiers held while the key changed state.
+        modifiers: Modifiers,
+        /// `true` for a press, `false` for a release.
+        pressed: bool,
+    },
     /// An active move-grab dragged `window` to a new `origin`.
     Moved {
         /// The window being dragged.
@@ -377,10 +405,11 @@ impl InputRouter {
 
     /// Deliver a key event to the focused window, naming it as the recipient.
     ///
-    /// Returns [`InputResponse::Ignored`] when focus rests on the desktop or
-    /// the focused window is no longer known to `compositor` — in the latter
-    /// case focus is dropped so a stale window never keeps the keyboard
-    /// (fail closed).
+    /// Returns [`InputResponse::DesktopKey`] when focus rests on the desktop
+    /// or the focused window is no longer known to `compositor` — in the
+    /// latter case focus is dropped first, so a stale window never keeps the
+    /// keyboard (fail closed) and the key goes to the desktop rather than to
+    /// whichever window happens to be there now.
     fn deliver_key(
         &mut self,
         key: Key,
@@ -401,13 +430,18 @@ impl InputRouter {
                 }
             }
         }
+        let desktop_key = InputResponse::DesktopKey {
+            key,
+            modifiers,
+            pressed,
+        };
         let Some(window) = self.focused else {
-            return InputResponse::Ignored;
+            return desktop_key;
         };
         if compositor.window(window).is_none() {
             self.focused = None;
             self.furniture_key_focus = false;
-            return InputResponse::Ignored;
+            return desktop_key;
         }
         // When the focused decorated window's frame furniture holds the
         // keyboard, keys drive its command controls (Space/Enter activate the
@@ -541,7 +575,7 @@ impl InputRouter {
             };
         }
         let Some(window) = compositor.window_at(to) else {
-            return InputResponse::Ignored;
+            return InputResponse::DesktopPointerMoved;
         };
         if !over_client(window, to, compositor) {
             return InputResponse::Ignored;

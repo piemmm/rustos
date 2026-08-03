@@ -25,13 +25,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{AppInfoHeader, Errno, APPINFO_WIRE_MAX};
-use tairix_geometry::Point;
-use tairix_icon::IconKind;
-use tairix_log::Sink;
+use tairix_geometry::{Point, Scale};
+use tairix_icon::{ArtworkCache, ArtworkRasteriser, ArtworkReader, IconKind};
 use tairix_proglib::{Catalog, EntryId, IconAsset};
-use tairix_raster::Surface;
-use tairix_reclaim::{disposable_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
-use tairix_taskbar::{BarLayout, PinView, TaskId};
+use tairix_taskbar::{BarLayout, LibraryIconRequest, PinView, TaskId, Taskbar};
 use tairix_taskpins::{
     parse as parse_pins, render as render_pins, user_pins_path, BundlePath, PinError, PinList,
     PinTarget,
@@ -136,35 +133,33 @@ impl SessionPins {
     where
         W: SessionFileWriter + ?Sized,
     {
-        let mut next = self.list.clone();
-        let index = next
-            .pin(PinTarget::Entry(entry))
-            .map_err(PinEditError::from)?;
-        self.persist(writer, next)?;
-        Ok(index)
+        self.pin_at(writer, self.list.len(), PinTarget::Entry(entry))
     }
 
-    /// Insert a pin for the application bundle at `bundle`, at `index`
-    /// (clamped to the end), persist the store, and return the pin's index.
+    /// Insert a pin for `target` at `index` (clamped to the end), persist the
+    /// store, and return the pin's index.
+    ///
+    /// The one insertion point every pin edit goes through, whichever kind of
+    /// target it names, so a catalogued entry and a bundle path can never be
+    /// admitted to the store on different terms.
     ///
     /// # Errors
     ///
-    /// [`PinEditError`] when the bundle is already pinned, the list is full,
+    /// [`PinEditError`] when the target is already pinned, the list is full,
     /// there is no home, or the write is refused (in which case nothing
     /// changes).
-    pub fn pin_bundle_at<W>(
+    pub fn pin_at<W>(
         &mut self,
         writer: &mut W,
         index: usize,
-        bundle: BundlePath,
+        target: PinTarget,
     ) -> Result<usize, PinEditError>
     where
         W: SessionFileWriter + ?Sized,
     {
         let mut next = self.list.clone();
         let index = index.min(next.len());
-        next.pin_at(index, PinTarget::Bundle(bundle))
-            .map_err(PinEditError::from)?;
+        next.pin_at(index, target).map_err(PinEditError::from)?;
         self.persist(writer, next)?;
         Ok(index)
     }
@@ -282,11 +277,24 @@ fn resolve_entry(id: &EntryId, catalog: &Catalog) -> ResolvedPin {
         label: entry.name().as_str().to_string(),
         entry: Some(id.clone()),
         run_path: Some(format!("{}/Run", entry.bundle().as_str())),
-        icon: entry.icon().map(|asset| PinIconSource {
-            bundle: entry.bundle().as_str().to_string(),
-            asset: asset.as_str().to_string(),
-        }),
+        icon: entry_icon_source(catalog, id),
     }
+}
+
+/// The icon source a catalogued `id` declares: its own icon asset inside the
+/// entry's bundle, or `None` when the entry is uncatalogued or declares no
+/// icon (the caller then falls back to the application-bundle artwork or its
+/// glyph).
+///
+/// The single place an `entry` pin *and* a program-library row both derive
+/// their bundle icon from, so a pinned application and its library row can
+/// never resolve their icon two different ways.
+fn entry_icon_source(catalog: &Catalog, id: &EntryId) -> Option<PinIconSource> {
+    let entry = catalog.entry(id)?;
+    entry.icon().map(|asset| PinIconSource {
+        bundle: entry.bundle().as_str().to_string(),
+        asset: asset.as_str().to_string(),
+    })
 }
 
 /// Resolve a `bundle` pin through the bundle's own `AppInfo` manifest.
@@ -357,14 +365,34 @@ pub trait PinBridge {
     fn drag_withdrawn(&mut self, window: u64);
 }
 
-/// An armed drag: the channel window it started in and the validated bundle
-/// it carries. Consumed by the drop (or replaced by the next offer).
+/// Where an armed pin drag started.
+///
+/// A drag ends where it began: only the origin that armed an offer can
+/// consume or withdraw it, so a release in one place can never claim a drag
+/// started in another. The program-library popup is a single surface rather
+/// than one of many served windows, so it needs no id of its own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DragOrigin {
+    /// A served application window, by its window-channel id.
+    Window(u64),
+    /// The taskbar's own program-library popup.
+    Library,
+}
+
+/// An armed drag: where it started and the pin target it carries. Consumed
+/// by the drop (or replaced by the next offer).
+///
+/// The target is the pin store's own union, so a drag from the program
+/// library carries the catalogued entry it was dragged from and a drag from
+/// an application window carries the bundle path that window offered —
+/// neither is re-derived from the other, and the drop admits both through
+/// one path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DragOffer {
-    /// The window-channel id of the source window.
-    pub window: u64,
-    /// The offered application bundle.
-    pub bundle: BundlePath,
+    /// Where the drag was started.
+    pub origin: DragOrigin,
+    /// What a drop would pin.
+    pub target: PinTarget,
 }
 
 /// The session's pin service: the store, the seams that read and write it,
@@ -450,24 +478,57 @@ where
         if !self.bundle_is_launchable(&bundle) {
             return PinDecision::Refused;
         }
-        match self.pins.pin_bundle_at(&mut self.writer, index, bundle) {
-            Ok(_) => {
-                self.dirty = true;
-                PinDecision::Pinned
+        self.insert(index, PinTarget::Bundle(bundle))
+    }
+
+    /// Validate `target` and pin it at `index` (clamped to the end),
+    /// persisting the store.
+    ///
+    /// The admission each kind of target needs, in the one place a drop
+    /// resolves: a bundle path must spell a store bundle carrying a
+    /// decodable manifest; a program-library entry must still be in
+    /// `catalog`, so an entry uninstalled between the drag and the drop is
+    /// refused rather than recorded as a pin that can never launch.
+    pub fn pin_target_at(
+        &mut self,
+        index: usize,
+        target: PinTarget,
+        catalog: &Catalog,
+    ) -> PinDecision {
+        match target {
+            PinTarget::Bundle(bundle) => self.pin_bundle_at(index, bundle.as_str()),
+            PinTarget::Entry(entry) => {
+                if catalog.entry(&entry).is_none() {
+                    return PinDecision::Refused;
+                }
+                self.insert(index, PinTarget::Entry(entry))
             }
-            Err(PinEditError::AlreadyPinned) => PinDecision::AlreadyPinned,
-            Err(PinEditError::Full) => PinDecision::Full,
-            Err(_) => PinDecision::Refused,
         }
     }
 
-    /// Consume the armed drag offer from channel window `window`, if any —
-    /// how the embedder resolves a drop.
-    pub fn take_drag_for(&mut self, window: u64) -> Option<BundlePath> {
+    /// Arm an offer of `target`, dragged from `origin`.
+    ///
+    /// Armed on shape alone; the drop re-validates fully before pinning.
+    /// One offer is armed at a time — a new drag replaces the old, since
+    /// only one pointer gesture can be in flight.
+    pub fn offer_drag(&mut self, origin: DragOrigin, target: PinTarget) {
+        self.drag = Some(DragOffer { origin, target });
+    }
+
+    /// Withdraw the armed offer if `origin` is the one that armed it.
+    pub fn withdraw_drag(&mut self, origin: DragOrigin) {
+        if self.drag.as_ref().is_some_and(|off| off.origin == origin) {
+            self.drag = None;
+        }
+    }
+
+    /// Consume the armed drag offer made from `origin`, if any — how the
+    /// embedder resolves a drop.
+    pub fn take_drag_for(&mut self, origin: DragOrigin) -> Option<PinTarget> {
         match self.drag.take() {
-            Some(offer) if offer.window == window => Some(offer.bundle),
+            Some(offer) if offer.origin == origin => Some(offer.target),
             other => {
-                // A release from any other window disarms nothing.
+                // A release from anywhere else disarms nothing.
                 self.drag = other;
                 None
             }
@@ -479,6 +540,21 @@ where
     #[must_use]
     pub fn drag_armed(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// Insert an admitted `target` at `index` and report the store's verdict.
+    /// The one place an admitted pin reaches the store, so every refusal is
+    /// spelled the same way.
+    fn insert(&mut self, index: usize, target: PinTarget) -> PinDecision {
+        match self.pins.pin_at(&mut self.writer, index, target) {
+            Ok(_) => {
+                self.dirty = true;
+                PinDecision::Pinned
+            }
+            Err(PinEditError::AlreadyPinned) => PinDecision::AlreadyPinned,
+            Err(PinEditError::Full) => PinDecision::Full,
+            Err(_) => PinDecision::Refused,
+        }
     }
 
     /// The bundle's manifest exists and decodes — the fail-closed shape
@@ -505,24 +581,17 @@ where
     }
 
     fn drag_offered(&mut self, window: u64, path: &str) -> bool {
-        // Arm on shape alone; the drop re-validates fully before pinning.
-        // One offer is armed at a time: a new drag replaces the old, since
-        // only one pointer gesture can be in flight.
+        // The window channel offers a *path*, so its shape is checked here,
+        // where paths arrive; the drop re-validates fully before pinning.
         let Ok(bundle) = BundlePath::new(path) else {
             return false;
         };
-        self.drag = Some(DragOffer { window, bundle });
+        self.offer_drag(DragOrigin::Window(window), PinTarget::Bundle(bundle));
         true
     }
 
     fn drag_withdrawn(&mut self, window: u64) {
-        if self
-            .drag
-            .as_ref()
-            .is_some_and(|offer| offer.window == window)
-        {
-            self.drag = None;
-        }
+        self.withdraw_drag(DragOrigin::Window(window));
     }
 }
 
@@ -531,180 +600,64 @@ where
 ///
 /// In production this is the parser-sandbox icon service — the session
 /// never decodes bundle artwork in its own address space; tests supply a
-/// fake. The rasteriser is trusted only to the extent the caller verifies:
-/// [`IconCache::artwork`] re-checks the returned pixel length before
-/// building a surface from it.
+/// fake. It is bridged to the shared [`ArtworkRasteriser`] by
+/// [`ArtworkSandbox`] so the one [`ArtworkCache`] verifies and retains every
+/// decode; the cache re-checks the returned pixel length before building a
+/// surface from it, so the seam is trusted only to the extent the cache
+/// verifies.
 pub trait IconRasteriser {
     /// Rasterise `icon` to a `side`-pixel square, or refuse.
     fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// One decode outcome, retained: the rasterised artwork, or the refusal
-/// that decoding it produced.
+/// Bridges the session's [`SessionFileReader`] to the shared
+/// [`ArtworkReader`] the one [`ArtworkCache`] reads asset bytes through.
 ///
-/// A refusal is worth remembering — it stops a malformed icon being
-/// decoded again on every strip refresh — and it is charged its
-/// bookkeeping like any other entry, so a bundle store full of broken
-/// artwork cannot grow the cache past its budget.
-///
-/// Public only because it names the value type of the cache
-/// [`artwork_cache`] builds and [`IconCache::new`] takes; the outcome
-/// itself is reached through [`IconCache::artwork`].
-pub struct CachedArtwork(Option<Surface>);
+/// A refused or missing read (any [`Errno`]) becomes the glyph-fallback
+/// `None`: an unreadable bundle icon is never fatal, the caller degrades to
+/// the built-in artwork. Owns its reader so it can be boxed as the shell's
+/// artwork seam; it adds no logic of its own beyond the `Result`→`Option`
+/// bridge.
+pub struct ArtworkFileReader<R>(pub R);
 
-impl CachedBytes for CachedArtwork {
-    fn payload_bytes(&self) -> usize {
-        self.0.as_ref().map_or(0, CachedBytes::payload_bytes)
-    }
-
-    fn wipe(&mut self) {
-        if let Some(surface) = self.0.as_mut() {
-            surface.wipe();
-        }
+impl<R: SessionFileReader> ArtworkReader for ArtworkFileReader<R> {
+    fn read(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.0.read(path).ok()
     }
 }
 
-/// The per-seat pinned-app artwork cache: one decode outcome per icon
-/// asset path and pixel side.
+/// Bridges the session's [`IconRasteriser`] (the parser sandbox) to the
+/// shared [`ArtworkRasteriser`] the one [`ArtworkCache`] rasterises through.
 ///
-/// A scale change alters the side and so misses the cache, re-rasterising
-/// at the new geometry. Nothing invalidates the whole cache at once —
-/// bundle artwork changes at install time, not while its icon is on the
-/// bar — so the generation is the unit value; what bounds this cache is
-/// its budget, and what ends it is the seat's teardown.
-///
-/// The entries are a user's own pinned-application artwork, so they are
-/// owned by the seat, overwritten when released, and given back under
-/// memory pressure like every other rasterised desktop asset. The keys
-/// are bundle-supplied paths, so an unbounded map here would let a
-/// crafted or merely crowded bundle store grow the session without
-/// limit; the budget forecloses that.
-pub struct IconCache {
-    entries: ReclaimCache<(String, u32), CachedArtwork, ()>,
-}
+/// The pixel signature is identical, so this only forwards — the untrusted
+/// decode still runs in the sandbox worker, never here. Owns its rasteriser
+/// so it can be boxed as the shell's artwork seam.
+pub struct ArtworkSandbox<D>(pub D);
 
-/// Bytes of bookkeeping each retained decode costs beyond its pixels: the
-/// asset path the entry is keyed by (bounded by the shared path cap), the
-/// pixel side, the recency index node, and the map nodes holding them.
-const ARTWORK_ENTRY_METADATA_BYTES: usize = 256;
-
-/// Build the cache [`IconCache::new`] wraps, classified and budgeted by
-/// the one shared desktop policy.
-///
-/// `fb_bytes` is the output's frame size, so the artwork a seat may retain
-/// scales with the display it is drawn on rather than a fixed ceiling.
-#[must_use]
-pub fn artwork_cache(
-    seat: u64,
-    fb_bytes: usize,
-    pressure: &'static (dyn PressureGauge + 'static),
-    sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<(String, u32), CachedArtwork, ()> {
-    disposable_ui_cache(
-        "session.pin-artwork",
-        seat,
-        fb_bytes,
-        ARTWORK_ENTRY_METADATA_BYTES,
-        pressure,
-        sink,
-    )
-}
-
-impl IconCache {
-    /// An empty cache over the caller's ready-built reclaimable cache.
-    ///
-    /// The cache is injected rather than defaulted for the same reason
-    /// the window manager's and taskbar's are: only the session knows the
-    /// output's size, the seat, the live pressure gauge, and the audit
-    /// sink, and a cache built without them would retain nothing while
-    /// looking like it worked.
-    #[must_use]
-    pub const fn new(entries: ReclaimCache<(String, u32), CachedArtwork, ()>) -> Self {
-        Self { entries }
+impl<D: IconRasteriser> ArtworkRasteriser for ArtworkSandbox<D> {
+    fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+        self.0.rasterise(side, bytes)
     }
-
-    /// Release every retained decode, overwriting the artwork first.
-    ///
-    /// Called when the seat is lost or its session ends, so one user's
-    /// pinned-application artwork never outlives their session in
-    /// reusable heap.
-    pub fn teardown(&mut self) {
-        self.entries.teardown();
-    }
-
-    /// Apply the current memory-pressure band's forced shrink, returning
-    /// the bytes released.
-    pub fn trim(&mut self) -> usize {
-        self.entries.enforce_pressure()
-    }
-
-    /// Bytes currently charged for retained artwork, payload plus this
-    /// cache's own per-entry bookkeeping.
-    #[must_use]
-    pub fn charged_bytes(&self) -> usize {
-        self.entries.charged_bytes()
-    }
-
-    /// The artwork for `source` at `side` pixels: served from the cache,
-    /// or read through `reader` (bounded), rasterised through
-    /// `rasteriser`, verified, and cached. `None` — also cached — when
-    /// the asset is unreadable, over-long, refused by the decoder, or the
-    /// returned pixel block is not exactly `side`×`side`.
-    pub fn artwork<R, D>(
-        &mut self,
-        reader: &mut R,
-        rasteriser: &mut D,
-        source: &PinIconSource,
-        side: u32,
-    ) -> Option<Surface>
-    where
-        R: SessionFileReader + ?Sized,
-        D: IconRasteriser + ?Sized,
-    {
-        let path = source.path();
-        let served = self.entries.get_or_build(&(), (path.clone(), side), || {
-            Some(CachedArtwork(render_icon(reader, rasteriser, &path, side)))
-        })?;
-        served.0.clone()
-    }
-}
-
-/// Read, rasterise, and verify one asset (the cache-miss path).
-fn render_icon<R, D>(reader: &mut R, rasteriser: &mut D, path: &str, side: u32) -> Option<Surface>
-where
-    R: SessionFileReader + ?Sized,
-    D: IconRasteriser + ?Sized,
-{
-    if side == 0 {
-        return None;
-    }
-    let bytes = reader.read(path).ok()?;
-    let pixels = rasteriser.rasterise(side, &bytes)?;
-    // The pixel count is validated here as well as in the transport: a
-    // surface is built only from a block of exactly the promised shape,
-    // wherever it came from.
-    let expected = (side as usize)
-        .checked_mul(side as usize)
-        .and_then(|area| area.checked_mul(4))?;
-    if pixels.len() != expected {
-        return None;
-    }
-    Surface::from_rgba8(side, side, &pixels)
 }
 
 /// Resolve a primary release as a possible drop of the armed app-reference
-/// drag: `channel` is the releasing window's channel id (when it is a
-/// served window), `layout` the bar's current geometry, and `pointer` the
-/// screen position of the release.
+/// drag: `origin` is where the release came from (the releasing window's
+/// channel id, or the program-library popup) when it is a place a drag can
+/// start, `catalog` the merged program library an entry target is checked
+/// against, `layout` the bar's current geometry, and `pointer` the screen
+/// position of the release.
 ///
 /// The gesture ends here either way — the offer is consumed the moment its
-/// window releases, wherever the release lands (one gesture, one decision).
-/// `None` means nothing was attempted (no armed drag, an unserved window,
+/// origin releases, wherever the release lands (one gesture, one decision),
+/// so a release away from the pin band withdraws the drag cleanly rather
+/// than leaving it armed for some later click. `None` means nothing was
+/// attempted (no armed drag, a release from somewhere a drag cannot start,
 /// or a release away from the pin band); `Some(decision)` is the pin
 /// admission's verdict for the embedder to report.
 pub fn resolve_pin_drop<R, W>(
     service: &mut PinService<R, W>,
-    channel: Option<u64>,
+    origin: Option<DragOrigin>,
+    catalog: &Catalog,
     layout: &BarLayout,
     pointer: Point,
 ) -> Option<PinDecision>
@@ -715,14 +668,14 @@ where
     if !service.drag_armed() {
         return None;
     }
-    let bundle = service.take_drag_for(channel?)?;
+    let target = service.take_drag_for(origin?)?;
     let index = layout.pin_drop_index(pointer)?;
-    Some(service.pin_bundle_at(index, bundle.as_str()))
+    Some(service.pin_target_at(index, target, catalog))
 }
 
 /// Assemble the taskbar's pin views from the resolved pins, their live
-/// running-window matches, and each pin's artwork (rasterised through the
-/// sandbox seam and cached).
+/// running-window matches, and each pin's artwork (read and rasterised
+/// through the shared [`ArtworkCache`]).
 ///
 /// The three inputs are positional: `matches[i]` is the running desktop
 /// task behind `resolved[i]`, or `None`. A missing artwork leaves the view
@@ -733,12 +686,12 @@ pub fn build_pin_views<R, D>(
     matches: &[Option<TaskId>],
     reader: &mut R,
     rasteriser: &mut D,
-    icons: &mut IconCache,
+    cache: &mut ArtworkCache,
     side: u32,
 ) -> Vec<PinView>
 where
-    R: SessionFileReader + ?Sized,
-    D: IconRasteriser + ?Sized,
+    R: ArtworkReader + ?Sized,
+    D: ArtworkRasteriser + ?Sized,
 {
     resolved
         .iter()
@@ -754,11 +707,79 @@ where
             if let Some(artwork) = pin
                 .icon
                 .as_ref()
-                .and_then(|source| icons.artwork(reader, rasteriser, source, side))
+                .and_then(|source| cache.path_artwork(reader, rasteriser, &source.path(), side))
+                .cloned()
             {
                 view = view.with_artwork(artwork);
             }
             view
         })
         .collect()
+}
+
+/// Resolve the program-library popup's *visible* rows' icon artwork and set
+/// it on the popup, so each application row shows its own icon.
+///
+/// The taskbar renders and the session resolves (exactly as it does for a
+/// pinned application): the popup reports which shown rows are launchable
+/// entries and the pixel side each draws its icon at
+/// ([`tairix_taskbar::LibraryPopup::visible_icon_requests`]), and this
+/// resolves each through
+/// the same shared [`ArtworkCache`] the pin strip uses, from the same
+/// catalog-entry icon source a pin resolves from — one resolution, never two.
+///
+/// A row whose entry declares an icon gets that icon; a row whose entry
+/// declares none, or whose asset will not read or decode, falls back to the
+/// shipped application-bundle artwork; and a row for which even that is
+/// absent is left with no artwork, so the shared list-row slot draws its
+/// built-in glyph and a row can never blank.
+///
+/// Only the rows the popup actually shows at `scale` are resolved, so
+/// opening a large library never decodes an icon nobody sees, and a row
+/// already holding artwork of the right pixel side is left alone, so
+/// re-resolving before each paint costs a lookup rather than a copy. A
+/// closed popup resolves nothing at all.
+pub fn resolve_library_icons<R, D>(
+    taskbar: &mut Taskbar,
+    scale: Scale,
+    reader: &mut R,
+    rasteriser: &mut D,
+    cache: &mut ArtworkCache,
+) where
+    R: ArtworkReader + ?Sized,
+    D: ArtworkRasteriser + ?Sized,
+{
+    if !taskbar.library().is_open() {
+        return;
+    }
+    let requests = {
+        let layout = taskbar.library_layout(scale);
+        taskbar
+            .library()
+            .visible_icon_requests(&layout, scale, taskbar.theme())
+    };
+    for LibraryIconRequest { row, side, entry } in requests {
+        let drawn = taskbar
+            .library()
+            .row_artwork(row)
+            .is_some_and(|art| art.width() == side);
+        if drawn {
+            continue;
+        }
+        // The bundle's own icon first; each borrow of the cache is cloned out
+        // before the next so the fallback can re-borrow it.
+        let source = entry_icon_source(taskbar.library().catalog(), &entry);
+        let mut art = None;
+        if let Some(source) = source {
+            art = cache
+                .path_artwork(reader, rasteriser, &source.path(), side)
+                .cloned();
+        }
+        if art.is_none() {
+            art = cache
+                .kind_artwork(reader, rasteriser, IconKind::AppBundle, side)
+                .cloned();
+        }
+        taskbar.set_library_row_artwork(row, art);
+    }
 }

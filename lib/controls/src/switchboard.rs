@@ -1830,7 +1830,9 @@ impl Switchboard {
                 scale,
                 theme,
             );
-            entry.row.render(surface, row_rect, scale, theme, font);
+            entry
+                .row
+                .render(surface, row_rect, scale, theme, font, None);
             if let Some(rect) = buttons.first() {
                 entry.action.render(surface, *rect, scale, theme, font);
             }
@@ -1864,7 +1866,9 @@ impl Switchboard {
                 item.width,
                 item.height.saturating_sub(gap),
             );
-            entry.card.render(surface, card_rect, scale, theme, font);
+            entry
+                .card
+                .render(surface, card_rect, scale, theme, font, None);
         }
     }
 
@@ -1896,7 +1900,9 @@ impl Switchboard {
                     if let Some(edit) = self.rename.as_ref().filter(|e| e.index == ai) {
                         edit.field.render(surface, row_rect, scale, theme, font);
                     } else {
-                        entry.header.render(surface, row_rect, scale, theme, font);
+                        entry
+                            .header
+                            .render(surface, row_rect, scale, theme, font, None);
                     }
                     if let Some(rect) = buttons.first() {
                         entry.switch.render(surface, *rect, scale, theme, font);
@@ -1928,7 +1934,7 @@ impl Switchboard {
                         item.height,
                     );
                     let (row_rect, _) = Self::split_row(indented, 0, scale, theme);
-                    member.render(surface, row_rect, scale, theme, font);
+                    member.render(surface, row_rect, scale, theme, font, None);
                 }
             }
         }
@@ -1956,7 +1962,7 @@ impl Switchboard {
                 item.width,
                 item.height.saturating_sub(gap),
             );
-            card.render(surface, card_rect, scale, theme, font);
+            card.render(surface, card_rect, scale, theme, font, None);
         }
     }
 
@@ -1980,7 +1986,9 @@ impl Switchboard {
                 scale,
                 theme,
             );
-            entry.row.render(surface, row_rect, scale, theme, font);
+            entry
+                .row
+                .render(surface, row_rect, scale, theme, font, None);
             if let Some(rect) = buttons.first() {
                 entry.restart.render(surface, *rect, scale, theme, font);
             }
@@ -2014,7 +2022,7 @@ impl Switchboard {
                 break;
             }
             let rect = Rect::new(pc.left(), top, pc.width, card_h.saturating_sub(gap));
-            entry.card.render(surface, rect, scale, theme, font);
+            entry.card.render(surface, rect, scale, theme, font, None);
         }
 
         let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);
@@ -2028,7 +2036,9 @@ impl Switchboard {
                 scale,
                 theme,
             );
-            entry.row.render(surface, row_rect, scale, theme, font);
+            entry
+                .row
+                .render(surface, row_rect, scale, theme, font, None);
             if let Some(rect) = buttons.first() {
                 entry.action.render(surface, *rect, scale, theme, font);
             }

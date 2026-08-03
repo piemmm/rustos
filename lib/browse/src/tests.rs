@@ -10,9 +10,11 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::Errno;
 use tairix_geometry::Rect;
-use tairix_raster::Color;
+use tairix_icon::{IconArtwork, IconKind, NoArtwork};
+use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::browser::Browser;
@@ -24,6 +26,8 @@ use crate::execute::{
     paste_strategy, CopyAction, CopyCursor, CopyError, CopyWalk, CopyWalkError, PasteStrategy,
     VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
+use crate::media::MediaType;
+use crate::places::{PlaceKind, Places, Volume};
 use crate::select::Selection;
 use crate::source::DirectorySource;
 
@@ -32,6 +36,306 @@ use crate::source::DirectorySource;
 /// string.
 fn key(components: &[String]) -> String {
     crate::vfs::spell_absolute_path(components)
+}
+
+// --- The places / devices rail -----------------------------------------
+
+/// A home directory's path components, as the app reads them from the user's
+/// own identity.
+fn home() -> Vec<String> {
+    vec!["Users".to_string(), "ann".to_string()]
+}
+
+/// One offered volume.
+fn volume(label: &str, target: &str, medium: Option<BlkDeviceClass>) -> Volume {
+    Volume {
+        label: label.to_string(),
+        target: target.to_string(),
+        medium,
+    }
+}
+
+/// Every row's label, in rail order.
+fn place_labels(places: &Places) -> Vec<String> {
+    places
+        .rows()
+        .iter()
+        .map(|row| row.label().to_string())
+        .collect()
+}
+
+#[test]
+fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
+    let places = Places::new(
+        &home(),
+        &[
+            volume(
+                "Scratch",
+                "/Storage/Scratch",
+                Some(BlkDeviceClass::SolidState),
+            ),
+            volume(
+                "Backup",
+                "/Storage/Backup",
+                Some(BlkDeviceClass::Rotational),
+            ),
+        ],
+    );
+    // The user's own places first, in their fixed order, then the volumes
+    // sorted by label whatever order the mount table paged them out in.
+    assert_eq!(
+        place_labels(&places),
+        [
+            "Home",
+            "Desktop",
+            "Documents",
+            "Apps",
+            "System",
+            "Backup",
+            "Scratch"
+        ]
+    );
+    assert_eq!(places.volume_start(), Some(5));
+    assert_eq!(places.rows()[0].kind(), PlaceKind::Home);
+    assert_eq!(places.rows()[1].kind(), PlaceKind::UserFolder);
+    assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
+    assert_eq!(places.rows()[5].kind(), PlaceKind::Volume);
+    // The fixed places navigate where their names say, whether or not those
+    // directories exist — the model performs no I/O and never checks.
+    assert_eq!(places.rows()[0].components(), home().as_slice());
+    assert_eq!(
+        places.rows()[2].components(),
+        ["Users", "ann", "Documents"].map(String::from)
+    );
+    assert_eq!(places.rows()[3].components(), ["Apps"].map(String::from));
+    // With no volumes there is nothing to separate.
+    assert_eq!(Places::new(&home(), &[]).volume_start(), None);
+    // Without a home there is nothing for the three home rows to hang off, so
+    // only the machine-wide roots remain — never a row navigating nowhere.
+    assert_eq!(place_labels(&Places::new(&[], &[])), ["Apps", "System"]);
+}
+
+#[test]
+fn every_storage_medium_draws_its_own_drive_icon() {
+    let places = Places::new(
+        &[],
+        &[
+            volume("Disk", "/Storage/Disk", Some(BlkDeviceClass::Rotational)),
+            volume("Fast", "/Storage/Fast", Some(BlkDeviceClass::SolidState)),
+            volume("Stick", "/Storage/Stick", Some(BlkDeviceClass::Removable)),
+            volume("Guest", "/Storage/Guest", Some(BlkDeviceClass::Virtual)),
+            volume("Plain", "/Storage/Plain", None),
+        ],
+    );
+    let icons: Vec<(String, IconKind)> = places
+        .rows()
+        .iter()
+        .filter(|row| row.kind() == PlaceKind::Volume)
+        .map(|row| (row.label().to_string(), row.icon()))
+        .collect();
+    // Sorted by label: Disk, Fast, Guest, Plain, Stick. A paravirtual device
+    // and an unreported medium both draw the generic drive — never a guess at
+    // hardware that was not reported.
+    assert_eq!(
+        icons,
+        [
+            ("Disk".to_string(), IconKind::DiskHard),
+            ("Fast".to_string(), IconKind::DiskSolidState),
+            ("Guest".to_string(), IconKind::Disk),
+            ("Plain".to_string(), IconKind::Disk),
+            ("Stick".to_string(), IconKind::DiskUsb),
+        ]
+    );
+}
+
+#[test]
+fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
+    let over_long = "v".repeat(crate::MAX_PLACE_LABEL + 1);
+    let places = Places::new(
+        &home(),
+        &[
+            volume("Good", "/Storage/Good", None),
+            // No label to show.
+            volume("", "/Storage/Nameless", None),
+            // A label longer than a row will ever accept.
+            volume(&over_long, "/Storage/Long", None),
+            // A label carrying a control character.
+            volume("Ba\nd", "/Storage/Control", None),
+            // A target that is not an absolute path.
+            volume("Relative", "Storage/Relative", None),
+            // A second row for a target an accepted row already covers.
+            volume("Twin", "/Storage/Good", None),
+            // A volume landing on a fixed place's own target.
+            volume("Shadow", "/Apps", None),
+        ],
+    );
+    assert_eq!(
+        place_labels(&places),
+        ["Home", "Desktop", "Documents", "Apps", "System", "Good"]
+    );
+    // The duplicate never displaced the fixed row it collided with.
+    assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
+}
+
+#[test]
+fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
+    let theme = Theme::dark();
+    let font = tairix_font::BitmapFont::inconsolata();
+    let window = Rect::new(0, 0, 400, 400);
+    let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
+    let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
+
+    for index in 0..places.len() {
+        let rect = view.row_rect(index).expect("drawn row");
+        let top = u32::try_from(rect.origin.y).expect("row top");
+        // Both edges of the row resolve to it, and the pixel above its top
+        // belongs to whatever is above — never to this row.
+        assert_eq!(view.index_at(0, top), Some(index));
+        assert_eq!(
+            view.index_at(rect.width - 1, top + rect.height - 1),
+            Some(index)
+        );
+        assert_ne!(view.index_at(0, top.wrapping_sub(1)), Some(index));
+    }
+    // The separation between the user's places and the volumes is not a row.
+    let band = view.separator_rect().expect("separator");
+    let band_y = u32::try_from(band.origin.y).expect("band top");
+    assert_eq!(view.index_at(0, band_y), None);
+    // Nothing outside the rail resolves: past its right edge, or below the
+    // last row.
+    assert_eq!(view.index_at(view.width(), 0), None);
+    assert_eq!(view.index_at(0, window.height), None);
+    let last = view.row_rect(places.len() - 1).expect("last row");
+    let below = u32::try_from(last.origin.y).expect("last top") + last.height;
+    assert_eq!(view.index_at(0, below), None);
+    // A window with no room for even one row resolves nothing at all.
+    let squat = Rect::new(0, 0, 400, 1);
+    let tiny = crate::render::sidebar_view(squat, &theme, font, Some(&places)).expect("rail");
+    assert_eq!(tiny.index_at(0, 0), None);
+}
+
+#[test]
+fn the_content_area_is_inset_by_the_rail_and_untouched_without_one() {
+    let theme = Theme::dark();
+    let font = tairix_font::BitmapFont::inconsolata();
+    let window = Rect::new(0, 0, 400, 300);
+    let places = Places::new(&home(), &[]);
+    let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
+    let rail = view.width();
+    assert!(rail > 0);
+
+    let inset = crate::render::content_area(window, &theme, font, Some(&places));
+    assert_eq!(inset.origin.x, i32::try_from(rail).expect("rail width"));
+    assert_eq!(inset.width, window.width - rail);
+    assert_eq!(inset.origin.y, window.origin.y);
+    assert_eq!(inset.height, window.height);
+    // Everything the view lays out follows the inset, so the scrollbar sits
+    // against the window's right edge rather than the rail's.
+    let bar = crate::render::scrollbar_bounds(&theme, font, inset).expect("scrollbar");
+    assert!(bar.origin.x > inset.origin.x);
+    assert!(u32::try_from(bar.origin.x).expect("bar x") + bar.width <= window.width);
+
+    // With no rail the area is the window, byte for byte, so a view without a
+    // sidebar is laid out exactly as it was before there was one.
+    assert_eq!(
+        crate::render::content_area(window, &theme, font, None),
+        window
+    );
+    // An empty rail is no rail at all.
+    let empty = Places::default();
+    assert!(crate::render::sidebar_view(window, &theme, font, Some(&empty)).is_none());
+    assert_eq!(
+        crate::render::content_area(window, &theme, font, Some(&empty)),
+        window
+    );
+}
+
+#[test]
+fn the_rail_selects_the_row_matching_the_browsers_location() {
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let places = Places::new(&home(), &[]);
+    // At the root, no place matches, so nothing is selected.
+    assert_eq!(places.index_of(browser.components()), None);
+    // Standing on a place selects exactly it.
+    assert_eq!(places.index_of(&["Apps".to_string()]), Some(3));
+    // A directory *inside* a place is not that place: an exact match only,
+    // never a claim that the user is somewhere they are not.
+    assert_eq!(
+        places.index_of(&["Apps".to_string(), "Notes.app".to_string()]),
+        None
+    );
+
+    // The selection reaches the drawn rail: the frame differs once the
+    // browser stands on a place.
+    let theme = Theme::dark();
+    let font = tairix_font::BitmapFont::inconsolata();
+    let viewport = Rect::new(0, 0, 400, 300);
+    let chrome = crate::ManagerChrome {
+        tools: &[],
+        tool_model: crate::ManagerToolModel::none(),
+        sidebar: Some(&places),
+    };
+    let unselected =
+        crate::render(&browser, &theme, font, viewport, &chrome, &mut NoArtwork).expect("surface");
+    let mut at_place = Browser::open_root(MockFs::fixture()).expect("root");
+    at_place
+        .navigate_to(vec!["System".to_string()])
+        .expect("navigate to System");
+    let selected =
+        crate::render(&at_place, &theme, font, viewport, &chrome, &mut NoArtwork).expect("surface");
+    let rail = crate::render::sidebar_view(viewport, &theme, font, Some(&places))
+        .expect("rail")
+        .row_rect(4)
+        .expect("the System row");
+    let row_y = usize::try_from(rail.origin.y).expect("row top");
+    let width = usize::try_from(viewport.width).expect("width");
+    let at = row_y * width;
+    assert_ne!(
+        unselected.pixels()[at..at + usize::try_from(rail.width).expect("row width")],
+        selected.pixels()[at..at + usize::try_from(rail.width).expect("row width")]
+    );
+}
+
+#[test]
+fn a_rail_row_carries_every_state_the_control_offers() {
+    let mut places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
+    // Focus, cursor, and hover are the rail's own; each is reachable and each
+    // reports whether it actually moved so a caller repaints only when needed.
+    assert!(!places.is_focused());
+    places.set_focused(true);
+    assert!(places.is_focused());
+    assert_eq!(places.cursor(), 0);
+    assert!(places.move_cursor(1));
+    assert_eq!(places.cursor(), 1);
+    assert!(places.move_cursor(-5));
+    assert_eq!(places.cursor(), 0);
+    // Clamped at both ends: a held arrow never wraps round the rail.
+    assert!(!places.move_cursor(-1));
+    assert!(places.move_cursor(1_000));
+    assert_eq!(places.cursor(), places.len() - 1);
+    assert!(!places.move_cursor(1));
+    // An index the rail does not have is ignored rather than stored.
+    places.set_cursor(places.len());
+    assert_eq!(places.cursor(), places.len() - 1);
+
+    assert_eq!(places.hovered(), None);
+    assert!(places.set_hovered(Some(2)));
+    assert_eq!(places.hovered(), Some(2));
+    assert!(!places.set_hovered(Some(2)));
+    // A row the rail does not have clears the highlight rather than storing
+    // an index nothing will ever draw.
+    assert!(places.set_hovered(Some(places.len())));
+    assert_eq!(places.hovered(), None);
+
+    // Availability is only ever *taken away*, and only for a row that exists.
+    assert!(places.rows().iter().all(crate::Place::is_available));
+    places.set_unavailable(1);
+    assert!(!places.rows()[1].is_available());
+    places.set_unavailable(places.len());
+    assert_eq!(
+        places.rows().iter().filter(|r| !r.is_available()).count(),
+        1
+    );
 }
 
 /// An in-memory directory tree with an optional set of unreadable paths.
@@ -310,8 +614,8 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
         &theme,
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 200, 120),
-        &[],
-        crate::ManagerToolModel::none(),
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
     )
     .expect("surface");
     assert_eq!(surface.width(), 200);
@@ -331,8 +635,8 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
         &theme,
         font,
         Rect::new(0, 0, 200, header + row_height * 3),
-        &[],
-        crate::ManagerToolModel::none(),
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
     )
     .expect("surface");
 
@@ -378,8 +682,8 @@ fn render_into_a_tiny_viewport_does_not_panic() {
         &theme,
         tairix_font::BitmapFont::inconsolata(),
         Rect::new(0, 0, 4, 3),
-        &[],
-        crate::ManagerToolModel::none(),
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
     )
     .expect("surface");
     assert_eq!(surface.width(), 4);
@@ -1267,8 +1571,8 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
         &theme,
         font,
         vp,
-        &[],
-        crate::ManagerToolModel::none(),
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
     )
     .expect("grid surface");
     assert_eq!(surface.width(), 400);
@@ -1289,6 +1593,403 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
         entry_index_at(&browser, font, &theme, vp, Point::new(4, 0)),
         None
     );
+}
+
+/// An artwork lookup that answers every request with one solid-colour square
+/// and records what it was asked for, so a render can be proven to have gone
+/// through the seam rather than straight to the built-in glyph.
+struct RecordingArtwork {
+    art: Surface,
+    asked: Vec<(IconKind, u32)>,
+}
+
+impl RecordingArtwork {
+    fn new(side: u32, color: Color) -> Self {
+        let mut art = Surface::new(side, side).expect("artwork surface");
+        art.fill(color);
+        Self {
+            art,
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl IconArtwork for RecordingArtwork {
+    fn artwork(&mut self, kind: IconKind, side: u32) -> Option<&Surface> {
+        self.asked.push((kind, side));
+        Some(&self.art)
+    }
+}
+
+/// Whether `surface` shows `color` anywhere.
+fn shows(surface: &Surface, color: Color) -> bool {
+    let wanted = color.premultiply();
+    (0..surface.height()).any(|y| (0..surface.width()).any(|x| surface.get(x, y) == Some(wanted)))
+}
+
+#[test]
+fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_returns() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let mut browser = many_files(20);
+    browser.set_view_mode(ViewMode::Grid);
+    let vp = Rect::new(0, 0, 400, 400);
+
+    // The fixture's names carry no extension, so every tile classifies as the
+    // generic content type and asks for that kind's artwork at the card's own
+    // icon slot.
+    let art_colour = Color::rgb(255, 0, 255);
+    let mut artwork = RecordingArtwork::new(24, art_colour);
+    let drawn = crate::render(
+        &browser,
+        &theme,
+        font,
+        vp,
+        &crate::ManagerChrome::none(),
+        &mut artwork,
+    )
+    .expect("grid surface");
+    assert!(!artwork.asked.is_empty(), "the grid consults the lookup");
+    assert!(artwork
+        .asked
+        .iter()
+        .all(|(kind, side)| *kind == IconKind::File && *side > 0));
+    assert!(
+        shows(&drawn, art_colour),
+        "the supplied artwork reaches the tile"
+    );
+
+    // Without a lookup the same grid draws the built-in glyph instead, so the
+    // colour above can only have come through the seam.
+    let plain = crate::render(
+        &browser,
+        &theme,
+        font,
+        vp,
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
+    )
+    .expect("grid surface");
+    assert!(!shows(&plain, art_colour));
+}
+
+#[test]
+fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
+    let font = tairix_font::BitmapFont::inconsolata();
+    let theme = Theme::dark();
+    let browser = many_files(20);
+    let mut artwork = RecordingArtwork::new(24, Color::rgb(255, 0, 255));
+    crate::render(
+        &browser,
+        &theme,
+        font,
+        Rect::new(0, 0, 400, 400),
+        &crate::ManagerChrome::none(),
+        &mut artwork,
+    )
+    .expect("list surface");
+    assert!(artwork.asked.is_empty());
+}
+
+// --- The grid over the real shipped-artwork cache ------------------------
+//
+// The file manager draws its grid through the shared reclaim-governed
+// `ArtworkCache` bound to a read seam and a *sandboxed* rasterise seam. These
+// tests drive that exact composition with fakes for the two seams — no live
+// sandbox — so the safety properties are host-proven: the fallback chain is
+// total, a reply that cannot be believed is refused, and the cache decodes
+// each `(asset, side)` once no matter how many tiles want it.
+
+use alloc::boxed::Box;
+
+use tairix_icon::{
+    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkRasteriser, ArtworkReader,
+    IconArtworkSource, MAX_ARTWORK_BYTES,
+};
+use tairix_log::DiscardSink;
+use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
+
+/// A reader over an in-memory asset table that records every path it was
+/// asked for, so a test can prove which kinds were resolved and that a second
+/// tile of the same kind was served from the cache rather than read again.
+struct CountingReader {
+    assets: BTreeMap<String, Vec<u8>>,
+    read: Vec<String>,
+}
+
+impl CountingReader {
+    fn new() -> Self {
+        Self {
+            assets: BTreeMap::new(),
+            read: Vec::new(),
+        }
+    }
+
+    /// Ship `bytes` as the raster master for `kind`, at the one shared asset
+    /// path the desktop resolves that kind to.
+    fn shipping(mut self, kind: IconKind, bytes: Vec<u8>) -> Self {
+        self.assets.insert(icon_artwork_path(kind), bytes);
+        self
+    }
+}
+
+impl ArtworkReader for CountingReader {
+    fn read(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.read.push(path.to_string());
+        self.assets.get(path).cloned()
+    }
+}
+
+/// A rasteriser that answers with one solid opaque colour at the requested
+/// side and counts every decode, standing in for the sandboxed worker.
+struct CountingRasteriser {
+    color: Color,
+    decodes: usize,
+}
+
+impl CountingRasteriser {
+    fn new(color: Color) -> Self {
+        Self { color, decodes: 0 }
+    }
+}
+
+impl ArtworkRasteriser for CountingRasteriser {
+    fn rasterise(&mut self, side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+        self.decodes += 1;
+        let pixel = [self.color.r, self.color.g, self.color.b, 0xff];
+        Some(
+            pixel
+                .iter()
+                .copied()
+                .cycle()
+                .take((side as usize) * (side as usize) * 4)
+                .collect(),
+        )
+    }
+}
+
+/// A rasteriser whose reply is the wrong length, modelling a worker that
+/// lies about the geometry it produced.
+struct ShortRasteriser;
+
+impl ArtworkRasteriser for ShortRasteriser {
+    fn rasterise(&mut self, _side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+        Some(vec![0xff; 3])
+    }
+}
+
+/// A rasteriser that must never run: the caller is required to refuse the
+/// input before any decode happens.
+struct PanicRasteriser;
+
+impl ArtworkRasteriser for PanicRasteriser {
+    fn rasterise(&mut self, _side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+        panic!("no byte of a missing or over-long asset may reach the decoder");
+    }
+}
+
+/// The shared artwork cache wired as the file manager wires it, at a normal
+/// pressure band so it retains what it decodes.
+fn test_artwork_cache() -> ArtworkCache {
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+    artwork_cache("browse.test-artwork", 1, 1920 * 1080 * 4, gauge, sink)
+}
+
+/// Render `browser` into `vp` through the artwork lookup `artwork`.
+fn grid_surface<S: DirectorySource>(
+    browser: &Browser<S>,
+    vp: Rect,
+    artwork: &mut dyn IconArtwork,
+) -> Surface {
+    crate::render(
+        browser,
+        &Theme::dark(),
+        tairix_font::BitmapFont::inconsolata(),
+        vp,
+        &crate::ManagerChrome::none(),
+        artwork,
+    )
+    .expect("grid surface")
+}
+
+/// A grid of `n` extension-less files, every one of them the generic content
+/// type, so all tiles resolve to the same icon kind.
+fn generic_grid(n: usize) -> Browser<MockFs> {
+    let mut browser = many_files(n);
+    browser.set_view_mode(ViewMode::Grid);
+    browser
+}
+
+/// A grid whose first `png` entries are PNG images and whose last `txt`
+/// entries are plain text, so the two halves resolve to different icon kinds
+/// and sort into that order.
+fn two_kind_grid(png: usize, txt: usize) -> Browser<MockFs> {
+    let mut entries = Vec::new();
+    for i in 0..png {
+        entries.push(Entry::file(format!("a{i:03}.png")));
+    }
+    for i in 0..txt {
+        entries.push(Entry::file(format!("z{i:03}.txt")));
+    }
+    let mut dirs = BTreeMap::new();
+    dirs.insert("/".to_string(), entries);
+    let mut browser = Browser::open_root(MockFs {
+        dirs,
+        denied: BTreeSet::new(),
+        deny_after_first: BTreeSet::new(),
+        reads: BTreeMap::new(),
+        root_after_refresh: None,
+    })
+    .expect("root");
+    browser.set_view_mode(ViewMode::Grid);
+    browser
+}
+
+#[test]
+fn a_grid_tile_blits_shipped_artwork_and_falls_back_to_the_glyph_without_it() {
+    let browser = generic_grid(6);
+    let vp = Rect::new(0, 0, 400, 400);
+    let art_colour = Color::rgb(0x11, 0x22, 0x33);
+    // The all-glyph frame every fallback case below must reproduce exactly.
+    let glyphs = grid_surface(&browser, vp, &mut NoArtwork);
+
+    // The system ships artwork for the tile's kind: the decoded pixels reach
+    // the tile.
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new().shipping(IconKind::File, vec![0xab; 64]);
+    let mut rasteriser = CountingRasteriser::new(art_colour);
+    let drawn = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert_eq!(rasteriser.decodes, 1);
+    assert!(shows(&drawn, art_colour), "the shipped artwork is blitted");
+    assert_ne!(drawn.pixels(), glyphs.pixels());
+
+    // No asset on disk: nothing is decoded and the tile is the built-in glyph
+    // — never a blank tile.
+    let mut cache = test_artwork_cache();
+    let mut absent = CountingReader::new();
+    let missing = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut absent, &mut PanicRasteriser),
+    );
+    assert_eq!(missing.pixels(), glyphs.pixels());
+
+    // An asset longer than the shared artwork ceiling is refused *before* the
+    // decoder runs — `PanicRasteriser` would fire if a byte of it reached one
+    // — and the tile is the glyph again.
+    let mut cache = test_artwork_cache();
+    let mut oversize =
+        CountingReader::new().shipping(IconKind::File, vec![0u8; MAX_ARTWORK_BYTES + 1]);
+    let refused = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut oversize, &mut PanicRasteriser),
+    );
+    assert_eq!(refused.pixels(), glyphs.pixels());
+}
+
+#[test]
+fn a_rasteriser_reply_of_the_wrong_length_is_refused_and_never_reaches_the_frame() {
+    let browser = generic_grid(6);
+    let vp = Rect::new(0, 0, 400, 400);
+    let glyphs = grid_surface(&browser, vp, &mut NoArtwork);
+
+    // The worker claims success but hands back three bytes where a full
+    // square was promised: the reply is not believed, so the frame is the
+    // glyph frame exactly — no partial blit, no torn tile.
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new().shipping(IconKind::File, vec![0xab; 64]);
+    let drawn = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut ShortRasteriser),
+    );
+    assert_eq!(drawn.width(), vp.width);
+    assert_eq!(drawn.height(), vp.height);
+    assert_eq!(drawn.pixels(), glyphs.pixels());
+}
+
+#[test]
+fn a_hundred_tiles_of_one_kind_are_read_and_decoded_exactly_once() {
+    let browser = generic_grid(100);
+    let vp = Rect::new(0, 0, 400, 400);
+    let art_colour = Color::rgb(0x11, 0x22, 0x33);
+
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new().shipping(IconKind::File, vec![0xab; 64]);
+    let mut rasteriser = CountingRasteriser::new(art_colour);
+    let drawn = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert!(shows(&drawn, art_colour));
+    // Every tile shares one `(asset, side)` key, so a hundred-entry grid
+    // costs one read and one decode, not a hundred of each.
+    assert_eq!(reader.read.len(), 1);
+    assert_eq!(rasteriser.decodes, 1);
+}
+
+#[test]
+fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
+    let mut browser = two_kind_grid(40, 40);
+    let vp = Rect::new(0, 0, 400, 400);
+    let png = icon_artwork_path(IconKind::ImagePng);
+    let text = icon_artwork_path(IconKind::Text);
+
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new()
+        .shipping(IconKind::ImagePng, vec![0xab; 64])
+        .shipping(IconKind::Text, vec![0xcd; 64]);
+    let mut rasteriser = CountingRasteriser::new(Color::rgb(0x11, 0x22, 0x33));
+
+    // The first page is all images: the text kind is never touched, so a tile
+    // scrolled out of view costs nothing.
+    grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert_eq!(reader.read, core::slice::from_ref(&png));
+    assert_eq!(rasteriser.decodes, 1);
+
+    // Scroll to the end (the layout clamps the request to the last page):
+    // only the kind that just became visible is read and decoded, and the
+    // image artwork already held is not resolved again.
+    browser.set_scroll_offset(u64::from(u32::MAX));
+    grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert_eq!(reader.read, [png, text]);
+    assert_eq!(rasteriser.decodes, 2);
+}
+
+#[test]
+fn teardown_releases_the_retained_artwork() {
+    let browser = generic_grid(6);
+    let vp = Rect::new(0, 0, 400, 400);
+
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new().shipping(IconKind::File, vec![0xab; 64]);
+    let mut rasteriser = CountingRasteriser::new(Color::rgb(0x11, 0x22, 0x33));
+    grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert!(cache.charged_bytes() > 0, "the decode is retained");
+
+    // Closing the window ends the cache: the decoded pixels are given back.
+    cache.teardown();
+    assert_eq!(cache.charged_bytes(), 0);
 }
 
 // --- FM4: navigation history and breadcrumb navigation -----------------
@@ -1448,59 +2149,6 @@ fn navigation_history_is_bounded_and_drops_the_oldest() {
     }
     assert_eq!(steps, HISTORY_MAX);
     assert!(!browser.can_go_back());
-}
-
-// --- File-type icon classification (FM3) -------------------------------
-
-mod icon_classifier {
-    use tairix_abi::time::Time64;
-    use tairix_icon::IconKind;
-
-    use crate::entry::{Entry, EntryKind};
-    use crate::icon::{icon_for, icon_for_name};
-
-    fn bundle(name: &str) -> Entry {
-        Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH)
-    }
-
-    #[test]
-    fn kind_decides_before_extension() {
-        // A directory is a folder and a bundle an app tile regardless of any
-        // extension-looking name; the file table is only consulted for files.
-        assert_eq!(icon_for(&Entry::directory("Documents")), IconKind::Folder);
-        assert_eq!(icon_for(&bundle("Editor.app")), IconKind::AppBundle);
-        // A directory named like an archive is still a folder.
-        assert_eq!(icon_for(&Entry::directory("backup.zip")), IconKind::Folder);
-    }
-
-    #[test]
-    fn known_extensions_map_to_their_class() {
-        assert_eq!(icon_for(&Entry::file("notes.txt")), IconKind::Text);
-        assert_eq!(icon_for(&Entry::file("main.rs")), IconKind::Text);
-        assert_eq!(icon_for(&Entry::file("photo.PNG")), IconKind::Image);
-        assert_eq!(icon_for(&Entry::file("logo.svg")), IconKind::Image);
-        assert_eq!(icon_for(&Entry::file("dump.tar.gz")), IconKind::Archive);
-        assert_eq!(icon_for(&Entry::file("shell.rxe")), IconKind::Executable);
-        assert_eq!(icon_for(&Entry::file("mod.wasm")), IconKind::Executable);
-    }
-
-    #[test]
-    fn extension_match_is_case_insensitive() {
-        assert_eq!(icon_for_name("READ.MD"), IconKind::Text);
-        assert_eq!(icon_for_name("A.ZiP"), IconKind::Archive);
-    }
-
-    #[test]
-    fn unknown_and_extensionless_fall_back_to_generic_file() {
-        assert_eq!(icon_for_name("blob.qwerty"), IconKind::File);
-        assert_eq!(icon_for_name("Makefile"), IconKind::File);
-        // A dotfile whose only dot starts the name has no extension.
-        assert_eq!(icon_for_name(".profile"), IconKind::File);
-        // A trailing dot with nothing after it is not an extension.
-        assert_eq!(icon_for_name("archive."), IconKind::File);
-        // The last extension wins for a multi-part name.
-        assert_eq!(icon_for_name("a.txt.zip"), IconKind::Archive);
-    }
 }
 
 // --- In-place rename (FM5) ---------------------------------------------
@@ -2220,7 +2868,7 @@ fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
 
 // --- open_with: the "Open With…" type→bundle association model (FM6b) ---
 
-use crate::open_with::{applications_for, mime_for_name, AppAssociation, BundleSource};
+use crate::open_with::{applications_for, AppAssociation, BundleSource};
 
 /// An in-memory installed-bundle store, the test backing for [`BundleSource`].
 struct MockBundleStore {
@@ -2237,36 +2885,42 @@ impl BundleSource for MockBundleStore {
     }
 }
 
+/// The association model derives a file's type through the shared registry, so
+/// the type a bundle is matched against is exactly the one the tile draws
+/// (the registry's own mapping is proven in `media_tests.rs`).
 #[test]
-fn mime_for_name_classifies_each_content_class() {
-    assert_eq!(mime_for_name("notes.txt"), Some("text/plain"));
-    assert_eq!(mime_for_name("main.rs"), Some("text/plain"));
-    assert_eq!(mime_for_name("README.md"), Some("text/markdown"));
-    assert_eq!(mime_for_name("data.json"), Some("application/json"));
-    assert_eq!(mime_for_name("photo.png"), Some("image/png"));
-    assert_eq!(mime_for_name("scan.jpeg"), Some("image/jpeg"));
-    assert_eq!(mime_for_name("logo.svg"), Some("image/svg+xml"));
-    assert_eq!(mime_for_name("backup.tar"), Some("application/x-tar"));
-    assert_eq!(mime_for_name("bundle.tgz"), Some("application/gzip"));
-    assert_eq!(mime_for_name("tool.rxe"), Some("application/x-tairix-rxe"));
-    assert_eq!(mime_for_name("mod.wasm"), Some("application/wasm"));
+fn the_offered_type_is_the_registry_type() {
+    for (name, media) in [
+        ("notes.txt", MediaType::TextPlain),
+        ("README.md", MediaType::TextMarkdown),
+        ("data.json", MediaType::Json),
+        ("photo.png", MediaType::ImagePng),
+        ("tool.rxe", MediaType::TairixRxe),
+    ] {
+        let claimant = AppAssociation::new(
+            "claimant",
+            "/Apps/claimant.app",
+            vec![media.as_str().to_string()],
+        );
+        let offered = applications_for(name, core::slice::from_ref(&claimant));
+        assert_eq!(offered.len(), 1, "{name}");
+    }
 }
 
 #[test]
-fn mime_for_name_is_case_insensitive_on_the_extension() {
-    assert_eq!(mime_for_name("PHOTO.PNG"), Some("image/png"));
-    assert_eq!(mime_for_name("Notes.TxT"), Some("text/plain"));
-}
-
-#[test]
-fn mime_for_name_fails_closed_on_an_unrecognised_or_absent_extension() {
-    // Unknown extension, no extension, a dotfile with no further extension, and
-    // a trailing dot all yield no type — never a guess.
-    assert_eq!(mime_for_name("mystery.xyz"), None);
-    assert_eq!(mime_for_name("Makefile"), None);
-    assert_eq!(mime_for_name(".profile"), None);
-    assert_eq!(mime_for_name("archive."), None);
-    assert_eq!(mime_for_name(""), None);
+fn a_file_the_registry_cannot_type_is_offered_nothing() {
+    // An unrecognised extension, no extension at all, and a bare dotfile each
+    // yield an honest empty answer rather than a guessed default — even from a
+    // store whose bundle claims the generic type.
+    let catch_all = AppAssociation::new(
+        "catch-all",
+        "/Apps/catch-all.app",
+        vec!["application/octet-stream".to_string()],
+    );
+    let bundles = [catch_all];
+    for name in ["mystery.xyz", "Makefile", ".profile", "archive.", ""] {
+        assert!(applications_for(name, &bundles).is_empty(), "{name}");
+    }
 }
 
 #[test]
@@ -2349,6 +3003,114 @@ fn applications_for_is_empty_for_an_unrecognised_type() {
     // bundles exist.
     assert!(applications_for("mystery.xyz", &bundles).is_empty());
     assert!(applications_for("Makefile", &bundles).is_empty());
+}
+
+/// An application declaring only the broad `text/plain` type — a plain text
+/// editor, the case the subclass chain exists for.
+fn plain_text_editor() -> AppAssociation {
+    AppAssociation::new("editor", "/Apps/editor.app", vec!["text/plain".to_string()])
+}
+
+#[test]
+fn a_generic_text_application_opens_a_specific_text_file() {
+    let bundles = [plain_text_editor()];
+    for name in [
+        "notes.txt",
+        "main.rs",
+        "install.sh",
+        "parse.c",
+        "parse.h",
+        "README.md",
+        "rows.csv",
+        "data.json",
+        "deploy.yaml",
+        "layout.xml",
+        "index.html",
+        "Main.java",
+        "logo.svg",
+    ] {
+        let offered = applications_for(name, &bundles);
+        assert_eq!(offered.len(), 1, "{name}");
+        assert_eq!(offered[0].name(), "editor", "{name}");
+    }
+}
+
+#[test]
+fn a_generic_text_application_is_not_offered_for_binary_content() {
+    // The chain widens a type, it does not open everything: nothing binary
+    // subclasses plain text.
+    let bundles = [plain_text_editor()];
+    for name in [
+        "photo.png",
+        "release.zip",
+        "manual.pdf",
+        "tool.rxe",
+        "tile.spr",
+    ] {
+        assert!(applications_for(name, &bundles).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn a_specific_declaration_outranks_a_generic_one() {
+    // The generic editor is enumerated first, so only specificity ranking can
+    // put the Rust application ahead of it.
+    let bundles = [
+        plain_text_editor(),
+        AppAssociation::new(
+            "rustide",
+            "/Apps/rustide.app",
+            vec!["text/x-rust".to_string()],
+        ),
+    ];
+    let offered: Vec<&str> = applications_for("main.rs", &bundles)
+        .iter()
+        .map(|b| b.name())
+        .collect();
+    assert_eq!(offered, ["rustide", "editor"]);
+    // A file the specific application does not claim leaves the answer alone.
+    let offered: Vec<&str> = applications_for("notes.txt", &bundles)
+        .iter()
+        .map(|b| b.name())
+        .collect();
+    assert_eq!(offered, ["editor"]);
+}
+
+#[test]
+fn a_two_step_chain_ranks_each_ancestor_in_turn() {
+    // An SVG is XML and XML is text, so all three are offered — nearest claim
+    // first, whatever order the store enumerated them in.
+    let bundles = [
+        plain_text_editor(),
+        AppAssociation::new(
+            "xmltool",
+            "/Apps/xmltool.app",
+            vec!["application/xml".to_string()],
+        ),
+        AppAssociation::new("draw", "/Apps/draw.app", vec!["image/svg+xml".to_string()]),
+    ];
+    let offered: Vec<&str> = applications_for("logo.svg", &bundles)
+        .iter()
+        .map(|b| b.name())
+        .collect();
+    assert_eq!(offered, ["draw", "xmltool", "editor"]);
+}
+
+#[test]
+fn a_bundle_claiming_both_a_type_and_its_ancestor_is_offered_once() {
+    let bundles = [
+        AppAssociation::new(
+            "studio",
+            "/Apps/studio.app",
+            vec!["text/plain".to_string(), "text/x-rust".to_string()],
+        ),
+        plain_text_editor(),
+    ];
+    let offered: Vec<&str> = applications_for("main.rs", &bundles)
+        .iter()
+        .map(|b| b.name())
+        .collect();
+    assert_eq!(offered, ["studio", "editor"]);
 }
 
 #[test]

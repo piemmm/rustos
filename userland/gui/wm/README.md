@@ -138,6 +138,27 @@ router**:
   the crate asks for the repaint but never speaks the window protocol
   itself.
 
+- The desktop layer (`compositor`): an optional `Surface` the session
+  installs with `set_desktop`, composited between the opaque background
+  fill and every window and taken back down with `clear_desktop`
+  (`desktop_bounds` reports the footprint either answers). It carries no
+  `WindowId`, which is exactly why it can never be raised, focused, moved,
+  or restacked through the ordinary window z-order — nothing in that
+  z-order can end up beneath it by accident, either. In
+  `present_accelerated` it is encoded as its own hardware layer, directly
+  on top of the background layer and beneath every window's, so the
+  accelerated and software paths agree pixel-for-pixel. Installing,
+  clearing, or replacing it damages exactly its old and new footprints,
+  precisely as a window's own surface replacement does.
+- Input that resolves to no window is reported, not swallowed: a primary
+  press or a key with focus on the desktop comes back as `DesktopPressed`
+  / `DesktopKey { key, modifiers, pressed }`, and pointer motion that
+  lands on no window and starts no grab comes back as
+  `DesktopPointerMoved` — carrying no position of its own, because the
+  motion has already updated the router's own `pointer()`, which is where
+  the desktop layer's owner reads it from. The router names where the
+  input landed and takes no action of its own for any of the four.
+
 GPU acceleration and the default apps build on this core in later
 Stage 7 increments.
 
@@ -164,8 +185,13 @@ presents nothing, disjoint rectangles present individually, whole-screen
 damage presents once, and more rectangles than the limit collapse to one
 bounding-box present), no-op updates marking nothing, edit-reported
 content damage (offset by a decoration band, clipped to the client, empty
-marking nothing), and input routing (hit-testing, click-to-activate focus
-and raise, desktop-clears-focus, programmatic `focus`/`unfocus` with the
+marking nothing), the desktop layer (drawing over the background and under
+every window, a smaller-than-screen layer leaving the background showing,
+and installing/replacing/clearing each damaging exactly its footprint),
+and input routing (hit-testing, click-to-activate focus
+and raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position
+of its own and `DesktopKey` naming focus-on-desktop, programmatic
+`focus`/`unfocus` with the
 fail-closed unknown-window path, move-grab drag, and the fail-closed grab
 edge cases), the cursor overlay (compositing above windows, move/hide
 repaint with damage, a multi-sample sweep composing the byte-identical

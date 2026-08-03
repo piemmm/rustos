@@ -51,8 +51,44 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
 
 fn row_surface(row: &ListRow, theme: &Theme, scale: Scale) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    row.render(&mut surface, Rect::new(0, 0, W, H), scale, theme, font());
+    row.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        scale,
+        theme,
+        font(),
+        None,
+    );
     surface
+}
+
+/// A solid square of `color` — the stand-in for an owner's rasterised icon
+/// artwork, which a control blits without ever decoding image bytes.
+fn artwork(side: u32, color: Color) -> Surface {
+    let mut art = Surface::new(side, side).expect("artwork surface");
+    art.fill(color);
+    art
+}
+
+/// A colour no theme palette uses, so finding it in a render can only mean the
+/// supplied artwork reached the surface.
+const ART: Color = Color::rgb(255, 0, 255);
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` of `want` in `surface`.
+fn bbox(surface: &Surface, want: Pixel) -> Option<(u32, u32, u32, u32)> {
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..surface.height() {
+        for x in 0..surface.width() {
+            if surface.get(x, y) != Some(want) {
+                continue;
+            }
+            found = Some(match found {
+                None => (x, y, x, y),
+                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+            });
+        }
+    }
+    found
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -253,8 +289,59 @@ fn list_row_renders_high_contrast_and_scale() {
         scale,
         &Theme::dark(),
         font(),
+        None,
     );
     assert!(has_pixel(&big, premul(Theme::dark().palette().on_surface)));
+}
+
+// --- Owner-supplied artwork --------------------------------------------
+//
+// A list row, a card, and a taskbar item all draw their icon through the one
+// shared slot painter, so the rule is proven here for the collection controls:
+// artwork the owner supplies is blitted, its absence falls back to the
+// built-in class glyph, and artwork sized differently from the slot is centred
+// in it rather than anchored to a corner.
+
+#[test]
+fn list_row_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    // An empty label so the only content in the render is the icon itself.
+    let row = ListRow::new("").with_icon(IconKind::Text);
+    let side = row.icon_side(bounds, Scale::ONE, &theme, font());
+    assert!(side > 0, "the row reserves an icon column");
+
+    let art = artwork(side, ART);
+    let mut with = Surface::new(W, H).expect("surface");
+    row.render(&mut with, bounds, Scale::ONE, &theme, font(), Some(&art));
+    let drawn = bbox(&with, ART.premultiply()).expect("artwork drawn");
+    // Slot-sized artwork fills exactly the column the row advertised.
+    assert_eq!(drawn.2 + 1 - drawn.0, side);
+    assert_eq!(drawn.3 + 1 - drawn.1, side);
+
+    // Without artwork the same row draws its built-in glyph instead…
+    let glyph = row_surface(&row, &theme, Scale::ONE);
+    assert!(!has_pixel(&glyph, ART.premultiply()));
+    assert!(has_pixel(&glyph, premul(theme.palette().on_surface)));
+    // …and a row carrying no icon draws neither.
+    let bare = row_surface(&ListRow::new(""), &theme, Scale::ONE);
+    assert!(!has_pixel(&bare, premul(theme.palette().on_surface)));
+}
+
+#[test]
+fn a_row_with_no_icon_ignores_supplied_artwork() {
+    let theme = Theme::dark();
+    let art = artwork(8, ART);
+    let mut s = Surface::new(W, H).expect("surface");
+    ListRow::new("Documents").render(
+        &mut s,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        &theme,
+        font(),
+        Some(&art),
+    );
+    assert!(!has_pixel(&s, ART.premultiply()));
 }
 
 // --- Column alignment invariant (spec §11.13) --------------------------
@@ -382,7 +469,14 @@ const CH: u32 = 140;
 
 fn card_surface(card: &Card, theme: &Theme) -> Surface {
     let mut s = Surface::new(CW, CH).expect("surface");
-    card.render(&mut s, Rect::new(0, 0, CW, CH), Scale::ONE, theme, font());
+    card.render(
+        &mut s,
+        Rect::new(0, 0, CW, CH),
+        Scale::ONE,
+        theme,
+        font(),
+        None,
+    );
     s
 }
 
@@ -461,6 +555,84 @@ fn card_icon_draws_above_the_title() {
     // (here empty) label.
     let iconed = card_surface(&Card::new("").with_icon(IconKind::Folder), &theme);
     assert!(region_has(&iconed, band.0, band.1, fg));
+}
+
+/// Paint `card` with `art` in its icon slot and report the artwork's bounding
+/// box, so two placements can be compared without reaching into the tile's
+/// private geometry.
+fn card_artwork_bbox(card: &Card, theme: &Theme, art: &Surface) -> (u32, u32, u32, u32) {
+    let mut s = Surface::new(CW, CH).expect("surface");
+    card.render(
+        &mut s,
+        Rect::new(0, 0, CW, CH),
+        Scale::ONE,
+        theme,
+        font(),
+        Some(art),
+    );
+    bbox(&s, ART.premultiply()).expect("artwork drawn")
+}
+
+#[test]
+fn card_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
+    let theme = Theme::dark();
+    let card = Card::new("").with_icon(IconKind::AppBundle);
+    let side = card.icon_side(Rect::new(0, 0, CW, CH), Scale::ONE, &theme, font());
+    assert!(side > 0, "the tile reserves an icon slot");
+
+    // Slot-sized artwork fills exactly the slot the tile advertised.
+    let drawn = card_artwork_bbox(&card, &theme, &artwork(side, ART));
+    assert_eq!(drawn.2 + 1 - drawn.0, side);
+    assert_eq!(drawn.3 + 1 - drawn.1, side);
+
+    // Without artwork the same tile draws its built-in glyph instead.
+    let glyph = card_surface(&card, &theme);
+    assert!(!has_pixel(&glyph, ART.premultiply()));
+    assert!(has_pixel(&glyph, premul(theme.palette().on_surface)));
+}
+
+#[test]
+fn a_card_with_no_icon_ignores_supplied_artwork() {
+    let theme = Theme::dark();
+    let mut s = Surface::new(CW, CH).expect("surface");
+    Card::new("Status").render(
+        &mut s,
+        Rect::new(0, 0, CW, CH),
+        Scale::ONE,
+        &theme,
+        font(),
+        Some(&artwork(16, ART)),
+    );
+    assert!(!has_pixel(&s, ART.premultiply()));
+}
+
+#[test]
+fn artwork_sized_differently_from_the_slot_is_centred_in_it() {
+    let theme = Theme::dark();
+    let card = Card::new("").with_icon(IconKind::AppBundle);
+    let side = card.icon_side(Rect::new(0, 0, CW, CH), Scale::ONE, &theme, font());
+    assert!(side > 8, "the slot has room to be over- and under-shot");
+
+    // The slot itself, then artwork four pixels smaller and four larger.
+    let slot = card_artwork_bbox(&card, &theme, &artwork(side, ART));
+    let small = card_artwork_bbox(&card, &theme, &artwork(side - 4, ART));
+    let large = card_artwork_bbox(&card, &theme, &artwork(side + 4, ART));
+
+    // Undersized artwork sits wholly inside the slot, inset on every side
+    // rather than pinned to its leading corner.
+    assert!(small.0 > slot.0 && small.1 > slot.1);
+    assert!(small.2 < slot.2 && small.3 < slot.3);
+    // Oversized artwork overhangs the slot on both sides instead of spilling
+    // from one corner.
+    assert!(large.0 < slot.0 && large.2 > slot.2);
+    assert!(large.1 < slot.1 && large.3 > slot.3);
+    // All three share the slot's centre, to within the odd pixel of a size
+    // that cannot be split evenly.
+    for placed in [small, large] {
+        let dx = i64::from(placed.0 + placed.2) - i64::from(slot.0 + slot.2);
+        let dy = i64::from(placed.1 + placed.3) - i64::from(slot.1 + slot.3);
+        assert!(dx.abs() <= 1 && dy.abs() <= 1, "{placed:?} off centre");
+    }
 }
 
 #[test]

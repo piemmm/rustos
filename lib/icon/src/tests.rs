@@ -2,9 +2,10 @@
 
 use alloc::vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_raster::Color;
 
-use crate::glyph::{builtin_icon, IconKind};
+use crate::glyph::{builtin_icon, disk_icon, IconKind};
 use crate::vector::{IconLayer, VectorIcon};
 
 const FG: Color = Color::rgb(230, 230, 235);
@@ -46,6 +47,96 @@ fn for_asset_maps_known_ids() {
     assert_eq!(IconKind::for_asset("empty-trash"), IconKind::EmptyTrash);
     assert_eq!(IconKind::for_asset("library"), IconKind::Library);
     assert_eq!(IconKind::for_asset("switchboard"), IconKind::Switchboard);
+    assert_eq!(
+        IconKind::for_asset("service-bundle"),
+        IconKind::ServiceBundle
+    );
+    assert_eq!(IconKind::for_asset("text-html"), IconKind::TextHtml);
+    assert_eq!(IconKind::for_asset("text-x-rust"), IconKind::TextRust);
+    assert_eq!(IconKind::for_asset("text-x-java"), IconKind::TextJava);
+    assert_eq!(
+        IconKind::for_asset("application-x-shellscript"),
+        IconKind::ShellScript
+    );
+    assert_eq!(IconKind::for_asset("application-pdf"), IconKind::Pdf);
+    assert_eq!(IconKind::for_asset("image-png"), IconKind::ImagePng);
+    assert_eq!(IconKind::for_asset("image-jpeg"), IconKind::ImageJpeg);
+    assert_eq!(IconKind::for_asset("image-gif"), IconKind::ImageGif);
+    assert_eq!(IconKind::for_asset("image-svg-xml"), IconKind::ImageSvg);
+    assert_eq!(
+        IconKind::for_asset("image-x-riscos-sprite"),
+        IconKind::ImageSprite
+    );
+    assert_eq!(IconKind::for_asset("disk-hard"), IconKind::DiskHard);
+    assert_eq!(
+        IconKind::for_asset("disk-solid-state"),
+        IconKind::DiskSolidState
+    );
+    assert_eq!(IconKind::for_asset("disk"), IconKind::Disk);
+    assert_eq!(IconKind::for_asset("disk-usb"), IconKind::DiskUsb);
+}
+
+#[test]
+fn the_disk_glyph_draws_pixels_for_every_disk_kind() {
+    // The generic drive and the three fine-grained media share the one disk
+    // glyph; each must rasterise to a legible, non-empty silhouette.
+    for kind in [
+        IconKind::Disk,
+        IconKind::DiskHard,
+        IconKind::DiskSolidState,
+        IconKind::DiskUsb,
+    ] {
+        let image = builtin_icon(kind, FG).rasterise(16).expect("renderable");
+        assert_eq!(image.width(), 16);
+        assert_eq!(image.height(), 16);
+        assert!(
+            image.pixels().iter().filter(|p| p.a > 0).count() > 0,
+            "{kind:?} drew nothing"
+        );
+    }
+}
+
+#[test]
+fn a_fine_grained_kind_shares_its_family_glyph() {
+    // The distinction is in the asset id, not the built-in fallback: a
+    // fine-grained kind draws its broad family's glyph.
+    assert_eq!(
+        builtin_icon(IconKind::TextHtml, FG),
+        builtin_icon(IconKind::Text, FG)
+    );
+    assert_eq!(
+        builtin_icon(IconKind::ImagePng, FG),
+        builtin_icon(IconKind::Image, FG)
+    );
+    assert_eq!(
+        builtin_icon(IconKind::ServiceBundle, FG),
+        builtin_icon(IconKind::AppBundle, FG)
+    );
+    assert_eq!(
+        builtin_icon(IconKind::DiskHard, FG),
+        builtin_icon(IconKind::DiskUsb, FG)
+    );
+}
+
+#[test]
+fn disk_icon_maps_every_medium() {
+    assert_eq!(
+        disk_icon(Some(BlkDeviceClass::Rotational)),
+        IconKind::DiskHard
+    );
+    assert_eq!(
+        disk_icon(Some(BlkDeviceClass::SolidState)),
+        IconKind::DiskSolidState
+    );
+    assert_eq!(
+        disk_icon(Some(BlkDeviceClass::Removable)),
+        IconKind::DiskUsb
+    );
+    // A paravirtual device is not rotational, solid-state or removable, and
+    // an unclassified mount is not known to be any of them: both draw the
+    // generic drive rather than a guess.
+    assert_eq!(disk_icon(Some(BlkDeviceClass::Virtual)), IconKind::Disk);
+    assert_eq!(disk_icon(None), IconKind::Disk);
 }
 
 #[test]

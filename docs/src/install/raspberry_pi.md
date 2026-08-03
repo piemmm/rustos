@@ -33,6 +33,19 @@ Two image profiles exist (`--profile`, default `debug`):
 | Partition 2 (`0x7E`, ARXFS, 64 MiB) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
 | Partition 3 (`0x7F`, ARXFS, 64 MiB) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; unlocked by a passphrase-derived key |
 
+The read-only `/System` volume carries, beside its signed driver and app
+bundles, the **discovered system payload**: each command app's
+internationalised `Help/` tree, its bundle `Resources/`, and the desktop's
+graphics assets — the raster icon masters — planted under
+`/System/Graphics/Icons` (`AGENTS.md` §16.2, §10). All three are discovered
+from their own on-disk sources at build time (`tools/syshelp`) and planted by
+one shared walk, so a new help document, resource, or icon (a
+`<asset-id>.png` dropped under `lib/icon/assets/`) ships without editing the
+image builder. Each icon is validated against the desktop's own icon contract
+as it is discovered, so an unresolvable name or an over-large file fails the
+image build closed rather than shipping artwork that would silently render as
+a fallback glyph.
+
 `root.unlock` is the root volume's plaintext key-derivation descriptor
 (`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count
 the bootstrap reads — before anything is decrypted — to turn the

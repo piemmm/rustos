@@ -158,6 +158,7 @@ pub mod assets;
 pub mod cli;
 pub mod config;
 pub mod confirm;
+pub mod desktop;
 pub mod device;
 pub mod input;
 pub mod keyboard;
@@ -176,14 +177,18 @@ pub mod vigil;
 pub mod windows;
 
 #[cfg(test)]
+mod desktop_tests;
+#[cfg(test)]
 mod tests;
 
-pub use assets::{
-    load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter, GRAPHICS_DIR,
-};
+pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use config::{FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH};
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
+pub use desktop::{
+    Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DESKTOP_MARGIN,
+    RELIST_MIN_INTERVAL_NS,
+};
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
@@ -194,9 +199,9 @@ pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
 pub use pins::{
-    artwork_cache, build_pin_views, resolve_pin_drop, resolve_pins, CachedArtwork, DragOffer,
-    IconCache, IconRasteriser, PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin,
-    SessionPins,
+    build_pin_views, resolve_library_icons, resolve_pin_drop, resolve_pins, ArtworkFileReader,
+    ArtworkSandbox, DragOffer, DragOrigin, IconRasteriser, PinBridge, PinEditError, PinIconSource,
+    PinService, ResolvedPin, SessionPins,
 };
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};

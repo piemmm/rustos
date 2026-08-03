@@ -94,13 +94,16 @@ mod program {
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
         WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
-    use tairix_browse::{DirectorySource, VfsDirectorySource};
+    use tairix_browse::{
+        association_from_appinfo, AppAssociation, DirectorySource, VfsDirectorySource,
+    };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        artwork_cache, build_pin_views, command_section, deliver_pending_open, load_library,
+        build_pin_views, command_section, deliver_pending_open, load_library,
         maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
-        serve_switchboard_request, window_control_event, Answer, CliError, Command, ConcludedPick,
-        ConfirmPrompt, DesktopShell, DeviceInputSource, HangTracker, IconCache, IconRasteriser,
+        serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
+        CliError, Command, ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser,
         InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
         PinBridge, PinService, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
         SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
@@ -116,6 +119,7 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
+    use tairix_taskpins::PinTarget;
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
@@ -648,7 +652,7 @@ mod program {
     fn spawn_switchboard(launched: &mut LaunchTable) -> Option<u64> {
         record_launch(
             launched,
-            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes()),
+            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes(), &[]),
             SWITCHBOARD_LABEL,
             SWITCHBOARD_RUN_PATH,
         );
@@ -759,6 +763,16 @@ mod program {
         // a large display than a small one and no ceiling is guessed. They
         // are governed by the process pressure gauge, which the wait loop
         // below keeps current from the kernel's band.
+        //
+        // Publish the band *before* those caches exist: the gauge starts in
+        // its fail-closed unknown state, in which every cache admits
+        // nothing, so a desktop that first read the band from its wait-set
+        // member would draw its whole bring-up — the first frame included —
+        // with no cached cursor, glyph, or icon artwork at all, and would
+        // keep doing so until the machine happened to move band. The
+        // member's own read below closes the race between here and its
+        // registration.
+        refresh_pressure_band();
         static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
         let mut shell = DesktopShell::new(
             TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
@@ -793,6 +807,19 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
+        // The desktop's icon artwork — the shipped `/System/Graphics`
+        // masters and each bundle's own icon — is read through the
+        // session's own VFS identity and decoded in the parser-sandbox
+        // worker, never in this address space. Until this call the shell
+        // draws every icon from its built-in glyphs, and it falls back to
+        // them again whenever either seam refuses.
+        shell.set_artwork_source(
+            alloc::boxed::Box::new(ArtworkFileReader(VfsFileReader)),
+            alloc::boxed::Box::new(ArtworkSandbox(SandboxRasteriser {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+            })),
+        );
+
         // The program library: read the machine store and the logged-in
         // user's overlay under the session's own identity, merge them, and
         // hand the resolved catalog to the taskbar's popup. A store that
@@ -807,18 +834,38 @@ mod program {
         // loaded. Edits arriving later (a context-menu unpin, a pin request
         // or drop from an app) mark the service dirty and the loop
         // re-resolves before its next present.
-        let mut pins = load_pin_service(IconCache::new(artwork_cache(
-            SEAT_PRIMARY,
-            frame_len,
-            tairix_rt::pressure::gauge(),
-            &LOG_SINK,
-        )));
+        let mut pins = load_pin_service();
 
-        // First frame: place the bar, install the pointer cursor at the
-        // seat's initial pointer position, and push the whole surface once;
+        // The desktop's own icon column: the logged-in user's `Desktop`
+        // folder, listed through the same capability-checked directory call
+        // the trusted picker uses, under the session's own identity. An
+        // unset or malformed `HOME` leaves the folder at the storage root's
+        // `Desktop`, which simply lists nothing if it is not there.
+        let mut desktop_folder = tairix_rt::env_var(b"HOME")
+            .and_then(|home| core::str::from_utf8(home).ok())
+            .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
+            .unwrap_or_default();
+        desktop_folder.push(alloc::string::String::from("Desktop"));
+        let mut desktop = Desktop::new(
+            VfsDirectorySource::new(|path: &str| {
+                tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
+            }),
+            desktop_folder,
+        );
+        desktop.relist(tairix_rt::clock_get());
+        // Which installed application opens which file, read once from the
+        // bundles the catalog already names and refreshed only when the
+        // catalog is. Resolving it per gesture would re-read every manifest
+        // on every click.
+        let mut associations = desktop_associations(&shell);
+
+        // First frame: place the bar, paint the desktop's icons beneath
+        // every window, install the pointer cursor at the seat's initial
+        // pointer position, and push the whole surface once;
         // every later present carries only the composited damage. The cursor
         // is then kept live by the shell as each seat event is pumped.
         shell.present(&mut compositor);
+        shell.present_desktop(&mut compositor, &desktop);
         shell.refresh_cursor(&mut compositor);
         if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
             return code;
@@ -958,11 +1005,11 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "memory-pressure wait refused");
         }
-        // Start from the band in force now: the member reports only
-        // *changes*, so without this the caches would run on the gauge's
-        // fail-closed unknown state until the machine happened to move
-        // band. A read that fails leaves the gauge closed, which costs
-        // cache hits and nothing else.
+        // Re-read the band now the member is registered: it reports only
+        // *changes*, so a move between the bring-up read above and this
+        // registration would otherwise never be seen. A read that fails
+        // leaves the gauge as it stands, which costs cache hits and
+        // nothing else.
         refresh_pressure_band();
 
         // The window channel's server state: the engine, the session-side
@@ -1125,7 +1172,7 @@ mod program {
                                 &mut |launched: &mut LaunchTable, run_path: &str, label: &str| {
                                     record_launch(
                                         launched,
-                                        spawn_app(run_path.as_bytes()),
+                                        spawn_app(run_path.as_bytes(), &[]),
                                         label,
                                         run_path,
                                     );
@@ -1182,7 +1229,6 @@ mod program {
                 // trim released is asked to present again straight away.
                 if refresh_pressure_band() {
                     let _ = shell.trim_caches(&mut compositor);
-                    let _ = pins.icons.trim();
                     deliver_pending_redraws(
                         &mut server,
                         &mut sink,
@@ -1254,6 +1300,14 @@ mod program {
                         }
                     },
                 );
+                // A program the desktop started has finished, and it may
+                // have written to the folder the icons come from. This
+                // system has no filesystem-change notification, so an exit
+                // the session itself observes is one of the few honest
+                // moments to look again — and it is an event, never a poll.
+                if desktop.relist(tairix_rt::clock_get()) {
+                    shell.present_desktop(&mut compositor, &desktop);
+                }
             } else if token == SEAT_TOKEN && lock.is_locked() {
                 // Locked: the seat's events belong to the lock and to
                 // nothing else. They are drained straight out of the
@@ -1289,6 +1343,15 @@ mod program {
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 };
                 for outcome in outcomes {
+                    route_desktop(
+                        &outcome,
+                        &mut desktop,
+                        &mut shell,
+                        &mut compositor,
+                        &mut launched,
+                        &mut associations,
+                        now_ns,
+                    );
                     if route_outcome(
                         outcome,
                         None,
@@ -1307,10 +1370,10 @@ mod program {
                         &mut pins,
                         &mut switchboard_pid,
                         &mut pending_open,
+                        &mut associations,
                     ) == Routed::EndSession
                     {
                         shell.teardown(&mut compositor);
-                        pins.icons.teardown();
                         return EXIT_LOGGED_OUT;
                     }
                 }
@@ -1319,6 +1382,15 @@ mod program {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
                             let outcome = shell.handle(event, &mut compositor, now_ns);
+                            route_desktop(
+                                &outcome,
+                                &mut desktop,
+                                &mut shell,
+                                &mut compositor,
+                                &mut launched,
+                                &mut associations,
+                                now_ns,
+                            );
                             if route_outcome(
                                 outcome,
                                 Some(record),
@@ -1337,10 +1409,10 @@ mod program {
                                 &mut pins,
                                 &mut switchboard_pid,
                                 &mut pending_open,
+                                &mut associations,
                             ) == Routed::EndSession
                             {
                                 shell.teardown(&mut compositor);
-                                pins.icons.teardown();
                                 return EXIT_LOGGED_OUT;
                             }
                         }
@@ -1423,15 +1495,16 @@ mod program {
     }
 
     /// The session's pin state: the store-owning service plus the resolved
-    /// pins, their live running-window matches, and the sandboxed icon
-    /// pipeline (rasteriser + artwork cache), kept beside the loop so a
+    /// pins and their live running-window matches, kept beside the loop so a
     /// press resolves against exactly what the strip shows.
+    ///
+    /// The pins' icons are not here: the shell owns the one artwork cache
+    /// and the seams it reads and decodes through, so the strip's icons and
+    /// the rest of the desktop's cannot be cached twice.
     struct PinPanel {
         service: PinService<VfsFileReader, VfsFileWriter>,
         resolved: alloc::vec::Vec<ResolvedPin>,
         matches: alloc::vec::Vec<Option<TaskId>>,
-        rasteriser: SandboxRasteriser,
-        icons: IconCache,
     }
 
     /// The production [`IconRasteriser`]: untrusted icon bytes go to the
@@ -1450,13 +1523,8 @@ mod program {
     }
 
     /// Load the user's pin store (reporting an unusable one loudly) into a
-    /// service over the production file seams, alongside the sandboxed
-    /// icon pipeline.
-    ///
-    /// `icons` is the seat's ready-built artwork cache: the caller owns
-    /// the output size, the seat, the pressure gauge, and the audit sink
-    /// that classify and bound it.
-    fn load_pin_service(icons: IconCache) -> PinPanel {
+    /// service over the production file seams.
+    fn load_pin_service() -> PinPanel {
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         let (store, warning) = SessionPins::load(&mut VfsFileReader, home);
         if let Some(warning) = warning {
@@ -1466,10 +1534,6 @@ mod program {
             service: PinService::new(VfsFileReader, VfsFileWriter, store),
             resolved: alloc::vec::Vec::new(),
             matches: alloc::vec::Vec::new(),
-            rasteriser: SandboxRasteriser {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-            },
-            icons,
         }
     }
 
@@ -1538,16 +1602,17 @@ mod program {
 
     /// Push the resolved pins (with their live matches and artwork) into
     /// the taskbar's strip and re-present. Artwork is rasterised at the
-    /// strip's own icon geometry through the sandboxed pipeline, served
-    /// from the cache on every later push.
+    /// strip's own icon geometry through the shell's sandboxed pipeline,
+    /// served from its one cache on every later push.
     fn push_pin_views(pins: &mut PinPanel, shell: &mut DesktopShell, compositor: &mut Compositor) {
         let side = shell.session().taskbar().pin_icon_side(compositor.scale());
+        let (cache, reader, rasteriser) = shell.artwork_parts();
         let views = build_pin_views(
             &pins.resolved,
             &pins.matches,
-            &mut VfsFileReader,
-            &mut pins.rasteriser,
-            &mut pins.icons,
+            reader,
+            rasteriser,
+            cache,
             side,
         );
         shell.set_pins(compositor, views);
@@ -1588,6 +1653,7 @@ mod program {
         pins: &mut PinPanel,
         switchboard: &mut Option<u64>,
         pending_open: &mut Option<CommandSection>,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
     ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -1903,7 +1969,12 @@ mod program {
                 // bundle at the drop index. The release still reaches the app
                 // either way, so its own gesture state always unwinds.
                 InputResponse::ClientPointerReleased { window, local } => {
-                    resolve_drop(window, pins, shell, compositor, windows);
+                    resolve_drop(
+                        windows.ipc_id(window).map(DragOrigin::Window),
+                        pins,
+                        shell,
+                        compositor,
+                    );
                     if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
@@ -1936,6 +2007,11 @@ mod program {
                 | InputResponse::Moved { .. }
                 | InputResponse::MoveEnded { .. }
                 | InputResponse::Resized { .. }
+                // A pointer motion or key that reached no window belongs to
+                // the desktop's icon column, which `route_desktop` has
+                // already applied; nothing is forwarded app-ward.
+                | InputResponse::DesktopPointerMoved
+                | InputResponse::DesktopKey { .. }
                 | InputResponse::Ignored => {}
             },
             ShellOutcome::Taskbar(TaskbarResponse::OpenFiles) => {
@@ -1965,8 +2041,24 @@ mod program {
                 // Re-read the stores each time the popup opens, so an edit
                 // made through `applib` (or a fresh install) shows without
                 // restarting the session. Two small documents: cheap, and
-                // always current.
+                // always current. What each installed application opens is
+                // read from the same bundles, so it is refreshed here and
+                // nowhere else.
                 refresh_library(shell, compositor);
+                *associations = desktop_associations(shell);
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::PinDragOffered { entry }) => {
+                // Every popup row is a catalogued entry, so the offer names
+                // that identity directly — the store records what the
+                // catalog vouches for, never a path guessed from a label.
+                pins.service
+                    .offer_drag(DragOrigin::Library, PinTarget::Entry(entry));
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::PinDragDropped) => {
+                resolve_drop(Some(DragOrigin::Library), pins, shell, compositor);
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::PinDragWithdrawn) => {
+                pins.service.withdraw_drag(DragOrigin::Library);
             }
             ShellOutcome::Taskbar(TaskbarResponse::ActivatePin { index }) => {
                 // A pinned application with no live window: launch it (or
@@ -2056,10 +2148,14 @@ mod program {
             // session adds nothing. Listed rather than caught by a wildcard
             // so a new outcome fails the build instead of being dropped in
             // silence.
+            ShellOutcome::Taskbar(TaskbarResponse::LibraryDismissed) => {
+                // The popup is the pin drag source, so a drag it had offered
+                // dies with it rather than staying armed for a later click.
+                pins.service.withdraw_drag(DragOrigin::Library);
+            }
             ShellOutcome::Ignored
             | ShellOutcome::Taskbar(
                 TaskbarResponse::Ignored
-                | TaskbarResponse::LibraryDismissed
                 | TaskbarResponse::TaskActivated { .. }
                 | TaskbarResponse::DismissNotification { .. }
                 | TaskbarResponse::ClockPressed,
@@ -2107,21 +2203,25 @@ mod program {
     }
 
     /// Resolve a drop of the armed app-reference drag: a primary release
-    /// from the offering window that lands on the bar's pin band pins the
-    /// offered bundle at the drop index; anywhere else, the gesture simply
-    /// ends (the shared, host-tested `resolve_pin_drop` policy). A refused
-    /// admission is reported loudly; the desktop carries on.
+    /// from the origin that offered it, landing on the bar's pin band, pins
+    /// the offered application at the drop index; anywhere else, the gesture
+    /// simply ends (the shared, host-tested `resolve_pin_drop` policy). A
+    /// refused admission is reported loudly; the desktop carries on.
+    ///
+    /// One drop path for both origins — an application window offering one
+    /// of its own bundles, and a program dragged out of the library popup —
+    /// so the two can never admit a pin on different terms.
     fn resolve_drop(
-        window: tairix_wm::WindowId,
+        origin: Option<DragOrigin>,
         pins: &mut PinPanel,
         shell: &DesktopShell,
         compositor: &Compositor,
-        windows: &SessionWindows,
     ) {
         let layout = shell.session().taskbar().layout(compositor.scale());
         let decision = tairix_desktop_session::resolve_pin_drop(
             &mut pins.service,
-            windows.ipc_id(window),
+            origin,
+            shell.session().taskbar().library().catalog(),
             &layout,
             shell.router().pointer(),
         );
@@ -2137,6 +2237,135 @@ mod program {
                 io::write_stderr_line("desktop: pin drop refused");
             }
         }
+    }
+
+    /// The file-type associations of every catalogued application: each
+    /// entry's bundle manifest, decoded through the shared, fail-closed
+    /// [`association_from_appinfo`].
+    ///
+    /// The program-library catalog is the session's existing record of what
+    /// is installed, so the desktop reads no directory of its own to find
+    /// out what can open a file. A bundle whose manifest is missing or will
+    /// not decode simply claims nothing.
+    fn desktop_associations(shell: &DesktopShell) -> alloc::vec::Vec<AppAssociation> {
+        shell
+            .session()
+            .taskbar()
+            .library()
+            .catalog()
+            .entries()
+            .filter_map(|entry| {
+                let bundle = entry.bundle().as_str();
+                let manifest = alloc::format!("{bundle}/AppInfo");
+                let bytes = VfsFileReader.read(&manifest).ok()?;
+                association_from_appinfo(bundle, &bytes)
+            })
+            .collect()
+    }
+
+    /// Apply one shell outcome to the desktop's icon column and carry out
+    /// whatever it asks for.
+    ///
+    /// The window manager reports a pointer or key event that reached no
+    /// window as one of the desktop outcomes, and those drive the column's
+    /// hover, selection, keyboard, and activation. Every other outcome means
+    /// the gesture went somewhere else; when the pointer is over a window or
+    /// the bar that is a departure, which clears the hover and arms the next
+    /// arrival's re-listing.
+    ///
+    /// A refusal — a file no installed application opens — is written to
+    /// `stderr` and changes nothing else.
+    fn route_desktop<S: DirectorySource>(
+        outcome: &tairix_desktop_session::ShellOutcome,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launched: &mut LaunchTable,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
+        now_ns: u64,
+    ) {
+        // The desktop holds the keyboard exactly when no window does, so the
+        // focus ring follows the window manager's one notion of focus rather
+        // than a second one kept here.
+        let mut redraw = desktop.set_focused(shell.router().focused().is_none());
+        let pointer = shell.router().pointer();
+        let layout = shell.desktop_layout(compositor, desktop);
+        let acted = match outcome {
+            tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
+                InputResponse::DesktopPointerMoved => {
+                    desktop.pointer_moved(pointer, &layout, now_ns)
+                }
+                InputResponse::DesktopPressed => {
+                    desktop.press(pointer, &layout, now_ns, associations)
+                }
+                InputResponse::DesktopKey { key, pressed, .. } => {
+                    desktop.key(*key, *pressed, &layout, associations)
+                }
+                _ => departed(desktop, compositor, pointer),
+            },
+            _ => departed(desktop, compositor, pointer),
+        };
+        redraw |= acted.redraw;
+        match acted.action {
+            Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
+                record_launch(
+                    launched,
+                    spawn_app(FILES_RUN_PATH.as_bytes(), &[path.as_bytes()]),
+                    FILES_LABEL,
+                    FILES_RUN_PATH,
+                );
+            }
+            Some(DesktopAction::Activate(DesktopActivation::Launch {
+                run_path,
+                label,
+                argument,
+            })) => {
+                let args: alloc::vec::Vec<&[u8]> = argument
+                    .iter()
+                    .map(alloc::string::String::as_bytes)
+                    .collect();
+                record_launch(
+                    launched,
+                    spawn_app(run_path.as_bytes(), &args),
+                    &label,
+                    &run_path,
+                );
+            }
+            Some(DesktopAction::Refuse(reason)) => {
+                let _ = write!(Stderr, "{reason}");
+            }
+            None => {}
+        }
+        if acted.relisted {
+            // The user's own files demonstrably changed under the desktop, so
+            // this is the honest moment to re-read what is installed as well:
+            // a program installed since bring-up can open a document from
+            // here without waiting for the library popup to be opened. A
+            // re-list that found nothing changed costs none of this.
+            refresh_library(shell, compositor);
+            *associations = desktop_associations(shell);
+        }
+        if redraw {
+            shell.present_desktop(compositor, desktop);
+        }
+    }
+
+    /// The desktop's answer to an outcome that was not its own: a pointer
+    /// resting over a window or the bar has left the desktop, and anything
+    /// else leaves it exactly as it is.
+    ///
+    /// Asking the compositor what is under the pointer is total, so window
+    /// furniture and the bar's own surfaces count as a departure just like a
+    /// window's content does.
+    fn departed<S: DirectorySource>(
+        desktop: &mut Desktop<S>,
+        compositor: &Compositor,
+        pointer: tairix_wm::Point,
+    ) -> DesktopOutcome {
+        if compositor.window_at(pointer).is_some() {
+            return desktop.pointer_left();
+        }
+        DesktopOutcome::ignored()
     }
 
     /// An idempotent bundle activation: raise the running copy's window
@@ -2161,7 +2390,12 @@ mod program {
             }
             return;
         }
-        record_launch(launched, spawn_app(run_path.as_bytes()), label, run_path);
+        record_launch(
+            launched,
+            spawn_app(run_path.as_bytes(), &[]),
+            label,
+            run_path,
+        );
     }
 
     /// The compositor window of the first served window owned by `pid`,
@@ -2200,7 +2434,12 @@ mod program {
         };
         let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
         let label = chosen.name().as_str();
-        record_launch(launched, spawn_app(run_path.as_bytes()), label, &run_path);
+        record_launch(
+            launched,
+            spawn_app(run_path.as_bytes(), &[]),
+            label,
+            &run_path,
+        );
     }
 
     /// (Re)load the program library from its on-disk stores and hand the
@@ -2298,7 +2537,7 @@ mod program {
     /// child still runs under the session's attested credential and console
     /// ([`CONSOLE_INHERIT`]/[`SPAWN_UID_INHERIT`]) — the environment is data and
     /// carries no authority (§4, §5.4).
-    fn spawn_app(path: &[u8]) -> i64 {
+    fn spawn_app(path: &[u8], args: &[&[u8]]) -> i64 {
         let count = tairix_rt::env_count();
         let mut env: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(count as usize);
         for index in 0..count {
@@ -2306,7 +2545,7 @@ mod program {
                 env.push(entry);
             }
         }
-        tairix_rt::spawn_with(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &[], &env)
+        tairix_rt::spawn_with(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, args, &env)
     }
 
     /// Record a just-issued launch. Asynchronous launch admits the child and

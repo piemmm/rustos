@@ -12,9 +12,14 @@
 //! a kind plus a single theme colour into a [`VectorIcon`]; the glyphs are
 //! monochrome silhouettes tinted by the caller, so re-theming is data, not
 //! new code.
+//!
+//! [`disk_icon`] maps the storage medium a mounted volume reports onto the
+//! drive kind that represents it, so the file manager and the desktop draw
+//! the same icon for the same medium rather than each guessing.
 
 use alloc::vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_raster::Color;
 
 use crate::vector::{IconLayer, VectorIcon};
@@ -28,6 +33,15 @@ const DESIGN: u32 = 24;
 /// A closed set: adding a glyph is a new variant plus its coordinate table
 /// (and its [`index`](Self::index) slot), never an open-ended string lookup
 /// at the draw site.
+///
+/// A fine-grained file-class kind (an HTML or Rust text file, a PNG or SVG
+/// image, a specific disk medium) deliberately shares its broad family's
+/// built-in glyph: [`builtin_icon`] draws a `TextHtml` as the plain text
+/// glyph, an `ImagePng` as the plain image glyph, and every `Disk*` as the
+/// one disk glyph. The distinction still names a distinct on-disk asset id,
+/// so a system that ships the raster artwork resolves the precise icon while
+/// one that does not still shows a meaningful family glyph rather than the
+/// bare [`Generic`](Self::Generic) placeholder — fallback stays total.
 ///
 /// `Ord` orders the cache-invalidation candidates a reclaim cache indexes,
 /// not a meaningful glyph ordering — the taskbar's icon cache
@@ -84,6 +98,37 @@ pub enum IconKind {
     /// Three horizontal fader tracks with a knob offset differently on each,
     /// for the taskbar's always-trailing Switchboard tray capsule.
     Switchboard,
+    /// A long-running system service bundle; shares the app-bundle glyph.
+    ServiceBundle,
+    /// An HTML document; shares the text glyph.
+    TextHtml,
+    /// A Rust source file; shares the text glyph.
+    TextRust,
+    /// A Java source file; shares the text glyph.
+    TextJava,
+    /// A shell script; shares the text glyph.
+    ShellScript,
+    /// A PDF document; shares the text glyph.
+    Pdf,
+    /// A PNG image; shares the image glyph.
+    ImagePng,
+    /// A JPEG image; shares the image glyph.
+    ImageJpeg,
+    /// A GIF image; shares the image glyph.
+    ImageGif,
+    /// An SVG image; shares the image glyph.
+    ImageSvg,
+    /// A RISC OS sprite image; shares the image glyph.
+    ImageSprite,
+    /// A drive whose medium is unknown or paravirtual: the generic disk
+    /// glyph, drawn when nothing better can be said honestly.
+    Disk,
+    /// A rotational hard disk; shares the disk glyph.
+    DiskHard,
+    /// A solid-state disk; shares the disk glyph.
+    DiskSolidState,
+    /// A USB mass-storage disk; shares the disk glyph.
+    DiskUsb,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
 }
@@ -118,6 +163,21 @@ impl IconKind {
             "empty-trash" => Self::EmptyTrash,
             "library" => Self::Library,
             "switchboard" => Self::Switchboard,
+            "service-bundle" => Self::ServiceBundle,
+            "text-html" => Self::TextHtml,
+            "text-x-rust" => Self::TextRust,
+            "text-x-java" => Self::TextJava,
+            "application-x-shellscript" => Self::ShellScript,
+            "application-pdf" => Self::Pdf,
+            "image-png" => Self::ImagePng,
+            "image-jpeg" => Self::ImageJpeg,
+            "image-gif" => Self::ImageGif,
+            "image-svg-xml" => Self::ImageSvg,
+            "image-x-riscos-sprite" => Self::ImageSprite,
+            "disk" => Self::Disk,
+            "disk-hard" => Self::DiskHard,
+            "disk-solid-state" => Self::DiskSolidState,
+            "disk-usb" => Self::DiskUsb,
             _ => Self::Generic,
         }
     }
@@ -156,6 +216,21 @@ impl IconKind {
             Self::EmptyTrash => 21,
             Self::Library => 22,
             Self::Switchboard => 23,
+            Self::ServiceBundle => 24,
+            Self::TextHtml => 25,
+            Self::TextRust => 26,
+            Self::TextJava => 27,
+            Self::ShellScript => 28,
+            Self::Pdf => 29,
+            Self::ImagePng => 30,
+            Self::ImageJpeg => 31,
+            Self::ImageGif => 32,
+            Self::ImageSvg => 33,
+            Self::ImageSprite => 34,
+            Self::Disk => 35,
+            Self::DiskHard => 36,
+            Self::DiskSolidState => 37,
+            Self::DiskUsb => 38,
         }
     }
 
@@ -193,7 +268,36 @@ impl IconKind {
             Self::EmptyTrash => "empty-trash",
             Self::Library => "library",
             Self::Switchboard => "switchboard",
+            Self::ServiceBundle => "service-bundle",
+            Self::TextHtml => "text-html",
+            Self::TextRust => "text-x-rust",
+            Self::TextJava => "text-x-java",
+            Self::ShellScript => "application-x-shellscript",
+            Self::Pdf => "application-pdf",
+            Self::ImagePng => "image-png",
+            Self::ImageJpeg => "image-jpeg",
+            Self::ImageGif => "image-gif",
+            Self::ImageSvg => "image-svg-xml",
+            Self::ImageSprite => "image-x-riscos-sprite",
+            Self::Disk => "disk",
+            Self::DiskHard => "disk-hard",
+            Self::DiskSolidState => "disk-solid-state",
+            Self::DiskUsb => "disk-usb",
         }
+    }
+}
+
+/// The icon that represents a mounted volume's storage medium.
+///
+/// An unknown medium and a paravirtual device both resolve to the generic
+/// drive icon rather than a guessed one.
+#[must_use]
+pub const fn disk_icon(medium: Option<BlkDeviceClass>) -> IconKind {
+    match medium {
+        Some(BlkDeviceClass::Rotational) => IconKind::DiskHard,
+        Some(BlkDeviceClass::SolidState) => IconKind::DiskSolidState,
+        Some(BlkDeviceClass::Removable) => IconKind::DiskUsb,
+        Some(BlkDeviceClass::Virtual) | None => IconKind::Disk,
     }
 }
 
@@ -211,9 +315,22 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Folder => folder(color),
         IconKind::FolderOpen => folder_open(color),
         IconKind::File => file(color),
-        IconKind::AppBundle => app_bundle(color),
-        IconKind::Text => text(color),
-        IconKind::Image => image(color),
+        // The app-bundle, text, and image families each share one built-in
+        // glyph: the fine-grained kinds differ only in their shipped raster
+        // artwork, so a system without it still shows the broad family glyph.
+        IconKind::AppBundle | IconKind::ServiceBundle => app_bundle(color),
+        IconKind::Text
+        | IconKind::TextHtml
+        | IconKind::TextRust
+        | IconKind::TextJava
+        | IconKind::ShellScript
+        | IconKind::Pdf => text(color),
+        IconKind::Image
+        | IconKind::ImagePng
+        | IconKind::ImageJpeg
+        | IconKind::ImageGif
+        | IconKind::ImageSvg
+        | IconKind::ImageSprite => image(color),
         IconKind::Archive => archive(color),
         IconKind::Executable => executable(color),
         IconKind::NavBack => nav_back(color),
@@ -227,6 +344,9 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::EmptyTrash => empty_trash(color),
         IconKind::Library => library(color),
         IconKind::Switchboard => switchboard(color),
+        IconKind::Disk | IconKind::DiskHard | IconKind::DiskSolidState | IconKind::DiskUsb => {
+            disk(color)
+        }
         IconKind::Generic => generic(color),
     };
     VectorIcon::new(DESIGN, layers)
@@ -530,6 +650,40 @@ fn switchboard(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, KNOB2),
         IconLayer::from_points(color, LINE3),
         IconLayer::from_points(color, KNOB3),
+    ]
+}
+
+/// A storage drive: a cylinder — a top platter disc over a drum body — the
+/// classic disk/storage silhouette, so it reads at 16px and stays distinct
+/// from the document and folder shapes. Shared by every fine-grained disk
+/// medium (hard, solid-state, floppy, USB), which differ only in their
+/// shipped raster artwork, not this fallback.
+fn disk(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const PLATTER: &[(i32, i32)] = &[
+        (4, 7),
+        (8, 5),
+        (12, 5),
+        (16, 5),
+        (20, 7),
+        (16, 9),
+        (12, 9),
+        (8, 9),
+    ];
+    const BODY: &[(i32, i32)] = &[
+        (4, 7),
+        (8, 9),
+        (12, 9),
+        (16, 9),
+        (20, 7),
+        (20, 17),
+        (16, 19),
+        (12, 19),
+        (8, 19),
+        (4, 17),
+    ];
+    vec![
+        IconLayer::from_points(color, PLATTER),
+        IconLayer::from_points(color, BODY),
     ]
 }
 

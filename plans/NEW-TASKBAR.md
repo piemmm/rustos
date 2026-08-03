@@ -12,8 +12,9 @@ full **icon bar** the desktop needs:
 - to its right, a permanent **File Manager** icon that opens `files.app`
   on its default view;
 - then a user-editable strip of **pinned application shortcuts** (created by
-  dragging from the file manager / desktop or by right-click → *Pin to
-  taskbar*);
+  dragging an application out of the file manager or the program-library
+  popup onto the bar, or by right-click → *Pin to taskbar*; the desktop is
+  deliberately not a drag source — T7 states why);
 - on the right, the **notification area**;
 - and, always right-most and immovable, the **Switchboard** icon — the
   system-overview surface that implements `plans/desktop1.png` and
@@ -37,8 +38,8 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`done` — **T1–T15 complete**, including T15's documentation deliverable and
-its QEMU pin + Switchboard vertical.
+`done` — **T1–T16 complete**, including T15's documentation deliverable and
+its QEMU pin + Switchboard vertical, and T16's desktop icon surface.
 Each stage's done-state section below records what it now guarantees. The
 **Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
@@ -353,8 +354,9 @@ the authority at the right granularity and, if so, uses it.
 Each stage is independently reviewable, ends green on the whole-project gate
 (§7), and lands its surface fully (§27). Stages are ordered by dependency;
 T1–T3 (library data), T4–T5 (library UI), T6–T7 (pins), T8–T9 (tray + icon),
-T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate). T9 needs the T10
-tray-signal feed for its live states, so the two land together.
+T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate), T16 (the desktop icon
+surface). T9 needs the T10 tray-signal feed for its live states, so the two
+land together.
 
 ## T1 — `lib/proglib`: the program-library catalog engine — **done**
 
@@ -684,29 +686,56 @@ The two ways a user creates a pin. What now stands:
   (`PinEntry { entry }` through the bar's context menu, T6), so a
   catalogued app pins by its catalog identity and an uncatalogued bundle by
   its path.
-- **Drag-to-taskbar**: the files app's drag source is `lib/browse`'s pure
-  `BundleDrag` detector (primary press on a bundle row arms; the first
-  motion beyond `DRAG_THRESHOLD_PX = 6` sends exactly one `DragOffer` per
-  gesture; `Escape` sends `DragWithdraw`; a release disarms locally; a
-  refused offer disarms silently). The session arms at most **one** offer
-  (per gesture, keyed to the offering channel window; a new offer replaces,
-  a withdraw disarms only its own window). The drop is the shared
-  host-tested `resolve_pin_drop` policy: a primary release from the
-  offering served window consumes the offer either way; landing on the pin
-  band (`BarLayout::pin_drop_index` — the strip plus the task-list region,
-  so a first pin lands on an empty strip) re-validates the bundle fully and
-  pins at the drop index; anywhere else the gesture simply ends. Dragging
-  from the desktop is gated on the desktop-icons work (not yet present) —
-  the drop target, payload, and session handling are complete, so the
-  desktop is a later *source*, not new taskbar machinery.
+- **Drag-to-taskbar**: there are exactly **two** drag sources, and both
+  drive `lib/browse`'s one pure `BundleDrag` detector (primary press arms;
+  the first motion beyond `DRAG_THRESHOLD_PX = 6` offers exactly once per
+  gesture; `Escape` withdraws; a release disarms locally; a refused offer
+  disarms silently) — the **files app**, offering a bundle row's path over
+  its window channel, and the **program-library popup**, offering the
+  pressed row's `EntryId` (a folder header arms nothing and still folds on
+  the press; a press that never travels is an ordinary click and launches).
+  The session arms at most **one** offer, keyed by `DragOrigin`
+  (`Window(id)` or `Library`): `take_drag_for` / `withdraw_drag` act only
+  for the origin that armed it, so neither source can claim or withdraw the
+  other's gesture, and dismissing the popup withdraws its offer rather than
+  leaving it armed for a later click. The drop is the shared host-tested
+  `resolve_pin_drop` policy: a primary release from the offering origin
+  consumes the offer either way; landing on the pin band
+  (`BarLayout::pin_drop_index` — the strip plus the task-list region, so a
+  first pin lands on an empty strip) re-validates the target through
+  `PinService::pin_target_at` — a bundle against its manifest, an entry
+  against the live catalog — and pins at the drop index; anywhere else the
+  gesture simply ends. An already-pinned target is refused rather than
+  duplicated, and an application uninstalled between the drag and the drop
+  is refused rather than recorded as a pin that can never launch.
+- **The desktop is deliberately not a drag source, and never will be.** An
+  installed application lives **only** in an application store — machine-wide
+  `/Apps`, or the user's own `/Users/<u>/Apps`. A `.app` directory a user
+  drops in their `Desktop` folder is therefore a directory *shaped like* an
+  application, not an installed one, and `BundlePath`'s store rule correctly
+  refuses it: the pin store may only record something the system can vouch
+  for and launch. A desktop pin gesture could never succeed — and a gesture
+  that can never succeed is not a feature, it is a promise the system cannot
+  keep. The program library is the source instead because every row it
+  lists is a **catalogued entry by construction**, so the gesture names an
+  identity the store records directly (`PinTarget::Entry`) with nothing
+  guessed from a path. Pinning something that only *lives* on the desktop is
+  served by installing it — `applib add` (T2) catalogues a bundle, after
+  which it is a library row like any other. The desktop icon surface itself
+  is T16.
 
 Tested in the abi suites (round-trip + refusal matrix + fuzz for the three
 ops), the window-engine suite (ownership binding, decision→status mapping,
 fail-closed defaults), the browse suites (menu row/order/enable rules; the
-drag detector's arm/threshold/one-offer/withdraw semantics), and the
-session suite (request validation decisions, drag management, and the
-drop-policy matrix: unarmed / unserved window / landing drop persists at
-the index / stray release ends the gesture).
+drag detector's arm/threshold/one-offer/withdraw semantics), the taskbar
+suite (the library popup's gesture end to end: a press that barely moves
+still launches, one offer per gesture however far the pointer goes on, the
+release drops without launching either the pressed row or the row it ended
+over, `Escape` withdraws and keeps the popup open, and a folder header arms
+nothing), and the session suite (request validation decisions, drag
+management including origin isolation — one origin's withdraw leaves the
+other's offer armed — and the drop-policy matrix: unarmed / unserved window
+/ landing drop persists at the index / stray release ends the gesture).
 
 ## T8 — Notification area upgrade — **done**
 
@@ -1376,15 +1405,88 @@ same change.
 **Done when**: docs current, the integration vertical green, and the
 whole-project gate green — all three met.
 
+## T16 — The desktop icon surface — **done**
+
+The user's own `Desktop` folder, shown as icons on the desktop itself. What
+now stands:
+
+- **A desktop layer in the compositor** (`userland/gui/wm`): an optional
+  `desktop: Option<Surface>` composited between the background fill and
+  every window (`set_desktop` / `clear_desktop` / `desktop_bounds`), damaged
+  exactly over what it covered and encoded as its own layer beneath the
+  windows on the accelerated path. It carries **no window id**, so it can
+  never be raised, focused, closed, or reached through the ordinary window
+  z-order — it is the floor, not the bottom window. Input belonging to no
+  window arrives as `InputResponse::DesktopPointerMoved` and
+  `InputResponse::DesktopKey { key, modifiers, pressed }`;
+  `DesktopPointerMoved` carries **no position**, because the router already
+  holds the one authoritative pointer (`InputRouter::pointer`) and a second
+  copy on the wire could disagree with it.
+- **One icon grid, two flows** (`lib/browse::layout`): `GridView` is
+  parameterised by `GridFlow` — `RowsFromLeading` for the file manager's
+  row-major scrolling grid, `ColumnsFromTrailing` for the desktop's
+  trailing-edge column that grows a new column inward as it fills — so both
+  share one cell geometry, one hit-test, and one set of counts
+  (`cells_per_line`, `lines_total`, `visible_lines`, `visible_range`). The
+  tile is shared too: `grid_tile`, `entry_label`, and `grid_metrics` are
+  public, so the desktop paints the *same* `Card` as the file manager rather
+  than a lookalike — there is no second icon-tile painter.
+- **The surface** (`userland/gui/session::desktop`): `Desktop<S:
+  DirectorySource>` lists the user's `Desktop` folder through the same
+  directory seam the trusted file picker uses, sorts and classifies it with
+  the shared engine, and paints through the shell's icon-artwork lookup —
+  shipped folder artwork for a folder, content-class artwork for a file, and
+  the built-in glyph when an asset is absent or refused, so a tile can never
+  blank. Hover, press to select, press on empty desktop to clear, the shared
+  `DoubleClickTracker` to activate, and — while the desktop holds the
+  keyboard — arrows to move (down/up one icon, left/right one whole column),
+  `Enter` to activate, `Escape` to clear. A folder that will not list shows
+  nothing rather than failing.
+- **Activation resolves by kind, and refuses loudly**: a directory opens the
+  file manager *at that path* (its first argument, which the files app now
+  honours); an application bundle launches its `Run` binary; a plain file
+  resolves its association through the catalog the session holds and
+  launches that application with the file as its argument; and a file
+  nothing is associated with is refused with the reason on `stderr`, the
+  icon left selected. Every launch rides the session's existing asynchronous
+  path (`plans/FIX-DESKTOP.md`), so the compositor never blocks on one.
+- **Re-listing is gesture-driven and rate-limited, never timed.** The system
+  has no filesystem-change notification, so the desktop re-lists at
+  bring-up, when the session asks (a forced re-list ignores the limit), and
+  on pointer arrival — no more often than `RELIST_MIN_INTERVAL_NS`, so
+  sweeping the pointer on and off cannot turn a gesture into a stream of
+  directory reads. There is deliberately **no timer and no polling loop**: a
+  periodically-waking desktop would keep a core busy to discover nothing. A
+  re-list keeps the selection on the same named icon, and one that changed
+  the folder also refreshes the library catalog and the file associations
+  (`DesktopOutcome::relisted`), so an application installed after bring-up
+  is picked up without a restart.
+- **Not a pin drag source** — T7 states why the store rule makes a desktop
+  pin gesture one that could never succeed.
+
+Tested in the wm suite (the layer draws over the background and under every
+window, a layer smaller than the screen leaves the background showing,
+setting and clearing it damages exactly what it covered, the accelerated
+scene carries it beneath the windows, and the two desktop input responses)
+and in `userland/gui/session/src/desktop_tests.rs` (shared sort order, an
+unlistable folder, selection kept or dropped across a re-list, the rate
+limit and the forced re-list, hover and its clearing, press-to-select and
+clear-on-empty, the keyboard model with its clamps and its silence when
+unfocused, every activation branch including the unassociated-file refusal
+and the too-slow second click, and painting — every shown icon draws even
+with no artwork store at all, an empty folder leaves the layer fully
+transparent).
+
+Docs: `userland/gui/wm/README.md`, `userland/gui/session/README.md`,
+`docs/src/desktop/wm.md`, `docs/src/desktop/session.md`,
+`docs/src/desktop/apps.md`.
+
 ---
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 
-- **Desktop-icon drag source** (T7): depends on the not-yet-present
-  desktop-icons work; the taskbar drop-target and payload land now, the
-  desktop source is a later, separate source.
-
-(The T10 questions are settled and recorded in their done-state sections:
-`CAP_PROC_CONTROL` was minted with its live enforcement point — no earlier
-capability fit — and the monitor service is session-spawned, with the
-capsule degrading calmly when it is absent.)
+None outstanding. The settled ones are recorded in their own done-state
+sections: the pin drag source is the program library and deliberately not
+the desktop (T7); `CAP_PROC_CONTROL` was minted with its live enforcement
+point — no earlier capability fit — and the monitor service is
+session-spawned, with the capsule degrading calmly when it is absent (T10).

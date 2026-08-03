@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fs::{Mode, Path, Vfs, VfsError};
+use crate::fs::{Mode, MountBacking, Path, Vfs, VfsError};
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, MountFlags, NodeId, NodeInfo, NodeKind, NodeTimes,
@@ -35,6 +35,13 @@ const MOCK_TIMES: NodeTimes = NodeTimes {
 
 fn p(text: &str) -> Path {
     Path::parse(text).expect("valid path")
+}
+
+/// A mount backing by driver `raw`. Delegation is indifferent to the
+/// device medium, so these fixtures record it as unknown rather than
+/// naming one no mock device reported.
+fn backing_of(raw: u64) -> MountBacking {
+    MountBacking::new(DriverHandle::from_raw(raw).expect("non-zero handle"), None)
 }
 
 fn cred(uid: u32, gid: u32, caps: &CapabilitySet) -> Credentials<'_> {
@@ -238,9 +245,9 @@ fn backed_vfs(mount_mode: u16) -> Vfs {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
         .expect("create mount point");
-    let handle = DriverHandle::from_raw(7).expect("non-zero handle");
+    let backing = backing_of(7);
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), MountFlags::READ_ONLY, Some(handle))
+        .mount(p("/Storage/usb0"), MountFlags::READ_ONLY, Some(backing))
         .expect("mount backed");
     vfs
 }
@@ -470,10 +477,10 @@ fn backed_vfs_rw(mount_mode: u16) -> Vfs {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
         .expect("create mount point");
-    let handle = DriverHandle::from_raw(8).expect("non-zero handle");
+    let backing = backing_of(8);
     let flags = MountFlags::from_bits(0).expect("empty flags");
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), flags, Some(handle))
+        .mount(p("/Storage/usb0"), flags, Some(backing))
         .expect("mount backed");
     vfs
 }
@@ -675,9 +682,8 @@ fn delegated_mutation_of_mount_root_is_invalid() {
 /// lands a top-level directory on the volume.
 fn root_backed_rw_vfs() -> Vfs {
     let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
-    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     vfs.mounts_write()
-        .back_root(handle)
+        .back_root(backing_of(9))
         .expect("back the root mount");
     vfs
 }
@@ -714,10 +720,9 @@ fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
     let vfs = root_backed_rw_vfs();
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    let handle = DriverHandle::from_raw(11).expect("non-zero handle");
     let flags = MountFlags::from_bits(0).expect("empty flags");
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), flags, Some(handle))
+        .mount(p("/Storage/usb0"), flags, Some(backing_of(11)))
         .expect("mount a second backed volume");
     let mut fs = RwMockFs::new();
     vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)

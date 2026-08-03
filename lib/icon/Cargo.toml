@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The storage-medium vocabulary a mounted volume reports (`BlkDeviceClass`).
+# The icon library maps a medium onto its drive glyph in one place rather
+# than every desktop consumer restating the mapping.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The pixel buffer and the single supersampled anti-aliased polygon-fill path
 # icons rasterise through. The icon library owns no scan converter or colour
 # arithmetic of its own (§2.2); it draws through `lib/raster`.
@@ -19,6 +23,14 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # converts an `SvgImage` straight onto its vector form without a second
 # rasterisation path (§2.2).
 tairix-svg = { path = "../svg", version = "=0.0.0" }
+# The reclaimable-memory model the shared artwork decode cache is built on:
+# both the desktop session and the file manager retain rasterised icon
+# artwork through one pressure-governed, budgeted cache rather than each
+# process inventing its own (plans/SMARTRAM.md).
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+# The audit sink the reclaimable-memory cache logs classification and
+# eviction through — supplied by the process that builds the cache.
+tairix-log = { path = "../log", version = "=0.0.0" }
 
 [lints]
 workspace = true

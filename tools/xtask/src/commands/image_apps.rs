@@ -618,6 +618,21 @@ fn build_bundle(
     );
     contents.push((BundleEntry::Run.as_str().to_string(), run.as_slice()));
     contents.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // A declared `library-icon` is a file the desktop rasterises from the
+    // bundle's own `Resources/`; the discovered resource bytes are the exact
+    // bytes the image ships and the desktop would decode, so verifying them
+    // here — where the bundle is composed — is verifying what the image
+    // actually carries.
+    verify_library_icon(
+        &bundle_dir,
+        app.manifest.library_icon.as_deref(),
+        tairix_syshelp::RESOURCE_FILES
+            .iter()
+            .filter(|res| res.bundle == bundle_dir)
+            .map(|res| (res.file, res.bytes.len())),
+    )?;
+
     let digests: Vec<BundleFileDigest<'_>> = contents
         .iter()
         .map(|(path, bytes)| BundleFileDigest { path, bytes })
@@ -665,4 +680,100 @@ fn verify_composed_appinfo(bytes: &[u8], name: &str) -> Result<(), String> {
         return Err(format!("image: composed {name} AppInfo is unsigned"));
     }
     Ok(())
+}
+
+/// Verify a bundle's declared `library-icon` is one the desktop could
+/// actually draw, from the bundle's own `Resources/`.
+///
+/// `resources` yields `(file_name, byte_len)` for every file in the bundle's
+/// `Resources/`. A bundle with no declared icon passes trivially. A declared
+/// icon must (a) be present in `Resources/` and (b) be at most
+/// [`tairix_icon::MAX_ARTWORK_BYTES`] — the same bound the desktop refuses
+/// artwork against *before* it decodes it. Without this check a bundle that
+/// ships a missing or over-large icon would render as a fallback glyph
+/// forever with nothing telling the author; failing the build closed here,
+/// with a message naming the bundle, the file, its size, and the bound, turns
+/// that silent failure into an actionable one.
+///
+/// # Errors
+///
+/// Returns an actionable build-error message when a declared icon is absent
+/// from `Resources/` or exceeds the artwork byte bound.
+fn verify_library_icon<'a>(
+    bundle_dir: &str,
+    library_icon: Option<&str>,
+    resources: impl IntoIterator<Item = (&'a str, usize)>,
+) -> Result<(), String> {
+    let Some(icon) = library_icon else {
+        return Ok(());
+    };
+    let size = resources
+        .into_iter()
+        .find_map(|(file, len)| (file == icon).then_some(len))
+        .ok_or_else(|| {
+            format!(
+                "image: {bundle_dir} declares library-icon `{icon}`, \
+                 but no Resources/{icon} is present in the bundle"
+            )
+        })?;
+    if size > tairix_icon::MAX_ARTWORK_BYTES {
+        return Err(format!(
+            "image: {bundle_dir} library-icon Resources/{icon} is {size} bytes, \
+             exceeding the {}-byte desktop artwork bound; the desktop would \
+             refuse it before decoding and draw a fallback glyph",
+            tairix_icon::MAX_ARTWORK_BYTES
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_library_icon;
+
+    /// A bundle that declares no library icon has nothing to verify.
+    #[test]
+    fn no_declared_icon_passes() {
+        assert!(verify_library_icon("terminal.app", None, core::iter::empty()).is_ok());
+    }
+
+    /// A present icon within the artwork bound is accepted, and the exact
+    /// bound value (not one over it) is accepted.
+    #[test]
+    fn present_and_within_bound_passes() {
+        let resources = [
+            ("other.bin", 10),
+            ("terminal.png", tairix_icon::MAX_ARTWORK_BYTES),
+        ];
+        assert!(verify_library_icon("terminal.app", Some("terminal.png"), resources).is_ok());
+    }
+
+    /// A declared icon that is not present in `Resources/` is refused, and
+    /// the message names the bundle and the missing file.
+    #[test]
+    fn missing_icon_is_refused() {
+        let err = verify_library_icon("terminal.app", Some("terminal.png"), [("other.bin", 10)])
+            .expect_err("a declared icon absent from Resources/ must be refused");
+        assert!(err.contains("terminal.app"), "{err}");
+        assert!(err.contains("terminal.png"), "{err}");
+    }
+
+    /// An icon one byte over the artwork bound is refused, and the message
+    /// names the file, its size, and the bound.
+    #[test]
+    fn over_bound_icon_is_refused() {
+        let size = tairix_icon::MAX_ARTWORK_BYTES + 1;
+        let err = verify_library_icon(
+            "terminal.app",
+            Some("terminal.png"),
+            [("terminal.png", size)],
+        )
+        .expect_err("an over-large icon must be refused");
+        assert!(err.contains("terminal.png"), "{err}");
+        assert!(err.contains(&size.to_string()), "{err}");
+        assert!(
+            err.contains(&tairix_icon::MAX_ARTWORK_BYTES.to_string()),
+            "{err}"
+        );
+    }
 }

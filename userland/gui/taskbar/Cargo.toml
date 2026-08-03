@@ -54,12 +54,17 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # renderer's notification-glyph cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an
-# unbounded cache of its own (§2.2).
+# unbounded cache of its own.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the icon cache's
 # audit sink is typed against (§2.2): the renderer never invents its own
 # logging vocabulary.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared directory-browser engine's pure drag detector (`BundleDrag`):
+# the program-library popup is the desktop's pin drag source, and it decides
+# "has this press become a drag?" with the same rule the file manager uses
+# rather than a second threshold of its own.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 # The bar renderer's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).

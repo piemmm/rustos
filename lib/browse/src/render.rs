@@ -30,16 +30,17 @@ use tairix_controls::button::{Button, ButtonContent};
 use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollRange};
 use tairix_controls::state::{
-    ActivityState, AuthorityState, ControlRole, ControlState, SelectionState,
+    ActivityState, AuthorityState, ControlRole, ControlState, PointerState, SelectionState,
 };
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    Card, Checkbox, IconButton, Menu, MenuItem, Panel, ScrollAction, ScrollBar, ScrollPart,
-    TableCell, TableRow, Toolbar,
+    Card, Checkbox, IconButton, ListRow, Menu, MenuItem, Panel, ScrollAction, ScrollBar,
+    ScrollPart, TableCell, TableRow, Toolbar,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{Palette, Theme};
@@ -53,8 +54,10 @@ use crate::chrome::{
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
-use crate::layout::{GridView, ListView, ViewLayout, ViewMode};
+use crate::layout::{GridFlow, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+use crate::media::media_for_entry;
 use crate::open_with::AppAssociation;
+use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
 use crate::properties::Properties;
 use crate::source::DirectorySource;
@@ -87,6 +90,14 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// [`ManagerToolModel::none`], since it draws none): a disabled tool renders
 /// muted, never hidden.
 ///
+/// `artwork` is the draw-site icon lookup the grid view resolves each tile's
+/// real icon through: for every grid tile the renderer classifies the entry to
+/// an [`IconKind`] and asks `artwork` for a pre-
+/// rasterised surface at the tile's icon slot, falling back to the built-in
+/// glyph when it returns `None`. The list view is text-only and never consults
+/// it. A caller with no artwork cache passes [`NoArtwork`](tairix_icon::NoArtwork),
+/// which always returns `None` (every tile then draws its built-in glyph).
+///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
 /// dimensions cannot be allocated (a surface that could never exist), so the
@@ -97,39 +108,269 @@ pub fn render<S: DirectorySource>(
     theme: &Theme,
     font: BitmapFont,
     viewport: Rect,
-    tools: &[ManagerTool],
-    tool_model: ManagerToolModel,
+    chrome: &ManagerChrome<'_>,
+    artwork: &mut dyn IconArtwork,
 ) -> Option<Surface> {
     let row_height = row_height(font);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
+    let area = content_area(viewport, theme, font, chrome.sidebar);
+    if let (Some(places), Some(view)) = (
+        chrome.sidebar,
+        sidebar_view(viewport, theme, font, chrome.sidebar),
+    ) {
+        let selected = places.index_of(browser.components());
+        draw_sidebar(&mut surface, theme, font, places, &view, selected, artwork);
+    }
     draw_toolbar(
         &mut surface,
         theme,
         font,
         browser,
-        viewport,
-        tools,
-        tool_model,
+        area,
+        chrome.tools,
+        chrome.tool_model,
     );
     draw_path_bar(
         &mut surface,
         font,
         palette,
         browser,
+        area,
         toolbar_height(theme),
         row_height,
     );
 
-    let content = content_viewport(viewport, theme);
+    let content = content_viewport(area, theme);
     match browser.view_mode() {
         ViewMode::List => draw_list(&mut surface, font, theme, browser, content),
-        ViewMode::Grid => draw_grid(&mut surface, font, theme, browser, content),
+        ViewMode::Grid => draw_grid(&mut surface, font, theme, browser, content, artwork),
     }
-    draw_scrollbar(&mut surface, theme, browser, font, viewport);
+    draw_scrollbar(&mut surface, theme, browser, font, area);
     Some(surface)
+}
+
+/// The manager-only chrome drawn around the shared browser view.
+///
+/// The file manager owns write tools and a places rail; the trusted file
+/// picker owns neither, and passes [`ManagerChrome::none`]. Grouping them
+/// keeps the pieces that appear and disappear together in one value, so a
+/// caller cannot draw a rail's rows while hit-testing a window that has none.
+///
+/// The picker's emptiness is deliberate, not an omission to fill in later. It
+/// is a read-only chooser: it has no write authority, so a write tool would be
+/// a control it could never honour; and its whole purpose is bounded to the
+/// directory tree the requesting application was authorised to be shown, so a
+/// rail offering one-click jumps to arbitrary mounted volumes would widen the
+/// pick beyond what was asked for. It draws the listing and nothing else.
+pub struct ManagerChrome<'a> {
+    /// The manager write tools drawn after the shared read-only commands.
+    pub tools: &'a [ManagerTool],
+    /// Each write tool's enable state; a disabled tool renders muted.
+    pub tool_model: ManagerToolModel,
+    /// The places rail drawn down the window's leading edge, or `None` for a
+    /// view with no rail (the window is then laid out exactly as it is with no
+    /// sidebar at all).
+    pub sidebar: Option<&'a Places>,
+}
+
+impl ManagerChrome<'_> {
+    /// The chrome of a view with no manager surface at all: no write tools, no
+    /// enable model, and no places rail.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            tools: &[],
+            tool_model: ManagerToolModel::none(),
+            sidebar: None,
+        }
+    }
+}
+
+/// The width of the places rail: a row's icon column, the widest fixed place
+/// label, and the row padding around them, all measured from the active font
+/// and the theme's metrics rather than a fixed pixel count, so the rail tracks
+/// the interface's density. Clamped to a third of the window so a narrow
+/// window keeps most of its width for the listing.
+fn sidebar_width(theme: &Theme, font: BitmapFont, viewport_width: u32) -> u32 {
+    let pad = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1);
+    font.glyph_height()
+        .saturating_add(font.text_width(places::WIDEST_FIXED_LABEL))
+        .saturating_add(pad.saturating_mul(3))
+        .min(viewport_width / 3)
+}
+
+/// The height of the band separating the user's own places from the mounted
+/// volumes: the theme's control gap, so the separation reads at the same
+/// rhythm as every other gap in the interface.
+fn separator_height(theme: &Theme) -> u32 {
+    Scale::ONE.scale_length(theme.metrics().control_gap).max(1)
+}
+
+/// The places rail's geometry for `sidebar`, or `None` when there is no rail
+/// to draw (no model, or a model with no rows).
+///
+/// The one definition the painter, the pointer hit-test
+/// ([`sidebar_index_at`]), and the content inset ([`content_area`]) all read,
+/// so the drawn rail and every measurement of it agree by construction.
+#[must_use]
+pub fn sidebar_view(
+    viewport: Rect,
+    theme: &Theme,
+    font: BitmapFont,
+    sidebar: Option<&Places>,
+) -> Option<SidebarView> {
+    let places = sidebar?;
+    if places.is_empty() {
+        return None;
+    }
+    Some(SidebarView::new(
+        viewport,
+        sidebar_width(theme, font, viewport.width),
+        row_height(font),
+        separator_height(theme),
+        places.len(),
+        places.volume_start(),
+    ))
+}
+
+/// The window area the browser's own chrome and item view occupy: the whole
+/// window, less the places rail when one is drawn.
+///
+/// Every geometry and hit-test entry point here takes the area the view is
+/// laid out in, so a caller drawing a rail resolves this once and passes it
+/// wherever it would otherwise pass the window — the toolbar, the path bar,
+/// the item view, and the scrollbar then sit exactly where a click looks for
+/// them. A caller with no rail gets the window back unchanged, so a view
+/// without a sidebar is laid out precisely as it was before there was one.
+#[must_use]
+pub fn content_area(
+    viewport: Rect,
+    theme: &Theme,
+    font: BitmapFont,
+    sidebar: Option<&Places>,
+) -> Rect {
+    let Some(view) = sidebar_view(viewport, theme, font, sidebar) else {
+        return viewport;
+    };
+    let rail = view.width();
+    Rect::new(
+        viewport.origin.x.saturating_add_unsigned(rail),
+        viewport.origin.y,
+        viewport.width.saturating_sub(rail),
+        viewport.height,
+    )
+}
+
+/// The places-rail row at window-local pixel `point`, or `None` when the point
+/// is not on one — outside the rail, in the separation between the user's
+/// places and the volumes, or below the last drawn row.
+///
+/// The exact inverse of what [`render`] painted, through the one shared
+/// [`sidebar_view`] geometry.
+#[must_use]
+pub fn sidebar_index_at(
+    viewport: Rect,
+    theme: &Theme,
+    font: BitmapFont,
+    sidebar: Option<&Places>,
+    point: Point,
+) -> Option<usize> {
+    let view = sidebar_view(viewport, theme, font, sidebar)?;
+    let x = u32::try_from(point.x).ok()?;
+    let y = u32::try_from(point.y).ok()?;
+    view.index_at(x, y)
+}
+
+/// Paint the places rail: its raised band, one shared [`ListRow`] per place,
+/// and the hairline separating the user's own places from the mounted
+/// volumes.
+///
+/// Each row asks `artwork` for its icon at exactly the slot the row will draw
+/// it in, so a volume shows the artwork for the medium it really sits on and
+/// falls back to the built-in glyph when the system has no asset for it. Rows
+/// the window is too short to draw in full are simply not drawn, which is the
+/// same set [`SidebarView::index_at`] will resolve a click to.
+fn draw_sidebar(
+    surface: &mut Surface,
+    theme: &Theme,
+    font: BitmapFont,
+    places: &Places,
+    view: &SidebarView,
+    selected: Option<usize>,
+    artwork: &mut dyn IconArtwork,
+) {
+    let palette = theme.palette();
+    let rail = view.rail_rect();
+    let rail_x = u32::try_from(rail.origin.x).unwrap_or(0);
+    let rail_y = u32::try_from(rail.origin.y).unwrap_or(0);
+    surface.fill_rect(
+        rail_x,
+        rail_y,
+        rail.width,
+        rail.height,
+        palette.surface_raised.into(),
+    );
+    if let Some(band) = view.separator_rect() {
+        let pad = Scale::ONE
+            .scale_length(theme.metrics().control_inset)
+            .max(1);
+        let x = u32::try_from(band.origin.x)
+            .unwrap_or(0)
+            .saturating_add(pad);
+        let y = u32::try_from(band.origin.y)
+            .unwrap_or(0)
+            .saturating_add(band.height / 2);
+        surface.fill_rect(
+            x,
+            y,
+            band.width.saturating_sub(pad.saturating_mul(2)),
+            1,
+            palette.on_surface_muted.into(),
+        );
+    }
+    for (index, place) in places.rows().iter().enumerate() {
+        let Some(bounds) = view.row_rect(index) else {
+            break;
+        };
+        let row = place_row(place, places, index, selected);
+        let side = row.icon_side(bounds, Scale::ONE, theme, font);
+        let art = artwork.artwork(place.icon(), side);
+        row.render(surface, bounds, Scale::ONE, theme, font, art);
+    }
+}
+
+/// Build the shared [`ListRow`] for one rail row, carrying every state the
+/// rail can put it in: a place whose target was refused reads disabled (and
+/// never also hovered — a control the user cannot use does not light up under
+/// the pointer), the row under the pointer hovers, the keyboard cursor's row
+/// is focused while the rail owns focus, and the row matching the browser's
+/// current location reads selected through the control's own selection state
+/// rather than a highlight painted here.
+fn place_row(place: &Place, places: &Places, index: usize, selected: Option<usize>) -> ListRow {
+    let mut state = if place.is_available() {
+        let idle = ControlState::idle();
+        if places.hovered() == Some(index) {
+            idle.with_pointer(PointerState::Hover)
+        } else {
+            idle
+        }
+    } else {
+        ControlState::disabled()
+    };
+    if selected == Some(index) {
+        state = state.with_selection(SelectionState::Selected);
+    }
+    let mut row = ListRow::new(place.label())
+        .with_icon(place.icon())
+        .with_state(state);
+    row.set_in_focus_field(places.is_focused());
+    row.set_focused(places.is_focused() && places.cursor() == index);
+    row
 }
 
 /// Fill the top path bar and draw the current directory as a clickable
@@ -147,28 +388,34 @@ fn draw_path_bar<S: DirectorySource>(
     font: BitmapFont,
     palette: &Palette,
     browser: &Browser<S>,
+    area: Rect,
     top: u32,
     row_height: u32,
 ) {
+    let left = u32::try_from(area.origin.x).unwrap_or(0);
     surface.fill_rect(
-        0,
+        left,
         top,
-        surface.width(),
+        area.width,
         row_height,
         palette.surface_raised.into(),
     );
     let crumbs = chrome::breadcrumbs(browser);
     let widths = crumb_widths(&crumbs, font);
     let sep_width = font.text_width(SEPARATOR);
-    let placed = breadcrumb::layout(&widths, surface.width(), LABEL_PADDING, sep_width);
+    let placed = breadcrumb::layout(&widths, area.width, LABEL_PADDING, sep_width);
     let y = top.saturating_add(row_height.saturating_sub(font.glyph_height()) / 2);
     let y = to_i32(y);
+    let left = to_i32(left);
     for (position, crumb) in placed.iter().zip(crumbs.iter()) {
         // The separator sits in the gap before every crumb but the first,
         // drawn from the previous crumb's right edge so it lands exactly in
         // the space the layout reserved for it.
         if position.index > 0 {
-            let sep_x = position.x.saturating_sub(to_i32(sep_width));
+            let sep_x = position
+                .x
+                .saturating_add(left)
+                .saturating_sub(to_i32(sep_width));
             font.draw_text(
                 surface,
                 sep_x,
@@ -182,7 +429,13 @@ fn draw_path_bar<S: DirectorySource>(
         } else {
             palette.accent
         };
-        font.draw_text(surface, position.x, y, crumb.label(), color.into());
+        font.draw_text(
+            surface,
+            position.x.saturating_add(left),
+            y,
+            crumb.label(),
+            color.into(),
+        );
     }
 }
 
@@ -226,7 +479,11 @@ pub fn crumb_at<S: DirectorySource>(
         LABEL_PADDING,
         font.text_width(SEPARATOR),
     );
-    let index = breadcrumb::crumb_at(&placed, point.x, viewport.width)?;
+    let index = breadcrumb::crumb_at(
+        &placed,
+        point.x.saturating_sub(viewport.origin.x),
+        viewport.width,
+    )?;
     let crumb = crumbs.get(index)?;
     if crumb.is_current() {
         None
@@ -269,36 +526,43 @@ fn draw_list<S: DirectorySource>(
 
 /// Draw the visible icon-grid tiles below the path bar as shared [`Card`]s,
 /// giving the selected entry the card's selection state.
+///
+/// Each tile's icon is the shared content-type classification
+/// ([`media_for_entry`]): the entry's [`MediaType`](crate::media::MediaType)
+/// decides an [`IconKind`], and `artwork` is asked for a
+/// pre-rasterised surface at the tile's [`Card::icon_side`] slot. When it
+/// supplies one the tile draws that artwork; otherwise the card falls back to
+/// the built-in glyph for the kind. The classification is resolved once here so
+/// the manager and picker draw the same icon for the same entry.
 fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
     font: BitmapFont,
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
+    artwork: &mut dyn IconArtwork,
 ) {
     let view = grid_view(browser, font, theme, content);
-    let columns = view.columns();
-    let visible_rows = view.visible_rows();
-    if columns == 0 || visible_rows == 0 {
-        return;
-    }
     let offset = browser.scroll_offset();
-    let first_row = view.first_visible(offset);
     let selected = browser.selected_index();
+    let parent = browser.components();
     let entries = browser.entries();
-    let start = first_row.saturating_mul(columns);
-    let end = first_row
-        .saturating_add(visible_rows)
-        .saturating_mul(columns)
-        .min(entries.len());
-    for index in start..end {
+    for index in view.visible_range(offset) {
         let Some(entry) = entries.get(index) else {
             break;
         };
         let Some(bounds) = view.cell_rect(offset, index) else {
             continue;
         };
-        grid_tile(entry, selected == Some(index)).render(surface, bounds, Scale::ONE, theme, font);
+        let kind = media_for_entry(entry, parent).icon();
+        let mut state = ControlState::idle();
+        if selected == Some(index) {
+            state.selection = SelectionState::Selected;
+        }
+        let tile = grid_tile(entry, state, kind);
+        let side = tile.icon_side(bounds, Scale::ONE, theme, font);
+        let art = artwork.artwork(kind, side);
+        tile.render(surface, bounds, Scale::ONE, theme, font, art);
     }
 }
 
@@ -339,8 +603,11 @@ pub fn scrollbar_bounds(theme: &Theme, font: BitmapFont, viewport: Rect) -> Opti
     }
     let content = content_viewport(viewport, theme);
     Some(Rect::new(
-        i32::try_from(content.width).unwrap_or(i32::MAX),
-        i32::try_from(header).unwrap_or(i32::MAX),
+        content.origin.x.saturating_add_unsigned(content.width),
+        content
+            .origin
+            .y
+            .saturating_add_unsigned(header.min(i32::MAX.unsigned_abs())),
         gutter,
         viewport.height.saturating_sub(header),
     ))
@@ -430,25 +697,23 @@ fn entry_row(entry: &Entry, selected: bool) -> TableRow {
     row
 }
 
-/// Build the [`Card`] tile for one grid entry: the entry's file-type icon
+/// Build the [`Card`] tile for one grid entry: the entry's file-type `icon`
 /// above its label, carrying the shared selection state when selected. The
-/// icon is the shared [`icon_for`](crate::icon::icon_for) classification — a
-/// display hint only, decided once here so the manager and picker draw the
-/// same glyph for the same entry (§2.2).
-fn grid_tile(entry: &Entry, selected: bool) -> Card {
-    let mut state = ControlState::idle();
-    if selected {
-        state.selection = SelectionState::Selected;
-    }
+/// `icon` is the shared content-type classification
+/// ([`media_for_entry`]) resolved by the caller — a display hint only, decided
+/// once so the manager and picker draw the same glyph for the same entry.
+#[must_use]
+pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> Card {
     Card::new(entry_label(entry))
-        .with_icon(crate::icon::icon_for(entry))
+        .with_icon(icon)
         .with_state(state)
 }
 
 /// The name shown for an entry: a directory is suffixed with `/` so its kind
 /// reads at a glance in the list view (whose rows carry no icon), and stays a
 /// familiar cue beneath the grid tile's folder glyph.
-fn entry_label(entry: &Entry) -> String {
+#[must_use]
+pub fn entry_label(entry: &Entry) -> String {
     let mut label = String::from(entry.name());
     if entry.is_directory() {
         label.push('/');
@@ -475,6 +740,18 @@ fn gutter_width(theme: &Theme, viewport_width: u32) -> u32 {
         .min(viewport_width)
 }
 
+/// The toolbar strip's rectangle within the browser's content area: the full
+/// width of the area, at its top. One definition, so the drawn toolbar and
+/// each of the three hit-tests that invert it cannot place it differently.
+fn toolbar_bounds(theme: &Theme, area: Rect) -> Rect {
+    Rect::new(
+        area.origin.x,
+        area.origin.y,
+        area.width,
+        toolbar_height(theme),
+    )
+}
+
 /// The content viewport (the window minus the reserved scrollbar gutter). The
 /// item views lay out within this, so no item ever underlaps the scrollbar.
 fn content_viewport(viewport: Rect, theme: &Theme) -> Rect {
@@ -490,7 +767,12 @@ fn content_viewport(viewport: Rect, theme: &Theme) -> Rect {
 /// The dimensions of one grid tile and the gap between tiles, derived from the
 /// render font so they scale with the theme's UI size (the window is not
 /// DPI-scaled today, so the font is the density proxy).
-fn grid_metrics(font: BitmapFont) -> (u32, u32, u32) {
+///
+/// Shared with the desktop's icon column, which lays the same tiles out under
+/// a different [`GridFlow`], so the two views can never disagree about how big
+/// an icon tile is.
+#[must_use]
+pub fn grid_metrics(font: BitmapFont) -> (u32, u32, u32) {
     let glyph = font.glyph_height().max(1);
     let cell_width = glyph.saturating_mul(6).max(48);
     let cell_height = glyph.saturating_mul(5).max(48);
@@ -581,7 +863,7 @@ fn draw_toolbar<S: DirectorySource>(
     tool_model: ManagerToolModel,
 ) {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let bounds = toolbar_bounds(theme, viewport);
     toolbar.render(surface, bounds, Scale::ONE, theme, font);
 }
 
@@ -601,7 +883,7 @@ pub fn toolbar_command_at<S: DirectorySource>(
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
     let toolbar = build_toolbar(model, &[], ManagerToolModel::none());
-    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let bounds = toolbar_bounds(theme, viewport);
     let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
     model.is_enabled(command).then_some(command)
@@ -627,7 +909,7 @@ pub fn manager_tool_at<S: DirectorySource>(
     tool_model: ManagerToolModel,
 ) -> Option<ManagerTool> {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let bounds = toolbar_bounds(theme, viewport);
     let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
     let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
     let tool = tools.get(tool_index).copied()?;
@@ -661,7 +943,7 @@ pub fn manager_tool_rect<S: DirectorySource>(
         tools,
         ManagerToolModel::new(true),
     );
-    let bounds = Rect::new(0, 0, viewport.width, toolbar_height(theme));
+    let bounds = toolbar_bounds(theme, viewport);
     let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
     toolbar.tool_rect(index, bounds, Scale::ONE, theme)
 }
@@ -697,6 +979,7 @@ fn grid_view<S: DirectorySource>(
         gap,
         chrome_height(font, theme),
         browser.entries().len(),
+        GridFlow::RowsFromLeading,
     )
 }
 

@@ -91,6 +91,12 @@ pub struct Compositor {
     pending_redraws: Vec<WindowId>,
     background: Color,
     order: ChannelOrder,
+    /// The desktop's own layer: the session's wallpaper-and-icons surface,
+    /// anchored at the screen origin and composited over the root fill but
+    /// *under* every window. It is deliberately not a [`Window`]: it has no
+    /// id, so it can never be raised, focused, moved, or restacked, and
+    /// nothing in the ordinary z-order can end up beneath it by accident.
+    desktop: Option<Surface>,
     windows: Vec<Window>,
     cursor: Option<CursorLayer>,
     /// The screen rectangle the cursor covered as of the last
@@ -167,6 +173,7 @@ impl Compositor {
             pending_redraws: Vec::new(),
             background,
             order,
+            desktop: None,
             windows: Vec::new(),
             cursor: None,
             cursor_on_screen: None,
@@ -520,6 +527,46 @@ impl Compositor {
     #[must_use]
     pub fn window_scale(&self, id: WindowId) -> Option<Scale> {
         self.window(id).map(|_| self.scale)
+    }
+
+    /// Install `surface` as the desktop layer, replacing any previous one,
+    /// and mark both footprints dirty.
+    ///
+    /// The desktop layer is anchored at the screen origin and composited over
+    /// the opaque root fill but beneath every window, so nothing in the
+    /// ordinary z-order can cover it by accident: it carries no
+    /// [`WindowId`], which is precisely why it cannot be raised, focused,
+    /// moved, or restacked. A surface smaller than the screen simply leaves
+    /// the root fill showing where it does not reach, and one larger is
+    /// clipped — the layer is never a reason to fail a frame.
+    pub fn set_desktop(&mut self, surface: Surface) {
+        if let Some(previous) = self.desktop_bounds() {
+            self.damage.add(previous);
+        }
+        self.desktop = Some(surface);
+        if let Some(current) = self.desktop_bounds() {
+            self.damage.add(current);
+        }
+    }
+
+    /// Take the desktop layer down, marking what it covered dirty. Returns
+    /// `false` when none was installed (nothing to do, nothing damaged).
+    pub fn clear_desktop(&mut self) -> bool {
+        let Some(covered) = self.desktop_bounds() else {
+            return false;
+        };
+        self.desktop = None;
+        self.damage.add(covered);
+        true
+    }
+
+    /// The screen rectangle the desktop layer covers, or `None` when none is
+    /// installed.
+    #[must_use]
+    pub fn desktop_bounds(&self) -> Option<Rect> {
+        self.desktop
+            .as_ref()
+            .map(|surface| Rect::new(0, 0, surface.width(), surface.height()))
     }
 
     /// Add `surface` as the top-most window at `origin`, returning its
@@ -1325,6 +1372,17 @@ impl Compositor {
                 Some(self.background.premultiply())
             })?,
         );
+        // The desktop layer sits directly on the background, beneath every
+        // window, so the hardware result matches the software one.
+        if let Some(desktop) = &self.desktop {
+            layers.push(
+                self.encode_layer(desktop.width(), desktop.height(), 0, 0, |lx, ly| {
+                    crate::surface::row(desktop, ly)
+                        .get(usize::try_from(lx).ok()?)
+                        .copied()
+                })?,
+            );
+        }
         for window in &self.windows {
             if !window.is_visible() {
                 continue;
@@ -1447,6 +1505,7 @@ impl Compositor {
         let Self {
             mode,
             order,
+            desktop,
             windows,
             cursor,
             chrome,
@@ -1458,6 +1517,7 @@ impl Compositor {
         let order = *order;
         let windows: &[Window] = windows;
         let cursor = cursor.as_ref();
+        let desktop = desktop.as_ref();
         let (Ok(first_col), Ok(cols)) = (usize::try_from(area.left()), usize::try_from(area.width))
         else {
             return;
@@ -1490,6 +1550,7 @@ impl Compositor {
                     .filter_map(|(window, chrome)| window.row(y, *chrome)),
             );
             let cursor_row = cursor.and_then(|c| c.local_row(y));
+            let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
             let Some(back_row) = back
                 .row_mut(py)
                 .and_then(|row| row.get_mut(first_col..last_col))
@@ -1510,6 +1571,9 @@ impl Compositor {
                 .zip(area.left()..area.right())
             {
                 let mut acc = base;
+                if let Some(src) = desktop_pixel(desktop_row, x) {
+                    acc = src.over(acc);
+                }
                 for row in &rows {
                     if let Some(src) = row.sample(x) {
                         acc = src.over(acc);
@@ -1525,6 +1589,15 @@ impl Compositor {
             }
         }
     }
+}
+
+/// The desktop layer's pixel at screen column `x` on an already-resolved
+/// scanline, or `None` where the layer does not reach (no layer at all, a row
+/// past its height, or a column past its width) — there the root fill shows
+/// through, exactly as it did before a layer was installed.
+fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
+    let column = usize::try_from(x).ok()?;
+    row?.get(column).copied()
 }
 
 /// Whether `window` can contribute a pixel inside `area`: it is visible

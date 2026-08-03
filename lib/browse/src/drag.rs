@@ -118,6 +118,19 @@ impl BundleDrag {
         self.state = DragState::Idle;
     }
 
+    /// Whether this gesture has sent its offer and not yet ended — the
+    /// question a release must answer to know whether it is a *drop* or an
+    /// ordinary click.
+    ///
+    /// The file manager never needs to ask (its release is a plain
+    /// [`release`](Self::release) and the session resolves the drop from the
+    /// offer it holds), but a drag whose source and drop resolver are the same
+    /// process does.
+    #[must_use]
+    pub const fn is_offered(&self) -> bool {
+        matches!(self.state, DragState::Offered)
+    }
+
     /// Cancel the gesture (`Escape`), returning `true` exactly when an offer
     /// is outstanding and the caller must withdraw it — an armed-but-unsent
     /// press just disarms, and cancelling with no gesture is a no-op.

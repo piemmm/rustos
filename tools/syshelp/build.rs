@@ -17,6 +17,15 @@
 //! A build script is host-only build tooling: a genuine build-environment
 //! failure (a missing `OUT_DIR`, an unreadable source tree) fails the build
 //! loudly rather than emitting a silently-incomplete image.
+//!
+//! Alongside the per-bundle help and resource families, this script also
+//! discovers the desktop's graphics assets — the raster icon masters under
+//! `lib/icon/assets/` — and emits a `[GraphicsFile]` table for the image
+//! builder to plant under `/System/Graphics`. Those are validated against the
+//! desktop's own icon contract (`tairix_icon`) as they are discovered: a name
+//! the desktop could never resolve, an over-large file, or two files claiming
+//! one asset id fails the build closed rather than shipping artwork that would
+//! silently render as a fallback glyph.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -32,6 +41,18 @@ use std::path::{Path, PathBuf};
 /// under its real bundle name. Extending this list is a rare structural
 /// change, not a per-bundle edit.
 const APP_ROOTS: &[&str] = &["userland/apps", "userland/gui", "userland/shell"];
+
+/// Source directory of the desktop's raster icon masters, relative to the
+/// workspace root. Unlike the per-bundle help/resource families this is a
+/// single non-per-bundle tree, so it is walked directly rather than under a
+/// per-crate `<root>/<crate>/…` layout.
+const GRAPHICS_ASSETS_ROOT: &str = "lib/icon/assets";
+
+/// The `/System/Graphics` subdirectory the icon masters are planted in — the
+/// `GraphicsFile::dir` every emitted icon row carries. Keeping it as data
+/// means a future cursor/chrome family plants through the same table and loop
+/// rather than a second one.
+const GRAPHICS_ICONS_DIR: &str = "Icons";
 
 fn main() {
     let manifest = PathBuf::from(env("CARGO_MANIFEST_DIR"));
@@ -125,7 +146,86 @@ fn main() {
         .and_then(|mut f| f.write_all(resource_rows.as_bytes()))
         .expect("write generated resource table");
 
+    emit_graphics_table(&workspace);
+
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// Discover the desktop's raster icon masters under [`GRAPHICS_ASSETS_ROOT`]
+/// and write `graphics_files.rs` — one `GraphicsFile` row per asset, planted
+/// at `Graphics/<dir>/<file>` on the image.
+///
+/// Each discovered file is validated against the desktop's own icon contract
+/// before it is emitted, so the build fails closed on artwork the desktop
+/// could never resolve rather than shipping a file that silently renders as a
+/// fallback glyph:
+///
+/// * the name must be a legal `<asset-id>.png`
+///   ([`tairix_icon::artwork_kind_for_file`]),
+/// * the file must be at most [`tairix_icon::MAX_ARTWORK_BYTES`] (the same
+///   untrusted-input bound the runtime resolver refuses over-long input
+///   against), and
+/// * no two files may claim the same asset id.
+///
+/// Rows are sorted (by file name) exactly as the help and resource walks are,
+/// so the emitted table — and the planted image — is reproducible.
+fn emit_graphics_table(workspace: &Path) {
+    let assets = workspace.join(GRAPHICS_ASSETS_ROOT);
+    println!("cargo:rerun-if-changed={}", assets.display());
+
+    let max_bytes = u64::try_from(tairix_icon::MAX_ARTWORK_BYTES).expect("bound fits u64");
+    let mut seen_ids: Vec<&'static str> = Vec::new();
+    let mut rows = String::from("[\n");
+    if assets.is_dir() {
+        for file in sorted_children(&assets) {
+            let path = assets.join(&file);
+            if !path.is_file() {
+                continue;
+            }
+            // A name the loader would never map to a kind (an unknown id, a
+            // wrong extension, a path separator) can never resolve to artwork,
+            // so shipping it is a build error, not a silent fallback.
+            let kind = tairix_icon::artwork_kind_for_file(&file).unwrap_or_else(|| {
+                panic!(
+                    "{}: not a legal desktop icon artwork name (expected `<asset-id>.png`)",
+                    path.display()
+                )
+            });
+            // The byte bound is a fixed validation limit on untrusted input:
+            // an over-large asset is refused before it is decoded, so one that
+            // exceeds it must never reach the image.
+            let len = fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+                .len();
+            assert!(
+                len <= max_bytes,
+                "{}: {len} bytes exceeds the {}-byte icon artwork bound",
+                path.display(),
+                tairix_icon::MAX_ARTWORK_BYTES
+            );
+            let id = kind.asset_id();
+            assert!(
+                !seen_ids.contains(&id),
+                "{}: two files claim the asset id `{id}`",
+                path.display()
+            );
+            seen_ids.push(id);
+
+            println!("cargo:rerun-if-changed={}", path.display());
+            let abs = path.to_str().expect("graphics path is valid UTF-8");
+            writeln!(
+                rows,
+                "    GraphicsFile {{ dir: {GRAPHICS_ICONS_DIR:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+            )
+            .expect("write to String");
+        }
+    }
+    rows.push(']');
+
+    let dest = PathBuf::from(env("OUT_DIR")).join("graphics_files.rs");
+    fs::File::create(&dest)
+        .and_then(|mut f| f.write_all(rows.as_bytes()))
+        .expect("write generated graphics table");
 }
 
 /// The planted bundle directory (`<name>.app`) of the app crate at

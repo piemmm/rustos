@@ -25,6 +25,7 @@
 //! has disappeared from the compositor (an embedder removed it), the next
 //! present re-creates it rather than silently doing nothing.
 
+use tairix_icon::IconArtwork;
 use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
@@ -122,6 +123,11 @@ impl TaskbarPresenter {
     /// cannot see — the scale belongs to the output, not the model — so a
     /// scale that differs from the last presented one repaints everything.
     ///
+    /// `artwork` is the shipped raster-icon lookup the bar draws its
+    /// launcher, pin, and task icons from; every slot falls back to its
+    /// built-in glyph when the lookup has nothing, so a system with no
+    /// installed graphics still presents a complete bar.
+    ///
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     ///
@@ -135,6 +141,7 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         parts: TaskbarRepaint,
+        artwork: &mut dyn IconArtwork,
     ) {
         // The desktop density belongs to the output the bar is on, so it is
         // read from the compositor here and laid out at present time — a
@@ -148,7 +155,7 @@ impl TaskbarPresenter {
         };
         self.presented_scale = Some(scale);
         if parts.bar || self.bar.is_none() {
-            self.present_bar(compositor, renderer, taskbar, scale);
+            self.present_bar(compositor, renderer, taskbar, scale, artwork);
         }
         if parts.library || self.popup.is_none() {
             self.present_popup(compositor, renderer, taskbar, scale);
@@ -194,8 +201,9 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         scale: Scale,
+        artwork: &mut dyn IconArtwork,
     ) {
-        let Some(surface) = renderer.render(taskbar, scale) else {
+        let Some(surface) = renderer.render(taskbar, scale, artwork) else {
             return;
         };
         let layout = taskbar.layout(scale);

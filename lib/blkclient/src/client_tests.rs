@@ -54,7 +54,7 @@ impl BlkCall for MemDevice {
                 block_size: self.block_size,
                 block_count: self.block_count,
                 flags: self.flags,
-                class: self.class,
+                class: Some(self.class),
             }
             .encode(reply),
             BlkOp::Read => {
@@ -278,7 +278,7 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: DEVICE_CLASS,
+                    class: Some(DEVICE_CLASS),
                 }
                 .encode(reply)
             } else {
@@ -312,7 +312,7 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: DEVICE_CLASS,
+                    class: Some(DEVICE_CLASS),
                 }
                 .encode(reply)
             } else {
@@ -348,7 +348,7 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: DEVICE_CLASS,
+                    class: Some(DEVICE_CLASS),
                 }
                 .encode(reply)
             } else {
@@ -384,7 +384,7 @@ impl BlkCall for FaultingDevice {
                 block_size: 512,
                 block_count: 64,
                 flags: 0,
-                class: DEVICE_CLASS,
+                class: Some(DEVICE_CLASS),
             }
             .encode(reply)
         } else {

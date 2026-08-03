@@ -14,9 +14,10 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_icon::MAX_ARTWORK_BYTES;
 use tairix_log::{Event, Sink};
 
-use super::{IconRasterFailure, IconRasterService, IconRefusal, MAX_ICON_INPUT, MAX_ICON_SIDE};
+use super::{IconRasterFailure, IconRasterService, IconRefusal, MAX_ICON_SIDE};
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
 use crate::wire::Writer;
@@ -287,7 +288,7 @@ fn a_zero_or_oversize_side_is_refused_before_any_request() {
 #[test]
 fn an_oversize_icon_is_refused_locally_before_any_request() {
     let mut sandbox = sandbox();
-    let oversize = vec![0u8; MAX_ICON_INPUT + 1];
+    let oversize = vec![0u8; MAX_ARTWORK_BYTES + 1];
     assert_eq!(
         rasterise_icon(&mut sandbox, 4, &oversize),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
@@ -320,7 +321,7 @@ fn the_worker_itself_refuses_every_malformed_request_shape() {
     let mut w = Writer::new();
     w.u8(super::OP_RASTERISE);
     w.u32(4);
-    w.bytes(&vec![0u8; MAX_ICON_INPUT + 1]);
+    w.bytes(&vec![0u8; MAX_ARTWORK_BYTES + 1]);
     assert_eq!(service.handle(&w.finish()), vec![super::REPLY_ERROR, 1]);
     // Trailing bytes after an otherwise well-formed request.
     let mut w = Writer::new();

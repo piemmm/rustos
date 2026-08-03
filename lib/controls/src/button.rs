@@ -19,9 +19,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    key_activation, paint_bead, paint_chevron, paint_plate, plate_border, pointer_activation,
-    resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape, ChevronDir,
-    PlateStyle, RenderInvariant,
+    key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
+    pointer_activation, resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape,
+    ChevronDir, PlateStyle, RenderInvariant,
 };
 use crate::state::{ActivityState, ControlDisposition, ControlRole, ControlState, PointerState};
 
@@ -476,7 +476,32 @@ impl IconButton {
         self.state.focus.focused = focused;
     }
 
+    /// The pixel side the button's glyph paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising
+    /// per-button artwork produces it at exactly the size [`Self::render`]
+    /// will place — the two can never disagree. An icon-only plate sizes the
+    /// glyph off the plate (never the text inset), so it fills the button;
+    /// `0` when the bounds are off-surface or too small for a glyph. The
+    /// `font` is accepted only so the query matches the shared
+    /// collection-control shape (an icon button has no label to measure).
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        let _ = font;
+        let Some((_, _, w, h)) = surface_rect(bounds) else {
+            return 0;
+        };
+        icon_content_side(w, h, plate_border(theme, scale))
+    }
+
     /// Paint the icon button into `surface` at `bounds` for the active theme.
+    ///
+    /// `artwork` is the owner's own icon, pre-rasterised at [`Self::icon_side`]
+    /// (through its cache); `None` falls back to the button's built-in class
+    /// glyph. The artwork is decoded and rasterised long before it reaches
+    /// this call — a control never parses image bytes. Both go through the one
+    /// shared "blit centred artwork, else rasterise the glyph" slot the other
+    /// collection controls draw their icon with.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -484,12 +509,18 @@ impl IconButton {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        artwork: Option<&Surface>,
     ) {
+        let _ = font;
         let res = resolve(theme, self.role, self.state);
         paint_frame(surface, bounds, scale, theme, &res);
-        if let Some(rect) = surface_rect(bounds) {
-            let content = ButtonContent::Icon(self.icon);
-            paint_content(surface, rect, scale, theme, &res, &content, font);
+        if let Some((x, y, w, h)) = surface_rect(bounds) {
+            let side = icon_content_side(w, h, plate_border(theme, scale));
+            if side > 0 {
+                let ix = x + (w.saturating_sub(side)) / 2;
+                let iy = y + (h.saturating_sub(side)) / 2;
+                paint_icon_slot(surface, ix, iy, side, self.icon, res.label, artwork);
+            }
         }
     }
 

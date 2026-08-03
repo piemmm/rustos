@@ -10,9 +10,9 @@ use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, IrqListRequest, IrqRecord,
     KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
-    MountRecord, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
-    ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED,
-    RECLAIM_CLASS_COUNT,
+    MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime,
+    IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_curses::{Event, Screen, Size, Tty};
@@ -373,8 +373,11 @@ fn mount_record(
         target,
         fstype,
         flags,
-        usage,
-        availability,
+        MountVolumeState {
+            usage,
+            availability,
+            medium: None,
+        },
         [0u8; 16],
     )
     .expect("mount")

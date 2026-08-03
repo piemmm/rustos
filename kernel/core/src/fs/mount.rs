@@ -2,7 +2,8 @@
 //!
 //! A mount associates a subtree (identified by its mount-point [`Path`])
 //! with a set of [`MountFlags`] (`ro`, `nosuid`, `nodev`, `noexec`) and,
-//! optionally, the [`DriverHandle`] of the filesystem driver backing it.
+//! optionally, the [`MountBacking`] — the filesystem driver serving it and
+//! the storage medium of the block device that driver reads.
 //! The VFS consults the table on every write to decide whether the most
 //! specific mount covering a path forbids it (e.g. `/System` is mounted
 //! read-only; its `/System/Logs` and `/System/Settings` children are
@@ -15,6 +16,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::driver::DriverHandle;
 
@@ -22,12 +24,53 @@ use super::path::Path;
 use super::perm::Metadata;
 use super::VfsError;
 
+/// What stands behind a mount: the filesystem driver serving it, and the
+/// storage medium of the block device that driver reads.
+///
+/// The two travel together because the medium is a property of the device
+/// the driver was attached to, learned at attach time and never re-derived
+/// later. Pairing them means a mount with no backing cannot carry a medium
+/// at all, so "nothing is mounted here" and "this volume sits on a spinning
+/// disk" are distinct states rather than one field two callers must keep
+/// consistent.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MountBacking {
+    driver: DriverHandle,
+    medium: Option<BlkDeviceClass>,
+}
+
+impl MountBacking {
+    /// A backing by `driver`, reading a device of `medium`.
+    ///
+    /// `medium` is `None` when the attach path has no classified block
+    /// device in hand — a driver serving synthetic content, or a
+    /// bootstrap-floor volume brought up before any classified block client
+    /// exists. Unknown is recorded as unknown; a medium is never assumed.
+    #[must_use]
+    pub const fn new(driver: DriverHandle, medium: Option<BlkDeviceClass>) -> Self {
+        Self { driver, medium }
+    }
+
+    /// The filesystem driver serving the mount.
+    #[must_use]
+    pub const fn driver(self) -> DriverHandle {
+        self.driver
+    }
+
+    /// The storage medium of the block device behind the driver, or `None`
+    /// when the attach path could not name one.
+    #[must_use]
+    pub const fn medium(self) -> Option<BlkDeviceClass> {
+        self.medium
+    }
+}
+
 /// One entry in the [`MountTable`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MountPoint {
     path: Path,
     flags: MountFlags,
-    backing: Option<DriverHandle>,
+    backing: Option<MountBacking>,
     /// The path *within the backing volume* at which this mount is rooted.
     ///
     /// Empty for a mount rooted at its driver's own root directory (the
@@ -65,7 +108,20 @@ impl MountPoint {
     /// the in-RAM default layout have no backing driver.
     #[must_use]
     pub fn backing(&self) -> Option<DriverHandle> {
-        self.backing
+        self.backing.map(MountBacking::driver)
+    }
+
+    /// The storage medium of the block device backing this mount, or `None`
+    /// when none is known.
+    ///
+    /// Unknown covers both a mount with no block device behind it at all (a
+    /// synthetic or view mount, the in-RAM layout) and a backed mount whose
+    /// attach path could not name the device's medium. Both are reported as
+    /// unknown rather than as a plausible-looking medium the device never
+    /// declared.
+    #[must_use]
+    pub fn medium(&self) -> Option<BlkDeviceClass> {
+        self.backing.and_then(MountBacking::medium)
     }
 
     /// The path components within the backing volume at which this mount is
@@ -129,7 +185,7 @@ impl MountTable {
         &mut self,
         path: Path,
         flags: MountFlags,
-        backing: Option<DriverHandle>,
+        backing: Option<MountBacking>,
     ) -> Result<(), VfsError> {
         self.mount_rebased(path, flags, backing, Vec::new())
     }
@@ -151,7 +207,7 @@ impl MountTable {
         &mut self,
         path: Path,
         flags: MountFlags,
-        backing: Option<DriverHandle>,
+        backing: Option<MountBacking>,
         backing_subtree: Vec<String>,
     ) -> Result<(), VfsError> {
         if self.mounts.iter().any(|m| m.path == path) {
@@ -183,7 +239,7 @@ impl MountTable {
         &mut self,
         path: Path,
         flags: MountFlags,
-        backing: DriverHandle,
+        backing: MountBacking,
         template: Metadata,
     ) -> Result<(), VfsError> {
         if self.mounts.iter().any(|m| m.path == path) {
@@ -209,7 +265,7 @@ impl MountTable {
     /// Returns [`VfsError::AlreadyExists`] if the root mount already has
     /// a backing driver: a second root volume is a wiring defect, never
     /// a silent re-mount (fail closed).
-    pub fn back_root(&mut self, backing: DriverHandle) -> Result<(), VfsError> {
+    pub fn back_root(&mut self, backing: MountBacking) -> Result<(), VfsError> {
         let root = &mut self.mounts[0];
         if root.backing.is_some() {
             return Err(VfsError::AlreadyExists);
@@ -222,7 +278,7 @@ impl MountTable {
     /// exactly `path`, rooting its content at `backing_subtree` within that
     /// volume, without changing the mount's permission flags.
     ///
-    /// This turns a policy-only mount of the default layout (the §16.2/§16.3
+    /// This turns a policy-only mount of the default layout (the
     /// `ro`/`nosuid`/… mount points [`Vfs::with_default_layout`](super::Vfs::with_default_layout)
     /// lays down) into a driver-backed one once the boot path knows which
     /// volume backs it: the flags come from the layout, the backing volume
@@ -241,7 +297,7 @@ impl MountTable {
     pub fn set_backing(
         &mut self,
         path: &Path,
-        backing: DriverHandle,
+        backing: MountBacking,
         backing_subtree: Vec<String>,
     ) -> Result<(), VfsError> {
         let mount = self
@@ -342,6 +398,11 @@ mod tests {
         Path::parse(text).expect("valid path")
     }
 
+    /// A backing whose device medium the attach path could not name.
+    fn unclassified(raw: u64) -> MountBacking {
+        MountBacking::new(DriverHandle::from_raw(raw).expect("non-zero handle"), None)
+    }
+
     #[test]
     fn root_mount_covers_everything() {
         let table = MountTable::new(MountFlags::default());
@@ -385,14 +446,92 @@ mod tests {
         let mut table = MountTable::new(MountFlags::default());
         assert_eq!(table.resolve(&p("/System")).backing(), None);
 
-        let handle = DriverHandle::from_raw(0x5EC0).expect("non-zero handle");
-        table.back_root(handle).expect("first backing attaches");
-        assert_eq!(table.resolve(&p("/System")).backing(), Some(handle));
+        let backing = unclassified(0x5EC0);
+        table.back_root(backing).expect("first backing attaches");
+        assert_eq!(
+            table.resolve(&p("/System")).backing(),
+            Some(backing.driver())
+        );
 
         // A second root volume is refused, and the first stays attached.
-        let other = DriverHandle::from_raw(0x5EC1).expect("non-zero handle");
-        assert_eq!(table.back_root(other), Err(VfsError::AlreadyExists));
-        assert_eq!(table.resolve(&p("/System")).backing(), Some(handle));
+        assert_eq!(
+            table.back_root(unclassified(0x5EC1)),
+            Err(VfsError::AlreadyExists)
+        );
+        assert_eq!(
+            table.resolve(&p("/System")).backing(),
+            Some(backing.driver())
+        );
+    }
+
+    #[test]
+    fn an_attached_backing_records_the_medium_the_device_reported() {
+        let mut table = MountTable::new(MountFlags::default());
+        let driver = DriverHandle::from_raw(0x5ED0).expect("non-zero handle");
+
+        // Every attach seam carries the medium the attach path learned from
+        // the block device, so which one a volume arrived through cannot
+        // change what the mount reports.
+        table
+            .back_root(MountBacking::new(driver, Some(BlkDeviceClass::Rotational)))
+            .expect("root backing");
+        assert_eq!(
+            table.resolve(&Path::root()).medium(),
+            Some(BlkDeviceClass::Rotational)
+        );
+
+        table
+            .mount(
+                p("/Storage/ssd"),
+                MountFlags::NOSUID,
+                Some(MountBacking::new(driver, Some(BlkDeviceClass::SolidState))),
+            )
+            .expect("mount");
+        assert_eq!(
+            table.resolve(&p("/Storage/ssd")).medium(),
+            Some(BlkDeviceClass::SolidState)
+        );
+
+        table
+            .mount(p("/Storage/stick"), MountFlags::NOSUID, None)
+            .expect("policy mount");
+        table
+            .set_backing(
+                &p("/Storage/stick"),
+                MountBacking::new(driver, Some(BlkDeviceClass::Removable)),
+                Vec::new(),
+            )
+            .expect("backing attaches");
+        assert_eq!(
+            table.resolve(&p("/Storage/stick")).medium(),
+            Some(BlkDeviceClass::Removable)
+        );
+    }
+
+    #[test]
+    fn a_mount_with_no_block_backing_reports_an_unknown_medium() {
+        let mut table = MountTable::new(MountFlags::default());
+        // The permanent root mount, before anything backs it.
+        assert_eq!(table.resolve(&Path::root()).medium(), None);
+
+        // A policy-only mount of the boot layout: no driver, no device.
+        table
+            .mount(p("/System"), MountFlags::READ_ONLY, None)
+            .expect("policy mount");
+        assert_eq!(table.resolve(&p("/System")).medium(), None);
+
+        // A driver-backed mount whose attach path had no classified device
+        // reports unknown too, rather than a plausible-looking medium.
+        table
+            .mount(
+                p("/Storage/x"),
+                MountFlags::NOSUID,
+                Some(unclassified(0x5ED1)),
+            )
+            .expect("mount");
+        let mount = table.resolve(&p("/Storage/x"));
+        assert!(mount.backing().is_some());
+        assert_eq!(mount.medium(), None);
     }
 
     #[test]
@@ -406,14 +545,14 @@ mod tests {
             )
             .expect("mount /Users");
 
-        let handle = DriverHandle::from_raw(0x5701).expect("non-zero handle");
+        let backing = unclassified(0x5701);
         table
-            .set_backing(&p("/Users"), handle, alloc::vec!["Users".into()])
+            .set_backing(&p("/Users"), backing, alloc::vec!["Users".into()])
             .expect("first backing attaches");
 
         let mount = table.resolve(&p("/Users/alice"));
-        assert_eq!(mount.backing(), Some(handle));
-        // The §16.3 flags are untouched by attaching a backing volume.
+        assert_eq!(mount.backing(), Some(backing.driver()));
+        // The layout's flags are untouched by attaching a backing volume.
         assert_eq!(mount.flags(), MountFlags::NOSUID.union(MountFlags::NODEV));
         // The sub-mount is rooted at the volume's own `/Users` directory.
         assert_eq!(mount.backing_subtree(), &[String::from("Users")]);
@@ -422,10 +561,10 @@ mod tests {
     #[test]
     fn set_backing_is_refused_for_an_unknown_mount_or_a_second_backing() {
         let mut table = MountTable::new(MountFlags::default());
-        let handle = DriverHandle::from_raw(0x5702).expect("non-zero handle");
+        let backing = unclassified(0x5702);
         // No mount covers exactly `/Storage` yet.
         assert_eq!(
-            table.set_backing(&p("/Storage"), handle, Vec::new()),
+            table.set_backing(&p("/Storage"), backing, Vec::new()),
             Err(VfsError::NotFound)
         );
 
@@ -433,15 +572,21 @@ mod tests {
             .mount(p("/Storage"), MountFlags::default(), None)
             .expect("mount /Storage");
         table
-            .set_backing(&p("/Storage"), handle, Vec::new())
+            .set_backing(&p("/Storage"), backing, Vec::new())
             .expect("first backing attaches");
         // A second backing is refused, and the first stays attached.
-        let other = DriverHandle::from_raw(0x5703).expect("non-zero handle");
+        let other = MountBacking::new(
+            DriverHandle::from_raw(0x5703).expect("non-zero handle"),
+            Some(BlkDeviceClass::SolidState),
+        );
         assert_eq!(
             table.set_backing(&p("/Storage"), other, Vec::new()),
             Err(VfsError::AlreadyExists)
         );
-        assert_eq!(table.resolve(&p("/Storage")).backing(), Some(handle));
+        let mount = table.resolve(&p("/Storage"));
+        assert_eq!(mount.backing(), Some(backing.driver()));
+        // The refused attach left the first backing's medium untouched.
+        assert_eq!(mount.medium(), None);
     }
 
     #[test]
@@ -451,18 +596,20 @@ mod tests {
 
         let mut table = MountTable::new(MountFlags::default());
         let handle = DriverHandle::from_raw(0x564F).expect("non-zero handle");
+        let backing = MountBacking::new(handle, Some(BlkDeviceClass::Removable));
         let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));
         table
             .mount_with_template(
                 p("/Storage/usb1"),
                 MountFlags::NOSUID,
-                handle,
+                backing,
                 template.clone(),
             )
             .expect("runtime mount");
 
         let mount = table.resolve(&p("/Storage/usb1/file"));
         assert_eq!(mount.backing(), Some(handle));
+        assert_eq!(mount.medium(), Some(BlkDeviceClass::Removable));
         assert_eq!(mount.template(), Some(&template));
         // Boot-layout mounts carry no template (their tree node is it).
         assert_eq!(table.resolve(&p("/other")).template(), None);
@@ -472,7 +619,7 @@ mod tests {
             table.mount_with_template(
                 p("/Storage/usb1"),
                 MountFlags::NOSUID,
-                handle,
+                backing,
                 template.clone()
             ),
             Err(VfsError::AlreadyExists)
@@ -483,7 +630,7 @@ mod tests {
     #[test]
     fn direct_children_lists_backed_child_mounts_only() {
         let mut table = MountTable::new(MountFlags::default());
-        let backed = DriverHandle::from_raw(0x5704).expect("non-zero handle");
+        let backed = unclassified(0x5704);
         table
             .mount(p("/Storage/usb1"), MountFlags::NOSUID, Some(backed))
             .expect("backed child");

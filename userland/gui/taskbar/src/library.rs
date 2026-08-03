@@ -35,14 +35,30 @@
 //!   launches the first match; `Escape` clears a non-empty search, and
 //!   dismisses the popup once the search is empty.
 //!
+//! # Dragging a program out to pin it
+//!
+//! The popup is the desktop's pin drag source (`plans/NEW-TASKBAR.md` T7).
+//! A primary press on an entry row arms the shared [`BundleDrag`] detector
+//! rather than launching at once; motion beyond the shared threshold offers
+//! that row's application, and the release that ends the gesture is the
+//! drop. A press-and-release that never travelled is an ordinary click and
+//! launches, so the gesture costs the click nothing.
+//!
+//! Every row is a *catalogued entry* by construction, so the offer names an
+//! [`EntryId`] and the pin store records that identity directly — no path is
+//! guessed and nothing the catalog cannot vouch for can be pinned. Folder
+//! headers arm nothing: they still toggle on the press.
+//!
 //! Everything fails closed: a press on no row changes nothing, a launch is
-//! only ever reported for a row that exists, and degenerate geometry (a
-//! screen too small for even one row) renders chrome with an empty viewport
-//! rather than panicking.
+//! only ever reported for a row that exists, an offer whose row has gone is
+//! abandoned rather than guessed at, and degenerate geometry (a screen too
+//! small for even one row) renders chrome with an empty viewport rather than
+//! panicking.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_browse::BundleDrag;
 use tairix_controls::{
     ControlRole, ControlState, FocusState, ListRow, Panel, PointerState, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, SearchField, TextAction,
@@ -51,6 +67,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{Catalog, EntryId, LibraryCategory};
+use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
 use crate::edge::Edge;
@@ -89,6 +106,28 @@ pub fn folder_label(category: LibraryCategory) -> &'static str {
         LibraryCategory::Utilities => "Utilities",
         LibraryCategory::Other => "Other",
     }
+}
+
+/// One shown row's request for owner-supplied icon artwork: the row's index
+/// into [`LibraryPopup::rows`], the pixel side its icon draws at, and the
+/// catalog entry to resolve the artwork from.
+///
+/// The popup reports these for the entry rows it actually shows so the
+/// session (which holds the filesystem and decode capabilities the bar does
+/// not) resolves each row's icon and hands it back with
+/// [`LibraryPopup::set_row_artwork`] — the same render/resolve split the pin
+/// strip uses. Folder rows raise no request: they draw their built-in
+/// folder glyph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryIconRequest {
+    /// The row's index into [`LibraryPopup::rows`].
+    pub row: usize,
+    /// The pixel side the row draws its icon at, so the owner rasterises at
+    /// exactly the size the list row will place.
+    pub side: u32,
+    /// The catalog entry the row launches, whose own icon the artwork comes
+    /// from.
+    pub entry: EntryId,
 }
 
 /// One row of the popup's scrolling list.
@@ -131,6 +170,15 @@ pub(crate) enum PopupOutcome {
     Changed,
     /// The user chose the entry with this identifier; the popup has closed.
     Launch(EntryId),
+    /// A pressed entry row has travelled beyond the shared drag threshold:
+    /// the user is dragging this application out of the popup to pin it.
+    DragOffered(EntryId),
+    /// The pressed pointer was released while a drag was offered. Where it
+    /// landed decides whether anything is pinned; the gesture is over either
+    /// way.
+    DragDropped,
+    /// `Escape` abandoned an offered drag. The popup stays open.
+    DragWithdrawn,
     /// The user dismissed the popup (click-away or `Escape`); it has closed.
     Dismiss,
 }
@@ -188,7 +236,19 @@ pub struct LibraryPopup {
     collapsed: Vec<LibraryCategory>,
     search: SearchField,
     scroll: ScrollBar,
+    /// The shared drag detector deciding when a pressed entry row's motion
+    /// has become a drag — the same rule the file manager uses, so the two
+    /// can never disagree about what a gesture means.
+    drag: BundleDrag,
+    /// The entry row a primary press landed on, remembered so a release over
+    /// the same row is a plain click that launches it.
+    pressed: Option<usize>,
     rows: Vec<LibraryRow>,
+    /// The owner-supplied icon artwork for each row, positionally aligned to
+    /// [`Self::rows`] and reset (to all-`None`) whenever the rows are
+    /// rebuilt, so a stale index can never draw the wrong application's
+    /// icon. `None` for a row falls back to the list row's built-in glyph.
+    row_artwork: Vec<Option<Surface>>,
     current: Option<usize>,
     hover: Option<usize>,
     focus: LibraryFocus,
@@ -213,7 +273,10 @@ impl LibraryPopup {
                 ScrollOrientation::Vertical,
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
             ),
+            drag: BundleDrag::new(),
+            pressed: None,
             rows: Vec::new(),
+            row_artwork: Vec::new(),
             current: None,
             hover: None,
             focus: LibraryFocus::Search,
@@ -245,6 +308,60 @@ impl LibraryPopup {
     #[must_use]
     pub fn rows(&self) -> &[LibraryRow] {
         &self.rows
+    }
+
+    /// Which shown rows want owner-supplied icon artwork, and at what size.
+    ///
+    /// One request per *visible* launchable entry row (folders are omitted —
+    /// they draw their own folder glyph), each carrying the row's index, the
+    /// pixel side its icon draws at, and the entry to resolve the artwork
+    /// from. The session resolves each and hands the result back with
+    /// [`set_row_artwork`](Self::set_row_artwork). Only the rows `layout`
+    /// shows are reported, so opening a large library never asks the session
+    /// to decode an icon nobody sees.
+    #[must_use]
+    pub fn visible_icon_requests(
+        &self,
+        layout: &LibraryLayout,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Vec<LibraryIconRequest> {
+        let font = popup_font(theme, scale);
+        layout
+            .rows
+            .iter()
+            .filter_map(|&(index, rect)| {
+                let row = self.rows.get(index)?;
+                let LibraryRow::Entry { id, .. } = row else {
+                    return None;
+                };
+                let side = list_row(row, false, false, false).icon_side(rect, scale, theme, font);
+                Some(LibraryIconRequest {
+                    row: index,
+                    side,
+                    entry: id.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Set the owner-resolved icon artwork for the row at `index` (an index
+    /// into [`rows`](Self::rows)), or clear it with `None`.
+    ///
+    /// Out-of-range indices are ignored, so a request resolved against a
+    /// since-rebuilt row list is a no-op rather than a panic.
+    pub fn set_row_artwork(&mut self, index: usize, artwork: Option<Surface>) {
+        if let Some(slot) = self.row_artwork.get_mut(index) {
+            *slot = artwork;
+        }
+    }
+
+    /// The owner-resolved icon artwork for the row at `index`, if any — what
+    /// [`render`](crate::TaskbarRenderer::render_library) blits in place of
+    /// the row's built-in glyph.
+    #[must_use]
+    pub fn row_artwork(&self, index: usize) -> Option<&Surface> {
+        self.row_artwork.get(index).and_then(Option::as_ref)
     }
 
     /// The row the keyboard cursor rests on, as an index into
@@ -503,11 +620,20 @@ impl LibraryPopup {
                     self.hover = hover;
                     changed = true;
                 }
+                if let Some(row) = self.drag.motion(point) {
+                    match self.entry_at(row) {
+                        Some(entry) => return PopupOutcome::DragOffered(entry),
+                        // The rows changed under the gesture, so there is
+                        // nothing to offer and no offer to withdraw later.
+                        None => self.drag.offer_failed(),
+                    }
+                }
                 changed_outcome(changed)
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
+                self.disarm_drag();
                 if layout.search.contains(point) {
                     self.focus_search();
                     return PopupOutcome::Changed;
@@ -519,7 +645,17 @@ impl LibraryPopup {
                     return changed_outcome(changed);
                 }
                 if let Some(index) = layout.row_at(point) {
-                    return self.activate(index, layout.visible_rows);
+                    // A folder header has nothing to drag, so it acts at
+                    // once; an entry row arms instead, and launches on the
+                    // release that ends the press as an ordinary click.
+                    if self.entry_at(index).is_none() {
+                        return self.activate(index, layout.visible_rows);
+                    }
+                    self.pressed = Some(index);
+                    self.drag.press(index, true, point);
+                    self.current = Some(index);
+                    self.focus = LibraryFocus::Rows;
+                    return PopupOutcome::Changed;
                 }
                 if layout.panel.contains(point) {
                     return changed_outcome(changed);
@@ -535,6 +671,20 @@ impl LibraryPopup {
                 } else {
                     self.close();
                     PopupOutcome::Dismiss
+                }
+            }
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => {
+                let offered = self.drag.is_offered();
+                let pressed = self.pressed.take();
+                self.drag.release();
+                if offered {
+                    return PopupOutcome::DragDropped;
+                }
+                match pressed.filter(|&row| layout.row_at(point) == Some(row)) {
+                    Some(row) => self.activate(row, layout.visible_rows),
+                    None => changed_outcome(changed),
                 }
             }
             InputEvent::PointerReleased { .. } => changed_outcome(changed),
@@ -559,6 +709,12 @@ impl LibraryPopup {
         layout: &LibraryLayout,
     ) -> PopupOutcome {
         self.sync_scroll(layout);
+        // Escape abandons an offered drag before it means anything else, so
+        // the user can back out of a drag without losing the popup as well.
+        if key == Key::Named(NamedKey::Escape) && self.drag.cancel() {
+            self.pressed = None;
+            return PopupOutcome::DragWithdrawn;
+        }
         if key == Key::Named(NamedKey::Tab) {
             return self.toggle_focus(layout.visible_rows);
         }
@@ -644,6 +800,23 @@ impl LibraryPopup {
             }
             Key::Named(_) => PopupOutcome::Ignored,
         }
+    }
+
+    /// The catalog identifier of the *entry* row at `index`; `None` for a
+    /// folder header or an index no row holds. The one place a row is turned
+    /// into the identity a launch or a pin names.
+    fn entry_at(&self, index: usize) -> Option<EntryId> {
+        match self.rows.get(index)? {
+            LibraryRow::Entry { id, .. } => Some(id.clone()),
+            LibraryRow::Folder { .. } => None,
+        }
+    }
+
+    /// End any gesture a previous press left behind, so a fresh press never
+    /// inherits a stale arming.
+    fn disarm_drag(&mut self) {
+        self.pressed = None;
+        self.drag.release();
     }
 
     /// Activate the row at `index`: toggle a folder, launch an entry.
@@ -865,6 +1038,19 @@ impl LibraryPopup {
                 self.current = None;
             }
         }
+        // The row list changed shape, so any resolved artwork is keyed to the
+        // old indices: drop it all and let the session re-resolve the new
+        // visible rows. A row with no artwork draws its built-in glyph, so the
+        // window between here and the next resolution never blanks.
+        self.row_artwork.clear();
+        self.row_artwork.resize_with(self.rows.len(), || None);
+        // An armed press is keyed to the old indices too, so it cannot be
+        // allowed to launch or offer whatever now sits at that position. Both
+        // halves of the gesture go: the pressed row *and* the drag detector
+        // that still holds it, or a rebuild reachable with the button held
+        // (typing into the filter, folding a folder) would let the next
+        // motion offer a different program than the one pressed.
+        self.disarm_drag();
     }
 
     /// The index of the first visible row for a viewport of `visible` rows.

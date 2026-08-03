@@ -29,10 +29,11 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
-use tairix_browse::ManagerToolModel;
+use tairix_browse::ManagerChrome;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
+use tairix_icon::NoArtwork;
 use tairix_theme::{TextRole, Theme};
 use tairix_wm::{Compositor, Point, Rect, WindowId};
 
@@ -383,18 +384,21 @@ fn render_surface<S: DirectorySource>(
     shell: &DesktopShell,
 ) -> Option<tairix_wm::Surface> {
     let theme = shell.session().active_theme();
-    // The picker is strictly read-only: it hands the renderer no manager write
-    // tools, so it never draws or resolves one (New Folder, the Trash location,
-    // and Empty Trash are the file manager's alone, never the trusted picker's
-    // — no write authority here). With no tools drawn, the enable model is the
-    // empty `ManagerToolModel::none()`.
+    // The picker is strictly read-only, so it draws no manager chrome at all:
+    // no write tools (New Folder, the Trash location, and Empty Trash are the
+    // file manager's alone — no write authority here) and no places rail (a
+    // pick is bounded to the tree the requesting application was authorised to
+    // be shown, and one-click jumps to arbitrary volumes would widen it).
+    // The picker has no per-entry artwork cache yet, so it resolves every grid
+    // tile to its built-in glyph through the always-empty artwork lookup; a
+    // later change gives it a real cache.
     render(
         browser,
         theme,
         picker_font(theme),
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
-        &[],
-        ManagerToolModel::none(),
+        &ManagerChrome::none(),
+        &mut NoArtwork,
     )
 }
 

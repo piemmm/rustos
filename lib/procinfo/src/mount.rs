@@ -130,9 +130,11 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::blkio::BlkDeviceClass;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountListRequest, MountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        MountAvailability, MountListRequest, MountRecord, MountVolumeState, SysinfoQueryId,
+        SysinfoRequestHeader,
     };
     use tairix_abi::Errno;
 
@@ -183,11 +185,37 @@ mod tests {
             target,
             fstype,
             flags,
-            VolumeStats::default(),
-            MountAvailability::Available,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
             [0u8; 16],
         )
         .expect("record")
+    }
+
+    #[test]
+    fn the_storage_medium_survives_the_client_decode() {
+        // The medium the service reported reaches the consumer through the
+        // paging walk, so a caller renders the drive it is really on.
+        let record = MountRecord::new(
+            b"usb1",
+            b"/Storage/usb1",
+            b"fat32",
+            MountFlags::NOSUID,
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: Some(BlkDeviceClass::Removable),
+            },
+            [0u8; 16],
+        )
+        .expect("record");
+        let fixture = Fixture::new(alloc::vec![record]);
+        let seen = collect(&fixture).expect("walk");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].medium(), Some(BlkDeviceClass::Removable));
     }
 
     fn collect(fixture: &Fixture) -> Result<Vec<MountRecord>, ListError> {
@@ -286,8 +314,11 @@ mod tests {
                 b"/Storage/usb1",
                 b"fat32",
                 MountFlags::NOSUID,
-                VolumeStats::default(),
-                availability,
+                MountVolumeState {
+                    usage: VolumeStats::default(),
+                    availability,
+                    medium: None,
+                },
                 [7u8; 16],
             )
             .expect("record");

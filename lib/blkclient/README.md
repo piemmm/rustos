@@ -61,6 +61,14 @@ them, so it lives here once and both consumers link it.
   declared class rather than an assumed envelope, so a removable unit
   riding out a bus reset and a paravirtual device that has simply wedged
   are each given their own class's patience.
+- A device need not declare a class this ABI recognises, so the class on a
+  completion is an `Option`: an unrecognised class word decodes to *unknown*
+  and stays unknown instead of being renamed to a class nobody reported.
+  Patience still needs a concrete envelope, and `BlkDeviceClass::served_as`
+  is the single policy that picks one — an unknown device is served the
+  bounded unclassified envelope and no extra patience. Hence `device_class`
+  reports what the device is *served as*, while `declared_class` reports
+  what it actually said.
 - `RtBlkCall` builds cleanly on the host (its syscall trap fails closed
   with a sentinel there rather than requiring a kernel), so this crate
   needs no target-conditional gate to stay host-testable end to end.

@@ -60,7 +60,7 @@ pub use tairix_abi::driver::filesystem::{
 pub use tairix_abi::CapabilityId;
 pub use tairix_abi::Errno;
 pub use tairix_caps::CapabilitySet;
-pub use tairix_kernel_core::fs::{Credentials, Mode, Path, Vfs, VfsError};
+pub use tairix_kernel_core::fs::{Credentials, Mode, MountBacking, Path, Vfs, VfsError};
 pub use tairix_kernel_sec::{GroupId, UserId};
 
 /// Logical block (sector) size of the in-memory device, in bytes. The
@@ -240,8 +240,10 @@ pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
     } else {
         MountFlags::default()
     };
+    // The suite's volume is an in-RAM block vector, so it declares no storage
+    // medium: unknown is the honest record.
     vfs.mounts_write()
-        .mount(path(MOUNT), flags, Some(handle))
+        .mount(path(MOUNT), flags, Some(MountBacking::new(handle, None)))
         .expect("mount the arxfs volume");
 
     (vfs, fs)

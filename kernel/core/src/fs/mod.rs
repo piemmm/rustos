@@ -62,7 +62,7 @@ pub mod volumes;
 pub use blkclient::BlkClient;
 pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
 pub use fscache::CachedFs;
-pub use mount::{MountPoint, MountTable};
+pub use mount::{MountBacking, MountPoint, MountTable};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService,
@@ -110,7 +110,11 @@ pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
     let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
     let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
-    vfs.mounts_write().back_root(handle)?;
+    // A private, short-lived reader over a driver the caller already holds:
+    // it never sees the block device, so it records an unknown medium rather
+    // than one it cannot have learned.
+    vfs.mounts_write()
+        .back_root(MountBacking::new(handle, None))?;
     Ok(vfs)
 }
 

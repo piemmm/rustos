@@ -111,6 +111,27 @@ The shared chevron and focus-ring/cell-outline primitives live once in the
 private `paint` module (`ChevronDir`/`paint_chevron`, `draw_outline`), so no
 family carries its own triangle or outline recipe.
 
+## Owner-supplied icon artwork
+
+A `shell::TaskbarItem`, a `collection::Card` tile, a `collection::ListRow`, and
+a `button::IconButton` each draw an icon whose artwork their owner may already
+hold rasterised (a desktop icon cache, an app bundle's own icon). They share one
+seam: `icon_side(bounds, scale, theme, font)` reports the exact pixel side the
+icon slot will be drawn into (`0` when the geometry leaves room for none), so the
+owner can ask its cache for artwork at precisely that size; `render(…,
+artwork: Option<&Surface>)` then blits that artwork centred in the slot, or
+rasterises the control's built-in vector glyph when none is supplied. A
+missing, refused, or undecodable asset therefore degrades to a meaningful icon
+rather than a blank slot.
+
+The "blit the artwork, else draw the built-in glyph" rule lives **once**, in
+the private `paint` module (`paint_icon_slot`), so the four controls cannot
+drift apart. Artwork that does not match the slot is centred on it rather than
+pinned to a corner, and a control with no icon slot ignores the parameter. No
+control decodes an image: artwork arrives already decoded and rasterised
+through the desktop's sandboxed asset path, so a malformed file can only fail
+to produce artwork.
+
 ## Masked text entry
 
 `TextField::secret(max_len)` turns a field into a password/passphrase/PIN

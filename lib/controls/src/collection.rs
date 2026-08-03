@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -30,8 +30,8 @@ use tairix_theme::Theme;
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
     dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_count_badge,
-    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail, seam_thickness,
-    seam_width, surface_rect, to_i32, RenderInvariant,
+    paint_icon_slot, plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail,
+    seam_thickness, seam_width, surface_rect, to_i32, RenderInvariant,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
 
@@ -293,7 +293,42 @@ impl ListRow {
         )
     }
 
+    /// The pixel side the row's leading icon paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising
+    /// per-entry artwork produces it at exactly the size [`Self::render`] will
+    /// place — the two can never disagree. The icon column is sized off the
+    /// text line so it lines up with the label, and the side is the same
+    /// whether or not the row carries an icon (the reserved column is fixed),
+    /// so a caller can size artwork before deciding to supply it.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        // The list row's icon column is sized purely off the text line and the
+        // row height; the scale and theme are accepted only so the query
+        // matches the shared collection-control shape.
+        let _ = (scale, theme);
+        let Some((_, _, _, h)) = surface_rect(bounds) else {
+            return 0;
+        };
+        Self::icon_slot_side(font, h)
+    }
+
+    /// The side of the square icon column a row of content height `ch`
+    /// reserves: the text line, never taller than the row. One definition so
+    /// [`Self::icon_side`] and [`Self::render`] cannot size the column
+    /// differently.
+    fn icon_slot_side(font: BitmapFont, ch: u32) -> u32 {
+        font.glyph_height().min(ch)
+    }
+
     /// Paint the row into `surface` at `bounds` for the active theme.
+    ///
+    /// `artwork` is the entry's own icon, pre-rasterised by the owner (at
+    /// [`Self::icon_side`], through its cache); `None` falls back to the row's
+    /// built-in class glyph. It is used only when the row carries an icon; a
+    /// row with no reserved icon ignores it. The artwork is decoded and
+    /// rasterised long before it reaches this call — a control never parses
+    /// image bytes.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -301,6 +336,7 @@ impl ListRow {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        artwork: Option<&Surface>,
     ) {
         let Some(rect) = surface_rect(bounds) else {
             return;
@@ -317,13 +353,11 @@ impl ListRow {
         let mut left = cx;
         // The leading icon on a reserved column, so labels line up whether or
         // not a row has an icon (text stability, spec §14).
-        let icon_slot = font.glyph_height().min(ch);
+        let icon_slot = Self::icon_slot_side(font, ch);
         if let Some(kind) = self.icon {
             if icon_slot > 0 {
-                if let Some(image) = builtin_icon(kind, fg).rasterise(icon_slot) {
-                    let iy = to_i32(cy) + (to_i32(ch) - to_i32(icon_slot)).max(0) / 2;
-                    surface.blit(to_i32(left), iy, &image);
-                }
+                let iy = cy + (ch.saturating_sub(icon_slot)) / 2;
+                paint_icon_slot(surface, left, iy, icon_slot, kind, fg, artwork);
             }
             left = left.saturating_add(icon_slot).saturating_add(pad);
         }
@@ -837,7 +871,31 @@ impl Card {
         rects
     }
 
+    /// The pixel side the card's identifying glyph paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising
+    /// per-entry artwork produces it at exactly the size [`Self::render`] will
+    /// place — the two can never disagree. A card with no icon still reports
+    /// the slot the top band would reserve, so a caller can size artwork
+    /// before deciding to supply it; `0` when the bounds are off-surface or
+    /// too small for a glyph.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        // The tile's icon band is sized off the plate geometry, not the text
+        // line; the font is accepted only so the query matches the shared
+        // collection-control shape.
+        let _ = font;
+        Self::icon_slot(bounds, scale, theme).map_or(0, |(_, _, side)| side)
+    }
+
     /// Paint the card into `surface` at `bounds` for the active theme.
+    ///
+    /// `artwork` is the entry's own icon, pre-rasterised by the owner (at
+    /// [`Self::icon_side`], through its cache); `None` falls back to the card's
+    /// built-in class glyph. It is used only when the card carries an icon; a
+    /// status or notification card with none ignores it. The artwork is
+    /// decoded and rasterised long before it reaches this call — a control
+    /// never parses image bytes.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -845,6 +903,7 @@ impl Card {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        artwork: Option<&Surface>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -904,7 +963,7 @@ impl Card {
         // title sits below it and both centre under it. The top-trailing count
         // pill / alert bead follows, then the title and body up to whatever
         // leading edge the badge left, then the footer actions.
-        let title_top = self.paint_icon(surface, (iy, ih, content_left, content_right), pad, theme);
+        let title_top = self.paint_icon(surface, bounds, scale, theme, iy, artwork);
         let title_right = self.paint_badge(
             surface,
             (ix, iy, iw, ih),
@@ -981,34 +1040,52 @@ impl Card {
         content_right
     }
 
-    /// Paint an optional identifying glyph centred in a band at the top of the
-    /// content, returning the y the title should start at: the icon's bottom
-    /// edge when an icon was drawn, else the content top `iy` unchanged. The
-    /// icon is sized to the content width but capped so the title keeps room
-    /// below it, and is tinted like the title so the tile reads as one unit.
+    /// Paint an optional identifying glyph in the tile's icon slot, returning
+    /// the y the title should start at: the icon's bottom edge when an icon was
+    /// drawn, else `content_top` unchanged. The glyph is tinted like the title
+    /// so the tile reads as one unit.
     fn paint_icon(
         &self,
         surface: &mut Surface,
-        inner: (u32, u32, u32, u32),
-        pad: u32,
+        bounds: Rect,
+        scale: Scale,
         theme: &Theme,
+        content_top: u32,
+        artwork: Option<&Surface>,
     ) -> u32 {
-        let (iy, ih, content_left, content_right) = inner;
         let Some(kind) = self.icon else {
-            return iy;
+            return content_top;
         };
-        let avail_w = content_right.saturating_sub(content_left);
-        // Leave at least the lower two-fifths of the tile for the label.
-        let slot = avail_w.min(ih.saturating_mul(3) / 5);
-        if slot == 0 {
-            return iy;
-        }
+        let Some((x, y, side)) = Self::icon_slot(bounds, scale, theme) else {
+            return content_top;
+        };
         let fg = foreground(theme, self.state.disposition());
-        if let Some(image) = builtin_icon(kind, fg).rasterise(slot) {
-            let ix_icon = content_left.saturating_add((avail_w.saturating_sub(slot)) / 2);
-            surface.blit(to_i32(ix_icon), to_i32(iy.saturating_add(pad)), &image);
+        paint_icon_slot(surface, x, y, side, kind, fg, artwork);
+        y.saturating_add(side)
+    }
+
+    /// The square icon slot the tile reserves at the top of its content:
+    /// `(x, y, side)`, centred across the content columns and sized to the
+    /// content width but capped so at least the lower two-fifths of the tile
+    /// stays for the label. `None` when the plate is off-surface or leaves no
+    /// room for a glyph.
+    ///
+    /// The one definition of that geometry, so the side an owner rasterises
+    /// artwork at ([`Self::icon_side`]) is exactly the slot [`Self::render`]
+    /// paints it into.
+    fn icon_slot(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
+        let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
+        let rail_w = rail_thickness(theme, scale).min(iw);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let content_left = ix.saturating_add(rail_w).saturating_add(pad);
+        let content_right = ix.saturating_add(iw).saturating_sub(pad);
+        let avail_w = content_right.saturating_sub(content_left);
+        let side = avail_w.min(ih.saturating_mul(3) / 5);
+        if side == 0 {
+            return None;
         }
-        iy.saturating_add(pad).saturating_add(slot)
+        let x = content_left.saturating_add((avail_w.saturating_sub(side)) / 2);
+        Some((x, iy.saturating_add(pad), side))
     }
 
     /// Paint the card title and its optional body line within the content

@@ -399,12 +399,45 @@ pub struct BlkCompletion {
     /// and the consumer derives its budget from that one shared policy
     /// instead of assuming a single envelope for every device.
     ///
+    /// `None` is a device that declared a class word this build does not
+    /// recognise. It is kept distinct from every named class so a consumer
+    /// that *reports* what a volume is — the mount table, and the drive icon
+    /// a file manager draws from it — says "unknown" rather than asserting a
+    /// medium nobody declared. For patience it is served exactly the
+    /// [`BlkDeviceClass::served_as`] envelope, so it buys no extra time.
+    ///
     /// The driver is untrusted, and this field needs no trust: it selects
     /// only how patient the consumer is with *this* device, grants no
     /// authority, and is bounded by the widest class budget either way. A
     /// driver that overstates its patience only delays its own deadline; one
     /// that understates it only fails itself sooner.
-    pub class: BlkDeviceClass,
+    pub class: Option<BlkDeviceClass>,
+}
+
+/// The class word written for a device whose declared class this build does
+/// not recognise, so an unknown survives a re-encode as an unknown instead of
+/// being relayed as a class nobody declared. It is deliberately outside the
+/// defined range, so [`BlkDeviceClass::from_u32`] refuses it.
+const BLK_CLASS_UNRECOGNISED: u32 = u32::MAX;
+
+/// The wire word for a declared class.
+const fn class_to_wire(class: Option<BlkDeviceClass>) -> u32 {
+    match class {
+        Some(class) => class.as_u32(),
+        None => BLK_CLASS_UNRECOGNISED,
+    }
+}
+
+/// The declared class a wire word names, or `None` for any word outside the
+/// defined set.
+///
+/// Every unrecognised word collapses to the one `None`, so a driver cannot
+/// smuggle a value of its choosing through a relaying consumer.
+const fn class_from_wire(word: u32) -> Option<BlkDeviceClass> {
+    match BlkDeviceClass::from_u32(word) {
+        Ok(class) => Some(class),
+        Err(_) => None,
+    }
 }
 
 /// Write one completion frame (`status || errno || geometry`) into `buf`.
@@ -426,7 +459,11 @@ fn encode_frame(
     put_u32(buf, COMPLETION_GEOMETRY_OFF, geometry.block_size);
     put_u64(buf, COMPLETION_GEOMETRY_OFF + 4, geometry.block_count);
     put_u32(buf, COMPLETION_GEOMETRY_OFF + 12, geometry.flags);
-    put_u32(buf, COMPLETION_GEOMETRY_OFF + 16, geometry.class.as_u32());
+    put_u32(
+        buf,
+        COMPLETION_GEOMETRY_OFF + 16,
+        class_to_wire(geometry.class),
+    );
     Ok(BLK_COMPLETION_LEN)
 }
 
@@ -552,11 +589,12 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 flags: read_u32(reply, COMPLETION_GEOMETRY_OFF + 12),
                 // An unrecognised class word is not a reason to discard an
                 // otherwise well-formed completion: the class selects only
-                // how patient this consumer is, so a device speaking a class
-                // we do not know is served the bounded unclassified envelope
-                // rather than being trusted with a wider one.
-                class: BlkDeviceClass::from_u32(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16))
-                    .unwrap_or(BlkDeviceClass::Virtual),
+                // how patient this consumer is. It stays an explicit unknown
+                // rather than being folded into a named class, so a consumer
+                // reporting what the volume is cannot assert a medium the
+                // device never declared; patience comes from `served_as`,
+                // which grants an unknown no more than a paravirtual device.
+                class: class_from_wire(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16)),
             },
             error: status.default_errno(),
         }
@@ -606,8 +644,9 @@ pub enum BlkDeviceClass {
     /// prone to bus resets and surprise removal.
     Removable = 2,
     /// A paravirtual device (virtio-blk) or other software-backed unit: fast,
-    /// but bounded so a wedged host backend never stalls forever. The
-    /// fail-closed default for an unclassified node.
+    /// but bounded so a wedged host backend never stalls forever. Also the
+    /// bounded envelope an unrecognised device is served with
+    /// ([`BlkDeviceClass::served_as`]).
     #[default]
     Virtual = 3,
 }
@@ -631,6 +670,22 @@ impl BlkDeviceClass {
             2 => Ok(Self::Removable),
             3 => Ok(Self::Virtual),
             _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The class a device that declared `class` is *served as*, where `None`
+    /// is a device whose declared class word this build does not recognise.
+    ///
+    /// An unrecognised device is served the paravirtual envelope: bounded,
+    /// and no more patient than any class it could have named honestly, so
+    /// naming a word nobody defines can never buy a driver extra time. This
+    /// is patience policy only — what the device *is* stays the declared
+    /// `Option`, so nothing downstream reports a medium nobody declared.
+    #[must_use]
+    pub const fn served_as(class: Option<Self>) -> Self {
+        match class {
+            Some(class) => class,
+            None => Self::Virtual,
         }
     }
 
@@ -1819,7 +1874,7 @@ fn classify<B: Block>(
             // *is*: its declared class travels with its size and write policy
             // so the consumer derives its deadline, reissue, and grace budget
             // from the same shared policy the driver serves it with.
-            let class = device.device_class();
+            let class = Some(device.device_class());
             Served::Device(device.geometry().map(|geometry| BlkCompletion {
                 block_size: geometry.block_size,
                 block_count: geometry.block_count,
@@ -2025,7 +2080,7 @@ mod tests {
             block_size: 512,
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
-            class: BlkDeviceClass::Rotational,
+            class: Some(BlkDeviceClass::Rotational),
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         let n = completion.encode(&mut buf).expect("encodes");
@@ -2047,33 +2102,75 @@ mod tests {
                 block_size: 4096,
                 block_count: 9,
                 flags: 0,
-                class,
+                class: Some(class),
             };
             let mut buf = [0u8; BLK_COMPLETION_LEN];
             completion.encode(&mut buf).expect("encodes");
             let decoded = decode_completion(&buf).expect("valid completion");
-            assert_eq!(decoded.class, class);
-            assert_eq!(decoded.class.budget(), class.budget());
+            assert_eq!(decoded.class, Some(class));
+            assert_eq!(
+                BlkDeviceClass::served_as(decoded.class).budget(),
+                class.budget()
+            );
         }
     }
 
-    #[test]
-    fn an_unknown_class_word_decodes_to_the_bounded_unclassified_envelope() {
-        // A device claiming a class this build does not know is served the
-        // unclassified envelope, never a wider one it asked for and never a
-        // discarded completion: the class is patience policy, not authority.
+    /// A completion whose class word names nothing this build defines.
+    fn completion_with_unknown_class_word() -> [u8; BLK_COMPLETION_LEN] {
         let completion = BlkCompletion {
             block_size: 512,
             block_count: 4,
             flags: 0,
-            class: BlkDeviceClass::Rotational,
+            class: Some(BlkDeviceClass::Rotational),
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         completion.encode(&mut buf).expect("encodes");
         put_u32(&mut buf, COMPLETION_GEOMETRY_OFF + 16, 0xDEAD_BEEF);
+        buf
+    }
+
+    #[test]
+    fn an_unknown_class_word_is_served_the_bounded_unclassified_envelope() {
+        // A device claiming a class this build does not know buys no extra
+        // patience: it is served the same envelope a paravirtual device gets,
+        // and its otherwise well-formed completion is not discarded.
+        let buf = completion_with_unknown_class_word();
         let decoded = decode_completion(&buf).expect("valid completion");
-        assert_eq!(decoded.class, BlkDeviceClass::Virtual);
+        assert_eq!(
+            BlkDeviceClass::served_as(decoded.class).budget(),
+            BlkDeviceClass::Virtual.budget()
+        );
         assert_eq!(decoded.block_count, 4);
+    }
+
+    #[test]
+    fn an_unknown_class_word_stays_unknown_rather_than_becoming_virtual() {
+        // "The driver said something I do not understand" must not be
+        // reported as "this is a paravirtual device": the mount table and the
+        // drive icon drawn from it would then assert a medium nobody
+        // declared. The unknown also survives a re-encode as an unknown, so a
+        // relaying consumer cannot launder it into a named class.
+        let buf = completion_with_unknown_class_word();
+        let decoded = decode_completion(&buf).expect("valid completion");
+        assert_eq!(decoded.class, None);
+        assert_ne!(decoded.class, Some(BlkDeviceClass::Virtual));
+
+        let mut relayed = [0u8; BLK_COMPLETION_LEN];
+        decoded.encode(&mut relayed).expect("encodes");
+        assert_eq!(decode_completion(&relayed).expect("valid").class, None);
+    }
+
+    #[test]
+    fn served_as_maps_every_declared_class_to_itself() {
+        for class in [
+            BlkDeviceClass::Rotational,
+            BlkDeviceClass::SolidState,
+            BlkDeviceClass::Removable,
+            BlkDeviceClass::Virtual,
+        ] {
+            assert_eq!(BlkDeviceClass::served_as(Some(class)), class);
+        }
+        assert_eq!(BlkDeviceClass::served_as(None), BlkDeviceClass::Virtual);
     }
 
     #[test]
@@ -2157,7 +2254,7 @@ mod tests {
             block_size: 4096,
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
-            class: BlkDeviceClass::Removable,
+            class: Some(BlkDeviceClass::Removable),
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         geometry
@@ -3308,7 +3405,7 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: 0,
-                class: MEM_BLOCK_CLASS,
+                class: Some(MEM_BLOCK_CLASS),
             })
         );
         assert_eq!(
@@ -3317,7 +3414,7 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: BLK_FLAG_READ_ONLY,
-                class: MEM_BLOCK_CLASS,
+                class: Some(MEM_BLOCK_CLASS),
             })
         );
     }
@@ -3339,9 +3436,12 @@ mod tests {
             &mut window,
         )
         .expect("geometry");
-        assert_eq!(completion.class, MEM_BLOCK_CLASS);
+        assert_eq!(completion.class, Some(MEM_BLOCK_CLASS));
         assert_ne!(MEM_BLOCK_CLASS, BlkDeviceClass::Virtual);
-        assert_eq!(completion.class.budget(), MEM_BLOCK_CLASS.budget());
+        assert_eq!(
+            BlkDeviceClass::served_as(completion.class).budget(),
+            MEM_BLOCK_CLASS.budget()
+        );
     }
 
     #[test]

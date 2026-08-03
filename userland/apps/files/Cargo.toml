@@ -21,10 +21,12 @@ publish.workspace = true
 name = "tairix-files-run"
 path = "src/run.rs"
 
-# Everything the freestanding `Run` binary links is pulled in for the
-# bare-metal targets it is actually built for; on the host the binary is
-# an inert stub with no dependencies at all.
-[target.'cfg(target_os = "none")'.dependencies]
+# What the host-visible places-rail routing (`src/sidebar.rs`) and command-line
+# decision (`src/command.rs`) link. The rest of the program is freestanding,
+# but those decisions are pure and host-tested, so the crates they are
+# expressed in must build for the host too. The bare-metal section below adds
+# only what the *program* needs on top.
+[dependencies]
 # The frozen `Errno`, the input/display vocabulary, and the window-channel
 # wire types the binary speaks (§2.2, §17.4).
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
@@ -32,9 +34,40 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry (§2.2, §6).
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
-# Shared integer screen geometry (`Rect`/`Scale`) for the render viewport
-# and the inline rename editor's overlay (§2.2).
+# Shared integer screen geometry (`Point`/`Rect`/`Scale`) for the render
+# viewport, the rail's hit-test, and the inline rename editor's overlay.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The single shared theme definition every desktop surface resolves from.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The shared text rasteriser: the rail's width and every label are measured in
+# the theme's font. The production font-service transport is a bare-metal-only
+# feature, added in the target section below, so the host view is the built-in
+# face and its metrics alone.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The one shared path grammar: the starting-location argument is diagnosed
+# against the same filename rule the browser spells every component with, so
+# this app carries no second path parser.
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
+
+# Everything else the freestanding `Run` binary links is pulled in for the
+# bare-metal targets it is actually built for; on the host those parts of the
+# binary are not compiled at all.
+[target.'cfg(target_os = "none")'.dependencies]
+# The shared icon vocabulary's draw-site artwork seam: the reclaim-governed
+# `ArtworkCache` this app builds through the one shared `artwork_cache`
+# constructor, and the `IconArtworkSource` that binds it to the read and
+# rasterise seams the grid resolves each tile through.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The parser sandbox: the icon artwork the grid draws is untrusted input, so it
+# is decoded in a minimum-capability worker this binary re-enters itself as,
+# never in this process.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The System Information client the memory-pressure band is read through, so
+# the artwork cache obeys the same band every other cache on the machine does.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# The shared reclaimable-memory model: the `PressureBand` the band read above
+# is published to this process's gauge as.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The shared Reactive Alloy GUI controls: the in-place rename editor is the
 # one shared `TextField` (its caret/selection editor and validation-message
 # surface), never a browser-private text box (§2.2, §17.4).
@@ -43,14 +76,15 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # controls consume; the binary maps the window channel's wire `KeyInput`
 # onto it to drive the rename editor.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
-# The shared text rasteriser: the browser renders its labels at the theme's
-# font size, so the binary resolves the `BitmapFont` it passes to `render`.
-# The `Run` binary reaches the sandboxed font service over the runtime
-# `ipc_call` transport (this is a target-only dependency, so no host build is
-# affected).
+# The production font-service transport, added to the shared dependency
+# above: the `Run` binary reaches the sandboxed font service over the runtime
+# `ipc_call` transport, which only exists on the bare-metal targets, so no
+# host build is affected.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
-# The single shared theme definition (§10).
-tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The one shared command-help engine: the reserved `-h`/`-?` switches render
+# this bundle's own `Help/` tree through the same engine as every other
+# command's short help, never a second copy of the text.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
 # The app half of the window channel: `WindowClient` (create / present /
 # close over the `WindowTransport` seam) and `WindowEvents` (the typed,
 # parked event wait over the `EventSource` seam).

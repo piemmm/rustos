@@ -46,7 +46,7 @@ use tairix_abi::driver::filesystem::{
     NodeKind as DriverNodeKind, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
-use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeIoHealthRecord};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
@@ -1219,8 +1219,11 @@ where
                     path_str(mount.path()).as_bytes(),
                     fstype.as_bytes(),
                     mount.flags(),
-                    usage,
-                    availability,
+                    MountVolumeState {
+                        usage,
+                        availability,
+                        medium: mount.medium(),
+                    },
                     volume_id,
                 )
                 .ok()

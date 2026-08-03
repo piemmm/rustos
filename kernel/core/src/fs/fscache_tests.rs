@@ -8,7 +8,7 @@ use super::*;
 
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::{Credentials, Metadata, Mode};
-use crate::fs::{Path, Vfs, VfsError};
+use crate::fs::{MountBacking, Path, Vfs, VfsError};
 use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
 
@@ -423,7 +423,10 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
     let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
     vfs.mounts_write()
-        .back_root(DriverHandle::from_raw(1).expect("handle"))
+        .back_root(MountBacking::new(
+            DriverHandle::from_raw(1).expect("handle"),
+            None,
+        ))
         .expect("backs root");
 
     let caps = CapabilitySet::empty();

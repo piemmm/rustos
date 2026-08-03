@@ -170,8 +170,14 @@ pub struct BlkClient {
     /// The device's declared class, as reported at
     /// [`connect`](Self::connect). Kept so a consumer layered over this
     /// client (a RAID composition, a cache) reports the real hardware's
-    /// envelope rather than hiding it behind the unclassified default.
-    class: BlkDeviceClass,
+    /// envelope rather than hiding it behind the unclassified default, and so
+    /// the mount this device backs can report the medium it is really on.
+    ///
+    /// `None` is a device that declared a class word this build does not
+    /// recognise. It stays distinct from every named class so the mount table
+    /// says "unknown" instead of asserting a medium nobody declared; for
+    /// patience it is served the bounded unclassified envelope.
+    declared_class: Option<BlkDeviceClass>,
     /// The volume-availability overlay this device's reported health drives,
     /// shared by [`Arc`] with the mount registry so the mount snapshot can
     /// show a live-but-unwell device as `Degraded`/`Recovering` rather than
@@ -248,8 +254,8 @@ impl BlkClient {
             // envelope: the geometry query below is itself deadlined, so an
             // endpoint that never answers fails closed promptly rather than
             // being granted a spinning disk's patience on nothing but hope.
-            class: BlkDeviceClass::Virtual,
-            budget: BlkDeviceClass::Virtual.budget(),
+            declared_class: None,
+            budget: BlkDeviceClass::served_as(None).budget(),
             health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
             counters: Arc::new(BlkHealthCountersAtomic::default()),
         };
@@ -274,10 +280,11 @@ impl BlkClient {
         // Adopt the device's declared class for every subsequent request, so
         // this mount's deadline, reissue count, and the driver's grace window
         // all derive from one policy for this device rather than a single
-        // assumed envelope. The class is decoded fail-safe to the bounded
-        // unclassified envelope, so an unrecognised claim cannot buy patience.
-        client.class = completion.class;
-        client.budget = completion.class.budget();
+        // assumed envelope. An unrecognised claim is kept as an explicit
+        // unknown and served the bounded unclassified envelope, so it cannot
+        // buy patience and cannot be reported as a medium it never declared.
+        client.declared_class = completion.class;
+        client.budget = BlkDeviceClass::served_as(completion.class).budget();
         Ok(client)
     }
 
@@ -285,6 +292,19 @@ impl BlkClient {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// The storage medium the device declared at connect, or `None` when it
+    /// declared a class word this build does not recognise.
+    ///
+    /// This is what the device *said* it is, for a consumer that reports the
+    /// medium a volume lives on. It is deliberately not the class the client
+    /// serves the device as ([`Block::device_class`]), which collapses an
+    /// unknown onto a bounded envelope for patience: reporting that collapse
+    /// would assert a medium nobody declared.
+    #[must_use]
+    pub const fn declared_class(&self) -> Option<BlkDeviceClass> {
+        self.declared_class
     }
 
     /// The shared live-health handles for this device (the serving endpoint
@@ -540,12 +560,15 @@ impl BlkClient {
 }
 
 impl Block for BlkClient {
-    /// The class the served device declared at [`BlkClient::connect`], from
-    /// which this client's [`IoBudget`] is derived. Reported rather than
-    /// defaulted so a composition layered over this client (a RAID array, a
-    /// cache) inherits the real hardware's envelope.
+    /// The class this client *serves* the device as, from which its
+    /// [`IoBudget`] is derived. Reported rather than defaulted so a
+    /// composition layered over this client (a RAID array, a cache) inherits
+    /// the real hardware's envelope; a device whose declared class word this
+    /// build does not recognise is served the bounded unclassified envelope.
+    /// What the device *said* it is stays on
+    /// [`declared_class`](BlkClient::declared_class).
     fn device_class(&self) -> BlkDeviceClass {
-        self.class
+        BlkDeviceClass::served_as(self.declared_class)
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -710,7 +733,9 @@ mod tests {
         flushes: usize,
         read_only: bool,
         reported_block_size: u32,
-        reported_class: BlkDeviceClass,
+        /// `None` declares a class word this build does not recognise, which
+        /// is how a device speaking an unknown class is simulated.
+        reported_class: Option<BlkDeviceClass>,
     }
 
     impl MemDevice {
@@ -720,7 +745,7 @@ mod tests {
                 flushes: 0,
                 read_only: false,
                 reported_block_size: BLOCK_SIZE_U32,
-                reported_class: MEM_DEVICE_CLASS,
+                reported_class: Some(MEM_DEVICE_CLASS),
             }
         }
 
@@ -825,10 +850,22 @@ mod tests {
         blocks: u64,
         requests: usize,
     ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
+        connected_declaring(blocks, requests, Some(MEM_DEVICE_CLASS))
+    }
+
+    /// As [`connected`], with the device declaring `class` in its geometry
+    /// reply — `None` being a class word this build does not recognise.
+    fn connected_declaring(
+        blocks: u64,
+        requests: usize,
+        class: Option<BlkDeviceClass>,
+    ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
-        let device = StdArc::new(Mutex::new(MemDevice::new(blocks)));
+        let mut mem = MemDevice::new(blocks);
+        mem.reported_class = class;
+        let device = StdArc::new(Mutex::new(mem));
         let server = serve(
             endpoint,
             Window(window),
@@ -849,12 +886,26 @@ mod tests {
         // every device.
         let (client, _device, server) = connected(64, 1);
         assert_eq!(client.device_class(), MEM_DEVICE_CLASS);
+        assert_eq!(client.declared_class(), Some(MEM_DEVICE_CLASS));
         assert_eq!(client.budget, MEM_DEVICE_CLASS.budget());
         assert_ne!(MEM_DEVICE_CLASS, BlkDeviceClass::Virtual);
         assert_ne!(
             MEM_DEVICE_CLASS.budget().deadline_ns,
             BlkDeviceClass::Virtual.budget().deadline_ns
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_undefined_class_word_is_served_cautiously_and_reported_unknown() {
+        // A device declaring a class word this build does not define buys no
+        // extra patience — it is served the same bounded envelope a
+        // paravirtual device gets — but what it *is* stays unknown, so the
+        // mount it backs never asserts a medium nobody declared.
+        let (client, _device, server) = connected_declaring(64, 1, None);
+        assert_eq!(client.budget, BlkDeviceClass::Virtual.budget());
+        assert_eq!(client.device_class(), BlkDeviceClass::Virtual);
+        assert_eq!(client.declared_class(), None);
         server.join().unwrap();
     }
 
@@ -1045,7 +1096,7 @@ mod tests {
                             block_size: BLOCK_SIZE_U32,
                             block_count: 8,
                             flags: 0,
-                            class: SCRIPTED_DEVICE_CLASS,
+                            class: Some(SCRIPTED_DEVICE_CLASS),
                         }
                         .encode(&mut reply)
                         .unwrap(),

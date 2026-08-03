@@ -945,6 +945,58 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_icon_artwork_reads_back_from_system_graphics() {
+        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
+        use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+
+        // The desktop's raster icon masters ship under `/System/Graphics`,
+        // discovered from disk (`tairix_syshelp::GRAPHICS_FILES`) — assert
+        // the shipped set is non-empty so an accidentally empty walk cannot
+        // pass this test silently.
+        assert!(
+            !tairix_syshelp::GRAPHICS_FILES.is_empty(),
+            "the desktop ships at least one icon asset"
+        );
+        let folder = tairix_syshelp::GRAPHICS_FILES
+            .iter()
+            .find(|asset| asset.dir == "Icons" && asset.file == "folder.png")
+            .expect("the folder icon master ships");
+
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(9),
+            ImageProfile::Installer,
+            &[],
+            &[],
+        )
+        .expect("image builds");
+
+        let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::ARXFSSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
+        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("/System mounts read-only under the public key");
+
+        let mut node = sys.root();
+        for component in [b"Graphics".as_slice(), b"Icons", b"folder.png"] {
+            node = sys
+                .lookup(node, component)
+                .expect("Graphics/Icons/folder.png path component");
+        }
+        let mut buf = vec![0u8; folder.bytes.len() + 16];
+        let read = sys.read_at(node, 0, &mut buf).expect("the icon reads back");
+        assert_eq!(
+            &buf[..read],
+            folder.bytes,
+            "the planted icon is byte-identical to the shipped master"
+        );
+    }
+
+    #[test]
     fn the_root_only_mounts_under_the_passphrase_derived_key() {
         let built = build_rpi_image(
             &test_kernel_elf(),

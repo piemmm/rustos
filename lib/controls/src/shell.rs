@@ -23,9 +23,9 @@ use tairix_theme::Theme;
 use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::paint::{
-    foreground, inset, key_activation, paint_bead, paint_count_badge, paint_plate, plate_border,
-    pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail, seam_thickness,
-    seam_width, surface_rect, to_i32, BeadShape, PlateStyle, RenderInvariant,
+    foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
+    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
+    seam_thickness, seam_width, surface_rect, to_i32, BeadShape, PlateStyle, RenderInvariant,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState, ValidationState,
@@ -186,12 +186,15 @@ impl Notification {
                 }
             }
         }
+        // A notification card carries no per-entry artwork; it always draws
+        // its built-in class glyph.
         self.card.render(
             surface,
             self.card_bounds(bounds, scale, theme, font),
             scale,
             theme,
             font,
+            None,
         );
     }
 
@@ -549,10 +552,9 @@ impl TaskbarItem {
         );
     }
 
-    /// Paint the identity icon at `(x, y)` in a `side`-pixel slot: the
-    /// owner-supplied artwork when present (centred, so a stale cache entry
-    /// from mid-scale-change still paints sensibly), else the built-in class
-    /// glyph tinted for the resolved frame.
+    /// Paint the item's identity icon at `(x, y)` in a `side`-pixel slot
+    /// through the shared "artwork else built-in glyph" rule, carrying this
+    /// item's class glyph and the resolved frame tint.
     fn paint_icon(
         &self,
         surface: &mut Surface,
@@ -562,13 +564,7 @@ impl TaskbarItem {
         tint: Color,
         artwork: Option<&Surface>,
     ) {
-        if let Some(art) = artwork {
-            let ax = to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2;
-            let ay = to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2;
-            surface.blit(ax, ay, art);
-        } else if let Some(image) = builtin_icon(self.icon, tint).rasterise(side) {
-            surface.blit(to_i32(x), to_i32(y), &image);
-        }
+        paint_icon_slot(surface, x, y, side, self.icon, tint, artwork);
     }
 
     /// Paint the item's status edges and marks: the active-window accent seam,

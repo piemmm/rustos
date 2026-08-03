@@ -15,6 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU8;
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
@@ -32,13 +33,16 @@ use crate::fs::blkclient::{BlkHealthCountersAtomic, VolumeHealthSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
-use crate::fs::{Mode, Path, Vfs};
+use crate::fs::{Mode, MountBacking, Path, Vfs};
 
 /// The test principal that owns the mounted volume's files.
 const TEST_UID: u32 = 1000;
 const TEST_GID: u32 = 1000;
 /// The mount point the in-memory driver is mounted at.
 const MOUNT: &str = "/Storage/vol";
+/// The storage medium the fixture's block device declares, so the snapshot
+/// can be checked against a value only the attach path could have supplied.
+const MOUNT_MEDIUM: BlkDeviceClass = BlkDeviceClass::SolidState;
 
 /// A sink that discards every event — the identity-table verifier audits its
 /// outcome but these tests assert behaviour, not the audit trail.
@@ -88,8 +92,14 @@ fn vfs(read_only: bool) -> Vfs {
     } else {
         MountFlags::from_bits(0).expect("empty flags")
     };
+    // The fixture stands in for a volume attached from a classified block
+    // device, so the medium it reports is the one the device declared.
     vfs.mounts_write()
-        .mount(mount, flags, Some(handle))
+        .mount(
+            mount,
+            flags,
+            Some(MountBacking::new(handle, Some(MOUNT_MEDIUM))),
+        )
         .expect("mount backed");
     vfs
 }
@@ -160,7 +170,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
             .mount_rebased(
                 Path::parse(mount_point).expect("path"),
                 nosuid,
-                Some(h_shared),
+                Some(MountBacking::new(h_shared, None)),
                 alloc::vec![alloc::string::String::from(subtree)],
             )
             .expect("rebased mount");
@@ -169,7 +179,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         .mount(
             Path::parse("/Storage/other").expect("path"),
             nosuid,
-            Some(h_other),
+            Some(MountBacking::new(h_other, None)),
         )
         .expect("other mount");
 
@@ -270,7 +280,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     vfs.mounts_write()
         .set_backing(
             &Path::parse("/Storage").expect("path"),
-            h_parent,
+            MountBacking::new(h_parent, None),
             Vec::new(),
         )
         .expect("back /Storage");
@@ -279,7 +289,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
         .mount_with_template(
             Path::parse("/Storage/usb1").expect("path"),
             MountFlags::NOSUID,
-            h_usb,
+            MountBacking::new(h_usb, Some(BlkDeviceClass::Removable)),
             template.clone(),
         )
         .expect("runtime mount");
@@ -287,7 +297,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
         .mount_with_template(
             Path::parse("/Storage/dup").expect("path"),
             MountFlags::NOSUID,
-            h_dup,
+            MountBacking::new(h_dup, Some(BlkDeviceClass::Removable)),
             template,
         )
         .expect("colliding runtime mount");
@@ -979,11 +989,12 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(9).expect("handle");
     let root_handle = DriverHandle::from_raw(10).expect("handle");
-    vfs.mounts_write().back_root(root_handle).expect("back /");
+    let root_backing = MountBacking::new(root_handle, None);
+    vfs.mounts_write().back_root(root_backing).expect("back /");
     vfs.mounts_write()
         .set_backing(
             &Path::parse("/System").expect("path"),
-            system_handle,
+            MountBacking::new(system_handle, None),
             Vec::new(),
         )
         .expect("back /System");
@@ -991,7 +1002,7 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
         let path = Path::parse(sub).expect("path");
         let subtree = path.components().to_vec();
         vfs.mounts_write()
-            .set_backing(&path, root_handle, subtree)
+            .set_backing(&path, root_backing, subtree)
             .expect("back writable exception");
     }
 
@@ -1033,6 +1044,9 @@ fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
     assert_eq!(root.source_bytes(), b"");
     assert_eq!(root.fstype_bytes(), b"");
     assert_eq!(root.usage().total_blocks, 0);
+    // With no block device behind it, the root mount's medium is unknown
+    // rather than a plausible-looking guess.
+    assert_eq!(root.medium(), None);
     // The backed volume reports its registration names and the driver's
     // live accounting.
     let vol = records
@@ -1040,6 +1054,8 @@ fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
         .find(|record| record.source_bytes() == b"vol")
         .expect("the registered volume is listed by its source name");
     assert_eq!(vol.fstype_bytes(), b"memfs");
+    // The medium the attach path recorded reaches the record userland reads.
+    assert_eq!(vol.medium(), Some(MOUNT_MEDIUM));
     let usage = vol.usage();
     assert_eq!(usage.block_size, 512);
     assert_eq!(usage.total_blocks, 4096);

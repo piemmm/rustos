@@ -37,7 +37,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_icon::VectorIcon;
+use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES};
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_raster::Surface;
 use tairix_svg::{SvgError, SvgImage};
@@ -49,14 +49,6 @@ use crate::worker::Service;
 #[cfg(test)]
 #[path = "iconraster_tests.rs"]
 mod tests;
-
-/// Largest icon file the service will decode, in bytes.
-///
-/// A fixed validation bound, not a growable capacity: real desktop icon
-/// artwork (SVG source or a modestly sized PNG) is a tiny fraction of
-/// this, so the ceiling exists purely to bound how much hostile work a
-/// single request can demand before any byte is decoded.
-pub const MAX_ICON_INPUT: usize = 256 * 1024;
 
 /// Largest pixel side a caller may request for the rasterised output.
 ///
@@ -198,7 +190,7 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
         return Err(IconRefusal::MalformedRequest);
     }
     let icon = r
-        .bytes(MAX_ICON_INPUT)
+        .bytes(MAX_ARTWORK_BYTES)
         .map_err(|_| IconRefusal::MalformedRequest)?;
     if !r.is_exhausted() {
         return Err(IconRefusal::MalformedRequest);
@@ -447,10 +439,10 @@ fn pixel_buffer_len(width: u32, height: u32) -> usize {
 /// rasterise it to a `side`×`side` straight-alpha RGBA8 image.
 ///
 /// `side` and `icon.len()` are checked locally against
-/// [`MAX_ICON_SIDE`]/[`MAX_ICON_INPUT`] before anything is sent, so an
-/// out-of-bounds request never round-trips through the sandbox just to be
-/// refused. The reply is never trusted as-is: the tag, the echoed side,
-/// and the exact pixel length are all validated before the bytes are
+/// [`MAX_ICON_SIDE`]/[`tairix_icon::MAX_ARTWORK_BYTES`] before anything is
+/// sent, so an out-of-bounds request never round-trips through the sandbox
+/// just to be refused. The reply is never trusted as-is: the tag, the echoed
+/// side, and the exact pixel length are all validated before the bytes are
 /// returned, so a compromised worker can lie about its geometry, never
 /// hand the caller a buffer of the wrong size.
 ///
@@ -465,7 +457,7 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     side: u32,
     icon: &[u8],
 ) -> Result<Vec<u8>, IconRasterFailure> {
-    if side == 0 || side > MAX_ICON_SIDE || icon.len() > MAX_ICON_INPUT {
+    if side == 0 || side > MAX_ICON_SIDE || icon.len() > MAX_ARTWORK_BYTES {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
     let mut w = Writer::new();

@@ -356,18 +356,47 @@ opens nothing — an honest "no application" answer, never an empty menu
 (`AGENTS.md` §2.24). The default open still picks the first association; the
 chooser lets the user pick any of them.
 
+### File-type classification — the one content-type registry
+
+`lib/browse::media` is the single closed registry that both the icon a tile
+draws and the "Open With…" association vocabulary read, so the two can never
+drift apart (`AGENTS.md` §2.2):
+
+- `MediaType` names each content type by its IANA (or TAIRiX vendor)
+  media-type spelling; `MediaType::as_str` and `MediaType::from_media_str`
+  round-trip it, case-insensitively. The enum is **closed** — an unrecognised
+  spelling is simply not one the registry knows (`None`, never a free-form
+  string at a draw or association site).
+- `media_for_name(name)` maps a filename extension to its type,
+  ASCII-case-insensitively and without allocating; `media_for_entry(entry,
+  parent)` classifies a listed entry — `inode/directory` for a directory
+  whatever its name, `application/x-tairix-service` for a `<Name>.app` listed
+  from the system service store and `application/x-tairix-app` elsewhere, and
+  the extension's type for a regular file, falling closed to
+  `application/octet-stream`.
+- `MediaType::icon` is the glyph the type draws. That mapping is deliberately
+  many-to-one and is the *only* part of the registry allowed to be: several
+  distinct types share `IconKind::Text`. Two types are never merged because
+  they draw alike — an application whose manifest declared the vanished type
+  would silently stop matching its own files.
+- `MediaType::parent` is the **subclass relation**, the same one the
+  freedesktop.org shared-mime-info database models (`text/x-csrc` is a
+  subclass of `text/plain`). Every readable-text type names `text/plain` as its
+  broader type — `image/svg+xml` reaches it through `application/xml` — and
+  everything binary names none. The chain is finite and acyclic, and
+  association matching walks it, so naming a format precisely (`.rs` is
+  `text/x-rust`) never narrows what can open it.
+
 ### "Open With…" — the type→bundle association
 
 Offering a file to a chosen application is a second pure engine model, the
 `open_with` module (`plans/NEW-FILEMANAGER.md` FM6b), host-proven ahead of the
 app-side spawn exactly as the `Activation` decision was:
 
-- `mime_for_name(name)` derives a file's content type from its filename
-  extension — the one bridge from a name (all a VFS listing gives) to the MIME
-  vocabulary a bundle's signed `AppInfo` declares its associations in. It
-  recognises exactly the extensions the `icon` classifier draws a typed glyph
-  for, mapping source and structured-config files to their honest concrete
-  type (`text/plain`, `application/json`, …); an unknown or absent extension
+- `media_for_name(name)` derives a file's content type from its filename
+  extension through the shared content-type registry above — the one bridge
+  from a name (all a VFS listing gives) to the MIME vocabulary a bundle's
+  signed `AppInfo` declares its associations in. An unknown or absent extension
   yields `None`, never a guess.
 - `BundleSource` is the injected installed-bundle enumeration seam — the
   "Open With…" analogue of `DirectorySource`. On a running system it is backed
@@ -375,9 +404,14 @@ app-side spawn exactly as the `Activation` decision was:
   own identity); in tests it is an in-memory list, so the matching is exercised
   without a kernel.
 - `applications_for(name, bundles)` returns the `AppAssociation`s whose
-  declared MIME set handles the file's type, in the source's enumeration order.
-  No match is an **honest empty answer** — the caller shows a "no application"
-  notice (`AGENTS.md` §2.24), never a crash and never a fabricated default.
+  declared MIME set handles the file's type **or any broader type it is a
+  subclass of** (`MediaType::parent`), so an editor declaring `text/plain` is
+  offered for a `.rs` file. Candidates are ordered by how specifically they
+  claim the file — an application declaring `text/x-rust` comes before one
+  declaring `text/plain` — and bundles claiming at the same level keep the
+  source's enumeration order. No match is an **honest empty answer** — the
+  caller shows a "no application" notice (`AGENTS.md` §2.24), never a crash and
+  never a fabricated default.
 
 The type decision is a **display hint only**, like the icon classifier: it
 decides which applications are *offered*, and the ordinary signed load gate
@@ -390,7 +424,8 @@ read-only picker composes the same engine and never launches.
 
 ### Rendering
 
-`render(browser, theme, font, viewport, tools)` paints a command toolbar strip,
+`render(browser, theme, font, viewport, tools, tool_model, artwork)` paints a
+command toolbar strip,
 a path bar, and the current directory into a `tairix-raster` `Surface` sized to
 the viewport, in whichever of the two views the browser holds
 (`ViewMode::List` or `ViewMode::Grid`). `tools` is the manager-only
@@ -420,14 +455,19 @@ at the epoch so a stampless file is never given a fabricated date, §21). In the
 **grid** view each entry is a shared `lib/controls` `Card` tile carrying its
 file-type icon above that same label, wrapped into as many columns as fit the
 width; the two views share one selection model, so toggling never moves the
-selection or re-reads the directory. The icon comes from the shared
-`lib/browse::icon` classifier (`icon_for`): a directory is a folder glyph and a
-`<Name>.app` an application tile, and a regular file maps through a small,
-documented filename-extension table to the broad content classes text / image
-/ archive / executable, with the generic file glyph as the fail-closed
-fallback. It is one classification both the file manager and the trusted picker
-draw from (`AGENTS.md` §2.2) and a **display hint only** — it decides a glyph,
-never an operation; authority stays in the VFS and the launcher. The selected
+selection or re-reads the directory. The icon is the shared registry's
+(`media_for_entry(entry, parent).icon()`, above): one classification both the
+file manager and the trusted picker draw from (`AGENTS.md` §2.2) and a
+**display hint only** — it decides a glyph, never an operation; authority stays
+in the VFS and the launcher. `render` takes a
+trailing `artwork: &mut dyn tairix_icon::IconArtwork` lookup and asks it for
+each tile's kind at the exact `Card::icon_side` the tile reserves, blitting the
+real icon artwork when the system ships and can decode it and drawing the
+built-in vector glyph when it cannot — so a missing or refused asset degrades
+to a meaningful icon and can never blank the tile (`AGENTS.md` §10). The file
+manager binds a real cache to that lookup (*Grid-view icon artwork*, below);
+the read-only trusted picker still passes `NoArtwork`, so it draws glyphs only.
+The list view is text-only and never consults the lookup. The selected
 item carries the shared selection state — the raised surface plus the accent
 selection rail every collection view shares — not a bespoke accent fill.
 
@@ -436,7 +476,21 @@ offset, and the pixel-to-index pointer hit-test (`entry_index_at`) all come
 from the one shared `layout` geometry — `ListView` and `GridView` behind the
 `ViewLayout` dispatch — which clamps its scroll window through the
 `lib/controls` `scroll::ScrollRange` rather than a re-derived anchor, so the
-paint and the hit-test can never disagree (`AGENTS.md` §2.2). A vertical
+paint and the hit-test can never disagree (`AGENTS.md` §2.2). `GridView` is
+**flow-parameterised** (`GridFlow`) rather than hard-wired to one direction:
+`RowsFromLeading` fills a row left-to-right from the leading edge and wraps
+downward, scrolling vertically in rows — the file manager's grid — while
+`ColumnsFromTrailing` fills a column downward and starts each new column one
+pitch inward from the trailing edge, scrolling horizontally in columns — the
+[desktop icon surface](session.md#the-desktop-icon-surface). Both flows share
+one cell geometry (`cell_rect`), one hit-test (`entry_index_at`), and one set
+of counts (`cells_per_line`, `lines_total`, `visible_lines`, and the
+`visible_range(offset)` the painter iterates), so the two surfaces cannot
+drift apart (`AGENTS.md` §2.2). The tile itself is shared the same way: the
+`render` helpers `grid_metrics`, `grid_tile`, and `entry_label` are public, so
+the desktop paints the *same* `Card` tile — same icon side, same label
+elision, same selection state — as the file manager's grid rather than a
+lookalike. A vertical
 `lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
 same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
 (`scroll_lines`), and a selection-moving key reveals the selection the least it
@@ -449,6 +503,151 @@ The surface is rectangular; the compositor places and rounds it through its
 single anti-aliased rounded-corner path, so there is no rounding in the app.
 Every length saturates so a degenerate viewport paints what it can rather than
 panicking (`AGENTS.md` §2.9).
+
+### Grid-view icon artwork
+
+The grid draws the OS's shipped raster icon masters. The `Run` binary binds the
+renderer's `IconArtwork` lookup to the shared two-tier artwork layer
+(`lib/icon::artwork`), so a tile shows the real picture where one exists and
+the built-in vector glyph where it does not. Resolution is therefore **total**:
+an absent, over-long, undecodable, or disbelieved asset degrades to a glyph and
+never to a blank tile (`AGENTS.md` §10, §2.9).
+
+- **Where the assets come from.** One `<asset-id>.png` per icon kind under
+  `/System/Graphics/Icons` (`tairix_icon::icon_artwork_path`) — the same store
+  and the same spelling the desktop session resolves, not a file manager copy
+  (`AGENTS.md` §2.2). The kind comes from the one content-type registry
+  (`media_for_entry(entry, parent).icon()`), so the artwork a name gets and the
+  applications offered for it can never drift apart.
+- **How the bytes are read.** Through the app's own capability-checked VFS read
+  under the launching user's identity — no new authority — bounded to one byte
+  past `tairix_icon::MAX_ARTWORK_BYTES`, so an over-long asset is *detected* as
+  over-long rather than silently truncated into something that looks decodable.
+  It is the same bounded open/read/close the bundle-manifest scan uses, with a
+  different ceiling; there is no second copy of that loop.
+- **How the pixels are produced — in a sandbox, never in the app.** Icon
+  artwork is a file on a volume, i.e. untrusted input, so it is decoded by the
+  shared `lib/sandbox` `iconraster` service running in a minimum-capability
+  worker (`AGENTS.md` §19.5). The `Run` binary re-enters **itself** in the
+  reserved worker role over a fresh pipe pair — the same production launcher
+  pattern the desktop session uses (`ParserSandbox` over `RtLauncher`), not a
+  second mechanism — and the kernel brands that child capability-empty and
+  confines it to the sandbox syscall allow-list. Nothing is decoded in the file
+  manager's own address space.
+- **The reply is not trusted.** The worker's echoed side and exact pixel length
+  are validated by the transport, and the shared cache re-checks the block is
+  exactly `side`×`side` straight-alpha RGBA8 before a surface is built from it.
+  A short, long, or refusing reply resolves to `None`, which draws the glyph.
+- **The fallback chain, in order.** Shipped raster artwork → the built-in vector
+  glyph. Every failure along the way (asset missing, asset over-long, decode
+  refused, worker crashed and was replaced, reply disbelieved) falls to the
+  glyph, and the refusal itself is cached so a broken asset is not re-read every
+  frame.
+- **Only what is drawn is decoded.** The renderer asks the lookup for the
+  visible tiles alone, at the exact `Card::icon_side` each tile reserves, so a
+  hundred-entry directory costs one read and one decode per *visible kind* — not
+  per entry — and scrolling decodes only the kinds that just came into view.
+  Nothing pre-warms an icon for an entry that is scrolled out of sight.
+- **The memory is governed and given back.** The cache is built through the one
+  shared `tairix_icon::artwork_cache` constructor with the app's real seat,
+  frame size, live pressure gauge, and audit sink, so it is classified and
+  budgeted by the same reclaimable-memory policy the session's caches obey — no
+  hand-picked numbers. The app adds a `WaitSourceKind::MemoryPressure` member to
+  the wait-set it already parks on: it reads the band once before the first
+  present (the member reports only *changes*, and the process gauge starts at
+  the fail-closed unknown band, which admits nothing) and, on each pressure
+  wake, re-reads the band and trims the cache at the wake itself. There is no
+  timer and no poll. Dropping the pipeline tears the cache down, overwriting the
+  artwork first, so the pixels are released on every way out of the app — a
+  window close and a fail-loud exit alike.
+- **No new capability.** Hosting the sandbox worker is an ordinary restricted
+  spawn, and `files.app` already requests `CAP_PROC_SPAWN` for launching an
+  activated bundle; the sandbox launch reuses that same authority and asks for
+  nothing more. Decoding in-process to avoid the spawn would be the wrong trade
+  and is not done.
+
+The safety properties are host-proven in `lib/browse`'s tests with fakes for
+both seams (no live sandbox): artwork reaching a tile, a missing asset and an
+over-long asset each reproducing the glyph frame exactly with the decoder never
+reached, a wrong-length reply refused without touching the frame, one decode
+across a hundred tiles, a scroll decoding only the newly visible kind, and
+`teardown` dropping the charged bytes to zero.
+
+### The places / devices sidebar
+
+The file manager draws a vertical shortcut rail down the leading edge of its
+window. The model is `lib/browse`'s `places` module and it is **pure**: it is
+handed the user's home path components and a list of volumes, and returns an
+ordered, validated list. It never opens, stats, or lists anything, so it is
+host-testable and cannot smuggle a read past the app's own capability-checked
+seam.
+
+**Order.** One deterministic order, so the rail never reshuffles between two
+paints of the same state:
+
+1. `Home`, `Desktop`, `Documents` — the user's own places, derived from their
+   home components. They are always listed, whether or not the directories
+   exist (the model does no I/O and cannot know); a shortcut that turns out to
+   be missing fails closed on activation and says so.
+2. `Apps`, `System` — the machine's application and system roots.
+3. a separation, then the mounted volumes, sorted by label.
+
+With no home components the three home-derived rows are dropped rather than
+spelled as rows that navigate nowhere.
+
+**Volumes come from the live mount table, and the medium is real data.** The
+app reads the ungated `MOUNT_LIST` query through `lib/procinfo`'s
+`for_each_mount`, keeps only mounts that are actually serving I/O, and passes
+each one's label, target, and `MountRecord::medium()` to the model. The icon is
+`tairix_icon::disk_icon(medium)`: rotational, solid-state, and removable each
+get their own shipped artwork, and a paravirtual or unreported medium gets the
+generic drive glyph — never a guessed classification.
+
+**Malformed input is dropped, not repaired.** A volume whose label is empty,
+longer than `MAX_PLACE_LABEL`, or carries a control character; whose target is
+not an absolute path; or whose target duplicates a row already accepted (a
+fixed place included) is left out. The mount table reports what the machine has
+mounted, including text this process did not author, so it is validated rather
+than trusted.
+
+**Layout and paint go through the shared machinery.** `SidebarView`
+(`lib/browse::layout`) is the one definition of the rail's geometry: its width
+derived from the row's icon column plus the widest fixed label measured in the
+active font plus the theme's padding (never a fixed pixel count, and clamped to
+a third of the window), its per-row rectangles, the separator band, and the
+`index_at` hit-test that inverts them exactly. `render::content_area` insets the
+toolbar, path bar, list/grid, and scrollbar by the rail through that same
+geometry, so a click resolves to the control the user saw; with no rail it
+returns the window unchanged and the view is laid out exactly as before.
+
+Rows are drawn with the shared `ListRow` control, which already carries the
+artwork seam, so a volume shows its medium's artwork and falls back to the
+built-in glyph. Every state the control offers is reachable: the pointer's row
+hovers, the keyboard cursor's row is focused while the rail holds focus, the row
+matching the browser's current location is *selected* through the control's own
+selection state (an exact component match — standing inside a place is not
+standing on it), and a row whose navigation was refused reads *disabled*.
+
+**Input.** A primary press on a row focuses the rail, moves its cursor there,
+and navigates. `Tab` moves focus between the rail and the file view from either
+side; while the rail holds focus the up/down arrows move its cursor, `Enter`
+activates, and `Escape` hands focus back. A place that cannot be listed leaves
+the browser exactly where it was, states the reason on `stderr`, and marks the
+row unavailable so it reads disabled from then on — it never wedges or blanks
+the window.
+
+**Refresh.** The kernel publishes no mount-change notification today, so the
+volume rows are re-read whenever the user asks the window to refresh (`F5`, or
+the toolbar's Refresh command) — the same gesture that re-lists the directory.
+There is no polling loop and nothing spins waiting for a mount; the keyboard
+focus and cursor survive the rebuild.
+
+**The trusted picker draws no rail.** `render` takes the manager chrome —
+write tools plus the optional rail — as one `ManagerChrome` value, and the
+picker passes `ManagerChrome::none()`. That is deliberate: the picker is a
+read-only chooser bounded to the tree the requesting application was authorised
+to be shown, and one-click jumps to arbitrary mounted volumes would widen the
+pick beyond what was asked for.
 
 ### The `Run` bundle
 
@@ -470,9 +669,13 @@ crumb climbs to that ancestor through the same transactional
 it (`Browser::select`) — the GUI is a spelling of the user's
 intent, never an escalation, so a refused re-listing leaves the browser exactly
 where it was. A `CloseRequested` from the desktop ends it cleanly, and every
-bring-up refusal exits fail-loud with its reason on `stderr`. The taskbar's
-permanent Files button spawns the bundle — or raises its window when one is
-already open (`plans/NEW-TASKBAR.md` T4).
+bring-up refusal exits fail-loud with its reason on `stderr`. It opens at the
+directory named as its first argument — the operand validated fail-closed
+before any syscall, a refusal stated on `stderr` and degraded to the launching
+user's home directory and then the root view, so a bad argument never leaves
+the user without a window — or at that home directory when no argument is
+given. The taskbar's permanent Files button spawns the bundle — or raises its
+window when one is already open (`plans/NEW-TASKBAR.md` T4).
 
 ### In-place rename
 

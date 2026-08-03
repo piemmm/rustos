@@ -34,14 +34,19 @@
 //! [`TaskbarPresenter`]: crate::TaskbarPresenter
 //! [`TaskbarRenderer`]: tairix_taskbar::TaskbarRenderer
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
+use tairix_browse::{DirectorySource, GridView};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
-use tairix_icon::IconSet;
+use tairix_font::BitmapFont;
+use tairix_icon::{
+    artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource, IconSet,
+};
 use tairix_log::Sink;
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
@@ -49,13 +54,16 @@ use tairix_taskbar::{
     icon_cache, ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
+use tairix_theme::TextRole;
 use tairix_wm::{
     cursor_cache, Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect,
     Scale, Surface, WindowActivationState, WindowFrame, WindowFurnitureState, WindowId,
     WindowSizeState,
 };
 
+use crate::desktop::Desktop;
 use crate::input::{SessionInputResponse, SessionInputRouter};
+use crate::pins::resolve_library_icons;
 use crate::presenter::TaskbarPresenter;
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -112,11 +120,10 @@ pub enum ShellOutcome {
 /// a loaded notification-icon set is installed with [`set_icons`](Self::set_icons);
 /// tearing the desktop down is [`teardown`](Self::teardown).
 ///
-/// Not `Clone`: the shell owns the seat's two rasterised-asset caches, and
+/// Not `Clone`: the shell owns the seat's rasterised-asset caches, and
 /// each holds a live pressure gauge and audit sink behind trait objects.
 /// Copying a shell would double-count their charged bytes against the
 /// seat and give the copy a cache the reclaim ledger does not know about.
-#[derive(Debug)]
 pub struct DesktopShell {
     session: DesktopSession,
     router: SessionInputRouter,
@@ -124,11 +131,61 @@ pub struct DesktopShell {
     renderer: TaskbarRenderer,
     tasks: TaskBridge,
     cursor: CursorController,
+    /// The seat's decoded desktop icon artwork — the shipped
+    /// `/System/Graphics` masters and each application bundle's own icon —
+    /// keyed by asset path and pixel side.
+    artwork: ArtworkCache,
+    /// Where the artwork bytes are read from, and what turns them into
+    /// pixels. Boxed because an embedder installs its own real seams (the
+    /// VFS reader and the parser sandbox) over the starting pair, which
+    /// find and decode nothing so a shell that was never given them draws
+    /// entirely from built-in glyphs rather than reaching for I/O it does
+    /// not hold.
+    artwork_reader: Box<dyn ArtworkReader>,
+    artwork_rasteriser: Box<dyn ArtworkRasteriser>,
     /// The decorated window currently shown with its active frame rim, kept
     /// in step with the window manager's focused window by
     /// [`sync_active_frame`](Self::sync_active_frame). `None` when focus rests
     /// on the desktop or an undecorated window.
     active_frame: Option<WindowId>,
+}
+
+impl core::fmt::Debug for DesktopShell {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The artwork seams are caller-supplied trait objects with no
+        // formatting of their own; the cache is reported by what it costs.
+        f.debug_struct("DesktopShell")
+            .field("session", &self.session)
+            .field("router", &self.router)
+            .field("presenter", &self.presenter)
+            .field("renderer", &self.renderer)
+            .field("tasks", &self.tasks)
+            .field("cursor", &self.cursor)
+            .field("artwork_bytes", &self.artwork.charged_bytes())
+            .field("active_frame", &self.active_frame)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The artwork seams a shell starts with: nothing is found and nothing is
+/// decoded, so every icon falls back to its built-in glyph until the
+/// embedder installs the real filesystem and sandbox seams with
+/// [`DesktopShell::set_artwork_source`].
+///
+/// One type for both halves because both are the same refusal; two would be
+/// the same emptiness written twice.
+struct NoArtworkSeam;
+
+impl ArtworkReader for NoArtworkSeam {
+    fn read(&mut self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+impl ArtworkRasteriser for NoArtworkSeam {
+    fn rasterise(&mut self, _side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 impl DesktopShell {
@@ -141,12 +198,16 @@ impl DesktopShell {
     /// one, and the program library is empty until
     /// [`set_library`](Self::set_library) hands it the resolved catalog.
     /// `output_bytes` is the byte size of one frame of the output this
-    /// session drives; both rasterised-asset caches derive their budget
+    /// session drives; every rasterised-asset cache derives its budget
     /// from it, so a 4K desktop is allowed proportionately more cached
-    /// pixels than a small panel and neither carries a hand-picked
+    /// pixels than a small panel and none carries a hand-picked
     /// ceiling. `seat` owns those bytes in the reclaim ledger, `pressure`
     /// is the gauge the kernel reports the memory-pressure band into, and
     /// `sink` receives the caches' audit records.
+    ///
+    /// The shipped icon artwork starts unreachable — every icon draws its
+    /// built-in glyph — until the embedder installs the seams that can read
+    /// and decode it with [`set_artwork_source`](Self::set_artwork_source).
     #[must_use]
     pub fn new(
         config: TaskbarConfig,
@@ -162,8 +223,55 @@ impl DesktopShell {
             renderer: TaskbarRenderer::new(icon_cache(seat, output_bytes, pressure, sink)),
             tasks: TaskBridge::new(),
             cursor: CursorController::new(cursor_cache(seat, output_bytes, pressure, sink)),
+            artwork: artwork_cache(
+                "session.desktop-artwork",
+                seat,
+                output_bytes,
+                pressure,
+                sink,
+            ),
+            artwork_reader: Box::new(NoArtworkSeam),
+            artwork_rasteriser: Box::new(NoArtworkSeam),
             active_frame: None,
         }
+    }
+
+    /// Install the seams the desktop's shipped and bundle-supplied icon
+    /// artwork is read and decoded through: `reader` fetches the asset
+    /// bytes and `rasteriser` turns them into pixels.
+    ///
+    /// The embedder supplies the real pair — the session's file reader and
+    /// the parser sandbox that decodes untrusted image bytes outside this
+    /// address space. Until it does, both refuse, and every icon draws its
+    /// built-in glyph; a refusal after they are installed does the same, so
+    /// no slot can blank whatever the store holds.
+    pub fn set_artwork_source(
+        &mut self,
+        reader: Box<dyn ArtworkReader>,
+        rasteriser: Box<dyn ArtworkRasteriser>,
+    ) {
+        self.artwork_reader = reader;
+        self.artwork_rasteriser = rasteriser;
+    }
+
+    /// The artwork cache and the two seams it resolves through, borrowed
+    /// together.
+    ///
+    /// One accessor rather than three because a caller needs all three at
+    /// once (they are the arguments of a single resolution) and three
+    /// separate borrows of the same shell cannot be held together.
+    pub fn artwork_parts(
+        &mut self,
+    ) -> (
+        &mut ArtworkCache,
+        &mut dyn ArtworkReader,
+        &mut dyn ArtworkRasteriser,
+    ) {
+        (
+            &mut self.artwork,
+            self.artwork_reader.as_mut(),
+            self.artwork_rasteriser.as_mut(),
+        )
     }
 
     /// Give back every rasterised pixel the current memory-pressure band
@@ -174,8 +282,8 @@ impl DesktopShell {
     /// than at whatever later frame happens to touch a cache. A band that
     /// demands nothing releases nothing, so a spurious wake is cheap.
     ///
-    /// `compositor` is trimmed alongside the shell's own two caches
-    /// because the desktop's third disposable-UI cache — the decorated
+    /// `compositor` is trimmed alongside the shell's own caches because
+    /// the desktop's remaining disposable-UI cache — the decorated
     /// windows' rendered furniture — belongs to the output, not the
     /// shell, and pressure is answered by the whole session at once.
     ///
@@ -192,6 +300,7 @@ impl DesktopShell {
         self.cursor
             .trim()
             .saturating_add(self.renderer.trim())
+            .saturating_add(self.artwork.trim())
             .saturating_add(compositor.trim_chrome())
             .saturating_add(compositor.release_content_under_pressure(focused))
     }
@@ -501,13 +610,88 @@ impl DesktopShell {
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     pub fn present(&mut self, compositor: &mut Compositor) {
+        // An open popup's shown rows get their applications' own icons
+        // resolved before the paint, so a row that has just scrolled into
+        // view is drawn with its icon in the same frame.
+        resolve_library_icons(
+            self.session.taskbar_mut(),
+            compositor.scale(),
+            self.artwork_reader.as_mut(),
+            self.artwork_rasteriser.as_mut(),
+            &mut self.artwork,
+        );
         let parts = self.session.taskbar_mut().take_repaint();
+        let mut artwork = IconArtworkSource::new(
+            &mut self.artwork,
+            self.artwork_reader.as_mut(),
+            self.artwork_rasteriser.as_mut(),
+        );
         self.presenter.present(
             compositor,
             &mut self.renderer,
             self.session.taskbar(),
             parts,
+            &mut artwork,
         );
+    }
+
+    /// Repaint the desktop's icon column and install it as the compositor's
+    /// desktop layer, beneath every window.
+    ///
+    /// The layer is screen-sized and starts fully transparent, so the theme's
+    /// wallpaper colour shows everywhere the icons do not reach; the icons
+    /// themselves are laid out in the work area, which excludes the taskbar's
+    /// band, so nothing is ever drawn under the bar. Each icon's artwork is
+    /// resolved through the same seat-wide cache and seams the taskbar draws
+    /// from, at exactly the slot side the tile will paint it in, and an icon
+    /// the store cannot supply falls back to its built-in glyph.
+    ///
+    /// Fails closed: a screen-sized surface the heap will not give back
+    /// leaves the desktop layer exactly as it was rather than blanking it.
+    pub fn present_desktop<S: DirectorySource>(
+        &mut self,
+        compositor: &mut Compositor,
+        desktop: &Desktop<S>,
+    ) {
+        let screen = compositor.screen_rect();
+        let Some(mut surface) = Surface::new(screen.width, screen.height) else {
+            return;
+        };
+        let scale = compositor.scale();
+        let layout = self.desktop_layout(compositor, desktop);
+        let font = self.desktop_font(scale);
+        let theme = self.session.active_theme();
+        let mut artwork = IconArtworkSource::new(
+            &mut self.artwork,
+            self.artwork_reader.as_mut(),
+            self.artwork_rasteriser.as_mut(),
+        );
+        desktop.render(&mut surface, &layout, scale, theme, font, &mut artwork);
+        compositor.set_desktop(surface);
+    }
+
+    /// The grid the desktop's icons occupy on this output: the shared
+    /// trailing-edge column laid out in the work area at the output's
+    /// density.
+    ///
+    /// The one place the desktop's geometry is decided, so what a press is
+    /// hit-tested against and what [`present_desktop`](Self::present_desktop)
+    /// paints can never be two different grids.
+    #[must_use]
+    pub fn desktop_layout<S: DirectorySource>(
+        &self,
+        compositor: &Compositor,
+        desktop: &Desktop<S>,
+    ) -> GridView {
+        let scale = compositor.scale();
+        desktop.layout(self.work_area(compositor), scale, self.desktop_font(scale))
+    }
+
+    /// The font the desktop's icon labels are set in: the active theme's
+    /// body face at `scale`.
+    #[must_use]
+    fn desktop_font(&self, scale: Scale) -> BitmapFont {
+        BitmapFont::for_role(self.session.active_theme().fonts(), TextRole::Body, scale)
     }
 
     /// Hand the taskbar's program-library popup the resolved `catalog` (the
@@ -736,8 +920,12 @@ impl DesktopShell {
             InputResponse::DesktopPressed => None,
             // A drag, resize, command-control activation, key, or scroll acts
             // on the already-focused window (the press that started it moved
-            // focus), so none of them changes the highlighted task.
-            InputResponse::Moved { .. }
+            // focus); a hover or key that reached the desktop rather than a
+            // window leaves focus where the last press put it. Neither moves
+            // the highlighted task.
+            InputResponse::DesktopPointerMoved
+            | InputResponse::DesktopKey { .. }
+            | InputResponse::Moved { .. }
             | InputResponse::MoveEnded { .. }
             | InputResponse::Resized { .. }
             | InputResponse::ResizeEnded { .. }
@@ -824,16 +1012,17 @@ impl DesktopShell {
 
     /// Remove the bar and popup windows from `compositor` and forget them, so a
     /// later [`present`](Self::present) starts fresh, and wipe every rasterised
-    /// cursor image, notification glyph, and window-furniture strip the
-    /// seat's disposable-UI caches hold, along with any window content the
-    /// compositor is still holding. Tearing the session down leaves no
-    /// orphaned windows and no rendered user pixel data behind — the
+    /// cursor image, notification glyph, decoded icon, and window-furniture
+    /// strip the seat's disposable-UI caches hold, along with any window
+    /// content the compositor is still holding. Tearing the session down
+    /// leaves no orphaned windows and no rendered user pixel data behind — the
     /// furniture carries window titles and the content is whatever the user
     /// was looking at, so both are overwritten rather than merely dropped.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presenter.teardown(compositor);
         self.cursor.teardown();
         self.renderer.teardown();
+        self.artwork.teardown();
         compositor.teardown_chrome();
         compositor.teardown_content();
     }
