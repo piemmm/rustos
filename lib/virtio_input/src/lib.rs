@@ -344,10 +344,14 @@ impl<T: Transport> Input for VirtioInput<'_, T> {
         }
         // Drain whatever the device has already completed; only park the
         // CPU (interrupt-driven, never a busy-spin)
-        // when nothing is pending, then drain once more.
+        // when nothing is pending, then drain once more. There is no
+        // request outstanding to bound this on — the caller is waiting for
+        // the *next* keystroke or pointer motion, which may legitimately
+        // never come — so this parks indefinitely rather than manufacturing
+        // a deadline for an event nothing promised would arrive.
         let mut count = self.drain_ready(events);
         if matches!(count, Ok(0)) {
-            self.host.notify_wait(self.eventq.index());
+            self.host.notify_wait(self.eventq.index(), u64::MAX);
             count = self.drain_ready(events);
         }
         // Acknowledge the device's interrupt now that its completions have

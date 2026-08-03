@@ -209,7 +209,13 @@ keystroke (the lost keypress that made the autoload-input vertical flaky).
 `poll` parks in the kernel
 (`irq_wait` through the host's `notify_wait`) while no event is pending and
 acknowledges the device each cycle (`Transport::ack_interrupt`), so an idle
-keyboard consumes no CPU — never a yield-poll loop (`AGENTS.md` §2.23). Every
+keyboard consumes no CPU — never a yield-poll loop (`AGENTS.md` §2.23). That
+wait is deliberately **unbounded** (`u64::MAX`): nothing is outstanding and the
+next keystroke may genuinely be hours away, so there is no deadline to apply
+and a periodic re-poll would only burn power. It is the opposite case to a
+*request* wait (a block transfer), which must always carry its device's
+per-request deadline, because there the request's own completion is the only
+other event that could end the wait. Every
 capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up
 failure exits with a reserved fail-closed code (`80`/`81`/`82`) and a hard
 device fault exits `83` rather than spinning on a broken device. It is a

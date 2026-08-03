@@ -20,7 +20,7 @@ use tairix_abi::{CapabilityQuery, DriverError};
 // trait is re-exported here so existing `use crate::VirtioHost`
 // import sites (in this crate and in every consuming virtio driver
 // crate) keep working unchanged.
-pub use tairix_abi::driver::{DmaHost, VirtioHost};
+pub use tairix_abi::driver::{CompletionSignal, DmaHost, VirtioHost};
 
 /// Factory that mints a per-driver [`VirtioHost`] for the duration of a
 /// single driver `register()` call.
@@ -151,8 +151,16 @@ impl DmaHost for MockHost {
 }
 
 impl VirtioHost for MockHost {
-    fn notify_wait(&self, queue_index: u16) {
+    /// Records the wait and returns immediately.
+    ///
+    /// The mock never actually blocks: completions are produced inline by
+    /// the in-process software peer, so there is nothing to wait *for* and
+    /// `timeout_ns` is irrelevant here. Every call is therefore a
+    /// [`CompletionSignal::Fired`] — the one answer an always-ready peer can
+    /// honestly give.
+    fn notify_wait(&self, queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
         self.notify_log.borrow_mut().push(queue_index);
+        CompletionSignal::Fired
     }
 }
 
@@ -182,9 +190,9 @@ mod tests {
     #[test]
     fn mock_host_records_notifies() {
         let host = MockHost::new();
-        host.notify_wait(0);
-        host.notify_wait(1);
-        host.notify_wait(0);
+        assert_eq!(host.notify_wait(0, u64::MAX), CompletionSignal::Fired);
+        assert_eq!(host.notify_wait(1, u64::MAX), CompletionSignal::Fired);
+        assert_eq!(host.notify_wait(0, u64::MAX), CompletionSignal::Fired);
         assert_eq!(host.notify_log(), alloc::vec![0u16, 1, 0]);
     }
 

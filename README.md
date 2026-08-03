@@ -32,6 +32,7 @@ QEMU). Click a thumbnail for the full-size image.
   <tr>
     <td align="center"><a href="docs/screenshots/wide-character-support-korean.png"><img src="docs/screenshots/wide-character-support-korean.png" alt="Wide-character (Korean) text support" width="140"></a><br><sub>Korean text</sub></td>
     <td align="center"><a href="docs/screenshots/japanese-text.png"><img src="docs/screenshots/japanese-text.png" alt="Japanese text support" width="140"></a><br><sub>Japanese text</sub></td>
+    <td align="center"><a href="docs/screenshots/system-monitor.png"><img src="docs/screenshots/system-monitor.png" alt="The sysmon system-monitor app" width="140"></a><br><sub>sysmon app</sub></td>
   </tr>
 </table>
 

@@ -55,8 +55,9 @@ use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::{DriverError, IrqHandle};
-use tairix_kernel_irq::{block_until_ready, IrqTable, IrqWaiter};
+use tairix_kernel_irq::{block_until_ready, IrqTable, IrqWaiter, WaitOutcome};
 use tairix_kernel_mem::{DmaBuffer, DmaPool, PageTable};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
@@ -297,7 +298,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
 }
 
 impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
-    fn notify_wait(&self, _queue_index: u16) {
+    fn notify_wait(&self, _queue_index: u16, timeout_ns: u64) -> CompletionSignal {
         // Block on the device's pre-bound interrupt line. A virtio
         // device signals completion on its single MSI / MMIO line
         // (not per-queue), so the driver re-scans every used ring on
@@ -308,19 +309,32 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
         // mask-before-wake invariant (`docs/src/security/irq.md`) is
         // observed before this returns.
         //
-        // `u64::MAX` is the documented unbounded-wait sentinel: the
-        // loop still terminates on a fire or on a binding release
-        // (the latter surfaces as a spurious wake-up, which the
-        // trait contract permits — the driver re-checks its rings).
-        // The trait method returns `()`, so the terminal outcome is
-        // intentionally discarded.
-        let _ = block_until_ready(
+        // The caller's `timeout_ns` bounds the wait, and every park inside
+        // the loop registers that bound with the timed sweep, so a device
+        // that goes silent — a lost or coalesced completion interrupt, an
+        // unresponsive controller — releases the task at the deadline
+        // instead of parking it forever inside the device operation while
+        // it holds that device's lock.
+        match block_until_ready(
             self.irq,
             self.irq_handle,
             self.caller.task(),
-            u64::MAX,
+            timeout_ns,
             self.waiter,
-        );
+        ) {
+            WaitOutcome::Ready => CompletionSignal::Fired,
+            // Every non-fire outcome is reported as silence, so the driver
+            // fails the outstanding transfer closed: the budget elapsed, the
+            // binding was released underneath us, the line was quarantined
+            // by the runaway-interrupt net, or the wait was aborted because
+            // the task is being torn down. None of them can be distinguished
+            // from a dead device by a driver, and none of them is a reason to
+            // wait again.
+            WaitOutcome::TimedOut
+            | WaitOutcome::NotFound
+            | WaitOutcome::Quarantined
+            | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
+        }
     }
 }
 
@@ -375,13 +389,13 @@ mod tests {
 
     /// Deterministic [`IrqWaiter`] for the host tests.
     ///
-    /// `now_ns` advances one tick per yield so any finite timeout
-    /// would expire (the host waits with `u64::MAX`, so only an
-    /// injected fire or a released binding ends the loop). When
+    /// `now_ns` advances one tick per park, so a caller's finite budget
+    /// expires after that many parks — the silent-device path. When
     /// `fire_line` is set, the waiter fires that line on the
-    /// `fire_after`-th yield — the "device raises its line while the
-    /// driver is parked" path. `mask_calls` lets a test assert that
-    /// the controller mask ran (mask-before-wake).
+    /// `fire_after`-th park — the "device raises its line while the
+    /// driver is parked" path. `parked_until` records the deadline the
+    /// wait loop handed to the most recent park, so a test can assert the
+    /// caller's budget reaches the park that has to honour it.
     struct TestWaiter<'a> {
         table: &'a IrqTable,
         controller: OkController,
@@ -389,6 +403,7 @@ mod tests {
         fire_after: u32,
         yields: AtomicU32,
         now: AtomicU64,
+        parked_until: AtomicU64,
     }
 
     impl<'a> TestWaiter<'a> {
@@ -402,6 +417,7 @@ mod tests {
                 fire_after: 0,
                 yields: AtomicU32::new(0),
                 now: AtomicU64::new(0),
+                parked_until: AtomicU64::new(0),
             }
         }
 
@@ -415,11 +431,16 @@ mod tests {
                 fire_after: after,
                 yields: AtomicU32::new(0),
                 now: AtomicU64::new(0),
+                parked_until: AtomicU64::new(0),
             }
         }
 
         fn yields(&self) -> u32 {
             self.yields.load(Ordering::Relaxed)
+        }
+
+        fn parked_until(&self) -> u64 {
+            self.parked_until.load(Ordering::Relaxed)
         }
     }
 
@@ -428,8 +449,9 @@ mod tests {
             self.now.load(Ordering::Relaxed)
         }
 
-        fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        fn yield_now(&self, deadline_ns: u64) -> Result<(), IrqWaitAbort> {
             let n = self.yields.fetch_add(1, Ordering::Relaxed) + 1;
+            self.parked_until.store(deadline_ns, Ordering::Relaxed);
             if let Some(line) = self.fire_line {
                 if n == self.fire_after {
                     self.table.fire(line, &self.controller).expect("fire");
@@ -655,7 +677,7 @@ mod tests {
         irq.fire(4, &OkController).expect("pre-fire");
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
-        host.notify_wait(0);
+        assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         // No yield occurred: the pre-fired ready flag was consumed on
         // the first poll.
         assert_eq!(waiter.yields(), 0);
@@ -683,7 +705,9 @@ mod tests {
         let waiter = TestWaiter::firing(&irq, 4, 3);
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
-        host.notify_wait(0);
+        // A budget generous enough to outlast the three parks (the fake
+        // clock ticks once per park), so the fire is what ends the wait.
+        assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         // The loop parked three times before the injected fire
         // released it.
         assert_eq!(waiter.yields(), 3);
@@ -727,7 +751,7 @@ mod tests {
             fn now_ns(&self) -> u64 {
                 0
             }
-            fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+            fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
                 if self.yields.fetch_add(1, Ordering::Relaxed) == 0 {
                     self.table.fire(self.line, self.probe).expect("fire");
                 }
@@ -754,7 +778,7 @@ mod tests {
         };
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
-        host.notify_wait(0);
+        assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         assert_eq!(
             *probe.ready_during_mask.lock(),
             Some(false),
@@ -766,10 +790,11 @@ mod tests {
         );
     }
 
-    /// `notify_wait` returns without hanging when the binding has
-    /// been released (the driver task was torn down). The shared
-    /// loop surfaces this as `NotFound`, which the host treats as a
-    /// spurious wake-up.
+    /// `notify_wait` returns without hanging when the binding has been
+    /// released (the driver task was torn down). The shared loop surfaces
+    /// this as `NotFound`, which the host reports as silence: a driver
+    /// cannot tell a vanished binding from a dead device, and neither is a
+    /// reason to keep waiting.
     #[test]
     fn notify_wait_returns_when_binding_released() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
@@ -784,8 +809,62 @@ mod tests {
         irq.release_for(OWNER);
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
-        host.notify_wait(0);
+        assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::TimedOut);
         assert!(irq.lookup(handle).is_none());
+    }
+
+    /// A device that never signals releases the caller at its budget and is
+    /// reported as silence.
+    ///
+    /// This is the whole point of the budget. The waiting task holds the
+    /// disk's lock for the duration of its request, so a wait that could
+    /// not expire would not merely delay this caller: it would wedge every
+    /// other user of that disk — at boot, the `/System` mount and the
+    /// driver-store service, and with them the rest of the system — with no
+    /// error anywhere to explain it.
+    #[test]
+    fn a_silent_device_times_out_instead_of_waiting_forever() {
+        let frames = FrameAllocator::new(&small_map(16)).unwrap();
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+        let (irq, handle) = irq_binding(4);
+        // Never fires; the fake clock ticks once per park, so a 5 ns budget
+        // expires after a bounded number of parks.
+        let waiter = TestWaiter::idle(&irq);
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
+        // The binding is untouched: a timed-out wait consumes nothing and
+        // leaves the line bound for the next request.
+        assert!(irq.lookup(handle).is_some());
+    }
+
+    /// The caller's budget reaches the park that must honour it.
+    ///
+    /// A park is releasable without the line firing only if it knows the
+    /// deadline, so passing the budget down is what makes the wait bounded
+    /// in fact rather than in intent.
+    #[test]
+    fn the_callers_budget_reaches_the_park() {
+        let frames = FrameAllocator::new(&small_map(16)).unwrap();
+        let sim = fresh_sim();
+        let pool = fresh_pool(&frames, &sim);
+        let sink = Recorder::new();
+        let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+        let (irq, handle) = irq_binding(4);
+        let waiter = TestWaiter::idle(&irq);
+        let host =
+            KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
+        // The clock starts at 0, so the loop's absolute deadline is the
+        // budget itself.
+        assert_eq!(host.notify_wait(0, 9), CompletionSignal::TimedOut);
+        assert_eq!(
+            waiter.parked_until(),
+            9,
+            "the park must be told the deadline the wait is bounded by"
+        );
     }
 
     #[test]

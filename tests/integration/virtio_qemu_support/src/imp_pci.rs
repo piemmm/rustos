@@ -146,12 +146,18 @@ impl IrqWaiter for HltWaiter {
         rdtsc()
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+    fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
         // Park with the canonical race-free `sti; hlt` idiom, then
         // disable interrupts again on wake. The completion path is
         // lock-free on the IRQ side, so the ISR can never deadlock a
         // parked waiter; the periodic LAPIC timer bounds every park so a
         // missed edge still re-checks readiness.
+        //
+        // The caller's deadline needs no timer of its own here: the park
+        // ends on the next interrupt whatever happens, so control always
+        // returns to the wait loop, which compares the clock against that
+        // deadline itself. A park that could sleep past the deadline would
+        // have to register it instead.
         //
         // SAFETY: `sti`/`hlt`/`cli` are privileged but well-defined in
         // ring 0; the IDT is fully populated by the boot pipeline and the

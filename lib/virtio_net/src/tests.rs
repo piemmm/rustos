@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use tairix_abi::driver::net::NetOffloads;
 use tairix_abi::driver::net_ring::{FrameOffload, RingGeometry};
 use tairix_abi::driver::BufferClass;
-use tairix_virtio::{ChainView, DmaHost, MockHost, MockTransport};
+use tairix_virtio::{ChainView, CompletionSignal, DmaHost, MockHost, MockTransport};
 
 /// MAC address the mock device exposes through its config window.
 const DEVICE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -127,7 +127,7 @@ impl DmaHost for AutoDrainHost {
 }
 
 impl VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16) {
+    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
         // SAFETY: the driver releases its `&mut self.transport`
         // borrow between `kick` and `notify_wait`; the pointer was
         // installed while no live borrow existed and is unique
@@ -137,7 +137,7 @@ impl VirtioHost for AutoDrainHost {
             let t = unsafe { &mut *t_ptr };
             let _ = t.drain_queue(queue_index);
         }
-        self.inner.notify_wait(queue_index);
+        self.inner.notify_wait(queue_index, timeout_ns)
     }
 }
 
@@ -161,7 +161,7 @@ impl DmaHost for NoWaitHost {
 }
 
 impl VirtioHost for NoWaitHost {
-    fn notify_wait(&self, _queue_index: u16) {
+    fn notify_wait(&self, _queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
         panic!("service() must never wait on the device");
     }
 }

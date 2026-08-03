@@ -61,7 +61,7 @@ pub mod transport_pci;
 mod tests;
 
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
-pub use host::{DmaHost, MockHost, VirtioHost, VirtioHostFactory};
+pub use host::{CompletionSignal, DmaHost, MockHost, VirtioHost, VirtioHostFactory};
 pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{

@@ -45,7 +45,8 @@ pub trait IrqWaiter {
     /// extend the wait rather than corrupt the table.
     fn now_ns(&self) -> u64;
 
-    /// Suspend the calling task until it should re-poll the line.
+    /// Suspend the calling task until it should re-poll the line, or
+    /// until the absolute monotonic `deadline_ns` the loop is bounded by.
     ///
     /// Called once per poll iteration that observes neither a fire
     /// nor a timeout. How it suspends is the implementation's choice:
@@ -58,10 +59,23 @@ pub trait IrqWaiter {
     /// the supplied [`IrqWaitAbort`] reason (e.g. the task can no longer
     /// be scheduled).
     ///
+    /// `deadline_ns` is the same bound [`block_until_ready`] polls
+    /// against, handed to the park so a parking implementation can
+    /// register it with a timed wake source and be released even when the
+    /// line never fires at all. A park that is *not* told the deadline can
+    /// only be woken by the line itself, which turns a lost or coalesced
+    /// completion interrupt into a task parked forever — and a task parked
+    /// forever inside a device operation holds that device's lock forever,
+    /// wedging every other consumer of the same hardware. Passing the
+    /// bound through here is what makes a bounded wait bounded in fact and
+    /// not merely in intent. [`u64::MAX`] means the caller asked for no
+    /// deadline (the `irq_wait` / `waitset_wait` convention), so the park
+    /// waits on the line alone.
+    ///
     /// # Errors
     ///
     /// Implementation-defined; see [`IrqWaitAbort`].
-    fn yield_now(&self) -> Result<(), IrqWaitAbort>;
+    fn yield_now(&self, deadline_ns: u64) -> Result<(), IrqWaitAbort>;
 }
 
 /// Reason a cooperative [`IrqWaiter::yield_now`] aborted the wait.
@@ -140,7 +154,7 @@ pub fn block_until_ready(
             WaitStep::NotFound => return WaitOutcome::NotFound,
             WaitStep::Quarantined => return WaitOutcome::Quarantined,
             WaitStep::Continue => {
-                if let Err(abort) = waiter.yield_now() {
+                if let Err(abort) = waiter.yield_now(deadline_ns) {
                     return WaitOutcome::Aborted(abort);
                 }
             }
@@ -178,6 +192,9 @@ mod tests {
         yield_calls: Cell<u32>,
         abort_after: Option<(u32, IrqWaitAbort)>,
         on_yield: Option<(u32, &'a dyn Fn())>,
+        /// The bound handed to the most recent park, so a test can assert
+        /// the loop tells its park what deadline it is bounded by.
+        parked_until: Cell<u64>,
     }
 
     impl<'a> TestWaiter<'a> {
@@ -188,6 +205,7 @@ mod tests {
                 yield_calls: Cell::new(0),
                 abort_after: None,
                 on_yield: None,
+                parked_until: Cell::new(0),
             }
         }
 
@@ -198,6 +216,7 @@ mod tests {
                 yield_calls: Cell::new(0),
                 abort_after: Some((abort_after, reason)),
                 on_yield: None,
+                parked_until: Cell::new(0),
             }
         }
 
@@ -208,6 +227,7 @@ mod tests {
                 yield_calls: Cell::new(0),
                 abort_after: None,
                 on_yield: Some((fire_on, hook)),
+                parked_until: Cell::new(0),
             }
         }
     }
@@ -217,9 +237,10 @@ mod tests {
             self.now.get()
         }
 
-        fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        fn yield_now(&self, deadline_ns: u64) -> Result<(), IrqWaitAbort> {
             let n = self.yield_calls.get() + 1;
             self.yield_calls.set(n);
+            self.parked_until.set(deadline_ns);
             if let Some((fire_on, hook)) = self.on_yield {
                 if n == fire_on {
                     hook();
@@ -277,6 +298,35 @@ mod tests {
             block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
             WaitOutcome::TimedOut
         );
+    }
+
+    #[test]
+    fn the_park_is_told_the_deadline_the_loop_is_bounded_by() {
+        // A bounded wait is only bounded in fact if the park can be released
+        // without the line firing: the loop therefore hands its own deadline
+        // to every park. A park told nothing could only be woken by the line,
+        // so a lost completion interrupt would strand the task forever while
+        // it holds the device's lock.
+        let table = IrqTable::new(31);
+        let out = table.bind(7, TaskId(1)).unwrap();
+        let waiter = TestWaiter::new(100);
+        assert_eq!(
+            block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
+            WaitOutcome::TimedOut
+        );
+        assert_eq!(waiter.parked_until.get(), 250);
+
+        // `u64::MAX` is the caller asking for no deadline, and is passed
+        // through unchanged rather than saturating into a near-term bound.
+        // The abort ends this wait after its first park (an unbounded wait
+        // whose line never fires has no other terminal step, which is the
+        // whole reason a *request* wait must never ask for one).
+        let unbounded = TestWaiter::aborting(1, IrqWaitAbort::TaskVanished);
+        assert_eq!(
+            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &unbounded),
+            WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
+        );
+        assert_eq!(unbounded.parked_until.get(), u64::MAX);
     }
 
     #[test]

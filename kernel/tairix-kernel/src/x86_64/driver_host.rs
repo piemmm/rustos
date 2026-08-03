@@ -208,7 +208,7 @@ mod tests {
         fn now_ns(&self) -> u64 {
             0
         }
-        fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
             Ok(())
         }
     }

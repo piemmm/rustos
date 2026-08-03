@@ -1027,6 +1027,18 @@ an update to this section.
   desktop draws it in, so downscaling — never upscaling — is what a slot
   needs. A raster master is a legitimate canonical source *only* for that
   class, and never for chrome.
+  - **Every app ships its own icon, and SVG is the preferred form for it.**
+    A command-line or graphical application's own icon is **mandatory**: each
+    bundle carries one icon asset inside its own `Resources/`, named by its
+    signed manifest, so the taskbar, launcher, desktop, and file manager draw
+    that app rather than the one generic application picture. Author it as SVG
+    wherever the artwork can be expressed in the supported subset — one vector
+    file then serves every slot and every UI scale exactly — and as a raster
+    master (above) only where the app's identity is a rendered picture. Either
+    way the build refuses a declared icon the desktop could not draw (absent,
+    over-long, undecodable, a non-square or undersized raster master, or one
+    that draws nothing), so a broken icon is a build failure, never a silent
+    fallback glyph (`plans/APPS.md` §14, `plans/ICONS.md`).
   - **The built-in vector glyph is mandatory for every icon, always.** An
     icon that exists only as a raster asset is forbidden: each kind carries a
     first-party built-in glyph, so resolution is total — raster artwork if

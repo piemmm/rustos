@@ -132,6 +132,16 @@ model. IO6 depends on ARXFS existing and is gated on it.
 Give the block seam a deadline so a consumer is *never* parked forever on a
 wedged device. The ABI is unfrozen (§9), so change it in place (§2.13).
 
+The same guarantee holds one layer lower, at the **driver → device** wait:
+`VirtioHost::notify_wait(queue_index, timeout_ns) -> CompletionSignal` takes
+the caller's budget, and `virtio_blk` passes
+`device_class().budget().deadline_ns` — the same per-class policy — failing a
+silent request closed with `DeviceOffline` after a final used-ring re-scan. The
+deadline reaches the park itself (`IrqWaiter::yield_now(deadline_ns)` registers
+it with the timed sweep), so a lost or coalesced completion interrupt cannot
+strand the task inside the request while it holds the device's lock. Only a
+wait with *nothing outstanding* (an idle input device) may pass `u64::MAX`.
+
 **Landed (now guaranteed):** the async submit/complete seam exists as three
 non-blocking syscalls on the existing `CallEndpoint` — `call_post` (99,
 posts + arms a per-ticket one-shot deadline + writes the ticket out),

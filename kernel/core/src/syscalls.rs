@@ -10125,9 +10125,14 @@ where
             .monotonic_ns(SchedulerArch::current_cpu(self.arch))
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-        // Re-arm the bound line on the driver's behalf before parking: a
-        // user-space interrupt-driven driver holds no controller access, so
+    fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
+        // `deadline_ns` is not consulted here: `irq_wait` already registered
+        // this same deadline on `IRQ_WAITQ` before the first poll (so a fire
+        // arriving before the first park is never lost), and the one-shot
+        // armed just below is computed from that registration, not from this
+        // parameter. Re-arm the bound line on the driver's behalf before
+        // parking: a user-space interrupt-driven driver holds no controller
+        // access, so
         // the kernel routes its line to the waiting CPU and clears the mask
         // `IrqTable::fire` set on the previous completion (mask-before-wake,
         // `docs/src/security/irq.md`). On the first park this is the initial

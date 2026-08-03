@@ -1218,85 +1218,74 @@ the only place an unknown is turned into a concrete envelope (§2.2).
 
 ---
 
-## D22 — `netstack-dhcp-qemu-riscv64` intermittent stall under the full pipeline (OPEN)
+## D22 — `netstack-dhcp-qemu-riscv64` stall: an unbounded device wait — DONE
 
-**Symptom.** During a whole-project `cargo xtask ci` on a 22-thread host the
-vertical hit its 360 s deadline:
+**State:** fixed. The mechanism was a guest-side stall, not a budget of the
+wrong shape: the in-kernel virtio completion wait could not expire, so a
+single unobserved completion parked the boot task **inside** a disk request
+while it held that disk's lock. `/System`'s mount and the driver-store service
+sit behind the same lock, which is why the guest went silent for the rest of
+the run at exactly the point `devmgr` reported the catalogue missing.
 
-```
-xtask: test --qemu (tairix-test-netstack-dhcp-qemu-riscv64) TIMEOUT after 360s
-```
+**How the two candidates were separated.** The measurement D22 asked for,
+done on the same 22-thread host:
 
-The same enrolment passes run alone, and the whole `cargo xtask test --qemu`
-matrix passes standalone on the same host. It fails only when the guest matrix
-shares the machine with the rest of the pipeline.
+- A lone run's *guest* phase (excluding its build) completes the whole
+  campaign in **under 6 s**, so the 360 s budget carried ~60× headroom, not
+  the ~12× the earlier "~30 s" figure (which included the build) suggested.
+- Under deliberate 2× host oversubscription (44 spinners on 22 threads) the
+  guest phase stretched to ~54 s — about **7×** — and still **passed**, ten
+  consecutive times. Starvation of the magnitude needed to blow a 60× margin
+  is therefore not what the pipeline produces.
+- The failing transcript's last line is `id=13005`, i.e. the guest fell silent
+  ~355 s before the kill. A proportionally-starved guest would have kept
+  narrating its boot; a stalled one is silent, which is what was observed.
 
-**What the transcript shows.** The guest boots, brings up `sysinfod`,
-`netstack`, `devmgr`, and `seatmgr`, then logs
-`id=13005 driver-store catalogue unavailable; retrying on re-evaluation
-task=6` and never reaches any of the vertical's witnesses
-(`NETSTACK_BOUND`, `DHCP_LEASE_ACQUIRED`, `INBOUND_ECHO_SERVED`). The NIC
-driver is therefore never autoloaded and no lease is ever taken.
+**The defect.** `KernelVirtioHost::notify_wait` waited with `u64::MAX` — no
+deadline at all — and `IrqParkWaiter` only registered a timed wake for callers
+that used its own `park_wait`, so a virtio wait parked on the line *alone*.
+Any completion the driver did not observe (a lost or coalesced interrupt) left
+the task parked forever, holding `SharedBlock`'s lock. The sibling
+bootstrap-floor driver already had this right: the SDHCI engine waits with
+`EMMC2_SILENCE_BUDGET_NS` and fails the transfer closed, precisely so a dead
+controller cannot become "a task parked forever holding the volume's lock".
+The virtio path — which every Tier-1 target except the Pi actually boots
+from — never got the same treatment.
 
-**Ruled out by reading the code** (so the search does not restart here):
+**Fix (landed).**
 
-- *Not* a lost wakeup on the re-evaluation trigger. `devmgr` parks in
-  `hw_tree_wait(last_generation, u64::MAX)`; the syscall compares against the
-  live monotonic `HwTreeStore` generation *before* registering, and re-checks
-  it after registering and before parking. It is level-triggered against a
-  counter that only increases, not an edge-delivered signal, so a
-  `HW_TREE.bump()` at any point is visible on the next read. There is one
-  global `HW_TREE`, and `serve_system_store` bumps it precisely when the
-  driver-store endpoint binds.
-- *Not* the failed root unlock. `finish_unlock` spawns the passphrase prompt
-  as its own service task and proceeds unconditionally to
-  `install_system_mount` and `serve_driver_store`, so `console_unreadable`
-  shares no control-flow dependency with the `/System` bind — as the
-  vertical's own docs claim.
-- *Not* fixable by enlarging the budget. This enrolment's budget was already
-  raised once (240 s → 360 s) for this same reason. Making a problem stop
-  happening by growing a limit is mitigation, not a structural control, and
-  repeating it here would just buy the next quiet failure.
+- The wait loop hands its deadline to every park (`IrqWaiter::yield_now` takes
+  `deadline_ns`), so a bounded wait is releasable by construction rather than
+  when a caller remembers to arm one. `IrqParkWaiter`'s private
+  deadline field is gone with the bookkeeping it existed for.
+- `VirtioHost::notify_wait(queue_index, timeout_ns) -> CompletionSignal`: the
+  caller states its budget and learns whether the device signalled or stayed
+  silent. A driver with a request outstanding passes its device class's
+  per-request deadline; an idle input driver waiting for an unsolicited event
+  still passes `u64::MAX`, which is correct for a wait with nothing pending.
+- `virtio_blk` fails a silent request closed with `DriverError::DeviceOffline`
+  after one final ring re-scan, and never reissues in place (the device may
+  still own the published chain). The wake-storm bound stays as it was.
+- `CompletionSignal` is now one ABI vocabulary in `lib/abi`, shared by both
+  floor storage drivers; eMMC2's private copy was deleted.
+- The harness no longer conflates two failures: a gated run that reaches its
+  ceiling reports `UNCONFIRMED … guest silent for Ns` (`GateNeverTripped`)
+  instead of a bare `TIMEOUT`. The silence at the kill is the number that
+  separates "alive but never confirmed" from "stalled at a fixed point", so a
+  recurrence diagnoses itself instead of needing this investigation again. The
+  comment claiming gated guests chatter (which is why silence was not read as
+  the signal) was false and is corrected: they park silently on their
+  wait-set, and the host peer retries every 500 ms indefinitely.
 
-**What is not yet known.** Whether the guest is *progressing proportionally
-slower* (starved of TCG host time, so the fixed ceiling is simply the wrong
-shape) or *genuinely stalled at a fixed point*. The transcript cannot
-distinguish them: the harness persists whatever serial output existed when it
-killed the guest, and this vertical is silent-by-design after boot — it waits
-for the host peer's echo campaign rather than narrating.
+**Not** fixed by a budget bump: the 360 s budget is unchanged, and the earlier
+240 → 360 s raise is exactly the mitigation that let this hide.
 
-**Bound on the gap (measured).** Run alone on the same 22-thread host the
-enrolment completes in **~30 s** of guest time (`cargo xtask test --qemu --only
-netstack-dhcp-qemu-riscv64`, 36 s wall including its build). Inside the full
-pipeline it exceeds **360 s**. Any starvation explanation therefore has to
-account for a **>12×** slowdown while the matrix admits at most three
-uniprocessor guests (weight 2 each) against a budget of 7 — so either the rest
-of the pipeline loads the host far beyond what `qemu_host_budget_for` assumes,
-or the slowdown is not proportional and the guest is stalled. This narrows the
-two candidates but does not yet choose between them; the per-event timestamp
-comparison below is still the evidence that settles it.
-
-**Evidence that would settle it.** Re-run the full pipeline capturing
-wall-clock timestamps per boot-audit event, and compare the guest's logical
-progress rate against a lone run. Proportional slowdown indicts the budget's
-*shape*; a fixed stall point re-opens the hunt for a real defect.
-
-**Structural fix, once that is known.** One of the two the charter admits for
-a load-dependent timeout — never a third budget bump:
-
-- *Bounded concurrency.* `qemu_host_budget_for` sizes the guest matrix at a
-  third of the host's logical CPUs on the assumption the matrix owns the
-  machine. Inside the full pipeline it does not. The budget must account for
-  the load the rest of the pipeline places on the host, so a guest is never
-  starved below the budget it was sized against.
-- *A completion signal.* Replace the wall-clock ceiling with progress the
-  guest actually reports, so a slow-but-advancing run cannot be killed for
-  being slow — the inactivity budget already works this way; the absolute
-  deadline does not.
-
-**Done when:** the mechanism is named with evidence, the fix is one of the two
-above, and the vertical survives the full pipeline repeatedly on a loaded
-host. A green re-run is not a fix and does not close this item.
+**Regression cover.** `a_silent_device_times_out_instead_of_waiting_forever`
+and `the_callers_budget_reaches_the_park` (`kernel/virtio`),
+`a_silent_device_fails_closed_with_device_offline` (`virtio_blk`),
+`the_park_is_told_the_deadline_the_loop_is_bounded_by` (`kernel/irq`), and
+`an_unconfirmed_gated_run_reports_the_silence_that_diagnoses_it`
+(`tools/qemu`).
 
 ---
 

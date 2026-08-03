@@ -158,15 +158,21 @@ impl DmaHost for AutoDrainHost {
 }
 
 impl tairix_virtio::VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16) {
-        self.inner.notify_wait(queue_index);
+    /// Always reports [`CompletionSignal::Fired`] — a wake is advisory
+    /// only, so this double reports one whether or not it actually drained
+    /// the queue this call, exactly like the mock host it wraps. A spurious
+    /// wake with an exhausted budget (`n` above `MAX_COMPLETION_WAKES`) is
+    /// therefore indistinguishable from a genuine one to the caller, which
+    /// is what lets this same double drive the wake-storm test below.
+    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
+        let signal = self.inner.notify_wait(queue_index, timeout_ns);
         // A leading spurious/early wake returns without draining, so the
         // completion is not yet in the used ring and the driver must
         // re-poll and wait again.
         let spurious = self.spurious_remaining.get();
         if spurious > 0 {
             self.spurious_remaining.set(spurious - 1);
-            return;
+            return signal;
         }
         // SAFETY: the pointer was installed by `install_transport`
         // while no other borrow of the transport was live; the
@@ -179,7 +185,45 @@ impl tairix_virtio::VirtioHost for AutoDrainHost {
             let t = unsafe { &mut *t_ptr };
             let _ = t.drain_queue(queue_index);
         }
+        signal
     }
+}
+
+/// `VirtioHost` that never signals at all: models a device whose
+/// completion interrupt is permanently lost or absent, so every wait
+/// exhausts its caller-supplied budget. Mirrors the production kernel
+/// host's [`CompletionSignal::TimedOut`] outcome once its deadline
+/// elapses, and exercises the silent-device path (`DeviceOffline`)
+/// independently of [`AutoDrainHost`]'s wake-storm path (`DeviceFault`)
+/// above — a fired-without-completion wake and a device that never wakes
+/// at all are different failures with different typed errors.
+struct SilentHost {
+    inner: MockHost,
+}
+
+impl SilentHost {
+    fn new() -> Self {
+        Self {
+            inner: MockHost::new(),
+        }
+    }
+}
+
+impl DmaHost for SilentHost {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
+        self.inner.alloc_dma_zeroed(size)
+    }
+}
+
+impl tairix_virtio::VirtioHost for SilentHost {
+    fn notify_wait(&self, _queue_index: u16, _timeout_ns: u64) -> CompletionSignal {
+        CompletionSignal::TimedOut
+    }
+}
+
+fn open_with_silent_host(t: MockTransport) -> Box<VirtioBlk<'static, MockTransport>> {
+    let host: &'static SilentHost = Box::leak(Box::new(SilentHost::new()));
+    Box::new(VirtioBlk::open(t, host).expect("open"))
 }
 
 fn auto_host() -> &'static AutoDrainHost {
@@ -250,6 +294,22 @@ fn a_never_completing_device_fails_closed() {
         blk.read_blocks(0, &mut buf),
         Err(DriverError::DeviceFault),
         "a wake-storm with no completion must fail closed, not hang"
+    );
+}
+
+/// A device that never signals at all — no wake, fired or otherwise —
+/// must fail **closed** with `DeviceOffline` once its per-request deadline
+/// elapses, distinct from the wake-storm's `DeviceFault` above: here the
+/// wait itself times out rather than firing without a completion.
+#[test]
+fn a_silent_device_fails_closed_with_device_offline() {
+    let (t, _backing) = build_device();
+    let mut blk = open_with_silent_host(t);
+    let mut buf = vec![0u8; SECTOR_SIZE];
+    assert_eq!(
+        blk.read_blocks(0, &mut buf),
+        Err(DriverError::DeviceOffline),
+        "a device that never signals must fail closed once its deadline elapses"
     );
 }
 

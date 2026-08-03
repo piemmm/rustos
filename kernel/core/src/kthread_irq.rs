@@ -100,13 +100,20 @@ where
         (self.clock)()
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+    fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
         // A cooperative yield re-enqueues the kthread and resumes here on
         // the next dispatch; the shared loop then re-polls the table. A
         // service kthread cannot "vanish" mid-wait the way a user task
         // can (no `exit` syscall reaps it), so the yield always succeeds —
         // there is no scheduler error to surface (: the
         // failure modes that exist on the syscall path do not apply here).
+        //
+        // The deadline is intentionally not consulted here: this yield
+        // always returns promptly on the kthread's next dispatch (it never
+        // parks past it), so the loop's own `now_ns` / deadline check at the
+        // top of its next iteration is what actually bounds the wait —
+        // exactly as it does for every iteration that never reaches this
+        // yield at all.
         self.yielder.yield_now();
         Ok(())
     }

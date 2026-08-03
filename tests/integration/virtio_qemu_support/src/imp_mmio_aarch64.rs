@@ -369,12 +369,18 @@ struct WfiWaiter {
 
 impl IrqWaiter for WfiWaiter {
     fn now_ns(&self) -> u64 {
-        // The host waits with the `u64::MAX` unbounded sentinel, so the
-        // exact value is immaterial.
+        // A fixed reading: this vertical's bound is the completion itself,
+        // not a clock (see the park below).
         0
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+    fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
+        // The caller's deadline needs no timer here: the park ends on any
+        // interrupt, so control always returns to the wait loop. With a fixed
+        // clock the loop's deadline never elapses, so a device that never
+        // completed leaves the *guest* to be bounded by the harness's own
+        // no-progress budget rather than by this park — which is the scenario
+        // the vertical is asserting against.
         BRIDGE.unmask(self.source);
         // SAFETY: setting `DAIF.I` masks interrupt *taking* (not
         // pending); `wfi` still wakes on a pending enabled interrupt;

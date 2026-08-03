@@ -52,7 +52,7 @@ extern crate alloc;
 use core::convert::TryFrom;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use tairix_abi::driver::BufferClass;
+use tairix_abi::driver::{BufferClass, CompletionSignal};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
     BounceBuffer, ChainSegment, Direction, DmaSlab, SplitQueue, Status, Transport, VirtioError,
@@ -492,16 +492,38 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// no completion is coming. Re-scan the ring after every wake and wait
     /// again only when it is genuinely empty — the request is serialised
     /// by the owner's lock, so exactly one completion is outstanding and
-    /// the loop ends when it lands. `MAX_COMPLETION_WAKES` bounds a
-    /// pathological wake-storm (a stuck shared line delivering wakes with
-    /// no matching completion) so the wait fails closed with `DeviceFault`
-    /// rather than looping forever.
+    /// the loop ends when it lands.
+    ///
+    /// Two independent bounds keep an unwell device from stalling the
+    /// caller, because the two failure shapes are different and neither
+    /// bound catches the other:
+    ///
+    /// * **Silence** — each wait carries this device class's per-request
+    ///   deadline, so a device whose completion interrupt is lost, coalesced
+    ///   or never raised releases the caller at the deadline. Without it the
+    ///   caller parks inside the request forever *holding the disk's lock*,
+    ///   which wedges every other user of that disk (at boot: the `/System`
+    ///   mount and the driver store, and so the whole system) — a hang, not
+    ///   a fault, and invisible to the caller.
+    /// * **Noise** — `MAX_COMPLETION_WAKES` bounds a wake storm (a stuck
+    ///   shared line delivering wakes with no matching completion), which no
+    ///   deadline would catch because each wake resets the wait.
+    ///
+    /// Both bounds fail the request closed with a typed error, so the caller
+    /// gets an answer it can act on and the disk's lock is released.
     fn submit_and_wait(&mut self, segments: &[ChainSegment]) -> Result<(), DriverError> {
         self.queue
             .add_chain(segments)
             .map_err(VirtioError::as_driver_error)?;
         self.queue.kick(&mut self.transport);
+        // The per-request deadline is the shared per-class I/O policy every
+        // consumer of a block device already obeys, discovered from the class
+        // this driver declares for its hardware — not a constant of this
+        // driver's own, which a bigger machine or a slower device would
+        // outgrow.
+        let deadline_ns = self.device_class().budget().deadline_ns;
         let mut outcome: Result<(), DriverError> = Err(DriverError::DeviceFault);
+        let mut silent = false;
         for _ in 0..MAX_COMPLETION_WAKES {
             match self.queue.poll_used() {
                 Ok(_token) => {
@@ -509,7 +531,28 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                     break;
                 }
                 Err(VirtioError::NoCompletion) => {
-                    self.host.notify_wait(self.queue.index());
+                    if silent {
+                        // The deadline elapsed and this final re-scan still
+                        // finds no completion: the device is present but not
+                        // answering. Fail closed rather than reissuing — the
+                        // device may still own the published descriptor
+                        // chain, so re-publishing the same staging could have
+                        // it write an abandoned request's data into the next
+                        // request's buffers. Reissue policy belongs to the
+                        // consumer above, which knows whether the request is
+                        // safe to repeat.
+                        outcome = Err(DriverError::DeviceOffline);
+                        break;
+                    }
+                    if self.host.notify_wait(self.queue.index(), deadline_ns)
+                        == CompletionSignal::TimedOut
+                    {
+                        // Re-scan once before giving up: a completion whose
+                        // interrupt was lost or coalesced is already sitting
+                        // in the ring, and a wait timing out says nothing
+                        // about the ring's contents.
+                        silent = true;
+                    }
                 }
                 Err(e) => {
                     outcome = Err(e.as_driver_error());

@@ -778,12 +778,13 @@ service's mount / install / give-up decisions route onto the audit channel
 
 The kthread dispatches on which floor block driver bound: **virtio-blk**
 over the production device-IRQ path (the QEMU `virt` / x86_64 root), or the
-Raspberry Pi 4 **EMMC2** SD host over programmed I/O. The mount, the
+Raspberry Pi 4 **EMMC2** SD host. The mount, the
 pre-unlock `/System` autoload, and the interactive unlock are shared between
 the two (`finish_unlock`, `AGENTS.md` §2.2); only the bring-up differs. EMMC2
-is programmed-I/O, so its arm has no DMA pool and no device interrupt — it
+is interrupt-driven and uses ADMA2 DMA: it
 maps the matched node's sole SDHCI register window under `CAP_MMIO_MAP`
-through a minimal in-kernel MMIO-only DriverHost and brings the card up over
+through a minimal in-kernel MMIO-only DriverHost, carves a staging slab
+from a `CAP_MEM_DMA`-gated `Emmc2DmaHost`, and brings the card up over
 the host-proven `tairix-drv-storage-emmc2` engine.
 
 `virtio-blk` proves it end to end on `-M virt`: the `root_unlock_login`

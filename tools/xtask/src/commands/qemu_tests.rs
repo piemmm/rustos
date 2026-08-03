@@ -4927,13 +4927,21 @@ static TESTS: &[QemuTest] = &[
     // transcript for diagnosis, and the peer's own verdict (it offered,
     // acked, and got the echo reply at the leased address) subsumes them, so
     // a broken lease cannot pass on an address the guest formed itself (it
-    // forms none). Single CPU. Budgeted at 360 s — not the 240 s its
-    // aarch64/x86_64 siblings use: riscv64 is the slowest TCG target, and the
-    // full boot + autoload + service bring-up + bind + DHCP exchange takes
-    // materially longer on it, so under the full parallel matrix a 240 s
-    // budget was a load-dependent miss. 360 s is the budget its riscv64
-    // DHCPv6 sibling already proves sufficient for strictly more guest work,
-    // so this is a budget sized to the work, not a retry.
+    // forms none). Single CPU. Budgeted at 360 s, the same as its riscv64
+    // DHCPv6 sibling, which does strictly more guest work: riscv64 is the
+    // slowest TCG target, and the full boot + autoload + service bring-up +
+    // bind + DHCP exchange takes materially longer on it.
+    //
+    // The budget is not the knob for a miss here. A healthy run trips the gate
+    // within a few seconds of boot, so this carries roughly sixty-fold
+    // headroom, and the one miss that looked like host load was in fact a
+    // guest-side stall: an unbounded virtio completion wait parked the boot
+    // task inside a disk request while it held the disk's lock, so `/System`'s
+    // mount and the driver store never came up. Raising the budget only
+    // lengthens the silence before the same stall is reported, which is why
+    // this run now reports how long the guest had been silent when it was
+    // killed — near zero means look at the peer, the link or host load; a
+    // silence near the ceiling means look at the transcript's last line.
     QemuTest {
         package: "tairix-test-netstack-dhcp-qemu-riscv64",
         binary: "tairix-test-netstack-dhcp-qemu-riscv64",
@@ -8098,7 +8106,25 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
         Outcome::Timeout { budget, serial } => {
             persist_failure_serial(t.package, &serial_log, &serial)?;
             Err(format!(
-                "test --qemu ({}) TIMEOUT after {budget:?} (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) TIMEOUT after {budget:?} with no serial output (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                t.package,
+                serial_log.display()
+            ))
+        }
+        Outcome::GateNeverTripped {
+            ceiling,
+            silent_for,
+            serial,
+        } => {
+            persist_failure_serial(t.package, &serial_log, &serial)?;
+            // The silence at the kill is the first thing a reader needs: near
+            // zero means the guest was alive and working but its round trip
+            // was never confirmed (look at the peer, the link, or host load),
+            // while a silence close to the ceiling means the guest went quiet
+            // early and stalled — the transcript's last line is then the
+            // stall point.
+            Err(format!(
+                "test --qemu ({}) UNCONFIRMED after {ceiling:?}: the link peer never confirmed the round trip; guest silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))

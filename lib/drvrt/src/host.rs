@@ -6,6 +6,7 @@ use core::ptr::NonNull;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::virtio::VirtioHost;
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::mailbox_ipc;
 use tairix_abi::{
@@ -529,31 +530,38 @@ unsafe fn free_dma_shim<S: GrantSyscalls>(
 }
 
 impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
-    fn notify_wait(&self, _queue_index: u16) {
-        // Park the driver on its granted device interrupt line until the
-        // device signals queue activity (an
-        // interrupt-driven driver parks, never busy-spins). A virtio device
-        // raises one MSI/MMIO line (not per-queue), so `queue_index` is not
-        // part of the wait key: the driver re-scans every used ring on wake.
-        //
-        // The line is bound lazily on the first call through [`Self::bind_irq`]
-        // and cached, so the bind syscall runs at most once. The kernel
-        // re-arms the line across each park on the driver's behalf — the
-        // driver holds no controller access — so this just `irq_wait`s the
-        // bound handle. A driver granted no IRQ line (or lacking
-        // `CAP_IRQ_BIND`) returns without parking; its caller then re-polls
-        // (fail safe, never a wedged wait). A driver whose event loop
-        // *depends* on the park preflights `bind_irq` and fails loud instead
-        // of relying on this silent fallback.
+    /// Parks on the driver's granted device interrupt line until the device
+    /// signals queue activity, `timeout_ns` elapses, or the wait is
+    /// otherwise refused (an interrupt-driven driver parks, never
+    /// busy-spins). A virtio device raises one MSI/MMIO line (not
+    /// per-queue), so `queue_index` is not part of the wait key: the driver
+    /// re-scans every used ring on wake.
+    ///
+    /// The line is bound lazily on the first call through [`Self::bind_irq`]
+    /// and cached, so the bind syscall runs at most once. The kernel
+    /// re-arms the line across each park on the driver's behalf — the
+    /// driver holds no controller access — so this just `irq_wait`s the
+    /// bound handle with the caller's own budget. A driver granted no IRQ
+    /// line (or lacking `CAP_IRQ_BIND`) cannot park at all, and the kernel's
+    /// `-errno` refusal is indistinguishable in effect from a silent
+    /// device, so both report [`CompletionSignal::TimedOut`] — fail closed
+    /// rather than letting a driver mistake "the wait could not even start"
+    /// for a completion it never saw. A driver whose event loop *depends* on
+    /// the park preflights `bind_irq` and fails loud instead of relying on
+    /// this silent fallback.
+    fn notify_wait(&self, _queue_index: u16, timeout_ns: u64) -> CompletionSignal {
         if self.bind_irq().is_err() {
-            return;
+            return CompletionSignal::TimedOut;
         }
-        // Unbounded wait: the loop terminates on a fire, a binding release
-        // (a spurious wake the caller tolerates by re-scanning), or never —
-        // the device is the only thing that completes a virtio request. The
-        // terminal outcome is intentionally discarded; the trait returns `()`
-        // and the caller re-checks its rings on return.
-        let _ = self.syscalls.irq_wait(self.irq_handle.get(), u64::MAX);
+        // `irq_wait` returns `0` on a genuine fire and `-errno` on either a
+        // timeout or a refusal; both non-fire outcomes collapse to
+        // `TimedOut` because the caller's only recourse either way is to
+        // fail the outstanding transfer closed rather than park again.
+        if self.syscalls.irq_wait(self.irq_handle.get(), timeout_ns) == 0 {
+            CompletionSignal::Fired
+        } else {
+            CompletionSignal::TimedOut
+        }
     }
 }
 

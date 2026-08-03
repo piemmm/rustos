@@ -131,7 +131,19 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             ExitCode::from(1)
         }
         Ok(Outcome::Timeout { budget, serial }) => {
-            eprintln!("tairix-qemu-run: TIMEOUT after {budget:?}");
+            eprintln!("tairix-qemu-run: TIMEOUT after {budget:?} with no serial output");
+            eprint!("{serial}");
+            ExitCode::from(2)
+        }
+        Ok(Outcome::GateNeverTripped {
+            ceiling,
+            silent_for,
+            serial,
+        }) => {
+            eprintln!(
+                "tairix-qemu-run: UNCONFIRMED after {ceiling:?} \
+                 (observer never confirmed the round trip; guest silent for {silent_for:?})"
+            );
             eprint!("{serial}");
             ExitCode::from(2)
         }

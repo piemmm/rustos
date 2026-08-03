@@ -275,6 +275,36 @@ impl DriverKind {
     }
 }
 
+/// Outcome of one wait for a device to signal.
+///
+/// Every driver that waits on hardware — a virtio queue notification
+/// ([`VirtioHost::notify_wait`]), an SDHCI command/transfer completion —
+/// gets one of exactly two answers, and the distinction is load-bearing:
+///
+/// * [`Fired`](Self::Fired) — the device signalled. It is *advisory* only:
+///   a device's memory write and its interrupt can be observed in either
+///   order, and one line commonly serves several queues, so the driver
+///   re-reads its own rings or status registers to learn what actually
+///   happened. A signal is never itself proof of a completion.
+/// * [`TimedOut`](Self::TimedOut) — the device stayed silent for the whole
+///   budget the caller allowed. For a wait with a transfer *outstanding*
+///   this means the device (or its interrupt routing) is not answering, so
+///   the driver fails that transfer closed with a typed error rather than
+///   waiting again. Nothing about a timed-out wait is retried in place: a
+///   wait that could not expire, or that simply re-waited, would strand the
+///   task inside the device operation while it holds the device's lock, and
+///   take every other user of that hardware down with it.
+///
+/// One vocabulary, shared by both bootstrap-floor block drivers, so their
+/// two completion paths cannot classify a silent device differently.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompletionSignal {
+    /// The device signalled; re-read the rings/status to see what changed.
+    Fired,
+    /// The caller's budget elapsed with no signal at all.
+    TimedOut,
+}
+
 /// Stable error code returned across the driver ABI.
 ///
 /// The variants are kept disjoint from [`Errno`] so that a stray

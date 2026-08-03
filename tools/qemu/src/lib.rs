@@ -120,6 +120,29 @@ pub enum Outcome {
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
     },
+    /// A [`Spec::completion_gate`] run reached its absolute ceiling: the
+    /// out-of-guest observer never confirmed the round trip, while the guest
+    /// was still alive and had not been silent long enough to be declared
+    /// hung.
+    ///
+    /// Reported separately from [`Self::Timeout`] because the two say
+    /// different things about the guest, and conflating them costs a
+    /// diagnosis: a hung guest stopped talking, whereas this guest was
+    /// running and simply never got its round trip confirmed.
+    /// `silent_for` is how long it had produced no serial output when it was
+    /// killed, which is the number that tells the two apart on sight — a
+    /// value near zero means a live guest that kept working and never
+    /// completed the exchange (a peer, network or campaign fault, or a guest
+    /// merely starved of host time), while a value approaching `ceiling`
+    /// means it went quiet early and stalled at a fixed point.
+    GateNeverTripped {
+        /// Absolute wall-clock ceiling the gated run was given.
+        ceiling: Duration,
+        /// How long the guest had produced no serial output at the kill.
+        silent_for: Duration,
+        /// Captured QEMU stdout up to the kill, best-effort.
+        serial: String,
+    },
 }
 
 impl Outcome {
@@ -1176,13 +1199,22 @@ fn supervise(
     let mut heartbeat = ProgressClock::new(Instant::now());
     // Absolute run start, used only when a completion gate is configured: the
     // gate's success (the out-of-guest observer's confirmation) is what ends
-    // such a run, and a gate that never trips must still fail loud rather than
-    // hang. The guest deliberately does not self-exit in that mode and keeps
-    // emitting campaign chatter, so the inactivity heartbeat alone cannot bound
-    // it; `spec.timeout` is applied as an absolute ceiling instead. It carries
-    // ample margin — a healthy run trips the gate within tens of seconds of
-    // boot, far inside the budget — so a slow-but-progressing guest is not
-    // killed prematurely.
+    // such a run, because the guest deliberately does not self-exit in that
+    // mode. A gate that never trips must still fail loud rather than hang the
+    // pipeline, so `spec.timeout` doubles as an absolute ceiling for gated
+    // runs. It carries ample margin — a healthy run trips the gate within a
+    // few seconds of boot — so a slow-but-progressing guest is not killed
+    // prematurely.
+    //
+    // The gated guests park silently once they have done their part (they wait
+    // on their wait-set for the peer's traffic and narrate nothing), so the
+    // inactivity heartbeat bounds them too, and the two bounds diagnose
+    // different faults: the heartbeat catches a guest that stopped talking,
+    // the ceiling catches a run whose round trip was never confirmed. Which
+    // one fired, and how long the guest had been silent when it did, is
+    // reported rather than collapsed into one "timeout" — that distinction is
+    // the difference between hunting a guest-side stall and hunting a peer,
+    // link or host-load problem, and its absence once cost a long hunt.
     let run_start = Instant::now();
 
     let SerialDrain {
@@ -1380,14 +1412,17 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len();
         heartbeat.observe(serial_len, Instant::now());
-        // With a completion gate the guest keeps emitting campaign chatter
-        // while it waits to be confirmed, so the inactivity heartbeat would
-        // never fire; bound the wait with an absolute ceiling so a gate that
-        // never trips fails loud instead of hanging the run.
+        // A gate that never trips must fail loud instead of hanging the run,
+        // whatever the guest is doing — including a guest that keeps talking,
+        // which the inactivity heartbeat would never declare hung. The silence
+        // at the kill rides along in the report, because it is what
+        // distinguishes a live guest that never completed the exchange from one
+        // that stalled and went quiet.
         if spec.completion_gate.is_some() && run_start.elapsed() >= spec.timeout {
+            let silent_for = heartbeat.idle_for(Instant::now());
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(DoneReason::TimedOut);
+            return Ok(DoneReason::GateNeverTripped { silent_for });
         }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
             // Strict, no-retry kill. `wait` afterwards is best
@@ -1476,6 +1511,11 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
         DoneReason::CompletedByGate => Outcome::Pass,
         DoneReason::TimedOut => Outcome::Timeout {
             budget: spec.timeout,
+            serial,
+        },
+        DoneReason::GateNeverTripped { silent_for } => Outcome::GateNeverTripped {
+            ceiling: spec.timeout,
+            silent_for,
             serial,
         },
         DoneReason::InjectionFailed(reason) | DoneReason::DrainFailed(reason) => {
@@ -1604,8 +1644,17 @@ fn append_stderr(serial: &mut String, captured_err: &Mutex<String>) {
 enum DoneReason {
     /// The child exited with this status code.
     Exited(i32),
-    /// The deadline elapsed; the child was killed.
+    /// The guest fell silent for the whole inactivity budget; the child was
+    /// killed.
     TimedOut,
+    /// A gated run hit its absolute ceiling without the observer confirming
+    /// the round trip; the child was killed. Carries how long the guest had
+    /// been silent, which separates a live-but-unconfirmed guest from one
+    /// stalled at a fixed point.
+    GateNeverTripped {
+        /// How long the guest had produced no serial output at the kill.
+        silent_for: Duration,
+    },
     /// The [`Spec::completion_gate`] tripped: the out-of-guest observer
     /// (the `netpeer` link peer) confirmed success, so the child was
     /// killed and the run scored `Pass`.
@@ -2403,6 +2452,66 @@ mod tests {
         assert!(matches!(
             outcome_from_done(DoneReason::CompletedByGate, &spec, "campaign log".into()),
             Outcome::Pass
+        ));
+    }
+
+    #[test]
+    fn an_unconfirmed_gated_run_reports_the_silence_that_diagnoses_it() {
+        // A gated run that reaches its ceiling is *not* the same failure as a
+        // guest that fell silent, and the report must not collapse them: the
+        // silence at the kill is what tells a reader which hunt to start. A
+        // guest that was still talking (silence far below the ceiling) points
+        // at the peer, the link, or host load; one that went quiet early
+        // points at a guest-side stall, with the transcript's last line as
+        // the stall point.
+        let ceiling = Duration::from_secs(360);
+        let spec = Spec::for_riscv64_kernel("/tmp/k")
+            .with_timeout(ceiling)
+            .with_completion_gate(Arc::new(AtomicBool::new(false)));
+        let live_but_unconfirmed = outcome_from_done(
+            DoneReason::GateNeverTripped {
+                silent_for: Duration::from_millis(20),
+            },
+            &spec,
+            "campaign log".into(),
+        );
+        match live_but_unconfirmed {
+            Outcome::GateNeverTripped {
+                ceiling: reported,
+                silent_for,
+                serial,
+            } => {
+                assert_eq!(reported, ceiling);
+                assert_eq!(silent_for, Duration::from_millis(20));
+                assert_eq!(serial, "campaign log");
+            }
+            other => panic!("an unconfirmed gated run must not be reported as {other:?}"),
+        }
+
+        // The stalled shape carries its own silence, so the two are
+        // distinguishable from the report alone.
+        let stalled = outcome_from_done(
+            DoneReason::GateNeverTripped {
+                silent_for: Duration::from_secs(355),
+            },
+            &spec,
+            "boot log".into(),
+        );
+        let Outcome::GateNeverTripped { silent_for, .. } = stalled else {
+            panic!("a stalled gated run must report the gate ceiling outcome");
+        };
+        assert_eq!(silent_for, Duration::from_secs(355));
+    }
+
+    #[test]
+    fn a_silent_guest_is_still_reported_as_a_plain_timeout() {
+        // The inactivity budget keeps its own outcome: only the gated ceiling
+        // gained a separate verdict, so an ungated guest that stops talking
+        // reads exactly as before.
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(60));
+        assert!(matches!(
+            outcome_from_done(DoneReason::TimedOut, &spec, "boot log".into()),
+            Outcome::Timeout { budget, .. } if budget == Duration::from_secs(60)
         ));
     }
 
