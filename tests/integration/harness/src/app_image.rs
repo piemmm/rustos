@@ -115,9 +115,12 @@ pub struct AppManifestSource {
     /// a graphical application declares its folder in its own manifest
     /// (`plans/NEW-TASKBAR.md` T3).
     pub library: Option<LibraryCategory>,
-    /// The library icon asset — a plain file name inside the bundle's own
-    /// `Resources/` — legal only on a listed bundle. `None` means a
-    /// launcher draws its class fallback icon.
+    /// The bundle's own icon asset — a plain file name inside its own
+    /// `Resources/`. Independent of `library`: it is the bundle's identity
+    /// wherever it is drawn (a file-manager tile, a taskbar button, a
+    /// launcher row), not a launcher-listing detail. `None` means a draw
+    /// site falls back to the bundle's class artwork and then to the
+    /// built-in glyph (`plans/ICONS.md`).
     pub library_icon: Option<String>,
 }
 
@@ -131,8 +134,8 @@ impl AppManifestSource {
     /// over-long or empty identity field, a name that is not a plain
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
     /// name, a capability list exceeding the manifest bound, an unknown
-    /// library folder, a `library-icon` without `library`, or a `library`
-    /// on a `service`.
+    /// library folder, an over-long `library-icon`, or a `library` on a
+    /// `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -180,8 +183,10 @@ impl AppManifestSource {
             kind: require(kind, "kind")?,
             capabilities: require(capabilities, "capabilities")?,
             // `associations` is optional: a bundle that opens no operand
-            // file declares none. `library`/`library-icon` are optional
-            // too: absence means the library never lists the bundle.
+            // file declares none. `library` is optional too — absence means
+            // the program library never lists the bundle — as is
+            // `library-icon`, whose absence means the bundle is drawn with
+            // its class artwork instead of one of its own.
             associations: associations.unwrap_or_default(),
             library,
             library_icon,
@@ -222,11 +227,6 @@ impl AppManifestSource {
             check_len(ctx, "association", mime, MIME_TYPE_MAX)?;
         }
         if let Some(icon) = &self.library_icon {
-            if self.library.is_none() {
-                // An icon on a bundle the library never lists is incoherent;
-                // refuse the manifest whole rather than half-honour it.
-                return Err(AppImageError::new(ctx, "`library-icon` without `library`"));
-            }
             check_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?;
         }
         if self.library.is_some() && self.kind == AppKind::Service {
@@ -632,6 +632,17 @@ mod tests {
         assert_eq!(manifest.library_icon, None);
     }
 
+    /// An icon is the bundle's own identity, not a launcher-listing detail:
+    /// every command app carries one and none of them is listed, so a
+    /// manifest with an icon and no folder must parse.
+    #[test]
+    fn an_unlisted_bundle_declares_its_own_icon() {
+        let text = format!("{GOOD}library-icon = \"example.png\"\n");
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        assert_eq!(manifest.library, None);
+        assert_eq!(manifest.library_icon.as_deref(), Some("example.png"));
+    }
+
     #[test]
     fn service_kind_selects_the_services_store() {
         let text = GOOD.replace("\"command\"", "\"service\"");
@@ -684,10 +695,6 @@ mod tests {
             (
                 format!("{GOOD}library = \"office\"\n"),
                 "folder identifiers are case-exact",
-            ),
-            (
-                format!("{GOOD}library-icon = \"example.svg\"\n"),
-                "library-icon without library",
             ),
             (
                 listed().replace("\"command\"", "\"service\""),

@@ -32,6 +32,14 @@ path = "src/lib.rs"
 # It is `no_std`; here it links host-only into `build.rs`.
 [build-dependencies]
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
+# The OS filesystem layout's own definition of the two bundle stores
+# (`/System/Apps`, `/System/Services`). Each discovered payload row carries
+# the store its bundle installs to, spelled from these constants rather than
+# a second copy here, so a planted file always lands inside the very bundle
+# directory the composer signed — a file planted into the other store leaves
+# the installed bundle missing content its digest covers and the load gate
+# refuses it. It is `no_std`; here it links host-only into `build.rs`.
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The one help engine and its one help-tree lint (plans/APPS.md §6, §8.1):

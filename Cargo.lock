@@ -1493,6 +1493,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-log",
+ "tairix-path",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-svg",
@@ -2280,6 +2281,7 @@ dependencies = [
 name = "tairix-syshelp"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-help",
  "tairix-icon",
 ]
@@ -4888,6 +4890,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-help",
  "tairix-icon",
+ "tairix-image",
  "tairix-input",
  "tairix-itest-harness",
  "tairix-kernel-ipc",

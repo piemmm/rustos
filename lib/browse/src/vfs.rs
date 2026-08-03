@@ -51,6 +51,19 @@ pub fn spell_absolute_path(components: &[String]) -> String {
     path
 }
 
+/// Append the leaf `name` to the directory path already spelled in `path`.
+///
+/// The one place a directory path and a leaf are joined, so the root case
+/// (`/` plus a name, never `//name`) is handled once. Appending in place lets
+/// a caller that spells many children of one directory — a grid of tiles —
+/// reuse a single buffer instead of allocating a path each time.
+pub fn push_child(path: &mut String, name: &str) {
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    path.push_str(name);
+}
+
 /// Parse an absolute path string into validated root-first components — the
 /// inverse of [`spell_absolute_path`].
 ///

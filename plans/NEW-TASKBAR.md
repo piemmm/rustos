@@ -448,16 +448,19 @@ What now guarantees §16.5/§18.5's "no compiled-in app list":
 - **The manifest listing (`lib/abi`)** — `AppInfoHeader` carries the
   program-library listing as an explicit **opt-in**: a `library` wire byte
   (`0` = never listed — the default for every command app and service — else
-  the `LibraryCategory` folder) plus an optional `library_icon` asset name
-  (legal only on a listed bundle; icon-without-listing, an unknown folder
-  byte, or a dirty reserved field refuse the whole manifest). There is no
-  `show_in_library` boolean and no app-class heuristic: a bundle asks to be
-  listed by declaring its folder, in its own signed manifest. The manifest
-  TOML source grows the matching optional `library` / `library-icon` keys
-  (composer-validated: unknown folder, case drift, an icon without a
-  listing, or a `library` on a `service` fail the build). The C header is
-  regenerated (`cargo xtask c-header --write`); `lib/appload` consumers read
-  the listing off the verified header's own accessors.
+  the `LibraryCategory` folder). An unknown folder byte or a dirty reserved
+  field refuses the whole manifest. There is no `show_in_library` boolean and
+  no app-class heuristic: a bundle asks to be listed by declaring its folder,
+  in its own signed manifest. Alongside it, and **independent of it**, sits
+  the optional `library_icon` asset name: the icon is the bundle's own
+  identity, drawn wherever the bundle appears (a file-manager tile, a taskbar
+  button, a launcher row), so every command app declares one while none of
+  them is listed (`plans/ICONS.md`). The manifest TOML source grows the
+  matching optional `library` / `library-icon` keys (composer-validated:
+  unknown folder, case drift, a `library` on a `service`, or an icon that is
+  absent, over-large, or not square master-sized artwork fail the build). The
+  C header is regenerated (`cargo xtask c-header --write`); `lib/appload`
+  consumers read the listing off the verified header's own accessors.
 - **The fold (`lib/proglib::Catalog::reconcile`)** + **`applib rescan`** —
   the walk covers `/System/Apps` then `/Apps` (machine) or the caller's
   `<home>/Apps` (`--user`), breadth-first in sorted order (deterministic

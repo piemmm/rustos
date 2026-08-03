@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::Errno;
 use tairix_geometry::Rect;
-use tairix_icon::{IconArtwork, IconKind, NoArtwork};
+use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -1615,8 +1615,8 @@ impl RecordingArtwork {
 }
 
 impl IconArtwork for RecordingArtwork {
-    fn artwork(&mut self, kind: IconKind, side: u32) -> Option<&Surface> {
-        self.asked.push((kind, side));
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
+        self.asked.push((request.icon_kind(), side));
         Some(&self.art)
     }
 }
@@ -1731,6 +1731,13 @@ impl CountingReader {
         self.assets.insert(icon_artwork_path(kind), bytes);
         self
     }
+
+    /// Hold `bytes` at an exact path — a bundle's own manifest or the icon
+    /// asset that manifest names.
+    fn holding(mut self, path: &str, bytes: Vec<u8>) -> Self {
+        self.assets.insert(path.to_string(), bytes);
+        self
+    }
 }
 
 impl ArtworkReader for CountingReader {
@@ -1822,6 +1829,32 @@ fn generic_grid(n: usize) -> Browser<MockFs> {
     browser
 }
 
+/// A grid holding one application bundle, so its tile resolves through the
+/// bundle tier: the icon the bundle itself carries, then the class artwork,
+/// then the glyph.
+fn bundle_grid() -> Browser<MockFs> {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        vec![Entry::new(
+            "Editor.app",
+            EntryKind::Bundle,
+            0,
+            Time64::UNIX_EPOCH,
+        )],
+    );
+    let mut browser = Browser::open_root(MockFs {
+        dirs,
+        denied: BTreeSet::new(),
+        deny_after_first: BTreeSet::new(),
+        reads: BTreeMap::new(),
+        root_after_refresh: None,
+    })
+    .expect("root");
+    browser.set_view_mode(ViewMode::Grid);
+    browser
+}
+
 /// A grid whose first `png` entries are PNG images and whose last `txt`
 /// entries are plain text, so the two halves resolve to different icon kinds
 /// and sort into that order.
@@ -1892,6 +1925,96 @@ fn a_grid_tile_blits_shipped_artwork_and_falls_back_to_the_glyph_without_it() {
         &mut IconArtworkSource::new(&mut cache, &mut oversize, &mut PanicRasteriser),
     );
     assert_eq!(refused.pixels(), glyphs.pixels());
+}
+
+#[test]
+fn a_bundle_tile_draws_the_icon_the_bundle_itself_carries() {
+    let browser = bundle_grid();
+    let vp = Rect::new(0, 0, 400, 400);
+    let art_colour = Color::rgb(0x44, 0x55, 0x66);
+    let glyphs = grid_surface(&browser, vp, &mut NoArtwork);
+
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new()
+        .holding(
+            "/Editor.app/AppInfo",
+            build_appinfo("Editor", Some("editor.png"), &[]),
+        )
+        .holding("/Editor.app/Resources/editor.png", vec![0xab; 64])
+        // The class artwork is shipped too, so preferring the bundle's own
+        // icon is a choice the resolver made rather than the only asset it
+        // could find.
+        .shipping(IconKind::AppBundle, vec![0xcd; 64]);
+    let mut rasteriser = CountingRasteriser::new(art_colour);
+    let drawn = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+
+    assert!(
+        shows(&drawn, art_colour),
+        "the bundle's own icon is blitted"
+    );
+    assert_ne!(drawn.pixels(), glyphs.pixels());
+    assert!(
+        reader.read.iter().any(|p| p == "/Editor.app/AppInfo"),
+        "the tile asks the bundle's own manifest which icon it carries: {:?}",
+        reader.read
+    );
+    assert!(
+        reader
+            .read
+            .iter()
+            .any(|p| p == "/Editor.app/Resources/editor.png"),
+        "the named asset is read from inside the bundle: {:?}",
+        reader.read
+    );
+    assert!(
+        !reader
+            .read
+            .iter()
+            .any(|p| *p == icon_artwork_path(IconKind::AppBundle)),
+        "the class artwork is not consulted when the bundle has its own: {:?}",
+        reader.read
+    );
+    assert_eq!(rasteriser.decodes, 1);
+}
+
+#[test]
+fn a_bundle_with_no_icon_of_its_own_falls_back_to_the_class_artwork_then_the_glyph() {
+    let browser = bundle_grid();
+    let vp = Rect::new(0, 0, 400, 400);
+    let art_colour = Color::rgb(0x77, 0x11, 0x22);
+    let glyphs = grid_surface(&browser, vp, &mut NoArtwork);
+
+    // A manifest that names no icon: the shipped class artwork answers.
+    let mut cache = test_artwork_cache();
+    let mut reader = CountingReader::new()
+        .holding("/Editor.app/AppInfo", build_appinfo("Editor", None, &[]))
+        .shipping(IconKind::AppBundle, vec![0xcd; 64]);
+    let mut rasteriser = CountingRasteriser::new(art_colour);
+    let drawn = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+    );
+    assert!(shows(&drawn, art_colour), "the class artwork is blitted");
+    assert!(reader
+        .read
+        .iter()
+        .any(|p| *p == icon_artwork_path(IconKind::AppBundle)));
+
+    // Neither a manifest nor class artwork: the tile is the built-in glyph,
+    // never a blank tile — and no byte ever reaches a decoder.
+    let mut cache = test_artwork_cache();
+    let mut bare = CountingReader::new();
+    let plain = grid_surface(
+        &browser,
+        vp,
+        &mut IconArtworkSource::new(&mut cache, &mut bare, &mut PanicRasteriser),
+    );
+    assert_eq!(plain.pixels(), glyphs.pixels());
 }
 
 #[test]
@@ -3130,10 +3253,10 @@ fn bundle_source_propagates_a_refused_enumeration() {
 /// signature is left zero: `association_from_appinfo` reads the declared types
 /// as a display hint and never verifies the signature (the signed load gate
 /// does that at launch), so an unsigned fixture exercises exactly the decode.
-fn build_appinfo(name: &str, mimes: &[&str]) -> Vec<u8> {
+fn build_appinfo(name: &str, icon: Option<&str>, mimes: &[&str]) -> Vec<u8> {
     use tairix_abi::{
         AppInfoHeader, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-        BUNDLE_VERSION_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+        BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
     };
     fn inline<const N: usize>(value: &str) -> [u8; N] {
         let mut buf = [0u8; N];
@@ -3142,6 +3265,7 @@ fn build_appinfo(name: &str, mimes: &[&str]) -> Vec<u8> {
     }
     let id = "os.tairix.fixture";
     let version = "0.1.0";
+    let icon = icon.unwrap_or("");
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
@@ -3151,13 +3275,13 @@ fn build_appinfo(name: &str, mimes: &[&str]) -> Vec<u8> {
         id_len: u8::try_from(id.len()).expect("id fits"),
         name_len: u8::try_from(name.len()).expect("name fits"),
         version_len: u8::try_from(version.len()).expect("version fits"),
-        library_icon_len: 0,
+        library_icon_len: u8::try_from(icon.len()).expect("icon fits"),
         library: 0,
         reserved0: [0; 3],
         id: inline::<BUNDLE_ID_MAX>(id),
         name: inline::<BUNDLE_NAME_MAX>(name),
         version: inline::<BUNDLE_VERSION_MAX>(version),
-        library_icon: [0; tairix_abi::LIBRARY_ICON_MAX],
+        library_icon: inline::<LIBRARY_ICON_MAX>(icon),
         syscall_table_hash: [0; 32],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
@@ -3176,7 +3300,7 @@ fn build_appinfo(name: &str, mimes: &[&str]) -> Vec<u8> {
 
 #[test]
 fn association_from_appinfo_reads_the_name_and_declared_types() {
-    let bytes = build_appinfo("viewer", &["text/plain", "text/markdown"]);
+    let bytes = build_appinfo("viewer", None, &["text/plain", "text/markdown"]);
     let assoc = crate::open_with::association_from_appinfo("/System/Apps/viewer.app", &bytes)
         .expect("decodes");
     assert_eq!(assoc.name(), "viewer");
@@ -3192,7 +3316,7 @@ fn association_from_appinfo_reads_the_name_and_declared_types() {
 fn association_from_appinfo_reads_a_bundle_that_declares_no_types() {
     // A pure command declares no associations: it decodes to an empty MIME
     // set (never an error) and is simply never an "open with" candidate.
-    let bytes = build_appinfo("printf", &[]);
+    let bytes = build_appinfo("printf", None, &[]);
     let assoc = crate::open_with::association_from_appinfo("/System/Apps/printf.app", &bytes)
         .expect("decodes");
     assert!(assoc.mime_types().is_empty());
@@ -3205,7 +3329,7 @@ fn association_from_appinfo_fails_closed_on_garbage() {
     assert!(crate::open_with::association_from_appinfo("/x.app", b"not a manifest").is_none());
     assert!(crate::open_with::association_from_appinfo("/x.app", &[]).is_none());
     // A header claiming a MIME entry the body does not carry fails closed too.
-    let mut bytes = build_appinfo("viewer", &["text/plain"]);
+    let mut bytes = build_appinfo("viewer", None, &["text/plain"]);
     let short = bytes.len() - 4;
     bytes.truncate(short);
     assert!(crate::open_with::association_from_appinfo("/x.app", &bytes).is_none());

@@ -54,31 +54,47 @@ over a resolution-independent design grid, so the same glyph is
   `Default`) is the all-fallback set the desktop draws before any asset
   loads, so a complete icon set always exists.
 - `artwork` — the shared "resolve an icon to drawable pixels" layer, used by
-  both the desktop session and the file manager. It adds a preferred **raster
-  artwork** tier over the vector glyph: `ArtworkReader` (a capability-gated
-  read) and `ArtworkRasteriser` (the parser sandbox) are injected seams, so
-  the crate stays `no_std` and the untrusted decode never runs here (`AGENTS.md`
-  §19.5). `icon_artwork_path`/`icon_vector_path` name a kind's
-  `/System/Graphics/Icons/<id>.png` / `.svg` asset; `artwork_kind_for_file`
-  validates a shipped-artwork file name; `MAX_ARTWORK_BYTES` is the one fixed
-  validation bound on an artwork file (the sandboxed rasteriser refuses
-  over-long input against this same definition, `AGENTS.md` §2.2 / §24.4).
-  `ArtworkCache` (built by `artwork_cache`, over `lib/reclaim`) retains each
-  decode — success or refusal — keyed by path and pixel side, returning a
-  **borrow** so a grid draws many icons a frame without copying; a bad, absent,
-  oversize, or wrong-shaped asset yields a cached `None` (`AGENTS.md` §2.9).
-  `IconArtworkSource` hands a renderer a plain `IconArtwork` lookup, and
-  `NoArtwork` is the all-glyph lookup a headless build or a test uses.
+  both the desktop session and the file manager. It adds the preferred tiers
+  over the vector glyph: the icon a thing carries of its **own**, then the
+  shipped **raster artwork** for its class. `ArtworkReader` (a
+  capability-gated read) and `ArtworkRasteriser` (the parser sandbox) are
+  injected seams, so the crate stays `no_std` and the untrusted decode never
+  runs here (`AGENTS.md` §19.5). A draw site states what it wants as one
+  `IconRequest` — `kind` (the class alone), `asset` (an icon path the caller
+  already resolved), or `bundle` (an application bundle whose own signed
+  manifest names its icon) — and this layer owns the order they are tried in,
+  so no surface re-decides it. `icon_artwork_path`/`icon_vector_path` name a
+  kind's `/System/Graphics/Icons/<id>.png` / `.svg` asset;
+  `artwork_kind_for_file` validates a shipped-artwork file name;
+  `MAX_ARTWORK_BYTES`, `MAX_ARTWORK_SIDE`, and `MIN_ARTWORK_SIDE` are the one
+  definition of the artwork bounds (the sandboxed rasteriser decodes within
+  them and the image build refuses first-party artwork that fails them,
+  `AGENTS.md` §2.2 / §24.4). `ArtworkCache` (built by `artwork_cache`, over
+  `lib/reclaim`) retains each decode — success or refusal — keyed by what was
+  resolved and the pixel side, returning a **borrow** so a grid draws many
+  icons a frame without copying; a bad, absent, oversize, or wrong-shaped
+  asset yields a cached `None` (`AGENTS.md` §2.9). `IconArtworkSource` hands a
+  renderer a plain `IconArtwork` lookup, and `NoArtwork` is the all-glyph
+  lookup a headless build or a test uses.
 
-## Two-tier asset model
+## Asset model
 
-An icon resolves through two on-disk tiers over an always-present built-in
-floor: raster artwork (`<id>.png`) preferred, vector SVG (`<id>.svg`) next, and
-the built-in `builtin_icon` glyph always last, so resolution is total even on a
-system that ships no artwork at all (`AGENTS.md` §2.9). A fine-grained
-file-class kind (an HTML or Rust text file, a PNG or SVG image, a specific disk
-medium) names its own asset id but shares its broad family's built-in glyph, so
-a system without the raster artwork still shows a meaningful icon.
+An icon resolves through the thing's own icon (an application bundle's
+`Resources/` master, named by its manifest) and then two on-disk class tiers
+over an always-present built-in floor: raster artwork (`<id>.png`) preferred,
+vector SVG (`<id>.svg`) next, and the built-in `builtin_icon` glyph always
+last, so resolution is total even on a system that ships no artwork at all
+(`AGENTS.md` §2.9). A fine-grained file-class kind (an HTML or Rust text file,
+a PNG or SVG image, a specific disk medium) names its own asset id but shares
+its broad family's built-in glyph, so a system without the raster artwork
+still shows a meaningful icon.
+
+A bundle's manifest is authored by whoever built the bundle, so the bundle
+tier treats it as untrusted input: the manifest is read under the ABI's wire
+bound and decoded fail-closed, and the asset name is accepted only as a plain
+file name resolved *inside* the bundle's own directory — a bundle cannot aim
+the desktop at a file elsewhere, and one that tries simply draws its class
+picture.
 
 ## Where it sits
 

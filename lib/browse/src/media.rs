@@ -48,7 +48,7 @@
 use alloc::string::String;
 
 use tairix_abi::SYSTEM_SERVICE_STORE;
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconRequest};
 
 use crate::entry::{Entry, EntryKind};
 
@@ -436,6 +436,33 @@ pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
             media_for_name(entry.name()).unwrap_or(MediaType::ApplicationOctetStream)
         }
     }
+}
+
+/// The icon request for one listed entry drawn out of the directory `dir`.
+///
+/// An application bundle names *itself* in the request, so the artwork layer
+/// can prefer the icon the bundle carries in its own `Resources/` over the
+/// generic artwork for its class; every other entry resolves by class alone.
+/// `scratch` is a buffer the caller reuses across the entries of one frame, so
+/// a grid of tiles spells its bundle paths without allocating one per tile.
+///
+/// Both surfaces that draw directory entries — the file manager's grid and the
+/// desktop's icons — build their request here, so an application cannot be
+/// pictured one way on the desktop and another in the manager.
+#[must_use]
+pub fn entry_icon_request<'a>(
+    dir: &str,
+    entry: &Entry,
+    kind: IconKind,
+    scratch: &'a mut String,
+) -> IconRequest<'a> {
+    if !entry.is_bundle() {
+        return IconRequest::kind(kind);
+    }
+    scratch.clear();
+    scratch.push_str(dir);
+    crate::vfs::push_child(scratch, entry.name());
+    IconRequest::bundle(kind, scratch)
 }
 
 /// Whether `parent`'s root-first components are exactly the system service

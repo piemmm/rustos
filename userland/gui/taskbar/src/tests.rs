@@ -13,7 +13,7 @@ use tairix_controls::{
     TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconSet, NoArtwork};
+use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
@@ -2899,7 +2899,8 @@ impl FakeArtwork {
 }
 
 impl IconArtwork for FakeArtwork {
-    fn artwork(&mut self, kind: IconKind, side: u32) -> Option<&Surface> {
+    fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
+        let kind = request.icon_kind();
         self.asked.push((kind, side));
         self.held
             .iter()

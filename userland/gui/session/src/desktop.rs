@@ -53,8 +53,8 @@ use alloc::vec::Vec;
 
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
-    applications_for, media_for_entry, sort_entries, AppAssociation, ClickKind, DirectorySource,
-    DoubleClickTracker, Entry, EntryKind, GridFlow, GridView, SortMode,
+    applications_for, entry_icon_request, media_for_entry, sort_entries, AppAssociation, ClickKind,
+    DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFlow, GridView, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_font::BitmapFont;
@@ -325,9 +325,12 @@ impl<S: DirectorySource> Desktop<S> {
     ///
     /// Only the icons the column actually shows are painted and only their
     /// artwork is asked for, so a folder with more icons than fit costs
-    /// nothing for the ones off screen. An icon whose artwork the lookup
-    /// declines falls back to the shared class glyph inside the card, so a
-    /// system with no `/System/Graphics` still shows a meaningful desktop.
+    /// nothing for the ones off screen. An application bundle on the desktop
+    /// names itself in its request, so it draws the icon it carries in its own
+    /// `Resources/` rather than the generic bundle picture. An icon whose
+    /// artwork the lookup declines falls back to the shared class glyph inside
+    /// the card, so a system with no `/System/Graphics` still shows a
+    /// meaningful desktop.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -337,6 +340,10 @@ impl<S: DirectorySource> Desktop<S> {
         font: BitmapFont,
         artwork: &mut dyn IconArtwork,
     ) {
+        // Spelled once for the whole pass; a bundle icon appends its own leaf
+        // into this one buffer rather than allocating a path per tile.
+        let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
+        let mut bundle = String::new();
         for index in layout.visible_range(0) {
             let Some(entry) = self.entries.get(index) else {
                 break;
@@ -347,7 +354,8 @@ impl<S: DirectorySource> Desktop<S> {
             let kind = media_for_entry(entry, &self.folder).icon();
             let tile = grid_tile(entry, self.icon_state(index), kind);
             let side = tile.icon_side(bounds, scale, theme, font);
-            let art = artwork.artwork(kind, side);
+            let request = entry_icon_request(&dir, entry, kind, &mut bundle);
+            let art = artwork.artwork(request, side);
             tile.render(surface, bounds, scale, theme, font, art);
         }
     }
@@ -511,13 +519,8 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// The absolute path of the child called `name` inside the desktop folder.
     fn path_of(&self, name: &str) -> String {
-        let mut path = String::new();
-        for component in &self.folder {
-            path.push('/');
-            path.push_str(component);
-        }
-        path.push('/');
-        path.push_str(name);
+        let mut path = tairix_browse::vfs::spell_absolute_path(&self.folder);
+        tairix_browse::vfs::push_child(&mut path, name);
         path
     }
 }

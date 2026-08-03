@@ -21,3 +21,5 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # it in the desktop's program library under the development folder
 # (plans/NEW-TASKBAR.md T3).
 library = "Programming"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "widgets.png"

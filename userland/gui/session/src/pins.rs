@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{AppInfoHeader, Errno, APPINFO_WIRE_MAX};
 use tairix_geometry::{Point, Scale};
-use tairix_icon::{ArtworkCache, ArtworkRasteriser, ArtworkReader, IconKind};
+use tairix_icon::{ArtworkCache, ArtworkRasteriser, ArtworkReader, IconKind, IconRequest};
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_taskbar::{BarLayout, LibraryIconRequest, PinView, TaskId, Taskbar};
 use tairix_taskpins::{
@@ -766,20 +766,16 @@ pub fn resolve_library_icons<R, D>(
         if drawn {
             continue;
         }
-        // The bundle's own icon first; each borrow of the cache is cloned out
-        // before the next so the fallback can re-borrow it.
-        let source = entry_icon_source(taskbar.library().catalog(), &entry);
-        let mut art = None;
-        if let Some(source) = source {
-            art = cache
-                .path_artwork(reader, rasteriser, &source.path(), side)
-                .cloned();
-        }
-        if art.is_none() {
-            art = cache
-                .kind_artwork(reader, rasteriser, IconKind::AppBundle, side)
-                .cloned();
-        }
+        // The application's own icon, else the shipped bundle artwork, else
+        // the glyph the row draws when this leaves it empty: the artwork
+        // layer owns that order, so the launcher does not restate it.
+        let asset =
+            entry_icon_source(taskbar.library().catalog(), &entry).map(|source| source.path());
+        let request = asset.as_deref().map_or_else(
+            || IconRequest::kind(IconKind::AppBundle),
+            |path| IconRequest::asset(IconKind::AppBundle, path),
+        );
+        let art = cache.artwork(reader, rasteriser, request, side).cloned();
         taskbar.set_library_row_artwork(row, art);
     }
 }

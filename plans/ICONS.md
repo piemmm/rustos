@@ -19,17 +19,28 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 
 ## Status
 
-`done` — I1–I6 complete. Every stage's section below records what it now
+`done` — I1–I7 complete. Every stage's section below records what it now
 guarantees.
 
 ## 0. The binding decisions
 
-- **Three tiers, always total.** An icon resolves as raster artwork
+- **Tiers, always total.** A *thing* resolves to its own icon first — an
+  application bundle's `Resources/` master, named by its signed manifest —
+  and then to its *class*: raster artwork
   (`/System/Graphics/Icons/<asset-id>.png`), else the on-disk vector asset
   (`<asset-id>.svg`), else the first-party built-in glyph. The glyph tier is
   mandatory: no icon may exist as an asset alone, so a missing, oversize,
   corrupt, or refused file degrades to a meaningful picture and can never
   blank a surface. The charter carries this rule; this plan implements it.
+- **The order is decided in exactly one place.** `ArtworkCache::artwork`
+  takes one `IconRequest` (a kind alone, a kind plus an already-resolved
+  asset path, or a kind plus a bundle directory) and owns the tier order, so
+  a taskbar button, a launcher row, a desktop icon and a file-manager tile
+  cannot resolve the same thing three different ways.
+- **A bundle's own icon is its identity, not a launcher detail.** The
+  manifest's `library-icon` is independent of its `library` listing: every
+  command app declares an icon and none of them is listed in the program
+  library. The two were coupled once; the coupling is gone.
 - **One vocabulary.** `IconKind` (`lib/icon`) is the single closed icon
   vocabulary. A file-class kind and a chrome glyph are the same kind of
   thing to every draw site; the difference is only which tier resolves.
@@ -46,23 +57,42 @@ guarantees.
   in a minimum-capability sandbox process, and accepted only when the reply
   is exactly the pixels requested. The desktop trusts validated pixels,
   never a file.
-- **Decode once, per (asset, pixel side).** One reclaim-governed cache
-  (`lib/icon::ArtworkCache`), shared by every consumer process, keyed by
-  asset path and pixel side, returning borrows so a hundred-tile grid never
-  copies a hundred images per frame. Negative results are cached too, so a
-  bad asset is not re-read every frame.
+- **Decode once, per (thing, pixel side).** One reclaim-governed cache
+  (`lib/icon::ArtworkCache`), shared by every consumer process, keyed by what
+  was resolved (an asset path, or a bundle directory) and the pixel side,
+  returning borrows so a hundred-tile grid never copies a hundred images per
+  frame. Negative results are cached too, so a bad asset — or a bundle with
+  no icon at all — is not re-read every frame.
 - **Artwork is data, discovered at build time.** The shipped set is whatever
-  is in `lib/icon/assets/`; adding an icon is dropping a file there. No
-  hand-maintained list exists in the kernel, the image builder, or a test
-  fixture, and the build refuses a file the desktop could not resolve.
+  is in `lib/icon/assets/` and in each bundle's own `Resources/`; adding an
+  icon is dropping a file there. No hand-maintained list exists in the
+  kernel, the image builder, or a test fixture, and the build refuses a file
+  the desktop could not resolve.
 
 ## 1. The shipped set
 
-`lib/icon/assets/<asset-id>.png` — square, straight-alpha, 256×256 raster
-masters, each within `MAX_ARTWORK_BYTES` (256 KiB). The file name *is* the
-asset id, and the id *is* an `IconKind::asset_id()`, so a typo cannot ship:
-`tools/syshelp`'s build script fails the build on an unrecognised name, an
-oversize file, or a duplicate id.
+Two families of master, one contract.
+
+**The class artwork** — `lib/icon/assets/<asset-id>.png`, planted at
+`/System/Graphics/Icons/`. The file name *is* the asset id, and the id *is*
+an `IconKind::asset_id()`, so a typo cannot ship: `tools/syshelp`'s build
+script fails the build on an unrecognised name, an oversize file, or a
+duplicate id.
+
+**Each bundle's own icon** — `<crate>/Resources/<name>.png`, declared as
+`library-icon` in that bundle's `AppInfo.toml` and planted inside the bundle.
+Every command app and every GUI app under the three app roots the resource
+walk covers (`userland/apps`, `userland/shell`, `userland/gui`) carries one,
+so browsing `/System/Apps` shows fifty distinct pictures rather than fifty
+copies of the generic bundle icon. Services outside those roots keep the
+service-bundle class artwork, which is the honest picture for them.
+
+Both families are square, straight-alpha, at least `MIN_ARTWORK_SIDE`
+(256×256) and within `MAX_ARTWORK_BYTES` (256 KiB), and both are *authored
+artwork*: adding or replacing one is dropping a PNG on disk, never editing a
+list. The image build proves every one of them decodes through the desktop's
+own decoder (below), so "the icon is broken" is a build failure rather than a
+silent glyph on someone's desktop.
 
 Masters that no live consumer can select are **not** shipped. They live in
 `artwork/` (reference art, not shipped) and return to `lib/icon/assets/` in
@@ -110,7 +140,8 @@ The same stage closed a live defect: a bundle could declare a
 `library-icon` larger than the desktop will ever decode, and would then
 silently render as a glyph forever with nothing telling the author. The
 image build now refuses it, naming the bundle, the file, its size, and the
-bound.
+bound — and, since I7, refuses one that is not decodable, not square, or
+under the master side as well.
 
 ## 5. I4 — the taskbar and the program library — **done**
 
@@ -150,7 +181,36 @@ class into a concrete class, so a composed volume may publish a medium
 nobody declared. Its only user-visible consumer today is the drive icon,
 where the generic glyph is already the right picture.
 
-## 8. What this plan deliberately does not cover
+## 8. I7 — every app carries its own icon — **done**
+
+The last stage closed the gap the tiers implied but nothing supplied: the
+system shipped one picture for *all* applications. Now:
+
+- Every command and GUI bundle ships a 256×256 master in its own
+  `Resources/` and declares it in its manifest. The set is one visual family
+  — a bevelled plate, a chrome motif, an orange accent — with the plate tint
+  grouping a bundle by what it does (files and shell, text utilities,
+  network, process and monitoring, storage and devices, users and security),
+  so a strip of them reads as one system rather than fifty unrelated images.
+- `AppInfoHeader` no longer refuses an icon on an unlisted bundle. That rule
+  made sense when the program library was the only consumer; the file manager
+  and the desktop are consumers too, and neither has anything to do with the
+  launcher's folders.
+- The file manager's grid and the desktop's icons name the bundle in their
+  request, so a `.app` tile draws the application's own picture. Resolution
+  stays demand-driven (only the tiles on screen), and a bundle is keyed in
+  the cache by its *directory*, so its manifest is read once and a bundle
+  with no icon of its own remembers that too.
+- The image build decodes every icon it is about to plant — class artwork and
+  bundle icon alike — through `lib/image` under the same limits the sandboxed
+  rasteriser applies, and refuses anything that is not square, is under
+  `MIN_ARTWORK_SIDE`, or is not decodable artwork at all.
+- A bundle's manifest is untrusted at that boundary: the icon name is
+  accepted only as a plain file name and resolved *inside* the bundle's own
+  directory, so a hostile `library-icon` cannot aim the desktop at a file
+  elsewhere. It draws its class picture instead.
+
+## 9. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

@@ -12,12 +12,17 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::{
+    AppInfoHeader, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX,
+    LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+};
 use tairix_log::DiscardSink;
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
     artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
-    ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource, NoArtwork, MAX_ARTWORK_BYTES,
+    ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource, IconRequest, NoArtwork,
+    MAX_ARTWORK_BYTES,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -28,6 +33,7 @@ use crate::load::ICON_KINDS;
 struct CountingReader {
     files: BTreeMap<String, Vec<u8>>,
     reads: usize,
+    read_paths: Vec<String>,
 }
 
 impl CountingReader {
@@ -35,6 +41,7 @@ impl CountingReader {
         Self {
             files: BTreeMap::new(),
             reads: 0,
+            read_paths: Vec::new(),
         }
     }
 
@@ -47,6 +54,7 @@ impl CountingReader {
 impl ArtworkReader for CountingReader {
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
         self.reads += 1;
+        self.read_paths.push(path.to_string());
         self.files.get(path).cloned()
     }
 }
@@ -196,20 +204,27 @@ fn a_zero_side_is_refused_without_reading() {
 }
 
 #[test]
-fn kind_artwork_reads_the_kind_png_path() {
+fn a_kind_request_reads_the_kind_png_path() {
     let mut c = cache();
     let path = icon_artwork_path(IconKind::Folder);
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
-        .kind_artwork(&mut reader, &mut ras, IconKind::Folder, 8)
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::kind(IconKind::Folder),
+            8
+        )
         .is_some());
 }
 
 #[test]
 fn no_artwork_never_resolves() {
     let mut none = NoArtwork;
-    assert!(none.artwork(IconKind::Folder, 16).is_none());
+    assert!(none
+        .artwork(IconRequest::kind(IconKind::Folder), 16)
+        .is_none());
 }
 
 #[test]
@@ -219,7 +234,184 @@ fn icon_artwork_source_resolves_through_the_cache() {
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let mut source = IconArtworkSource::new(&mut c, &mut reader, &mut ras);
-    assert!(source.artwork(IconKind::AppBundle, 8).is_some());
+    assert!(source
+        .artwork(IconRequest::kind(IconKind::AppBundle), 8)
+        .is_some());
+}
+
+/// A structurally valid manifest naming `icon` as the bundle's own icon (or
+/// declaring none when `icon` is empty).
+///
+/// The artwork layer decodes the header's shape, not its signature — the
+/// signed load gate is what admits a bundle — so a test manifest needs only
+/// to be well-formed.
+fn manifest(icon: &str) -> Vec<u8> {
+    fn inline<const N: usize>(text: &str) -> ([u8; N], u8) {
+        let mut buf = [0u8; N];
+        buf[..text.len()].copy_from_slice(text.as_bytes());
+        (buf, u8::try_from(text.len()).expect("short"))
+    }
+    let (id, id_len) = inline::<BUNDLE_ID_MAX>("os.tairix.test");
+    let (name, name_len) = inline::<BUNDLE_NAME_MAX>("test");
+    let (version, version_len) = inline::<BUNDLE_VERSION_MAX>("0.1.0");
+    let (library_icon, library_icon_len) = inline::<LIBRARY_ICON_MAX>(icon);
+    AppInfoHeader {
+        magic: APPINFO_MAGIC,
+        abi_version: tairix_abi::ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: 0,
+        mime_count: 0,
+        id_len,
+        name_len,
+        version_len,
+        library_icon_len,
+        library: 0,
+        reserved0: [0; 3],
+        id,
+        name,
+        version,
+        library_icon,
+        syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
+        content_hash: [0; 32],
+        signer_pubkey: [0; 32],
+        signature: [0; 64],
+    }
+    .to_le_bytes()
+    .to_vec()
+}
+
+#[test]
+fn a_bundle_draws_the_icon_its_own_manifest_names() {
+    let mut c = cache();
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/AppInfo", manifest("x.png"))
+        .with("/Apps/x.app/Resources/x.png", vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    let surface = c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            8,
+        )
+        .expect("the bundle's own icon");
+    assert_eq!(surface.width(), 8);
+    assert_eq!(reader.reads, 2, "the manifest and the asset it names");
+}
+
+#[test]
+fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
+    let mut c = cache();
+    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/AppInfo", manifest(""))
+        .with(&kind_path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            8,
+        )
+        .is_some());
+}
+
+#[test]
+fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
+    let mut c = cache();
+    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    // The manifest names an icon, but the asset is absent from the bundle.
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/AppInfo", manifest("gone.png"))
+        .with(&kind_path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            8,
+        )
+        .is_some());
+
+    // A bundle with no manifest at all resolves the same way.
+    let mut bare = CountingReader::new().with(&kind_path, vec![0u8; 10]);
+    assert!(c
+        .artwork(
+            &mut bare,
+            &mut ras,
+            IconRequest::bundle(IconKind::AppBundle, "/Apps/bare.app"),
+            8,
+        )
+        .is_some());
+}
+
+#[test]
+fn a_bundle_icon_escaping_its_own_resources_is_refused() {
+    let mut c = cache();
+    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/AppInfo", manifest("../../../System/secret"))
+        // The file the hostile name aims at, reachable if the name were ever
+        // joined as a path rather than validated as a leaf.
+        .with("/System/secret", vec![0u8; 10])
+        .with(&kind_path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    let surface = c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            8,
+        )
+        .expect("the class artwork still resolves");
+    assert_eq!(surface.width(), 8);
+    assert!(
+        !reader
+            .read_paths
+            .iter()
+            .any(|path| path == "/System/secret"),
+        "a traversing icon name must never be read: {:?}",
+        reader.read_paths
+    );
+}
+
+#[test]
+fn a_bundle_with_no_icon_re_reads_neither_its_manifest_nor_the_kind_asset() {
+    let mut c = cache();
+    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/AppInfo", manifest(""))
+        .with(&kind_path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app");
+    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_some());
+    let after_first = reader.reads;
+    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_some());
+    assert_eq!(
+        reader.reads, after_first,
+        "both the manifest refusal and the class artwork were retained"
+    );
+}
+
+#[test]
+fn an_asset_request_prefers_the_named_asset_over_the_kind() {
+    let mut c = cache();
+    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let mut reader = CountingReader::new()
+        .with("/Apps/x.app/Resources/x.png", vec![0u8; 10])
+        .with(&kind_path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::asset(IconKind::AppBundle, "/Apps/x.app/Resources/x.png"),
+            8,
+        )
+        .is_some());
+    assert_eq!(reader.reads, 1, "the class asset was never consulted");
 }
 
 #[test]

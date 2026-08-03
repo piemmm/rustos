@@ -29,6 +29,7 @@
 use std::sync::OnceLock;
 
 use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
+use tairix_image::DecodeLimits;
 use tairix_itest_harness::app_image::{
     compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
     APP_MANIFEST_SOURCE,
@@ -630,7 +631,7 @@ fn build_bundle(
         tairix_syshelp::RESOURCE_FILES
             .iter()
             .filter(|res| res.bundle == bundle_dir)
-            .map(|res| (res.file, res.bytes.len())),
+            .map(|res| (res.file, res.bytes)),
     )?;
 
     let digests: Vec<BundleFileDigest<'_>> = contents
@@ -685,43 +686,89 @@ fn verify_composed_appinfo(bytes: &[u8], name: &str) -> Result<(), String> {
 /// Verify a bundle's declared `library-icon` is one the desktop could
 /// actually draw, from the bundle's own `Resources/`.
 ///
-/// `resources` yields `(file_name, byte_len)` for every file in the bundle's
+/// `resources` yields `(file_name, bytes)` for every file in the bundle's
 /// `Resources/`. A bundle with no declared icon passes trivially. A declared
-/// icon must (a) be present in `Resources/` and (b) be at most
-/// [`tairix_icon::MAX_ARTWORK_BYTES`] — the same bound the desktop refuses
-/// artwork against *before* it decodes it. Without this check a bundle that
-/// ships a missing or over-large icon would render as a fallback glyph
-/// forever with nothing telling the author; failing the build closed here,
-/// with a message naming the bundle, the file, its size, and the bound, turns
-/// that silent failure into an actionable one.
+/// icon must be present in `Resources/` and then satisfy the shared master
+/// contract ([`verify_icon_master`]). Without this check a bundle that ships
+/// a missing, over-large, or undecodable icon would render as a fallback
+/// glyph forever with nothing telling the author; failing the build closed
+/// here turns that silent failure into an actionable one.
 ///
 /// # Errors
 ///
 /// Returns an actionable build-error message when a declared icon is absent
-/// from `Resources/` or exceeds the artwork byte bound.
+/// from `Resources/` or is not artwork the desktop would draw.
 fn verify_library_icon<'a>(
     bundle_dir: &str,
     library_icon: Option<&str>,
-    resources: impl IntoIterator<Item = (&'a str, usize)>,
+    resources: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Result<(), String> {
     let Some(icon) = library_icon else {
         return Ok(());
     };
-    let size = resources
+    let bytes = resources
         .into_iter()
-        .find_map(|(file, len)| (file == icon).then_some(len))
+        .find_map(|(file, bytes)| (file == icon).then_some(bytes))
         .ok_or_else(|| {
             format!(
                 "image: {bundle_dir} declares library-icon `{icon}`, \
                  but no Resources/{icon} is present in the bundle"
             )
         })?;
-    if size > tairix_icon::MAX_ARTWORK_BYTES {
+    verify_icon_master(
+        &format!("{bundle_dir} library-icon Resources/{icon}"),
+        bytes,
+    )
+}
+
+/// Verify one icon master is artwork the desktop will actually draw.
+///
+/// `label` names the artefact in the build error. The bytes must:
+///
+/// * be at most [`tairix_icon::MAX_ARTWORK_BYTES`] — the same bound the
+///   desktop refuses artwork against *before* it decodes it,
+/// * decode through [`tairix_image`] under the same limits the sandboxed
+///   rasteriser applies, so the build accepts exactly what the runtime would,
+/// * be square, because every slot draws icons in a square, and
+/// * be at least [`tairix_icon::MIN_ARTWORK_SIDE`] on a side, so a slot only
+///   ever downscales a master rather than blurring it up.
+///
+/// Checking the decode here rather than trusting the file extension is what
+/// makes "the icon is broken" a build failure instead of a silent glyph on
+/// someone's desktop.
+///
+/// # Errors
+///
+/// Returns an actionable build-error message naming `label` and what is wrong
+/// with the artwork.
+fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > tairix_icon::MAX_ARTWORK_BYTES {
         return Err(format!(
-            "image: {bundle_dir} library-icon Resources/{icon} is {size} bytes, \
-             exceeding the {}-byte desktop artwork bound; the desktop would \
-             refuse it before decoding and draw a fallback glyph",
+            "image: {label} is {} bytes, exceeding the {}-byte desktop artwork \
+             bound; the desktop would refuse it before decoding and draw a \
+             fallback glyph",
+            bytes.len(),
             tairix_icon::MAX_ARTWORK_BYTES
+        ));
+    }
+    let limits = DecodeLimits::new(
+        tairix_icon::MAX_ARTWORK_SIDE,
+        tairix_icon::MAX_ARTWORK_SIDE,
+        u64::from(tairix_icon::MAX_ARTWORK_SIDE) * u64::from(tairix_icon::MAX_ARTWORK_SIDE),
+    );
+    let image = tairix_image::decode(bytes, &limits)
+        .map_err(|e| format!("image: {label} is not artwork the desktop can decode: {e:?}"))?;
+    let (width, height) = (image.width(), image.height());
+    if width != height {
+        return Err(format!(
+            "image: {label} is {width}x{height}; an icon master must be square"
+        ));
+    }
+    if width < tairix_icon::MIN_ARTWORK_SIDE {
+        return Err(format!(
+            "image: {label} is {width}x{height}, smaller than the {}-pixel icon \
+             master side; a slot would have to blur it up",
+            tairix_icon::MIN_ARTWORK_SIDE
         ));
     }
     Ok(())
@@ -729,7 +776,79 @@ fn verify_library_icon<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::verify_library_icon;
+    use super::{verify_icon_master, verify_library_icon};
+
+    /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG.
+    ///
+    /// Built here rather than committed as a fixture so a test can ask for
+    /// exactly the geometry it wants to be refused. The `IDAT` zlib stream is
+    /// a run of stored (uncompressed) DEFLATE blocks, which is legal and
+    /// keeps this to arithmetic the reader can check by eye; greyscale keeps
+    /// a master-sized image comfortably inside the artwork byte bound without
+    /// needing a compressor here.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for byte in bytes {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    let mask = 0u32.wrapping_sub(crc & 1);
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        fn chunk(out: &mut Vec<u8>, tag: [u8; 4], body: &[u8]) {
+            out.extend_from_slice(&u32::try_from(body.len()).expect("chunk fits").to_be_bytes());
+            let mut crc_over = tag.to_vec();
+            crc_over.extend_from_slice(body);
+            out.extend_from_slice(&tag);
+            out.extend_from_slice(body);
+            out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
+        }
+
+        // One filter byte per row, then `width` opaque white samples.
+        let mut raw = Vec::new();
+        for _ in 0..height {
+            raw.push(0u8);
+            raw.extend(core::iter::repeat_n(0xFFu8, width as usize));
+        }
+
+        // RFC 1950 envelope over RFC 1951 stored blocks (each at most the
+        // 16-bit block length the format allows).
+        let mut zlib = vec![0x78, 0x01];
+        let mut rest = raw.as_slice();
+        loop {
+            let take = rest.len().min(usize::from(u16::MAX));
+            let (block, tail) = rest.split_at(take);
+            let len = u16::try_from(block.len()).expect("bounded by u16::MAX");
+            zlib.push(u8::from(tail.is_empty()));
+            zlib.extend_from_slice(&len.to_le_bytes());
+            zlib.extend_from_slice(&(!len).to_le_bytes());
+            zlib.extend_from_slice(block);
+            rest = tail;
+            if rest.is_empty() {
+                break;
+            }
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for byte in &raw {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        chunk(&mut out, *b"IHDR", &ihdr);
+        chunk(&mut out, *b"IDAT", &zlib);
+        chunk(&mut out, *b"IEND", &[]);
+        out
+    }
 
     /// A bundle that declares no library icon has nothing to verify.
     #[test]
@@ -737,14 +856,12 @@ mod tests {
         assert!(verify_library_icon("terminal.app", None, core::iter::empty()).is_ok());
     }
 
-    /// A present icon within the artwork bound is accepted, and the exact
-    /// bound value (not one over it) is accepted.
+    /// A present icon that decodes as a square master at the shipped side is
+    /// accepted.
     #[test]
-    fn present_and_within_bound_passes() {
-        let resources = [
-            ("other.bin", 10),
-            ("terminal.png", tairix_icon::MAX_ARTWORK_BYTES),
-        ];
+    fn a_square_master_at_the_shipped_side_passes() {
+        let master = png(tairix_icon::MIN_ARTWORK_SIDE, tairix_icon::MIN_ARTWORK_SIDE);
+        let resources: [(&str, &[u8]); 2] = [("other.bin", &[0u8; 4]), ("terminal.png", &master)];
         assert!(verify_library_icon("terminal.app", Some("terminal.png"), resources).is_ok());
     }
 
@@ -752,28 +869,102 @@ mod tests {
     /// the message names the bundle and the missing file.
     #[test]
     fn missing_icon_is_refused() {
-        let err = verify_library_icon("terminal.app", Some("terminal.png"), [("other.bin", 10)])
+        let resources: [(&str, &[u8]); 1] = [("other.bin", &[0u8; 4])];
+        let err = verify_library_icon("terminal.app", Some("terminal.png"), resources)
             .expect_err("a declared icon absent from Resources/ must be refused");
         assert!(err.contains("terminal.app"), "{err}");
         assert!(err.contains("terminal.png"), "{err}");
     }
 
-    /// An icon one byte over the artwork bound is refused, and the message
-    /// names the file, its size, and the bound.
+    /// An icon one byte over the artwork bound is refused *before* it is
+    /// decoded, and the message names the file, its size, and the bound.
     #[test]
     fn over_bound_icon_is_refused() {
         let size = tairix_icon::MAX_ARTWORK_BYTES + 1;
-        let err = verify_library_icon(
-            "terminal.app",
-            Some("terminal.png"),
-            [("terminal.png", size)],
-        )
-        .expect_err("an over-large icon must be refused");
+        let over = vec![0u8; size];
+        let resources: [(&str, &[u8]); 1] = [("terminal.png", &over)];
+        let err = verify_library_icon("terminal.app", Some("terminal.png"), resources)
+            .expect_err("an over-large icon must be refused");
         assert!(err.contains("terminal.png"), "{err}");
         assert!(err.contains(&size.to_string()), "{err}");
         assert!(
             err.contains(&tairix_icon::MAX_ARTWORK_BYTES.to_string()),
             "{err}"
+        );
+    }
+
+    /// A file that is not decodable artwork at all is refused: the check is
+    /// the desktop's own decoder, not the file's name.
+    #[test]
+    fn a_file_that_is_not_an_image_is_refused() {
+        let err = verify_icon_master("x.app icon", b"PNG? no.")
+            .expect_err("undecodable bytes must be refused");
+        assert!(err.contains("decode"), "{err}");
+    }
+
+    /// A non-square master is refused: every slot draws an icon in a square,
+    /// so a rectangular master would be letterboxed forever.
+    #[test]
+    fn a_non_square_master_is_refused() {
+        let side = tairix_icon::MIN_ARTWORK_SIDE;
+        let err = verify_icon_master("x.app icon", &png(side, side / 2))
+            .expect_err("a rectangular master must be refused");
+        assert!(err.contains("square"), "{err}");
+    }
+
+    /// A master below the shipped side is refused: a slot may only ever
+    /// downscale artwork, never blur it up.
+    #[test]
+    fn an_undersized_master_is_refused() {
+        let small = tairix_icon::MIN_ARTWORK_SIDE / 2;
+        let err = verify_icon_master("x.app icon", &png(small, small))
+            .expect_err("an undersized master must be refused");
+        assert!(
+            err.contains(&tairix_icon::MIN_ARTWORK_SIDE.to_string()),
+            "{err}"
+        );
+    }
+
+    /// Every icon master the image ships — the desktop's class artwork and
+    /// every bundle's own icon alike — is artwork the desktop will really
+    /// draw. Discovered from disk, so a new asset is judged the moment it is
+    /// dropped in.
+    #[test]
+    fn every_shipped_icon_master_is_artwork_the_desktop_will_draw() {
+        assert!(!tairix_syshelp::GRAPHICS_FILES.is_empty());
+        for asset in tairix_syshelp::GRAPHICS_FILES {
+            verify_icon_master(
+                &format!("Graphics/{}/{}", asset.dir, asset.file),
+                asset.bytes,
+            )
+            .expect("a shipped icon master");
+        }
+
+        let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the crate lives at <workspace>/tools/xtask")
+            .join("userland");
+        let discovered = super::discover_app_manifests(&userland).expect("discovery");
+        let mut bundle_icons = 0usize;
+        for app in &discovered {
+            let bundle_dir = app.manifest.bundle_dir();
+            if app.manifest.library_icon.is_some() {
+                bundle_icons += 1;
+            }
+            verify_library_icon(
+                &bundle_dir,
+                app.manifest.library_icon.as_deref(),
+                tairix_syshelp::RESOURCE_FILES
+                    .iter()
+                    .filter(|res| res.bundle == bundle_dir)
+                    .map(|res| (res.file, res.bytes)),
+            )
+            .expect("a bundle's own icon");
+        }
+        assert!(
+            bundle_icons > 0,
+            "the shipped bundles declare their own icons"
         );
     }
 }

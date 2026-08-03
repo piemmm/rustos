@@ -36,3 +36,5 @@ name = "switchboard"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "switchboard.png"

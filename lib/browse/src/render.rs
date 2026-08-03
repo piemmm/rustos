@@ -40,7 +40,7 @@ use tairix_controls::{
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind};
+use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{Palette, Theme};
@@ -55,7 +55,7 @@ use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridFlow, GridView, ListView, SidebarView, ViewLayout, ViewMode};
-use crate::media::media_for_entry;
+use crate::media::{entry_icon_request, media_for_entry};
 use crate::open_with::AppAssociation;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
@@ -92,11 +92,12 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 ///
 /// `artwork` is the draw-site icon lookup the grid view resolves each tile's
 /// real icon through: for every grid tile the renderer classifies the entry to
-/// an [`IconKind`] and asks `artwork` for a pre-
-/// rasterised surface at the tile's icon slot, falling back to the built-in
-/// glyph when it returns `None`. The list view is text-only and never consults
-/// it. A caller with no artwork cache passes [`NoArtwork`](tairix_icon::NoArtwork),
-/// which always returns `None` (every tile then draws its built-in glyph).
+/// an [`IconKind`] — naming the bundle itself as well when the entry is one —
+/// and asks `artwork` for a pre-rasterised surface at the tile's icon slot,
+/// falling back to the built-in glyph when it returns `None`. The list view is
+/// text-only and never consults it. A caller with no artwork cache passes
+/// [`NoArtwork`](tairix_icon::NoArtwork), which always returns `None` (every
+/// tile then draws its built-in glyph).
 ///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
@@ -339,7 +340,7 @@ fn draw_sidebar(
         };
         let row = place_row(place, places, index, selected);
         let side = row.icon_side(bounds, Scale::ONE, theme, font);
-        let art = artwork.artwork(place.icon(), side);
+        let art = artwork.artwork(IconRequest::kind(place.icon()), side);
         row.render(surface, bounds, Scale::ONE, theme, font, art);
     }
 }
@@ -534,6 +535,12 @@ fn draw_list<S: DirectorySource>(
 /// supplies one the tile draws that artwork; otherwise the card falls back to
 /// the built-in glyph for the kind. The classification is resolved once here so
 /// the manager and picker draw the same icon for the same entry.
+///
+/// An application bundle additionally names *itself* in the request, so the
+/// artwork layer can prefer the icon the bundle carries in its own
+/// `Resources/` over the generic bundle artwork. Only the tiles actually on
+/// screen are asked for, so browsing a store of a thousand applications reads
+/// and decodes only the ones in view.
 fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
     font: BitmapFont,
@@ -547,6 +554,10 @@ fn draw_grid<S: DirectorySource>(
     let selected = browser.selected_index();
     let parent = browser.components();
     let entries = browser.entries();
+    // Spelled once for the whole frame; each bundle tile appends its own leaf
+    // into one reused buffer rather than allocating a path per tile.
+    let dir = crate::vfs::spell_absolute_path(parent);
+    let mut bundle = String::new();
     for index in view.visible_range(offset) {
         let Some(entry) = entries.get(index) else {
             break;
@@ -555,13 +566,14 @@ fn draw_grid<S: DirectorySource>(
             continue;
         };
         let kind = media_for_entry(entry, parent).icon();
+        let request = entry_icon_request(&dir, entry, kind, &mut bundle);
         let mut state = ControlState::idle();
         if selected == Some(index) {
             state.selection = SelectionState::Selected;
         }
         let tile = grid_tile(entry, state, kind);
         let side = tile.icon_side(bounds, Scale::ONE, theme, font);
-        let art = artwork.artwork(kind, side);
+        let art = artwork.artwork(request, side);
         tile.render(surface, bounds, Scale::ONE, theme, font, art);
     }
 }

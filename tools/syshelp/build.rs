@@ -77,7 +77,7 @@ fn main() {
                 continue;
             }
             println!("cargo:rerun-if-changed={}", help.display());
-            let bundle = bundle_dir_name(&crate_dir);
+            let (bundle, store) = bundle_identity(&crate_dir);
             for locale in sorted_children(&help) {
                 let locale_dir = help.join(&locale);
                 if !locale_dir.is_dir() {
@@ -96,7 +96,7 @@ fn main() {
                     let abs = path.to_str().expect("help path is valid UTF-8");
                     writeln!(
                         rows,
-                        "    HelpFile {{ bundle: {bundle:?}, locale: {locale:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                        "    HelpFile {{ store: {store:?}, bundle: {bundle:?}, locale: {locale:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
                     )
                     .expect("write to String");
                 }
@@ -123,7 +123,7 @@ fn main() {
                 continue;
             }
             println!("cargo:rerun-if-changed={}", resources.display());
-            let bundle = bundle_dir_name(&crate_dir);
+            let (bundle, store) = bundle_identity(&crate_dir);
             for file in sorted_children(&resources) {
                 let path = resources.join(&file);
                 if !path.is_file() {
@@ -133,7 +133,7 @@ fn main() {
                 let abs = path.to_str().expect("resource path is valid UTF-8");
                 writeln!(
                     resource_rows,
-                    "    ResourceFile {{ bundle: {bundle:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                    "    ResourceFile {{ store: {store:?}, bundle: {bundle:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
                 )
                 .expect("write to String");
             }
@@ -229,26 +229,50 @@ fn emit_graphics_table(workspace: &Path) {
 }
 
 /// The planted bundle directory (`<name>.app`) of the app crate at
-/// `crate_dir`, from its `AppInfo.toml` manifest source's `name` key — the
-/// same source of truth the app-bundle composer plants under, never the
-/// crate directory's own name. A crate that ships a `Help/` or
-/// `Resources/` payload without a readable manifest name is a broken
-/// source tree: fail the build loudly rather than plant the payload under
-/// a guessed bundle.
-fn bundle_dir_name(crate_dir: &Path) -> String {
+/// `crate_dir` and the `/System` store it installs to, from its
+/// `AppInfo.toml` manifest source's `name` and `kind` keys — the same source
+/// of truth the app-bundle composer plants under, never the crate
+/// directory's own name. The store matters as much as the name: a service's
+/// payload planted under the application store would leave the installed
+/// bundle missing content its signed digest covers, and the load gate would
+/// refuse the bundle. A crate that ships a `Help/` or `Resources/` payload
+/// without a readable manifest name and kind is a broken source tree: fail
+/// the build loudly rather than plant the payload under a guessed bundle.
+fn bundle_identity(crate_dir: &Path) -> (String, &'static str) {
     let manifest = crate_dir.join("AppInfo.toml");
     let text = fs::read_to_string(&manifest)
         .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
-    let name = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .find_map(|line| {
-            let value = line.strip_prefix("name")?.trim_start().strip_prefix('=')?;
-            value.trim().strip_prefix('"')?.strip_suffix('"')
-        })
-        .unwrap_or_else(|| panic!("{}: no `name = \"...\"` key", manifest.display()));
-    format!("{name}.app")
+    let value_of = |key: &str| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+                value.trim().strip_prefix('"')?.strip_suffix('"')
+            })
+            .unwrap_or_else(|| panic!("{}: no `{key} = \"...\"` key", manifest.display()))
+    };
+    let name = value_of("name");
+    let kind = value_of("kind");
+    let store = match kind {
+        "service" => store_dir(tairix_abi::SYSTEM_SERVICE_STORE),
+        "command" | "application" => store_dir(tairix_abi::SYSTEM_APP_STORE),
+        other => panic!("{}: unknown kind `{other}`", manifest.display()),
+    };
+    (format!("{name}.app"), store)
+}
+
+/// The `/System` subdirectory of a store path (`/System/Apps` -> `Apps`).
+///
+/// Derived from the store's one definition in `lib/abi` rather than spelled
+/// again here, so the planted path cannot drift from the path the loader
+/// scans.
+fn store_dir(store: &'static str) -> &'static str {
+    store
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| panic!("{store} names no directory"))
 }
 
 /// The names of a directory's entries, sorted, so the generated table (and

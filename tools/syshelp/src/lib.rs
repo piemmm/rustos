@@ -4,9 +4,11 @@
 //!
 //! TAIRiX ships each command app's internationalised command help as a
 //! structured-Markdown `Help/` tree on the read-only `/System` volume, at
-//! `/System/Apps/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`), and
+//! `/System/<store>/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`), and
 //! each app's bundle resources (e.g. `lspci`'s compiled ID-database table,
-//! `plans/DEVICES.md`) at `/System/Apps/<name>.app/Resources/<file>`. It also
+//! `plans/DEVICES.md`) at `/System/<store>/<name>.app/Resources/<file>`,
+//! where `<store>` is the store the bundle's own manifest kind installs it
+//! to — `Apps` for an application, `Services` for a service. It also
 //! ships the desktop's graphics assets — the raster icon masters — under
 //! `/System/Graphics`. The image builder
 //! (`tools/mkimage`) and the QEMU image fixture must plant all of these onto
@@ -47,14 +49,21 @@
 #![deny(missing_docs)]
 
 /// One shipped Help document, ready to plant at
-/// `/System/Apps/<bundle>/Help/<locale>/<file>` on the read-only `/System`
+/// `/System/<store>/<bundle>/Help/<locale>/<file>` on the read-only `/System`
 /// volume.
 ///
-/// The fields are the volume-relative path components under the app store's
-/// `Help/` tree plus the document's embedded bytes; the image builder writes
-/// `bytes` at `Apps/<bundle>/Help/<locale>/<file>`.
+/// The fields are the volume-relative path components under the bundle's own
+/// store plus the document's embedded bytes; the image builder writes `bytes`
+/// at `<store>/<bundle>/Help/<locale>/<file>`.
 #[derive(Clone, Copy, Debug)]
 pub struct HelpFile {
+    /// The `/System` subdirectory of the store this bundle installs to —
+    /// `Apps` for an application, `Services` for a service. Carried per row
+    /// because the payload must land inside the very bundle directory the
+    /// composer signed: a file planted into the other store leaves the
+    /// installed bundle missing content its manifest's digest covers, and
+    /// the load gate then refuses the bundle outright.
+    pub store: &'static str,
     /// The bundle directory name, including the `.app` suffix (e.g. `ls.app`).
     pub bundle: &'static str,
     /// The BCP-47 locale directory (`en-US/` is the mandatory canonical one).
@@ -74,17 +83,21 @@ pub struct HelpFile {
 pub const HELP_FILES: &[HelpFile] = &include!(concat!(env!("OUT_DIR"), "/help_files.rs"));
 
 /// One shipped bundle resource, ready to plant at
-/// `/System/Apps/<bundle>/Resources/<file>` on the read-only `/System`
+/// `/System/<store>/<bundle>/Resources/<file>` on the read-only `/System`
 /// volume.
 ///
 /// A resource is bundle data the program reads at runtime through the
 /// secured VFS (never `include_bytes!` into its binary): e.g. `lspci`'s
-/// compiled `pci.ids.bin` lookup table. The image builder writes `bytes` at
-/// `Apps/<bundle>/Resources/<file>`, and the bundle's signed `AppInfo`
+/// compiled `pci.ids.bin` lookup table, or the icon the bundle draws itself
+/// with. The image builder writes `bytes` at
+/// `<store>/<bundle>/Resources/<file>`, and the bundle's signed `AppInfo`
 /// content hash covers it, so a tampered resource fails the load gate
 /// closed.
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceFile {
+    /// The `/System` subdirectory of the store this bundle installs to —
+    /// `Apps` for an application, `Services` for a service.
+    pub store: &'static str,
     /// The bundle directory name, including the `.app` suffix
     /// (e.g. `lspci.app`).
     pub bundle: &'static str,
@@ -158,7 +171,7 @@ pub fn plant_system_payload<E>(
     for doc in HELP_FILES {
         plant(
             &[
-                b"Apps",
+                doc.store.as_bytes(),
                 doc.bundle.as_bytes(),
                 b"Help",
                 doc.locale.as_bytes(),
@@ -170,7 +183,7 @@ pub fn plant_system_payload<E>(
     for res in RESOURCE_FILES {
         plant(
             &[
-                b"Apps",
+                res.store.as_bytes(),
                 res.bundle.as_bytes(),
                 b"Resources",
                 res.file.as_bytes(),
@@ -225,6 +238,79 @@ mod tests {
             !lspci_table.bytes.is_empty(),
             "a discovered resource carries its file bytes"
         );
+    }
+
+    /// Every discovered payload row is planted inside the store its own
+    /// bundle installs to.
+    ///
+    /// A bundle's signed `AppInfo` digest covers its `Help/` and
+    /// `Resources/` files, so a row planted into the *other* store leaves
+    /// the installed bundle missing content its digest claims and the load
+    /// gate refuses the bundle outright — the whole bundle, not just the
+    /// stray file. The walk used to assume every bundle was an application,
+    /// which silently broke the moment a service shipped a payload; this
+    /// re-derives each bundle's store from its own manifest, independently
+    /// of the discovery that produced the rows, and holds every row to it.
+    #[test]
+    fn a_bundles_payload_is_planted_in_the_store_it_installs_to() {
+        use std::collections::BTreeMap;
+        use std::path::Path;
+        use std::string::{String, ToString};
+        use std::{format, fs};
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("the crate lives at <workspace>/tools/syshelp");
+        let mut store_of: BTreeMap<String, String> = BTreeMap::new();
+        for root in ["userland/apps", "userland/gui", "userland/shell"] {
+            let Ok(entries) = fs::read_dir(workspace.join(root)) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let Ok(text) = fs::read_to_string(entry.path().join("AppInfo.toml")) else {
+                    continue;
+                };
+                let value_of = |key: &str| {
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|line| !line.starts_with('#'))
+                        .find_map(|line| {
+                            let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+                            value.trim().strip_prefix('"')?.strip_suffix('"')
+                        })
+                        .map(ToString::to_string)
+                };
+                let (Some(name), Some(kind)) = (value_of("name"), value_of("kind")) else {
+                    continue;
+                };
+                let store = if kind == "service" {
+                    "Services"
+                } else {
+                    "Apps"
+                };
+                store_of.insert(format!("{name}.app"), store.to_string());
+            }
+        }
+        assert!(
+            store_of.values().any(|store| store == "Services"),
+            "a service bundle must be among the discovered roots, or this proves nothing"
+        );
+
+        let rows = HELP_FILES.iter().map(|doc| (doc.store, doc.bundle)).chain(
+            super::RESOURCE_FILES
+                .iter()
+                .map(|res| (res.store, res.bundle)),
+        );
+        for (store, bundle) in rows {
+            let expected = store_of
+                .get(bundle)
+                .unwrap_or_else(|| panic!("{bundle} has no manifest among the app roots"));
+            assert_eq!(
+                store, expected,
+                "{bundle}'s payload must be planted under {expected}, not {store}"
+            );
+        }
     }
 
     /// Every discovered tree passes the one shared help-tree lint

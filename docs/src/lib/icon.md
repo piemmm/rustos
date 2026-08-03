@@ -10,15 +10,21 @@ one supersampled `Surface::fill_polygon` path, exactly like `lib/cursor`.
 The built-in glyph representation (`VectorIcon`, `IconLayer`, `IconKind`,
 `builtin_icon`, the SVG-first `IconSet`/`IconAssetSource` loader) is described
 under [Desktop icons](../desktop/icons.md). This page covers the crate's
-**two-tier asset model** and the `artwork` layer that resolves it.
+**asset model** and the `artwork` layer that resolves it.
 
-## The two-tier asset model
+## The asset model
 
-Every `IconKind` resolves to drawable pixels through two on-disk asset tiers
-over an always-present built-in floor, tried in order, so resolution is
-**total** — a draw site always gets something:
+Every request resolves to drawable pixels through on-disk asset tiers over an
+always-present built-in floor, tried in order, so resolution is **total** — a
+draw site always gets something:
 
-1. **Raster artwork (preferred).** A pre-rasterised master shipped by the OS
+0. **The thing's own icon (preferred, where it has one).** An application
+   bundle names an icon inside its own `Resources/` in its signed `AppInfo`
+   manifest, so `ls.app` draws `ls`'s picture and not the generic
+   every-application picture. This tier is asked for by naming the thing in
+   the request (see below); everything without an icon of its own starts at
+   tier 1.
+1. **Raster artwork (next).** A pre-rasterised master shipped by the OS
    at `/System/Graphics/Icons/<asset-id>.png` (`icon_artwork_path(kind)`).
    Raster masters are a canonical icon source: they carry richer detail than a
    monochrome silhouette can.
@@ -56,13 +62,42 @@ library or in the renderer that consumes it (`AGENTS.md` §19.5):
   (`AGENTS.md` §24.4). The sandboxed rasteriser (`lib/sandbox`) refuses
   over-long input against this same one definition, so the bound cannot
   diverge between the two crates (`AGENTS.md` §2.2).
+- `MAX_ARTWORK_SIDE` (2048) is the source side an icon is ever decoded at,
+  and `MIN_ARTWORK_SIDE` (256) the side a *shipped* master is authored at so a
+  slot only ever downscales it. Both are one definition: the sandboxed
+  rasteriser bounds its decode by the first, and the image build refuses
+  first-party artwork that fails either.
 - `artwork_kind_for_file(name)` accepts exactly `<asset-id>.png` for a known
   kind and refuses anything else (an unknown id, a wrong extension, an empty
   name, or a directory-bearing path-traversal attempt), so the image build can
   reject an asset the desktop could never resolve.
 
-`ArtworkCache` retains each decode — success **or** refusal — keyed by asset
-path and pixel side, over the one shared reclaimable-memory cache
+## Asking for a picture
+
+A draw site states what it wants as one `IconRequest`, and the artwork layer
+owns the order the tiers are tried in — so a taskbar button, a launcher row,
+a desktop icon and a file-manager tile cannot resolve the same thing three
+different ways:
+
+- `IconRequest::kind(kind)` — the class picture alone.
+- `IconRequest::asset(kind, path)` — an icon whose path the caller already
+  knows (the program-library catalog stores one per listed application),
+  falling back to the class picture.
+- `IconRequest::bundle(kind, dir)` — the application bundle at `dir`, whose
+  own manifest names its icon. The artwork layer reads that manifest itself,
+  so a draw site holding only a directory entry needs no manifest knowledge.
+
+A bundle's manifest is authored by whoever built the bundle, so it is treated
+as untrusted input at that boundary: it is read under the ABI's own wire
+bound, decoded by the shared fail-closed header decoder, and the asset name is
+accepted only as a plain file name (`tairix_path::validate_file_name`) and
+then resolved *inside* the directory it came from. A bundle therefore cannot
+aim the desktop at a file outside its own `Resources/`, and one that tries
+simply draws its class picture.
+
+`ArtworkCache` retains each decode — success **or** refusal — keyed by what
+was resolved (an asset path, or a bundle directory) and the pixel side, over
+the one shared reclaimable-memory cache
 (`lib/reclaim`, `plans/SMARTRAM.md`), so a crowded or crafted bundle store can
 never grow a session without bound and a bad asset is not re-read every frame.
 A cache miss reads the bytes, refuses **before** rasterising when they exceed
@@ -77,6 +112,11 @@ sink)` builds the cache identically for both consumers, and
 plain `IconArtwork` lookup that knows nothing about I/O. `NoArtwork` is the
 all-glyph lookup a headless build or a test uses — it never resolves any
 artwork, so every draw site falls back to its built-in glyph.
+
+A bundle is keyed by its *directory*, not by the asset its manifest names, so
+the manifest read is paid once per bundle and a bundle that declares no icon
+(or names one that will not decode) remembers that refusal too rather than
+re-reading it every frame.
 
 ## Stability
 

@@ -54,8 +54,9 @@ mod tests;
 
 pub use artwork::{
     artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
-    ArtworkRasteriser, ArtworkReader, CachedArtwork, IconArtwork, IconArtworkSource, NoArtwork,
-    ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR, MAX_ARTWORK_BYTES,
+    ArtworkKey, ArtworkRasteriser, ArtworkReader, CachedArtwork, IconArtwork, IconArtworkSource,
+    IconRequest, NoArtwork, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR,
+    MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};

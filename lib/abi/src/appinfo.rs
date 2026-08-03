@@ -523,8 +523,10 @@ pub struct AppInfoHeader {
     pub version_len: u8,
     /// Valid byte count of the inline `library_icon` buffer
     /// (`<= LIBRARY_ICON_MAX`); zero when the bundle declares no icon.
-    /// Non-zero only on a listed bundle (`library != 0`) — an icon on a
-    /// bundle the library never shows is a malformed manifest.
+    /// Independent of `library`: the icon is the bundle's own identity,
+    /// drawn wherever the bundle appears — a file-manager tile, a taskbar
+    /// button, a launcher row — while `library` decides only whether the
+    /// program library lists it.
     pub library_icon_len: u8,
     /// The bundle's program-library listing ([`LibraryCategory::to_wire`]):
     /// `0` for a bundle the desktop's program library never lists (every
@@ -538,10 +540,11 @@ pub struct AppInfoHeader {
     pub name: [u8; BUNDLE_NAME_MAX],
     /// Version-string bytes; the valid prefix is `version_len` long.
     pub version: [u8; BUNDLE_VERSION_MAX],
-    /// Library icon asset name bytes — a plain file name resolved inside
-    /// the bundle's own `Resources/` directory; the valid prefix is
-    /// `library_icon_len` long. All zero when the bundle declares no icon
-    /// (a launcher then draws its class fallback icon).
+    /// Icon asset name bytes — a plain file name resolved inside the
+    /// bundle's own `Resources/` directory; the valid prefix is
+    /// `library_icon_len` long. All zero when the bundle declares no icon,
+    /// and a draw site then falls back to its class artwork and, failing
+    /// that, to the built-in glyph.
     pub library_icon: [u8; LIBRARY_ICON_MAX],
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
@@ -635,9 +638,8 @@ impl AppInfoHeader {
     ///   any inline string length exceeds its cap.
     /// * [`Errno::OutOfRange`] if a mandatory identity string (`id`, `name`,
     ///   `version`) is empty or is not valid UTF-8, if the `library` byte is
-    ///   outside the [`LibraryCategory::from_wire`] encoding, if the icon
-    ///   bytes are not valid UTF-8, or if an icon is declared on a bundle
-    ///   the library never lists.
+    ///   outside the [`LibraryCategory::from_wire`] encoding, or if the icon
+    ///   bytes are not valid UTF-8.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -672,11 +674,6 @@ impl AppInfoHeader {
             return Err(Errno::BadMagic);
         }
         LibraryCategory::from_wire(library)?;
-        if library == 0 && library_icon_len != 0 {
-            // An icon on a bundle the library never lists is incoherent; a
-            // manifest that says both is refused whole rather than half-read.
-            return Err(Errno::OutOfRange);
-        }
 
         let mut id = [0u8; BUNDLE_ID_MAX];
         id.copy_from_slice(&bytes[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX]);
@@ -1131,6 +1128,18 @@ mod tests {
         assert_eq!(decoded.library_icon(), None);
     }
 
+    /// A bundle's icon is its own identity, not a property of the launcher:
+    /// every command app declares one and none of them is listed in the
+    /// program library, so an icon without a category must decode.
+    #[test]
+    fn an_unlisted_bundle_may_still_declare_its_own_icon() {
+        let mut h = sample();
+        h.library = LibraryCategory::to_wire(None);
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("valid");
+        assert_eq!(decoded.library_category(), None);
+        assert_eq!(decoded.library_icon(), Some("editor.svg"));
+    }
+
     #[test]
     fn every_library_category_round_trips_the_wire_byte() {
         assert_eq!(LibraryCategory::from_wire(0), Ok(None));
@@ -1168,14 +1177,6 @@ mod tests {
         // A library byte outside the encoding.
         let mut h = sample();
         h.library = u8::try_from(LibraryCategory::ALL.len()).expect("small set") + 1;
-        assert_eq!(
-            AppInfoHeader::from_bytes(&h.to_le_bytes()),
-            Err(Errno::OutOfRange)
-        );
-
-        // An icon on a bundle the library never lists.
-        let mut h = sample();
-        h.library = LibraryCategory::to_wire(None);
         assert_eq!(
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
             Err(Errno::OutOfRange)

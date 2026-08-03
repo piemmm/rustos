@@ -31,6 +31,11 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # The audit sink the reclaimable-memory cache logs classification and
 # eviction through — supplied by the process that builds the cache.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The shared file-name validator. An application bundle names its own icon in
+# its manifest, and that name is untrusted input: it is accepted only as a
+# plain file name, checked by the one path parser the tree already has rather
+# than a second spelling of the same rule.
+tairix-path = { path = "../path", version = "=0.0.0" }
 
 [lints]
 workspace = true

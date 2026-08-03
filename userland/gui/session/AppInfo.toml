@@ -30,3 +30,5 @@ name = "desktop"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "desktop.png"

@@ -461,12 +461,16 @@ file manager and the trusted picker draw from (`AGENTS.md` §2.2) and a
 **display hint only** — it decides a glyph, never an operation; authority stays
 in the VFS and the launcher. `render` takes a
 trailing `artwork: &mut dyn tairix_icon::IconArtwork` lookup and asks it for
-each tile's kind at the exact `Card::icon_side` the tile reserves, blitting the
+each tile's icon at the exact `Card::icon_side` the tile reserves, blitting the
 real icon artwork when the system ships and can decode it and drawing the
 built-in vector glyph when it cannot — so a missing or refused asset degrades
-to a meaningful icon and can never blank the tile (`AGENTS.md` §10). The file
-manager binds a real cache to that lookup (*Grid-view icon artwork*, below);
-the read-only trusted picker still passes `NoArtwork`, so it draws glyphs only.
+to a meaningful icon and can never blank the tile (`AGENTS.md` §10). A tile
+for an application bundle names the bundle itself in that request
+(`entry_icon_request`, shared with the desktop's own icons), so `ls.app` draws
+the icon `ls` carries in its own `Resources/` rather than the one generic
+every-application picture. The file manager binds a real cache to that lookup
+(*Grid-view icon artwork*, below); the read-only trusted picker still passes
+`NoArtwork`, so it draws glyphs only.
 The list view is text-only and never consults the lookup. The selected
 item carries the shared selection state — the raised surface plus the accent
 selection rail every collection view shares — not a bespoke accent fill.
@@ -506,19 +510,26 @@ panicking (`AGENTS.md` §2.9).
 
 ### Grid-view icon artwork
 
-The grid draws the OS's shipped raster icon masters. The `Run` binary binds the
-renderer's `IconArtwork` lookup to the shared two-tier artwork layer
-(`lib/icon::artwork`), so a tile shows the real picture where one exists and
-the built-in vector glyph where it does not. Resolution is therefore **total**:
-an absent, over-long, undecodable, or disbelieved asset degrades to a glyph and
-never to a blank tile (`AGENTS.md` §10, §2.9).
+The grid draws each application's own icon, and the OS's shipped raster masters
+for everything else. The `Run` binary binds the renderer's `IconArtwork` lookup
+to the shared artwork layer (`lib/icon::artwork`), so a tile shows the real
+picture where one exists and the built-in vector glyph where it does not.
+Resolution is therefore **total**: an absent, over-long, undecodable, or
+disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
+§10, §2.9).
 
-- **Where the assets come from.** One `<asset-id>.png` per icon kind under
-  `/System/Graphics/Icons` (`tairix_icon::icon_artwork_path`) — the same store
-  and the same spelling the desktop session resolves, not a file manager copy
-  (`AGENTS.md` §2.2). The kind comes from the one content-type registry
+- **Where the assets come from.** For an application bundle, the icon its own
+  signed `AppInfo` names inside its own `Resources/`; for everything else —
+  and for a bundle that declares none, or whose icon will not serve — one
+  `<asset-id>.png` per icon kind under `/System/Graphics/Icons`
+  (`tairix_icon::icon_artwork_path`), the same store and the same spelling the
+  desktop session resolves, not a file manager copy (`AGENTS.md` §2.2). The
+  kind comes from the one content-type registry
   (`media_for_entry(entry, parent).icon()`), so the artwork a name gets and the
-  applications offered for it can never drift apart.
+  applications offered for it can never drift apart. A bundle's manifest is
+  read at that boundary as untrusted input: bounded, decoded fail-closed, and
+  its icon name accepted only as a plain file name resolved inside the
+  bundle's own directory.
 - **How the bytes are read.** Through the app's own capability-checked VFS read
   under the launching user's identity — no new authority — bounded to one byte
   past `tairix_icon::MAX_ARTWORK_BYTES`, so an over-long asset is *detected* as

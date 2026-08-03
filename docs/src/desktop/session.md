@@ -110,7 +110,7 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
   `/System/Graphics/Icons`, so the launcher buttons, a pin, a running task,
   and a library row all draw out of one store and one budget.
 
-Every lookup is keyed by `(asset path, pixel side)`, and a refusal is cached
+Every lookup is keyed by (what was resolved, pixel side), and a refusal is cached
 like a success, so an application whose icon will not decode costs one read
 and one sandbox round trip — not one per frame.
 
@@ -170,8 +170,9 @@ the leading edge; the desktop's column hugs the trailing edge and grows a new
 column inward as it fills, but both share one cell geometry and one hit-test
 (`lib/browse::layout`). It paints through the same public `grid_tile` /
 `grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
-shows the shipped folder artwork and a file its content-class artwork,
-falling back to built-in glyphs exactly as the file manager's grid does.
+shows the shipped folder artwork, a file its content-class artwork, and an
+application bundle the icon it carries in its own `Resources/`, falling back
+to built-in glyphs exactly as the file manager's grid does.
 
 **Pointer and keyboard.** A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared

@@ -223,6 +223,12 @@ tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
 # (plans/NEW-TASKBAR.md T15, AGENTS.md §2.2).
 tairix-switchboard = { path = "../../userland/gui/switchboard", version = "=0.0.0" }
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
+# The desktop's own PNG decoder. The image build decodes every icon it is
+# about to plant through exactly the decoder the desktop will use, so artwork
+# that would refuse at runtime — a file that is not a PNG, is not square, or
+# is smaller than the largest slot a desktop draws it in — fails the build
+# where the author can see it instead of degrading silently on screen.
+tairix-image = { path = "../../lib/image", version = "=0.0.0" }
 # The shared pointer input-event vocabulary: the T15 script raises the real
 # context menu by driving the production bar router with the very events the
 # guest will receive, so the menu geometry it clicks is the model's own.

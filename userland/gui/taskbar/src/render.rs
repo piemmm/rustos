@@ -56,7 +56,7 @@ use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{ControlRole, ControlState, PointerState, TaskVisibility, TaskbarItem};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconSet};
+use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
@@ -274,7 +274,7 @@ impl TaskbarRenderer {
             }
             let bounds = local_rect(rect, origin);
             let side = button.icon_side(bounds, scale, theme, fonts.text);
-            let art = artwork.artwork(kind, side);
+            let art = artwork.artwork(IconRequest::kind(kind), side);
             button.render(&mut surface, bounds, scale, theme, fonts.text, art);
         }
 
@@ -692,7 +692,7 @@ fn slot_artwork<'a>(
 ) -> Option<&'a Surface> {
     match app {
         Some(surface) => Some(surface),
-        None => artwork.artwork(kind, side),
+        None => artwork.artwork(IconRequest::kind(kind), side),
     }
 }
 

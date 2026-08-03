@@ -37,7 +37,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES};
+use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_raster::Surface;
 use tairix_svg::{SvgError, SvgImage};
@@ -57,19 +57,9 @@ mod tests;
 /// render larger than this.
 pub const MAX_ICON_SIDE: u32 = 512;
 
-/// Largest source width or height a PNG icon may declare, before any
-/// scaling to the requested output `side`.
-///
-/// This is a *decode-time* bound on the source image the worker will ever
-/// hold in memory, kept well above any real icon's native resolution but
-/// far below a value that could turn a small request into an expensive
-/// decode; it is deliberately independent of `side` so a caller asking
-/// for a tiny output cannot use that to sneak a huge source image past
-/// the reply-size limit.
-const PNG_DECODE_MAX_SIDE: u32 = 2048;
-
-/// Largest total PNG source pixel count ([`PNG_DECODE_MAX_SIDE`] squared).
-const PNG_DECODE_MAX_PIXELS: u64 = 2048 * 2048;
+/// Largest total PNG source pixel count
+/// ([`tairix_icon::MAX_ARTWORK_SIDE`] squared).
+const PNG_DECODE_MAX_PIXELS: u64 = (MAX_ARTWORK_SIDE as u64) * (MAX_ARTWORK_SIDE as u64);
 
 /// Request opcode.
 const OP_RASTERISE: u8 = 1;
@@ -245,15 +235,11 @@ fn straight_alpha_from_surface(surface: &Surface) -> Vec<u8> {
     out
 }
 
-/// Decode a PNG icon (bounded by [`PNG_DECODE_MAX_SIDE`] /
+/// Decode a PNG icon (bounded by [`tairix_icon::MAX_ARTWORK_SIDE`] /
 /// [`PNG_DECODE_MAX_PIXELS`], not by the requested `side`) and scale it to
 /// `side`×`side`.
 fn rasterise_png(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
-    let limits = DecodeLimits::new(
-        PNG_DECODE_MAX_SIDE,
-        PNG_DECODE_MAX_SIDE,
-        PNG_DECODE_MAX_PIXELS,
-    );
+    let limits = DecodeLimits::new(MAX_ARTWORK_SIDE, MAX_ARTWORK_SIDE, PNG_DECODE_MAX_PIXELS);
     let image = tairix_image::decode(icon, &limits).map_err(|_| IconRefusal::MalformedImage)?;
     Ok(scale_to_square(
         image.width(),

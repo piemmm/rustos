@@ -13,3 +13,5 @@ name = "groupadd"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_USER_ADMIN", "CAP_FS_ACCESS"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "groupadd.png"

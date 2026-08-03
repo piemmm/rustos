@@ -26,3 +26,5 @@ associations = ["text/plain", "text/markdown", "text/csv", "application/json", "
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other text tools (plans/NEW-TASKBAR.md T3).
 library = "Accessories"
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "viewer.png"
