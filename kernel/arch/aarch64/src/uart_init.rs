@@ -259,7 +259,7 @@ fn apply_pl011_init(base: usize) {
         let reg = |offset: usize| (base + offset) as *mut u32;
         core::ptr::write_volatile(reg(PL011_CR), 0);
         let fr = reg(console::ConsoleModel::Pl011.status_offset());
-        let mut budget = console::TX_POLL_BUDGET;
+        let mut budget = tairix_conout::TX_POLL_BUDGET;
         while budget != 0 && core::ptr::read_volatile(fr) & FR_BUSY != 0 {
             budget -= 1;
             core::hint::spin_loop();

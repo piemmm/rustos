@@ -1,0 +1,28 @@
+[package]
+name = "tairix-conout"
+description = "TAIRiX shared console-output transmit queue: the architecture-neutral, allocation-free staging engine every kernel port drives its character console through, with whole-record admission, severity-ordered tail eviction, counted-and-reported loss, and one interrupt-masked lock discipline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The one structured-log vocabulary and diagnostic line format. The queue
+# renders its own loss report as a real `Event` through
+# `tairix_log::write_diag_line`, so a dropped-output report is the same shape
+# on the wire as every other record and existing `id=` consumers see it
+# without a second formatter. Allocation-free, like this crate.
+tairix-log = { path = "../log", version = "=0.0.0" }
+# The one interrupt-safe lock discipline. Any structure an interrupt handler
+# and a normal path both touch is held through `IrqSafeSpinLock`, which masks
+# the current CPU for the hold; a console is exactly that structure, so this
+# crate uses that primitive rather than rolling a second one.
+tairix-sync = { path = "../sync", version = "=0.0.0" }

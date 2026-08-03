@@ -148,6 +148,7 @@ pub mod gdt;
 pub mod hybrid;
 pub mod interrupts;
 pub mod irq;
+pub mod irqmask;
 #[cfg(feature = "sched-arch")]
 pub mod kernel_arch;
 /// x86_64 implementation of the Arch HAL memory-tagging surface

@@ -262,87 +262,24 @@ mod metal {
     use core::arch::asm;
     use core::cell::UnsafeCell;
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::Ordering;
 
     use tairix_abi::RegisterWindow;
     use tairix_fbcon::{Cell, TextConsole};
     use tairix_fdt::Fdt;
     use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
+    use tairix_sync::IrqSafeSpinLock;
     use tairix_vcmailbox::{
         arm_physical_to_bus, MmioMailbox, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET,
         MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
     };
 
+    use crate::irqmask::PortIrqControl;
+
     use super::{
         bring_up, find_mailbox, ramfb_geometry, DiscoveredMailbox, DiscoveredVideo, Geometry,
         VIDEO_ACTIVE,
     };
-
-    /// Serialises post-MMU rendering (cursor + surface writes) across
-    /// CPUs, masking IRQ+FIQ for the critical section so a log write
-    /// from an interrupt handler on the holding CPU cannot deadlock.
-    ///
-    /// A minimal DAIF-masking spinlock private to this module —
-    /// deliberately not `tairix_sync::IrqSafeSpinLock`, a documented
-    /// carve-out: the minimal aarch64 QEMU test binaries link no
-    /// global allocator, and cargo feature unification across the
-    /// single `--target aarch64-unknown-none` build of the test matrix
-    /// compiles `lib/sync`'s alloc-backed `epoch` module into every
-    /// graph naming that crate, which would force an allocator into
-    /// those binaries.
-    struct RenderLock {
-        locked: AtomicBool,
-    }
-
-    /// Holds [`RenderLock`]; releasing restores the saved DAIF state.
-    struct RenderGuard<'a> {
-        lock: &'a RenderLock,
-        daif: u64,
-    }
-
-    impl RenderLock {
-        const fn new() -> Self {
-            Self {
-                locked: AtomicBool::new(false),
-            }
-        }
-
-        fn lock(&self) -> RenderGuard<'_> {
-            let daif: u64;
-            // SAFETY: reading DAIF and setting its I/F mask bits
-            // (`msr daifset, #3`) is always permitted at EL1 and
-            // touches no memory; masking *before* acquiring makes the
-            // hold-time interrupt-free, and an already-masked state
-            // round-trips unchanged (reentrant).
-            unsafe {
-                asm!(
-                    "mrs {0}, daif",
-                    "msr daifset, #3",
-                    out(reg) daif,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-            while self.locked.swap(true, Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
-            RenderGuard { lock: self, daif }
-        }
-    }
-
-    impl Drop for RenderGuard<'_> {
-        fn drop(&mut self) {
-            self.lock.locked.store(false, Ordering::Release);
-            // SAFETY: writes back the exact DAIF value captured by
-            // `lock` on this CPU, restoring the prior interrupt mask.
-            unsafe {
-                asm!(
-                    "msr daif, {0}",
-                    in(reg) self.daif,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-        }
-    }
 
     /// The discovered surface and, once attached post-MMU, the renderer.
     ///
@@ -386,7 +323,15 @@ mod metal {
     static VIDEO: VideoSlot = VideoSlot(UnsafeCell::new(None));
 
     /// The single render lock every console write serialises on.
-    static RENDER_LOCK: RenderLock = RenderLock::new();
+    ///
+    /// Masking this CPU for the hold is what makes it safe against its own
+    /// interrupt handlers: a handler that logs to the screen while the CPU it
+    /// fired on was mid-render would otherwise spin on a lock its own
+    /// interrupted mainline holds. It guards `()` rather than the state
+    /// itself because that state is written pre-MMU, where an atomic
+    /// read-modify-write is architecturally UNPREDICTABLE, so the slot cannot
+    /// live inside a lock; the discipline on [`VideoSlot`] covers that window.
+    static RENDER_LOCK: IrqSafeSpinLock<(), PortIrqControl> = IrqSafeSpinLock::new(());
 
     /// The DMA-visible mailbox property message, 16-byte aligned as the
     /// doorbell protocol requires.

@@ -595,8 +595,10 @@ pub use riscv64::boot::{
     RISCV_UART_CONSOLE,
 };
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub use tairix_arch_x86_64::serial::{SerialSink, SERIAL_SINK};
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use x86_64::boot::{boot, BootError};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use x86_64::panic_ctx::handle_panic_via_kernel_core;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use x86_64::serial_sink::{Com1Console, SerialSink, COM1_CONSOLE, SERIAL_SINK};
+pub use x86_64::serial_sink::{Com1Console, COM1_CONSOLE};

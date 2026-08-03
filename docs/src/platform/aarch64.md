@@ -551,11 +551,10 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   its cell (there is no hardware cursor on the scan-out surface), honouring
   DECTCEM show/hide. After the MMU and caches come on, each write cleans the touched
   scanlines to the point of coherency (`dc cvac` + `dsb`) so the
-  firmware scan-out sees them; rendering is serialised by a private
-  DAIF-masking spinlock (deliberately not `lib/sync` — feature
-  unification across the single aarch64-none test-matrix build would
-  compile its alloc-backed `epoch` module into the minimal,
-  allocator-free QEMU binaries; the carve-out is documented at the lock).
+  firmware scan-out sees them; rendering is serialised by a
+  DAIF-masking `IrqSafeSpinLock` over the port's one masking primitive
+  (`irqmask::DaifIrqControl`), so a screen write from an interrupt handler
+  on the holding CPU cannot deadlock against its own interrupted mainline.
 - **Routing.** The **boot-log** path (`serial::ConsoleWriter`, the log
   sink) routes by build profile. A **release build** renders to the
   screen when `video::is_active` and falls back to the UART otherwise.

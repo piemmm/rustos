@@ -36,7 +36,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_x86_64::backtrace::Backtracer;
 use tairix_arch_x86_64::kernel_arch::halt as arch_halt;
-use tairix_arch_x86_64::serial::{Serial, COM1_BASE};
+use tairix_arch_x86_64::serial::{Serial, COM1_BASE, SERIAL_SINK};
 use tairix_kernel_core::{handle_panic, PanicContext};
 
 /// The x86_64 post-mortem CPU-state handle the panic bridge attaches so
@@ -44,7 +44,6 @@ use tairix_kernel_core::{handle_panic, PanicContext};
 static BACKTRACER: Backtracer = Backtracer::new();
 
 use crate::x86_64::arch_wrapper::BinArch;
-use crate::x86_64::serial_sink::SERIAL_SINK;
 
 /// `AtomicPtr<BinArch>` published by [`crate::x86_64::boot::boot`] once the
 /// architecture handle is constructed.

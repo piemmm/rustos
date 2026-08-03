@@ -1,7 +1,7 @@
 # tairix-sync
 
 Shared `no_std` synchronisation primitives for TAIRiX: spin / MCS / RW
-locks, `SeqLock`, epoch-based reclamation, and set-once `Once` / `OnceCell`.
+locks, `SeqLock`, and set-once `Once` / `OnceCell`.
 
 These primitives are foundational and free of any kernel dependency, so
 they live in `lib/` where every layer may consume them (`AGENTS.md` §6,
@@ -16,10 +16,16 @@ selection guidance.
 ## Stability tier
 
 `stable` — the public surface (the lock types, their guards,
-`Epoch`/`Guard`, `Once`/`OnceCell`, and the `InterruptControl` seam) is
-consumed across the kernel and test trees. It is `no_std` and depends
-only on `core` (and `loom` under the opt-in `--cfg loom` model-check
-build).
+`Once`/`OnceCell`, and the `InterruptControl` seam) is consumed across the
+kernel, driver, userland and test trees.
+
+It depends on `core` alone, never `alloc` (and `loom` under the opt-in
+`--cfg loom` model-check build). That is deliberate and load-bearing: a
+`no_std` binary whose crate graph includes `alloc` must supply a
+`#[global_allocator]`, so a single allocating primitive here would force a
+heap onto the freestanding boot binaries that deliberately have none — and
+push them into hand-rolling their own lock instead. A primitive that must
+allocate does not belong in this crate.
 
 ## Features
 

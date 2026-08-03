@@ -869,14 +869,10 @@ from an injected `MonotonicClock` (a `Sink` receives no timestamp).
   message longer than `TAIL_MESSAGE_MAX` is truncated on a UTF-8 boundary, so
   a stored message is always valid UTF-8 and no input can make a read panic.
 
-It lives in `kernel/core` rather than `lib/log` because it needs the IRQ-safe
-lock from `lib/sync`, whose epoch-reclamation module is that crate's only
-`alloc` user; pulling `lib/sync` into `tairix-log` would force a global
-allocator into the minimal, allocator-free QEMU fault-test binaries that link
-`tairix-log`. `kernel/core` already depends on `lib/sync`, `lib/log`, and
-`alloc`, and is never linked by those minimal binaries, so the ring lands
-where its producer (the audit-sink composition) and its consumer (the
-Supervisor host) both live.
+It lives in `kernel/core` rather than `lib/log` because that is where both its
+producer (the audit-sink composition) and its consumer (the Supervisor host)
+live, and because `lib/log` stays the pure record vocabulary rather than
+gaining a retained store only the kernel uses.
 
 ## Testing
 

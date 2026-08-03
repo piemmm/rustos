@@ -65,7 +65,9 @@ use crate::unlock_service::{
     loader_caps, note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK,
 };
 use crate::x86_64::arch_wrapper::published_irq_table;
-use crate::x86_64::serial_sink::{COM1_CONSOLE, SERIAL_SINK};
+use tairix_arch_x86_64::serial::SERIAL_SINK;
+
+use crate::x86_64::serial_sink::COM1_CONSOLE;
 
 /// The MSI-X table entry the device's vector is programmed into. Every
 /// virtqueue shares it, so one bound [`IrqHandle`] covers the whole device.

@@ -161,6 +161,15 @@ pub fn console_putchar(byte: u8) {
     }
 }
 
+/// Inert on the host build: there is no firmware to call, so the byte is
+/// accepted and discarded.
+///
+/// It exists so the console that sits on top of this call compiles and is
+/// unit-tested off-target, exactly as the sibling ports' inert device stubs
+/// let theirs be.
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+pub fn console_putchar(_byte: u8) {}
+
 /// Send an inter-processor interrupt to every hart selected by
 /// `(hart_mask, hart_mask_base)` via the SBI v0.2 IPI extension.
 ///

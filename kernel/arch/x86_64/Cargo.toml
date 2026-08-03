@@ -58,6 +58,17 @@ sched-arch = []
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../api", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared console-output engine: whole-line framing, ordering, severity
+# shedding, accounted loss reporting and the one bounded transmit wait live
+# there, so every port shares one definition and this port supplies only its
+# 16550 port I/O. Allocator-free, so the freestanding test bins link it with no
+# global allocator.
+tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
+# The one interrupt-safe lock discipline, which this port's `RFLAGS.IF` masking
+# primitive plugs into. Needs only `core`, so the freestanding binaries here
+# still link no global allocator.
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 # The Multiboot2 information-structure wire layout is defined once in
 # `lib/multiboot2` (the shared home the kernel parser and the first-party

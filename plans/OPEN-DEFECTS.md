@@ -498,7 +498,6 @@ fixed in passing (D4.3).
 | `lib/sync::RwLock` | writer-preference; stated fairness invariant (`pending_writers>0` blocks new readers) with a property test | §27-complete |
 | `lib/sync::SeqLock` | read-mostly seqlock — `read`/`write`/`sequence`, retry-on-odd | §27-complete |
 | `lib/sync::OnceCell` / `Once` | full once-init: `get`/`set`/`get_or_try_init`/`take`/`call_once`(+infallible), poison handling | §27-complete |
-| `lib/sync::Epoch` | epoch-based reclamation — `register`/`pin`/`defer_free`/`defer`/`advance`; complete lifecycle | §27-complete |
 | `lib/collections::BitSet256` | 4×u64; full set algebra + subset + popcount + ascending fused iter, all O(1) | §27-complete |
 | `lib/caps::CapabilitySet` | 256-bit; full algebra + subset-enforcing `delegate` + `revoke` + wire round-trip; delegation-never-widens property-tested (§19.7) | §27-complete |
 | `lib/caps::CapToken` | unforgeable token vocabulary (`token.rs`) | §27-complete |

@@ -15,17 +15,13 @@
 #[cfg(loom)]
 pub(crate) use loom::hint::spin_loop;
 #[cfg(loom)]
-pub(crate) use loom::sync::atomic::{
-    fence, AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
-};
+pub(crate) use loom::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 // Re-exports under normal (non-`loom`) builds.
 #[cfg(not(loom))]
 pub(crate) use core::hint::spin_loop;
 #[cfg(not(loom))]
-pub(crate) use core::sync::atomic::{
-    fence, AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering,
-};
+pub(crate) use core::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 /// A `Sync`-friendly `UnsafeCell` wrapper that mirrors `loom::cell::UnsafeCell`'s
 /// `with`/`with_mut` access pattern.

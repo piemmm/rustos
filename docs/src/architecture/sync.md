@@ -5,9 +5,12 @@ provides the synchronisation primitives every other kernel crate depends
 on, so they land first and never need to be retrofitted (`AGENTS.md`
 §2.4).
 
-The crate is `no_std`. Only the [`Epoch`](#epoch--guard--deferfree)
-reclamation primitive uses the `alloc` crate (for its deferred-action
-queue); the rest is pure `core`.
+The crate needs only `core`, never `alloc`. That is deliberate and
+load-bearing: a `no_std` binary whose crate graph includes `alloc` must supply
+a `#[global_allocator]`, so a single allocating primitive here would force a
+heap onto the freestanding boot binaries that deliberately have none — and
+push them into hand-rolling their own lock instead. A primitive that must
+allocate does not belong in this crate.
 
 ## Primitive catalogue
 
@@ -18,7 +21,6 @@ queue); the rest is pure `core`.
 | `RwLock<T>` (writer-preference) | Read-mostly data with occasional writers. Writers are never starved. | Interrupt handlers (use `IrqSafeSpinLock` or `SeqLock`). | `Acquire`/`Release` on a packed state word. | Process / kernel-thread only. |
 | `McsLock<T>` | High-contention critical sections; need FIFO fairness and no cache-line storms. | Low contention (`SpinLock` is cheaper); interrupt handlers (queue is unbounded). | `AcqRel` swap on tail; `Release` store on successor flag. | Process / kernel-thread only. |
 | `SeqLock<T>` | Read-mostly `T: Copy` data where readers must never block (vDSO time, statistics counters). | Multiple concurrent writers; large payloads. | Sequence-counter validation with `Acquire` re-sample. | Readers safe at any IRQ; writers must serialise themselves. |
-| `Epoch` / `Guard` / `defer_free` | Lock-free / RCU-style structures where the old version of an object must be freed once no reader can observe it. | Mutual exclusion; small payloads (use `SeqLock`); no-`alloc` contexts. | `SeqCst` pin; `Acquire/Release` on the deferred queue. | Process / kernel-thread only. |
 | `OnceCell<T>` / `Once<T>` | Set-once or lazy-init data. **No panic on poison** — the API returns `Result`. | Inside interrupt context against the same cell as the initialiser (busy loop). | `Release` publication; `Acquire` observation. | Process / kernel-thread only. |
 
 ### When a critical section may *sleep* — `SleepLock` (kernel-side)
@@ -73,12 +75,6 @@ non-sleeping critical sections.
                                                                                Yes                       No
                                                                                   |                        |
                                                                               McsLock<T>             SpinLock<T>
-
-       Replacing an entire data structure
-       and freeing the old version only after
-       all readers have moved on?
-                |
-            Epoch / Guard / defer_free
 ```
 
 ## Ordering guarantees in detail
@@ -99,11 +95,6 @@ non-sleeping critical sections.
   `Acquire` plus an explicit `Acquire` fence; writers bump the counter
   to an odd value with `Release` before mutating and back to even with
   `Release` on commit.
-- **`Epoch`** — `Participant::pin` performs a `SeqCst` load of the
-  global epoch and a `SeqCst` store of `active = true`, so any
-  subsequent loads happen-after the global-epoch update they observed.
-  `defer_free` and `advance` synchronise through the shared `SpinLock`
-  on the deferred queue.
 - **`OnceCell` / `Once`** — initial publication is a `Release` store on
   the state word; every observer pairs it with an `Acquire` load.
 
@@ -115,7 +106,7 @@ non-sleeping critical sections.
   invariant live in
   [`lib/sync/tests/rwlock_fairness.rs`](../../../lib/sync/tests/rwlock_fairness.rs).
 - **Loom-based concurrency tests** for `SpinLock`, `RwLock`, `McsLock`,
-  `SeqLock`, `OnceCell` and `Epoch` live in
+  `SeqLock` and `OnceCell` live in
   [`lib/sync/tests/loom.rs`](../../../lib/sync/tests/loom.rs).
   They are gated behind `#[cfg(loom)]`:
 

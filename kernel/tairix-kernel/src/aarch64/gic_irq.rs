@@ -52,6 +52,10 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_arch_aarch64::gic::{GicController, GicMmio};
+// The port's one interrupt-masking primitive, which every lock an interrupt
+// handler and a normal path both touch is guarded by.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+use tairix_arch_aarch64::irqmask::{DaifIrqControl, DaifState};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_kernel_core::IrqRouting;
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
@@ -59,7 +63,7 @@ use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
 use tairix_sync::once::Once;
 use tairix_sync::once::OnceCell;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use tairix_sync::{InterruptControl, IrqSafeSpinLock, IrqState};
+use tairix_sync::{InterruptControl, IrqSafeSpinLock};
 
 /// Set while the console UART's receive line is **masked at the GIC because
 /// its receive queue was full** (`drain_uart_into_console_queue`): the ISR
@@ -594,108 +598,6 @@ fn note_resched_here() {
     tairix_kernel_core::note_preempt_tick(tairix_arch_aarch64::smp::current_cpu_index());
 }
 
-/// Saved DAIF state for [`DaifIrqControl`].
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-#[derive(Copy, Clone)]
-pub struct DaifState(u64);
-
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-impl IrqState for DaifState {}
-
-/// The aarch64 `InterruptControl` behind [`UART_RX_GATE`]: masks
-/// asynchronous interrupts via DAIF for the critical section and restores
-/// the exact prior state on release (reentrant — an already-masked state
-/// round-trips unchanged). Plugged into `lib/sync`'s IRQ-safe spinlock so
-/// the gate is also correct across CPUs (mask locally, spin globally).
-///
-/// The section masks IRQ+FIQ (the classic discipline, matching the arch
-/// port's video render lock). The debug watchdog build additionally
-/// re-clears FIQ (`DAIF.F`) — so its non-maskable Group-0/FIQ self-sample
-/// can observe a core wedged inside this section (`plans/WATCHDOG.md`) —
-/// but **only** when the boot probe proved a non-maskable FIQ is
-/// deliverable to this kernel (`tairix_arch_aarch64::watchdog::fiq_cadence_enabled`).
-/// Where the probe found FIQ undeliverable (a two-Security-state GIC-400,
-/// a Raspberry Pi 4, where Group 0 is secure) FIQ stays masked exactly as
-/// in a shippable build (fail closed).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub struct DaifIrqControl;
-
-// SAFETY: `disable` reads DAIF and sets its IRQ+FIQ mask bits — always
-// permitted at EL1, touches no memory — atomically masking asynchronous
-// interrupts on this CPU and returning the exact prior state; `restore`
-// writes that state back verbatim. A `disable` while already masked returns
-// the masked state, whose restore leaves interrupts masked (reentrant),
-// exactly as the trait requires. The debug watchdog build re-clears FIQ
-// (`DAIF.F`) only when the boot probe proved FIQ is genuinely deliverable
-// to this kernel; that is sound because on such a GIC the only Group-0/FIQ
-// source is the watchdog self-sample, which reads the interrupted context
-// and never takes this lock, so it cannot deadlock against a held critical
-// section. Where the probe found FIQ undeliverable (a secure Group 0 on a
-// two-Security-state GIC-400) FIQ stays masked, so a held section is never
-// exposed to a secure-world Group-0 FIQ the kernel cannot service.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-unsafe impl InterruptControl for DaifIrqControl {
-    type State = DaifState;
-
-    fn disable() -> Self::State {
-        let daif: u64;
-        // Capture the prior state and mask IRQ+FIQ — the shippable-safe
-        // default (the classic discipline, matching the arch port's video
-        // render lock). `restore` writes the captured state back verbatim,
-        // so this is reentrant.
-        // SAFETY: reading DAIF and setting its mask bits is always
-        // permitted at EL1 and touches no memory.
-        unsafe {
-            core::arch::asm!(
-                "mrs {0}, daif",
-                "msr daifset, #{mask}",
-                out(reg) daif,
-                mask = const (tairix_arch_aarch64::exceptions::daif::I
-                    | tairix_arch_aarch64::exceptions::daif::F),
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-        // Debug watchdog self-sample: re-clear FIQ (`DAIF.F`) for the
-        // critical section ONLY when the boot probe *proved* a non-maskable
-        // FIQ is deliverable to this kernel, so a Group-0/FIQ cadence can
-        // observe a core wedged inside this section (`plans/WATCHDOG.md`).
-        // Where the probe found FIQ undeliverable (a two-Security-state
-        // GIC-400 — a Raspberry Pi 4, where Group 0 belongs to the secure
-        // world) FIQ stays masked exactly as in a shippable build, so a held
-        // critical section is never exposed to a secure-world Group-0 FIQ the
-        // non-secure kernel cannot service (fail closed). The decision is a
-        // run-time property of the hardware, not of the build, so it is read
-        // from the probe rather than a compile-time constant.
-        #[cfg(feature = "watchdog-diagnostics")]
-        if tairix_arch_aarch64::watchdog::fiq_cadence_enabled() {
-            // SAFETY: clearing `DAIF.F` only unmasks FIQ and touches no
-            // memory; the probe has confirmed a taken FIQ reaches this
-            // kernel, and the self-sample reads the interrupted context and
-            // never takes this lock, so it cannot deadlock against the hold.
-            unsafe {
-                core::arch::asm!(
-                    "msr daifclr, #{f}",
-                    f = const tairix_arch_aarch64::exceptions::daif::F,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-        }
-        DaifState(daif)
-    }
-
-    unsafe fn restore(state: Self::State) {
-        // SAFETY: writing back the DAIF value captured by `disable` on
-        // this CPU restores exactly the prior mask state.
-        unsafe {
-            core::arch::asm!(
-                "msr daif, {0}",
-                in(reg) state.0,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-    }
-}
-
 /// Mask this CPU's interrupts for a kernel-heap-allocator critical section,
 /// returning the prior `DAIF` state as an opaque token.
 ///
@@ -703,12 +605,12 @@ unsafe impl InterruptControl for DaifIrqControl {
 /// (`tairix_kalloc::FreeListAllocator::install_irq_control`) so the
 /// allocator's lock is interrupt-safe: an interrupt taken on a CPU already
 /// holding the lock can no longer reenter `alloc`/`dealloc` and spin forever
-/// on the lock its own interrupted mainline holds. Delegates to the same
-/// [`DaifIrqControl`] every IRQ-safe spinlock uses, so the masking discipline
-/// is defined once.
+/// on the lock its own interrupted mainline holds. It masks through the
+/// port's one masking primitive, so the discipline is defined once; the
+/// token exists only because a `fn` pointer cannot carry the state type.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub(crate) fn kalloc_irq_disable() -> usize {
-    <DaifIrqControl as InterruptControl>::disable().0 as usize
+    <DaifIrqControl as InterruptControl>::disable().as_token()
 }
 
 /// Restore this CPU's interrupt state from a token
@@ -718,7 +620,7 @@ pub(crate) fn kalloc_irq_restore(token: usize) {
     // SAFETY: `token` is a `DAIF` value a paired `kalloc_irq_disable`
     // captured on this CPU; writing it back restores exactly the prior mask.
     unsafe {
-        <DaifIrqControl as InterruptControl>::restore(DaifState(token as u64));
+        <DaifIrqControl as InterruptControl>::restore(DaifState::from_token(token));
     }
 }
 

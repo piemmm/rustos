@@ -21,7 +21,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use tairix_sync::{Epoch, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
+use tairix_sync::{McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
 
 #[test]
 fn loom_spinlock_mutual_exclusion() {
@@ -101,20 +101,5 @@ fn loom_oncecell_single_init() {
         t1.join().unwrap();
         let v = cell.get().unwrap().unwrap();
         assert!(*v == 11 || *v == 22);
-    });
-}
-
-#[test]
-fn loom_epoch_pin_advance() {
-    loom::model(|| {
-        let e = Arc::new(Epoch::new());
-        let e1 = e.clone();
-        let t1 = thread::spawn(move || {
-            let p = e1.register();
-            let _g = p.pin();
-            // Drop guard immediately; just exercising registration.
-        });
-        e.advance();
-        t1.join().unwrap();
     });
 }

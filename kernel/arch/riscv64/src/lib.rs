@@ -140,6 +140,7 @@ pub mod cpuname;
 pub mod entropy;
 pub mod fault;
 pub mod fdt;
+pub mod irqmask;
 pub mod kernel_arch;
 /// riscv64 implementation of the Arch HAL memory-tagging surface
 /// ([`tairix_arch_api::MemoryTagging`]). The RISC-V
@@ -162,8 +163,11 @@ pub mod qemu_exit;
 // The SBI module's `ecall` wrappers are individually gated to the
 // freestanding target; its extension-id constants, `SbiRet`, and the
 // `hart_mask_for` helper build on the host so their unit tests run
-// under `cargo test`.
+// under `cargo test`. The console byte write additionally has an inert host
+// variant, so the console built on it is host-testable like the sibling
+// ports'.
 pub mod sbi;
+pub mod serial;
 /// riscv64 implementation of the Arch HAL side-channel mitigation
 /// surface ([`tairix_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
@@ -189,8 +193,6 @@ pub mod userentry;
 pub mod entry;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub mod panic;
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub mod serial;
 /// riscv64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the
 /// Arch HAL [`tairix_arch_api::MachineTakeover`] body driving the pre-boot
 /// Supervisor's one-way whole-RAM `memtest`. Freestanding
@@ -205,5 +207,4 @@ pub use kernel_arch::{RiscvArch, RiscvArchStorage};
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub use panic::handle_panic_via_serial;
-#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub use serial::{SerialSink, SERIAL_SINK};

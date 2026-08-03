@@ -1990,10 +1990,8 @@ console".
   `tairix-kernel::boot_aarch64` (caches off ⇒ the property exchange is
   DMA-coherent with no maintenance; the state cell is written by the
   single-threaded boot CPU — no atomic RMW MMU-off). Post-MMU rendering
-  serialises on a private DAIF-masking spinlock (not `lib/sync`: feature
-  unification across the aarch64-none test-matrix build would force its
-  alloc-backed `epoch` into the allocator-free minimal QEMU bins) and
-  cleans the touched
+  serialises on a DAIF-masking `IrqSafeSpinLock` over the port's one masking
+  primitive (`irqmask::DaifIrqControl`) and cleans the touched
   scanlines (`dc cvac` + `dsb`) so the firmware scan-out sees them. The
   doorbell base joins the Device-gigapage mask inputs; the boot audit
   line carries `video_console=true/false`.

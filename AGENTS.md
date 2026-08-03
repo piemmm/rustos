@@ -533,6 +533,7 @@ tairix/
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── complete/        # Shared filename-completion engine.
 │   ├── compress/        # First-party LZ codec.
+│   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.
 │   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.

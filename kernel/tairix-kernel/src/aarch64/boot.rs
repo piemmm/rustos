@@ -71,7 +71,7 @@ use tairix_kernel_core::{kernel_main, BootInfo};
 use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
 
-use crate::aarch64::gic_irq::DaifIrqControl;
+use tairix_arch_aarch64::irqmask::DaifIrqControl;
 use tairix_util::fmt::format_hex_u64;
 
 use crate::aarch64::arch_wrapper::{

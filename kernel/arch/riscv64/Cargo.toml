@@ -48,6 +48,16 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # (`AGENTS.md` §2.2); this port builds its `platform` discovery on it.
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared console-output engine: whole-line framing, ordering, severity
+# shedding and accounted loss reporting live there, so every port shares one
+# definition and this port supplies only its firmware console call.
+# Allocator-free, so the freestanding test bins link it with no global
+# allocator.
+tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
+# The one interrupt-safe lock discipline, which this port's `sstatus.SIE`
+# masking primitive plugs into. Needs only `core`, so the freestanding
+# binaries here still link no global allocator.
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [dev-dependencies]
 # Enable the shared DTB builder for this port's `fdt`/`platform` host

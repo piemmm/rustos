@@ -57,6 +57,16 @@ tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 # allocator.
 tairix-fbcon = { path = "../../../lib/fbcon", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared console-output engine: whole-line framing, ordering, severity
+# shedding, accounted loss reporting and the one bounded drain live there, so
+# every port shares one definition and this port supplies only its device
+# registers. Allocator-free, so the freestanding QEMU test bins link it with no
+# global allocator.
+tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
+# The one interrupt-safe lock discipline, which this port's `DAIF` masking
+# primitive plugs into. Needs only `core`, so the freestanding boot binaries
+# here still link no global allocator.
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # The shared VideoCore firmware mailbox protocol (`AGENTS.md` §2.2):
 # the framebuffer boot console's display probe + surface allocation,
 # also spoken by drivers/display/rpi_hvs.

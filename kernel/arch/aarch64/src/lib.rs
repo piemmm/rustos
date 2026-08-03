@@ -153,6 +153,7 @@ pub mod gic;
 /// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
 /// (`plans/WIRING.md` Stage W10).
 pub mod hetcore;
+pub mod irqmask;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
 /// ([`tairix_arch_api::MemoryTagging`]) — Arm MTE
@@ -218,12 +219,6 @@ pub mod watchdog;
 pub mod entry;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod panic;
-/// PL011 / mini-UART-backed `tairix_log::Sink` plus the buffered,
-/// non-blocking serial transmit ring shared by the diagnostic log and the
-/// `stream_write` console backing. The MMIO transmit/receive primitives
-/// are gated to the bare-metal target (host stubs make them inert), so the
-/// pure ring discipline and the buffered-drain decision logic are
-/// host-unit-tested under `cargo test`.
 pub mod serial;
 /// aarch64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the
 /// Arch HAL [`tairix_arch_api::MachineTakeover`] body driving the pre-boot

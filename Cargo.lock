@@ -573,11 +573,13 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-arch-api",
+ "tairix-conout",
  "tairix-fbcon",
  "tairix-fdt",
  "tairix-fwcfg",
  "tairix-log",
  "tairix-rng",
+ "tairix-sync",
  "tairix-vcmailbox",
 ]
 
@@ -596,9 +598,11 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-arch-api",
+ "tairix-conout",
  "tairix-fdt",
  "tairix-log",
  "tairix-rng",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -618,9 +622,12 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-api",
  "tairix-arch-x86_64",
+ "tairix-conout",
  "tairix-kernel-mem",
+ "tairix-log",
  "tairix-multiboot2",
  "tairix-rng",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -760,6 +767,14 @@ dependencies = [
  "tairix-help",
  "tairix-rt",
  "tairix-sysconfig",
+]
+
+[[package]]
+name = "tairix-conout"
+version = "0.0.0"
+dependencies = [
+ "tairix-log",
+ "tairix-sync",
 ]
 
 [[package]]

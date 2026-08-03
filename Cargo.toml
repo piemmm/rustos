@@ -45,6 +45,7 @@ members = [
     "lib/collections",
     "lib/complete",
     "lib/compress",
+    "lib/conout",
     "lib/controls",
     "lib/cpuops",
     "lib/crc32c",

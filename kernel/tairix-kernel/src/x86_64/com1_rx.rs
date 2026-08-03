@@ -23,8 +23,8 @@
 //! races the receive ISR — both destructively read the same FIFO.
 //! [`COM1_RX_GATE`] serialises the whole drain-and-read against the ISR by
 //! masking this CPU's interrupts for the hold (`cli`/`sti` via
-//! [`RflagsIrqControl`]), the x86_64 analogue of the aarch64 `UART_RX_GATE`
-//! (DAIF). The hold is short (one FIFO drain) and the wake it publishes
+//! the port's one masking primitive), the x86_64 analogue of the aarch64
+//! `UART_RX_GATE`. The hold is short (one FIFO drain) and the wake it publishes
 //! (`console_wake`) is lock-free, so masked delivery is deferred by at most
 //! that bound.
 //!
@@ -41,74 +41,24 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use tairix_arch_x86_64::irqmask::{RflagsIrqControl, RflagsState};
 use tairix_arch_x86_64::serial;
 use tairix_kernel_core::{ConsoleInputQueue, ConsoleRead};
 use tairix_sync::once::OnceCell;
-use tairix_sync::{InterruptControl, IrqSafeSpinLock, IrqState};
-
-/// Saved `RFLAGS.IF` state for [`RflagsIrqControl`].
-#[derive(Copy, Clone)]
-pub struct RflagsState {
-    /// Whether maskable interrupts were enabled (`RFLAGS.IF == 1`) before
-    /// the matching [`RflagsIrqControl::disable`].
-    irqs_were_enabled: bool,
-}
-
-impl IrqState for RflagsState {}
-
-/// The x86_64 [`InterruptControl`] behind [`COM1_RX_GATE`]: masks maskable
-/// interrupts on the current CPU (`cli`) for the critical section and
-/// restores the exact prior `RFLAGS.IF` on release. Reentrant — a `disable`
-/// while already masked captures `IF == 0`, whose restore leaves interrupts
-/// masked. The x86_64 sibling of the aarch64 `DaifIrqControl`.
-pub struct RflagsIrqControl;
-
-// SAFETY: `disable` reads RFLAGS (pushfq/pop) and masks IF (cli),
-// atomically masking asynchronous interrupts on this CPU and returning the
-// exact prior IF state; `restore` re-enables IF (sti) only when it was set
-// before, leaving an already-masked state masked (reentrant), exactly as
-// the trait requires. Both instructions are well-defined in ring 0 and
-// touch only the interrupt flag.
-unsafe impl InterruptControl for RflagsIrqControl {
-    type State = RflagsState;
-
-    fn disable() -> Self::State {
-        let flags: u64;
-        // SAFETY: pushfq/pop reads RFLAGS into a scratch register; cli then
-        // masks IF. Well-defined in ring 0; touches only the flag we read.
-        unsafe {
-            core::arch::asm!("pushfq", "pop {0}", "cli", out(reg) flags, options(preserves_flags));
-        }
-        // RFLAGS.IF is bit 9.
-        RflagsState {
-            irqs_were_enabled: flags & (1 << 9) != 0,
-        }
-    }
-
-    unsafe fn restore(state: Self::State) {
-        if state.irqs_were_enabled {
-            // SAFETY: re-enable IF exactly as it was before `disable`; `sti`
-            // touches only the interrupt flag.
-            unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-            }
-        }
-    }
-}
+use tairix_sync::{InterruptControl, IrqSafeSpinLock};
 
 /// Mask this CPU's interrupts for a kernel-heap-allocator critical section,
-/// returning the prior `RFLAGS.IF` as an opaque token (`1` = were enabled).
+/// returning the prior `RFLAGS.IF` as an opaque token.
 ///
 /// The `fn`-pointer adapter the boot path installs into the global heap
 /// (`tairix_kalloc::FreeListAllocator::install_irq_control`) so the
 /// allocator's lock is interrupt-safe: an interrupt taken on a CPU already
 /// holding the lock can no longer reenter `alloc`/`dealloc` and spin forever
-/// on the lock its own interrupted mainline holds. Delegates to the same
-/// [`RflagsIrqControl`] every IRQ-safe spinlock uses, so the masking
-/// discipline is defined once. The x86_64 sibling of aarch64's
-/// `kalloc_irq_disable`.
+/// on the lock its own interrupted mainline holds. It masks through the port's
+/// one masking primitive, so the discipline is defined once; the token exists
+/// only because a `fn` pointer cannot carry the state type.
 pub fn kalloc_irq_disable() -> usize {
-    usize::from(<RflagsIrqControl as InterruptControl>::disable().irqs_were_enabled)
+    <RflagsIrqControl as InterruptControl>::disable().as_token()
 }
 
 /// Restore this CPU's interrupt state from a token
@@ -118,9 +68,7 @@ pub fn kalloc_irq_restore(token: usize) {
     // captured on this CPU; restoring it re-enables interrupts only if they
     // were enabled before.
     unsafe {
-        <RflagsIrqControl as InterruptControl>::restore(RflagsState {
-            irqs_were_enabled: token != 0,
-        });
+        <RflagsIrqControl as InterruptControl>::restore(RflagsState::from_token(token));
     }
 }
 

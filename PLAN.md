@@ -178,8 +178,10 @@ Do **not** begin a stage before all its listed dependencies are complete.
 
 **Sub-stages**
 - [x] 2.1 — `lib/sync`: spinlock + IRQ-safe spinlock, writer-preference
-      RwLock, MCS queue lock, SeqLock, epoch reclamation, `Once`/`OnceCell`;
-      loom + proptest tests; decision tree in `docs/src/architecture/sync.md`.
+      RwLock, MCS queue lock, SeqLock, `Once`/`OnceCell`; loom + proptest
+      tests; decision tree in `docs/src/architecture/sync.md`. The crate needs
+      only `core`, never `alloc`, so a freestanding binary that links it is not
+      forced to supply a global allocator.
 - [x] 2.2 — `kernel/mem`: buddy/bitmap `FrameAllocator` over a typed
       `BootMemoryMap`, per-process `AddressSpace<P: PageTable>` (Arch HAL
       `mmu::AddressSpace + tlb::TlbShootdown` alias, including transactional
@@ -2224,7 +2226,7 @@ order (one fully-gated increment each):
                  foundational primitive other code builds on: the `lib/sync`
                  locks (`SpinLock`/`IrqSafeSpinLock`, the fair FIFO `McsLock`,
                  the writer-preference `RwLock`, `SeqLock`), `OnceCell`/`Once`,
-                 `Epoch`, `lib/collections::BitSet256`, `lib/caps` (`CapabilitySet`
+                 `lib/collections::BitSet256`, `lib/caps` (`CapabilitySet`
                  delegation + `CapToken`), `kernel/ipc` (`PortRegistry` +
                  `call`/`port`/`notify` over the P-6 wake/drain), and the
                  allocators (`lib/kalloc` coalescing free list, `lib/rt` heap
@@ -2346,66 +2348,58 @@ order (one fully-gated increment each):
            boot and never blocks the pump; it is still captured when diagnostics
            lower the threshold. Host-proven (`pump_diagnostics_emits_a_bounded_heartbeat`
            lowers the level to observe the `Debug` record).
-           The structural defect behind all three was then fixed (the
-           level-demotions papered over it): the aarch64 `SerialSink` wrote
-           each line *synchronously* to the UART via `console::tx_wait`,
+           The structural defect behind all three was a *synchronous* serial
+           write: the log sink pushed each line to the UART byte by byte,
            blocking the calling task — single-CPU, the whole core — for the
            line's transmit time, so *any* task's logging (devmgr's flood via
-           `log_emit`, a kthread heartbeat, or program console output) could
-           starve the keyboard pump. **Fixed (the design `lib/log` always
-           documented):** `serial.rs` buffers **all** UART output — the
-           diagnostic log sink *and* `write_console_bytes` (the
-           `stream_write`/`ConsoleWrite` backing) — through one ~4 KiB byte
-           ring guarded by a self-contained try-lock (`RingLock`;
-           `lib/sync::SpinLock` would feature-unify `alloc` onto this port's
-           allocator-less QEMU test bins, §2.2 carve-out). A producer copies
-           its bytes and returns; at the end of each write the ring drains
-           opportunistically (whatever the FIFO accepts now, no spin). It
-           block-flushes only when the ring fills (operator-directed: bound
-           memory) and goes lossy only when the UART is genuinely wedged
-           (`tx_wait` drops, never hangs, §2.1); the panic bridge
-           `flush_serial_blocking`s buffered context out before parking. Boot
-           beacons stay on the direct lock-free `putchar` path (MMU-off, must
-           trace immediately).
-           The ring buffers **any** serial output, not just the log, so its
-           types/API are named generically — `SerialRing` (the buffer),
-           `serial::pump_tx` / `serial::flush_serial_blocking`, no
-           `log`-specific names (operator-directed). The `serial` module is
-           host-compiled (full host stubs), so its ring + console-model logic
-           is host-unit-tested.
-           **Draining never blocks the CPU; the TX interrupt + `wfi`-wake do
-           it in the background (the real fix).** The operator saw the stall
-           persist and the whole system feel lethargic (the `Root passphrase:`
-           wait too), and was right that it was "something else": an earlier
-           revision drained the dispatch loop with a **blocking** per-byte
-           `putchar` spin (and refused to `wfi` while a backlog remained), so
-           on this cooperative, effectively single-CPU boot the CPU spent the
-           burst-heavy boot busy-waiting at the UART's byte rate instead of
-           doing real work — a regression that turned a ~300 ms PCIe
-           inbound-window read-back into ~4.3 s and made the prompts laggy.
-           Logging must never block the CPU. **Fixed:** one shared
-           non-blocking drain step (`pump` = `drain_ready` + arm `TXIM`) is used
-           by the producer, the transmit ISR, and the dispatch loop
-           (`pump_tx`, §2.2). `poll_interrupts` and the idle `wait_for_interrupt`
-           call `pump_tx` (push what the FIFO accepts now, arm the transmit
-           interrupt for the rest) then `wfi` plainly — no per-byte spin, no
-           backlog re-step. The backlog drains in the background through the
-           console TX interrupt (`serial::service_uart_tx_irq`), which a `wfi`
-           is woken by the moment the FIFO has room, so a queued backlog flows
-           at the UART's real rate with the CPU asleep between refills, then
-           tickless idle (§17.1) resumes. The TX line is routed+unmasked at GIC
-           bring-up with device sources masked at reset (additive, §2.17); the
-           ISR reads the masked status (`ConsoleModel::tx_interrupt_fired`/
-           `rx_interrupt_fired`) so it drains receive bytes only when RX
-           actually fired — the passphrase FIFO-poll keeps its bytes while RX
-           stays masked (§5.4, fail closed). Only a **full** ring blocks, and
-           only the producer (`flush_blocking`, operator-directed: bound
-           memory); a wedged UART drops bytes rather than hanging (lossy, §2.1).
+           `log_emit`, a kthread heartbeat, program console output) starved the
+           keyboard pump. **Fixed:** every port buffers **all** console output —
+           the diagnostic log sink *and* `write_console_bytes` (the
+           `stream_write`/`ConsoleWrite` backing) — through the shared
+           `lib/conout` engine, so the two share one ordered stream on the wire
+           and a producer copies its bytes and returns.
+           **Draining never blocks the CPU on this port; the TX interrupt +
+           `wfi`-wake do it in the background.** One non-blocking step (push
+           what the FIFO accepts now, then arm `TXIM`) is shared by the
+           producer, the transmit ISR and the dispatch loop (`pump_tx`, §2.2);
+           `poll_interrupts` and the idle `wait_for_interrupt` call it and then
+           `wfi` plainly — no per-byte spin. The backlog then flows at the
+           UART's real rate through the console TX interrupt
+           (`serial::service_uart_tx_irq`), which wakes the `wfi` the moment the
+           FIFO has room, and tickless idle (§17.1) resumes. The TX line is
+           routed+unmasked at GIC bring-up with device sources masked at reset
+           (additive, §2.17); the ISR reads the masked status
+           (`ConsoleModel::tx_interrupt_fired`/`rx_interrupt_fired`) so it
+           drains receive bytes only when RX actually fired — the passphrase
+           FIFO poll keeps its bytes while RX stays masked (§5.4, fail closed).
            The TX register policy is in `ConsoleModel` for both PL011
            (`UARTIMSC.TXIM`/`UARTMIS`/`TXIC`) and mini-UART (`IER`/`IIR`),
-           host-tested. riscv64/x86_64 do not share the flow-blocked-PL011
-           defect (SBI-console / COM1 transmit), so this stays genuinely
-           aarch64 glue, not stranded common logic (§2.21).
+           host-tested. Boot beacons stay on the direct lock-free `putchar`
+           path (MMU-off, must trace immediately), and the panic bridge
+           `flush_serial_blocking`s buffered context out before parking.
+         - **The output queue is shared by every port, not aarch64 glue.** An
+           earlier revision kept a private *byte* ring here, reasoning that the
+           other ports did not share the flow-blocked-PL011 defect. That was
+           wrong twice over. A byte ring drops individual **bytes**, truncating
+           a line and letting the next line's bytes fill the gap — the reported
+           output corruption — with no accounting, while `plans/SYSLOG.md`
+           requires a trusted loss record and forbids silently dropping an audit
+           record (this sink is installed as *both* log and audit sink). And the
+           other two ports had **no serialisation at all**, so two CPUs/harts
+           logging concurrently interleaved mid-line, x86_64 additionally
+           spinning *unboundedly* on its transmitter (§2.1/§2.23). All three
+           ports now share `lib/conout` (§2.2/§2.21): whole-line frames,
+           severity-ordered shedding (a record may evict a newer, less severe
+           record; program output and the in-flight frame never), loss counted
+           and reported on the wire where the gap is (`CONSOLE_OUTPUT_DROPPED`
+           18001), one bounded transmit wait, and one `IrqSafeSpinLock` masking
+           discipline through each port's single masking primitive
+           (`arch/<target>/irqmask.rs`, also de-duplicated out of the kernel
+           binary). Each port supplies only its device: PL011/mini-UART
+           registers with a completion interrupt here; 16550 port I/O
+           write-through on x86_64 (its interrupt is unmasked only at session
+           start, after the whole boot log); the firmware console call on
+           riscv64, whose interface reports neither readiness nor completion.
          - **Remaining (metal-only, §0.4):** confirm serial output now flows
            smoothly at the UART's real rate *throughout* boot and idle (no
            chunk-then-pause) and the `Root passphrase:`/login prompts stay

@@ -16,7 +16,6 @@
 //! | [`RwLock<T>`] | Many readers, occasional writer; writer-preference. |
 //! | [`McsLock<T>`] | High-contention critical sections; need fair queueing. |
 //! | [`SeqLock<T>`] | Read-mostly data; readers must never block (e.g. `gettimeofday`). |
-//! | [`Epoch`] / [`Guard`] | Defer-free / RCU-style reclamation. |
 //! | [`OnceCell<T>`] / [`Once<T>`] | Set-once / lazy initialisation, no panic on poison. |
 //!
 //! Each module's documentation states:
@@ -33,8 +32,12 @@
 //! - Every primitive is usable from a `static` (`const fn new` is
 //!   provided on all stable builds; the `loom` model-checking build
 //!   relaxes this because `loom`'s atomic constructors are not `const`).
-//! - The crate is `no_std`. The [`Epoch`] reclamation primitive uses
-//!   the `alloc` crate internally for its deferred-action queue.
+//! - The crate needs only `core`, never `alloc`. That is deliberate and
+//!   load-bearing: a `no_std` binary whose crate graph includes `alloc` must
+//!   supply a `#[global_allocator]`, so a single allocating primitive here
+//!   would force a heap onto the freestanding boot binaries that deliberately
+//!   have none — and push them into hand-rolling their own lock instead. A
+//!   primitive that must allocate does not belong in this crate.
 //! - Every `unsafe` block carries a `// SAFETY:` rationale per.
 
 #![no_std]
@@ -42,7 +45,6 @@
 
 mod loom_compat;
 
-pub mod epoch;
 pub mod irq;
 /// Debug-only lock-site observation for the lockup watchdog. Present only
 /// with the `lock-diagnostics` feature (a `watchdog-diagnostics` kernel
@@ -55,7 +57,6 @@ pub mod rwlock;
 pub mod seqlock;
 pub mod spinlock;
 
-pub use epoch::{Epoch, Guard, Participant};
 pub use irq::{InterruptControl, IrqState, NopInterruptControl, NopIrqState};
 pub use mcs::{McsGuard, McsLock, McsNode};
 pub use once::{AlreadySetError, InitError, Once, OnceCell, PoisonError};
@@ -374,57 +375,6 @@ mod tests {
         assert_eq!(calls.load(AOrd::Relaxed), 1);
     }
 
-    // -- Epoch -------------------------------------------------------------
-
-    #[test]
-    fn epoch_defer_runs_only_after_advance_without_pin() {
-        use std::sync::atomic::{AtomicBool, Ordering as AOrd};
-        let e = Epoch::new();
-        let ran = Arc::new(AtomicBool::new(false));
-        let r2 = ran.clone();
-        e.defer(move || r2.store(true, AOrd::Release));
-        assert!(!ran.load(AOrd::Acquire));
-        // No participants are active, so advance should run the action.
-        e.advance();
-        assert!(ran.load(AOrd::Acquire));
-    }
-
-    #[test]
-    fn epoch_pinned_reader_blocks_reclamation() {
-        use std::sync::atomic::{AtomicBool, Ordering as AOrd};
-        let e = Epoch::new();
-        let p = e.register();
-        let g = p.pin();
-        let ran = Arc::new(AtomicBool::new(false));
-        let r2 = ran.clone();
-        e.defer(move || r2.store(true, AOrd::Release));
-        e.advance(); // global moves, but our pinned epoch holds it back
-        assert!(!ran.load(AOrd::Acquire));
-        drop(g);
-        e.advance();
-        assert!(ran.load(AOrd::Acquire));
-    }
-
-    struct Bomb {
-        flag: Arc<std::sync::atomic::AtomicBool>,
-    }
-    impl Drop for Bomb {
-        fn drop(&mut self) {
-            self.flag.store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
-    #[test]
-    fn epoch_defer_free_drops_payload() {
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let e = Epoch::new();
-        e.defer_free(Bomb {
-            flag: dropped.clone(),
-        });
-        e.advance();
-        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
-    }
-
     // -- ZST + ?Sized smoke checks ----------------------------------------
 
     #[test]
@@ -589,39 +539,6 @@ mod tests {
         let p = PoisonError;
         let s = std::format!("{p}");
         assert!(s.contains("poisoned"));
-    }
-
-    #[test]
-    fn epoch_current_and_advance_returns_count() {
-        let e = Epoch::new();
-        assert_eq!(e.current(), 0);
-        // Two deferred actions, both safe to run since no participants.
-        e.defer(|| {});
-        e.defer(|| {});
-        let n = e.advance();
-        assert_eq!(n, 2);
-    }
-
-    #[test]
-    fn epoch_register_reuses_freed_slots() {
-        let e = Epoch::new();
-        let p1 = e.register();
-        drop(p1);
-        // Second registration should reuse the freed slot rather than
-        // pushing a new one.
-        let p2 = e.register();
-        let _g = p2.pin();
-    }
-
-    #[test]
-    fn epoch_guard_records_pin_epoch() {
-        let e = Epoch::new();
-        let p = e.register();
-        e.advance(); // global = 1
-        let g = p.pin();
-        assert_eq!(g.epoch(), 1);
-        let _domain = g.domain();
-        let _participant_domain = p.domain();
     }
 
     #[test]

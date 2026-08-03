@@ -786,17 +786,11 @@ zero total and a narrow geometry never panic.
   **safely**. `kernel/core::audit` is only the id catalogue and
   `lib/log::BootRing` is a drain-once FIFO, so neither serves the
   Supervisor's `log`: this ring is that missing store.
-  - **Home is `kernel/core`, not `lib/log` (deliberate).** The ring needs the
-    IRQ-safe lock from `lib/sync`, but `lib/sync`'s `epoch` module is the sync
-    crate's only `alloc` user, and the multi-crate `--target …-none` build
-    unifies features — so any crate depending on `lib/sync` forces `alloc`
-    into *every* binary in that build, including the minimal no-allocator
-    QEMU fault-test binaries that link `tairix-log`. Putting the ring in
-    `kernel/core` (which already depends on `lib/sync`+`lib/log`+`alloc` and
-    is never linked by those minimal binaries) keeps `tairix-log` allocator-
-    free while landing the ring where its producer (audit-sink composition)
-    and consumer (the `SupervisorHost`) both live. It is a `tairix_log::Sink`,
-    exactly as the seam requires.
+  - **Home is `kernel/core`, not `lib/log` (deliberate).** It lands where both
+    its producer (audit-sink composition) and its consumer (the
+    `SupervisorHost`) live, and `lib/log` stays the pure record vocabulary
+    rather than gaining a retained store only the kernel uses. It is a
+    `tairix_log::Sink`, exactly as the seam requires.
   - Guarded by the shared `IrqSafeSpinLock` (generic over the arch's
     `InterruptControl`, supplied by the bin crate's `static`); the lock is
     held only for one record copy, never across rendering, so a slow console

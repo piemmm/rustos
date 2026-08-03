@@ -1,6 +1,6 @@
 [package]
 name = "tairix-sync"
-description = "TAIRiX synchronisation primitives: spin/MCS/RW locks, SeqLock, epoch-based reclamation, Once."
+description = "TAIRiX synchronisation primitives: spin/MCS/RW locks, SeqLock, Once."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

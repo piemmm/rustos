@@ -67,8 +67,8 @@ use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{Event, EventId, Field, Level, Sink, TeeSink};
 
-use crate::x86_64::com1_rx::RflagsIrqControl;
-use crate::x86_64::serial_sink::SERIAL_SINK;
+use tairix_arch_x86_64::irqmask::RflagsIrqControl;
+use tairix_arch_x86_64::serial::SERIAL_SINK;
 
 use crate::mem_map::carve_guard_arena_from_map;
 use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
@@ -340,10 +340,10 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 /// audit record the kernel emits from the earliest boot onward is teed into
 /// it and can be read back non-destructively — the store the pre-boot
 /// Supervisor's `log` command tails (`plans/NEW-SUPERVISOR.md`). It is
-/// guarded by the x86_64 [`RflagsIrqControl`], so a record copy masks this
-/// CPU's interrupts for its short, allocation-free duration and the ring is
-/// safe to write from an interrupt handler that logs. It stamps each record
-/// with the kernel's monotonic since-boot clock ([`boot_audit_clock`]).
+/// guarded by the port's one interrupt-masking primitive, so a record copy
+/// masks this CPU's interrupts for its short, allocation-free duration and the
+/// ring is safe to write from an interrupt handler that logs. It stamps each
+/// record with the kernel's monotonic since-boot clock ([`boot_audit_clock`]).
 pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, RflagsIrqControl> =
     BootAuditRing::new(boot_audit_clock);
 
