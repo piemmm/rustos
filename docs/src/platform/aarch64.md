@@ -629,22 +629,24 @@ deadline; it ends when the QEMU window is closed or the guest powers
 off.
 
 The windowed display backend is chosen **explicitly**, not left to
-QEMU's implicit default. A QEMU built without GTK/SDL (a common modern
-build) has no graphical default and silently falls back to a headless
-VNC server, so no window ever appears; relying on the default is not
-portable across builds. The runner therefore probes the QEMU binary's
-actual `-display help` output and passes the first window-opening
-backend it finds (`gtk` preferred, then `sdl`). Because a machine may
-carry several QEMU builds, it searches candidate binaries in order —
-`PATH` first, then `/usr/bin` and `/usr/local/bin` — so a
-distribution build that still carries GTK/SDL is used even when a
-locally built, GUI-less QEMU shadows it on `PATH`. Set `TAIRIX_QEMU_BIN`
-to pin a specific binary (it then becomes the only candidate). If no
-candidate offers a windowing backend the run fails closed with an
-actionable message listing what was probed, rather than starting an
-invisible VNC server (`AGENTS.md` §2.9, §2.24). Headless integration
-tests are unaffected: they keep passing `-display none` and capture the
-serial console.
+QEMU's implicit default. A QEMU built without a windowing backend (a
+common modern Linux build carries no GTK/SDL) has no graphical default
+and silently falls back to a headless VNC server, so no window ever
+appears; relying on the default is not portable across builds. The
+runner therefore probes the QEMU binary's actual `-display help` output
+and passes the first window-opening backend it finds — the native macOS
+`cocoa` first (a Homebrew `qemu-system-*` reports `cocoa` rather than
+`gtk`/`sdl`, so it is what opens a window on a Mac), then `gtk`, then
+`sdl`. Because a machine may carry several QEMU builds, it searches
+candidate binaries in order — `PATH` first, then `/usr/bin` and
+`/usr/local/bin` — so a distribution build that still carries a
+windowing backend is used even when a locally built, GUI-less QEMU
+shadows it on `PATH`. Set `TAIRIX_QEMU_BIN` to pin a specific binary
+(it then becomes the only candidate). If no candidate offers a
+windowing backend the run fails closed with an actionable message
+listing what was probed, rather than starting an invisible VNC server
+(`AGENTS.md` §2.9, §2.24). Headless integration tests are unaffected:
+they keep passing `-display none` and capture the serial console.
 
 ## Board-discovered interrupt controller
 

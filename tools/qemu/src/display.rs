@@ -13,13 +13,20 @@
 //! by separately attaching a VNC client. Relying on QEMU's implicit default
 //! display is therefore not portable across builds.
 //!
+//! On macOS the native window backend is `cocoa`: a Homebrew `qemu-system-*`
+//! reports `cocoa` from `-display help` (and typically neither GTK nor SDL),
+//! so a gtk/sdl-only selector fails loud on an otherwise perfectly capable
+//! Mac. `cocoa` is therefore a first-class window backend here, preferred
+//! wherever it is offered (only a macOS build ever offers it, so this is
+//! transparent on Linux/BSD).
+//!
 //! This module makes the interactive display **explicit**: it probes the
 //! QEMU binary's actual `-display help` output, selects a backend that opens
-//! a window on its own (GTK preferred, then SDL), and — because a machine may
-//! carry several QEMU builds — searches a small ordered set of candidate
-//! binaries for one that can. If none can present a window it fails loud with
-//! an actionable message rather than silently starting an invisible VNC
-//! server.
+//! a window on its own (the native macOS `cocoa` first, then GTK, then SDL),
+//! and — because a machine may carry several QEMU builds — searches a small
+//! ordered set of candidate binaries for one that can. If none can present a
+//! window it fails loud with an actionable message rather than silently
+//! starting an invisible VNC server.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -29,13 +36,16 @@ use std::process::Command;
 
 /// A QEMU display backend that opens a native host window by itself.
 ///
-/// Ordered by preference in [`WindowBackend::PREFERENCE`]: GTK first (native
-/// menus and window integration), then SDL. Backends that do *not* open a
-/// window unaided — `none`, `curses`, `dbus`, `vnc`, `spice-app`,
-/// `egl-headless` — are deliberately excluded: the interactive session's
-/// whole purpose is a visible window.
+/// Ordered by preference in [`WindowBackend::PREFERENCE`]: Cocoa first (the
+/// native macOS window, needing no X11 — only a macOS QEMU build reports it),
+/// then GTK (native menus and window integration on Linux/BSD), then SDL.
+/// Backends that do *not* open a window unaided — `none`, `curses`, `dbus`,
+/// `vnc`, `spice-app`, `egl-headless` — are deliberately excluded: the
+/// interactive session's whole purpose is a visible window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowBackend {
+    /// QEMU's macOS Cocoa UI (`-display cocoa`).
+    Cocoa,
     /// QEMU's GTK UI (`-display gtk`).
     Gtk,
     /// QEMU's SDL UI (`-display sdl`).
@@ -44,12 +54,18 @@ pub enum WindowBackend {
 
 impl WindowBackend {
     /// Windowing backends in descending order of preference.
-    pub const PREFERENCE: [WindowBackend; 2] = [WindowBackend::Gtk, WindowBackend::Sdl];
+    ///
+    /// Cocoa leads because it is macOS's native, X11-free window; only a
+    /// macOS QEMU build reports it, so on Linux/BSD it is simply never
+    /// available and GTK/SDL win as before.
+    pub const PREFERENCE: [WindowBackend; 3] =
+        [WindowBackend::Cocoa, WindowBackend::Gtk, WindowBackend::Sdl];
 
     /// The `-display <name>` token QEMU accepts for this backend.
     #[must_use]
     pub fn qemu_name(self) -> &'static str {
         match self {
+            WindowBackend::Cocoa => "cocoa",
             WindowBackend::Gtk => "gtk",
             WindowBackend::Sdl => "sdl",
         }
@@ -229,8 +245,9 @@ fn no_windowing_backend_message(
     probed: &[(PathBuf, Vec<String>)],
 ) -> String {
     let mut msg = format!(
-        "no QEMU binary with a windowing display backend (gtk or sdl) was \
-         found for {binary_name}, so `cargo xtask run` cannot open a window.\n"
+        "no QEMU binary with a windowing display backend (cocoa, gtk, or sdl) \
+         was found for {binary_name}, so `cargo xtask run` cannot open a \
+         window.\n"
     );
     if probed.is_empty() {
         msg.push_str("  (no candidate binary could be run)\n");
@@ -252,9 +269,10 @@ fn no_windowing_backend_message(
         );
     }
     msg.push_str(
-        "  A QEMU built without GTK/SDL defaults to a headless VNC server, \
-         which opens no window. Install a QEMU built with GTK or SDL support \
-         (e.g. your distribution's qemu-system package), or set ",
+        "  A QEMU built without a windowing backend defaults to a headless VNC \
+         server, which opens no window. Install a QEMU built with a windowing \
+         backend (cocoa on macOS, gtk or sdl elsewhere — e.g. your \
+         distribution's or Homebrew's qemu-system package), or set ",
     );
     msg.push_str(QEMU_BIN_ENV);
     msg.push_str(" to one that has it.");
@@ -308,6 +326,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_macos_build_list_and_picks_cocoa() {
+        // The macOS regression: a Homebrew qemu-system-* reports `cocoa`
+        // (and no gtk/sdl), which a gtk/sdl-only selector rejected, so
+        // `cargo xtask run` failed loud on a perfectly capable Mac.
+        let help = "Available display backend types:\n\
+                    none\n\
+                    cocoa\n\
+                    dbus\n\
+                    vnc\n\
+                    \n\
+                    Some display backends support suboptions...\n";
+        let names = parse_display_backends(help);
+        assert_eq!(names, vec!["none", "cocoa", "dbus", "vnc"]);
+        assert_eq!(pick_backend(&names), Some(WindowBackend::Cocoa));
+    }
+
+    #[test]
+    fn pick_prefers_cocoa_over_gtk_and_sdl() {
+        // Only a macOS build reports cocoa; where it and the X11 backends are
+        // both offered, the native, X11-free cocoa wins.
+        let names = vec![
+            "sdl".to_string(),
+            "gtk".to_string(),
+            "cocoa".to_string(),
+            "none".to_string(),
+        ];
+        assert_eq!(pick_backend(&names), Some(WindowBackend::Cocoa));
+    }
+
+    #[test]
     fn pick_prefers_gtk_over_sdl() {
         let names = vec!["sdl".to_string(), "gtk".to_string(), "none".to_string()];
         assert_eq!(pick_backend(&names), Some(WindowBackend::Gtk));
@@ -327,6 +375,7 @@ mod tests {
 
     #[test]
     fn backend_qemu_names_are_the_display_tokens() {
+        assert_eq!(WindowBackend::Cocoa.qemu_name(), "cocoa");
         assert_eq!(WindowBackend::Gtk.qemu_name(), "gtk");
         assert_eq!(WindowBackend::Sdl.qemu_name(), "sdl");
     }
@@ -366,6 +415,8 @@ mod tests {
         assert!(msg.contains("/usr/local/bin/qemu-system-aarch64"));
         assert!(msg.contains("none, curses, dbus"));
         assert!(msg.contains(QEMU_BIN_ENV));
-        assert!(msg.contains("GTK or SDL"));
+        // The remedy names every windowing backend, including macOS's cocoa.
+        assert!(msg.contains("cocoa"));
+        assert!(msg.contains("gtk or sdl"));
     }
 }
