@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use tairix_virtio::{ChainView, DmaHost, DmaSlab, MockHost, MockTransport};
+use tairix_virtio::{ChainView, CompletionSignal, DmaHost, DmaSlab, MockHost, MockTransport};
 
 /// A queued raw `virtio_input_event` the mock device will deliver:
 /// `(type, code, value)`.
@@ -81,7 +81,7 @@ impl DmaHost for AutoDrainHost {
 }
 
 impl VirtioHost for AutoDrainHost {
-    fn notify_wait(&self, queue_index: u16) {
+    fn notify_wait(&self, queue_index: u16, timeout_ns: u64) -> CompletionSignal {
         // SAFETY: the driver releases its `&mut self.transport` borrow
         // between `kick` and `notify_wait`; the pointer was installed
         // while no live borrow existed and is unique here for the
@@ -91,7 +91,7 @@ impl VirtioHost for AutoDrainHost {
             let t = unsafe { &mut *t_ptr };
             let _ = t.drain_queue(queue_index);
         }
-        self.inner.notify_wait(queue_index);
+        self.inner.notify_wait(queue_index, timeout_ns)
     }
 }
 

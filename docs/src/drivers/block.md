@@ -30,9 +30,11 @@ and the volume manager's probe alike — classifies it through the one shared
 (`AGENTS.md` §2.2). The health classes stay distinct so the filesystem layer
 can act on them: a permanent bad sector is `DriverError::MediumError`, a
 present-but-unresponsive or surprise-removed device is
-`DriverError::DeviceOffline`, a transient stall or a device/hub reset is a
-reissuable `DriverError::Busy`, and a timed-out or vanished endpoint (and any
-unclassified failure) fails closed as `DriverError::DeviceFault`. Because the
+`DriverError::DeviceOffline` — including a `virtio_blk` request whose
+per-request deadline elapsed with no completion — a transient stall or a
+device/hub reset is a reissuable `DriverError::Busy`, and a timed-out or
+vanished endpoint, a wake-storm on a stuck device line, and any
+unclassified failure all fail closed as `DriverError::DeviceFault`. Because the
 mapping is per-consumer-agnostic, a fault on one device surfaces only to that
 device's callers while every other mount keeps running (`plans/FIX-IO.md`
 IO1/IO2).

@@ -336,14 +336,40 @@ Three implementations exist:
   device SPI wakes a parked kthread under the live scheduler.
 * **`KernelVirtioHost::notify_wait`** (`kernel/virtio`): waits on
   the device's pre-bound
-  `IrqHandle` against the owning task (`caller.task()`) with an
-  unbounded (`u64::MAX`) timeout. A virtio device signals completion
+  `IrqHandle` against the owning task (`caller.task()`) with the
+  **caller's** timeout, and answers `CompletionSignal::Fired` or
+  `CompletionSignal::TimedOut`. A virtio device signals completion
   on a single MSI / MMIO line, not per-queue, so the wait key is the
   handle, not `queue_index`; the driver re-scans every used ring on
   wake-up. Because the wake-up is the ready flag that `fire` sets
   *after* masking, the mask-before-wake invariant is observed before
   the driver returns from `notify_wait` — exercised by
   `kernel_host::tests::notify_wait_observes_mask_before_wake`.
+
+  A driver with a **request outstanding** passes that device's
+  per-request deadline (`BlkDeviceClass::budget().deadline_ns` for a
+  block device); only a driver waiting for an **unsolicited event**
+  with nothing pending — an idle keyboard — passes `u64::MAX`. The
+  distinction is load-bearing: the waiting task holds the device's
+  lock for the duration of its request, so a request wait that could
+  not expire turns one lost or coalesced completion interrupt into a
+  task parked forever, and every other user of that hardware stalls
+  behind it with no error to explain why. That is exactly how a
+  `/System` mount once wedged a whole boot. Every non-`Ready`
+  outcome — deadline elapsed, binding released, line quarantined,
+  wait aborted — is reported as `TimedOut`, because a driver cannot
+  tell them apart from a dead device and none of them is a reason to
+  wait again; the driver fails the transfer closed
+  (`DriverError::DeviceOffline`) instead. Covered by
+  `kernel_host::tests::a_silent_device_times_out_instead_of_waiting_forever`
+  and `the_callers_budget_reaches_the_park`.
+
+  The deadline reaches the park because `block_until_ready` hands it
+  to every `IrqWaiter::yield_now` call, so `IrqParkWaiter` registers
+  it on `IRQ_WAITQ` and the timed sweep can release a park whose line
+  never fires at all. A park that is not told the deadline can only be
+  woken by the line, which is what made the wait unbounded in fact
+  while it looked bounded in the caller.
 
 This design composes existing scheduler primitives only; no new
 scheduler interface is introduced (`AGENTS.md` §2.4 — no interface

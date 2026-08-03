@@ -20,6 +20,7 @@ use core::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use tairix_abi::driver::dma::{DmaHost, SlabCoherencyFn};
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
@@ -857,19 +858,22 @@ fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
     let host =
         RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
 
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    let first = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
+    let second = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
 
     assert_eq!(line.get(), IRQ_LINE, "binds the node's granted line");
     assert_eq!(binds.get(), 1, "the line is bound exactly once (cached)");
     assert_eq!(waits.get(), 2, "every call parks on irq_wait");
+    assert_eq!(first, CompletionSignal::Fired, "the mock irq_wait fires");
+    assert_eq!(second, CompletionSignal::Fired, "the mock irq_wait fires");
 }
 
 #[test]
 fn notify_wait_without_an_irq_grant_is_a_noop() {
     // A driver granted no IRQ line cannot park on one; `notify_wait` returns
-    // without binding or waiting, and its caller falls back to a polling
-    // re-scan + yield (fail safe, never a wedged wait).
+    // `TimedOut` without binding or waiting, so its caller fails the
+    // outstanding transfer closed rather than mistaking the refusal for a
+    // completion (fail safe, never a wedged wait).
     let mock = MockSyscalls::new();
     let (_, binds, waits) = mock.irq_observers();
     let host = RtDriverHost::new(
@@ -880,9 +884,10 @@ fn notify_wait_without_an_irq_grant_is_a_noop() {
     )
     .unwrap();
 
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    let signal = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
     assert_eq!(binds.get(), 0);
     assert_eq!(waits.get(), 0);
+    assert_eq!(signal, CompletionSignal::TimedOut);
 }
 
 #[test]
@@ -893,16 +898,17 @@ fn notify_wait_without_the_bind_capability_is_a_noop() {
     let (_, binds, waits) = mock.irq_observers();
     let host = RtDriverHost::new(caps(&[]), mock, &[irq_grant()], None).unwrap();
 
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    let signal = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
     assert_eq!(binds.get(), 0);
     assert_eq!(waits.get(), 0);
+    assert_eq!(signal, CompletionSignal::TimedOut);
 }
 
 #[test]
 fn notify_wait_does_not_park_when_the_bind_is_refused() {
     // A refused bind (the kernel rejects the line) must not be papered over
-    // with a wait on an unbound handle: `notify_wait` returns and the bind is
-    // retried on the next call (fail closed, no cached
+    // with a wait on an unbound handle: `notify_wait` returns `TimedOut` and
+    // the bind is retried on the next call (fail closed, no cached
     // bogus handle).
     let mock = MockSyscalls::new();
     mock.fail_irq_bind(Errno::PermissionDenied);
@@ -910,10 +916,12 @@ fn notify_wait_does_not_park_when_the_bind_is_refused() {
     let host =
         RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
 
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
-    tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    let first = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
+    let second = tairix_abi::driver::virtio::VirtioHost::notify_wait(&host, 0, u64::MAX);
     assert_eq!(binds.get(), 2, "a refused bind is retried, never cached");
     assert_eq!(waits.get(), 0, "never parks on an unbound handle");
+    assert_eq!(first, CompletionSignal::TimedOut);
+    assert_eq!(second, CompletionSignal::TimedOut);
 }
 
 #[test]

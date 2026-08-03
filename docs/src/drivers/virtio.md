@@ -319,6 +319,22 @@ pre-bound interrupt line through `kernel/irq::block_until_ready`
 the bus-driver-minted `IrqHandle`, and the scheduler/clock
 `IrqWaiter` seam for this.
 
+The wait is bounded by the **caller's** `timeout_ns` and answers
+`CompletionSignal::Fired` or `CompletionSignal::TimedOut`. A driver with a
+request outstanding passes its device class's per-request deadline
+(`BlkDeviceClass::budget().deadline_ns`); a driver waiting for an unsolicited
+event with nothing pending (an idle input device) passes `u64::MAX`. A request
+wait must never be unbounded: the waiting task holds the device's lock for the
+duration of its request, so one lost or coalesced completion interrupt would
+park it forever and stall every other user of that disk behind it — silently,
+with no error to explain it. `virtio_blk` therefore fails a silent request
+closed with `DriverError::DeviceOffline` after one final used-ring re-scan
+(a completion whose interrupt was lost is already in the ring), and does not
+reissue in place: the device may still own the published descriptor chain, so
+re-publishing the same staging could have an abandoned request complete into
+the next one's buffers. Reissue policy belongs to the consumer above, which
+knows whether the request is safe to repeat.
+
 ### Kernel-binary factory (`KernelVirtioFactory`)
 
 Stage 4.D Item 2-tail.4 wires the host into the userland driver

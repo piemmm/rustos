@@ -32,6 +32,7 @@ use core::convert::Infallible;
 
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use tairix_abi::driver::sole_register_window;
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper};
 use tairix_arch_aarch64::fdt::gic_device_intid;
 use tairix_arch_aarch64::kernel_arch::clean_invalidate_dcache_range;
@@ -42,7 +43,7 @@ use tairix_arch_aarch64::{gic, video, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
-use tairix_drv_storage_emmc2::{CompletionSignal, CompletionWait};
+use tairix_drv_storage_emmc2::CompletionWait;
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use tairix_fdt::Fdt;
 use tairix_kernel_core::{

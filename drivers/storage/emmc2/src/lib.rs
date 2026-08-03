@@ -55,6 +55,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
+use tairix_abi::driver::CompletionSignal;
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
 };
@@ -229,28 +230,19 @@ pub struct DmaRegion<'a> {
 /// host test supplies an inline no-wait. A spurious wake-up cannot be
 /// mistaken for a retriable failure — the engine re-reads the status
 /// register on every [`CompletionSignal::Fired`] return.
+///
+/// The outcome is the driver ABI's [`CompletionSignal`], the same vocabulary
+/// the virtio host's queue-notification wait answers in, so the two
+/// bootstrap-floor storage paths cannot classify a silent device
+/// differently. The SDHCI controller raises its interrupt for every started
+/// operation — a completion *or* an error status — so a wait that elapses
+/// with no interrupt at all means the controller, or its interrupt routing,
+/// is dead.
 pub trait CompletionWait {
     /// Block until the controller signals a completion on its interrupt
     /// line or the implementation's bounded budget elapses; the caller
     /// re-reads `INTERRUPT` on a fire and fails closed on a timeout.
     fn await_irq(&self) -> CompletionSignal;
-}
-
-/// Outcome of one [`CompletionWait::await_irq`] wait.
-///
-/// The SDHCI controller raises its interrupt for every started operation —
-/// a completion *or* an error status — so a wait that elapses with no
-/// interrupt at all means the controller (or its interrupt routing) is
-/// dead. The engine maps [`Self::TimedOut`] to
-/// [`DriverError::DeviceFault`] immediately rather than re-polling a
-/// silent device: the caller gets a loud, typed error and the system keeps
-/// running, instead of a task parked forever holding its mount's lock.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum CompletionSignal {
-    /// The interrupt line fired (or may have fired); re-read `INTERRUPT`.
-    Fired,
-    /// The bounded wait elapsed with no interrupt — a dead controller.
-    TimedOut,
 }
 
 /// The metal SDHCI host: the capability-gated [`RegisterWindow`] paired with

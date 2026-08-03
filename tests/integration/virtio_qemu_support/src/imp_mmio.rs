@@ -197,7 +197,15 @@ impl IrqWaiter for WfiWaiter {
         0
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+    fn yield_now(&self, _deadline_ns: u64) -> Result<(), IrqWaitAbort> {
+        // The caller's deadline needs no timer here: this vertical exists to
+        // prove the completion interrupt arrives, and the park below ends on
+        // any interrupt, so control always returns to the wait loop. With a
+        // fixed clock the loop's deadline never elapses, so a device that
+        // never completed would leave the *guest* to be bounded by the
+        // harness's own no-progress budget rather than by this park — which
+        // is the scenario the vertical is asserting against.
+        //
         // The loop only yields when the line is not yet ready. Unmask the
         // source so the next completion delivers.
         let _ = self.plic.unmask(self.source);

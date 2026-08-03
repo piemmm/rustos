@@ -45,8 +45,6 @@
 //! everything else is parked waiting on it, so briefly halting the CPU
 //! there starves nothing; every steady-state wait takes the task-park path.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use tairix_abi::IrqHandle;
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
@@ -55,7 +53,7 @@ use tairix_kernel_sec::TaskId;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
-use crate::waitq::{nearest_timed_deadline, wait_arch, IRQ_WAITQ, NO_DEADLINE};
+use crate::waitq::{nearest_timed_deadline, wait_arch, IRQ_WAITQ};
 
 /// A bounded CPU-park a port supplies for contexts that cannot be
 /// scheduler-parked (see the module docs). It must return once the bound
@@ -66,14 +64,13 @@ pub type FallbackPark = fn(&IrqTable, IrqHandle);
 /// Parking [`IrqWaiter`] for one device's bound interrupt line.
 ///
 /// One instance is built per brought-up device and lives with it for the
-/// kernel's lifetime. It serves two consumers:
-///
-/// * [`KernelVirtioHost::notify_wait`] drives it directly through the
-///   shared [`block_until_ready`] loop (unbounded wait; the used-ring
-///   re-scan tolerates spurious wake-ups), and
-/// * a completion seam wraps [`Self::park_wait`] for a **bounded** wait
-///   that fails closed when the controller stays silent (no completion
-///   *and* no error interrupt) past its budget.
+/// kernel's lifetime. Every consumer waits through [`Self::park_wait`] —
+/// the virtio host's completion notifier and the SDHCI engine's completion
+/// seam alike — so there is exactly one bounded device-wait shape, and a
+/// device operation cannot acquire an *unbounded* one by reaching past it.
+/// A wait that could not expire would strand its task inside the device
+/// operation, holding the device's lock, the instant a completion interrupt
+/// were lost or coalesced.
 ///
 /// [`KernelVirtioHost::notify_wait`]: ../../tairix_kernel_virtio/struct.KernelVirtioHost.html#method.notify_wait
 pub struct IrqParkWaiter {
@@ -86,12 +83,6 @@ pub struct IrqParkWaiter {
     line: u32,
     /// The controller the line is re-armed through.
     controller: &'static (dyn IrqController + Sync),
-    /// Absolute deadline of the wait in flight ([`NO_DEADLINE`] outside
-    /// [`Self::park_wait`]), registered with the wait queue so the timed
-    /// sweep can wake a bounded wait whose line never fires. Device
-    /// operations are serialised by the owner's `SleepLock`, so at most
-    /// one wait is in flight per waiter.
-    deadline_ns: AtomicU64,
     /// The port's bounded CPU-park for non-parkable contexts.
     fallback_park: FallbackPark,
 }
@@ -115,7 +106,6 @@ impl IrqParkWaiter {
             handle,
             line,
             controller,
-            deadline_ns: AtomicU64::new(NO_DEADLINE),
             fallback_park,
         }
     }
@@ -123,24 +113,23 @@ impl IrqParkWaiter {
     /// Block the caller until the bound line fires or `timeout_ns`
     /// elapses, consuming the ready flag on a fire.
     ///
-    /// The deadline is armed for the whole wait so the timed sweep can
-    /// release a park whose line never fires; a silent controller
-    /// therefore surfaces as [`WaitOutcome::TimedOut`] instead of a
-    /// parked-forever task holding its mount's lock. `NotFound` (a
-    /// released binding) and `Aborted` are fail-closed outcomes the
-    /// caller maps to its own error surface.
+    /// Each park inside the wait registers the loop's own deadline with the
+    /// timed wait queue, so the sweep releases a park whose line never
+    /// fires: a silent controller surfaces as [`WaitOutcome::TimedOut`]
+    /// instead of a parked-forever task holding its device's lock.
+    /// `NotFound` (a released binding), `Quarantined` and `Aborted` are the
+    /// other fail-closed outcomes the caller maps to its own error surface.
+    ///
+    /// `timeout_ns` is the caller's budget; [`u64::MAX`] asks for no
+    /// deadline (the `irq_wait` convention) and is legitimate **only** for
+    /// waiting on an event that may genuinely never come — an idle input
+    /// device with no transfer outstanding. A wait for an *outstanding
+    /// request* must always pass its device's per-request deadline, because
+    /// the request's completion is the only other thing that could end the
+    /// wait.
+    #[must_use]
     pub fn park_wait(&self, owner: TaskId, timeout_ns: u64) -> WaitOutcome {
-        let deadline = self.now_ns().saturating_add(timeout_ns);
-        self.deadline_ns.store(deadline, Ordering::SeqCst);
-        let outcome = block_until_ready(self.table, self.handle, owner, timeout_ns, self);
-        self.deadline_ns.store(NO_DEADLINE, Ordering::SeqCst);
-        // Re-point the one-shot at the nearest deadline any remaining
-        // timed waiter needs (or clear it) so a finished wait leaves no
-        // stale arming behind.
-        if let Some(hook) = wait_arch() {
-            hook.set_wakeup(nearest_timed_deadline());
-        }
-        outcome
+        block_until_ready(self.table, self.handle, owner, timeout_ns, self)
     }
 }
 
@@ -152,7 +141,7 @@ impl IrqWaiter for IrqParkWaiter {
         wait_arch().map_or(0, crate::waitq::WaitQueueArch::now_ns)
     }
 
-    fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+    fn yield_now(&self, deadline_ns: u64) -> Result<(), IrqWaitAbort> {
         // Re-arm the line before any wait: the dispatch path's `fire`
         // masked it on the previous completion (mask-before-wake). A
         // refusal is harmless — the wait is then bounded by its deadline.
@@ -169,12 +158,17 @@ impl IrqWaiter for IrqParkWaiter {
             (self.fallback_park)(self.table, self.handle);
             return Ok(());
         };
-        let deadline = self.deadline_ns.load(Ordering::SeqCst);
+        // Register the bound the wait loop is polling against, so the timed
+        // sweep can release this park even if the line never fires at all.
+        // A caller that asked for no deadline passes the maximum, which the
+        // wait queue already reads as "never released by timeout", so the two
+        // conventions need no translation.
+        //
         // Register before the re-test so a fire in the poll→park window is
         // never lost (see the module docs), then re-test: if the line
         // already fired, skip the park and let the loop's next poll
         // consume the flag.
-        IRQ_WAITQ.register(task, deadline);
+        IRQ_WAITQ.register(task, deadline_ns);
         if self.table.ready_for(self.handle) {
             IRQ_WAITQ.deregister(task);
             return Ok(());
@@ -193,6 +187,10 @@ impl IrqWaiter for IrqParkWaiter {
             return Ok(());
         }
         IRQ_WAITQ.deregister(task);
+        // Re-point the one-shot at the nearest deadline any remaining timed
+        // waiter needs (or clear it) so this finished park leaves no stale
+        // arming behind.
+        hook.set_wakeup(nearest_timed_deadline());
         Ok(())
     }
 }
@@ -322,17 +320,5 @@ mod tests {
         let (table, _handle, waiter) = bound_waiter();
         table.release_for(OWNER);
         assert_eq!(waiter.park_wait(OWNER, 1_000), WaitOutcome::NotFound);
-    }
-
-    #[test]
-    fn the_deadline_is_cleared_after_a_wait() {
-        let _ = arch();
-        let (_table, _handle, waiter) = bound_waiter();
-        let _ = waiter.park_wait(OWNER, 250);
-        assert_eq!(
-            waiter.deadline_ns.load(Ordering::SeqCst),
-            NO_DEADLINE,
-            "a finished wait must disarm its registered deadline"
-        );
     }
 }
