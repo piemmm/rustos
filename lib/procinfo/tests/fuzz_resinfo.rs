@@ -226,6 +226,7 @@ fn kernel_stats_reply(query: SysinfoQueryId) -> Option<Vec<u8>> {
                         failures: 0,
                         hits: (i as u64) * 10,
                         misses: 1,
+                        self_reported_bytes: 0,
                     }
                     .to_le_bytes(),
                 );

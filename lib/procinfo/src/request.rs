@@ -7,9 +7,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::sysinfo::{
-    SysinfoQueryId, SysinfoRequestHeader, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
-};
+use tairix_abi::sysinfo::{encode_request as frame_request, SysinfoQueryId, SysinfoRequestHeader};
 use tairix_abi::Errno;
 
 use crate::transport::Transport;
@@ -31,28 +29,22 @@ pub enum CallError {
     Service(Errno),
 }
 
-/// Frame `query` and its already-encoded `payload` into a `sysinfo-v1`
-/// request: the [`SysinfoRequestHeader`] envelope followed by the payload
-/// bytes.
+/// Frame `query` and its already-encoded `payload` into an owned
+/// `sysinfo-v1` request buffer.
 ///
-/// The header's `payload_len` is the payload's byte length. Every payload a
-/// process-list client builds is at most a handful of bytes, so the
-/// `usize → u32` conversion is always exact; the saturating fallback is
-/// unreachable and never silently corrupts a real request.
+/// The envelope itself is built by the one framer in `lib/abi`, beside the
+/// reply framing it mirrors; this adds only the allocation a tool wants and
+/// the runtime's cache reporter does not. Every payload a client builds is
+/// at most a handful of bytes and the buffer is sized to fit exactly, so the
+/// framer cannot refuse; an empty request on that unreachable path would be
+/// refused by the service rather than misread.
 #[must_use]
 pub fn encode_request(query: SysinfoQueryId, payload: &[u8]) -> Vec<u8> {
-    let header = SysinfoRequestHeader {
-        magic: SYSINFO_REQUEST_MAGIC,
-        version: SYSINFO_VERSION_CURRENT,
-        flags: 0,
-        query,
-        reserved: 0,
-        payload_len: u32::try_from(payload.len()).unwrap_or(u32::MAX),
-        request_id: 0,
-    };
-    let mut bytes = Vec::with_capacity(SysinfoRequestHeader::WIRE_LEN + payload.len());
-    bytes.extend_from_slice(&header.to_le_bytes());
-    bytes.extend_from_slice(payload);
+    let mut bytes = alloc::vec![0u8; SysinfoRequestHeader::WIRE_LEN + payload.len()];
+    match frame_request(query, payload, &mut bytes) {
+        Ok(len) => bytes.truncate(len),
+        Err(_) => bytes.clear(),
+    }
     bytes
 }
 

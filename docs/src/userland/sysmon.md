@@ -92,8 +92,8 @@ play, and the `?` overlay reproduces this key in-app:
     separately attributed above (caches, buffers, kernel frames);
   - blank track — **free** memory.
 
-  The trailing text states the `used / total` figures (in compact
-  `K`/`M`/`G` units), the used percentage, the kernel-heap size, and —
+  The trailing text states the `used / total` figures (in compact binary
+  byte units), the used percentage, the kernel-heap size, and —
   when non-zero — the `ramzip` compressed-store bytes and the `pinned`
   anonymous-memory total. Those last two overlap the bar's buckets
   (pinned pages are user-resident; the compressed store is kernel
@@ -120,25 +120,33 @@ six views. Each table's column header is drawn as an inverted
 (reverse-video) full-width bar, and stated refusals and degraded rows are
 drawn in their own colour, so structure reads without hunting.
 
-- **`caches`** — the **reclaimable-cache ledger**, one row per reclaim
-  class: the memory the kernel *could* hand back under pressure without
-  data loss (every entry is rebuildable from its canonical source, so it
-  is dropped rather than paged out), broken down by class and — the panel
+- **`caches`** — the **reclaimable-cache ledger**, in two tables: one row
+  per reclaim class, then one row per cache behind those totals. This is
+  the memory the kernel *could* hand back under pressure without data
+  loss (every entry is rebuildable from its canonical source, so it is
+  dropped rather than paged out), broken down by class and — the panel
   exists for this — carrying each class's **hit ratio**, the direct
-  measure of whether a cache is earning the memory it holds. The columns
-  are `class`, `entries` (live entries held), `cached` (payload plus
-  per-entry metadata bytes), `hits` and `misses` (lookups served from
-  cache vs. fallen through to the source, since boot), `hit%` (`hits /
-  (hits + misses)`, or `-` for a class nothing has looked up this boot —
-  never a fabricated `0%`), and the health counters `ref` (admissions
-  refused), `shr` (pressure-forced shrink passes), and `fail` (internal
-  failures that poisoned a cache). Counts abbreviate above 99 999 as
-  `k`/`M`/`G`/`T` (decimal thousands) so a column never widens. Hits and
-  misses are counted **per class** in the kernel's `CacheAccounting`
-  ledger (each cache attributes every lookup to the class it served), so
-  the ratios are honest per-class figures, not a whole-cache average. The
-  nine classes, in reclaim order (first dropped first, so a class low in
-  the list survives longest): `disposable-ui` (rasterised UI assets),
+  measure of whether a cache is earning the memory it holds. The class
+  columns are `class`, `entries` (live entries held), `cached` (payload
+  plus per-entry metadata bytes), `self%` (the share of `cached` that was
+  self-reported rather than kernel-measured — how much of the total is
+  taken on trust), `hits` and `misses` (lookups served from cache
+  vs. fallen through to the source, since boot), `hit%` (`hits / (hits +
+  misses)`, or `-` for a class nothing has looked up this boot — never a
+  fabricated `0%`), and the health counters `ref` (admissions refused),
+  `shr` (pressure-forced shrink passes), and `fail` (internal failures
+  that poisoned a cache). Counts abbreviate above 99 999 as
+  `k`/`M`/`G`/`T` (decimal thousands) so a column never widens; byte
+  figures abbreviate in binary units with a `K`/`M`/`G`/`T`/`P`/`E` suffix
+  (`tairix_procinfo::format_size`), a ladder reaching exbibytes so that no
+  64-bit count can outgrow the `tairix_procinfo::SIZE_WIDTH` column budget
+  — a figure cannot be elided the way a name can, because an elided number
+  is a wrong number. Hits and misses are counted **per class** in the
+  kernel's `CacheAccounting` ledger (each cache attributes every lookup to
+  the class it served), so the ratios are honest per-class figures, not a
+  whole-cache average. The nine classes, in reclaim order (first dropped
+  first, so a class low in the list survives longest):
+  `disposable-ui` (rasterised UI assets),
   `predictive-prefetch` (speculative prefetch), `background-validation`
   (idle-time validation work), `semantic-app-cache` (verified app-launch
   state), `runtime-cache` (runtime-derived state), `clean-file-data`
@@ -146,6 +154,27 @@ drawn in their own colour, so structure reads without hunting.
   (verified/decrypted/decompressed data), `fs-metadata` (stat, lookup,
   directory, and security records), and `reliability-assist` (recovery
   assist state).
+
+  The **per-cache breakdown** beneath the class table turns "the
+  `disposable-ui` class holds 12 MiB" into "and here is which caches hold
+  it": one row per registered cache ledger (`CACHE_LEDGERS`, gated on
+  `CAP_SYSINFO_KERNEL` exactly as the class table is), kernel-measured
+  rows first, then the rows processes reported for their own caches, with
+  the rows of a class summing to that class's row above. Its columns are
+  `cache` (the label), `owner` (`kernel`, `vol:<id>`, `task:<id>`,
+  `seat:<id>`, or `proc`, plus `@<pid>` on a reported row), `origin`
+  (`kernel` measured, `self` reported, `?` unattributed), `class`, and the
+  same `entries`, `cached`, and `hit%` for that one cache. A name too long
+  for its column — a dotted cache label, an owner carrying two large ids —
+  loses its *middle* to a `~` rather than an end (`font.cli~.glyphs`,
+  `task:1~551615`): the leaf is usually what tells two of them apart, and a
+  silently cut id would read as a different owner. The kernel can only
+  measure caches registered inside it, so a userland glyph atlas or icon
+  cache reaches the panel by reporting itself; such a figure is a
+  diagnostic, not an attestation, and the word `self` sits in the row so it
+  reads on a monochrome serial console rather than depending on colour. An
+  empty ledger says so in one line, and a refused query states the refusal
+  — neither can be mistaken for "this machine holds no caches".
 - **`ramzip`** — the **compressed memory tier**, laid out in aligned
   sections. `ramzip` transparently compresses cold anonymous pages into a
   smaller in-RAM store instead of paging them out, so more fits in
@@ -170,8 +199,12 @@ drawn in their own colour, so structure reads without hunting.
   denominator is idle — never a ratio invented from zero.
 - **`disks`** — the **mounted-volume storage table**, one `df`-style row
   per mounted filesystem: mount point, filesystem type, total size, used,
-  available, use percentage, and an ASCII usage bar. A volume whose
-  driver reports no capacity shows `capacity unknown` rather than a
+  available, use percentage, and an ASCII usage bar. A mount point too long
+  for its column loses its middle through the same `elide_middle` the cache
+  label uses (`/Storage/backup-2024-vol1` → `/Storage/b~2024-vol1`), so two
+  volumes that agree up to the column width are still told apart by their
+  leaves. A volume whose driver reports no capacity shows
+  `capacity unknown` rather than a
   fabricated size; a surprise-removed or recovery-conflicted volume is
   drawn in the warn rendition with the condition named. (There are no
   per-device I/O throughput counters in `sysinfo-v1`, so this panel is

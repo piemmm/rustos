@@ -18,13 +18,13 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
-    CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
-    LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
-    RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
-    UserDirectoryRecord, VolumeIoHealthRecord,
+    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord,
+    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
+    MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity,
+    Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
 };
 use tairix_abi::time::Duration64;
-use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin};
+use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
 
 /// The authenticated principal on whose behalf a request is served.
 ///
@@ -213,14 +213,25 @@ pub trait SysinfoSource {
     /// one reading so the two can never disagree.
     fn memory_total(&self, caller: &Caller) -> Result<MemoryTotal, Errno>;
 
-    /// Return the reclaimable-cache ledger: one record per reclaim class,
-    /// in class-id order, aggregated across every live cache.
+    /// Return the kernel's own per-cache ledger rows: one
+    /// [`CacheLedgerRecord`] per cache the kernel measures directly, in the
+    /// kernel's stable registration order.
     ///
-    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed. The
-    /// owned list is returned whole and [`crate::serve`] applies the
-    /// `offset`/`limit` paging; ordering must be stable across paged
-    /// calls (class-id order is).
-    fn reclaim_records(&self, caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno>;
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed, exactly
+    /// like the reclaim-class aggregate this now backs. The owned list is
+    /// returned whole and unpaged: [`crate::serve`] folds it with the
+    /// self-reported rows the reporter registry holds before paging either
+    /// the per-class totals or the per-cache list a client asked for.
+    fn cache_ledger_records(&self, caller: &Caller) -> Result<Vec<CacheLedgerRecord>, Errno>;
+
+    /// Return the unforgeable process-instance id of every live process on
+    /// the machine, in no particular order.
+    ///
+    /// Caller-independent — it takes no [`Caller`] — because the answer is a
+    /// fact of the machine, not of the requester: it exists solely so
+    /// [`crate::serve`] can expire a reporter registry entry whose process
+    /// has since exited, never to answer a client query directly.
+    fn live_process_instances(&self) -> Result<Vec<ProcId>, Errno>;
 
     /// Return the `ramzip` compressed-tier accounting: counters only,
     /// never page contents or key material; an undriven tier truthfully
@@ -390,8 +401,8 @@ pub trait SysinfoSource {
     /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed: the
     /// per-device outcome tallies are kernel-wide storage operational state —
     /// the same boundary as [`memory_pressure`](Self::memory_pressure) and
-    /// [`reclaim_records`](Self::reclaim_records), not the ungated mount
-    /// table. The owned list is returned whole and [`crate::serve`] applies
+    /// [`cache_ledger_records`](Self::cache_ledger_records), not the ungated
+    /// mount table. The owned list is returned whole and [`crate::serve`] applies
     /// the `offset`/`limit` paging; ordering must be stable across paged
     /// calls.
     fn volume_io_health(&self, caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno>;

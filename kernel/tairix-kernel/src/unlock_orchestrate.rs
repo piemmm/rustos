@@ -257,7 +257,12 @@ pub fn finish_unlock<B: Block + 'static>(
     // pressure-governed cache of recently used blocks.
     let blk = BlockCache::for_boot_disk(blk, pressure, audit)
         .map_err(|_| "root-unlock: block device geometry")?;
-    tairix_kernel_core::memstats::MEM_STATS.register_ledger(blk.accounting_shared());
+    // A `None` means classification refused the cache at birth (it is then
+    // poisoned and admits nothing), so there is nothing to register — the
+    // refusal is already in the audit log.
+    if let Some(ledger) = blk.ledger() {
+        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+    }
     let store: &'static DriverStoreService<BlockCache<B>> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
             SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,

@@ -59,18 +59,18 @@ mod program {
     };
     use tairix_abi::reply::decode_page_reply;
     use tairix_abi::sysinfo::{
-        encode_reply_err, encode_reply_ok, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
-        CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
+        encode_reply_err, encode_reply_ok, CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord,
+        CpuTimeRecord, CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
         MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
-        RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime,
-        UserDirectoryRecord, VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+        VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
+        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use tairix_abi::time::Duration64;
-    use tairix_abi::{Errno, LimitKind, Origin, ORIGIN_WIRE_LEN, PROC_ID_LEN};
+    use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
-    use tairix_sysinfod::{serve, Caller, ProcessScope, SysinfoSource};
+    use tairix_sysinfod::{serve, CacheLedgerRegistry, Caller, ProcessScope, SysinfoSource};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -244,13 +244,22 @@ mod program {
             MemoryTotal::from_bytes(&read_scalar(IntrospectDomain::MemoryTotalBytes)?)
         }
 
-        fn reclaim_records(&self, _caller: &Caller) -> Result<Vec<ReclaimClassRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::Reclaim, ReclaimClassRecord::WIRE_LEN)?;
+        fn cache_ledger_records(&self, _caller: &Caller) -> Result<Vec<CacheLedgerRecord>, Errno> {
+            let bytes = read_list(IntrospectDomain::CacheLedgers, CacheLedgerRecord::WIRE_LEN)?;
             let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ ReclaimClassRecord::WIRE_LEN }>().0 {
-                records.push(ReclaimClassRecord::from_bytes(chunk)?);
+            for chunk in bytes.as_chunks::<{ CacheLedgerRecord::WIRE_LEN }>().0 {
+                records.push(CacheLedgerRecord::from_bytes(chunk)?);
             }
             Ok(records)
+        }
+
+        fn live_process_instances(&self) -> Result<Vec<ProcId>, Errno> {
+            let bytes = read_list(IntrospectDomain::Processes, ProcessRecord::WIRE_LEN)?;
+            let mut instances = Vec::new();
+            for chunk in bytes.as_chunks::<{ ProcessRecord::WIRE_LEN }>().0 {
+                instances.push(ProcessRecord::from_bytes(chunk)?.proc_id);
+            }
+            Ok(instances)
         }
 
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
@@ -629,6 +638,19 @@ mod program {
             return 1;
         }
 
+        // Size the reported-cache-ledger registry from the machine's own
+        // installed RAM (`CacheLedgerRegistry::new`'s policy) rather than a
+        // hand-picked constant. A machine that cannot even report its own
+        // RAM size is not one this service can serve correctly, so this
+        // fails closed exactly like the endpoint bind above.
+        let total_ram_bytes = match read_scalar(IntrospectDomain::MemoryTotalBytes)
+            .and_then(|bytes| MemoryTotal::from_bytes(&bytes))
+        {
+            Ok(total) => total.total_bytes,
+            Err(_) => return 1,
+        };
+        let mut registry = CacheLedgerRegistry::new(total_ram_bytes);
+
         let source = KernelSysinfoSource;
         let mut request = [0u8; SYSINFO_MAX_REQUEST];
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
@@ -668,6 +690,7 @@ mod program {
             match serve(
                 &source,
                 &caller,
+                &mut registry,
                 &LogSink,
                 &request[..request_len],
                 &mut payload,

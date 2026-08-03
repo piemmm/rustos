@@ -15,6 +15,7 @@ use tairix_abi::font_ipc::{
     decode_glyph_reply, decode_metrics_reply, FontRequest, FontWeight, FONT_MAX_CELL_HEIGHT,
     FONT_MAX_GLYPH_REPLY, FONT_MIN_CELL_HEIGHT,
 };
+use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::Errno;
 use tairix_font::glyph_cache_budget;
 use tairix_fontface::Repertoire;
@@ -75,6 +76,26 @@ fn service_with(bytes: &[Vec<u8>], cache: GlyphCache) -> FontService<'_> {
         .zip(FACE_REPERTOIRES)
         .collect();
     FontService::new(&sources, cache).expect("service parses the committed faces")
+}
+
+#[test]
+fn the_glyph_cache_reports_under_a_renderable_label() {
+    // The serving process hands this ledger to the system's cache monitor,
+    // which renders the label verbatim in its own row. A label the wire
+    // record refuses would silently cost the monitor the one row every GUI
+    // client's glyph memory is ultimately backed by, so the name is checked
+    // here rather than trusted by eye.
+    let (cache, _gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
+    let ledger = cache
+        .ledger()
+        .expect("the glyph cache is a classified reclaim cache");
+    let record = ledger.to_record().expect("the label fits the wire record");
+    assert_eq!(record.label(), "fontd.glyphs");
+    assert!(record.label().len() <= CACHE_LABEL_MAX);
+    assert!(record
+        .label()
+        .bytes()
+        .all(|byte| (0x20..0x7f).contains(&byte)));
 }
 
 #[test]

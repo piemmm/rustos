@@ -162,9 +162,16 @@ like their sibling:
   frames, and the per-band transition counters since boot.
 - **`RECLAIM_STATS`** — the `tairix_reclaim` ledger paged per class:
   class id, payload bytes, metadata bytes, entry count, shrink/teardown
-  counters, refusal counters. The SMARTRAM caches (filesystem cache,
-  transform cache, launch cache, block cache) appear here as the classes
-  they already are — one ledger, not a second per-cache query.
+  counters, refusal counters, and the self-reported share of the
+  resident total.
+- **`CACHE_LEDGERS`** — the same ledger paged per *cache*: the row
+  behind each class total, carrying the cache's label, owner, class,
+  reporting pid, and whether the figures were measured by the kernel or
+  reported by the process holding them. The SMARTRAM caches (filesystem,
+  transform, launch, block) are kernel rows; a desktop process's glyph
+  atlases and decoded artwork are reported rows, because nothing outside
+  that process can measure its heap. Both fold into the class totals
+  above through one shared fold, so the two views can never disagree.
 - **`RAMZIP_STATS`** — the SWAPSWAPSWAP §10 accounting dimensions: stored
   encrypted bytes, logical bytes represented, metadata bytes, min/soft/hard
   cap usage, compression attempts/acceptances/rejections, fault-ins,
@@ -309,7 +316,10 @@ is restored on exit).
     scrolling band history strip and the transition counters
     (`MEMORY_PRESSURE`).
   - *Reclaimable caches* — the per-class ledger table with payload/
-    metadata bytes and shrink/refusal counters (`RECLAIM_STATS`).
+    metadata bytes, shrink/refusal counters, and the self-reported share
+    of each class (`RECLAIM_STATS`), above the per-cache breakdown that
+    says which caches hold it and which of them are reporting their own
+    figures (`CACHE_LEDGERS`).
   - *Compressed tier* — `ramzip` stored/logical/saved bytes, cap usage
     against min/soft/hard, compression/fault-in/thrash counters
     (`RAMZIP_STATS`).
@@ -437,6 +447,11 @@ implementation fixed):
   `reclaim_class_from_name` in `lib/abi` are the one class vocabulary
   the kernel encoder and the resolver share; `PRESSURE_BAND_NAMES` is
   the band vocabulary.
+- `CACHE_LEDGERS` sits beside `RECLAIM_STATS` under the same capability
+  and the same audit, and `IntrospectDomain::CacheLedgers` is what the
+  kernel now exports — per cache, since the per-class fold belongs in
+  the one place that also holds the reported rows. The self-reported
+  half of that fold is `plans/SMARTRAM.md` SMART9.
 - Reconciliation against `CPU_TIME_STATS` (§3.1): `CpuLoadRecord`
   carries only the remainder — run-queue depth sample, context-switch
   and preemption counters; the busy/idle split stays in

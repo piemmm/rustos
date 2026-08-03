@@ -239,6 +239,11 @@ mod program {
     /// queue stays tiny (a fail-closed memory bound).
     const SWITCHBOARD_CAPACITY: usize = 4;
 
+    /// The audit sink every cache in this session records through. The shared
+    /// cache constructors take a `'static` borrow, and the runtime sink is a
+    /// unit value that owns nothing.
+    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main` to return.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -695,6 +700,18 @@ mod program {
         named
     }
 
+    /// Withdraws this process's reported cache rows on every way out of
+    /// [`session`] once the desktop's caches are registered, so the
+    /// system's cache monitor never keeps showing memory the ended session
+    /// no longer holds.
+    struct CacheReportGuard;
+
+    impl Drop for CacheReportGuard {
+        fn drop(&mut self) {
+            tairix_rt::cachereport::withdraw();
+        }
+    }
+
     /// Bring the desktop up and run it until the seat is lost or a fault
     /// ends it. Split from `main` so every exit path after the acquire
     /// flows back through the one owner-checked `display_release`.
@@ -773,7 +790,6 @@ mod program {
         // member's own read below closes the race between here and its
         // registration.
         refresh_pressure_band();
-        static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
         let mut shell = DesktopShell::new(
             TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
             SEAT_PRIMARY,
@@ -781,21 +797,34 @@ mod program {
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
+        // The shell registered the desktop's own cache rows, so from here
+        // every way out — a bring-up refusal below or the serve loop's
+        // fail-loud exit — has to take them back out of the monitor's
+        // registry; a dropped guard does that once, unconditionally.
+        let _cache_report = CacheReportGuard;
         // The decorated windows' furniture is the output's own cache, so it
         // is built here from the same seat, output size, gauge, and sink and
         // handed to the compositor that draws from it. The compositor takes
         // the gauge itself as well: a window's *content* is not a keyed
         // cache but a release policy over the same band, so it reads the
         // pressure directly rather than through the furniture cache.
+        //
+        // It is this process's memory like the shell's three caches, so it
+        // joins them in the report before the compositor takes it: a ledger
+        // is a shared handle to the figures, not the cache itself.
+        let chrome = chrome_cache(
+            SEAT_PRIMARY,
+            frame_len,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        );
+        if let Some(ledger) = chrome.ledger() {
+            tairix_rt::cachereport::register(ledger);
+        }
         let Some(mut compositor) = Compositor::new(
             mode,
             shell.desktop_background(),
-            chrome_cache(
-                SEAT_PRIMARY,
-                frame_len,
-                tairix_rt::pressure::gauge(),
-                &LOG_SINK,
-            ),
+            chrome,
             tairix_rt::pressure::gauge(),
         ) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
@@ -1093,10 +1122,25 @@ mod program {
 
         let mut token = 0u64;
         loop {
-            if tairix_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
-                // A dead wait-set would degrade the loop into a busy poll;
-                // exit fail-loud instead and let the supervisor decide.
-                return fail(EXIT_WAIT_FAILED, "seat wait failed");
+            // The park stays indefinite: a cache-report change the rate
+            // limiter is holding back only ever *tightens* the wait to the
+            // moment it may be sent, and folds back to indefinite once it
+            // has gone out. The desktop never polls for anything.
+            let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
+            let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
+            if waited != 0 {
+                if Errno::from_syscall(waited) != Errno::TimedOut {
+                    // A dead wait-set would degrade the loop into a busy poll;
+                    // exit fail-loud instead and let the supervisor decide.
+                    return fail(EXIT_WAIT_FAILED, "seat wait failed");
+                }
+                // No member woke, so `token` still names the *previous*
+                // wake's source and dispatching on it would block in a
+                // `call_recv` with nothing to receive. The held-back report
+                // is the only bounded wait this loop arms: send it and park
+                // again.
+                tairix_rt::cachereport::publish_if_due();
+                continue;
             }
             // Dispatch on the woken member's token and handle only that
             // source: `call_recv` *blocks* when nothing is pending, so a
@@ -1491,6 +1535,12 @@ mod program {
             if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
                 return code;
             }
+            // The wake is fully handled and its frame is on screen: report
+            // what the desktop's caches hold now, before parking again. A
+            // change made this turn would otherwise wait for the next wake,
+            // which on an idle desktop may be a very long time. Silent
+            // unless a figure actually moved.
+            tairix_rt::cachereport::publish_if_due();
         }
     }
 

@@ -345,7 +345,7 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
     }
     emit(
         out,
-        "class                  payload    metadata  entries      hits    misses  hit%  refusals  shrinks  failures",
+        "class                  payload    metadata  entries      hits    misses  hit%  refusals  shrinks  failures      self",
     )?;
     for chunk in reply.as_chunks::<{ ReclaimClassRecord::WIRE_LEN }>().0 {
         let record = ReclaimClassRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
@@ -353,7 +353,7 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
         emit(
             out,
             &format!(
-                "{:<21}  {:>7}  {:>10}  {:>7}  {:>8}  {:>8}  {:>4}  {:>8}  {:>7}  {:>8}",
+                "{:<21}  {:>7}  {:>10}  {:>7}  {:>8}  {:>8}  {:>4}  {:>8}  {:>7}  {:>8}  {:>8}",
                 name,
                 record.payload_bytes,
                 record.metadata_bytes,
@@ -364,6 +364,7 @@ fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
                 record.refusals,
                 record.pressure_shrinks,
                 record.failures,
+                record.self_reported_bytes,
             ),
         )?;
     }
@@ -1044,6 +1045,7 @@ mod tests {
                     failures: 0,
                     hits: 900,
                     misses: 100,
+                    self_reported_bytes: 1024,
                 }],
                 ramzip: RamzipStats {
                     entries: 4,
@@ -1605,6 +1607,10 @@ mod tests {
         // The hit ratio (900 / (900 + 100)) is rendered as a percentage.
         assert!(lines[0].contains("hit%"), "header: {}", lines[0]);
         assert!(lines[1].contains("90%"), "row: {}", lines[1]);
+        // The self-reported share (a trust-boundary diagnostic) has its own
+        // column, distinct from the attested `payload`/`metadata` figures.
+        assert!(lines[0].contains("self"), "header: {}", lines[0]);
+        assert!(lines[1].contains("1024"), "row: {}", lines[1]);
     }
 
     #[test]

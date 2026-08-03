@@ -19,26 +19,46 @@ pub fn format_tenths(tenths: u32) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
-/// Render a byte count for a `SIZE`-style column: whole KiB below ten MiB
-/// (`8432K`), tenths of MiB below ten GiB (`123.4M`), tenths of GiB above
-/// (`12.3G`). Zero renders as `0`.
+/// The widest string [`format_size`] can return, in columns.
+///
+/// A byte-count column is laid out at least this wide. A figure cannot be
+/// elided the way an over-long name can — an elided number is a wrong
+/// number — so the formatter is bounded instead, and this is the bound the
+/// viewers budget for.
+pub const SIZE_WIDTH: usize = 7;
+
+/// Render a byte count for a `SIZE`-style column: the exact count below a
+/// kibibyte (`742`), otherwise one decimal place in the largest binary band
+/// the count is under 1024 of, with a one-letter suffix — `K`, `M`, `G`,
+/// `T`, `P`, `E` (`1.5K`, `986.2M`, `2.0G`, `15.9E`). Zero renders as `0`.
+///
+/// The ladder runs all the way to exbibytes so that no `u64` can overrun
+/// [`SIZE_WIDTH`]: the widest result is `1023.9X` at the top of a band, and
+/// `u64::MAX` lands in the exbibyte band as `15.9E`. A ladder that stops
+/// lower has no band left to promote a huge figure into and grows the digits
+/// instead, which is what pushed a multi-terabyte figure past its column.
+///
+/// The tenths are computed in `u128`, so scaling `u64::MAX` cannot wrap.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes == 0 {
-        return String::from("0");
+    /// One band is this many times the one below it.
+    const BAND: u128 = 1024;
+    /// The band letters, indexed by how many times the count was divided by
+    /// [`BAND`]: `0` → kibibytes … `5` → exbibytes, which no `u64` exceeds.
+    const LETTERS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
+
+    let bytes = u128::from(bytes);
+    if bytes < BAND {
+        return format!("{bytes}");
     }
-    if bytes < 10 * MIB {
-        return format!("{}K", bytes.div_ceil(KIB));
+    let mut letter = 0usize;
+    let mut divisor = BAND;
+    while bytes / divisor >= BAND && letter + 1 < LETTERS.len() {
+        divisor *= BAND;
+        letter += 1;
     }
-    if bytes < 10 * GIB {
-        let tenths = bytes * 10 / MIB;
-        return format!("{}.{}M", tenths / 10, tenths % 10);
-    }
-    let tenths = bytes * 10 / GIB;
-    format!("{}.{}G", tenths / 10, tenths % 10)
+    let tenths = bytes * 10 / divisor;
+    format!("{}.{}{}", tenths / 10, tenths % 10, LETTERS[letter])
 }
 
 /// Render a plain event count for a narrow column: the exact number
@@ -110,7 +130,10 @@ pub fn format_load(fixed: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_count, format_load, format_mib, format_size, format_tenths, format_uptime};
+    use super::{
+        format_count, format_load, format_mib, format_size, format_tenths, format_uptime,
+        SIZE_WIDTH,
+    };
 
     #[test]
     fn counts_render_exact_then_compact_units() {
@@ -134,12 +157,55 @@ mod tests {
     }
 
     #[test]
-    fn sizes_choose_the_gnu_top_unit() {
+    fn sizes_climb_the_binary_ladder_to_exbibytes() {
         assert_eq!(format_size(0), "0");
-        assert_eq!(format_size(1), "1K");
-        assert_eq!(format_size(8 * 1024 * 1024), "8192K");
+        assert_eq!(format_size(742), "742");
+        assert_eq!(format_size(1023), "1023");
+        assert_eq!(format_size(1024), "1.0K");
+        assert_eq!(format_size(1536), "1.5K");
+        assert_eq!(format_size(8 * 1024 * 1024), "8.0M");
         assert_eq!(format_size(512 * 1024 * 1024), "512.0M");
         assert_eq!(format_size(20 * 1024 * 1024 * 1024), "20.0G");
+        assert_eq!(format_size(1024u64.pow(4)), "1.0T");
+        assert_eq!(format_size(3 * 1024u64.pow(5)), "3.0P");
+        assert_eq!(format_size(1024u64.pow(6)), "1.0E");
+        // The exbibyte band is the last one a `u64` can reach into.
+        assert_eq!(format_size(u64::MAX), "15.9E");
+    }
+
+    #[test]
+    fn no_byte_count_overflows_the_size_column() {
+        // A column overflows at the *top* of a band, where the digits are
+        // widest and the next band has not been entered yet, so every band
+        // boundary is probed either side.
+        let mut probes = alloc::vec::Vec::new();
+        let mut band = 1u64;
+        loop {
+            probes.push(band);
+            match band.checked_mul(1024) {
+                Some(next) => band = next,
+                None => break,
+            }
+        }
+        probes.push(u64::MAX);
+        for boundary in probes {
+            for bytes in [
+                boundary.saturating_sub(1),
+                boundary,
+                boundary.saturating_add(1),
+            ] {
+                let text = format_size(bytes);
+                let width = text.chars().count();
+                assert!(
+                    width <= SIZE_WIDTH,
+                    "format_size({bytes}) = {text:?} wants {width} columns, budget {SIZE_WIDTH}"
+                );
+            }
+        }
+        // The budget is tight, not slack: the top of a band really does need
+        // all seven columns, so it must not be narrowed.
+        assert_eq!(format_size(1024 * 1024 - 1), "1023.9K");
+        assert_eq!(format_size(1024 * 1024 - 1).chars().count(), SIZE_WIDTH);
     }
 
     #[test]

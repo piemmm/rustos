@@ -204,7 +204,7 @@ fn default_cache() -> GlyphCache {
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
     let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
-    ReclaimCache::new(
+    let cache = ReclaimCache::new(
         CLIENT_CACHE_LABEL,
         crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
             CLIENT_CACHE_OWNER,
@@ -212,7 +212,15 @@ fn default_cache() -> GlyphCache {
         crate::glyph_cache::glyph_cache_budget(total),
         tairix_rt::pressure::gauge(),
         &LOG_SINK,
-    )
+    );
+    // This cache is built here, on the process's behalf, so it is this
+    // library — not the program linking it — that tells the process-wide
+    // reporter about it; the program never sees the cache to register it
+    // itself.
+    if let Some(ledger) = cache.ledger() {
+        tairix_rt::cachereport::register(ledger);
+    }
+    cache
 }
 
 /// The one process-global font client.

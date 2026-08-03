@@ -76,6 +76,8 @@ mod start;
 
 mod startup;
 
+pub mod cachereport;
+
 pub mod io;
 
 pub mod net;

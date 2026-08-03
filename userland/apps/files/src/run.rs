@@ -689,14 +689,22 @@ mod program {
             // takes a `'static` borrow, and the runtime sink is a unit value
             // that owns nothing.
             static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+            let cache = artwork_cache(
+                "files.icon-artwork",
+                SEAT_PRIMARY,
+                frame_bytes,
+                tairix_rt::pressure::gauge(),
+                &LOG_SINK,
+            );
+            // Decoded artwork is memory only this process can see, so the app
+            // says what it holds; nothing outside it can sample the counters.
+            // A cache declared unclassifiable has no ledger and holds nothing,
+            // so there is simply nothing to report.
+            if let Some(ledger) = cache.ledger() {
+                tairix_rt::cachereport::register(ledger);
+            }
             Self {
-                cache: artwork_cache(
-                    "files.icon-artwork",
-                    SEAT_PRIMARY,
-                    frame_bytes,
-                    tairix_rt::pressure::gauge(),
-                    &LOG_SINK,
-                ),
+                cache,
                 reader: VfsArtworkReader,
                 rasteriser: SandboxRasteriser {
                     sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
@@ -711,13 +719,17 @@ mod program {
     }
 
     impl Drop for IconPipeline {
-        /// Release every retained decode, overwriting the artwork first.
+        /// Release every retained decode, overwriting the artwork first, and
+        /// withdraw the row a cache monitor was showing for it.
         ///
         /// The window closing and every fail-loud exit alike end the
         /// pipeline's scope, so the pixels are given back on *every* way out of
-        /// the app rather than on the ones a future edit remembers to spell.
+        /// the app rather than on the ones a future edit remembers to spell —
+        /// and the monitor stops charging this app for memory it no longer
+        /// holds at the same moment, from the same one place.
         fn drop(&mut self) {
             self.cache.teardown();
+            tairix_rt::cachereport::withdraw();
         }
     }
 
@@ -774,10 +786,23 @@ mod program {
                     Err(err) if errno_from(err) == Errno::WouldBlock => {
                         // Nothing queued: park until the session's next
                         // delivery — or a launched bundle's exit — wakes the
-                        // wait-set, never a spin.
+                        // wait-set, never a spin. A cache-report change the
+                        // rate limiter is holding back only ever *tightens*
+                        // the park to the moment it may be sent; with nothing
+                        // pending the park stays indefinite.
                         let mut token = 0u64;
-                        if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                            return Err(Errno::NotFound);
+                        let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
+                        let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
+                        if waited != 0 {
+                            if errno_from(waited) != Errno::TimedOut {
+                                return Err(Errno::NotFound);
+                            }
+                            // No member woke, so `token` names the *previous*
+                            // wake's source and acting on it would reap or
+                            // trim for nothing. The held-back report is the
+                            // only bounded wait here: send it and park again.
+                            tairix_rt::cachereport::publish_if_due();
+                            continue;
                         }
                         // A child-exit wake reaps the exited bundle(s) in
                         // place before re-parking, so a launched app is never
@@ -4042,6 +4067,14 @@ mod program {
             icons: &icons,
         });
         loop {
+            // Report what the icon cache holds at the head of the turn: this
+            // is the one point every path through the body passes through
+            // *before* anything can park (the park is inside `events.wait`
+            // below, and the operation branch re-runs a slice without
+            // parking at all), so a decode from the previous turn is never
+            // left unreported while the app sits waiting. Silent unless a
+            // figure actually moved.
+            tairix_rt::cachereport::publish_if_due();
             // A running long operation (a recursive delete, or a copy/move
             // paste) owns the window: drive it a bounded slice at a time,
             // repaint the progress, and poll (non-blocking) for a mid-run

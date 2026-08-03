@@ -26,10 +26,11 @@
 //! * a **task census** line;
 //! * a **panel tab bar** showing every detail panel with the focused one
 //!   highlighted and a scroll indicator when the panel overflows;
-//! * the focused **detail table** (reclaim ledger, `ramzip` counters,
-//!   mounted-volume storage, per-CPU load, interrupt lines, or the process
-//!   summary), with a styled header row and refusal/quarantine rows drawn in
-//!   their own colour.
+//! * the focused **detail table** (the reclaimable-cache page — the
+//!   per-class ledger over the per-cache breakdown behind it — `ramzip`
+//!   counters, mounted-volume storage, per-CPU load, interrupt lines, or the
+//!   process summary), with a styled header row and refusal/quarantine rows
+//!   drawn in their own colour.
 //!
 //! The detail panel is chosen with the Left/Right arrow keys (or `p`), which
 //! step the tab ring in either direction.
@@ -38,7 +39,9 @@
 //! its panel, while the session continues (fail closed, degrade gracefully).
 //! Colour is always reinforcement: on a monochrome terminal the gauges still
 //! fill, the bars still read, and the header falls back to reverse video —
-//! the layout never depends on colour to be legible.
+//! the layout never depends on colour to be legible. A figure a process
+//! reported about its own cache rather than the kernel measuring it says so
+//! in words in its row, for an operator reading over a serial console.
 //!
 //! The view redraws itself every refresh interval without a key press: the
 //! input wait is bounded by the interval, and an elapsed wait re-queries
@@ -49,10 +52,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
+use tairix_curses::{char_width, str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
 use tairix_procinfo::{
     field_lossy, format_count, format_load, format_size, format_tenths, format_uptime, state_char,
-    Transport,
+    Transport, SIZE_WIDTH,
 };
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -236,38 +239,61 @@ fn denied_row<T>(gauge: &Gauge<T>) -> PanelRow {
     }))
 }
 
+/// The reclaimable-cache page: the per-class ledger table over the
+/// per-cache breakdown behind it, so a class total is never just a number
+/// — the caches that make it up are on the same page.
+///
+/// The two tables carry different columns, so a blank line keeps them from
+/// reading as one table; each states its own refusal independently.
+fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
+    let mut rows = reclaim_class_rows(snapshot);
+    rows.push(PanelRow::body(String::new()));
+    rows.extend(cache_ledger_rows(snapshot));
+    rows
+}
+
+/// The name of reclaim class `class`, or `?` for an id this build does not
+/// know (a class the service invented is never rendered as a real one).
+fn class_name(class: u8) -> &'static str {
+    tairix_abi::sysinfo::RECLAIM_CLASS_NAMES
+        .get(usize::from(class))
+        .copied()
+        .unwrap_or("?")
+}
+
 /// The reclaim-ledger table: one row per reclaim class, leading with the
+/// class's live footprint and how much of it is attested, then the
 /// cache-effectiveness figures the panel exists to show at a glance —
-/// hits, misses, and the hit ratio — beside the class's live footprint and
-/// its health counters.
+/// hits, misses, and the hit ratio — and the health counters.
 ///
 /// The `hit%` column is `hits / (hits + misses)` as a whole percent, or
 /// `-` for a class no code has looked up this boot (an idle denominator is
 /// never a fabricated ratio). `cached` is the class's whole resident
-/// footprint (entry payload plus per-entry bookkeeping). Counts render
-/// through [`format_count`] so an unbounded counter never widens its
-/// column; the abbreviated headers (`ref` refusals, `shr` pressure
-/// shrinks, `fail` internal failures) are spelled out in the manual.
-fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
+/// footprint (entry payload plus per-entry bookkeeping), and `self%` is
+/// the share of that footprint the holding processes reported about
+/// themselves rather than the kernel measuring it — the rest is attested,
+/// so the column reads as how much of the total is taken on trust.
+/// Counts render through [`format_count`] so an unbounded counter never
+/// widens its column; the abbreviated headers (`ref` refusals, `shr`
+/// pressure shrinks, `fail` internal failures) are spelled out in the
+/// manual.
+fn reclaim_class_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     let Some(records) = snapshot.reclaim.ready() else {
         return alloc::vec![denied_row(&snapshot.reclaim)];
     };
     let mut rows = Vec::with_capacity(records.len() + 1);
     rows.push(PanelRow::header(format!(
-        "{:<21} {:>7} {:>7} {:>8} {:>8} {:>4} {:>5} {:>5} {:>5}",
-        "class", "entries", "cached", "hits", "misses", "hit%", "ref", "shr", "fail"
+        "{:<21} {:>7} {:>SIZE_WIDTH$} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5}",
+        "class", "entries", "cached", "self%", "hits", "misses", "hit%", "ref", "shr", "fail"
     )));
     for record in records {
-        let name = tairix_abi::sysinfo::RECLAIM_CLASS_NAMES
-            .get(usize::from(record.class))
-            .copied()
-            .unwrap_or("?");
         let cached = record.payload_bytes.saturating_add(record.metadata_bytes);
         rows.push(PanelRow::body(format!(
-            "{:<21} {:>7} {:>7} {:>8} {:>8} {:>4} {:>5} {:>5} {:>5}",
-            name,
+            "{:<21} {:>7} {:>SIZE_WIDTH$} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5}",
+            class_name(record.class),
             format_count(record.entries),
             format_size(cached),
+            ratio_pct(record.self_reported_bytes, cached),
             format_count(record.hits),
             format_count(record.misses),
             ratio_pct(record.hits, record.hits.saturating_add(record.misses)),
@@ -277,6 +303,146 @@ fn reclaim_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
         )));
     }
     rows
+}
+
+/// Width of the cache-label column: a longer label is elided rather than
+/// pushing the figures off an 80-column line.
+const CACHE_LABEL_COL: usize = 16;
+/// Width of the cache-owner column: room for a kind and an everyday id,
+/// with a longer one elided rather than widening the row.
+const CACHE_OWNER_COL: usize = 13;
+
+/// The per-cache breakdown: one row per registered cache ledger, so "the
+/// `disposable-ui` class holds 12 MiB" becomes "and here is which caches
+/// hold it". The rows of a class sum to that class's row in the table
+/// above.
+///
+/// `origin` names where the figures came from: `kernel` for a ledger the
+/// kernel measures, `self` for one the holding process reported about
+/// itself, `?` for a row the service left unattributed. A self-reported
+/// figure is a diagnostic — nothing outside that process can see it, and a
+/// compromised process can lie about it — so the word is in the row
+/// itself, legible on a monochrome serial console, and the notice
+/// rendition is reinforcement only.
+fn cache_ledger_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
+    use tairix_abi::sysinfo::CacheLedgerOrigin;
+    let Some(records) = snapshot.caches.ready() else {
+        return alloc::vec![denied_row(&snapshot.caches)];
+    };
+    let mut rows = Vec::with_capacity(records.len() + 1);
+    rows.push(PanelRow::header(format!(
+        "{:<CACHE_LABEL_COL$} {:<CACHE_OWNER_COL$} {:<6} {:<21} {:>7} {:>SIZE_WIDTH$} {:>4}",
+        "cache", "owner", "origin", "class", "entries", "cached", "hit%"
+    )));
+    if records.is_empty() {
+        rows.push(PanelRow::notice(String::from("no caches registered")));
+        return rows;
+    }
+    for record in records {
+        let text = format!(
+            "{:<CACHE_LABEL_COL$} {:<CACHE_OWNER_COL$} {:<6} {:<21} {:>7} {:>SIZE_WIDTH$} {:>4}",
+            elide_middle(record.label(), CACHE_LABEL_COL),
+            elide_middle(&cache_owner(record), CACHE_OWNER_COL),
+            cache_origin(record.origin),
+            class_name(record.class),
+            format_count(record.entries),
+            format_size(record.resident_bytes()),
+            ratio_pct(record.hits, record.hits.saturating_add(record.misses)),
+        );
+        rows.push(if record.origin == CacheLedgerOrigin::Kernel {
+            PanelRow::body(text)
+        } else {
+            PanelRow::notice(text)
+        });
+    }
+    rows
+}
+
+/// The owner column's text: the kind of principal charged for the cache,
+/// with the numeric id the kind carries, and `@pid` for a row a process
+/// reported.
+///
+/// An id is a `u64` and a reported row carries two of them, so this can
+/// outgrow [`CACHE_OWNER_COL`]; the caller fits it with [`elide_middle`].
+/// An elided id is visibly incomplete and so cannot be read as a different
+/// volume, task, or process, where a silently cut one could.
+fn cache_owner(record: &tairix_abi::sysinfo::CacheLedgerRecord) -> String {
+    use tairix_abi::sysinfo::CacheOwnerKind;
+    let owner = match record.owner_kind {
+        CacheOwnerKind::KernelSubsystem => String::from("kernel"),
+        CacheOwnerKind::FilesystemVolume => format!("vol:{}", record.owner_id),
+        CacheOwnerKind::Task => format!("task:{}", record.owner_id),
+        CacheOwnerKind::DesktopSession => format!("seat:{}", record.owner_id),
+        CacheOwnerKind::UserlandProcess => String::from("proc"),
+    };
+    if record.reporter_pid == 0 {
+        owner
+    } else {
+        format!("{owner}@{}", record.reporter_pid)
+    }
+}
+
+/// The `origin` column word: whether the row's figures are attested.
+fn cache_origin(origin: tairix_abi::sysinfo::CacheLedgerOrigin) -> &'static str {
+    use tairix_abi::sysinfo::CacheLedgerOrigin;
+    match origin {
+        CacheLedgerOrigin::Kernel => "kernel",
+        CacheLedgerOrigin::SelfReported => "self",
+        CacheLedgerOrigin::Unset => "?",
+    }
+}
+
+/// The mark standing in for the elided middle of a name too long for its
+/// column. ASCII, like every other glyph this view draws, so it reads on a
+/// serial console whose font has no `…`.
+const ELISION: char = '~';
+
+/// Fit `text` into `width` columns by dropping its *middle*, keeping both
+/// ends.
+///
+/// The names these tables identify a row by are dotted — a namespace head
+/// and a leaf — and it is usually the leaf that tells two of them apart
+/// (`clean_fs.data` from `clean_fs.metadata`), so cutting the tail would
+/// throw away the identity the column exists to show. The middle goes
+/// instead and [`ELISION`] says so, which also keeps an elided owner id
+/// from reading as a smaller whole number.
+///
+/// Text that already fits is returned unchanged; an elided result is
+/// exactly `width` columns. Below three columns there is no room for a
+/// head, a mark and a leaf, so the text is cut to the budget instead —
+/// narrower than asked for, never wider.
+pub(crate) fn elide_middle(text: &str, width: usize) -> String {
+    if str_width(text) <= width {
+        return String::from(text);
+    }
+    if width < 3 {
+        return String::from(truncate_to_width(text, width));
+    }
+    let leaf = suffix_to_width(text, (width - 1) / 2);
+    let head = truncate_to_width(text, width - 1 - str_width(leaf));
+    let mut elided = String::with_capacity(head.len() + leaf.len() + 1);
+    elided.push_str(head);
+    elided.push(ELISION);
+    elided.push_str(leaf);
+    elided
+}
+
+/// The longest suffix of `text` that fits `cols` columns — the tail-side
+/// counterpart of [`truncate_to_width`], which fits a prefix.
+///
+/// A double-width glyph that would straddle the limit is dropped whole, so
+/// the result never exceeds `cols` columns.
+fn suffix_to_width(text: &str, cols: usize) -> &str {
+    let mut used = 0usize;
+    let mut start = text.len();
+    for (offset, ch) in text.char_indices().rev() {
+        used += usize::from(char_width(ch));
+        if used > cols {
+            break;
+        }
+        start = offset;
+    }
+    &text[start..]
 }
 
 /// The width of the leading section-name column in the `ramzip` table, so
@@ -383,9 +549,22 @@ fn ramzip_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     ]
 }
 
+/// Width of the mount-point column: a deeper path is elided rather than
+/// pushing the capacity figures off the line.
+const MOUNT_TARGET_COL: usize = 20;
+/// Width of the filesystem-type column, which holds every type name the
+/// system can mount.
+const MOUNT_FSTYPE_COL: usize = 7;
+
 /// The mounted-volume storage panel: one row per mounted filesystem with its
 /// space accounting — total size, used, available, use percentage, and an
 /// ASCII usage bar — the `df`-class view of the disks the system has mounted.
+///
+/// A mount point too long for its column keeps both ends and loses its
+/// middle ([`elide_middle`]): two volumes filed beside each other agree for
+/// the whole width of the column and are told apart by the leaf, which a
+/// tail cut would be the one part to throw away. A type name is identified
+/// by its head, so it is simply cut.
 ///
 /// A volume whose driver reports no capacity (an all-zero
 /// [`VolumeStats`](tairix_abi::driver::filesystem::VolumeStats)) shows its
@@ -400,7 +579,7 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
     };
     let mut rows = Vec::with_capacity(records.len() + 1);
     rows.push(PanelRow::header(format!(
-        "{:<20} {:<7} {:>8} {:>8} {:>8} {:>4}  usage",
+        "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>4}  usage",
         "mounted on", "type", "size", "used", "avail", "use"
     )));
     if records.is_empty() {
@@ -424,9 +603,9 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
         let text = if total == 0 {
             // No capacity known: state the identity, never a fabricated size.
             format!(
-                "{:<20} {:<7} {:>8} {:>8} {:>8} {:>4}  capacity unknown{condition}",
-                truncate_to_width(&target, 20),
-                truncate_to_width(&fstype, 7),
+                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>4}  capacity unknown{condition}",
+                elide_middle(&target, MOUNT_TARGET_COL),
+                truncate_to_width(&fstype, MOUNT_FSTYPE_COL),
                 "-",
                 "-",
                 "-",
@@ -437,9 +616,9 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
             let avail = usage.avail_blocks.saturating_mul(block);
             let frac = frac_tenths(used, total);
             format!(
-                "{:<20} {:<7} {:>8} {:>8} {:>8} {:>3}%  {}{condition}",
-                truncate_to_width(&target, 20),
-                truncate_to_width(&fstype, 7),
+                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>3}%  {}{condition}",
+                elide_middle(&target, MOUNT_TARGET_COL),
+                truncate_to_width(&fstype, MOUNT_FSTYPE_COL),
                 format_size(total),
                 format_size(used),
                 format_size(avail),
@@ -576,7 +755,7 @@ fn process_rows(model: &Model) -> Vec<PanelRow> {
         return rows;
     }
     rows.push(PanelRow::header(format!(
-        "top by %cpu    {:>7} {:>6} {:>6} {}",
+        "top by %cpu    {:>7} {:>6} {:>SIZE_WIDTH$} {}",
         "pid", "%cpu", "size", "command"
     )));
     let mut by_cpu: Vec<_> = snapshot.processes.iter().collect();
@@ -589,7 +768,7 @@ fn process_rows(model: &Model) -> Vec<PanelRow> {
     });
     for record in by_cpu.iter().take(TOP_CONSUMERS) {
         rows.push(PanelRow::body(format!(
-            "               {:>7} {:>6} {:>6} {}",
+            "               {:>7} {:>6} {:>SIZE_WIDTH$} {}",
             record.pid,
             format_tenths(model.proc_pct(record.proc_id).unwrap_or(0)),
             format_size(record.mem_bytes),
@@ -597,14 +776,14 @@ fn process_rows(model: &Model) -> Vec<PanelRow> {
         )));
     }
     rows.push(PanelRow::header(format!(
-        "top by memory  {:>7} {:>6} {:>6} {}",
+        "top by memory  {:>7} {:>6} {:>SIZE_WIDTH$} {}",
         "pid", "state", "size", "command"
     )));
     let mut by_mem: Vec<_> = snapshot.processes.iter().collect();
     by_mem.sort_by(|a, b| b.mem_bytes.cmp(&a.mem_bytes).then(a.pid.cmp(&b.pid)));
     for record in by_mem.iter().take(TOP_CONSUMERS) {
         rows.push(PanelRow::body(format!(
-            "               {:>7} {:>6} {:>6} {}",
+            "               {:>7} {:>6} {:>SIZE_WIDTH$} {}",
             record.pid,
             state_char(record.state),
             format_size(record.mem_bytes),

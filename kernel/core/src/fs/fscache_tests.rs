@@ -606,6 +606,44 @@ fn construction_classifies_and_charges_the_volume_owner() {
 }
 
 #[test]
+fn each_exported_pool_names_itself_and_shares_the_one_ledger() {
+    // The two rows this cache contributes to the per-cache export must be
+    // readable on their own: a monitor showing two identically-named rows
+    // would leave an operator inferring the pool from the class column.
+    let mut cache = fixture(b"two pools");
+    let file = file_of(&mut cache);
+    let mut buf = [0u8; 32];
+    cache.read_at(file, 0, &mut buf).expect("warm file data");
+    cache.node_info(file).expect("warm metadata");
+
+    let ledgers = cache.ledgers().expect("classification accepted");
+    let labels: Vec<&str> = ledgers.iter().map(CacheLedger::label).collect();
+    assert_eq!(labels, ["clean_fs.data", "clean_fs.metadata"]);
+    let classes: Vec<ReclaimClass> = ledgers.iter().map(CacheLedger::class).collect();
+    assert_eq!(
+        classes,
+        [ReclaimClass::CleanFileData, ReclaimClass::FsMetadata],
+        "each row is the pool its label names"
+    );
+    for ledger in &ledgers {
+        assert_eq!(ledger.owner(), owner(), "both pools charge the volume");
+    }
+
+    // One shared ledger, two rows: each reports its own pool's bytes, and
+    // both labels render — an unrenderable one would drop the row.
+    let records = ledgers.map(|ledger| ledger.to_record().expect("renderable label"));
+    for (record, class) in records
+        .iter()
+        .zip([ReclaimClass::CleanFileData, ReclaimClass::FsMetadata])
+    {
+        let charged = u64::try_from(cache.accounting().class_payload_bytes(class))
+            .expect("payload bytes fit a u64");
+        assert_eq!(record.payload_bytes, charged);
+        assert!(charged > 0, "both pools are resident after the warm-up");
+    }
+}
+
+#[test]
 fn empty_and_zero_budget_cache_still_serves_correctly() {
     // A zero budget admits nothing; every operation still round-trips.
     let mut fs = RwMockFs::new();

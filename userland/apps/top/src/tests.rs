@@ -585,10 +585,47 @@ fn tenths_format_with_one_decimal_and_saturate() {
 #[test]
 fn sizes_format_by_magnitude() {
     assert_eq!(crate::app::format_size(0), "0");
-    assert_eq!(crate::app::format_size(4096), "4K");
-    assert_eq!(crate::app::format_size(5 * 1024 * 1024), "5120K");
+    assert_eq!(crate::app::format_size(4096), "4.0K");
+    assert_eq!(crate::app::format_size(5 * 1024 * 1024), "5.0M");
     assert_eq!(crate::app::format_size(200 * 1024 * 1024), "200.0M");
     assert_eq!(crate::app::format_size(20 * 1024 * 1024 * 1024), "20.0G");
+}
+
+#[test]
+fn the_size_column_holds_every_byte_count_a_process_can_report() {
+    // `SIZE` is the only row cell whose figure grows with the machine, so a
+    // process mapping the whole address space must still land inside the
+    // cell rather than shunting `S`, `%CPU` and the rest one place right.
+    let service = FakeService::new(vec![record_with(7, b"vast", 0, u64::MAX)]);
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let line = crate::app::process_row(&model, &model.rows()[0]);
+    let state = usize::from(crate::app::STATE_COL);
+    assert_eq!(
+        line.chars().nth(state),
+        Some('R'),
+        "state letter left its column: {line}"
+    );
+    assert!(line.contains("15.9E"), "exbibyte band: {line}");
+}
+
+#[test]
+fn the_column_header_sits_over_the_cells_the_rows_fill() {
+    // The header is a literal, the row a format string and the state cell a
+    // hand-written offset; a test is what keeps all three from drifting apart
+    // when a cell is widened. `SIZE` is the last cell before `S`, so its
+    // width is what the offset actually pins.
+    let state = usize::from(crate::app::STATE_COL);
+    assert_eq!(
+        crate::app::COLUMN_HEADER.chars().nth(state),
+        Some('S'),
+        "header: {}",
+        crate::app::COLUMN_HEADER
+    );
+    assert_eq!(
+        crate::app::COLUMN_HEADER[..state].trim_end(),
+        "    PID USER        SIZE"
+    );
 }
 
 #[test]
@@ -736,7 +773,7 @@ fn process_rows_carry_the_new_columns() {
     let line = crate::app::process_row(&model, &model.rows()[0]);
     assert!(line.contains("      7"));
     assert!(line.contains("alice"));
-    assert!(line.contains("4K"));
+    assert!(line.contains("4.0K"));
     assert!(line.contains(" R "));
     assert!(line.contains("1:01.50"));
     assert!(line.ends_with("worker"));

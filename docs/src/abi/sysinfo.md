@@ -62,6 +62,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `RAID_MEMBERS`          | `CAP_SYSINFO_HW`       | yes     |
 | `MEMORY_PRESSURE_BAND`  | none                   | no      |
 | `MEMORY_TOTAL`          | none                   | no      |
+| `CACHE_LEDGERS`         | `CAP_SYSINFO_KERNEL`   | yes     |
+| `CACHE_REPORT`          | none (self-scoped)     | no      |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -149,9 +151,14 @@ kernel-wide operational state:
 - `RECLAIM_STATS` — one `ReclaimClassRecord` per reclaim class (paged by
   a `ReclaimListRequest`): live payload/metadata byte and entry gauges
   plus the monotonic refusal/shrink/teardown/failure counters,
-  aggregated across every registered live cache. The class ids and the
-  stable names in `RECLAIM_CLASS_NAMES` are the shared vocabulary the
+  aggregated across every registered live cache, kernel-measured and
+  self-reported alike, with `self_reported_bytes` naming how much of the
+  resident total came from the latter. The class ids and the stable names
+  in `RECLAIM_CLASS_NAMES` are the shared vocabulary the
   `stats:mem/reclaim/<class>` selectors resolve through.
+- `CACHE_LEDGERS` — one `CacheLedgerRecord` per *cache* (paged by a
+  `CacheLedgerListRequest`): the breakdown behind those class totals. See
+  [Cache ledgers](#cache-ledgers-and-the-one-submission) below.
 - `RAMZIP_STATS` — a single `RamzipStats`: the compressed anonymous-
   memory tier's byte/entry gauges, derived min/soft/hard caps, every
   monotonic event counter, and `pinned_bytes` — the live system-wide
@@ -243,6 +250,90 @@ currently-active transmitting member (active-backup only), and its
 link/eligibility health. The `info:net/<bond>/members`,
 `state:net/<bond>/active-member`, and `state:net/<bond>/member-health`
 selectors resolve through it (`plans/NETWORK.md` §5, §6.3).
+
+## Cache ledgers, and the one submission
+
+The reclaim model is two-sided. The kernel's block, filesystem, launch,
+and transform caches and a desktop process's glyph atlases, decoded icon
+artwork, and rasterised window chrome all declare the same
+`ReclaimClass`, obey the same pressure bands, and shrink in the same
+order (`plans/SMARTRAM.md`). Only the kernel's side can be *measured*
+from outside a process: a process's heap is its own, so nothing but that
+process can see how many bytes its glyph atlas is holding.
+
+Left there, the class totals lie. `disposable-ui` is documented as
+"rasterised assets, glyph atlases" and is the class reclaim *starts*
+with, and it would read zero on a desktop holding megabytes of exactly
+that. So the API carries the figures both ways:
+
+- **`CACHE_LEDGERS`** reads one `CacheLedgerRecord` per cache: its label,
+  its `CacheOwnerKind` and the numeric owner id the kind carries, its
+  class, the reporting process's pid, a `CacheLedgerOrigin` saying
+  whether the figures were measured or reported, and the same nine
+  figures the class record aggregates. Kernel rows come first, then
+  reported rows, in a stable order so a paging client never skips or
+  repeats one. Summing the rows of a class reproduces that class's
+  `ReclaimClassRecord` exactly — there is one fold, `fold_cache_ledgers`,
+  and both views go through it.
+- **`CACHE_REPORT`** is the one submission in an otherwise read-only API:
+  a `CacheReportRequest` header followed by the caller's own rows, at
+  most `MAX_CACHE_REPORT_ENTRIES` of them. It is ungated for the same
+  reason `SELF_PROCESS_LIST` is — a process describes only itself, grants
+  nothing, and reads nothing — and a count of zero withdraws the
+  process's rows, which is what a process does as it tears its caches
+  down.
+
+### What stops a lying process
+
+A reported figure is a claim, and the design treats it as one.
+
+- **It never enters the kernel.** The registry of reported rows lives in
+  `sysinfod`, in user space. The kernel's own `reclaim_class_stats` sums
+  only ledgers it measures itself, and that sum gates a real reclaim
+  decision (the `ramzip` compress-out handoff waits for clean and
+  transform cache residue to drain). Keeping reported rows out of the
+  kernel makes it *structurally impossible* for a process to steer
+  reclaim by inflating its own numbers, rather than merely forbidden.
+- **The identity is the kernel's, not the caller's.** A submitted row
+  must carry `CacheLedgerOrigin::Unset` and a zero `reporter_pid`; a row
+  that pre-empts either is refused. `sysinfod` stamps
+  `CacheLedgerOrigin::SelfReported` and the pid from the caller's
+  kernel-attested `Origin`, so no process can attribute its figures to
+  another or present them as measured. Nor can it claim to *be* the
+  kernel: a submitted row naming `CacheOwnerKind::KernelSubsystem` is
+  refused, because no correct reporter can produce one. The other four
+  owner kinds stay open to it — a userland filesystem driver's cache is
+  genuinely owned by the volume it caches, a per-task cache by its task,
+  and a desktop cache by its seat.
+- **The footprint is bounded and expires.** Rows are keyed by the
+  caller's unforgeable process-instance id and *replace* that process's
+  previous rows, so a process cannot grow its share of the registry by
+  reporting repeatedly; the registry's reporter count is derived from the
+  machine's RAM rather than hand-picked; and a reporter whose instance is
+  no longer live is dropped, so a recycled numeric pid can never inherit
+  a dead process's rows.
+- **It cannot write the audit log.** The submission is ungated, so it
+  emits no audit record — otherwise any process could spam the
+  hash-chained journal by calling it. The privileged *reads* are audited,
+  exactly as their capability gate implies.
+- **It is labelled wherever it is shown.** Every row carries its origin,
+  and `ReclaimClassRecord::self_reported_bytes` says how much of a class
+  total came from reported ledgers, so an operator can see at a glance
+  what is attested and what is claimed.
+
+### How a process reports without polling
+
+`tairix_rt::cachereport` holds the process-wide set of caches. Each time
+round its event loop a program calls `publish_if_due()`, which samples
+its caches and sends a report only when the sample *differs* from the
+last one sent and the minimum interval has elapsed — the comparison is
+the change detection, so there are no dirty flags to forget to set. When
+a change is suppressed by the interval, `wait_deadline_ns()` returns the
+remaining nanoseconds and the program passes them as its `waitset_wait`
+timeout, so exactly one bounded wait is armed and only while something is
+genuinely pending. A process whose caches are unchanged arms nothing at
+all and reports nothing: its last report is still true, because an idle
+process is not changing what it holds.
 
 ## Wire framing
 

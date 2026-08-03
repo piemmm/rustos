@@ -5958,13 +5958,24 @@ rebuildable filesystem cache (`plans/SMARTRAM.md` SMART1 + §6.1):**
 **Done — SMART9 observability through existing diagnostics
 (`plans/SMARTRAM.md` SMART9 + §11; `docs/src/architecture/memory.md`
 §7k):**
-- Internal counters only, no public ABI (no current caller requires
-  one): `CacheAccounting` splits every class ledger into payload and
+- `CacheAccounting` splits every class ledger into payload and
   per-entry bookkeeping metadata (`class_payload_bytes` /
   `class_metadata_bytes`) and adds `pressure_shrinks` / `teardowns` /
   `failures` beside the existing event counters; `MemoryPressure`
   counts entries into each band (`band_entries`, swap-exact per stored
   change).
+- Those counters reach a reader through the audited
+  `CAP_SYSINFO_KERNEL` queries, and the export covers **both** halves of
+  the model. Each cache describes itself with one `CacheLedger` and one
+  conversion to the `CacheLedgerRecord` wire row; the kernel exports its
+  own rows per cache, a process reports the caches only it can see
+  through the ungated self-scoped `CACHE_REPORT`, and `sysinfod` folds
+  the two sets into the per-class `RECLAIM_STATS` totals it also serves
+  per cache as `CACHE_LEDGERS`. Reported rows stay in the service, never
+  the kernel, so a self-reported figure cannot reach a kernel reclaim
+  decision; each is stamped with the caller's attested identity, keyed by
+  its unforgeable process instance, and rendered marked as claimed rather
+  than measured.
 - `tairix_reclaim::audit` owns the subsystem's stable audit events
   in kernel/mem's reserved `2_000..3_000` `EventId` range:
   `RECLAIM_CACHE_REFUSED` (2000) and `RECLAIM_CACHE_POISONED` (2001),

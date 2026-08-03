@@ -85,8 +85,8 @@ use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
-    ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 
@@ -199,8 +199,25 @@ pub struct CachedFs<F> {
     lru_meta: BTreeMap<u64, KeyRef>,
 }
 
-/// The fixed `cache` label this cache's audit records carry.
-const CACHE_LABEL: &str = "clean_fs";
+/// The single source of this cache's label stem. The cache-wide audit
+/// label and both per-pool ledger labels below are built from this one
+/// token, so renaming the cache cannot leave the spellings out of step.
+macro_rules! cache_label {
+    () => {
+        "clean_fs"
+    };
+}
+
+/// The fixed `cache` label this cache's whole-cache audit records carry
+/// (poisoning purges both pools, so it is one event about the cache).
+const CACHE_LABEL: &str = cache_label!();
+
+/// The clean-file-data pool's label: the row it occupies in the per-cache
+/// export, and the label its own classification refusal is logged under.
+const DATA_LABEL: &str = concat!(cache_label!(), ".data");
+
+/// The filesystem-metadata pool's label, the sibling of [`DATA_LABEL`].
+const METADATA_LABEL: &str = concat!(cache_label!(), ".metadata");
 
 impl<F> CachedFs<F> {
     /// The cache's declared candidates: clean file data and filesystem
@@ -247,8 +264,14 @@ impl<F> CachedFs<F> {
         let policies = match (data.classify(), metadata.classify()) {
             (Ok(data), Ok(metadata)) => Some((data, metadata)),
             (data, metadata) => {
-                for refusal in [data.err(), metadata.err()].into_iter().flatten() {
-                    log_cache_refused(sink, CACHE_LABEL, Some(owner), refusal);
+                for (label, refusal) in [
+                    data.err().map(|refusal| (DATA_LABEL, refusal)),
+                    metadata.err().map(|refusal| (METADATA_LABEL, refusal)),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    log_cache_refused(sink, label, Some(owner), refusal);
                 }
                 None
             }
@@ -292,13 +315,36 @@ impl<F> CachedFs<F> {
         &self.accounting
     }
 
-    /// A shared handle to this cache's ledger, for registration with the
-    /// System Information memory-statistics registry. Observation-only:
-    /// the holder gets lock-free reads of the same saturating
-    /// diagnostics this cache keeps.
+    /// This cache's two classified pools described for the System
+    /// Information memory-statistics registry: clean file data and
+    /// filesystem metadata, each carrying a shared handle to the ledger
+    /// above. Observation-only — a holder gets lock-free reads of the
+    /// same saturating diagnostics this cache keeps.
+    ///
+    /// Both are exported, because both are really held: a registry given
+    /// only the file-data pool would report the metadata pool as empty
+    /// while the ledger behind it says otherwise. Each carries its own
+    /// pool's label, so the two rows a mount contributes name the pool
+    /// they measure instead of leaving a reader to infer it from the class
+    /// column; the volume charged separates one mount's rows from
+    /// another's.
+    ///
+    /// `None` when classification refused the cache (it is then poisoned
+    /// and admits nothing, so there is no footprint to attribute — the
+    /// refusal is already in the audit log with its reason).
     #[must_use]
-    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
-        Arc::clone(&self.accounting)
+    pub fn ledgers(&self) -> Option<[CacheLedger; 2]> {
+        let (data, metadata) = self.policies?;
+        Some(
+            [(DATA_LABEL, data), (METADATA_LABEL, metadata)].map(|(label, policy)| {
+                CacheLedger::new(
+                    label,
+                    policy.owner(),
+                    policy.class(),
+                    Arc::clone(&self.accounting),
+                )
+            }),
+        )
     }
 
     /// The cache's grow/shrink bounds.

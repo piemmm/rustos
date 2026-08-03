@@ -1273,17 +1273,26 @@ cached RXE state).
 The reclaimable-cache subsystem is observable through its internal
 counters, the existing structured logging, and — since
 `plans/STRESSTEST.md` ST1 — the capability-gated System Information
-queries `MEMORY_PRESSURE`, `RECLAIM_STATS`, and `RAMZIP_STATS`
-(`CAP_SYSINFO_KERNEL`, audited): no `/proc`, no `/sys`, and no
-text-scrape file. The export is the one arch-neutral memory-statistics
-registry (`kernel/core::memstats::MEM_STATS`): the boot path publishes
-the single system pressure gauge through it, every production cache
-registers its `Arc<CacheAccounting>` ledger at construction
-(observation-only, lock-free reads of saturating diagnostics), and the
-process-global `ramzip` tier's stats feed is installed there by the boot
-path (`memstats::install_global_ramzip_stats`, reading
+queries `MEMORY_PRESSURE`, `RECLAIM_STATS`, `CACHE_LEDGERS`, and
+`RAMZIP_STATS` (`CAP_SYSINFO_KERNEL`, audited): no `/proc`, no `/sys`,
+and no text-scrape file. The kernel's half of the export is the one
+arch-neutral memory-statistics registry
+(`kernel/core::memstats::MEM_STATS`): the boot path publishes the single
+system pressure gauge through it, every production cache registers its
+`CacheLedger` at construction (observation-only, lock-free reads of
+saturating diagnostics), and the process-global `ramzip` tier's stats
+feed is installed there by the boot path
+(`memstats::install_global_ramzip_stats`, reading
 `ramzip::global_stats`, §7p) — reporting a truthful idle all-zero tier
 until one is installed and populated.
+
+The reclaim model has two halves (§7g), and so does the export. Only the
+kernel's caches can be *measured* from outside the process holding them;
+a desktop process's glyph atlases and decoded icon artwork are its own
+heap, invisible to anything else. Left there the class totals would lie
+— `disposable-ui`, the class reclaim starts with, would read zero on a
+desktop holding megabytes of exactly that — so the userland half
+**reports** what it holds, and the two sets are folded into one.
 
 - **Counters.** Every cache instance's `CacheAccounting` (§7g) is the
   per-owner counter surface — each cache is charged to exactly one
@@ -1323,6 +1332,41 @@ until one is installed and populated.
   `AppStore::install_reclaim`), and the unlock path's
   `register_writable_state` / `WritableStateSink` (the writable root's
   pair).
+- **Per cache, not only per class.** A cache describes itself with one
+  shared `tairix_reclaim::CacheLedger` — its label, its `ReclaimOwner`,
+  its class, and a shared handle to the ledger above — and one shared
+  conversion into the `CacheLedgerRecord` wire row, so a kernel row and a
+  reported row cannot be spelled differently. `MemStats` exports its rows
+  through the `CacheLedgers` introspection domain; `sysinfod` folds every
+  row into the per-class `RECLAIM_STATS` totals with the single
+  `fold_cache_ledgers` and serves the breakdown itself as
+  `CACHE_LEDGERS`, so the class total is by construction the sum of its
+  rows. `sysmon`'s `caches` panel renders both.
+- **A process reports its own caches, event-driven.**
+  `tairix_rt::cachereport` holds the process-wide set of caches and
+  submits them through the ungated, self-scoped `CACHE_REPORT` operation
+  — ungated for the same reason `SELF_PROCESS_LIST` is, since a process
+  describes only itself, grants nothing, and reads nothing. It samples on
+  each turn of the owning program's event loop, sends only when the
+  sample differs from the last one sent, and offers a one-shot deadline
+  for a change the rate limit suppressed. An idle process arms nothing:
+  its last report is still true, because a process that is not running is
+  not changing what it holds. There is no timer and no poll loop
+  anywhere on the path.
+- **A reported figure is contained as a claim.** The registry of reported
+  rows lives in `sysinfod`, never the kernel, so it cannot reach
+  `reclaim_class_stats` and therefore cannot steer the `ramzip` handoff
+  (§7h) — structurally, not by convention. A submitted row must leave its
+  origin unset and its pid zero; the service stamps both from the
+  caller's kernel-attested `Origin`, keys each entry by the unforgeable
+  process-instance id so a recycled pid inherits nothing, replaces rather
+  than accumulates, expires an instance that is gone, derives its
+  reporter capacity from the machine's RAM, and emits no audit record on
+  that ungated path (which would otherwise hand every process a way to
+  write the hash-chained journal). Every row carries its origin and
+  `ReclaimClassRecord::self_reported_bytes` carries the claimed share of
+  each class total, so a reader always sees what is attested and what is
+  claimed.
 
 ## 7l. Cross-cache integration and benchmark evidence (SMART10)
 

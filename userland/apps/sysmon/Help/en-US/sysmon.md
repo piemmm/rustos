@@ -12,11 +12,12 @@ sysmon — watch the kernel's memory, caches, and load live
 memory and CPU, read entirely through the System Information API — there
 is no `/proc` to scrape. It shows physical memory and its composition,
 the kernel heap, the memory-pressure band and its recent history, the
-reclaimable-cache ledger with per-class **hit ratios**, the `ramzip`
-compressed memory tier, the pinned-memory aggregate, mounted-volume
-storage usage, per-CPU load, the kernel interrupt table, and a process
-census. It stays usable while the system is under deliberate stress and
-is quiescent between refreshes at idle (the read parks; it never spins).
+reclaimable-cache ledger with per-class **hit ratios** and a per-cache
+breakdown, the `ramzip` compressed memory tier, the pinned-memory
+aggregate, mounted-volume storage usage, per-CPU load, the kernel
+interrupt table, and a process census. It stays usable while the system
+is under deliberate stress and is quiescent between refreshes at idle
+(the read parks; it never spins).
 
 At startup the monitor pins its own memory (`mem_pin`, requiring
 `CAP_MEM_PIN`) so it never stalls on its own page fault-in under the very
@@ -47,7 +48,7 @@ the left so it reads without colour; colour is only reinforcement.
   the three load averages (1/5/15-minute), and the pin state
   (`[pinned]`, or `[unpinned: <reason>]` when the pin was refused).
 - **`Mem`** — the memory bar (see the bar key), followed by the used /
-  total figures (compact `K`/`M`/`G` units), the used percentage, the
+  total figures (compact byte units), the used percentage, the
   kernel-heap size, and — when non-zero — the `ramzip` compressed-store
   and `pinned` figures. The bar shrinks to keep every figure on an
   80-column line, so the figures are never clipped.
@@ -109,10 +110,12 @@ bar above the body.
 
 These are the caches the kernel may hand back to relieve memory pressure
 **without data loss**: every entry is rebuildable from its canonical
-source, so the kernel drops it rather than paging it out. The panel is
-the direct answer to "are the caches doing their job?": each row is one
-reclaim class, aggregated across every registered cache, and carries its
-own **hit ratio**.
+source, so the kernel drops it rather than paging it out. The page is the
+direct answer to "are the caches doing their job?", in two tables: the
+per-class ledger, then the per-cache breakdown behind it.
+
+Each row of the first table is one reclaim class, aggregated across every
+registered cache, and carries its own **hit ratio**.
 
 Columns:
 
@@ -120,6 +123,13 @@ Columns:
 - `entries` — live entries currently held for the class.
 - `cached` — the class's resident footprint: entry payload plus per-entry
   bookkeeping metadata, together.
+- `self%` — the share of `cached` that was **self-reported** rather than
+  kernel-measured: how much of the class total is taken on trust. The
+  kernel measures only the caches registered inside it, so a cache a
+  userland process holds — glyph atlases, icon artwork, cursors — is
+  counted from what that process reports about itself. `0%` means the
+  whole class total is attested; `100%` means none of it is. It reads
+  `-`, never `0%`, for a class holding nothing at all.
 - `hits` — lookups of the class served from cache since boot (the cache
   avoided the canonical source).
 - `misses` — lookups of the class that fell through to the canonical
@@ -138,6 +148,13 @@ Columns:
 
 Counts abbreviate above 99 999 as `k`/`M`/`G`/`T` (decimal thousands, not
 KiB) so a column never widens.
+
+Byte figures abbreviate in binary units: the exact count below a kibibyte,
+then one decimal place with a `K`, `M`, `G`, `T`, `P` or `E` suffix
+(`1.5K`, `986.2M`, `200.0T`). The ladder reaches exbibytes, so the widest
+figure any 64-bit byte count can produce is seven characters and no figure
+ever outgrows its column — a size cannot be shortened the way a name can,
+because a shortened number is a wrong number.
 
 The reclaim classes, in the order the kernel reclaims them under pressure
 (first listed is dropped first, so a cache low in the list survives
@@ -168,6 +185,45 @@ longest):
   windows, health summaries): justified by recovery latency, so it is
   preserved the longest.
 
+### caches — the per-cache breakdown
+
+Beneath the class table, one row per registered cache ledger: the answer
+to "the `disposable-ui` class holds 12 MiB — *which* caches hold it?".
+Kernel-measured ledgers come first, then the ones processes reported for
+themselves; summing the rows of a class reproduces that class's row above
+exactly.
+
+Columns:
+
+- `cache` — the cache's label. A label too long for the column loses its
+  *middle*, never an end: `font.client.glyphs` reads `font.cli~.glyphs`.
+  These names are dotted, and it is usually the leaf that tells two caches
+  in one namespace apart, so both ends are what the column keeps and the
+  `~` marks what it dropped.
+- `owner` — the principal charged for the memory: `kernel` for a kernel
+  subsystem, `vol:<id>` for a filesystem volume, `task:<id>` for a task,
+  `seat:<id>` for a desktop session, `proc` for a userland process. A
+  reported row appends `@<pid>`, the reporting process. An owner too long
+  for the column is elided in the middle like a label (`task:1~551615`),
+  so a shortened id is visibly incomplete — where a silently cut one would
+  read as a different owner.
+- `origin` — where the figures came from: `kernel` for a ledger the
+  kernel measures, `self` for one the holding process reported about
+  itself, `?` for a row the service left unattributed.
+- `class` — the reclaim class every entry of this cache belongs to.
+- `entries`, `cached`, `hit%` — as in the class table, for this one cache.
+
+A `self` row is a **diagnostic**, not an attested measurement: nothing
+outside the holding process can see inside its cache, and a compromised
+process can report whatever it likes. The word is in the row itself, so
+it reads on a monochrome serial console; the notice colour only
+reinforces it. Read `self` rows as claims and `kernel` rows as
+measurements.
+
+A machine with no registered cache says so in one line rather than
+leaving the table blank — and a *refused* query says that instead, so an
+empty table can never be mistaken for "there are no caches".
+
 ### ramzip — the compressed memory tier
 
 `ramzip` compresses cold anonymous pages into a smaller in-RAM store
@@ -195,8 +251,14 @@ instead of paging them out. Its sections:
 ### disks — mounted-volume storage
 
 One `df`-style row per mounted volume: mount point, filesystem type,
-total size, used, available, use percentage, and an ASCII usage bar. A
-volume whose driver reports no capacity shows `capacity unknown` rather
+total size, used, available, use percentage, and an ASCII usage bar.
+
+A mount point too long for its column loses its *middle*, never an end,
+exactly as a cache label does: `/Storage/backup-2024-vol1` reads
+`/Storage/b~2024-vol1`, so two volumes filed side by side are still told
+apart by the leaf that distinguishes them.
+
+A volume whose driver reports no capacity shows `capacity unknown` rather
 than a fabricated size; a surprise-removed or recovery-conflicted volume
 is drawn in the warn rendition and marked (`[unavailable-dirty]`,
 `[unavailable-lost]`, `[recovery-conflict]`). There are no per-device I/O
@@ -225,12 +287,13 @@ process list is `top`'s job; this is the census summary only.
 ### Capabilities
 
 Every figure travels through the System Information API. The kernel-wide
-statistics queries (memory, pressure, caches, `ramzip`, per-CPU load)
-need `CAP_SYSINFO_KERNEL`; the interrupt-lines panel needs
-`CAP_SYSINFO_HW`; the all-process census needs `CAP_SYSINFO_GLOBAL`. A
-caller without one sees that panel's refusal spelled out — never a
-fabricated figure — while the rest of the session continues (fail closed,
-degrade gracefully). Mounted-volume storage is ungated.
+statistics queries (memory, pressure, the cache classes and the per-cache
+breakdown, `ramzip`, per-CPU load) need `CAP_SYSINFO_KERNEL`; the
+interrupt-lines panel needs `CAP_SYSINFO_HW`; the all-process census
+needs `CAP_SYSINFO_GLOBAL`. A caller without one sees that panel's
+refusal spelled out — never a fabricated figure — while the rest of the
+session continues (fail closed, degrade gracefully). Mounted-volume
+storage is ungated.
 
 ## OPTIONS
 

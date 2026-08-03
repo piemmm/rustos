@@ -490,6 +490,12 @@ fn resolve_stats(
         // Reclaimable bytes held — the whole ledger, or one class by its
         // stable name. Unknown class names fail closed.
         ["mem", "reclaim", leaf] => reclaim_bytes_metric(reference, now, transport, leaf),
+        // How much of that same total or class is self-reported rather
+        // than kernel-measured — the trust-boundary companion to the
+        // selector above.
+        ["mem", "reclaim", leaf, "self"] => {
+            reclaim_self_reported_metric(reference, now, transport, leaf)
+        }
         // The compressed tier's stored/logical byte gauges and the bytes
         // it is saving (their difference).
         ["mem", "ramzip", leaf @ ("stored" | "logical" | "saved")] => {
@@ -654,6 +660,44 @@ fn reclaim_bytes_metric(
     };
     let mut name = String::from("mem/reclaim/");
     name.push_str(leaf);
+    gated_metric(
+        reference,
+        now,
+        &name,
+        MetricKind::Gauge,
+        Unit::Bytes,
+        value,
+        ResetBehavior::Never,
+    )
+}
+
+/// The gated `stats:mem/reclaim/*/self` byte gauges: how much of the whole
+/// ledger's (`total`) or one class's resident bytes came from a ledger a
+/// process reported about itself rather than one the kernel measures; an
+/// unknown class name fails closed exactly as [`reclaim_bytes_metric`]
+/// does.
+fn reclaim_self_reported_metric(
+    reference: &ResourceRef,
+    now: Time64,
+    transport: &dyn Transport,
+    leaf: &str,
+) -> Result<ResourceResponse, ResolveInfoError> {
+    let records = query_reclaim_records(transport)?;
+    let value = if leaf == "total" {
+        records.iter().fold(0u64, |acc, record| {
+            acc.saturating_add(record.self_reported_bytes)
+        })
+    } else {
+        let class = reclaim_class_from_name(leaf).ok_or(ResolveInfoError::UnknownSelector)?;
+        let record = records
+            .iter()
+            .find(|record| record.class == class)
+            .ok_or(ResolveInfoError::Malformed)?;
+        record.self_reported_bytes
+    };
+    let mut name = String::from("mem/reclaim/");
+    name.push_str(leaf);
+    name.push_str("/self");
     gated_metric(
         reference,
         now,
@@ -1897,6 +1941,8 @@ mod tests {
     }
 
     /// One reclaim record per class, figures derived from the class id.
+    /// Class 5 additionally carries a self-reported share smaller than its
+    /// total, so a test can tell the two figures apart.
     fn fixture_reclaim() -> Vec<ReclaimClassRecord> {
         (0..RECLAIM_CLASS_COUNT)
             .map(|i| ReclaimClassRecord {
@@ -1911,6 +1957,7 @@ mod tests {
                 failures: 0,
                 hits: (i as u64) * 100,
                 misses: i as u64,
+                self_reported_bytes: if i == 5 { 2000 } else { 0 },
             })
             .collect()
     }
@@ -2899,6 +2946,44 @@ mod tests {
         // Class id 5: 5 * 1000 + 5 * 10.
         assert_eq!(metric.value, 5050);
         assert_eq!(metric.name(), "mem/reclaim/clean-file-data");
+    }
+
+    #[test]
+    fn stats_mem_reclaim_self_reports_the_attested_and_trusted_share() {
+        let fixture = Fixture::new();
+        // Only class 5 (clean-file-data) carries a self-reported share in
+        // the fixture, so the ledger-wide total equals that one class's
+        // share.
+        let response = resolve_str("stats:mem/reclaim/total/self", &fixture).expect("resolves");
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 2000);
+        assert_eq!(metric.unit, Unit::Bytes);
+        assert_eq!(metric.name(), "mem/reclaim/total/self");
+
+        let response =
+            resolve_str("stats:mem/reclaim/clean-file-data/self", &fixture).expect("resolves");
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 2000);
+        assert_eq!(metric.name(), "mem/reclaim/clean-file-data/self");
+
+        // A class with no self-reported bytes truthfully reports zero.
+        let response =
+            resolve_str("stats:mem/reclaim/disposable-ui/self", &fixture).expect("resolves");
+        let ResponsePayload::Metric(metric) = &response.payload else {
+            panic!("expected a metric");
+        };
+        assert_eq!(metric.value, 0);
+
+        // An unknown class name fails closed exactly as the total/class
+        // selector does.
+        assert_eq!(
+            resolve_str("stats:mem/reclaim/page-cache/self", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
     }
 
     #[test]

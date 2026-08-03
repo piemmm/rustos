@@ -330,6 +330,13 @@ The open items, in priority order:
   fixed the *decode* half: an undefined class word stays `None` end to end),
   recorded here rather than fixed inline because the remaining half widens
   the block trait across every implementor. Detail below.
+- **D22 — `netstack-dhcp-qemu-riscv64` intermittent stall under the full
+  pipeline (OPEN).** The vertical hits its 360 s deadline when the guest
+  matrix shares the host with the rest of `cargo xtask ci`, having stopped at
+  `driver-store catalogue unavailable`. The re-evaluation wakeup and the
+  root-unlock independence are both cleared by code inspection, and its
+  budget was already once enlarged for this same reason — so the fix is
+  bounded guest concurrency or a real completion signal, never a third bump.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -339,8 +346,9 @@ readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
 (closed), D19/D20 were the `autoload-input-qemu-aarch64` count-drift
 (closed: marker-based sequencing + file-manager choreography moved to host
-tests), and D21 is an ABI-honesty gap — a layer asserting a hardware fact
-nobody reported. Do not collapse the open items into one change; land each on
+tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
+reported — and D22 is a load-dependent QEMU-harness timeout whose mechanism is
+not yet named. Do not collapse the open items into one change; land each on
 its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
@@ -1206,6 +1214,77 @@ regression test composes an array over a member with an unreadable class
 word and asserts both halves — the composition is served the cautious
 envelope, and its mount reports `medium() == None`; and `served_as` remains
 the only place an unknown is turned into a concrete envelope (§2.2).
+
+---
+
+## D22 — `netstack-dhcp-qemu-riscv64` intermittent stall under the full pipeline (OPEN)
+
+**Symptom.** During a whole-project `cargo xtask ci` on a 22-thread host the
+vertical hit its 360 s deadline:
+
+```
+xtask: test --qemu (tairix-test-netstack-dhcp-qemu-riscv64) TIMEOUT after 360s
+```
+
+The same enrolment passes run alone, and the whole `cargo xtask test --qemu`
+matrix passes standalone on the same host. It fails only when the guest matrix
+shares the machine with the rest of the pipeline.
+
+**What the transcript shows.** The guest boots, brings up `sysinfod`,
+`netstack`, `devmgr`, and `seatmgr`, then logs
+`id=13005 driver-store catalogue unavailable; retrying on re-evaluation
+task=6` and never reaches any of the vertical's witnesses
+(`NETSTACK_BOUND`, `DHCP_LEASE_ACQUIRED`, `INBOUND_ECHO_SERVED`). The NIC
+driver is therefore never autoloaded and no lease is ever taken.
+
+**Ruled out by reading the code** (so the search does not restart here):
+
+- *Not* a lost wakeup on the re-evaluation trigger. `devmgr` parks in
+  `hw_tree_wait(last_generation, u64::MAX)`; the syscall compares against the
+  live monotonic `HwTreeStore` generation *before* registering, and re-checks
+  it after registering and before parking. It is level-triggered against a
+  counter that only increases, not an edge-delivered signal, so a
+  `HW_TREE.bump()` at any point is visible on the next read. There is one
+  global `HW_TREE`, and `serve_system_store` bumps it precisely when the
+  driver-store endpoint binds.
+- *Not* the failed root unlock. `finish_unlock` spawns the passphrase prompt
+  as its own service task and proceeds unconditionally to
+  `install_system_mount` and `serve_driver_store`, so `console_unreadable`
+  shares no control-flow dependency with the `/System` bind — as the
+  vertical's own docs claim.
+- *Not* fixable by enlarging the budget. This enrolment's budget was already
+  raised once (240 s → 360 s) for this same reason. Making a problem stop
+  happening by growing a limit is mitigation, not a structural control, and
+  repeating it here would just buy the next quiet failure.
+
+**What is not yet known.** Whether the guest is *progressing proportionally
+slower* (starved of TCG host time, so the fixed ceiling is simply the wrong
+shape) or *genuinely stalled at a fixed point*. The transcript cannot
+distinguish them: the harness persists whatever serial output existed when it
+killed the guest, and this vertical is silent-by-design after boot — it waits
+for the host peer's echo campaign rather than narrating.
+
+**Evidence that would settle it.** Re-run the full pipeline capturing
+wall-clock timestamps per boot-audit event, and compare the guest's logical
+progress rate against a lone run. Proportional slowdown indicts the budget's
+*shape*; a fixed stall point re-opens the hunt for a real defect.
+
+**Structural fix, once that is known.** One of the two the charter admits for
+a load-dependent timeout — never a third budget bump:
+
+- *Bounded concurrency.* `qemu_host_budget_for` sizes the guest matrix at a
+  third of the host's logical CPUs on the assumption the matrix owns the
+  machine. Inside the full pipeline it does not. The budget must account for
+  the load the rest of the pipeline places on the host, so a guest is never
+  starved below the budget it was sized against.
+- *A completion signal.* Replace the wall-clock ceiling with progress the
+  guest actually reports, so a slow-but-advancing run cannot be killed for
+  being slow — the inactivity budget already works this way; the absolute
+  deadline does not.
+
+**Done when:** the mechanism is named with evidence, the fix is one of the two
+above, and the vertical survives the full pipeline repeatedly on a loaded
+host. A green re-run is not a fix and does not close this item.
 
 ---
 

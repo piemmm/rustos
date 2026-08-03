@@ -54,11 +54,11 @@ use tairix_abi::switchboard_ipc::{
     TrayTaskName,
 };
 use tairix_abi::sysinfo::{
-    decode_reply, encode_reply_ok, CpuLoadRecord, CpuLoadRequest, IntrospectDomain,
-    KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
-    ProcessRecord, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-    SeatListRequest, SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime,
-    SYSINFO_REPLY_STATUS_LEN,
+    decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
+    CacheReportRequest, CpuLoadRecord, CpuLoadRequest, IntrospectDomain, KernelMemoryStats,
+    MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
+    RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::users_admin::{
@@ -191,6 +191,35 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
         let redecoded = ReclaimClassRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
+    }
+    if let Ok(req) = CacheLedgerListRequest::from_bytes(bytes) {
+        let redecoded = CacheLedgerListRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(req) = CacheReportRequest::from_bytes(bytes) {
+        let redecoded = CacheReportRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = CacheLedgerRecord::from_bytes(bytes) {
+        let redecoded = CacheLedgerRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+        // A row that decoded is a row the whole system will fold and
+        // render, so the label must already be renderable and the fold
+        // must survive it — an accepted record can never be a shape a
+        // later stage has to defend against a second time.
+        assert!(rec.label().is_ascii() && !rec.label().is_empty());
+        let totals = fold_cache_ledgers(&[rec, rec]);
+        let total = totals
+            .get(usize::from(rec.class))
+            .expect("an accepted record's class indexes the fold");
+        assert_eq!(
+            total.payload_bytes,
+            rec.payload_bytes.saturating_mul(2),
+            "the fold must saturate rather than wrap"
+        );
     }
     if let Ok(stats) = RamzipStats::from_bytes(bytes) {
         let redecoded = RamzipStats::from_bytes(&stats.to_le_bytes())
@@ -811,6 +840,38 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
         reserved: 0,
     }
     .to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
+        }
+    }
+}
+
+#[test]
+fn structured_cache_ledger_inputs_with_corrupted_fields_never_panic() {
+    // A cache-ledger row is 128 bytes with a validated label, so a random
+    // short input will essentially never produce one; only a bit-flip sweep
+    // from a well-formed row actually walks its accept/reject boundary. It
+    // is worth walking: on a report submission every one of these fields
+    // arrives from another process.
+    let mut row = CacheLedgerRecord::new(
+        b"session.desktop-artwork",
+        tairix_abi::sysinfo::CacheOwnerKind::DesktopSession,
+        1,
+        0,
+    )
+    .expect("a well-formed cache-ledger row encodes");
+    row.origin = tairix_abi::sysinfo::CacheLedgerOrigin::SelfReported;
+    row.reporter_pid = 41;
+    row.payload_bytes = u64::MAX - 1;
+    row.metadata_bytes = 4096;
+    row.entries = 12;
+    row.hits = 900;
+    row.misses = 100;
+
+    let mut base = row.to_le_bytes();
     for byte in 0..base.len() {
         for bit in 0..8u32 {
             base[byte] ^= 1 << bit;

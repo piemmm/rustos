@@ -23,9 +23,9 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureBand, MemoryPressureStats, MemoryTotal, ProcessRecord, ProcessState,
-    ReclaimClassRecord, ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+    CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
+    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
+    ProcessRecord, ProcessState, ResourceLimitRecord, SystemIdentity, Uptime, UserDirectoryRecord,
     CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE,
     RESOURCE_LIMITS_REPORT_LEN,
 };
@@ -33,7 +33,7 @@ use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::TaskId as SecTaskId;
-use tairix_reclaim::{PressureBand, ReclaimClass};
+use tairix_reclaim::PressureBand;
 
 use crate::bootinfo::KernelArch;
 use crate::fs::FilesystemService;
@@ -479,35 +479,16 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         Ok(total.to_le_bytes().to_vec())
     }
 
-    fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        // One record per reclaim class, aggregated across every
-        // registered live cache ledger; the wire class id is the class's
-        // index, pinned equal across `lib/abi` and `kernel/mem` by the
+    fn cache_ledgers(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        // One row per cache this kernel measures, each carrying the
+        // cache's own identity; the wire class id is the class's index,
+        // pinned equal across `lib/abi` and `kernel/mem` by the
         // `reclaim_classes_match_the_abi_registry` test below.
-        let classes = ReclaimClass::ALL;
-        let count = classes.len() as u64;
-        let first = offset.min(count);
-        let last = first.saturating_add(max_records as u64).min(count);
-        let mut out = Vec::new();
-        for index in first..last {
-            let class = classes[usize::try_from(index).unwrap_or(0)];
-            let stats = crate::memstats::MEM_STATS.reclaim_class_stats(class);
-            let record = ReclaimClassRecord {
-                class: u8::try_from(index).unwrap_or(0),
-                reserved: [0u8; 7],
-                payload_bytes: stats.payload_bytes,
-                metadata_bytes: stats.metadata_bytes,
-                entries: stats.entries,
-                refusals: stats.refusals,
-                pressure_shrinks: stats.pressure_shrinks,
-                teardowns: stats.teardowns,
-                failures: stats.failures,
-                hits: stats.hits,
-                misses: stats.misses,
-            };
-            out.extend_from_slice(&record.to_le_bytes());
-        }
-        Ok(out)
+        Ok(cache_ledger_page(
+            &crate::memstats::MEM_STATS.cache_ledger_records(),
+            offset,
+            max_records,
+        ))
     }
 
     fn ramzip(&self) -> Result<Vec<u8>, Errno> {
@@ -719,10 +700,29 @@ fn user_directory_page(
     Ok(out)
 }
 
+/// Encode one page of the per-cache ledger export: at most `max_records`
+/// of `records` starting at `offset`, packed little-endian back-to-back.
+///
+/// `records` arrives in the registry's registration order, which no
+/// running cache changes, so a client paging the list sees each row once.
+/// An `offset` past the last row — including one too large for this
+/// target's `usize` — yields the empty page every paged domain terminates
+/// with, never an error.
+fn cache_ledger_page(records: &[CacheLedgerRecord], offset: u64, max_records: usize) -> Vec<u8> {
+    let total = records.len();
+    let first = usize::try_from(offset).unwrap_or(total).min(total);
+    let last = first.saturating_add(max_records).min(total);
+    let mut out = Vec::new();
+    for record in &records[first..last] {
+        out.extend_from_slice(&record.to_le_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::counts_toward_load;
-    use tairix_abi::sysinfo::{PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
+    use super::{cache_ledger_page, counts_toward_load, CacheLedgerRecord};
+    use tairix_abi::sysinfo::{CacheOwnerKind, PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT};
     use tairix_kernel_sched_api::TaskState;
     use tairix_reclaim::ReclaimClass;
 
@@ -736,6 +736,84 @@ mod tests {
         for (index, class) in ReclaimClass::ALL.iter().enumerate() {
             assert_eq!(class.index(), index);
         }
+    }
+
+    /// The labels of the three rows [`ledger_rows`] builds, in order — what
+    /// a decoded page is checked against.
+    const LEDGER_LABELS: [&str; 3] = ["clean_fs.data", "clean_fs.metadata", "launch"];
+
+    /// Three rows whose labels, owners, and figures all differ, so a
+    /// decoded page proves *which* rows it carries, not merely how many.
+    fn ledger_rows() -> Vec<CacheLedgerRecord> {
+        let mut rows = Vec::new();
+        for (index, label) in LEDGER_LABELS.iter().enumerate() {
+            let owner_id = u64::try_from(index).expect("three rows fit");
+            let mut record = CacheLedgerRecord::new(
+                label.as_bytes(),
+                CacheOwnerKind::FilesystemVolume,
+                owner_id,
+                0,
+            )
+            .expect("renderable label");
+            record.payload_bytes = 4096 * (owner_id + 1);
+            rows.push(record);
+        }
+        rows
+    }
+
+    /// Decode a page back into the rows it carries, refusing a page whose
+    /// length is not a whole number of records — a client indexes by the
+    /// fixed stride, so a partial tail row would be read as garbage.
+    fn decode(page: &[u8]) -> Vec<CacheLedgerRecord> {
+        assert_eq!(
+            page.len() % CacheLedgerRecord::WIRE_LEN,
+            0,
+            "whole records only"
+        );
+        page.chunks(CacheLedgerRecord::WIRE_LEN)
+            .map(|chunk| CacheLedgerRecord::from_bytes(chunk).expect("decodes"))
+            .collect()
+    }
+
+    #[test]
+    fn the_cache_ledger_page_honours_offset_and_limit() {
+        let rows = ledger_rows();
+
+        // A limit covering the registry carries every row unchanged: the
+        // identity, owner, and figures a client reads are the ones the
+        // registry holds.
+        assert_eq!(decode(&cache_ledger_page(&rows, 0, rows.len())), rows);
+
+        // A limit truncates from the front; the offset then resumes from
+        // exactly where the previous page stopped, so a paging client sees
+        // every row once and none twice.
+        let first = decode(&cache_ledger_page(&rows, 0, 2));
+        let second = decode(&cache_ledger_page(&rows, 2, 2));
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1);
+        let paged: Vec<&str> = first
+            .iter()
+            .chain(&second)
+            .map(CacheLedgerRecord::label)
+            .collect();
+        assert_eq!(paged, LEDGER_LABELS);
+
+        // A limit of nothing asks for nothing, and is not an error.
+        assert!(cache_ledger_page(&rows, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn the_cache_ledger_page_terminates_past_the_last_row() {
+        let rows = ledger_rows();
+        let total = u64::try_from(rows.len()).expect("three rows fit");
+        // At the end, one past it, and an offset no `usize` on a 32-bit
+        // target could hold: each is the empty terminator every paged
+        // domain ends with, never an error and never a wrapped row.
+        for offset in [total, total + 1, u64::MAX] {
+            assert!(cache_ledger_page(&rows, offset, rows.len()).is_empty());
+        }
+        // An empty registry is the same terminator from the first read.
+        assert!(cache_ledger_page(&[], 0, 8).is_empty());
     }
 
     /// The pressure export's band vocabulary is the kernel gauge's own

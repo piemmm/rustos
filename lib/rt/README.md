@@ -164,6 +164,35 @@ ungated `SysinfoQueryId::MEMORY_PRESSURE_BAND` query on wake, and calls
 `pressure::report` — event-driven throughout, never polled (`AGENTS.md`
 §2.23).
 
+## Reporting the process's caches (`cachereport` module)
+
+The band comes *in* through `pressure`; the figures go *out* through
+`tairix_rt::cachereport`. A process's heap is its own, so nothing outside
+it can measure what its glyph atlas or its decoded icon artwork is
+holding — left unreported, the `disposable-ui` reclaim class would read
+zero on a monitor while a desktop held megabytes of exactly that. Each
+cache hands the runtime a `tairix_reclaim::CacheLedger` with
+`cachereport::register`, and the runtime submits the set through the
+ungated, self-scoped `SysinfoQueryId::CACHE_REPORT` operation. Being
+ungated costs nothing: the process describes only itself, grants nothing,
+and reads nothing, and the service stamps the kernel-attested identity
+rather than believing the caller's.
+
+The owning program drives it, for the same reason it drives `pressure`.
+Once per turn of its event loop it calls `cachereport::publish_if_due()`,
+which samples the registered caches and sends only when the sample
+*differs* from the last one sent and the minimum interval has elapsed —
+the comparison is the change detection, so there is no dirty flag to
+forget. When the interval suppresses a change,
+`cachereport::wait_deadline_ns()` returns the nanoseconds remaining and
+the program folds that into its wait timeout, so exactly one bounded wait
+is armed and only while something is genuinely pending. An idle process
+arms nothing and sends nothing: its last report is still true, because a
+process that is not running is not changing what it holds. There is no
+timer and no poll loop on the path. `cachereport::withdraw()` removes the
+process's rows as it tears its caches down, so a monitor never shows
+memory nobody holds.
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled

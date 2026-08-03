@@ -216,20 +216,40 @@ impl DesktopShell {
         pressure: &'static (dyn PressureGauge + 'static),
         sink: &'static (dyn Sink + Sync),
     ) -> Self {
+        let artwork = artwork_cache(
+            "session.desktop-artwork",
+            seat,
+            output_bytes,
+            pressure,
+            sink,
+        );
+        let icons = icon_cache(seat, output_bytes, pressure, sink);
+        let cursors = cursor_cache(seat, output_bytes, pressure, sink);
+        // All three caches are *this* process's memory: the taskbar's glyphs
+        // and the window manager's cursors are composed here, out of the seat
+        // and output size only the session knows, and the crates that define
+        // them are libraries linked into this binary rather than processes of
+        // their own — so the session is what a cache monitor must charge, and
+        // this is the one point that knows all three. A cache declared
+        // unclassifiable has no ledger and simply contributes no row.
+        //
+        // Only the running session binary reports: the host-testable
+        // construction path the unit tests share links no reporter at all.
+        #[cfg(freestanding)]
+        for ledger in [artwork.ledger(), icons.ledger(), cursors.ledger()]
+            .into_iter()
+            .flatten()
+        {
+            tairix_rt::cachereport::register(ledger);
+        }
         Self {
             session: DesktopSession::new(config),
             router: SessionInputRouter::new(),
             presenter: TaskbarPresenter::new(),
-            renderer: TaskbarRenderer::new(icon_cache(seat, output_bytes, pressure, sink)),
+            renderer: TaskbarRenderer::new(icons),
             tasks: TaskBridge::new(),
-            cursor: CursorController::new(cursor_cache(seat, output_bytes, pressure, sink)),
-            artwork: artwork_cache(
-                "session.desktop-artwork",
-                seat,
-                output_bytes,
-                pressure,
-                sink,
-            ),
+            cursor: CursorController::new(cursors),
+            artwork,
             artwork_reader: Box::new(NoArtworkSeam),
             artwork_rasteriser: Box::new(NoArtworkSeam),
             active_frame: None,

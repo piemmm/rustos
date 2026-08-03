@@ -1,10 +1,10 @@
 //! The shared kernel-statistics fetches (`plans/STRESSTEST.md` ST1/ST4).
 //!
-//! The four kernel-wide observability queries — the memory-pressure gauge,
-//! the reclaim ledger, the `ramzip` tier counters, and the per-CPU scheduler
-//! load — are consumed by both the `info:`/`stats:` resolver
-//! ([`mod@crate::resolve`]) and the `sysmon` monitor, so the fetch + fail-closed
-//! decode lives here once. The paged walks are the generic
+//! The kernel-wide observability queries — the memory-pressure gauge, the
+//! reclaim ledger and its per-cache breakdown, the `ramzip` tier counters,
+//! and the per-CPU scheduler load — are consumed by both the `info:`/`stats:`
+//! resolver ([`mod@crate::resolve`]) and the `sysmon` monitor, so the fetch +
+//! fail-closed decode lives here once. The paged walks are the generic
 //! [`walk_pages`](crate::list) the process and mount lists use; the scalar
 //! queries share its convention that a structurally invalid reply is
 //! [`Errno::BadMagic`], never a partial decode.
@@ -18,9 +18,9 @@
 //! document why they need no capability.
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureBand,
-    MemoryPressureStats, MemoryTotal, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-    SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, IrqListRequest,
+    IrqRecord, MemoryPressureBand, MemoryPressureStats, MemoryTotal, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -47,6 +47,14 @@ pub const RECLAIM_PAGE: u16 = {
         RECLAIM_CLASS_COUNT as u16
     }
 };
+
+/// Number of [`CacheLedgerRecord`]s requested per cache-ledger page.
+///
+/// Unlike the closed reclaim-class set, the number of registered caches is
+/// open-ended (every reclaimable cache in the system, kernel and
+/// self-reported alike), so [`for_each_cache_ledger`] genuinely walks
+/// multiple pages on a busy desktop.
+pub const CACHE_LEDGER_PAGE: u16 = 64;
 
 /// Query the live memory-pressure snapshot
 /// ([`SysinfoQueryId::MEMORY_PRESSURE`]).
@@ -167,6 +175,45 @@ pub fn for_each_reclaim_class(
     )
 }
 
+/// Page through the per-cache ledger breakdown behind the reclaim classes
+/// ([`SysinfoQueryId::CACHE_LEDGERS`]) and hand each decoded
+/// [`CacheLedgerRecord`] to `sink`, kernel rows first then reported rows, in
+/// the service's stable order.
+///
+/// Summing the rows this walk yields for one class reproduces that class's
+/// [`ReclaimClassRecord`] exactly (`fold_cache_ledgers`); this is the
+/// per-cache detail behind that per-class total, so a caller can see which
+/// specific cache holds a class's bytes.
+///
+/// # Errors
+///
+/// As [`for_each_reclaim_class`].
+pub fn for_each_cache_ledger(
+    transport: &dyn Transport,
+    mut sink: impl FnMut(&CacheLedgerRecord) -> Result<(), Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        SysinfoQueryId::CACHE_LEDGERS,
+        CacheLedgerRecord::WIRE_LEN,
+        CACHE_LEDGER_PAGE,
+        |offset, limit| {
+            CacheLedgerListRequest {
+                offset,
+                limit,
+                flags: 0,
+            }
+            .to_le_bytes()
+            .to_vec()
+        },
+        |chunk| {
+            let record = CacheLedgerRecord::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
 /// Page through the per-CPU scheduler load figures
 /// ([`SysinfoQueryId::CPU_LOAD`]) and hand each decoded [`CpuLoadRecord`]
 /// to `sink`, in ascending CPU order.
@@ -257,8 +304,9 @@ pub fn for_each_irq(
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_cpu_load, for_each_irq, for_each_reclaim_class, memory_pressure,
-        memory_total_bytes, ramzip_stats, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
+        for_each_cache_ledger, for_each_cpu_load, for_each_irq, for_each_reclaim_class,
+        memory_pressure, memory_total_bytes, ramzip_stats, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE,
+        IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -266,19 +314,21 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
+        CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
         CpuLoadRecord, CpuLoadRequest, IrqListRequest, IrqRecord, MemoryPressureStats, MemoryTotal,
         RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
         RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::Errno;
 
-    /// An in-memory `sysinfod` stand-in answering the four kernel-stats
-    /// queries from fixed data, decoding each request exactly as the real
-    /// service does.
+    /// An in-memory `sysinfod` stand-in answering the kernel-stats queries
+    /// from fixed data, decoding each request exactly as the real service
+    /// does.
     struct Fixture {
         pressure: MemoryPressureStats,
         ramzip: RamzipStats,
         reclaim: Vec<ReclaimClassRecord>,
+        caches: Vec<CacheLedgerRecord>,
         loads: Vec<CpuLoadRecord>,
         irqs: Vec<IrqRecord>,
         deny: Option<SysinfoQueryId>,
@@ -310,6 +360,39 @@ mod tests {
                     ..RamzipStats::default()
                 },
                 reclaim,
+                caches: alloc::vec![
+                    {
+                        let mut row = CacheLedgerRecord::new(
+                            b"fontd-glyphs",
+                            CacheOwnerKind::KernelSubsystem,
+                            0,
+                            0,
+                        )
+                        .unwrap();
+                        row.origin = CacheLedgerOrigin::Kernel;
+                        row.payload_bytes = 4096;
+                        row.entries = 4;
+                        row.hits = 40;
+                        row.misses = 4;
+                        row
+                    },
+                    {
+                        let mut row = CacheLedgerRecord::new(
+                            b"taskbar-icons",
+                            CacheOwnerKind::UserlandProcess,
+                            0,
+                            0,
+                        )
+                        .unwrap();
+                        row.origin = CacheLedgerOrigin::SelfReported;
+                        row.reporter_pid = 77;
+                        row.payload_bytes = 2048;
+                        row.entries = 2;
+                        row.hits = 10;
+                        row.misses = 1;
+                        row
+                    },
+                ],
                 irqs: alloc::vec![
                     IrqRecord {
                         line: 27,
@@ -385,6 +468,12 @@ mod tests {
                 SysinfoQueryId::IRQ_LIST => {
                     let req = IrqListRequest::from_bytes(payload)?;
                     Ok(page(&self.irqs, req.offset, req.limit, |r| {
+                        r.to_le_bytes().to_vec()
+                    }))
+                }
+                SysinfoQueryId::CACHE_LEDGERS => {
+                    let req = CacheLedgerListRequest::from_bytes(payload)?;
+                    Ok(page(&self.caches, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     }))
                 }
@@ -607,6 +696,63 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::IRQ_LIST);
         assert_eq!(
             for_each_irq(&fixture, |_| Ok(())),
+            Err(ListError::Call(CallError::PermissionDenied))
+        );
+    }
+
+    #[test]
+    fn cache_ledger_walk_yields_kernel_and_reported_rows() {
+        let fixture = Fixture::new();
+        let seen = RefCell::new(Vec::new());
+        for_each_cache_ledger(&fixture, |record| {
+            seen.borrow_mut().push(*record);
+            Ok(())
+        })
+        .expect("walk");
+        let got = seen.into_inner();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].label(), "fontd-glyphs");
+        assert_eq!(got[0].origin, CacheLedgerOrigin::Kernel);
+        assert_eq!(got[0].reporter_pid, 0);
+        assert_eq!(got[1].label(), "taskbar-icons");
+        assert_eq!(got[1].origin, CacheLedgerOrigin::SelfReported);
+        assert_eq!(got[1].reporter_pid, 77);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::CACHE_LEDGERS]
+        );
+    }
+
+    #[test]
+    fn cache_ledger_walk_pages_until_short() {
+        let mut fixture = Fixture::new();
+        fixture.caches.clear();
+        for i in 0..=u32::from(CACHE_LEDGER_PAGE) {
+            let mut label = alloc::format!("cache-{i}");
+            label.truncate(32);
+            let mut row =
+                CacheLedgerRecord::new(label.as_bytes(), CacheOwnerKind::KernelSubsystem, 0, 0)
+                    .unwrap();
+            row.origin = CacheLedgerOrigin::Kernel;
+            fixture.caches.push(row);
+        }
+        let count = RefCell::new(0usize);
+        for_each_cache_ledger(&fixture, |_| {
+            *count.borrow_mut() += 1;
+            Ok(())
+        })
+        .expect("walk");
+        assert_eq!(*count.borrow(), usize::from(CACHE_LEDGER_PAGE) + 1);
+        // Two pages: the full page plus the short trailer.
+        assert_eq!(fixture.seen.borrow().len(), 2);
+    }
+
+    #[test]
+    fn cache_ledger_walk_denial_fails_closed() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::CACHE_LEDGERS);
+        assert_eq!(
+            for_each_cache_ledger(&fixture, |_| Ok(())),
             Err(ListError::Call(CallError::PermissionDenied))
         );
     }

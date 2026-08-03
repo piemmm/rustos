@@ -33,6 +33,8 @@
 //! * [`events`] — stable [`tairix_log::EventId`] constants (`8000` range).
 //! * [`source`] — the [`SysinfoSource`] data seam, the authenticated
 //!   [`Caller`], and the [`ProcessScope`] selector.
+//! * [`reporters`] — the [`CacheLedgerRegistry`], `sysinfod`'s own record of
+//!   the cache ledgers userland processes report for their own caches.
 //! * [`service`] — the [`serve`] entry point and its request pipeline.
 //!
 //! # Layering
@@ -48,8 +50,13 @@
 extern crate alloc;
 
 pub mod events;
+pub mod reporters;
 pub mod service;
 pub mod source;
 
+#[cfg(test)]
+mod testing;
+
+pub use reporters::CacheLedgerRegistry;
 pub use service::serve;
 pub use source::{Caller, ProcessScope, SysinfoSource};

@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 
 use tairix_log::Sink;
 use tairix_raster::Surface;
-use tairix_reclaim::{disposable_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
+use tairix_reclaim::{disposable_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache};
 
 use crate::glyph::IconKind;
 
@@ -240,6 +240,19 @@ impl ArtworkCache {
     #[must_use]
     pub fn charged_bytes(&self) -> usize {
         self.entries.charged_bytes()
+    }
+
+    /// A shared handle to this cache's ledger, for the owning process to
+    /// register with its process-wide cache reporter.
+    ///
+    /// This crate stays free of a runtime dependency deliberately: a cache
+    /// this library merely wraps is registered by the process that built
+    /// it, not by the library. `None` only for a cache declared
+    /// unclassifiable, which retains nothing and so has no footprint to
+    /// report.
+    #[must_use]
+    pub fn ledger(&self) -> Option<CacheLedger> {
+        self.entries.ledger()
     }
 
     /// The artwork for an arbitrary asset `path` at `side` pixels (an

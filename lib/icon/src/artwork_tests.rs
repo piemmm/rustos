@@ -241,6 +241,13 @@ fn trim_under_normal_pressure_releases_nothing() {
 }
 
 #[test]
+fn ledger_forwards_the_wrapped_caches_ledger() {
+    let c = cache();
+    let ledger = c.ledger().expect("a classified cache has a ledger");
+    assert_eq!(ledger.label(), "test.icon-artwork");
+}
+
+#[test]
 fn every_shipped_asset_is_recognised_and_within_the_cap() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
     let mut count = 0usize;

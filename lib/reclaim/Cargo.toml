@@ -15,13 +15,23 @@ publish.workspace = true
 # for a kernel cache and a desktop one.
 tairix-log = { path = "../log", version = "=0.0.0" }
 
+# The System Information wire record a cache's ledger is sampled into
+# (`src/ledger.rs`). The kernel's statistics registry and the userland
+# runtime's reporter both publish that record and neither may depend on
+# the other, so the one conversion lives beside the model that defines a
+# class and an owner. No new edge in the graph: `tairix-log` above already
+# depends on the ABI vocabulary, and the ABI crate itself depends on
+# nothing.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
 [lints]
 workspace = true
 
 # Nothing else, on purpose. The reclaimable-memory model is the shared
 # vocabulary the kernel memory manager *and* the userland desktop session
 # both classify their caches against, so it sits near the bottom of the
-# layering and is depended on, never depends. Anything platform-specific
+# layering: the only crates it names are the two that sit below it, the
+# structured-logging surface and the ABI vocabulary. Anything platform-specific
 # (the physical frame allocator behind the kernel's live gauge, the
 # `ramzip` handoff ordering) stays with its owner and plugs in through the
 # seams defined here.

@@ -56,8 +56,8 @@ use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
-    CacheCandidate, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost, ReclaimClass,
-    ReclaimOwner, ReclaimRule, Sensitivity,
+    CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 use zeroize::Zeroize;
 
@@ -189,7 +189,12 @@ impl TransformClusterCache {
         );
         // Every production transform cache registers its ledger with the
         // System Information memory-statistics registry (observation-only).
-        tairix_kernel_core::memstats::MEM_STATS.register_ledger(cache.accounting_shared());
+        // A `None` means classification refused the cache at birth (it is
+        // then poisoned and admits nothing), so there is nothing to
+        // register — the refusal is already in the audit log.
+        if let Some(ledger) = cache.ledger() {
+            tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+        }
         Box::new(cache)
     }
 
@@ -199,21 +204,30 @@ impl TransformClusterCache {
         &self.accounting
     }
 
-    /// A shared handle to this cache's ledger, for registration with the
-    /// System Information memory-statistics registry. Observation-only:
-    /// the holder gets lock-free reads of the same saturating
-    /// diagnostics this cache keeps.
-    #[must_use]
-    pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
-        Arc::clone(&self.accounting)
-    }
-
     /// The owner the cache's memory is charged to, or `None` when
     /// classification refused the cache (it is then poisoned and admits
     /// nothing).
     #[must_use]
     pub fn owner(&self) -> Option<ReclaimOwner> {
         self.policy.map(CachePolicy::owner)
+    }
+
+    /// This cache described for the System Information memory-statistics
+    /// registry: its label, owner, and class, plus a shared handle to the
+    /// ledger above.
+    ///
+    /// `None` when classification refused the cache (it is then poisoned
+    /// and admits nothing, so there is no footprint to attribute — the
+    /// refusal is already in the audit log with its reason).
+    #[must_use]
+    pub fn ledger(&self) -> Option<CacheLedger> {
+        let policy = self.policy?;
+        Some(CacheLedger::new(
+            CACHE_LABEL,
+            policy.owner(),
+            policy.class(),
+            Arc::clone(&self.accounting),
+        ))
     }
 
     /// The next unique recency tick.

@@ -47,7 +47,10 @@ The rows are sorted by `%CPU`, biggest consumer first, and carry:
   account directory; the numeric uid stands in when the name cannot be
   resolved.
 - `SIZE` — the memory mapped in the process's address space (image,
-  stack, and heap alike).
+  stack, and heap alike), in binary units: the exact count below a
+  kibibyte, then one decimal place with a `K`, `M`, `G`, `T`, `P` or `E`
+  suffix (`4.0K`, `986.2M`, `2.0G`). The ladder reaches exbibytes, so the
+  figure always fits its column.
 - `S` — the state letter: `R` running (green), `r` runnable, waiting
   for a CPU (cyan), `S` sleeping, `T` stopped (yellow), `Z` zombie
   (magenta). Colours appear on a colour terminal only; the letter

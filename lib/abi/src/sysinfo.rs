@@ -413,6 +413,48 @@ impl SysinfoQueryId {
     /// when composing an array.
     pub const RAID_MEMBERS: Self = Self(31);
 
+    /// Read the reclaimable-cache ledger one *cache at a time*: one
+    /// [`CacheLedgerRecord`] per registered cache — its label, its owner,
+    /// its class, whether the figures are kernel-measured or self-reported,
+    /// and the same nine figures [`Self::RECLAIM_STATS`] aggregates — paged
+    /// by a [`CacheLedgerListRequest`].
+    ///
+    /// This is the breakdown behind the class totals: a class row says
+    /// "disposable UI holds 12 MiB", and these rows say which caches hold
+    /// it — the one system-wide glyph-rasterisation cache in the font
+    /// service, the per-process glyph client caches, the desktop's icon
+    /// artwork, the kernel's block and filesystem caches. Summing every row
+    /// of a class reproduces that class's [`ReclaimClassRecord`] exactly.
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited, exactly like
+    /// [`Self::RECLAIM_STATS`]: naming every cache in the machine, with the
+    /// process holding it, is cross-principal operational state.
+    pub const CACHE_LEDGERS: Self = Self(32);
+
+    /// Publish the calling process's **own** cache ledgers so they appear
+    /// in [`Self::CACHE_LEDGERS`] and in the [`Self::RECLAIM_STATS`]
+    /// totals: a [`CacheReportRequest`] followed by its
+    /// [`CacheLedgerRecord`] rows. The reply carries no payload.
+    ///
+    /// This is the one *submission* in an otherwise read-only API, and it
+    /// exists because a userland cache is invisible otherwise. The reclaim
+    /// model is deliberately two-sided — the kernel's caches and a
+    /// process's rasterised glyphs and decoded artwork obey the same
+    /// classes and the same pressure bands — but only the kernel's side can
+    /// be measured from outside. Without this the `disposable-ui` class,
+    /// the one reclaim *starts* with, reads zero on a desktop holding
+    /// megabytes of it.
+    ///
+    /// Ungated and unaudited per call, for the same reason
+    /// [`Self::SELF_PROCESS_LIST`] is: a process describes only itself,
+    /// grants nothing, and reads nothing. The submitted rows replace that
+    /// process's previous rows rather than accumulating, the service stamps
+    /// the kernel-attested identity itself (a caller cannot name another
+    /// process), and every row is marked self-reported wherever it is
+    /// shown. Self-reported figures are diagnostics: they never feed a
+    /// kernel decision, because they never enter the kernel.
+    pub const CACHE_REPORT: Self = Self(33);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -485,10 +527,15 @@ pub enum IntrospectDomain {
     Seats = 9,
     /// The live memory-pressure gauge: a single [`MemoryPressureStats`].
     MemoryPressure = 10,
-    /// The reclaimable-cache ledger: every reclaim class, one packed
-    /// [`ReclaimClassRecord`], with the syscall's `arg` naming the record
-    /// offset to page from.
-    Reclaim = 11,
+    /// The reclaimable-cache ledger: every registered kernel cache, one
+    /// packed [`CacheLedgerRecord`], with the syscall's `arg` naming the
+    /// record offset to page from.
+    ///
+    /// Per *cache*, not per class: the broker folds these rows into the
+    /// per-class [`ReclaimClassRecord`] totals its clients see, and does so
+    /// in the one place that also holds the self-reported userland rows, so
+    /// the two views can never be summed differently.
+    CacheLedgers = 11,
     /// The `ramzip` compressed-tier accounting: a single [`RamzipStats`].
     Ramzip = 12,
     /// Per-CPU scheduler load figures: every online CPU, one packed
@@ -549,7 +596,7 @@ impl IntrospectDomain {
             8 => Ok(Self::CpuTimes),
             9 => Ok(Self::Seats),
             10 => Ok(Self::MemoryPressure),
-            11 => Ok(Self::Reclaim),
+            11 => Ok(Self::CacheLedgers),
             12 => Ok(Self::Ramzip),
             13 => Ok(Self::CpuLoad),
             14 => Ok(Self::Irqs),
@@ -804,6 +851,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: true,
     },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CACHE_LEDGERS,
+        name: "cache_ledgers",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::CACHE_REPORT,
+        name: "cache_report",
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding in [`ENCODED_QUERY_TABLE`].
@@ -905,7 +964,14 @@ pub const SYSINFO_ENDPOINT: u64 = 0x5953_1001;
 /// endpoint's per-call request capacity by it) and every client (which frames
 /// its request within it), so neither carries a private copy that could drift
 /// from the other.
-pub const SYSINFO_MAX_REQUEST: usize = 64;
+///
+/// Derived from that largest block rather than hand-picked, so adding a query
+/// with a bigger argument cannot silently outgrow the endpoint: every other
+/// query's payload is a handful of bytes, and the ceiling is set by a
+/// [`SysinfoQueryId::CACHE_REPORT`] carrying its full complement of rows.
+pub const SYSINFO_MAX_REQUEST: usize = SysinfoRequestHeader::WIRE_LEN
+    + CacheReportRequest::WIRE_LEN
+    + MAX_CACHE_REPORT_ENTRIES * CacheLedgerRecord::WIRE_LEN;
 
 /// Maximum reply, in bytes, the [`SYSINFO_ENDPOINT`] delivers: the framed
 /// status word ([`SYSINFO_REPLY_STATUS_LEN`]) plus one page of records.
@@ -930,6 +996,51 @@ pub const SYSINFO_REPLY_STATUS_LEN: usize = 4;
 const _: () = assert!(SYSINFO_MAX_REPLY > SYSINFO_REPLY_STATUS_LEN);
 const _: () = assert!(SYSINFO_MAX_REQUEST >= SysinfoRequestHeader::WIRE_LEN);
 const _: () = assert!(SYSINFO_MAX_REPLY <= SYSINFO_MAX_PAYLOAD_LEN as usize);
+const _: () = assert!(SYSINFO_MAX_REQUEST <= SYSINFO_MAX_PAYLOAD_LEN as usize);
+// A full page of the widest record must fit a reply, or the breakdown query
+// could never serve even one row.
+const _: () = assert!(SYSINFO_MAX_REPLY >= SYSINFO_REPLY_STATUS_LEN + CacheLedgerRecord::WIRE_LEN);
+
+/// Frame a `sysinfo-v1` request: the [`SysinfoRequestHeader`] envelope for
+/// `query` followed by its already-encoded `payload`, written into `out`.
+///
+/// Every client frames its request this way — the command-line tools through
+/// the allocating helper in `lib/procinfo`, the runtime's cache reporter
+/// directly into a buffer it owns — so the envelope is built in one place
+/// and a client cannot invent a variant the service would refuse.
+///
+/// # Errors
+///
+/// * [`Errno::LengthOutOfRange`] if `payload` exceeds
+///   [`SYSINFO_MAX_PAYLOAD_LEN`].
+/// * [`Errno::BufferTooSmall`] if `out` cannot hold the header plus
+///   `payload`.
+pub fn encode_request(
+    query: SysinfoQueryId,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Errno> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    if payload_len > SYSINFO_MAX_PAYLOAD_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let total = SysinfoRequestHeader::WIRE_LEN + payload.len();
+    if out.len() < total {
+        return Err(Errno::BufferTooSmall);
+    }
+    let header = SysinfoRequestHeader {
+        magic: SYSINFO_REQUEST_MAGIC,
+        version: SYSINFO_VERSION_CURRENT,
+        flags: 0,
+        query,
+        reserved: 0,
+        payload_len,
+        request_id: 0,
+    };
+    out[..SysinfoRequestHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+    out[SysinfoRequestHeader::WIRE_LEN..total].copy_from_slice(payload);
+    Ok(total)
+}
 
 /// Frame a **successful** `sysinfo` reply: a zero status word followed by
 /// `payload`, written into `out`.
@@ -3316,7 +3427,14 @@ impl ReclaimListRequest {
 /// Byte figures are live gauges (they rise and fall as caches charge and
 /// discharge); the event counters are monotonic since boot. All figures
 /// are aggregated across every registered cache ledger, so the record
-/// describes the *class*, not any one cache instance.
+/// describes the *class*, not any one cache instance — the per-cache
+/// breakdown behind it is [`SysinfoQueryId::CACHE_LEDGERS`].
+///
+/// The aggregate spans both sides of the reclaim model: the kernel's own
+/// measured ledgers and the ledgers processes report for their own caches
+/// ([`SysinfoQueryId::CACHE_REPORT`]). [`Self::self_reported_bytes`] says
+/// how much of the resident total came from the latter, so a reader can
+/// see at a glance how much of a class it is taking on trust.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct ReclaimClassRecord {
@@ -3347,12 +3465,21 @@ pub struct ReclaimClassRecord {
     /// Lookups of the class that fell through to the canonical source
     /// since boot: the miss half of the hit ratio.
     pub misses: u64,
+    /// How many of `payload_bytes + metadata_bytes` came from ledgers a
+    /// process reported for its own caches rather than from a ledger the
+    /// kernel measures.
+    ///
+    /// A self-reported figure is a diagnostic, not evidence: the process
+    /// holding the memory is the only thing that can see it, and a
+    /// compromised one can lie about it. Kept separable so a reader is
+    /// never misled about which part of a class total is attested.
+    pub self_reported_bytes: u64,
 }
 
 impl ReclaimClassRecord {
     /// Encoded size on the wire: the class byte plus 7 reserved bytes,
-    /// then nine `u64` figures.
-    pub const WIRE_LEN: usize = 8 + 9 * 8;
+    /// then ten `u64` figures.
+    pub const WIRE_LEN: usize = 8 + 10 * 8;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -3370,6 +3497,7 @@ impl ReclaimClassRecord {
             self.failures,
             self.hits,
             self.misses,
+            self.self_reported_bytes,
         ]
         .iter()
         .enumerate()
@@ -3411,8 +3539,510 @@ impl ReclaimClassRecord {
             failures: read_u64(bytes, 56),
             hits: read_u64(bytes, 64),
             misses: read_u64(bytes, 72),
+            self_reported_bytes: read_u64(bytes, 80),
         })
     }
+}
+
+/// Maximum bytes of a cache label carried in a [`CacheLedgerRecord`].
+pub const CACHE_LABEL_MAX: usize = 32;
+
+/// Who is charged for a cache's memory, as carried on the wire.
+///
+/// Mirrors the reclaim model's closed owner taxonomy. The variant says
+/// *what kind* of principal holds the memory; the numeric payload some
+/// kinds carry travels alongside in [`CacheLedgerRecord::owner_id`], and
+/// the cache's own label names the specific cache.
+///
+/// Discriminants are part of `sysinfo-v1` and must not be re-numbered.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum CacheOwnerKind {
+    /// A kernel subsystem. `owner_id` is zero.
+    KernelSubsystem = 0,
+    /// A mounted filesystem volume. `owner_id` is the volume id.
+    FilesystemVolume = 1,
+    /// One task. `owner_id` is the task id.
+    Task = 2,
+    /// A desktop session. `owner_id` is the seat id.
+    DesktopSession = 3,
+    /// A userland process. `owner_id` is zero; the reporting process is
+    /// named by [`CacheLedgerRecord::reporter_pid`].
+    UserlandProcess = 4,
+}
+
+impl CacheOwnerKind {
+    /// Numeric value carried on the wire.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire byte into a [`CacheOwnerKind`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any value that is not a defined variant —
+    /// never guessing an owner (fail closed).
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::KernelSubsystem),
+            1 => Ok(Self::FilesystemVolume),
+            2 => Ok(Self::Task),
+            3 => Ok(Self::DesktopSession),
+            4 => Ok(Self::UserlandProcess),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Where a [`CacheLedgerRecord`]'s figures came from, and therefore how
+/// far they can be trusted.
+///
+/// Discriminants are part of `sysinfo-v1` and must not be re-numbered.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum CacheLedgerOrigin {
+    /// Not yet attributed: the only value a
+    /// [`SysinfoQueryId::CACHE_REPORT`] submission may carry. The service
+    /// stamps the real origin from the caller's kernel-attested identity,
+    /// so a process cannot present its own figures as measured ones.
+    #[default]
+    Unset = 0,
+    /// Read from a ledger the kernel measures directly.
+    Kernel = 1,
+    /// Reported by the process that holds the cache. Nothing outside that
+    /// process can see the figure, and a compromised process can lie about
+    /// it, so it is a diagnostic and never an input to a decision.
+    SelfReported = 2,
+}
+
+impl CacheLedgerOrigin {
+    /// Numeric value carried on the wire.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire byte into a [`CacheLedgerOrigin`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any value that is not a defined variant.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Unset),
+            1 => Ok(Self::Kernel),
+            2 => Ok(Self::SelfReported),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One cache's ledger: the per-cache row behind the per-class totals of
+/// [`ReclaimClassRecord`].
+///
+/// The same record travels in both directions. A
+/// [`SysinfoQueryId::CACHE_LEDGERS`] response carries fully attributed
+/// rows; a [`SysinfoQueryId::CACHE_REPORT`] submission carries rows a
+/// process filled in for its own caches, with [`Self::origin`] left
+/// [`CacheLedgerOrigin::Unset`] and [`Self::reporter_pid`] zero for the
+/// service to stamp. One record type rather than two near-identical ones:
+/// the direction decides which fields the *service* owns, not which fields
+/// exist.
+///
+/// Byte figures are live gauges; the event counters are monotonic since
+/// the cache was built.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CacheLedgerRecord {
+    /// Valid byte count in the inline label buffer
+    /// (`<= CACHE_LABEL_MAX`); read the bytes through
+    /// [`Self::label_bytes`].
+    pub label_len: u8,
+    /// What kind of principal is charged for this cache's memory.
+    pub owner_kind: CacheOwnerKind,
+    /// Whether the figures are kernel-measured or self-reported.
+    pub origin: CacheLedgerOrigin,
+    /// The reclaim class of every entry: an index into
+    /// [`RECLAIM_CLASS_NAMES`].
+    pub class: u8,
+    /// The owner's numeric payload: a volume id, a task id, or a seat id
+    /// depending on [`Self::owner_kind`]; zero for the kinds that carry
+    /// none.
+    pub owner_id: u64,
+    /// The reporting process's numeric pid, for display; zero on a
+    /// kernel-measured row.
+    ///
+    /// Numeric pids are reused, so this is a display convenience: the
+    /// service keys its registry by the caller's unforgeable
+    /// process-instance identity and drops a row the moment that instance
+    /// is gone, so a recycled pid can never inherit another process's row.
+    pub reporter_pid: u64,
+    /// Cached payload bytes currently held.
+    pub payload_bytes: u64,
+    /// Bookkeeping metadata bytes currently held.
+    pub metadata_bytes: u64,
+    /// Entries currently held.
+    pub entries: u64,
+    /// Admissions refused.
+    pub refusals: u64,
+    /// Pressure-driven shrink passes that reclaimed from this cache.
+    pub pressure_shrinks: u64,
+    /// Whole-cache teardown drains.
+    pub teardowns: u64,
+    /// Detected internal failures that poisoned the cache.
+    pub failures: u64,
+    /// Lookups served from the cache.
+    pub hits: u64,
+    /// Lookups that fell through to the canonical source.
+    pub misses: u64,
+    label: [u8; CACHE_LABEL_MAX],
+}
+
+impl CacheLedgerRecord {
+    /// Encoded size on the wire: four descriptor bytes, four reserved,
+    /// the owner and reporter ids, nine `u64` figures, and the label.
+    pub const WIRE_LEN: usize = 24 + 9 * 8 + CACHE_LABEL_MAX;
+
+    /// Construct a row for `label`, with every figure zero.
+    ///
+    /// The figures are set by the caller after construction; a builder for
+    /// fifteen numbers would be noise. `label` must be printable ASCII no
+    /// longer than [`CACHE_LABEL_MAX`] — it is rendered verbatim in a
+    /// monitor and, on a reported row, comes from another process, so a
+    /// control character or an over-long name is refused here rather than
+    /// left for a renderer to cope with.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] if `label` is empty or exceeds
+    ///   [`CACHE_LABEL_MAX`].
+    /// * [`Errno::OutOfRange`] if `label` holds a byte outside printable
+    ///   ASCII, or if `class` is not a `sysinfo-v1` class id.
+    pub fn new(
+        label: &[u8],
+        owner_kind: CacheOwnerKind,
+        owner_id: u64,
+        class: u8,
+    ) -> Result<Self, Errno> {
+        if label.is_empty() || label.len() > CACHE_LABEL_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if !is_printable_label(label) {
+            return Err(Errno::OutOfRange);
+        }
+        if usize::from(class) >= RECLAIM_CLASS_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        let mut buf = [0u8; CACHE_LABEL_MAX];
+        buf[..label.len()].copy_from_slice(label);
+        let label_len = u8::try_from(label.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(Self {
+            label_len,
+            owner_kind,
+            origin: CacheLedgerOrigin::Unset,
+            class,
+            owner_id,
+            reporter_pid: 0,
+            payload_bytes: 0,
+            metadata_bytes: 0,
+            entries: 0,
+            refusals: 0,
+            pressure_shrinks: 0,
+            teardowns: 0,
+            failures: 0,
+            hits: 0,
+            misses: 0,
+            label: buf,
+        })
+    }
+
+    /// Borrow the valid prefix of the label buffer.
+    #[must_use]
+    pub fn label_bytes(&self) -> &[u8] {
+        &self.label[..self.label_len as usize]
+    }
+
+    /// The label as a string. Never fails: the decoder admits only
+    /// printable ASCII, which is always valid UTF-8.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        core::str::from_utf8(self.label_bytes()).unwrap_or("")
+    }
+
+    /// Resident bytes: payload plus this cache's own bookkeeping.
+    #[must_use]
+    pub const fn resident_bytes(&self) -> u64 {
+        self.payload_bytes.saturating_add(self.metadata_bytes)
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0] = self.label_len;
+        out[1] = self.owner_kind.as_u8();
+        out[2] = self.origin.as_u8();
+        out[3] = self.class;
+        put_u64(&mut out, 8, self.owner_id);
+        put_u64(&mut out, 16, self.reporter_pid);
+        for (i, value) in [
+            self.payload_bytes,
+            self.metadata_bytes,
+            self.entries,
+            self.refusals,
+            self.pressure_shrinks,
+            self.teardowns,
+            self.failures,
+            self.hits,
+            self.misses,
+        ]
+        .iter()
+        .enumerate()
+        {
+            put_u64(&mut out, 24 + i * 8, *value);
+        }
+        out[96..96 + CACHE_LABEL_MAX].copy_from_slice(&self.label);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if short.
+    /// * [`Errno::BadMagic`] if a reserved byte is non-zero, or if the
+    ///   label padding past `label_len` carries a hidden payload.
+    /// * [`Errno::OutOfRange`] for an unknown owner kind, an unknown
+    ///   origin, a `class` outside `sysinfo-v1`, or a label byte outside
+    ///   printable ASCII.
+    /// * [`Errno::LengthOutOfRange`] if `label_len` is zero or exceeds
+    ///   [`CACHE_LABEL_MAX`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[4..8] != [0u8; 4] {
+            return Err(Errno::BadMagic);
+        }
+        let owner_kind = CacheOwnerKind::from_u8(bytes[1])?;
+        let origin = CacheLedgerOrigin::from_u8(bytes[2])?;
+        let class = bytes[3];
+        if usize::from(class) >= RECLAIM_CLASS_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        let label_len = bytes[0];
+        if label_len == 0 || usize::from(label_len) > CACHE_LABEL_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut label = [0u8; CACHE_LABEL_MAX];
+        label.copy_from_slice(&bytes[96..96 + CACHE_LABEL_MAX]);
+        let (used, padding) = label.split_at(usize::from(label_len));
+        if padding.iter().any(|&byte| byte != 0) {
+            return Err(Errno::BadMagic);
+        }
+        if !is_printable_label(used) {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            label_len,
+            owner_kind,
+            origin,
+            class,
+            owner_id: read_u64(bytes, 8),
+            reporter_pid: read_u64(bytes, 16),
+            payload_bytes: read_u64(bytes, 24),
+            metadata_bytes: read_u64(bytes, 32),
+            entries: read_u64(bytes, 40),
+            refusals: read_u64(bytes, 48),
+            pressure_shrinks: read_u64(bytes, 56),
+            teardowns: read_u64(bytes, 64),
+            failures: read_u64(bytes, 72),
+            hits: read_u64(bytes, 80),
+            misses: read_u64(bytes, 88),
+            label,
+        })
+    }
+}
+
+/// Whether `label` is a non-empty run of printable ASCII.
+///
+/// A cache label is rendered verbatim by a monitor and, on a reported row,
+/// crosses a process boundary, so anything that could move a cursor,
+/// re-colour a terminal, or forge a column is refused at the ABI edge.
+fn is_printable_label(label: &[u8]) -> bool {
+    !label.is_empty() && label.iter().all(|&byte| (0x20..=0x7e).contains(&byte))
+}
+
+/// Request payload for [`SysinfoQueryId::CACHE_LEDGERS`].
+///
+/// The response is a sequence of [`CacheLedgerRecord`]s paged with
+/// `offset`/`limit`. Ordering is stable across paged calls: kernel rows
+/// first in registration order, then reported rows ordered by reporter and
+/// label, so a client walking the list never skips or repeats a row.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CacheLedgerListRequest {
+    /// Index of the first cache row to return.
+    pub offset: u32,
+    /// Maximum number of [`CacheLedgerRecord`]s the caller will accept.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl CacheLedgerListRequest {
+    /// Encoded size of a [`CacheLedgerListRequest`] on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode `bytes` into a [`CacheLedgerListRequest`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// Most cache rows one process may report in a single
+/// [`SysinfoQueryId::CACHE_REPORT`].
+///
+/// A fixed validation bound on untrusted input, not a growable capacity: a
+/// process holds a handful of reclaimable caches (its glyph client cache,
+/// its decoded artwork, its rasterised chrome), so the ceiling exists only
+/// to bound what one submission can demand of the service. A process with
+/// more caches than this reports its largest; it cannot enlarge its own
+/// footprint in the registry by declaring more.
+pub const MAX_CACHE_REPORT_ENTRIES: usize = 16;
+
+/// Request payload for [`SysinfoQueryId::CACHE_REPORT`]: this header
+/// followed by exactly `count` [`CacheLedgerRecord`]s.
+///
+/// The rows **replace** the calling process's previous rows rather than
+/// adding to them, so a process's footprint in the registry is bounded by
+/// [`MAX_CACHE_REPORT_ENTRIES`] however often it reports. A `count` of
+/// zero is meaningful and legal: it withdraws the process's rows, which is
+/// what a process does when it tears its caches down.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct CacheReportRequest {
+    /// Number of [`CacheLedgerRecord`]s that follow this header.
+    pub count: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub reserved: u32,
+}
+
+impl CacheReportRequest {
+    /// Encoded size of a [`CacheReportRequest`] header on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u16(&mut out, 0, self.count);
+        put_u16(&mut out, 2, self.flags);
+        put_u32(&mut out, 4, self.reserved);
+        out
+    }
+
+    /// Decode `bytes` into a [`CacheReportRequest`] header.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::BadMagic`] if a reserved field is non-zero.
+    /// * [`Errno::LengthOutOfRange`] if `count` exceeds
+    ///   [`MAX_CACHE_REPORT_ENTRIES`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 2);
+        let reserved = read_u32(bytes, 4);
+        if flags != 0 || reserved != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let count = read_u16(bytes, 0);
+        if usize::from(count) > MAX_CACHE_REPORT_ENTRIES {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            count,
+            flags,
+            reserved,
+        })
+    }
+}
+
+/// Fold per-cache rows into the per-class totals of a
+/// [`SysinfoQueryId::RECLAIM_STATS`] response.
+///
+/// One fold, used wherever the two views must agree: a class row is
+/// exactly the sum of the [`CacheLedgerRecord`]s of that class, and the
+/// resident bytes of the [`CacheLedgerOrigin::SelfReported`] rows are also
+/// carried separately as
+/// [`ReclaimClassRecord::self_reported_bytes`]. Every addition saturates —
+/// the byte figures are live gauges sampled independently, and a saturated
+/// diagnostic is still truthful about "a very large number".
+///
+/// A class with no cache reports a row of zeros rather than being absent:
+/// "nothing is cached in this class" is an answer, and a caller paging the
+/// nine classes gets nine records whatever the machine is doing.
+#[must_use]
+pub fn fold_cache_ledgers(rows: &[CacheLedgerRecord]) -> [ReclaimClassRecord; RECLAIM_CLASS_COUNT] {
+    let mut totals = [ReclaimClassRecord::default(); RECLAIM_CLASS_COUNT];
+    for (index, total) in totals.iter_mut().enumerate() {
+        // The index is a class id by construction; the array is exactly as
+        // long as the class set.
+        total.class = u8::try_from(index).unwrap_or(0);
+    }
+    for row in rows {
+        let Some(total) = totals.get_mut(usize::from(row.class)) else {
+            continue;
+        };
+        total.payload_bytes = total.payload_bytes.saturating_add(row.payload_bytes);
+        total.metadata_bytes = total.metadata_bytes.saturating_add(row.metadata_bytes);
+        total.entries = total.entries.saturating_add(row.entries);
+        total.refusals = total.refusals.saturating_add(row.refusals);
+        total.pressure_shrinks = total.pressure_shrinks.saturating_add(row.pressure_shrinks);
+        total.teardowns = total.teardowns.saturating_add(row.teardowns);
+        total.failures = total.failures.saturating_add(row.failures);
+        total.hits = total.hits.saturating_add(row.hits);
+        total.misses = total.misses.saturating_add(row.misses);
+        if row.origin == CacheLedgerOrigin::SelfReported {
+            total.self_reported_bytes = total
+                .self_reported_bytes
+                .saturating_add(row.resident_bytes());
+        }
+    }
+    totals
 }
 
 /// Response payload for [`SysinfoQueryId::RAMZIP_STATS`].
@@ -4997,7 +5627,7 @@ mod tests {
             (8, IntrospectDomain::CpuTimes),
             (9, IntrospectDomain::Seats),
             (10, IntrospectDomain::MemoryPressure),
-            (11, IntrospectDomain::Reclaim),
+            (11, IntrospectDomain::CacheLedgers),
             (12, IntrospectDomain::Ramzip),
             (13, IntrospectDomain::CpuLoad),
             (14, IntrospectDomain::Irqs),
@@ -6349,6 +6979,7 @@ mod tests {
             failures: 0,
             hits: 900,
             misses: 100,
+            self_reported_bytes: 1024,
         };
         let decoded = ReclaimClassRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
         assert_eq!(decoded, record);
@@ -6381,6 +7012,242 @@ mod tests {
         // Unknown names fail closed, never guessed.
         assert_eq!(reclaim_class_from_name("page-cache"), None);
         assert_eq!(reclaim_class_from_name(""), None);
+    }
+
+    /// A fully populated row, for the cache-ledger record tests.
+    fn cache_row() -> super::CacheLedgerRecord {
+        use super::{CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind};
+        let mut row =
+            CacheLedgerRecord::new(b"fontd.glyph-raster", CacheOwnerKind::UserlandProcess, 0, 0)
+                .expect("a printable in-range label is accepted");
+        row.origin = CacheLedgerOrigin::SelfReported;
+        row.reporter_pid = 42;
+        row.payload_bytes = 4096;
+        row.metadata_bytes = 256;
+        row.entries = 7;
+        row.refusals = 1;
+        row.pressure_shrinks = 2;
+        row.teardowns = 3;
+        row.failures = 4;
+        row.hits = 900;
+        row.misses = 100;
+        row
+    }
+
+    #[test]
+    fn cache_ledger_record_round_trips() {
+        use super::{CacheLedgerRecord, CACHE_LABEL_MAX};
+        let row = cache_row();
+        let decoded = CacheLedgerRecord::from_bytes(&row.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, row);
+        assert_eq!(decoded.label(), "fontd.glyph-raster");
+        assert_eq!(decoded.resident_bytes(), 4096 + 256);
+        assert_eq!(CacheLedgerRecord::WIRE_LEN, 96 + CACHE_LABEL_MAX);
+    }
+
+    #[test]
+    fn cache_ledger_record_rejects_a_label_it_cannot_render() {
+        use super::{CacheLedgerRecord, CacheOwnerKind, CACHE_LABEL_MAX};
+        // Empty, over-long, and control-carrying labels are all refused at
+        // construction: the label is rendered verbatim by a monitor and, on
+        // a reported row, crosses a process boundary.
+        assert_eq!(
+            CacheLedgerRecord::new(b"", CacheOwnerKind::KernelSubsystem, 0, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            CacheLedgerRecord::new(
+                &[b'a'; CACHE_LABEL_MAX + 1],
+                CacheOwnerKind::KernelSubsystem,
+                0,
+                0
+            ),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            CacheLedgerRecord::new(b"tidy\x1b[2Jname", CacheOwnerKind::KernelSubsystem, 0, 0),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            CacheLedgerRecord::new(b"kernel.block", CacheOwnerKind::KernelSubsystem, 0, 99),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn cache_ledger_record_decode_fails_closed() {
+        use super::{CacheLedgerRecord, RECLAIM_CLASS_COUNT};
+        let row = cache_row();
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&[0u8; CacheLedgerRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A reserved byte carrying anything is wire corruption.
+        let mut bytes = row.to_le_bytes();
+        bytes[4] = 1;
+        assert_eq!(CacheLedgerRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        // A payload hidden in the label padding is refused rather than
+        // silently dropped, so the decoded record is the whole record.
+        let mut bytes = row.to_le_bytes();
+        bytes[CacheLedgerRecord::WIRE_LEN - 1] = b'x';
+        assert_eq!(CacheLedgerRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        // Unknown owner kind, unknown origin, and an unassigned class each
+        // fail closed rather than being guessed.
+        let mut bytes = row.to_le_bytes();
+        bytes[1] = 5;
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+        let mut bytes = row.to_le_bytes();
+        bytes[2] = 3;
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+        let mut bytes = row.to_le_bytes();
+        bytes[3] = u8::try_from(RECLAIM_CLASS_COUNT).unwrap();
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+        // A zero-length label would render as an anonymous row.
+        let mut bytes = row.to_le_bytes();
+        bytes[0] = 0;
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A control byte inside the declared label is refused on decode too,
+        // not only at construction: the bytes may arrive from another process.
+        let mut bytes = row.to_le_bytes();
+        bytes[96] = 0x1b;
+        assert_eq!(
+            CacheLedgerRecord::from_bytes(&bytes),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn cache_ledger_list_request_round_trips_and_rejects_reserved() {
+        use super::CacheLedgerListRequest;
+        let req = CacheLedgerListRequest {
+            offset: 4,
+            limit: 32,
+            flags: 0,
+        };
+        assert_eq!(
+            CacheLedgerListRequest::from_bytes(&req.to_le_bytes()),
+            Ok(req)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1;
+        assert_eq!(
+            CacheLedgerListRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            CacheLedgerListRequest::from_bytes(&[0u8; CacheLedgerListRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn cache_report_request_bounds_what_one_process_may_submit() {
+        use super::{CacheReportRequest, MAX_CACHE_REPORT_ENTRIES};
+        let req = CacheReportRequest {
+            count: 3,
+            flags: 0,
+            reserved: 0,
+        };
+        assert_eq!(CacheReportRequest::from_bytes(&req.to_le_bytes()), Ok(req));
+        // Withdrawing every row is a legal report, not a malformed one.
+        let empty = CacheReportRequest::default();
+        assert_eq!(
+            CacheReportRequest::from_bytes(&empty.to_le_bytes()),
+            Ok(empty)
+        );
+        // More rows than the bound admits is refused before a byte is read.
+        let over = CacheReportRequest {
+            count: u16::try_from(MAX_CACHE_REPORT_ENTRIES).unwrap() + 1,
+            flags: 0,
+            reserved: 0,
+        };
+        assert_eq!(
+            CacheReportRequest::from_bytes(&over.to_le_bytes()),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[2] = 1;
+        assert_eq!(CacheReportRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        let mut bytes = req.to_le_bytes();
+        bytes[4] = 1;
+        assert_eq!(CacheReportRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn folding_cache_rows_reproduces_the_class_totals() {
+        use super::{
+            fold_cache_ledgers, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
+            RECLAIM_CLASS_COUNT,
+        };
+        let mut kernel =
+            CacheLedgerRecord::new(b"kernel.block", CacheOwnerKind::KernelSubsystem, 0, 5)
+                .expect("label accepted");
+        kernel.origin = CacheLedgerOrigin::Kernel;
+        kernel.payload_bytes = 8192;
+        kernel.metadata_bytes = 512;
+        kernel.entries = 2;
+        kernel.hits = 10;
+
+        let mut reported =
+            CacheLedgerRecord::new(b"wm.cursor", CacheOwnerKind::DesktopSession, 1, 0)
+                .expect("label accepted");
+        reported.origin = CacheLedgerOrigin::SelfReported;
+        reported.payload_bytes = 4096;
+        reported.metadata_bytes = 256;
+        reported.entries = 3;
+        reported.misses = 4;
+
+        let totals = fold_cache_ledgers(&[kernel, reported]);
+        assert_eq!(totals.len(), RECLAIM_CLASS_COUNT);
+        // Every class is present, in class order, even with no cache in it.
+        for (index, total) in totals.iter().enumerate() {
+            assert_eq!(usize::from(total.class), index);
+        }
+        // A kernel-measured class total carries no self-reported share.
+        assert_eq!(totals[5].payload_bytes, 8192);
+        assert_eq!(totals[5].metadata_bytes, 512);
+        assert_eq!(totals[5].entries, 2);
+        assert_eq!(totals[5].hits, 10);
+        assert_eq!(totals[5].self_reported_bytes, 0);
+        // A self-reported row lands in the class total *and* is separately
+        // attributed, so a reader can see what it is taking on trust.
+        assert_eq!(totals[0].payload_bytes, 4096);
+        assert_eq!(totals[0].metadata_bytes, 256);
+        assert_eq!(totals[0].misses, 4);
+        assert_eq!(totals[0].self_reported_bytes, 4096 + 256);
+        // An untouched class is a truthful row of zeros, never absent.
+        assert_eq!(
+            totals[3],
+            super::ReclaimClassRecord {
+                class: 3,
+                ..super::ReclaimClassRecord::default()
+            }
+        );
+    }
+
+    #[test]
+    fn folding_saturates_rather_than_wrapping() {
+        use super::{fold_cache_ledgers, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind};
+        let mut row = CacheLedgerRecord::new(b"huge", CacheOwnerKind::KernelSubsystem, 0, 1)
+            .expect("label accepted");
+        row.origin = CacheLedgerOrigin::SelfReported;
+        row.payload_bytes = u64::MAX;
+        row.metadata_bytes = u64::MAX;
+        let totals = fold_cache_ledgers(&[row, row]);
+        assert_eq!(totals[1].payload_bytes, u64::MAX);
+        assert_eq!(totals[1].self_reported_bytes, u64::MAX);
     }
 
     #[test]

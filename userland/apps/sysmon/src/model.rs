@@ -12,14 +12,15 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats, MountRecord,
-    ProcessRecord, RamzipStats, ReclaimClassRecord, SysinfoQueryId, Uptime,
+    CacheLedgerRecord, CpuLoadRecord, IrqRecord, KernelMemoryStats, LoadAverage,
+    MemoryPressureStats, MountRecord, ProcessRecord, RamzipStats, ReclaimClassRecord,
+    SysinfoQueryId, Uptime,
 };
 use tairix_curses::Event;
 use tairix_procinfo::{
-    call, for_each_cpu_load, for_each_cpu_time, for_each_irq, for_each_mount, for_each_process,
-    for_each_reclaim_class, memory_pressure, ramzip_stats, CallError, CpuTotals, ListError,
-    Transport,
+    call, for_each_cache_ledger, for_each_cpu_load, for_each_cpu_time, for_each_irq,
+    for_each_mount, for_each_process, for_each_reclaim_class, memory_pressure, ramzip_stats,
+    CallError, CpuTotals, ListError, Transport,
 };
 
 use crate::command::{DELAY_STEP_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
@@ -81,7 +82,9 @@ fn gauge_walk<T>(result: Result<(), ListError>, records: Vec<T>) -> Gauge<Vec<T>
 /// Which detail panel the lower half of the screen expands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Focus {
-    /// The per-class reclaimable-cache ledger table (`RECLAIM_STATS`).
+    /// The reclaimable-cache page: the per-class ledger table
+    /// (`RECLAIM_STATS`) over the per-cache breakdown behind it
+    /// (`CACHE_LEDGERS`).
     Reclaim,
     /// The `ramzip` compressed-tier counters (`RAMZIP_STATS`).
     Ramzip,
@@ -213,6 +216,12 @@ pub struct Snapshot {
     pub pressure: Gauge<MemoryPressureStats>,
     /// The per-class reclaim ledger (`RECLAIM_STATS`, gated).
     pub reclaim: Gauge<Vec<ReclaimClassRecord>>,
+    /// The per-cache ledger rows behind those class totals
+    /// (`CACHE_LEDGERS`, gated on the same capability): one record per
+    /// registered cache, kernel-measured rows first, then the rows a
+    /// process reported about its own caches. A refusal is recorded as the
+    /// refusal it is — an empty table would read as "no caches".
+    pub caches: Gauge<Vec<CacheLedgerRecord>>,
     /// The `ramzip` tier counters (`RAMZIP_STATS`, gated).
     pub ramzip: Gauge<RamzipStats>,
     /// The mounted-volume table with per-volume space accounting
@@ -242,6 +251,7 @@ impl Default for Snapshot {
             memory: Gauge::Unavailable,
             pressure: Gauge::Unavailable,
             reclaim: Gauge::Unavailable,
+            caches: Gauge::Unavailable,
             ramzip: Gauge::Unavailable,
             mounts: Gauge::Unavailable,
             cpu_loads: Gauge::Unavailable,
@@ -429,6 +439,15 @@ impl Model {
             reclaim_records,
         );
 
+        let mut cache_records = Vec::new();
+        let caches = gauge_walk(
+            for_each_cache_ledger(transport, |record| {
+                cache_records.push(*record);
+                Ok(())
+            }),
+            cache_records,
+        );
+
         let mut load_records = Vec::new();
         let cpu_loads = gauge_walk(
             for_each_cpu_load(transport, |record| {
@@ -480,6 +499,7 @@ impl Model {
             memory,
             pressure,
             reclaim,
+            caches,
             ramzip,
             mounts,
             cpu_loads,

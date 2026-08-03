@@ -2,18 +2,36 @@
 //! System Information introspection feed exports
 //! (`plans/STRESSTEST.md` ST1).
 //!
-//! The figures the `MEMORY_PRESSURE`, `RECLAIM_STATS`, and
-//! `RAMZIP_STATS` queries report live in places that only exist once the
-//! boot path has created them: the system pressure gauge is built over
-//! the frame allocator, each reclaimable cache's ledger is born with the
-//! cache (per mounted volume, per installed launch cache), and the
-//! `ramzip` tier is the one process-global compressed-memory pool the
-//! boot path installs once the CSPRNG is seeded (its stats feed is
+//! The figures the `MEMORY_PRESSURE`, `CACHE_LEDGERS`, and
+//! `RAMZIP_STATS` queries report live in places that only exist once
+//! the boot path has created them: the system pressure gauge is built
+//! over the frame allocator, each reclaimable cache's ledger is born
+//! with the cache (per mounted volume, per installed launch cache), and
+//! the `ramzip` tier is the one process-global compressed-memory pool
+//! the boot path installs once the CSPRNG is seeded (its stats feed is
 //! registered by [`install_global_ramzip_stats`]). This registry is the
 //! one arch-neutral rendezvous
 //! between those producers and the read-only export in
 //! [`crate::introspect_source`] — the same late-install pattern as the
 //! unlock-published user database.
+//!
+//! Every registered ledger carries its cache's identity as well as its
+//! counters, so the export is one row *per cache*
+//! ([`MemStats::cache_ledger_records`]) — the whole of what this kernel
+//! publishes about reclaimable caches. Folding those rows into per-class
+//! totals for display belongs to the client that also holds the caches
+//! processes report about themselves, which is a sum this kernel cannot
+//! measure. The one per-class total kept here
+//! ([`MemStats::reclaim_class_stats`]) is therefore not an export at all:
+//! it is the kernel's own input to [`MemStats::ramzip_reclaimable_residue`],
+//! the reclaim decision over when `ramzip` may start compressing anonymous
+//! pages out.
+//!
+//! Only *this kernel's own* caches ever land here — a userland process's
+//! self-reported figures for its own reclaimable caches live in a
+//! separate, userland-owned registry, never in this one, so a process can
+//! never present its own numbers as kernel-measured or steer that reclaim
+//! decision with them.
 //!
 //! Everything here is observation-only: registering a ledger grants the
 //! export nothing but lock-free reads of saturating diagnostics, and the
@@ -22,13 +40,12 @@
 //! how every consumer of the gauge reads it).
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tairix_abi::sysinfo::RamzipStats;
+use tairix_abi::sysinfo::{CacheLedgerOrigin, CacheLedgerRecord, RamzipStats};
 use tairix_reclaim::{
-    BandObserver, CacheAccounting, FreeMemorySource, MemoryPressure, PressureBand, ReclaimClass,
+    BandObserver, CacheLedger, FreeMemorySource, MemoryPressure, PressureBand, ReclaimClass,
     ReclaimClassStats,
 };
 use tairix_sync::RwLock;
@@ -111,11 +128,13 @@ pub struct MemStats {
     /// volume caches, the launch cache, and the export) so band
     /// hysteresis and transition counters have a single history.
     pressure: RwLock<Option<&'static MemoryPressure>>,
-    /// Every registered live cache ledger. Growable (one per mounted
-    /// volume cache plus the boot singletons), never a fixed ceiling; a
-    /// ledger registered here lives for the boot (the `Arc` keeps a
-    /// torn-down cache's final, zeroed books readable).
-    ledgers: RwLock<Vec<Arc<CacheAccounting>>>,
+    /// Every registered live cache's identity plus a shared handle to its
+    /// ledger. Growable (one per mounted volume cache plus the boot
+    /// singletons), never a fixed ceiling; a ledger registered here lives
+    /// for the boot (the cloned [`CacheLedger`] keeps a torn-down cache's
+    /// final, zeroed books readable). Registration order is preserved, so
+    /// [`Self::cache_ledger_records`] pages a stable list.
+    ledgers: RwLock<Vec<CacheLedger>>,
     /// The live `ramzip` tier, once one registers.
     ramzip: RwLock<Option<&'static (dyn RamzipStatsSource + 'static)>>,
 }
@@ -217,12 +236,13 @@ impl MemStats {
             .unwrap_or(usize::MAX)
     }
 
-    /// Register a live cache ledger for the reclaim export.
+    /// Register a live cache's ledger for the reclaim and per-cache
+    /// exports.
     ///
     /// Called by the production construction sites (a mounted volume's
     /// filesystem cache, the block/transform caches, the launch cache);
     /// unit-test caches simply never register.
-    pub fn register_ledger(&self, ledger: Arc<CacheAccounting>) {
+    pub fn register_ledger(&self, ledger: CacheLedger) {
         self.ledgers.write().push(ledger);
     }
 
@@ -234,7 +254,29 @@ impl MemStats {
         }
     }
 
-    /// Aggregate `class`'s figures across every registered ledger.
+    /// Aggregate `class`'s figures across every ledger **this kernel
+    /// measures itself**.
+    ///
+    /// This is why the aggregate still exists once the per-cache export
+    /// below exists: [`Self::ramzip_reclaimable_residue`] feeds it into a
+    /// real kernel reclaim decision (when `ramzip` may compress out
+    /// anonymous pages), and a decision like that must never be steerable
+    /// by a figure a process reported about itself. Summing only
+    /// registered ledgers — every one of them kernel-measured, since
+    /// nothing in this crate registers a self-reported one — keeps that
+    /// true by construction; a self-reported registry, wherever it lives,
+    /// must stay out of this sum.
+    ///
+    /// Each ledger contributes its **own** class only, and that is exactly
+    /// the identity: a pool charges nothing but the class its ledger
+    /// declares, so selecting a ledger's own class loses none of its
+    /// figures. What the selection does rule out is double counting. A
+    /// cache holding several classified pools registers one ledger per
+    /// pool over one *shared*
+    /// [`CacheAccounting`](tairix_reclaim::CacheAccounting), so reading
+    /// every ledger's figures for every class would read that one shared
+    /// ledger once per sibling pool and inflate the residue the reclaim
+    /// decision gates on.
     ///
     /// An empty registry truthfully reports zeros — nothing is cached
     /// yet — never an error a gated client would mistake for a refusal.
@@ -242,8 +284,8 @@ impl MemStats {
     pub fn reclaim_class_stats(&self, class: ReclaimClass) -> ReclaimClassStats {
         let ledgers = self.ledgers.read();
         let mut total = ReclaimClassStats::default();
-        for ledger in ledgers.iter() {
-            let stats = ledger.class_stats(class);
+        for ledger in ledgers.iter().filter(|ledger| ledger.class() == class) {
+            let stats = ledger.accounting().class_stats(class);
             total.payload_bytes = total.payload_bytes.saturating_add(stats.payload_bytes);
             total.metadata_bytes = total.metadata_bytes.saturating_add(stats.metadata_bytes);
             total.entries = total.entries.saturating_add(stats.entries);
@@ -257,6 +299,33 @@ impl MemStats {
             total.misses = total.misses.saturating_add(stats.misses);
         }
         total
+    }
+
+    /// One [`CacheLedgerRecord`] per registered ledger, in registration
+    /// order — stable across the paged `CACHE_LEDGERS` reads, exactly as
+    /// every other list domain requires.
+    ///
+    /// Every record is stamped [`CacheLedgerOrigin::Kernel`] with
+    /// `reporter_pid = 0`: everything registered here is a cache this
+    /// kernel measures directly, never a process's claim about itself.
+    /// A ledger whose [`CacheLedger::to_record`] refuses — an unrenderable
+    /// label, which is a defect in the crate that built the cache, not a
+    /// transient condition — is skipped rather than aborting the whole
+    /// query: one misbehaving cache must not blind the export to every
+    /// other registered ledger, and the label defect is exactly what
+    /// `to_record`'s own refusal already exists to catch.
+    #[must_use]
+    pub fn cache_ledger_records(&self) -> Vec<CacheLedgerRecord> {
+        let ledgers = self.ledgers.read();
+        let mut records = Vec::new();
+        for ledger in ledgers.iter() {
+            if let Ok(mut record) = ledger.to_record() {
+                record.origin = CacheLedgerOrigin::Kernel;
+                record.reporter_pid = 0;
+                records.push(record);
+            }
+        }
+        records
     }
 
     /// The `ramzip` tier's exported counters: the live tier's snapshot
@@ -304,7 +373,10 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use tairix_abi::sysinfo::CacheOwnerKind;
+    use tairix_reclaim::{CacheAccounting, ReclaimOwner};
 
     struct Fake {
         free: AtomicUsize,
@@ -348,8 +420,18 @@ mod tests {
 
         let a = Arc::new(CacheAccounting::new());
         let b = Arc::new(CacheAccounting::new());
-        stats.register_ledger(a.clone());
-        stats.register_ledger(b.clone());
+        stats.register_ledger(CacheLedger::new(
+            "cache-a",
+            ReclaimOwner::KernelSubsystem("mem"),
+            class,
+            a.clone(),
+        ));
+        stats.register_ledger(CacheLedger::new(
+            "cache-b",
+            ReclaimOwner::KernelSubsystem("mem"),
+            class,
+            b.clone(),
+        ));
 
         a.charge(class, 4096, 64).expect("charges");
         b.charge(class, 1024, 32).expect("charges");
@@ -365,6 +447,150 @@ mod tests {
         let after = stats.reclaim_class_stats(class);
         assert_eq!(after.payload_bytes, 1024);
         assert_eq!(after.entries, 1);
+    }
+
+    #[test]
+    fn a_class_total_is_the_pool_s_own_charges_however_many_pools_share_a_ledger() {
+        // A pool charges only the class its ledger declares, so reading a
+        // ledger under its own class loses none of its figures — that much
+        // is the identity. What it rules out is double counting: the
+        // filesystem cache registers a ledger per classified pool over one
+        // shared accounting object, and reading every ledger for every
+        // class would read that one shared object once per sibling pool and
+        // inflate the residue the reclaim decision gates on.
+        let pools = [
+            ("clean_fs.data", ReclaimClass::CleanFileData, 4096, 64),
+            ("clean_fs.metadata", ReclaimClass::FsMetadata, 1024, 32),
+        ];
+        let owner = ReclaimOwner::FilesystemVolume { volume: 1 };
+        // The exported figures are 64-bit; the ledger charges in host words.
+        let charge = |accounting: &CacheAccounting, class, payload: u64, metadata: u64| {
+            accounting
+                .charge(
+                    class,
+                    usize::try_from(payload).expect("fits a host word"),
+                    usize::try_from(metadata).expect("fits a host word"),
+                )
+                .expect("charges");
+        };
+
+        // Two pools over one shared ledger, exactly as that cache builds it.
+        let shared = MemStats::new();
+        let accounting = Arc::new(CacheAccounting::new());
+        for (label, class, payload, metadata) in pools {
+            shared.register_ledger(CacheLedger::new(label, owner, class, accounting.clone()));
+            charge(&accounting, class, payload, metadata);
+        }
+
+        // The same charges spread over a ledger each, as two independent
+        // single-pool caches would present them.
+        let separate = MemStats::new();
+        for (label, class, payload, metadata) in pools {
+            let own = Arc::new(CacheAccounting::new());
+            charge(&own, class, payload, metadata);
+            separate.register_ledger(CacheLedger::new(label, owner, class, own));
+        }
+
+        for (_, class, payload, metadata) in pools {
+            let total = shared.reclaim_class_stats(class);
+            assert_eq!(
+                total,
+                accounting.class_stats(class),
+                "the pool's own charges, read exactly once"
+            );
+            assert_eq!(
+                total,
+                separate.reclaim_class_stats(class),
+                "sharing one ledger between pools changes no class total"
+            );
+            assert_eq!(total.payload_bytes, payload);
+            assert_eq!(total.metadata_bytes, metadata);
+            assert_eq!(total.entries, 1);
+        }
+
+        // Both pools still appear as their own row in the per-cache
+        // export, each naming the pool it measures.
+        let records = shared.cache_ledger_records();
+        assert_eq!(records.len(), 2);
+        for (record, (label, class, payload, _)) in records.iter().zip(pools) {
+            assert_eq!(record.label(), label);
+            assert_eq!(usize::from(record.class), class.index());
+            assert_eq!(record.payload_bytes, payload);
+        }
+    }
+
+    #[test]
+    fn cache_ledger_records_is_empty_for_an_empty_registry() {
+        let stats = MemStats::new();
+        assert!(stats.cache_ledger_records().is_empty());
+    }
+
+    #[test]
+    fn cache_ledger_records_carries_identity_and_figures_in_registration_order() {
+        let stats = MemStats::new();
+        let first = Arc::new(CacheAccounting::new());
+        first
+            .charge(ReclaimClass::DisposableUi, 4096, 64)
+            .expect("charges");
+        stats.register_ledger(CacheLedger::new(
+            "wm.cursor",
+            ReclaimOwner::DesktopSession { seat: 1 },
+            ReclaimClass::DisposableUi,
+            first,
+        ));
+        let second = Arc::new(CacheAccounting::new());
+        second
+            .charge(ReclaimClass::CleanFileData, 1024, 32)
+            .expect("charges");
+        stats.register_ledger(CacheLedger::new(
+            "arxfs.clean",
+            ReclaimOwner::FilesystemVolume { volume: 3 },
+            ReclaimClass::CleanFileData,
+            second,
+        ));
+
+        let records = stats.cache_ledger_records();
+        assert_eq!(records.len(), 2, "one row per registered ledger");
+
+        assert_eq!(records[0].label(), "wm.cursor");
+        assert_eq!(records[0].owner_kind, CacheOwnerKind::DesktopSession);
+        assert_eq!(records[0].owner_id, 1);
+        assert_eq!(records[0].origin, CacheLedgerOrigin::Kernel);
+        assert_eq!(records[0].reporter_pid, 0);
+        assert_eq!(records[0].payload_bytes, 4096);
+        assert_eq!(records[0].metadata_bytes, 64);
+
+        assert_eq!(records[1].label(), "arxfs.clean");
+        assert_eq!(records[1].owner_kind, CacheOwnerKind::FilesystemVolume);
+        assert_eq!(records[1].owner_id, 3);
+        assert_eq!(records[1].origin, CacheLedgerOrigin::Kernel);
+        assert_eq!(records[1].reporter_pid, 0);
+        assert_eq!(records[1].payload_bytes, 1024);
+        assert_eq!(records[1].metadata_bytes, 32);
+    }
+
+    #[test]
+    fn cache_ledger_records_skips_a_ledger_with_an_unrenderable_label() {
+        let stats = MemStats::new();
+        // A control character in the label makes `to_record` refuse; the
+        // query must still answer with every other registered row rather
+        // than failing the whole page over one defective cache.
+        stats.register_ledger(CacheLedger::new(
+            "broken\u{1b}[2Jlabel",
+            ReclaimOwner::KernelSubsystem("mem"),
+            ReclaimClass::DisposableUi,
+            Arc::new(CacheAccounting::new()),
+        ));
+        stats.register_ledger(CacheLedger::new(
+            "good-cache",
+            ReclaimOwner::KernelSubsystem("mem"),
+            ReclaimClass::DisposableUi,
+            Arc::new(CacheAccounting::new()),
+        ));
+
+        let records = stats.cache_ledger_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].label(), "good-cache");
     }
 
     #[test]
@@ -384,8 +610,23 @@ mod tests {
         // Empty registry: nothing to drain before compression.
         assert_eq!(stats.ramzip_reclaimable_residue(), 0);
 
+        // One cache holding a pool of each class, so every class below is
+        // genuinely in the registry and the exclusions the residue makes
+        // are the formula's own, not an artefact of what was registered.
         let ledger = Arc::new(CacheAccounting::new());
-        stats.register_ledger(ledger.clone());
+        for class in [
+            ReclaimClass::CleanFileData,
+            ReclaimClass::TransformCache,
+            ReclaimClass::FsMetadata,
+            ReclaimClass::DisposableUi,
+        ] {
+            stats.register_ledger(CacheLedger::new(
+                "test-cache",
+                ReclaimOwner::KernelSubsystem("mem"),
+                class,
+                ledger.clone(),
+            ));
+        }
         // Clean file data and transform cache both count, payload+metadata.
         ledger
             .charge(ReclaimClass::CleanFileData, 4096, 64)

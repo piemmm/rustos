@@ -95,7 +95,9 @@ never bypass the authority that guards it:
   `stats:mem/pressure` and `stats:mem/pressure/transitions` (the live
   pressure band — with its name in the metric name — and the transition
   counter), `stats:mem/reclaim/{total,<class>}` (reclaimable bytes held,
-  whole-ledger or by the stable class names in `RECLAIM_CLASS_NAMES`),
+  whole-ledger or by the stable class names in `RECLAIM_CLASS_NAMES`) with
+  `stats:mem/reclaim/{total,<class>}/self` for how many of those bytes are
+  self-reported rather than kernel-measured,
   `stats:mem/ramzip/{stored,logical,saved}` (the compressed tier's byte
   gauges), and `stats:mem/pinned` (bytes of anonymous memory pinned
   system-wide by `mem_pin` and therefore exempt from the compressed

@@ -198,16 +198,22 @@ pub trait IntrospectSource: Sync {
     fn memory_total_bytes(&self) -> Result<Vec<u8>, Errno>;
 
     /// Encode up to `max_records`
-    /// [`tairix_abi::sysinfo::ReclaimClassRecord`]s beginning at class
-    /// index `offset`, in class-id order, packed little-endian
-    /// back-to-back — the reclaimable-cache ledger aggregated across
-    /// every registered live cache. An `offset` past the last class
-    /// returns an empty `Vec` (the paging terminator), never an error.
+    /// [`tairix_abi::sysinfo::CacheLedgerRecord`]s beginning at ledger
+    /// index `offset`, in registration order, packed little-endian
+    /// back-to-back: one row per reclaimable cache this kernel measures,
+    /// carrying the cache's own identity (label, owner, class) beside its
+    /// figures. An `offset` past the last ledger returns an empty `Vec`
+    /// (the paging terminator), never an error.
+    ///
+    /// A row per cache rather than a per-class total, because the class
+    /// totals a client displays fold these rows together with the caches a
+    /// process reports about itself — a sum this kernel cannot measure and
+    /// must not be asked to.
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
-    fn reclaim(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+    fn cache_ledgers(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
     /// The wire image of the current
     /// [`tairix_abi::sysinfo::RamzipStats`]: counters only, never page
@@ -308,7 +314,7 @@ impl IntrospectSource for NullIntrospectSource {
         Err(Errno::NotImplemented)
     }
 
-    fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+    fn cache_ledgers(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

@@ -185,8 +185,13 @@ impl AppStore {
             let launch = LaunchCache::new(budget, pressure, sink);
             // The installed launch cache registers its ledger with the
             // System Information memory-statistics registry
-            // (observation-only); only the winning install registers.
-            crate::memstats::MEM_STATS.register_ledger(launch.accounting_shared());
+            // (observation-only); only the winning install registers. A
+            // `None` means classification refused the cache at birth (it is
+            // then poisoned and admits nothing), so there is nothing to
+            // register — the refusal is already in the audit log.
+            if let Some(ledger) = launch.ledger() {
+                crate::memstats::MEM_STATS.register_ledger(ledger);
+            }
             *cache = Some(launch);
         }
     }

@@ -1142,7 +1142,9 @@ Docs:
 and existing structured logging; `plans/STRESSTEST.md` ST1 has since
 exported the same figures through the capability-gated
 `MEMORY_PRESSURE`/`RECLAIM_STATS`/`RAMZIP_STATS` System Information
-queries (the in-tree callers SMART9 anticipated). No
+queries (the in-tree callers SMART9 anticipated), and the export now
+covers **both** sides of the model — the kernel's measured ledgers and
+the ledgers a process reports for its own caches. No
 `/proc`/`/sys`/text-scrape path exists.
 
 What now holds (`docs/src/architecture/memory.md` §7k):
@@ -1169,11 +1171,45 @@ What now holds (`docs/src/architecture/memory.md` §7k):
   All three caches (`CachedFs`, `TransformClusterCache`,
   `LaunchCache`) take the boot audit sink at construction and report a
   poisoning exactly once; normal operation emits nothing.
+- Every cache describes itself with one shared `tairix_reclaim::CacheLedger`
+  (label, owner, class, and a shared handle to the ledger above) and one
+  shared conversion into the `CacheLedgerRecord` wire row, so a kernel row
+  and a reported row cannot be spelled differently. The kernel registers
+  its own ledgers with `MemStats` and exports them per *cache* through the
+  `CacheLedgers` introspection domain; `sysinfod` folds those rows and the
+  reported rows into the per-class `RECLAIM_STATS` totals with the one
+  `fold_cache_ledgers`, and serves the breakdown itself as `CACHE_LEDGERS`.
+- **Userland caches report themselves, because nothing else can see them.**
+  A process's heap is its own, so the `disposable-ui` class — the one
+  reclaim starts with — would otherwise read zero on a desktop holding
+  megabytes of glyph atlases and decoded artwork. `tairix_rt::cachereport`
+  holds the process-wide set of caches and submits them through the
+  ungated, self-scoped `CACHE_REPORT` operation: it samples on each turn of
+  the owning program's event loop, sends only when the sample differs from
+  the last one sent, and offers a one-shot deadline for a change the rate
+  limit suppressed, so an idle process arms nothing and no timer or poll
+  loop exists anywhere on the path.
+- **A reported figure is a claim, and is contained as one.** The registry
+  lives in `sysinfod`, never the kernel, so a self-reported number cannot
+  reach `reclaim_class_stats` and therefore cannot steer the `ramzip`
+  handoff — structurally, not by convention. A submitted row must leave
+  its origin unset and its pid zero; `sysinfod` stamps both from the
+  caller's attested `Origin`, keys the entry by the unforgeable
+  process-instance id, replaces rather than accumulates, expires an
+  instance that is gone, derives its reporter capacity from the machine's
+  RAM, and emits no audit record on the ungated path (which would
+  otherwise be an audit-write primitive for any process).
+  `ReclaimClassRecord::self_reported_bytes` carries the claimed share of
+  every class total, and every row carries its origin, so a reader always
+  sees what is attested and what is claimed.
 - Tests land beside each piece: counter-per-path and ledger-split
   coverage in `kernel/mem` and all three cache test suites, transition
   counting in the pressure tests, one-shot poison reporting with the
-  closed field shape, and a no-records-in-normal-operation check per
-  cache.
+  closed field shape, a no-records-in-normal-operation check per
+  cache, the wire round-trips and fold in `lib/abi`, the reporter's
+  change-detection/rate-limit/deadline logic in `lib/rt`, and the
+  registry's identity, replacement, expiry, capacity and refusal
+  behaviour in `sysinfod`.
 
 ### SMART10 - Integration, benchmarks, and full validation
 

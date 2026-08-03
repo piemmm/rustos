@@ -1,6 +1,8 @@
 //! The request dispatcher: the one place a `sysinfo` request is decoded,
 //! capability-checked, audited, and answered.
 
+use alloc::vec::Vec;
+
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -8,7 +10,8 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
-    spec_for, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
+    fold_cache_ledgers, spec_for, CacheLedgerListRequest, CacheLedgerRecord, CacheReportRequest,
+    CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
     CpuTimeRecord, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
     MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
     ProcessListRequest, ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest,
@@ -19,6 +22,7 @@ use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 use crate::events;
+use crate::reporters::CacheLedgerRegistry;
 use crate::source::{Caller, ProcessScope, SysinfoSource};
 
 /// Serve one System Information request.
@@ -27,7 +31,9 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 /// `request`, enforces the query's declared capability against `caller`,
 /// emits an audit record through `audit` where the query demands it, and
 /// writes the encoded typed response into `response`, returning the number
-/// of bytes written.
+/// of bytes written. `registry` is `sysinfod`'s own reported-cache-ledger
+/// state, threaded through rather than owned by this function so the
+/// service's serve loop can keep it alive across calls.
 ///
 /// The pipeline **fails closed**: the capability check
 /// happens before any data is touched, and every early return leaves
@@ -44,6 +50,15 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 /// * The scalar queries return the little-endian wire image of their
 ///   response struct.
 /// * The hardware-tree query returns the source's encoded bytes verbatim.
+/// * [`SysinfoQueryId::RECLAIM_STATS`] folds the kernel's own
+///   [`CacheLedgerRecord`] rows with `registry`'s self-reported rows
+///   (after dropping any reporter whose process has since exited) into the
+///   nine per-class [`ReclaimClassRecord`]s, packed back-to-back and paged
+///   like any other list.
+/// * [`SysinfoQueryId::CACHE_LEDGERS`] pages that same combined row list
+///   — kernel rows first, then reported rows — as raw [`CacheLedgerRecord`]s.
+/// * [`SysinfoQueryId::CACHE_REPORT`] carries no reply payload; a caller
+///   whose submission is accepted gets back zero bytes.
 ///
 /// # Errors
 ///
@@ -60,6 +75,7 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 pub fn serve(
     source: &dyn SysinfoSource,
     caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
     audit: &dyn Sink,
     request: &[u8],
     response: &mut [u8],
@@ -134,7 +150,7 @@ pub fn serve(
         );
     }
 
-    dispatch(source, caller, header.query, payload, response)
+    dispatch(source, caller, registry, header.query, payload, response)
 }
 
 /// Route a capability-cleared request to its [`SysinfoSource`] method and
@@ -142,6 +158,7 @@ pub fn serve(
 fn dispatch(
     source: &dyn SysinfoSource,
     caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
     query: SysinfoQueryId,
     payload: &[u8],
     response: &mut [u8],
@@ -180,7 +197,11 @@ fn dispatch(
     } else if query == SysinfoQueryId::MEMORY_TOTAL {
         write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::RECLAIM_STATS {
-        reclaim_list(source, caller, payload, response)
+        reclaim_list(source, caller, registry, payload, response)
+    } else if query == SysinfoQueryId::CACHE_LEDGERS {
+        cache_ledgers_list(source, caller, registry, payload, response)
+    } else if query == SysinfoQueryId::CACHE_REPORT {
+        cache_report(source, caller, registry, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::CPU_LOAD {
@@ -474,24 +495,104 @@ fn net_resolver_servers_list(
     )
 }
 
-/// Decode the [`ReclaimListRequest`], apply paging, and pack the selected
-/// [`ReclaimClassRecord`]s into `response`.
+/// Read the kernel's own per-cache rows, drop any reporter registry entry
+/// whose process instance has since exited, and return the combined row
+/// list: kernel rows first, then `registry`'s self-reported rows.
+///
+/// Shared by [`reclaim_list`] and [`cache_ledgers_list`] so the two query
+/// answers can never disagree about which rows exist.
+fn combined_cache_rows(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
+) -> Result<Vec<CacheLedgerRecord>, Errno> {
+    let mut rows = source.cache_ledger_records(caller)?;
+    registry.retain_live(&source.live_process_instances()?);
+    rows.extend(registry.rows());
+    Ok(rows)
+}
+
+/// Decode the [`ReclaimListRequest`], fold the combined kernel and
+/// self-reported cache rows into the nine per-class totals, apply paging,
+/// and pack the selected [`ReclaimClassRecord`]s into `response`.
 fn reclaim_list(
     source: &dyn SysinfoSource,
     caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let request = ReclaimListRequest::from_bytes(payload)?;
-    let records = source.reclaim_records(caller)?;
+    let rows = combined_cache_rows(source, caller, registry)?;
+    let totals = fold_cache_ledgers(&rows);
     page_records(
         response,
         request.offset as usize,
         request.limit as usize,
-        records.len(),
+        totals.len(),
         ReclaimClassRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+        |index, slot| slot.copy_from_slice(&totals[index].to_le_bytes()),
     )
+}
+
+/// Decode the [`CacheLedgerListRequest`], apply paging, and pack the
+/// combined kernel and self-reported [`CacheLedgerRecord`]s into
+/// `response`.
+fn cache_ledgers_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = CacheLedgerListRequest::from_bytes(payload)?;
+    let rows = combined_cache_rows(source, caller, registry)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        rows.len(),
+        CacheLedgerRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&rows[index].to_le_bytes()),
+    )
+}
+
+/// Decode a [`CacheReportRequest`] header followed by exactly `count`
+/// [`CacheLedgerRecord`]s and replace the caller's entry in `registry`.
+///
+/// The reply carries no payload, so a successful call always returns
+/// `Ok(0)`. Every row is decoded before `registry` is touched, so a
+/// malformed submission — a short body, trailing bytes, an over-long
+/// declared count, or a row with an unrenderable label — fails closed with
+/// the failing decoder's own [`Errno`] and leaves `registry` exactly as it
+/// was.
+fn cache_report(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    registry: &mut CacheLedgerRegistry,
+    payload: &[u8],
+    _response: &mut [u8],
+) -> Result<usize, Errno> {
+    let header = CacheReportRequest::from_bytes(payload)?;
+    let count = usize::from(header.count);
+    let body = payload
+        .get(CacheReportRequest::WIRE_LEN..)
+        .ok_or(Errno::BufferTooSmall)?;
+    let (records, trailing) = body.as_chunks::<{ CacheLedgerRecord::WIRE_LEN }>();
+    if records.len() != count || !trailing.is_empty() {
+        return Err(Errno::BadMagic);
+    }
+    let mut rows = Vec::with_capacity(count);
+    for record in records {
+        rows.push(CacheLedgerRecord::from_bytes(record)?);
+    }
+
+    // A full registry only refuses a genuinely *new* reporter: drop any
+    // entry whose process has already exited before deciding whether
+    // there is room for this one.
+    registry.retain_live(&source.live_process_instances()?);
+    registry.report(caller, rows)?;
+    Ok(0)
 }
 
 /// Decode the [`CpuLoadRequest`], apply paging, and pack the selected
@@ -756,9 +857,11 @@ fn query_field(name: &'static str) -> Field<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::serve;
+    use super::{serve, CacheLedgerRegistry};
     use crate::events;
+    use crate::reporters::{MIN_REPORTERS, RAM_BYTES_PER_REPORTER};
     use crate::source::{Caller, ProcessScope, SysinfoSource};
+    use crate::testing::{kernel_caller, user_caller};
     use core::cell::RefCell;
     use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
@@ -774,23 +877,24 @@ mod tests {
         RAID_SLOT_NONE,
     };
     use tairix_abi::sysinfo::{
-        CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
-        CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
-        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
-        MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
-        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
+        CacheReportRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
+        CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest,
+        HardwareTreeRequest, IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage,
+        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest,
+        MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState,
+        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
-        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
-        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES,
+        RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
+        SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{
-        CapabilityId, CapabilitySummary, Errno, LimitKind, Origin, ProcId, ResourceLimit,
-        SchedPriority, TrustDomain, ORIGIN_WIRE_LEN,
+        CapabilityId, Errno, LimitKind, Origin, ProcId, ResourceLimit, SchedPriority, TrustDomain,
+        ORIGIN_WIRE_LEN,
     };
     use tairix_log::{Event, Level, Sink};
 
@@ -880,22 +984,30 @@ mod tests {
         }
     }
 
-    /// One reclaim record per class, with figures derived from the class
-    /// id so paging tests can assert exact windows.
-    fn fixture_reclaim() -> alloc::vec::Vec<ReclaimClassRecord> {
+    /// One kernel-measured cache-ledger row per reclaim class, with figures
+    /// derived from the class id so paging and folding tests can assert
+    /// exact windows and values. Standing in for the retired
+    /// `fixture_reclaim`, which built the folded totals directly; folding
+    /// these through [`tairix_abi::sysinfo::fold_cache_ledgers`] now
+    /// reproduces the exact same per-class totals.
+    fn fixture_cache_ledgers() -> alloc::vec::Vec<CacheLedgerRecord> {
         (0..RECLAIM_CLASS_COUNT)
-            .map(|i| ReclaimClassRecord {
-                class: u8::try_from(i).unwrap(),
-                reserved: [0u8; 7],
-                payload_bytes: (i as u64) * 1000,
-                metadata_bytes: (i as u64) * 10,
-                entries: i as u64,
-                refusals: 0,
-                pressure_shrinks: 1,
-                teardowns: 0,
-                failures: 0,
-                hits: (i as u64) * 100,
-                misses: i as u64,
+            .map(|i| {
+                let mut record = CacheLedgerRecord::new(
+                    b"kernel-cache",
+                    CacheOwnerKind::KernelSubsystem,
+                    0,
+                    u8::try_from(i).unwrap(),
+                )
+                .unwrap();
+                record.origin = CacheLedgerOrigin::Kernel;
+                record.payload_bytes = (i as u64) * 1000;
+                record.metadata_bytes = (i as u64) * 10;
+                record.entries = i as u64;
+                record.pressure_shrinks = 1;
+                record.hits = (i as u64) * 100;
+                record.misses = i as u64;
+                record
             })
             .collect()
     }
@@ -1037,8 +1149,20 @@ mod tests {
         global: [ProcessRecord; 3],
         hwtree: alloc::vec::Vec<u8>,
         mounts: [MountRecord; 2],
+        cache_ledgers: alloc::vec::Vec<CacheLedgerRecord>,
+        /// Which process instances `live_process_instances` reports as
+        /// live, set by tests through [`FixtureSource::set_live`]; empty by
+        /// default, since most tests never report a cache and so never
+        /// need a reporter kept alive across a query.
+        live: RefCell<alloc::vec::Vec<ProcId>>,
     }
     impl FixtureSource {
+        /// Declare which process instances `live_process_instances` should
+        /// report as live, for tests that exercise reporter expiry.
+        fn set_live(&self, live: alloc::vec::Vec<ProcId>) {
+            *self.live.borrow_mut() = live;
+        }
+
         fn new() -> Self {
             let mk = |pid, uid, name: &[u8]| {
                 ProcessRecord::new(
@@ -1093,6 +1217,8 @@ mod tests {
                     )
                     .unwrap(),
                 ],
+                cache_ledgers: fixture_cache_ledgers(),
+                live: RefCell::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -1184,11 +1310,14 @@ mod tests {
                 total_bytes: self.kernel_memory_stats(caller)?.total_bytes,
             })
         }
-        fn reclaim_records(
+        fn cache_ledger_records(
             &self,
             _caller: &Caller,
-        ) -> Result<alloc::vec::Vec<ReclaimClassRecord>, Errno> {
-            Ok(fixture_reclaim())
+        ) -> Result<alloc::vec::Vec<CacheLedgerRecord>, Errno> {
+            Ok(self.cache_ledgers.clone())
+        }
+        fn live_process_instances(&self) -> Result<alloc::vec::Vec<ProcId>, Errno> {
+            Ok(self.live.borrow().clone())
         }
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
             Ok(fixture_ramzip())
@@ -1368,22 +1497,77 @@ mod tests {
         buf
     }
 
+    /// The representative attested caller most tests use: the dispatcher
+    /// gates on its capability summary and scopes by its uid, both read
+    /// from the attested origin the shared fixture mints.
     fn caller(caps: &Caps) -> Caller {
-        let mut summary = CapabilitySummary::EMPTY;
-        for cap in caps.0 {
-            summary.insert(*cap);
+        user_caller(caps.0, 0x10, 10)
+    }
+
+    /// Call [`serve`] against a fresh, generously-sized registry.
+    ///
+    /// Every pre-existing single-request test uses this: it never reports
+    /// a cache or looks at reporter state, so a registry that lives no
+    /// longer than the one call is equivalent to a persistent one. The
+    /// reporter-specific tests below thread their own registry explicitly
+    /// across several calls instead of using this helper.
+    fn serve_once(
+        source: &dyn SysinfoSource,
+        caller: &Caller,
+        sink: &dyn Sink,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        serve(source, caller, &mut registry, sink, request, response)
+    }
+
+    /// Like [`request_bytes`], but returned as an owned, exactly-sized
+    /// buffer rather than padded into a fixed 64-byte array — needed for a
+    /// [`SysinfoQueryId::CACHE_REPORT`] payload, which can carry up to
+    /// [`MAX_CACHE_REPORT_ENTRIES`] whole [`CacheLedgerRecord`]s and so can
+    /// exceed 64 bytes many times over.
+    fn request_bytes_vec(query: SysinfoQueryId, payload: &[u8]) -> alloc::vec::Vec<u8> {
+        let header = SysinfoRequestHeader {
+            magic: SYSINFO_REQUEST_MAGIC,
+            version: SYSINFO_VERSION_CURRENT,
+            flags: 0,
+            query,
+            reserved: 0,
+            payload_len: u32::try_from(payload.len()).unwrap(),
+            request_id: 7,
+        };
+        let mut buf = alloc::vec::Vec::new();
+        buf.extend_from_slice(&header.to_le_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// A [`CacheLedgerRecord`] with `origin`/`reporter_pid` left at the
+    /// caller-submittable defaults and `payload_bytes` set to
+    /// `resident_bytes`, ready to encode into a
+    /// [`SysinfoQueryId::CACHE_REPORT`] payload.
+    fn report_row(label: &str, class: u8, resident_bytes: u64) -> CacheLedgerRecord {
+        let mut row =
+            CacheLedgerRecord::new(label.as_bytes(), CacheOwnerKind::UserlandProcess, 0, class)
+                .expect("valid label");
+        row.payload_bytes = resident_bytes;
+        row
+    }
+
+    /// Encode a [`CacheReportRequest`] header followed by `rows`.
+    fn cache_report_payload(rows: &[CacheLedgerRecord]) -> alloc::vec::Vec<u8> {
+        let header = CacheReportRequest {
+            count: u16::try_from(rows.len()).unwrap(),
+            flags: 0,
+            reserved: 0,
+        };
+        let mut payload = alloc::vec::Vec::new();
+        payload.extend_from_slice(&header.to_le_bytes());
+        for row in rows {
+            payload.extend_from_slice(&row.to_le_bytes());
         }
-        // A representative attested user-process origin; the dispatcher gates
-        // on the capability summary and scopes by uid, both read from here.
-        Caller::new(Origin::new(
-            TrustDomain::User,
-            1000,
-            100,
-            10,
-            ProcId::from_raw([0x10; 16]),
-            summary,
-            tairix_abi::ORIGIN_CONSOLE_NONE,
-        ))
+        payload
     }
 
     #[test]
@@ -1395,7 +1579,7 @@ mod tests {
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::PROCESS_IDENTITY, &[]);
         let mut resp = [0u8; 128];
-        let n = serve(&source, &who, &sink, &req, &mut resp).expect("served");
+        let n = serve_once(&source, &who, &sink, &req, &mut resp).expect("served");
         assert_eq!(n, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&resp[..n]).expect("valid origin");
         assert_eq!(decoded, expected);
@@ -1418,7 +1602,7 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::SELF_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * ProcessRecord::WIRE_LEN);
         let first = ProcessRecord::from_bytes(&resp[..ProcessRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.name_bytes(), b"shell");
@@ -1438,7 +1622,7 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, ProcessRecord::WIRE_LEN);
         let rec = ProcessRecord::from_bytes(&resp[..ProcessRecord::WIRE_LEN]).unwrap();
         assert_eq!(rec.name_bytes(), b"shell");
@@ -1450,7 +1634,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -1464,7 +1648,7 @@ mod tests {
         let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         let events = sink.events.borrow();
@@ -1481,7 +1665,7 @@ mod tests {
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::KERNEL_MEMORY_STATS, &[]);
         let mut resp = [0u8; 64];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, KernelMemoryStats::WIRE_LEN);
         let stats = KernelMemoryStats::from_bytes(&resp).unwrap();
         assert_eq!(stats.page_size, 4096);
@@ -1525,26 +1709,26 @@ mod tests {
 
         let denied = Caps(&[]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &page(0, 2), &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &page(0, 2), &mut resp),
             Err(Errno::PermissionDenied)
         );
 
         // Page 1: the snapshot header plus the first two of three nodes.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
-        let n = serve(&source, &caller(&granted), &sink, &page(0, 2), &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &page(0, 2), &mut resp).unwrap();
         let (header, nodes) = decode_tree_page(&resp[..n]);
         assert_eq!(header.generation(), 7);
         assert_eq!(header.node_count(), 3);
         assert_eq!(nodes, tree_nodes()[..2]);
 
         // Page 2: the same header, the final node.
-        let n = serve(&source, &caller(&granted), &sink, &page(2, 2), &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &page(2, 2), &mut resp).unwrap();
         let (header, nodes) = decode_tree_page(&resp[..n]);
         assert_eq!(header.node_count(), 3);
         assert_eq!(nodes, tree_nodes()[2..]);
 
         // Past the end: the header alone, no records.
-        let n = serve(&source, &caller(&granted), &sink, &page(3, 2), &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &page(3, 2), &mut resp).unwrap();
         let (_, nodes) = decode_tree_page(&resp[..n]);
         assert!(nodes.is_empty());
     }
@@ -1585,7 +1769,7 @@ mod tests {
                 }
                 .to_le_bytes(),
             );
-            let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+            let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
             let (header, page) = decode_tree_page(&resp[..n]);
             assert_eq!(header.generation(), 9);
             assert_eq!(header.node_count(), nodes.len() as u64);
@@ -1617,7 +1801,7 @@ mod tests {
         );
         let mut resp = [0u8; 4096];
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
     }
@@ -1630,14 +1814,14 @@ mod tests {
 
         let req = request_bytes(SysinfoQueryId::UPTIME, &[]);
         let mut resp = [0u8; 64];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let up = Uptime::from_bytes(&resp[..n]).unwrap();
         assert_eq!(up.since_boot, Duration64::from_nanos(1_000));
         assert_eq!(up.boot_time, Time64::from_secs(1_700_000_000));
 
         let req = request_bytes(SysinfoQueryId::SYSTEM_IDENTITY, &[]);
         let mut resp = [0u8; 128];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let id = SystemIdentity::from_bytes(&resp[..n]).unwrap();
         assert_eq!(id.hostname_bytes(), b"tairix-box");
         // Neither query is audited.
@@ -1651,7 +1835,7 @@ mod tests {
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::LOAD_AVERAGE, &[]);
         let mut resp = [0u8; 64];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let load = LoadAverage::from_bytes(&resp[..n]).unwrap();
         assert_eq!(LoadAverage::whole(load.load1), 3);
         assert_eq!(load.runnable, 3);
@@ -1663,7 +1847,7 @@ mod tests {
         // Fails closed when the response buffer cannot hold the record.
         let mut tiny = [0u8; LoadAverage::WIRE_LEN - 1];
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut tiny),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut tiny),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -1675,7 +1859,7 @@ mod tests {
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::RESOURCE_LIMITS, &[]);
         let mut resp = [0u8; 256];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, RESOURCE_LIMITS_REPORT_LEN);
         // The records decode positionally, one per LimitKind in order.
         for (index, kind) in LimitKind::ALL.iter().enumerate() {
@@ -1696,7 +1880,7 @@ mod tests {
         // Fails closed when the response buffer cannot hold the report.
         let mut tiny = [0u8; RESOURCE_LIMITS_REPORT_LEN - 1];
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut tiny),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut tiny),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -1713,7 +1897,7 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr.to_le_bytes());
         let mut resp = [0u8; 1024];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 3 * UserDirectoryRecord::WIRE_LEN);
         let first =
             UserDirectoryRecord::from_bytes(&resp[..UserDirectoryRecord::WIRE_LEN]).unwrap();
@@ -1729,7 +1913,7 @@ mod tests {
             flags: 0,
         };
         let req_tail = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_tail.to_le_bytes());
-        let n = serve(&source, &caller(&caps), &sink, &req_tail, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req_tail, &mut resp).unwrap();
         assert_eq!(n, UserDirectoryRecord::WIRE_LEN);
         let tail = UserDirectoryRecord::from_bytes(&resp[..UserDirectoryRecord::WIRE_LEN]).unwrap();
         assert_eq!(tail.name_bytes(), b"bob");
@@ -1742,7 +1926,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -1759,7 +1943,7 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr.to_le_bytes());
         let mut resp = [0u8; 1024];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * MountRecord::WIRE_LEN);
         let first = MountRecord::from_bytes(&resp[..MountRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.target_bytes(), b"/");
@@ -1782,7 +1966,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -1799,7 +1983,7 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr.to_le_bytes());
         let mut resp = [0u8; 256];
-        let n = serve(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * CpuTimeRecord::WIRE_LEN);
         let first = CpuTimeRecord::from_bytes(&resp[..CpuTimeRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.cpu, 0);
@@ -1816,7 +2000,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -1962,7 +2146,7 @@ mod tests {
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -1973,7 +2157,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetBondMemberRecord::WIRE_LEN);
         let record = NetBondMemberRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_bond_member());
@@ -1999,7 +2183,7 @@ mod tests {
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2010,7 +2194,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetSocketRecord::WIRE_LEN);
         let record = NetSocketRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_socket());
@@ -2037,7 +2221,7 @@ mod tests {
         // ungated — emits no audit record.
         let none = Caps(&[]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).unwrap();
         let expected = fixture_resolver_servers();
         assert_eq!(n, expected.len() * NetResolverServer::WIRE_LEN);
         for (index, want) in expected.iter().enumerate() {
@@ -2069,7 +2253,7 @@ mod tests {
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2081,7 +2265,7 @@ mod tests {
         // requested window threads through to the record.
         let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetInterfaceRatesRecord::WIRE_LEN);
         let record = NetInterfaceRatesRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_rates(window));
@@ -2108,7 +2292,7 @@ mod tests {
         // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2119,7 +2303,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetInterfaceCountersRecord::WIRE_LEN);
         let record = NetInterfaceCountersRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_counters());
@@ -2145,7 +2329,7 @@ mod tests {
         // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
         let denied = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2156,7 +2340,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_HW` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetInterfaceFactsRecord::WIRE_LEN);
         let record = NetInterfaceFactsRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_facts());
@@ -2173,7 +2357,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::NET_INTERFACE_FACTS, &nlr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2194,7 +2378,7 @@ mod tests {
         // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2205,7 +2389,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, NetInterfaceStateRecord::WIRE_LEN);
         let record = NetInterfaceStateRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_state());
@@ -2233,7 +2417,7 @@ mod tests {
         // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
         let denied = Caps(&[]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2244,7 +2428,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_HW` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, SeatRecord::WIRE_LEN);
         let record = SeatRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record.seat_id, 0);
@@ -2264,7 +2448,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::SEAT_LIST, &slr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2287,7 +2471,7 @@ mod tests {
         // Denied without `CAP_SYSINFO_HW`; the refusal is logged.
         let denied = Caps(&[]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2299,7 +2483,7 @@ mod tests {
         // in order, with counts, owners, and the quarantine flag intact.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * IrqRecord::WIRE_LEN);
         let first = IrqRecord::from_bytes(&resp[..IrqRecord::WIRE_LEN]).unwrap();
         let second = IrqRecord::from_bytes(&resp[IrqRecord::WIRE_LEN..n]).unwrap();
@@ -2323,7 +2507,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::IRQ_LIST, &end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2347,7 +2531,7 @@ mod tests {
         // kernel operational state); the refusal is logged.
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2359,7 +2543,7 @@ mod tests {
         // volumes, in order, with their availability and folded counters.
         let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * VolumeIoHealthRecord::WIRE_LEN);
         let first = VolumeIoHealthRecord::from_bytes(&resp[..VolumeIoHealthRecord::WIRE_LEN])
             .expect("decode first");
@@ -2385,7 +2569,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2411,7 +2595,7 @@ mod tests {
         // to the composer.
         let denied = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2423,7 +2607,7 @@ mod tests {
         // in order, with level, health, and the rebuild flag intact.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * RaidArrayRecord::WIRE_LEN);
         let first =
             RaidArrayRecord::from_bytes(&resp[..RaidArrayRecord::WIRE_LEN]).expect("decode first");
@@ -2451,7 +2635,7 @@ mod tests {
             flags: 0,
         };
         let req_middle = request_bytes(SysinfoQueryId::RAID_ARRAYS, &middle.to_le_bytes());
-        let n = serve(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
         assert_eq!(n, RaidArrayRecord::WIRE_LEN);
         assert_eq!(
             RaidArrayRecord::from_bytes(&resp[..n])
@@ -2468,7 +2652,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::RAID_ARRAYS, &end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2492,7 +2676,7 @@ mod tests {
         // reaches the composer.
         let denied = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2504,7 +2688,7 @@ mod tests {
         // the composer holds, with its disposition, slot, and affiliation.
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 3 * RaidMemberRecord::WIRE_LEN);
         let decoded: alloc::vec::Vec<RaidMemberRecord> = resp[..n]
             .chunks(RaidMemberRecord::WIRE_LEN)
@@ -2531,7 +2715,7 @@ mod tests {
             flags: 0,
         };
         let req_middle = request_bytes(SysinfoQueryId::RAID_MEMBERS, &middle.to_le_bytes());
-        let n = serve(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
         assert_eq!(n, RaidMemberRecord::WIRE_LEN);
         assert_eq!(
             RaidMemberRecord::from_bytes(&resp[..n])
@@ -2548,7 +2732,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::RAID_MEMBERS, &end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2570,7 +2754,7 @@ mod tests {
         // register values); the refusal is logged.
         let denied = Caps(&[CapabilityId::SYSINFO_HW]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2582,7 +2766,7 @@ mod tests {
         // records, newest first, with their identity and load-relative pc.
         let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, 2 * CrashRecord::WIRE_LEN);
         let first = CrashRecord::from_bytes(&resp[..CrashRecord::WIRE_LEN]).unwrap();
         let second = CrashRecord::from_bytes(&resp[CrashRecord::WIRE_LEN..n]).unwrap();
@@ -2607,7 +2791,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::CRASH_RECORD, &end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2623,7 +2807,7 @@ mod tests {
         let sink = RecordingSink::new();
         let denied = Caps(&[]);
         assert_eq!(
-            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -2634,7 +2818,7 @@ mod tests {
         // Served (and audited) for a `CAP_SYSINFO_KERNEL` holder.
         let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, MemoryPressureStats::WIRE_LEN);
         let decoded = MemoryPressureStats::from_bytes(&resp[..n]).unwrap();
         assert_eq!(decoded, fixture_pressure());
@@ -2655,7 +2839,7 @@ mod tests {
         // machine is short of memory in order to give its caches back.
         let sink = RecordingSink::new();
         let none = Caps(&[]);
-        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
+        let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
         assert_eq!(n, MemoryPressureBand::WIRE_LEN);
         let decoded = MemoryPressureBand::from_bytes(&resp[..n]).expect("round trip");
 
@@ -2680,7 +2864,7 @@ mod tests {
         // process needs it to size its caches against the real machine.
         let sink = RecordingSink::new();
         let none = Caps(&[]);
-        let n = serve(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
+        let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
         assert_eq!(n, MemoryTotal::WIRE_LEN);
         let decoded = MemoryTotal::from_bytes(&resp[..n]).expect("round trip");
 
@@ -2715,12 +2899,12 @@ mod tests {
         };
         let req = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
 
         // The whole ledger: one record per class, class-id order.
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, ReclaimClassRecord::WIRE_LEN * RECLAIM_CLASS_COUNT);
         for i in 0..RECLAIM_CLASS_COUNT {
             let window =
@@ -2737,7 +2921,7 @@ mod tests {
             flags: 0,
         };
         let req_page = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_page.to_le_bytes());
-        let n = serve(&source, &caller(&granted), &sink, &req_page, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req_page, &mut resp).unwrap();
         assert_eq!(n, ReclaimClassRecord::WIRE_LEN * 2);
         let record = ReclaimClassRecord::from_bytes(&resp[..ReclaimClassRecord::WIRE_LEN]).unwrap();
         assert_eq!(usize::from(record.class), 7);
@@ -2750,7 +2934,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2763,12 +2947,12 @@ mod tests {
         let mut resp = [0u8; 256];
 
         assert_eq!(
-            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
 
         let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, RamzipStats::WIRE_LEN);
         let decoded = RamzipStats::from_bytes(&resp[..n]).unwrap();
         assert_eq!(decoded, fixture_ramzip());
@@ -2792,11 +2976,11 @@ mod tests {
         // counters are kernel scheduler internals, unlike the ungated
         // busy/idle split.
         assert_eq!(
-            serve(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&Caps(&[])), &sink, &req, &mut resp),
             Err(Errno::PermissionDenied)
         );
 
-        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, CpuLoadRecord::WIRE_LEN * 2);
         let first = CpuLoadRecord::from_bytes(&resp[..CpuLoadRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.cpu, 0);
@@ -2809,7 +2993,7 @@ mod tests {
             flags: 0,
         };
         let req_next = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_next.to_le_bytes());
-        let n = serve(&source, &caller(&granted), &sink, &req_next, &mut resp).unwrap();
+        let n = serve_once(&source, &caller(&granted), &sink, &req_next, &mut resp).unwrap();
         assert_eq!(n, CpuLoadRecord::WIRE_LEN);
         let second = CpuLoadRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(second.cpu, 1);
@@ -2820,7 +3004,7 @@ mod tests {
         };
         let req_end = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_end.to_le_bytes());
         assert_eq!(
-            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
     }
@@ -2833,14 +3017,14 @@ mod tests {
         let mut resp = [0u8; 64];
         // Too short to hold a header.
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &[0u8; 4], &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &[0u8; 4], &mut resp),
             Err(Errno::BufferTooSmall)
         );
         // Corrupt magic.
         let mut req = request_bytes(SysinfoQueryId::UPTIME, &[]);
         req[0] ^= 0xFF;
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
         let events = sink.events.borrow();
@@ -2868,7 +3052,7 @@ mod tests {
         };
         let mut resp = [0u8; 64];
         assert_eq!(
-            serve(
+            serve_once(
                 &source,
                 &caller(&caps),
                 &sink,
@@ -2888,7 +3072,7 @@ mod tests {
         let req = request_bytes(unassigned, &[]);
         let mut resp = [0u8; 64];
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
             Err(Errno::NotImplemented)
         );
         assert_eq!(
@@ -2905,8 +3089,486 @@ mod tests {
         let req = request_bytes(SysinfoQueryId::KERNEL_MEMORY_STATS, &[]);
         let mut resp = [0u8; 8]; // smaller than KernelMemoryStats::WIRE_LEN
         assert_eq!(
-            serve(&source, &caller(&caps), &sink, &req, &mut resp),
+            serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn cache_report_row_appears_in_cache_ledgers_and_reclaim_fold() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 4096];
+        let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
+
+        // Report one row for class 3, and keep the reporter alive across
+        // the queries below.
+        let reporter = user_caller(&[], 0xA1, 555);
+        source.set_live(alloc::vec![reporter.origin().proc_id()]);
+        let payload = cache_report_payload(&[report_row("glyphs", 3, 4096)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let n = serve(&source, &reporter, &mut registry, &sink, &req, &mut resp)
+            .expect("report accepted");
+        assert_eq!(n, 0);
+
+        // The row shows up in CACHE_LEDGERS, after the kernel rows.
+        let cll = CacheLedgerListRequest {
+            offset: 0,
+            limit: 32,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+        let n = serve(
+            &source,
+            &kernel_reader,
+            &mut registry,
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("cache_ledgers served");
+        assert_eq!(n, CacheLedgerRecord::WIRE_LEN * (RECLAIM_CLASS_COUNT + 1));
+        let last = CacheLedgerRecord::from_bytes(&resp[n - CacheLedgerRecord::WIRE_LEN..n])
+            .expect("valid record");
+        assert_eq!(last.label(), "glyphs");
+        assert_eq!(last.origin, CacheLedgerOrigin::SelfReported);
+        assert_eq!(last.reporter_pid, 555);
+
+        // …and its bytes are folded into class 3's `self_reported_bytes`,
+        // alongside (not instead of) the kernel row's own bytes; a kernel
+        // row's bytes never count towards it.
+        let rlr = ReclaimListRequest {
+            offset: 0,
+            limit: u16::try_from(RECLAIM_CLASS_COUNT).expect("the class count fits a paging limit"),
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr.to_le_bytes());
+        let n = serve(
+            &source,
+            &kernel_reader,
+            &mut registry,
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("reclaim_stats served");
+        assert_eq!(n, ReclaimClassRecord::WIRE_LEN * RECLAIM_CLASS_COUNT);
+        let class3 = ReclaimClassRecord::from_bytes(
+            &resp[3 * ReclaimClassRecord::WIRE_LEN..4 * ReclaimClassRecord::WIRE_LEN],
+        )
+        .unwrap();
+        assert_eq!(class3.payload_bytes, 3_000 + 4096);
+        assert_eq!(class3.self_reported_bytes, 4096);
+        let class0 = ReclaimClassRecord::from_bytes(&resp[..ReclaimClassRecord::WIRE_LEN]).unwrap();
+        assert_eq!(class0.self_reported_bytes, 0);
+    }
+
+    #[test]
+    fn cache_report_refuses_row_with_preset_origin_or_reporter_pid() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 256];
+        let reporter = user_caller(&[], 0xB2, 7);
+
+        let mut preset_origin = report_row("glyphs", 0, 10);
+        preset_origin.origin = CacheLedgerOrigin::Kernel;
+        let payload = cache_report_payload(&[preset_origin]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+
+        let mut preset_pid = report_row("glyphs", 0, 10);
+        preset_pid.reporter_pid = 999;
+        let payload = cache_report_payload(&[preset_pid]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+
+        assert!(registry.rows().is_empty());
+    }
+
+    #[test]
+    fn cache_report_refuses_a_row_claiming_a_kernel_subsystem_owner() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 256];
+        let reporter = user_caller(&[], 0xB3, 11);
+
+        let mut pretender = report_row("glyphs", 0, 4096);
+        pretender.owner_kind = CacheOwnerKind::KernelSubsystem;
+        // Every kernel row carries this owner kind, so the wire format
+        // accepts it and only the reported-row policy can refuse it: a
+        // process describing its own caches is not a kernel subsystem.
+        assert!(CacheLedgerRecord::from_bytes(&pretender.to_le_bytes()).is_ok());
+
+        let payload = cache_report_payload(&[pretender]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+        assert!(registry.rows().is_empty());
+    }
+
+    #[test]
+    fn cache_report_second_call_replaces_rather_than_appends() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 256];
+        let reporter = user_caller(&[], 0xC3, 8);
+
+        let first =
+            cache_report_payload(&[report_row("glyphs", 0, 10), report_row("artwork", 1, 20)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &first);
+        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("first report");
+
+        let second = cache_report_payload(&[report_row("cursors", 2, 5)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &second);
+        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("second report");
+
+        let rows = registry.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label(), "cursors");
+    }
+
+    #[test]
+    fn cache_report_empty_withdraws_the_reporter() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 256];
+        let reporter = user_caller(&[], 0xD4, 9);
+
+        let payload = cache_report_payload(&[report_row("glyphs", 0, 10)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("reported");
+
+        let empty = cache_report_payload(&[]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &empty);
+        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("withdrawn");
+
+        assert!(registry.rows().is_empty());
+    }
+
+    #[test]
+    fn dead_reporter_is_dropped_and_recycled_pid_does_not_inherit_its_rows() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 4096];
+        let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
+        let cll = CacheLedgerListRequest {
+            offset: 0,
+            limit: 32,
+            flags: 0,
+        };
+
+        let original = user_caller(&[], 0xE5, 111);
+        source.set_live(alloc::vec![original.origin().proc_id()]);
+        let payload = cache_report_payload(&[report_row("glyphs", 0, 10)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(&source, &original, &mut registry, &sink, &req, &mut resp).expect("reported");
+
+        // The process has exited: nobody is live any more.
+        source.set_live(alloc::vec::Vec::new());
+        let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+        let n = serve(
+            &source,
+            &kernel_reader,
+            &mut registry,
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .unwrap();
+        assert_eq!(n, CacheLedgerRecord::WIRE_LEN * RECLAIM_CLASS_COUNT);
+
+        // A different process instance, recycled to the same numeric pid,
+        // reports.
+        let recycled = user_caller(&[], 0xF6, 111);
+        source.set_live(alloc::vec![recycled.origin().proc_id()]);
+        let payload = cache_report_payload(&[report_row("cursors", 0, 20)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(&source, &recycled, &mut registry, &sink, &req, &mut resp)
+            .expect("recycled report admitted");
+
+        let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+        let n = serve(
+            &source,
+            &kernel_reader,
+            &mut registry,
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .unwrap();
+        assert_eq!(n, CacheLedgerRecord::WIRE_LEN * (RECLAIM_CLASS_COUNT + 1));
+        let last = CacheLedgerRecord::from_bytes(&resp[n - CacheLedgerRecord::WIRE_LEN..n])
+            .expect("valid record");
+        assert_eq!(last.label(), "cursors");
+        assert_eq!(last.reporter_pid, 111);
+    }
+
+    #[test]
+    fn full_registry_refuses_new_reporter_without_evicting_a_live_one() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        // Exactly the registry's own floor, read from the derivation policy
+        // rather than copied, so this test cannot drift from it.
+        let floor = u8::try_from(MIN_REPORTERS).expect("the reporter floor fits a fixture tag");
+        let mut registry = CacheLedgerRegistry::new(RAM_BYTES_PER_REPORTER * u64::from(floor));
+        let mut resp = [0u8; 256];
+        let mut live = alloc::vec::Vec::new();
+
+        for tag in 0..floor {
+            let reporter = user_caller(&[], tag, u64::from(tag));
+            live.push(reporter.origin().proc_id());
+            source.set_live(live.clone());
+            let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
+            let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp)
+                .expect("admitted within capacity");
+        }
+
+        let overflow = user_caller(&[], 200, 200);
+        live.push(overflow.origin().proc_id());
+        source.set_live(live);
+        let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(&source, &overflow, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::NoSpace)
+        );
+        assert_eq!(registry.rows().len(), MIN_REPORTERS);
+    }
+
+    #[test]
+    fn cache_ledgers_requires_capability_while_cache_report_does_not() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 256];
+
+        let cll = CacheLedgerListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+        assert_eq!(
+            serve(
+                &source,
+                &caller(&Caps(&[])),
+                &mut registry,
+                &sink,
+                &req,
+                &mut resp
+            ),
+            Err(Errno::PermissionDenied)
+        );
+
+        let reporter = user_caller(&[], 0x88, 1);
+        source.set_live(alloc::vec![reporter.origin().proc_id()]);
+        let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
+        let report_req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &sink,
+                &report_req,
+                &mut resp
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn cache_report_from_a_kernel_domain_caller_leaves_no_rows() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let mut resp = [0u8; 4096];
+
+        // `CACHE_REPORT` demands no capability, so the attested instance id
+        // is the only thing standing between a kernel-domain principal and
+        // a row that would read as self-reported. Nothing else — not the
+        // gate, not the decoder — refuses this request.
+        let payload = cache_report_payload(&[report_row("glyphs", 3, 4096)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        assert_eq!(
+            serve(
+                &source,
+                &kernel_caller(),
+                &mut registry,
+                &sink,
+                &req,
+                &mut resp
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(registry.rows().is_empty());
+
+        // Claiming to be live does not help either: expiry reads the
+        // kernel's live-instance list, and the reserved id is refused
+        // before the registry is consulted at all.
+        source.set_live(alloc::vec![ProcId::KERNEL]);
+        assert_eq!(
+            serve(
+                &source,
+                &kernel_caller(),
+                &mut registry,
+                &sink,
+                &req,
+                &mut resp
+            ),
+            Err(Errno::PermissionDenied)
+        );
+
+        // The combined view a reader gets is the kernel's own rows alone.
+        let cll = CacheLedgerListRequest {
+            offset: 0,
+            limit: 32,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+        let n = serve(
+            &source,
+            &caller(&Caps(&[CapabilityId::SYSINFO_KERNEL])),
+            &mut registry,
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("cache_ledgers served");
+        assert_eq!(n, CacheLedgerRecord::WIRE_LEN * RECLAIM_CLASS_COUNT);
+    }
+
+    #[test]
+    fn cache_ledgers_paging_never_skips_or_repeats_a_row() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
+        let mut resp = [0u8; 4096];
+
+        let reporter = user_caller(&[], 0x99, 2);
+        source.set_live(alloc::vec![reporter.origin().proc_id()]);
+        let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("reported");
+
+        let total = RECLAIM_CLASS_COUNT + 1;
+        let mut seen: alloc::vec::Vec<CacheLedgerRecord> = alloc::vec::Vec::new();
+        let mut offset: u32 = 0;
+        loop {
+            let cll = CacheLedgerListRequest {
+                offset,
+                limit: 3,
+                flags: 0,
+            };
+            let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
+            let n = serve(
+                &source,
+                &kernel_reader,
+                &mut registry,
+                &sink,
+                &req,
+                &mut resp,
+            )
+            .unwrap();
+            if n == 0 {
+                break;
+            }
+            let (records, trailing) = resp[..n].as_chunks::<{ CacheLedgerRecord::WIRE_LEN }>();
+            assert!(trailing.is_empty(), "a page is whole records");
+            for record in records {
+                seen.push(CacheLedgerRecord::from_bytes(record).unwrap());
+            }
+            offset += u32::try_from(records.len()).expect("a page length fits a u32");
+        }
+        assert_eq!(seen.len(), total);
+        for i in 0..seen.len() {
+            for j in (i + 1)..seen.len() {
+                assert_ne!(seen[i], seen[j], "duplicate row at {i} and {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_cache_report_fails_closed_and_leaves_registry_untouched() {
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let mut registry = CacheLedgerRegistry::new(1 << 30);
+        let reporter = user_caller(&[], 0x77, 42);
+        let mut resp = [0u8; 512];
+
+        // Short body: declares one row but supplies none.
+        let short_header = CacheReportRequest {
+            count: 1,
+            flags: 0,
+            reserved: 0,
+        };
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &short_header.to_le_bytes());
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+        assert!(registry.rows().is_empty());
+
+        // Trailing bytes: declares zero rows but supplies one anyway.
+        let zero_header = CacheReportRequest {
+            count: 0,
+            flags: 0,
+            reserved: 0,
+        };
+        let mut trailing = zero_header.to_le_bytes().to_vec();
+        trailing.extend_from_slice(&report_row("glyphs", 0, 1).to_le_bytes());
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &trailing);
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+        assert!(registry.rows().is_empty());
+
+        // Over-long declared count.
+        let over_header = CacheReportRequest {
+            count: u16::try_from(MAX_CACHE_REPORT_ENTRIES + 1).unwrap(),
+            flags: 0,
+            reserved: 0,
+        };
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &over_header.to_le_bytes());
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(registry.rows().is_empty());
+
+        // Unrenderable label: corrupt the wire image directly, since the
+        // safe constructor itself refuses to build such a row.
+        let mut bytes = report_row("glyphs", 0, 1).to_le_bytes();
+        bytes[96] = 0x01; // first label byte becomes a control character
+        let one_header = CacheReportRequest {
+            count: 1,
+            flags: 0,
+            reserved: 0,
+        };
+        let mut req_payload = one_header.to_le_bytes().to_vec();
+        req_payload.extend_from_slice(&bytes);
+        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &req_payload);
+        assert_eq!(
+            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            Err(Errno::OutOfRange)
+        );
+        assert!(registry.rows().is_empty());
     }
 }

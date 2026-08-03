@@ -135,9 +135,15 @@ where
         pressure,
         audit,
     );
-    // Every production volume cache registers its ledger with the
-    // System Information memory-statistics registry (observation-only).
-    tairix_kernel_core::memstats::MEM_STATS.register_ledger(cache.accounting_shared());
+    // Every production volume cache registers both of its classified pools
+    // — clean file data and metadata — with the System Information
+    // memory-statistics registry (observation-only). A `None` means
+    // classification refused the cache at birth (it is then poisoned and
+    // admits nothing), so there is nothing to register — the refusal is
+    // already in the audit log.
+    for ledger in cache.ledgers().into_iter().flatten() {
+        tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
+    }
     Box::new(cache)
 }
 

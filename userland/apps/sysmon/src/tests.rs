@@ -8,18 +8,19 @@ use core::cell::RefCell;
 
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{
-    CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord, IrqListRequest, IrqRecord,
-    KernelMemoryStats, LoadAverage, MemoryPressureStats, MountAvailability, MountListRequest,
-    MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader, Uptime,
-    IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
+    fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord,
+    CacheOwnerKind, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
+    IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+    MountAvailability, MountListRequest, MountRecord, MountVolumeState, ProcessListRequest,
+    ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
+    SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_curses::{Event, Screen, Size, Tty};
 use tairix_procinfo::Transport;
 use tairix_termcap::TermType;
 
-use crate::app::{detail_capacity, render, run};
+use crate::app::{detail_capacity, elide_middle, render, run};
 use crate::command::{parse, Command, DEFAULT_DELAY_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
 use crate::error::SysmonError;
 use crate::model::{Action, Focus, Gauge, Model, PinState};
@@ -36,6 +37,7 @@ struct FakeService {
     pressure: RefCell<Option<MemoryPressureStats>>,
     ramzip: Option<RamzipStats>,
     reclaim: Option<Vec<ReclaimClassRecord>>,
+    caches: Option<Vec<CacheLedgerRecord>>,
     cpu_times: RefCell<Option<Vec<CpuTimeRecord>>>,
     cpu_loads: Option<Vec<CpuLoadRecord>>,
     irqs: Option<Vec<IrqRecord>>,
@@ -76,21 +78,11 @@ impl FakeService {
                 fault_ins: 7,
                 ..RamzipStats::default()
             }),
-            reclaim: Some(
-                (0..RECLAIM_CLASS_COUNT)
-                    .map(|class| ReclaimClassRecord {
-                        class: u8::try_from(class).unwrap_or(0),
-                        payload_bytes: 1024 * (class as u64 + 1),
-                        entries: class as u64,
-                        // 100:10 per class — a 90% hit ratio the panel test
-                        // asserts, and a non-idle denominator so `hit%` is a
-                        // percentage rather than the idle `-`.
-                        hits: 100 * (class as u64 + 1),
-                        misses: 10 * (class as u64 + 1),
-                        ..ReclaimClassRecord::default()
-                    })
-                    .collect(),
-            ),
+            // The class totals are the fold of the cache rows below, as the
+            // real service guarantees: a double that let the two views
+            // disagree could hide exactly the arithmetic the panel shows.
+            reclaim: Some(fold_cache_ledgers(&healthy_caches()).to_vec()),
+            caches: Some(healthy_caches()),
             cpu_times: RefCell::new(Some(vec![cpu_time(0, 750, 250), cpu_time(1, 100, 900)])),
             cpu_loads: Some(vec![
                 CpuLoadRecord {
@@ -211,6 +203,15 @@ impl Transport for FakeService {
                     r.to_le_bytes().to_vec()
                 }))
             }
+            SysinfoQueryId::CACHE_LEDGERS => {
+                let Some(records) = &self.caches else {
+                    return Err(Errno::NotFound);
+                };
+                let req = CacheLedgerListRequest::from_bytes(payload)?;
+                Ok(page_bytes(records, req.offset, req.limit, |r| {
+                    r.to_le_bytes().to_vec()
+                }))
+            }
             SysinfoQueryId::CPU_LOAD => {
                 let Some(records) = &self.cpu_loads else {
                     return Err(Errno::NotFound);
@@ -324,6 +325,68 @@ fn record_with(pid: u64, name: &[u8], cpu_time_ns: u64, mem_bytes: u64) -> Proce
         name,
     )
     .expect("record")
+}
+
+/// The healthy-snapshot cache ledgers: one kernel-measured row per reclaim
+/// class, and one row a userland process filed for its own glyph cache in
+/// the `disposable-ui` class — the class the kernel cannot see into, and
+/// the reason the self-report path exists.
+///
+/// The per-class figures are the ones the class table has always shown
+/// (payload `1024 * (class + 1)`, `class` entries, hits and misses 10:1 for
+/// a 90% ratio). The reported row holds three times the kernel-measured
+/// resident bytes of its class — a 75% self share — and keeps the same
+/// 10:1 effectiveness so the folded class ratio is still 90%.
+fn healthy_caches() -> Vec<CacheLedgerRecord> {
+    let mut rows: Vec<CacheLedgerRecord> = (0..RECLAIM_CLASS_COUNT)
+        .map(|class| {
+            let class = u8::try_from(class).unwrap_or(0);
+            let scale = u64::from(class) + 1;
+            let mut row = cache_row(
+                &alloc::format!("kernel.slab{class}"),
+                CacheOwnerKind::KernelSubsystem,
+                0,
+                class,
+            );
+            row.origin = CacheLedgerOrigin::Kernel;
+            row.payload_bytes = 1024 * scale;
+            row.entries = u64::from(class);
+            row.hits = 100 * scale;
+            row.misses = 10 * scale;
+            row
+        })
+        .collect();
+    let mut reported = cache_row(
+        "font.client.glyphs",
+        CacheOwnerKind::UserlandProcess,
+        0,
+        disposable_ui_class(),
+    );
+    reported.origin = CacheLedgerOrigin::SelfReported;
+    reported.reporter_pid = 41;
+    reported.payload_bytes = 2560;
+    reported.metadata_bytes = 512;
+    reported.entries = 12;
+    reported.hits = 300;
+    reported.misses = 30;
+    rows.push(reported);
+    rows
+}
+
+/// A zeroed cache-ledger row for the fixtures.
+fn cache_row(
+    label: &str,
+    owner_kind: CacheOwnerKind,
+    owner_id: u64,
+    class: u8,
+) -> CacheLedgerRecord {
+    CacheLedgerRecord::new(label.as_bytes(), owner_kind, owner_id, class).expect("cache ledger")
+}
+
+/// The `disposable-ui` class id, looked up by its stable name so the
+/// fixtures cannot drift from the ABI's class order.
+fn disposable_ui_class() -> u8 {
+    tairix_abi::sysinfo::reclaim_class_from_name("disposable-ui").expect("disposable-ui class")
 }
 
 /// The healthy-snapshot mount table: a used root volume and a
@@ -769,6 +832,9 @@ fn render_draws_the_summary_and_the_reclaim_panel() {
     // the reclaim classes by name.
     assert!(contains(&out, b"caches"));
     assert!(contains(&out, b"disposable-ui"));
+    // The per-cache breakdown follows the class table on the same page.
+    assert!(contains(&out, b"origin"));
+    assert!(contains(&out, b"kernel.slab0"));
     // The caches table leads with the effectiveness columns: hits, misses,
     // and the hit ratio (100 : 10 per class renders as 90%).
     assert!(contains(&out, b"hits"));
@@ -814,7 +880,7 @@ fn each_panel_renders_its_detail_lines() {
     // follow below, carrying the compression accept rate.
     assert!(contains(&out, b"ramzip"));
     assert!(contains(&out, b"stored"));
-    assert!(contains(&out, b"16K"));
+    assert!(contains(&out, b"16.0K"));
     assert!(contains(&out, b"accept-rate"));
     focus_on(&mut model, Focus::Storage);
     let out = rendered(&mut model);
@@ -961,10 +1027,10 @@ fn focus_on(model: &mut Model, target: Focus) {
 fn the_memory_gauge_draws_a_stacked_bar_with_a_percentage() {
     // On a roomy screen the adaptive bar grows wide enough to show every
     // category, so the stacked composition is asserted directly on the
-    // reconstructed memory row: a `[`…`]` bar decomposing the 512M of 1024M
-    // used into `#` user-resident (128M), `K` kernel heap (64M), and `=`
-    // other-in-use cells, then the compact used/total figures and the exact
-    // used percentage.
+    // reconstructed memory row: a `[`…`]` bar decomposing the 512M of the
+    // 1G total used into `#` user-resident (128M), `K` kernel heap (64M),
+    // and `=` other-in-use cells, then the compact used/total figures and
+    // the exact used percentage.
     let (_service, mut model) = refreshed();
     let lines = grid_lines(&mut model, 25, 120);
     let mem = grid_row(&lines, "Mem");
@@ -974,7 +1040,7 @@ fn the_memory_gauge_draws_a_stacked_bar_with_a_percentage() {
     assert!(mem.contains('K'), "kernel-heap cells: {mem:?}");
     assert!(mem.contains('='), "other-in-use cells: {mem:?}");
     assert!(mem.contains("50% used"), "used percentage: {mem:?}");
-    assert!(mem.contains("512.0M/1024.0M"), "compact figures: {mem:?}");
+    assert!(mem.contains("512.0M/1.0G"), "compact figures: {mem:?}");
 }
 
 #[test]
@@ -1101,6 +1167,102 @@ fn the_storage_panel_lists_volumes_with_usage_and_marks_the_dead_one() {
     assert!(data.text.contains("[unavailable-dirty]"));
 }
 
+/// A storage-panel model serving exactly `mounts`.
+fn storage_model(mounts: Vec<MountRecord>) -> Model {
+    let mut service = FakeService::healthy();
+    service.mounts = Some(mounts);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    focus_on(&mut model, Focus::Storage);
+    model
+}
+
+#[test]
+fn two_deep_mount_points_stay_distinguishable_in_their_column() {
+    // Two volumes whose paths agree for the whole width of the column and
+    // differ only at the leaf. Telling them apart is the column's entire
+    // job, so the middle is what goes.
+    let model = storage_model(
+        [
+            &b"/Storage/backup-2024-vol1"[..],
+            &b"/Storage/backup-2024-vol2"[..],
+        ]
+        .into_iter()
+        .map(|target| {
+            mount_record(
+                b"backup",
+                target,
+                b"arxfs",
+                MountFlags::default(),
+                VolumeStats::default(),
+                MountAvailability::Available,
+            )
+        })
+        .collect(),
+    );
+    let rows = detail_rows(&model);
+    let targets: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.style != RowStyle::Header)
+        .map(|row| columns(row)[0])
+        .collect();
+    assert_eq!(targets, ["/Storage/b~2024-vol1", "/Storage/b~2024-vol2"]);
+}
+
+#[test]
+fn a_hundred_terabyte_volume_keeps_its_figures_inside_their_columns() {
+    // The charter's storage floor is volumes well past 100 TB, so the
+    // capacity figures must climb into the tebibyte and exbibyte bands
+    // rather than growing digits and shunting the usage bar off the line.
+    const BLOCK: u32 = 4096;
+    let volume = |bytes: u64, free: u64| VolumeStats {
+        block_size: BLOCK,
+        total_blocks: bytes / u64::from(BLOCK),
+        free_blocks: free / u64::from(BLOCK),
+        avail_blocks: free / u64::from(BLOCK),
+        files: 0,
+        files_free: 0,
+    };
+    let tib = 1024u64.pow(4);
+    let eib = 1024u64.pow(6);
+    let model = storage_model(vec![
+        mount_record(
+            b"vast",
+            b"/Storage/vast",
+            b"arxfs",
+            MountFlags::default(),
+            volume(200 * tib, 160 * tib),
+            MountAvailability::Available,
+        ),
+        mount_record(
+            b"vaster",
+            b"/Storage/vaster",
+            b"arxfs",
+            MountFlags::default(),
+            volume(2 * eib, eib),
+            MountAvailability::Available,
+        ),
+    ]);
+    let rows = detail_rows(&model);
+    assert_eq!(
+        columns(row_starting(&rows, "/Storage/vast"))[2..6],
+        ["200.0T", "40.0T", "160.0T", "20%"]
+    );
+    assert_eq!(
+        columns(row_starting(&rows, "/Storage/vaster"))[2..6],
+        ["2.0E", "1.0E", "1.0E", "50%"]
+    );
+    for row in rows.iter().filter(|row| row.style != RowStyle::Header) {
+        for figure in &columns(row)[2..5] {
+            assert!(
+                figure.chars().count() <= tairix_procinfo::SIZE_WIDTH,
+                "figure {figure:?} overruns its column: {}",
+                row.text
+            );
+        }
+    }
+}
+
 #[test]
 fn a_failed_mount_walk_renders_a_single_absence_row() {
     let service = FakeService::healthy();
@@ -1133,18 +1295,324 @@ fn the_irq_panel_styles_the_header_and_quarantined_line() {
     assert_eq!(active.style, RowStyle::Body);
 }
 
+/// The per-cache breakdown rows: everything below the breakdown table's own
+/// column header, which the `origin` column names uniquely.
+fn breakdown_rows(rows: &[crate::app::PanelRow]) -> &[crate::app::PanelRow] {
+    let header = rows
+        .iter()
+        .position(|row| row.style == RowStyle::Header && row.text.contains("origin"))
+        .expect("breakdown header");
+    &rows[header + 1..]
+}
+
+/// A row's columns, so an assertion names the column it means rather than a
+/// substring that could match anywhere on the line.
+fn columns(row: &crate::app::PanelRow) -> Vec<&str> {
+    row.text.split_whitespace().collect()
+}
+
+/// The panel row whose first column is `first`, or a panic naming the rows
+/// so a failure is legible.
+fn row_starting<'a>(rows: &'a [crate::app::PanelRow], first: &str) -> &'a crate::app::PanelRow {
+    rows.iter()
+        .find(|row| columns(row).first() == Some(&first))
+        .unwrap_or_else(|| panic!("no row for {first}: {rows:?}"))
+}
+
 #[test]
-fn a_refused_panel_query_yields_a_single_denied_row() {
+fn a_refused_class_query_states_the_refusal_rather_than_a_fabricated_table() {
     let service = FakeService::healthy();
     service.deny(SysinfoQueryId::RECLAIM_STATS);
     let mut model = Model::new(DEFAULT_DELAY_TENTHS);
     model.refresh(&service);
-    // The default focus is the reclaim panel; a refused query renders as one
-    // stated-refusal row, never a fabricated table.
+    // The default focus is the caches page; the refused class query renders
+    // as one stated-refusal row, never an invented class table.
     let rows = detail_rows(&model);
-    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].style, RowStyle::Denied);
     assert!(rows[0].text.contains("CAP_SYSINFO_KERNEL"));
+    assert!(
+        !rows.iter().any(|row| row.text.contains("self%")),
+        "no class table may be drawn for a refused query: {rows:?}"
+    );
+    // The per-cache breakdown is a separate query and still serves: each
+    // query degrades on its own.
+    assert_eq!(breakdown_rows(&rows).len(), RECLAIM_CLASS_COUNT + 1);
+}
+
+#[test]
+fn the_caches_page_breaks_each_class_total_down_per_cache() {
+    let (_service, model) = refreshed();
+    let rows = detail_rows(&model);
+    let breakdown = breakdown_rows(&rows);
+    // One row per registered ledger: the nine kernel-measured caches and the
+    // one a process reported for itself.
+    assert_eq!(breakdown.len(), RECLAIM_CLASS_COUNT + 1);
+    // Both tables are budgeted for the 80-column serial fallback, including
+    // the rows only a scrolled panel shows.
+    for row in &rows {
+        assert!(
+            tairix_curses::str_width(&row.text) <= 80,
+            "row wider than 80 columns: {}",
+            row.text
+        );
+    }
+
+    // The kernel-measured `disposable-ui` slab: a kernel-subsystem owner
+    // carries no id, its figures are attested, 1 KiB is resident, and 100
+    // hits to 10 misses is a 90% ratio.
+    let kernel = row_starting(breakdown, "kernel.slab0");
+    assert_eq!(
+        columns(kernel),
+        [
+            "kernel.slab0",
+            "kernel",
+            "kernel",
+            "disposable-ui",
+            "0",
+            "1.0K",
+            "90%"
+        ]
+    );
+    assert_eq!(kernel.style, RowStyle::Body);
+
+    // The reported glyph cache: the reporting pid names its owner, and 2560
+    // payload plus 512 metadata bytes are 3 KiB resident. The label is a
+    // column too long, so its middle goes and both ends stay — the leaf is
+    // what tells one glyph cache from another.
+    let reported = row_starting(breakdown, "font.cli~.glyphs");
+    assert_eq!(
+        columns(reported),
+        [
+            "font.cli~.glyphs",
+            "proc@41",
+            "self",
+            "disposable-ui",
+            "12",
+            "3.0K",
+            "90%"
+        ]
+    );
+}
+
+#[test]
+fn a_self_reported_cache_says_so_in_words_and_in_the_class_self_share() {
+    let (_service, model) = refreshed();
+    let rows = detail_rows(&model);
+    let breakdown = breakdown_rows(&rows);
+    let reported = row_starting(breakdown, "font.cli~.glyphs");
+    // The mark is a word in the row itself, legible on a monochrome serial
+    // console; the notice rendition reinforces it, never carries it alone.
+    assert_eq!(columns(reported).get(2), Some(&"self"));
+    assert_eq!(reported.style, RowStyle::Notice);
+    // Every attested row says where its figures came from too, and is drawn
+    // as an ordinary body row.
+    for row in breakdown.iter().filter(|row| row.style == RowStyle::Body) {
+        assert_eq!(columns(row).get(2), Some(&"kernel"), "{}", row.text);
+    }
+    // The class table carries the share of the class total that is taken on
+    // trust: 3 KiB reported of the 4 KiB resident.
+    assert_eq!(
+        columns(row_starting(&rows, "disposable-ui")).get(3),
+        Some(&"75%")
+    );
+    // A class no process reports for is wholly attested, and says 0% rather
+    // than a blank that could read as "unknown".
+    assert_eq!(
+        columns(row_starting(&rows, "fs-metadata")).get(3),
+        Some(&"0%")
+    );
+}
+
+#[test]
+fn a_class_total_is_the_sum_of_its_cache_rows() {
+    let (_service, model) = refreshed();
+    let rows = detail_rows(&model);
+    // `disposable-ui` holds two caches: the kernel-measured 1 KiB slab and
+    // the reported 3 KiB glyph cache. The class row is their sum — 12
+    // entries, 4 KiB resident, 400 hits and 40 misses — so the two tables
+    // can never tell an operator two different stories.
+    assert_eq!(
+        columns(row_starting(&rows, "disposable-ui")),
+        [
+            "disposable-ui",
+            "12",
+            "4.0K",
+            "75%",
+            "400",
+            "40",
+            "90%",
+            "0",
+            "0",
+            "0"
+        ]
+    );
+    let breakdown = breakdown_rows(&rows);
+    let residents: Vec<&str> = breakdown
+        .iter()
+        .filter(|row| columns(row).get(3) == Some(&"disposable-ui"))
+        .filter_map(|row| columns(row).get(5).copied())
+        .collect();
+    assert_eq!(residents, ["1.0K", "3.0K"], "rows of the class");
+}
+
+#[test]
+fn a_refused_cache_ledger_query_states_the_refusal_rather_than_an_empty_table() {
+    let service = FakeService::healthy();
+    // The breakdown is gated on the kernel-observability capability exactly
+    // as the class table is, so a caller without it is refused both.
+    service.deny(SysinfoQueryId::RECLAIM_STATS);
+    service.deny(SysinfoQueryId::CACHE_LEDGERS);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let rows = detail_rows(&model);
+    let refusals = rows
+        .iter()
+        .filter(|row| row.style == RowStyle::Denied)
+        .count();
+    assert_eq!(refusals, 2, "each table states its own refusal: {rows:?}");
+    for row in rows.iter().filter(|row| row.style == RowStyle::Denied) {
+        assert!(row.text.contains("CAP_SYSINFO_KERNEL"), "{}", row.text);
+    }
+    // Not one cache row, and no "no caches registered" notice: the page never
+    // implies the machine holds no caches when it was refused the answer.
+    assert!(
+        !rows.iter().any(|row| row.text.contains("no caches")),
+        "a refusal must not read as an empty table: {rows:?}"
+    );
+}
+
+#[test]
+fn an_empty_cache_ledger_is_stated_rather_than_left_blank() {
+    let mut service = FakeService::healthy();
+    let rows = Vec::new();
+    service.reclaim = Some(fold_cache_ledgers(&rows).to_vec());
+    service.caches = Some(rows);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let rows = detail_rows(&model);
+    let breakdown = breakdown_rows(&rows);
+    assert_eq!(breakdown.len(), 1);
+    assert_eq!(breakdown[0].style, RowStyle::Notice);
+    assert!(breakdown[0].text.contains("no caches registered"));
+}
+
+#[test]
+fn the_cache_breakdown_pages_until_the_service_runs_out() {
+    let total = usize::from(tairix_procinfo::CACHE_LEDGER_PAGE) + 6;
+    let mut service = FakeService::healthy();
+    // More ledgers than one page holds: the walk must ask again from the
+    // next offset until a short page ends it, or the tail is invisible.
+    let ledgers: Vec<CacheLedgerRecord> = (0..total)
+        .map(|n| {
+            let mut row = cache_row(
+                &alloc::format!("cache{n}"),
+                CacheOwnerKind::FilesystemVolume,
+                n as u64,
+                disposable_ui_class(),
+            );
+            row.origin = CacheLedgerOrigin::Kernel;
+            row.payload_bytes = 1024;
+            row
+        })
+        .collect();
+    service.reclaim = Some(fold_cache_ledgers(&ledgers).to_vec());
+    service.caches = Some(ledgers);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let rows = detail_rows(&model);
+    let breakdown = breakdown_rows(&rows);
+    assert_eq!(breakdown.len(), total);
+    assert!(breakdown[0].text.starts_with("cache0"));
+    let last = alloc::format!("cache{}", total - 1);
+    assert!(
+        breakdown[total - 1].text.starts_with(&last),
+        "last row: {}",
+        breakdown[total - 1].text
+    );
+    // The volume-owned rows name their volume id, which fits the owner
+    // column whole.
+    assert!(
+        breakdown[1].text.contains("vol:1"),
+        "owner id: {}",
+        breakdown[1].text
+    );
+}
+
+#[test]
+fn a_huge_owner_id_is_elided_rather_than_shifting_the_columns_after_it() {
+    let mut service = FakeService::healthy();
+    // The largest owner and reporter a `u64` can carry: 46 columns of owner
+    // text for a 13-column cell. Nothing stops a service sending it, and a
+    // cell that overran would push every figure after it off the line.
+    let mut row = cache_row(
+        "kernel.slab0",
+        CacheOwnerKind::Task,
+        u64::MAX,
+        disposable_ui_class(),
+    );
+    row.origin = CacheLedgerOrigin::SelfReported;
+    row.reporter_pid = u64::MAX;
+    row.payload_bytes = 1024;
+    row.entries = 3;
+    row.hits = 90;
+    row.misses = 10;
+    let ledgers = vec![row];
+    service.reclaim = Some(fold_cache_ledgers(&ledgers).to_vec());
+    service.caches = Some(ledgers);
+    let mut model = Model::new(DEFAULT_DELAY_TENTHS);
+    model.refresh(&service);
+    let rows = detail_rows(&model);
+    let breakdown = breakdown_rows(&rows);
+    assert_eq!(breakdown.len(), 1);
+    let row = &breakdown[0];
+    // The whole line, cell by cell: both ends of both ids survive inside
+    // the owner's own thirteen columns, so the row can neither be read as
+    // naming a smaller task or pid, nor shift the figures after it.
+    assert_eq!(
+        row.text,
+        alloc::format!(
+            "{:<16} {:<13} {:<6} {:<21} {:>7} {:>7} {:>4}",
+            "kernel.slab0",
+            "task:1~551615",
+            "self",
+            "disposable-ui",
+            "3",
+            "1.0K",
+            "90%"
+        )
+    );
+    assert_eq!(tairix_curses::str_width(&row.text), 80);
+}
+
+#[test]
+fn a_name_too_long_for_its_column_keeps_its_head_and_its_leaf() {
+    // A name that fits is the name.
+    assert_eq!(elide_middle("clean_fs.data", 16), "clean_fs.data");
+    assert_eq!(elide_middle("exactly16colums!", 16), "exactly16colums!");
+    // A longer one loses its middle, not its leaf: the leaf is what tells
+    // two caches in the same namespace apart.
+    assert_eq!(elide_middle("clean_fs.metadata", 16), "clean_fs~etadata");
+    assert_eq!(elide_middle("font.client.glyphs", 16), "font.cli~.glyphs");
+    // Whatever the width, an elided name is exactly the column it was given.
+    for width in 3..=32 {
+        let elided = elide_middle("session.desktop-artwork", width);
+        assert_eq!(
+            tairix_curses::str_width(&elided),
+            width.min(23),
+            "width {width}: {elided}"
+        );
+    }
+}
+
+#[test]
+fn a_column_too_narrow_to_hold_both_ends_cuts_rather_than_overruns() {
+    // Under three columns there is no room for a head, a mark and a leaf,
+    // so the name is cut to the budget — never widened past it, never a
+    // panic on the arithmetic.
+    assert_eq!(elide_middle("clean_fs.metadata", 2), "cl");
+    assert_eq!(elide_middle("clean_fs.metadata", 1), "c");
+    assert_eq!(elide_middle("clean_fs.metadata", 0), "");
+    assert_eq!(elide_middle("", 0), "");
 }
 
 #[test]

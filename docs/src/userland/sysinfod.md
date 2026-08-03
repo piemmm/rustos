@@ -32,6 +32,11 @@ failing closed at the first problem (`AGENTS.md` §5.4):
 Because steps 1–3 precede any data access, there is no path that answers
 a privileged query without first passing its capability gate.
 
+`CACHE_REPORT` is the one query that *writes*, and it takes the same five
+steps: it is admitted by the same decode and the same attested identity,
+and what it writes is only the caller's own row in the broker's reported-
+ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
+
 ## Queries served (`sysinfo-v1`)
 
 | Query                    | Capability           | Audited | Response                            |
@@ -68,6 +73,8 @@ a privileged query without first passing its capability gate.
 | `RAID_MEMBERS`           | `CAP_SYSINFO_HW`     | yes     | packed `RaidMemberRecord`s          |
 | `MEMORY_PRESSURE_BAND`   | none                 | no      | `MemoryPressureBand`                |
 | `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
+| `CACHE_LEDGERS`          | `CAP_SYSINFO_KERNEL` | yes     | packed `CacheLedgerRecord`s         |
+| `CACHE_REPORT`           | none                 | no      | empty (a submission)                |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -100,6 +107,48 @@ health, member tallies, geometry, endpoint, published node, scrub/resync
 cursors, generation — and `RAID_MEMBERS` one `RaidMemberRecord` per
 device the composer holds, including the unaffiliated candidates a new
 array can be built from. Both page with a `RaidListRequest`.
+
+## Reported cache ledgers
+
+The reclaim model has two halves and only one of them can be measured
+from outside. The kernel's block, filesystem, launch, and transform
+caches are visible to the kernel; a desktop process's glyph atlases and
+decoded icon artwork live in that process's own heap, where nothing else
+can see them. Left there the class totals would lie — `disposable-ui`,
+the class reclaim starts with, would read zero on a desktop holding
+megabytes of exactly that — so `sysinfod` is where the two halves meet.
+
+The broker owns the registry of **reported** rows. `CACHE_REPORT` takes a
+process's own rows, and `CACHE_LEDGERS` serves the kernel's rows followed
+by the reported ones; `RECLAIM_STATS` folds that same combined list into
+the per-class totals with the single `fold_cache_ledgers`, so the class
+table is by construction the sum of the breakdown.
+
+It is the broker and not the kernel deliberately. The kernel's own
+per-class sum gates a real reclaim decision, and keeping reported rows on
+this side of the syscall boundary makes it *structurally* impossible for
+a process to steer that decision by inflating its own figures. It also
+bounds a hostile reporter's blast radius to a restartable service.
+
+The registry treats every submitted row as the claim it is:
+
+- A row must arrive with its origin unset and its reporter pid zero, and
+  may not claim to be owned by a kernel subsystem — a process describing
+  itself is not one. The broker stamps the origin and pid from the
+  caller's kernel-attested `Origin`, so a caller can neither present its
+  figures as measured nor attribute them to another process.
+- Entries are keyed by the caller's unforgeable process-instance id, not
+  its numeric pid, so a recycled pid inherits nothing; a report
+  *replaces* that process's rows rather than adding to them, so
+  reporting repeatedly cannot grow a process's share; and an empty
+  report withdraws them.
+- The reporter count is derived from the machine's RAM rather than
+  hand-picked. When the registry is full, dead reporters are expired
+  first and a genuinely new one is then refused — never by evicting a
+  live reporter's truthful rows in favour of an unknown one.
+- The submission emits no audit record. It is ungated by its spec, and
+  auditing it would hand every process a way to write the hash-chained
+  journal. The gated *reads* are audited as their capability implies.
 
 ## Response encoding
 

@@ -22,7 +22,7 @@ use tairix_curses::{str_width, truncate_to_width, Pos, Screen, Size, Tty, Window
 // The figure → text conversions (`format_*`) are the shared full-screen
 // viewer formatters in `lib/procinfo`, so `top` and `sysmon` render the
 // same figures identically.
-use tairix_procinfo::{format_load, format_mib, state_char, Transport};
+use tairix_procinfo::{format_load, format_mib, state_char, Transport, SIZE_WIDTH};
 pub(crate) use tairix_procinfo::{format_size, format_tenths, format_uptime};
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -36,11 +36,11 @@ const HEADER_ROWS: u16 = 5;
 const FOOTER_ROWS: u16 = 1;
 
 /// The column header, matching [`process_row`]'s layout.
-const COLUMN_HEADER: &str = "    PID USER       SIZE S  %CPU  WCPU      TIME+ COMMAND";
+pub(crate) const COLUMN_HEADER: &str = "    PID USER        SIZE S  %CPU  WCPU      TIME+ COMMAND";
 
 /// Zero-based column of the single-letter state cell inside a process row:
-/// `PID` (7) + space + `USER` (8) + space + `SIZE` (6) + space.
-const STATE_COL: u16 = 24;
+/// `PID` (7) + space + `USER` (8) + space + `SIZE` ([`SIZE_WIDTH`]) + space.
+pub(crate) const STATE_COL: u16 = 25;
 
 /// The number of process rows that fit on a screen of `size`.
 #[must_use]
@@ -303,7 +303,7 @@ pub(crate) fn process_row(model: &Model, row: &Row) -> String {
         shorten(&uid, 8)
     };
     format!(
-        "{:>7} {:<8} {:>6} {} {:>5} {:>5} {:>10} {}",
+        "{:>7} {:<8} {:>SIZE_WIDTH$} {} {:>5} {:>5} {:>10} {}",
         record.pid,
         user,
         format_size(record.mem_bytes),

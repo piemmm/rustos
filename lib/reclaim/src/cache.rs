@@ -52,8 +52,10 @@ use core::ops::Deref;
 use tairix_log::Sink;
 
 use crate::audit::{log_cache_poisoned, log_cache_refused};
+use crate::ledger::CacheLedger;
 use crate::model::{
-    AccountingError, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, Sensitivity,
+    AccountingError, CacheAccounting, CacheBudget, CacheCandidate, CachePolicy, ReclaimClass,
+    ReclaimOwner, Sensitivity,
 };
 use crate::pressure::{shrink_target, PressureGauge};
 
@@ -179,6 +181,11 @@ struct Entry<V> {
 pub struct ReclaimCache<K, V, E> {
     /// Fixed label naming this cache in audit records.
     label: &'static str,
+    /// The declared owner and class, kept so the cache can describe itself
+    /// to a diagnostics registry. Both are `None` exactly when the
+    /// candidate declared none, which is also what poisons the cache.
+    owner: Option<ReclaimOwner>,
+    declared_class: Option<ReclaimClass>,
     budget: CacheBudget,
     /// The live band the shrink target and admission are decided
     /// against, sampled at the head of every operation — never a mode
@@ -258,6 +265,7 @@ where
         sink: &'static (dyn Sink + Sync),
     ) -> Self {
         let owner = candidate.owner;
+        let declared_class = candidate.class;
         let entry_metadata_bytes = candidate.entry_metadata_bytes;
         let policy = match candidate.classify() {
             Ok(policy) => Some(policy),
@@ -268,6 +276,8 @@ where
         };
         Self {
             label,
+            owner,
+            declared_class,
             budget,
             pressure,
             sink,
@@ -294,6 +304,24 @@ where
     #[must_use]
     pub fn accounting_shared(&self) -> Arc<CacheAccounting> {
         Arc::clone(&self.accounting)
+    }
+
+    /// This cache described for a diagnostics registry: its label, owner,
+    /// and class, plus a shared handle to the counters above.
+    ///
+    /// `None` when the candidate declared no owner or no class. Such a
+    /// cache is poisoned from birth and retains nothing, so there is no
+    /// footprint to attribute and a row for it would say only that a
+    /// misdeclared cache exists — which its classification refusal already
+    /// said, in the audit log, with the reason.
+    #[must_use]
+    pub fn ledger(&self) -> Option<CacheLedger> {
+        Some(CacheLedger::new(
+            self.label,
+            self.owner?,
+            self.declared_class?,
+            self.accounting_shared(),
+        ))
     }
 
     /// Whether the cache has disabled itself and serves everything

@@ -109,13 +109,23 @@ pub fn glyph_cache(
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> GlyphCache {
-    ReclaimCache::new(
+    let cache = ReclaimCache::new(
         CACHE_LABEL,
         glyph_cache_candidate(ReclaimOwner::UserlandProcess(CACHE_OWNER)),
         glyph_cache_budget(total_ram_bytes),
         pressure,
         sink,
-    )
+    );
+    // This is the one cache every GUI client's own glyph-atlas cache is
+    // ultimately backed by, so it is the most important row the desktop's
+    // cache monitor can show; only the freestanding service binary links
+    // the reporter (the host build and the dispatcher-only library consumer
+    // never do).
+    #[cfg(all(freestanding, feature = "program"))]
+    if let Some(ledger) = cache.ledger() {
+        tairix_rt::cachereport::register(ledger);
+    }
+    cache
 }
 
 /// The sandboxed font service's rasterising core.

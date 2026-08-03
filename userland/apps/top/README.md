@@ -22,7 +22,10 @@ model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
   by the never-reused `proc_id` so a numeric-PID reuse can never inherit
   another lifetime's statistics); `WCPU` is the exponentially smoothed
   average of those samples; `TIME+` is the cumulative CPU time; `SIZE` is
-  the memory mapped in the process's address space. `USER` resolves through
+  the memory mapped in the process's address space, in binary units with a
+  `K`/`M`/`G`/`T`/`P`/`E` suffix (the shared `tairix_procinfo::format_size`,
+  whose ladder reaches exbibytes so no `u64` outgrows the column). `USER`
+  resolves through
   the ungated, secret-free `USER_DIRECTORY` sysinfo query (uid + username,
   never credential material), degrading to the numeric uid when the name
   cannot be resolved.

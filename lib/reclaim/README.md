@@ -29,6 +29,16 @@ that enforces all of it.
   is O(log n); a forced shrink visits only the entries it releases; a
   cache that cannot admit a value still hands the caller a usable one
   (`Served::Uncached`), so caching is never required for correctness.
+- `ledger` — `CacheLedger`: one cache described for a diagnostics
+  registry (its label, owner, and class plus a shared handle to the
+  counters above) and the one conversion of that description into the
+  System Information wire record. The kernel's statistics registry and the
+  userland runtime's cache reporter both publish that record and neither
+  may depend on the other, so the conversion lives beside the model that
+  defines a class and an owner — a kernel row and a reported row cannot be
+  spelled differently. A sampled record deliberately leaves its origin
+  unset: whoever publishes it stamps that from an attested identity, so a
+  process cannot present its own figures as measured ones.
 - `audit` — the stable `2000` / `2001` audit events a classification
   refusal or a detected ledger defect emits through `lib/log`.
 
@@ -50,6 +60,16 @@ two vantage points:
 Both drive the same `shrink_target`, so the desktop's rasterised-asset
 caches give memory back in the same order, at the same bands, as the
 kernel's own caches.
+
+The figures travel the other way for the same reason. A process's heap is
+its own, so nothing outside it can measure what its glyph atlas or its
+decoded artwork is holding; left there, the `disposable-ui` class total
+would read zero on a desktop holding megabytes of exactly that. Every
+cache therefore hands out a `CacheLedger`, the kernel registers its own
+and the runtime reports the process's, and the two sets are folded into
+one set of class totals by the System Information service. Reported
+figures stay clearly marked and stay in user space: the kernel's own
+reclaim decisions read only the ledgers the kernel measures.
 
 ## Why it lives in `lib/`
 

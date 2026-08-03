@@ -11,6 +11,7 @@ use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTi
 use tairix_abi::switchboard_ipc::{
     CommandSection, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
+use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::{
     AppInfoHeader, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX,
     BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
@@ -26,7 +27,7 @@ use tairix_proglib::{
     user_library_path, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory,
     LibraryEntry, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
 };
-use tairix_reclaim::{PressureBand, ReclaimCache, ReportedPressure};
+use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
     icon_cache, ActivateOutcome, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
     TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
@@ -34,8 +35,8 @@ use tairix_taskbar::{
 use tairix_taskpins::PinTarget;
 use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
 use tairix_wm::{
-    chrome_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse, Key,
-    NamedKey, Point, PointerButton, Rect, Scale, Surface, WindowActivationState, WindowChrome,
+    chrome_cache, cursor_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse,
+    Key, NamedKey, Point, PointerButton, Rect, Scale, Surface, WindowActivationState, WindowChrome,
     WindowId,
 };
 
@@ -202,6 +203,68 @@ pub(crate) fn desktop_over(
     )
     .expect("the compositor allocates");
     (shell, compositor)
+}
+
+/// The desktop's caches, built exactly as the session composes them: its own
+/// artwork, the taskbar's icon glyphs, the window manager's cursors, and the
+/// decorated windows' furniture. All four live in the session process, so all
+/// four are its rows to report.
+fn desktop_caches() -> Vec<Option<CacheLedger>> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    vec![
+        artwork_cache(
+            "session.desktop-artwork",
+            TEST_SEAT,
+            TEST_FRAME_BYTES,
+            &NORMAL_PRESSURE,
+            &TEST_SINK,
+        )
+        .ledger(),
+        test_icon_cache().ledger(),
+        cursor_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK).ledger(),
+        test_chrome_cache().ledger(),
+    ]
+}
+
+#[test]
+fn every_desktop_cache_reports_under_a_renderable_label() {
+    // The session hands these ledgers to the system's cache monitor, which
+    // renders each label verbatim as its own row. A label the wire record
+    // refuses would cost the desktop a row rather than show a broken one, so
+    // every name is checked where the session composes it.
+    for ledger in desktop_caches() {
+        let ledger = ledger.expect("a desktop cache is a classified reclaim cache");
+        let record = ledger.to_record().expect("the label fits the wire record");
+        assert!(record.label().len() <= CACHE_LABEL_MAX);
+        assert!(record
+            .label()
+            .bytes()
+            .all(|byte| (0x20..0x7f).contains(&byte)));
+    }
+}
+
+#[test]
+fn the_desktop_caches_report_under_distinct_labels() {
+    // The reporter is keyed by label so a rebuilt cache replaces its own row
+    // instead of double-counting. Two of the desktop's caches sharing a name
+    // would silently collapse into one row, hiding whichever registered
+    // first.
+    let mut labels: Vec<String> = desktop_caches()
+        .into_iter()
+        .map(|ledger| {
+            String::from(
+                ledger
+                    .expect("a desktop cache is a classified reclaim cache")
+                    .to_record()
+                    .expect("the label fits the wire record")
+                    .label(),
+            )
+        })
+        .collect();
+    let composed = labels.len();
+    labels.sort();
+    labels.dedup();
+    assert_eq!(labels.len(), composed);
 }
 
 #[test]

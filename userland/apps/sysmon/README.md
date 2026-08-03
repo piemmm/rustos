@@ -4,10 +4,11 @@ The system app-store command app that watches every aspect of the
 kernel's memory and load through the System Information API
 (`plans/STRESSTEST.md` ST4): physical memory, the kernel heap, the
 memory-pressure band with its history strip, the reclaimable-cache
-ledger, the `ramzip` compressed tier, the pinned-memory aggregate,
-per-CPU load, and a process census. Its primary function is observing a
-machine under deliberate stress (the `stress` tool's companion), and it
-is quiescent between refreshes at idle.
+ledger and the per-cache breakdown behind it, the `ramzip` compressed
+tier, the pinned-memory aggregate, per-CPU load, and a process census.
+Its primary function is observing a machine under deliberate stress (the
+`stress` tool's companion), and it is quiescent between refreshes at
+idle.
 
 ## Shape
 
@@ -28,11 +29,15 @@ entry-point binary of the `sysmon.app` bundle:
   session continues unpinned), enters the alternate screen, and runs
   the loop over the inherited fd 0/1 and the `sysinfod` IPC transport.
 
-Every figure travels through `sysinfo-v1`; the four kernel-statistics
-fetches are the shared `lib/procinfo` `kstats` walks, never a private
-copy. Gated queries (`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_GLOBAL`)
-degrade to stated refusals per panel while the session continues; the
-monitor's only fatal failure is the terminal itself.
+Every figure travels through `sysinfo-v1`; the kernel-statistics fetches
+(memory, pressure, the reclaim classes, their per-cache ledgers, and
+`ramzip`) are the shared `lib/procinfo` `kstats` walks, never a private
+copy. Gated queries (`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_GLOBAL`) degrade
+to stated refusals per panel while the session continues; the monitor's
+only fatal failure is the terminal itself. A cache figure a process
+reported about itself is shown as such — the word `self` in the row, and
+the share of each class total it accounts for — so a claimed figure never
+reads as a measured one.
 
 ## Bundle
 

@@ -79,8 +79,8 @@ use crate::sched::{
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::sysinfo::{
-    CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashNamedReg,
-    CrashRecord, IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, SeatRecord,
+    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
+    CrashFaultClass, CrashNamedReg, CrashRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord,
     UserDirectoryRecord, VolumeIoHealthRecord, CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
@@ -6270,10 +6270,9 @@ where
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
             IntrospectDomain::MemoryPressureBand => self.introspect.memory_pressure_band()?,
             IntrospectDomain::MemoryTotalBytes => self.introspect.memory_total_bytes()?,
-            IntrospectDomain::Reclaim => self.introspect.reclaim(
-                arg,
-                records_that_fit(out_cap, ReclaimClassRecord::WIRE_LEN)?,
-            )?,
+            IntrospectDomain::CacheLedgers => self
+                .introspect
+                .cache_ledgers(arg, records_that_fit(out_cap, CacheLedgerRecord::WIRE_LEN)?)?,
             IntrospectDomain::Ramzip => self.introspect.ramzip()?,
             IntrospectDomain::CpuLoad => self
                 .introspect
@@ -24548,11 +24547,15 @@ mod tests {
         processes: alloc::vec::Vec<u8>,
         kernel_memory: alloc::vec::Vec<u8>,
         limits: Result<alloc::vec::Vec<u8>, Errno>,
+        cache_ledgers: alloc::vec::Vec<u8>,
         /// Records the `(offset, max_records)` the handler passed, so a test
         /// can assert the record-granular paging arithmetic.
         processes_call: RwLock<Option<(u64, usize)>>,
         /// Records the `ProcId` the handler resolved for a `TaskLimits` query.
         limits_call: RwLock<Option<ProcId>>,
+        /// Records the `(offset, max_records)` the handler passed for the
+        /// per-cache ledger domain, whose stride differs from the others'.
+        cache_ledgers_call: RwLock<Option<(u64, usize)>>,
     }
 
     impl crate::introspect::IntrospectSource for StaticIntrospect {
@@ -24610,8 +24613,13 @@ mod tests {
         fn memory_total_bytes(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
         }
-        fn reclaim(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
-            Ok(alloc::vec::Vec::new())
+        fn cache_ledgers(
+            &self,
+            offset: u64,
+            max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            *self.cache_ledgers_call.write() = Some((offset, max_records));
+            Ok(self.cache_ledgers.clone())
         }
         fn ramzip(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
@@ -24678,8 +24686,10 @@ mod tests {
             processes: blob.clone(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
+            cache_ledgers: alloc::vec::Vec::new(),
             processes_call: RwLock::new(None),
             limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -24730,8 +24740,10 @@ mod tests {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
+            cache_ledgers: alloc::vec::Vec::new(),
             processes_call: RwLock::new(None),
             limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -24743,6 +24755,129 @@ mod tests {
         );
         // The source was never consulted (fail closed before touching state).
         assert_eq!(*source.processes_call.read(), None);
+    }
+
+    /// The per-cache ledger domain pages by *its own* record stride and
+    /// copies the rows out unchanged.
+    #[test]
+    fn sysinfo_introspect_cache_ledgers_copies_out_and_pages_by_record() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let mut row = CacheLedgerRecord::new(
+            b"clean_fs.data",
+            tairix_abi::sysinfo::CacheOwnerKind::FilesystemVolume,
+            7,
+            0,
+        )
+        .expect("renderable label");
+        row.origin = tairix_abi::sysinfo::CacheLedgerOrigin::Kernel;
+        row.payload_bytes = 4096;
+        let blob = row.to_le_bytes().to_vec();
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: alloc::vec::Vec::new(),
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Ok(alloc::vec::Vec::new()),
+            cache_ledgers: blob.clone(),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_introspect(source);
+
+        assert_eq!(
+            h.sysinfo_introspect(
+                &ctx,
+                IntrospectDomain::CacheLedgers.as_u32(),
+                3,
+                0x1000,
+                4096
+            ),
+            Ok(blob.len() as u64)
+        );
+        // The ledger offset is forwarded verbatim and the record count is
+        // capped by this domain's own stride, not another domain's.
+        assert_eq!(
+            *source.cache_ledgers_call.read(),
+            Some((3, 4096 / CacheLedgerRecord::WIRE_LEN))
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; blob.len()];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(delivered, blob);
+        // The row survives the round trip with its identity intact.
+        let decoded = CacheLedgerRecord::from_bytes(&delivered).expect("decodes");
+        assert_eq!(decoded, row);
+    }
+
+    /// A buffer too small to hold one whole cache-ledger row fails closed
+    /// before the registry is read, exactly as the sibling list domains do.
+    #[test]
+    fn sysinfo_introspect_undersized_cache_ledger_buffer_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+            processes: alloc::vec::Vec::new(),
+            kernel_memory: alloc::vec::Vec::new(),
+            limits: Ok(alloc::vec::Vec::new()),
+            cache_ledgers: alloc::vec::Vec::new(),
+            processes_call: RwLock::new(None),
+            limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_introspect(source);
+        assert_eq!(
+            h.sysinfo_introspect(
+                &ctx,
+                IntrospectDomain::CacheLedgers.as_u32(),
+                0,
+                0x1000,
+                CacheLedgerRecord::WIRE_LEN - 1
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(*source.cache_ledgers_call.read(), None);
     }
 
     /// An unknown domain discriminant fails closed with `OutOfRange`.
@@ -24835,8 +24970,10 @@ mod tests {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(report.clone()),
+            cache_ledgers: alloc::vec::Vec::new(),
             processes_call: RwLock::new(None),
             limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -31670,8 +31807,10 @@ mod tests {
             processes: blob,
             kernel_memory: alloc::vec::Vec::new(),
             limits: Err(Errno::NotImplemented),
+            cache_ledgers: alloc::vec::Vec::new(),
             processes_call: RwLock::new(None),
             limits_call: RwLock::new(None),
+            cache_ledgers_call: RwLock::new(None),
         }));
 
         let h = KernelSyscallHandlers::new(
