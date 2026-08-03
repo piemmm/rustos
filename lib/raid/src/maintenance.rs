@@ -98,15 +98,15 @@
 //!   assembly decision, not a maintenance one.
 //! - It drives nothing on a non-redundant RAID0 stripe, which has nothing to
 //!   scrub from, rebuild from, or hot-swap
-//!   ([`RaidLevel::is_redundant`](crate::RaidLevel::is_redundant)).
+//!   ([`RaidLevel::is_redundant`](tairix_abi::raid::RaidLevel::is_redundant)).
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 
 use crate::array::{RaidArray, RaidError};
 use crate::backoff::{RetryCadence, RetryState};
-use crate::mirror::{ArrayHealth, MemberState};
 use crate::superblock::ArrayProgress;
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 /// How long after the last foreground request an array still counts as busy.
 ///

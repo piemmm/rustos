@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::BLK_DATA_LEN;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT};
-use tairix_abi::raid_ipc::RAID_MEMBER_COMPATIBLE;
+use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
@@ -82,6 +82,16 @@ const VOLMGR_RAID_MEMBER: EventId = EventId(4185);
 /// to stays short a member. Not fatal to this device's other volumes.
 const VOLMGR_RAID_MEMBER_UNPUBLISHED: EventId = EventId(4190);
 
+/// Diagnostic event id: the whole device carries nothing at all, so it was
+/// published as a device a new RAID array could be created over. A normal
+/// outcome for a fresh disk, logged so an administrator can see why a blank
+/// disk became nameable to the array tools.
+const VOLMGR_RAID_CANDIDATE: EventId = EventId(4191);
+
+/// Diagnostic event id: the blank-device node could not be published, so this
+/// disk cannot be named when creating an array. Not fatal to anything else.
+const VOLMGR_RAID_CANDIDATE_UNPUBLISHED: EventId = EventId(4192);
+
 /// The capability set the driver host re-checks up front; the kernel is
 /// the authority and re-checks every trap. It is the least-privilege set
 /// this policy driver needs — no MMIO, DMA, or IRQ. Node emission is held
@@ -95,11 +105,6 @@ fn driver_caps() -> CapabilitySet {
     caps.insert(CapabilityId::HW_EMIT);
     caps.insert(CapabilityId::LOG_EMIT);
     caps
-}
-
-/// Recover an [`Errno`] from a raw negative kernel result (`-errno`).
-fn errno_from(neg: i64) -> Errno {
-    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
 }
 
 /// Publish the member node the array composer's agent binds, re-declaring
@@ -121,8 +126,51 @@ fn errno_from(neg: i64) -> Errno {
 /// unassembled and logged, exactly as a device with no driver is left unbound,
 /// and never fails the volumes this device did attach.
 fn publish_raid_member(endpoint: u64, window_id: u64) {
+    publish_raid_node(
+        RAID_MEMBER_COMPATIBLE,
+        endpoint,
+        window_id,
+        VOLMGR_RAID_MEMBER_UNPUBLISHED,
+        "volmgr: could not publish the RAID member node; array cannot assemble",
+    );
+}
+
+/// Publish the node that offers this whole device to the array composer as
+/// one a new array could be created over.
+///
+/// Emitted only for a device the probe found *entirely* empty: no partition
+/// table, no whole-device filesystem, and no array metadata. A disk with
+/// anything recognisable on it is never offered, so creating an array cannot
+/// silently consume data — and the composer re-reads the device before it
+/// writes anything, so this node is a pointer to look rather than a claim to
+/// believe. It republishes only the transport this driver already holds.
+fn publish_raid_candidate(endpoint: u64, window_id: u64) {
+    publish_raid_node(
+        RAID_CANDIDATE_COMPATIBLE,
+        endpoint,
+        window_id,
+        VOLMGR_RAID_CANDIDATE_UNPUBLISHED,
+        "volmgr: could not publish the blank-device node; no array can be created here",
+    );
+}
+
+/// Emit one hardware-tree node bearing `compatible` and re-declaring this
+/// device's transport, so the array subsystem can reach it.
+///
+/// The kernel assigns the node's identity, parents it to this driver's own
+/// matched node, and admits each declared resource only if this task already
+/// holds a grant covering it — so an emission can republish this device's
+/// transport and nothing else. Best-effort: a refusal is logged and never
+/// fails the volumes this device did attach.
+fn publish_raid_node(
+    compatible: &[u8],
+    endpoint: u64,
+    window_id: u64,
+    refused: EventId,
+    refusal: &'static str,
+) {
     let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Storage);
-    let published = HwMatchKey::compatible(RAID_MEMBER_COMPATIBLE)
+    let published = HwMatchKey::compatible(compatible)
         .and_then(|key| node.push_match_key(key))
         .and_then(|()| node.push_resource(HwResource::endpoint(endpoint)))
         .and_then(|()| node.push_resource(HwResource::shared(window_id)))
@@ -132,11 +180,11 @@ fn publish_raid_member(endpoint: u64, window_id: u64) {
         );
     if published < 0 {
         log_hex_event(
-            VOLMGR_RAID_MEMBER_UNPUBLISHED,
+            refused,
             Level::Warn,
-            "volmgr: could not publish the RAID member node; array cannot assemble",
+            refusal,
             "errno_hex",
-            errno_from(published) as u64,
+            tairix_rt::errno_from_raw(published) as u64,
         );
     }
 }
@@ -333,6 +381,20 @@ fn main() -> i32 {
                 "unrecognised_hex",
                 u64::from(summary.unrecognised),
             );
+            // A device with no scheme at all carries nothing an array would
+            // destroy, so it is the one shape that may be offered for
+            // composition. A device whose partition table held only extents
+            // this build cannot read is *not* blank and is never offered.
+            if summary.no_scheme {
+                log_hex_event(
+                    VOLMGR_RAID_CANDIDATE,
+                    Level::Info,
+                    "volmgr: device is empty; offering it for array composition",
+                    "endpoint_hex",
+                    endpoint,
+                );
+                publish_raid_candidate(endpoint, window_id);
+            }
         }
         return 0;
     }

@@ -333,6 +333,17 @@ pub enum Errno {
     /// block layer surfaces it as a hard I/O error to that device's callers
     /// while leaving every other device untouched.
     DeviceOffline = 40,
+    /// A device or resource is busy and the requested operation is refused.
+    ///
+    /// The TAIRiX equivalent of POSIX `EBUSY`. Emitted when an orderly
+    /// `hw_remove_node` is asked to retire a still-present device (stopping
+    /// an assembled RAID array) while a volume is still attached on a
+    /// block-service endpoint the node declares: turning a live mounted
+    /// volume into a surprise-removal event is refused, and nothing is
+    /// removed (fail closed). A surprise removal, by contrast, never returns
+    /// this code — a vanished device cannot be kept alive by pretending its
+    /// volumes are still there.
+    Busy = 41,
 }
 
 impl Errno {
@@ -408,6 +419,7 @@ impl Errno {
             38 => Some(Self::LimitExceeded),
             39 => Some(Self::MediumError),
             40 => Some(Self::DeviceOffline),
+            41 => Some(Self::Busy),
             _ => None,
         }
     }
@@ -456,6 +468,7 @@ impl fmt::Display for Errno {
             Self::LimitExceeded => "resource limit exceeded",
             Self::MediumError => "permanent medium error",
             Self::DeviceOffline => "device offline or removed",
+            Self::Busy => "device or resource busy",
         };
         f.write_str(message)
     }
@@ -508,6 +521,7 @@ mod tests {
         assert_eq!(Errno::LimitExceeded.as_i32(), 38);
         assert_eq!(Errno::MediumError.as_i32(), 39);
         assert_eq!(Errno::DeviceOffline.as_i32(), 40);
+        assert_eq!(Errno::Busy.as_i32(), 41);
     }
 
     #[test]
@@ -555,11 +569,12 @@ mod tests {
             Errno::LimitExceeded,
             Errno::MediumError,
             Errno::DeviceOffline,
+            Errno::Busy,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(41), None);
+        assert_eq!(Errno::from_i32(42), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

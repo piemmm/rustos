@@ -62,8 +62,8 @@ use tairix_abi::elevate::{
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    BootFacts, BootId, CapabilityId, Errno, FileStat, HwNode, InputMode, LimitKind, MapFlags,
-    OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal,
+    BootFacts, BootId, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags, InputMode, LimitKind,
+    MapFlags, OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal,
     SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
     WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN,
     TERMINAL_SIZE_WIRE_LEN,
@@ -852,14 +852,28 @@ pub fn hw_emit_node(node: &HwNode) -> i64 {
 /// descendant, so a driver can never remove a node it does not own
 /// (no ambient authority). An unknown id, or a node the
 /// caller does not own, fails closed with `-errno`.
+///
+/// `flags` selects the removal posture. [`HwRemoveFlags::empty`] is a
+/// **surprise removal** — a device that physically vanished — and always
+/// proceeds. [`HwRemoveFlags::ORDERLY`] is the **stop-if-idle** posture an
+/// administrator uses to retire a still-present device (stopping an assembled
+/// RAID array): the kernel refuses with [`Errno::Busy`] (`-errno`), removing
+/// nothing, while a volume is still attached on a block-service endpoint the
+/// node declares, so a live mounted volume is never turned into a surprise
+/// removal.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
-pub fn hw_remove_node(node_id: u32) -> i64 {
+pub fn hw_remove_node(node_id: u32, flags: HwRemoveFlags) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
-    // side of the trap. The call passes no memory operand —
-    // `node_id` is a scalar in arg 0.
-    let ret = unsafe { raw_syscall(NUM_HW_REMOVE_NODE, [u64::from(node_id), 0, 0, 0, 0, 0]) };
+    // `CAP_HW_EMIT`, decodes `flags`, and resolves `node_id` against the live
+    // tree on the far side of the trap. The call passes no memory operand —
+    // `node_id` and the flag word are scalars in args 0 and 1.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_HW_REMOVE_NODE,
+            [u64::from(node_id), u64::from(flags.bits()), 0, 0, 0, 0],
+        )
+    };
     ret as i64
 }
 
@@ -3143,7 +3157,7 @@ pub fn self_origin() -> Result<Origin, i64> {
 /// encoding error, a transport failure, a protocol mismatch, or the broker's
 /// own refusal (for example `PermissionDenied` on a wrong password).
 pub fn elevate(request: &ElevateRequest<'_>) -> Result<ElevateReply, Errno> {
-    let console = self_origin().map_err(errno_from)?.console();
+    let console = self_origin().map_err(errno_from_raw)?.console();
     let endpoint = elevate_endpoint(console)?;
     let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
     elevate_exchange(endpoint, request, &mut buf[..])
@@ -3163,17 +3177,30 @@ fn elevate_exchange(
 ) -> Result<ElevateReply, Errno> {
     let len = request.encode(buf)?;
     let mut reply = [0u8; ELEVATE_REPLY_LEN];
-    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(errno_from)?;
+    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(errno_from_raw)?;
     ElevateReply::decode(&reply[..reply_len])
 }
 
 /// Convert a raw negative kernel result (`-errno`) into an [`Errno`].
 ///
-/// Fails closed as `NotImplemented` for any code the `abi-v1` source of truth
-/// does not recognise.
-fn errno_from(ret: i64) -> Errno {
-    i32::try_from(-ret)
-        .ok()
+/// A syscall that fails returns its error as a negated discriminant, so this is
+/// the one place the raw register becomes a typed error. Every consumer of a
+/// raw result — this runtime's own wrappers and the driver programs that issue
+/// syscalls directly — recovers its `Errno` here, so a refusal cannot be read
+/// one way in one program and another way in the next.
+///
+/// Anything the `abi-v1` source of truth does not recognise — a code this build
+/// has no variant for, a magnitude too large for an `i32`, or a non-negative
+/// value handed in by mistake — fails closed as
+/// [`Errno::NotImplemented`]: this build genuinely cannot say what the kernel
+/// meant. It deliberately never becomes [`Errno::NotFound`], which asserts that
+/// a named object does not exist and which callers act on (by creating it, or
+/// by treating an absence as benign); an unreadable result must not be able to
+/// masquerade as that answer.
+#[must_use]
+pub fn errno_from_raw(raw: i64) -> Errno {
+    raw.checked_neg()
+        .and_then(|code| i32::try_from(code).ok())
         .and_then(Errno::from_i32)
         .unwrap_or(Errno::NotImplemented)
 }
@@ -4580,6 +4607,61 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn every_errno_the_abi_defines_round_trips_through_the_raw_result() {
+        // Walk the discriminant space rather than restating a list of variants,
+        // so a newly appended errno is covered the moment it is added.
+        let mut recovered = 0usize;
+        for code in 1..=256i32 {
+            if let Some(errno) = Errno::from_i32(code) {
+                assert_eq!(
+                    errno_from_raw(-i64::from(code)),
+                    errno,
+                    "the raw refusal -{code} must recover its own variant"
+                );
+                recovered += 1;
+            }
+        }
+        assert!(
+            recovered > 20,
+            "the discriminant walk must actually reach the defined errnos, found {recovered}"
+        );
+    }
+
+    #[test]
+    fn a_success_value_is_not_mistaken_for_an_error_code() {
+        // A non-negative result is a success the caller should never have
+        // handed to the conversion; it must not surface as a plausible-looking
+        // refusal a caller would act on.
+        for raw in [0i64, 1, 7, 4096, i64::MAX] {
+            assert_eq!(errno_from_raw(raw), Errno::NotImplemented);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_negative_fails_closed_rather_than_naming_a_wrong_errno() {
+        // An unknown code, a magnitude no `i32` can hold, and the one value
+        // that cannot be negated at all: each is unreadable, and each says so
+        // rather than claiming an object is absent.
+        for raw in [
+            -(i64::from(i32::MAX) + 1),
+            -(i64::from(u32::MAX) + 12),
+            i64::MIN,
+            -100_000,
+        ] {
+            assert_eq!(
+                errno_from_raw(raw),
+                Errno::NotImplemented,
+                "the unreadable result {raw} must not become a real errno"
+            );
+            assert_ne!(
+                errno_from_raw(raw),
+                Errno::NotFound,
+                "and never the absence a caller acts on"
+            );
+        }
     }
 
     #[test]

@@ -39,6 +39,28 @@ Yr ymholiadau:
   rwymedig — ei rhif, y dasg gyrrwr sy'n berchen arni, nifer yr
   ymyriadau ers cychwyn, ac a yw'r llinell dan gwarantîn (angen
   `CAP_SYSINFO_HW`).
+- `cpuinfo` — yr adroddiad prosesydd fesul CPU (uwchset o
+  `/proc/cpuinfo`): model a gwneuthurwr, dosbarth perfformiad, baneri
+  estyniadau ISA, y gofrestr hunaniaeth grai, cyflymder cloc y craidd a
+  fesurwyd yn fyw (mewn MHz — neu «unknown» gonest lle nad oes cownter
+  cloc craidd) a'r amledd cyfeirio neu sail amser sefydlog. Ffeithiau
+  caledwedd cyhoeddus, nid oes angen unrhyw allu.
+- `storage`, `io` — iechyd M/A storio fesul cyfrol: un rhes fesul cyfrol
+  bloc sy'n ymwybodol o namau — rhagddodiad ei dynodydd parhaol, pen
+  gwasanaeth blociau sy'n ei gwasanaethu, ei argaeledd cyfredol
+  (available/degraded/recovering/lost) a'r cownteri canlyniad cronnol
+  (cwblhau, ailosodiadau, terfynau amser, gwallau cyfrwng, ailgyhoeddiadau)
+  y daw disg sy'n methu neu'n ansefydlog i'r golwg arnynt (angen
+  `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — yr araeau RAID cyfansawdd a'r dyfeisiau y mae'r
+  cyfansoddwr araeau yn eu dal: un rhes fesul arae — rhagddodiad ei
+  hunaniaeth, ei lefel, ei iechyd (optimal/degraded/recovering/failed),
+  nifer yr aelodau cydamserol a diffiniedig, ei uned stribed, ei nifer o
+  flociau, ac unrhyw ailadeiladu neu wirio ar y gweill — wedyn un rhes
+  fesul dyfais — ei nod yng nghoeden y caledwedd, yr arae y mae'n perthyn
+  iddi (cysylltnod ar gyfer ymgeisydd heb gysylltiad), ei slot, ei rôl
+  (candidate/held/in-sync/resyncing/faulted), ei maint, a'r cenhedliad
+  metadata y mae'n ei gario (angen `CAP_SYSINFO_HW`).
 - `help` — cymorth byr y gorchymyn hwn ei hun.
 
 Heb ymholiad, dangosir y cymorth byr.

@@ -1193,6 +1193,71 @@ impl HwMatchKey {
     };
 }
 
+/// How a driver retracts a node it published from the live hardware tree
+/// (the `flags` argument of the `hw_remove_node` syscall).
+///
+/// An empty set is **surprise removal**: the device is physically gone
+/// (a USB port-down, a PCIe hot-remove), so the node is always retired —
+/// it is never refused for being in use, because a vanished device cannot
+/// be kept alive by pretending its volumes are still there.
+///
+/// [`ORDERLY`](Self::ORDERLY) is the **stop-if-idle** posture: an
+/// administrator retiring a still-present device (stopping an assembled
+/// RAID array) that must not turn a live volume into a surprise-removal
+/// event. The kernel retires the node only when no volume is attached on
+/// any block-service endpoint the node declares, deciding it atomically
+/// with the removal so an attach cannot race in between; otherwise it
+/// refuses with [`Errno::Busy`] and removes nothing.
+///
+/// [`HwRemoveFlags::from_bits`] rejects any reserved bit, so an unknown
+/// request is never silently ignored (validate every input, fail closed).
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct HwRemoveFlags(u32);
+
+impl HwRemoveFlags {
+    /// Retire the node only if it is idle: refuse with [`Errno::Busy`],
+    /// removing nothing, while a volume is attached on any block-service
+    /// endpoint the node declares. Without this bit the removal is a
+    /// surprise removal and always proceeds.
+    pub const ORDERLY: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    const DEFINED_BITS: u32 = Self::ORDERLY.0;
+
+    /// An empty flag set: surprise removal, which always proceeds.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
+    /// request is rejected at the boundary, never silently ignored).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether the removal is the stop-if-idle posture: refuse a node whose
+    /// declared endpoint still backs an attached volume.
+    #[must_use]
+    pub const fn is_orderly(self) -> bool {
+        self.0 & Self::ORDERLY.0 != 0
+    }
+}
+
 /// One node in the hardware tree.
 ///
 /// A node names exactly one detected bus or device function: a stable
@@ -1886,6 +1951,29 @@ mod tests {
     fn version_and_root_sentinel_are_frozen() {
         assert_eq!(HWTREE_VERSION_V1, 1);
         assert_eq!(HW_NODE_ROOT, u32::MAX);
+    }
+
+    #[test]
+    fn hw_remove_flags_round_trip_and_reject_reserved_bits() {
+        // The empty set is a surprise removal (not orderly).
+        let empty = HwRemoveFlags::empty();
+        assert_eq!(empty.bits(), 0);
+        assert!(!empty.is_orderly());
+        assert_eq!(HwRemoveFlags::default(), empty);
+
+        // The one defined bit decodes and reports the orderly posture.
+        let orderly = HwRemoveFlags::from_bits(HwRemoveFlags::ORDERLY.bits()).expect("defined bit");
+        assert!(orderly.is_orderly());
+        assert_eq!(orderly.bits(), 1);
+        assert_eq!(HwRemoveFlags::from_bits(0), Ok(empty));
+
+        // Every reserved bit is rejected at the boundary, fail-closed.
+        assert_eq!(HwRemoveFlags::from_bits(0b10), Err(Errno::OutOfRange));
+        assert_eq!(HwRemoveFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
+        assert_eq!(
+            HwRemoveFlags::from_bits(HwRemoveFlags::ORDERLY.bits() | 0b10),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

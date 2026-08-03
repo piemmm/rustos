@@ -563,6 +563,31 @@ impl CapabilityId {
     /// refused.
     pub const SYSTEM_POWER: Self = Self(41);
 
+    /// Compose raw storage devices, and destroy the on-disk metadata that
+    /// says how they are composed — creating a RAID array over blank disks,
+    /// admitting a device into a live array, retiring a member from one, and
+    /// stopping an array.
+    ///
+    /// These acts overwrite disks and change what a mounted filesystem is
+    /// actually made of, so they are a guarded class rather than something a
+    /// principal who merely reaches storage may do. The class is the whole
+    /// composition surface — every device the composer can reach and every
+    /// array it serves, not one disk or one operation — and no existing
+    /// capability expresses it at that granularity: `CAP_FS_MOUNT` publishes
+    /// and retracts a *volume* on a device someone else composed and is held
+    /// by every principal who may mount removable media, so reusing it would
+    /// hand anyone who can mount a memory stick the authority to overwrite
+    /// every blank disk in the machine; `CAP_FS_ACCESS` is the coarse "may
+    /// use the filesystem at all" gate; `CAP_HW_EMIT` publishes a discovered
+    /// node and writes nothing to a medium.
+    ///
+    /// Reading array and member state needs nothing from here — that is the
+    /// System Information API's own gate. This capability guards only the
+    /// mutations, which the array composer checks against the caller's
+    /// kernel-attested origin before it touches a device, refusing and
+    /// auditing otherwise.
+    pub const STORAGE_ADMIN: Self = Self(42);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -614,6 +639,7 @@ impl CapabilityId {
         (Self::FS_CHOWN, "CAP_FS_CHOWN"),
         (Self::PROC_CONTROL, "CAP_PROC_CONTROL"),
         (Self::SYSTEM_POWER, "CAP_SYSTEM_POWER"),
+        (Self::STORAGE_ADMIN, "CAP_STORAGE_ADMIN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an

@@ -27,12 +27,13 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapab
 use tairix_abi::driver::{BufferClass, DriverError};
 
 use crate::dualparity::{DualParityArray, DualParityError};
-use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError};
+use crate::mirror::{MirrorArray, MirrorError};
 use crate::parity::{ParityArray, ParityError};
 use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::StripeArray;
-use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::superblock::ArrayProgress;
 use crate::triple::{TripleParityArray, TripleParityError};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 
 /// A reason a level-agnostic [`RaidArray`] operation could not be carried out.
 ///

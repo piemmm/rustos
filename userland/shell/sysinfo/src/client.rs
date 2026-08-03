@@ -7,6 +7,10 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
+use tairix_abi::raid::{ArrayHealth, RaidLevel};
+use tairix_abi::raid_admin::{
+    RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_SLOT_NONE,
+};
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
     KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats, ReclaimClassRecord,
@@ -18,8 +22,9 @@ use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process, render_limit_bound,
-    render_process, Output, Transport, PROCESS_HEADER,
+    call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process,
+    for_each_raid_array, for_each_raid_member, render_limit_bound, render_process, Output,
+    Transport, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -45,6 +50,7 @@ queries:
   cpuinfo             per-CPU model, class, flags, and live/reference MHz
   irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
+  raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -86,6 +92,7 @@ pub fn run(
         Command::CpuInfo => run_cpu_info(transport, out),
         Command::Irqs => run_irqs(transport, out),
         Command::Storage => run_storage(transport, out),
+        Command::Raid => run_raid(transport, out),
     }
 }
 
@@ -665,6 +672,136 @@ fn run_storage(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
     }
 }
 
+/// The short display name of a RAID level, for the `raid` array row. A
+/// closed match so a future [`RaidLevel`] variant is a compile error here
+/// rather than a silent blank.
+fn level_name(level: RaidLevel) -> &'static str {
+    match level {
+        RaidLevel::Mirror => "mirror",
+        RaidLevel::Stripe => "stripe",
+        RaidLevel::Parity => "parity",
+        RaidLevel::DualParity => "dual-parity",
+        RaidLevel::TripleParity => "triple-parity",
+        RaidLevel::Raid10 => "raid10",
+    }
+}
+
+/// The short display name of an array's health, for the `raid` array row. A
+/// closed match, as [`level_name`] is.
+fn health_name(health: ArrayHealth) -> &'static str {
+    match health {
+        ArrayHealth::Optimal => "optimal",
+        ArrayHealth::Degraded => "degraded",
+        ArrayHealth::Recovering => "recovering",
+        ArrayHealth::Failed => "failed",
+    }
+}
+
+/// The short display name of a held device's disposition, for the `raid`
+/// device row. A closed match, as [`level_name`] is.
+fn disposition_name(disposition: RaidMemberDisposition) -> &'static str {
+    match disposition {
+        RaidMemberDisposition::Candidate => "candidate",
+        RaidMemberDisposition::Held => "held",
+        RaidMemberDisposition::InSync => "in-sync",
+        RaidMemberDisposition::Resyncing => "resyncing",
+        RaidMemberDisposition::Faulted => "faulted",
+    }
+}
+
+/// What an array is doing right now, as a column: how far a running rebuild
+/// or verification pass has reached, as a percentage of the array's blocks.
+///
+/// A cursor at the array's block count means no pass is running, which reads
+/// as an idle array rather than a completed one; a zero-length array cannot
+/// be expressed as a fraction, so it reads idle too rather than dividing by
+/// zero.
+fn array_progress(record: &RaidArrayRecord) -> String {
+    let total = record.block_count();
+    let (label, cursor) = if record.resyncing() {
+        ("resync", record.resync_cursor())
+    } else if record.scrubbing() {
+        ("scrub", record.scrub_cursor())
+    } else {
+        return String::from("idle");
+    };
+    if total == 0 {
+        return String::from("idle");
+    }
+    format!("{label} {}%", cursor.min(total) * 100 / total)
+}
+
+/// Fetch and render the composed arrays and the devices the composer holds:
+/// one aligned row per array, then a blank line, then one aligned row per
+/// device. The paged walks, fail-closed decode, and `CAP_SYSINFO_HW` gate are
+/// the shared `lib/procinfo` helpers (the same records the `mdadm`
+/// administrator reads); the CLI supplies only the headers and the per-row
+/// rendering.
+///
+/// A machine with no running composer surfaces the transport's refusal, so an
+/// empty table always means "the composer holds nothing", never "nothing
+/// answered".
+fn run_raid(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "array             level          health      members  chunk  blocks       progress",
+    )?;
+    for_each_raid_array(transport, |record| {
+        out.write_line(&format!(
+            "{:<16}  {:<13}  {:<10}  {:>3}/{:<3}  {:>5}  {:>11}  {}",
+            hex(&record.array()[..8]),
+            level_name(record.level()),
+            health_name(record.health()),
+            record.active_members(),
+            record.member_count(),
+            record.chunk_blocks(),
+            record.block_count(),
+            array_progress(record),
+        ))
+    })
+    .map_err(SysinfoError::from)?;
+
+    emit(out, "")?;
+    emit(
+        out,
+        "device  array             slot  disposition  blocks       bsize  generation",
+    )?;
+    for_each_raid_member(transport, |record| {
+        out.write_line(&format!(
+            "{:<6}  {:<16}  {:<4}  {:<11}  {:>11}  {:>5}  {:>10}",
+            record.node(),
+            member_affiliation(record),
+            member_slot(record),
+            disposition_name(record.disposition()),
+            record.block_count(),
+            record.block_size(),
+            record.generation(),
+        ))
+    })
+    .map_err(SysinfoError::from)
+}
+
+/// The array a held device belongs to, as a column: a short prefix of the
+/// array's identity, or a dash for an unaffiliated candidate that belongs to
+/// none.
+fn member_affiliation(record: &RaidMemberRecord) -> String {
+    if record.is_unaffiliated() {
+        String::from("-")
+    } else {
+        hex(&record.array()[..8])
+    }
+}
+
+/// The array slot a held device occupies, as a column: a dash when it
+/// occupies none.
+fn member_slot(record: &RaidMemberRecord) -> String {
+    if record.slot() == RAID_SLOT_NONE {
+        String::from("-")
+    } else {
+        format!("{}", record.slot())
+    }
+}
+
 /// Render `bytes` as lowercase hex with no separators.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -692,12 +829,17 @@ mod tests {
     use tairix_abi::blkio::BlkHealthCounters;
     use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
+    use tairix_abi::raid::{ArrayHealth, RaidLevel};
+    use tairix_abi::raid_admin::{
+        RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_ARRAY_FLAG_RESYNCING,
+        RAID_SLOT_NONE,
+    };
     use tairix_abi::sysinfo::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
         KernelMemoryStats, MemoryPressureStats, MountAvailability, ProcessListRequest,
-        ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-        ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-        SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
+        ProcessRecord, ProcessState, RaidListRequest, RamzipStats, ReclaimClassRecord,
+        ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
         CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
@@ -752,6 +894,94 @@ mod tests {
         out: &dyn Output,
     ) -> Result<(), SysinfoError> {
         engine_run(command, None, transport, &NoHelp, out)
+    }
+
+    /// Two arrays the composer would report: an idle mirror and a parity
+    /// array part-way through a rebuild, so both the healthy and the
+    /// in-progress rendering are covered.
+    fn fixture_arrays() -> Vec<RaidArrayRecord> {
+        alloc::vec![
+            RaidArrayRecord::new(
+                [0x11; 16],
+                RaidLevel::Mirror,
+                ArrayHealth::Optimal,
+                0,
+                2,
+                2,
+                512,
+                0,
+                1_000_000,
+                0x5241_2001,
+                40,
+                1_000_000,
+                1_000_000,
+                7,
+            ),
+            RaidArrayRecord::new(
+                [0x22; 16],
+                RaidLevel::Parity,
+                ArrayHealth::Recovering,
+                RAID_ARRAY_FLAG_RESYNCING,
+                3,
+                2,
+                4096,
+                128,
+                2_000_000,
+                0x5241_2002,
+                41,
+                2_000_000,
+                500_000,
+                9,
+            ),
+        ]
+    }
+
+    /// Two devices the composer holds: a slotted in-sync member and an
+    /// unaffiliated candidate, so the affiliation and slot dashes are
+    /// covered.
+    fn fixture_members() -> Vec<RaidMemberRecord> {
+        alloc::vec![
+            RaidMemberRecord::new(
+                [0x22; 16],
+                RaidMemberDisposition::InSync,
+                1,
+                51,
+                0x5241_3001,
+                1_000_000,
+                4096,
+                9,
+            ),
+            RaidMemberRecord::new(
+                [0u8; 16],
+                RaidMemberDisposition::Candidate,
+                RAID_SLOT_NONE,
+                52,
+                0x5241_3002,
+                4_000_000,
+                512,
+                0,
+            ),
+        ]
+    }
+
+    /// Serve the window a paged request selects out of `records`, exactly as
+    /// the real service's paging does.
+    fn page<T>(
+        payload: &[u8],
+        records: &[T],
+        encode: impl Fn(&T) -> Vec<u8>,
+    ) -> Result<Vec<u8>, Errno> {
+        let request = RaidListRequest::from_bytes(payload)?;
+        let offset = request.offset as usize;
+        if offset >= records.len() {
+            return Ok(Vec::new());
+        }
+        let take = core::cmp::min(records.len() - offset, request.limit as usize);
+        let mut out = Vec::new();
+        for record in &records[offset..offset + take] {
+            out.extend_from_slice(&encode(record));
+        }
+        Ok(out)
     }
 
     /// An in-memory `sysinfod` stand-in: it decodes a request the same way
@@ -987,6 +1217,14 @@ mod tests {
                     out.extend_from_slice(&record.to_le_bytes());
                 }
                 Ok(out)
+            } else if header.query == SysinfoQueryId::RAID_ARRAYS {
+                page(payload, &fixture_arrays(), |record| {
+                    record.to_le_bytes().to_vec()
+                })
+            } else if header.query == SysinfoQueryId::RAID_MEMBERS {
+                page(payload, &fixture_members(), |record| {
+                    record.to_le_bytes().to_vec()
+                })
             } else if header.query == SysinfoQueryId::RESOURCE_LIMITS {
                 let mut out = Vec::new();
                 for (index, kind) in LimitKind::ALL.iter().enumerate() {
@@ -1467,6 +1705,91 @@ mod tests {
         denied.deny = Some(SysinfoQueryId::VOLUME_IO_HEALTH);
         assert_eq!(
             run(Command::Storage, &denied, &Recorder::new()),
+            Err(SysinfoError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn raid_renders_the_array_and_device_tables() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Raid, &fixture, &out).expect("raid renders");
+        let lines = out.lines();
+        // An array header, its two arrays, a blank separator, a device
+        // header, and its two devices.
+        assert_eq!(lines.len(), 7, "lines: {lines:?}");
+        assert!(lines[0].starts_with("array"), "header: {}", lines[0]);
+        assert!(lines[0].contains("health"), "header: {}", lines[0]);
+        assert!(lines[0].contains("progress"), "header: {}", lines[0]);
+
+        // The idle mirror: level, health, full member tally, and no pass
+        // running.
+        assert!(
+            lines[1].starts_with("1111111111111111"),
+            "row: {}",
+            lines[1]
+        );
+        assert!(lines[1].contains("mirror"), "row: {}", lines[1]);
+        assert!(lines[1].contains("optimal"), "row: {}", lines[1]);
+        assert!(lines[1].contains("2/2"), "row: {}", lines[1]);
+        assert!(lines[1].ends_with("idle"), "row: {}", lines[1]);
+
+        // The rebuilding parity array: the degraded tally and the rebuild's
+        // progress as a percentage of its blocks.
+        assert!(
+            lines[2].starts_with("2222222222222222"),
+            "row: {}",
+            lines[2]
+        );
+        assert!(lines[2].contains("parity"), "row: {}", lines[2]);
+        assert!(lines[2].contains("recovering"), "row: {}", lines[2]);
+        assert!(lines[2].contains("2/3"), "row: {}", lines[2]);
+        assert!(lines[2].ends_with("resync 25%"), "row: {}", lines[2]);
+
+        assert!(lines[3].is_empty(), "separator: {}", lines[3]);
+        assert!(lines[4].starts_with("device"), "header: {}", lines[4]);
+        assert!(lines[4].contains("disposition"), "header: {}", lines[4]);
+
+        // The slotted member names its array and slot.
+        assert!(lines[5].starts_with("51"), "row: {}", lines[5]);
+        assert!(lines[5].contains("2222222222222222"), "row: {}", lines[5]);
+        assert!(lines[5].contains("in-sync"), "row: {}", lines[5]);
+
+        // The unaffiliated candidate belongs to no array and holds no slot,
+        // which reads as a dash rather than a fabricated zero.
+        assert!(lines[6].starts_with("52"), "row: {}", lines[6]);
+        assert!(lines[6].contains("candidate"), "row: {}", lines[6]);
+        assert!(!lines[6].contains("2222222222222222"), "row: {}", lines[6]);
+
+        // Both queries routed, arrays before devices.
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::RAID_ARRAYS, SysinfoQueryId::RAID_MEMBERS]
+        );
+    }
+
+    #[test]
+    fn raid_fails_closed_on_a_denial_of_either_query() {
+        // A refused array read ends the command; nothing is rendered beyond
+        // the header, and no device query follows a refusal.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::RAID_ARRAYS);
+        let out = Recorder::new();
+        assert_eq!(
+            run(Command::Raid, &denied, &out),
+            Err(SysinfoError::PermissionDenied)
+        );
+        assert_eq!(
+            denied.seen.borrow().as_slice(),
+            &[SysinfoQueryId::RAID_ARRAYS]
+        );
+
+        // A refused device read likewise ends it, rather than reporting the
+        // arrays and silently dropping the devices.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::RAID_MEMBERS);
+        assert_eq!(
+            run(Command::Raid, &denied, &Recorder::new()),
             Err(SysinfoError::PermissionDenied)
         );
     }

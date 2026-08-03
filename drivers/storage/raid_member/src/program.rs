@@ -69,11 +69,6 @@ fn driver_caps() -> CapabilitySet {
     caps
 }
 
-/// Recover an [`Errno`] from a raw negative kernel result (`-errno`).
-fn errno_from(neg: i64) -> Errno {
-    Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
-}
-
 /// Emit one diagnostic record carrying a single hex-rendered field.
 fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
     let mut value_buf = [0u8; 16];
@@ -130,7 +125,7 @@ impl Waits {
     fn create() -> Result<Self, Errno> {
         let set = tairix_rt::waitset_create();
         if set < 0 {
-            return Err(errno_from(set));
+            return Err(tairix_rt::errno_from_raw(set));
         }
         Ok(Self {
             set: set as u64,
@@ -172,11 +167,11 @@ impl Waits {
 fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
     let granted = tairix_rt::call_grant(transport.endpoint, RAID_REGISTRY_ENDPOINT);
     if granted < 0 {
-        return Err(errno_from(granted));
+        return Err(tairix_rt::errno_from_raw(granted));
     }
     let shared = tairix_rt::shm_grant(transport.window, RAID_REGISTRY_ENDPOINT);
     if shared < 0 {
-        return Err(errno_from(shared));
+        return Err(tairix_rt::errno_from_raw(shared));
     }
     let request = MemberOffer {
         endpoint: transport.endpoint,
@@ -188,7 +183,8 @@ fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
     // No deadline: the membership lasts as long as the array holds the device,
     // and the composer going away cancels the call and wakes the agent, so
     // there is no wedge for a deadline to break.
-    tairix_rt::call_post(RAID_REGISTRY_ENDPOINT, &frame[..len], u64::MAX).map_err(errno_from)
+    tairix_rt::call_post(RAID_REGISTRY_ENDPOINT, &frame[..len], u64::MAX)
+        .map_err(tairix_rt::errno_from_raw)
 }
 
 /// Claim the membership's outcome, parking until it is known.
@@ -197,7 +193,7 @@ fn await_end(waits: &Waits, ticket: u64) -> MembershipEnd {
     loop {
         match tairix_rt::call_reap(RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
             Ok(len) => return MembershipEnd::from_reply(Some(&reply[..len.min(reply.len())])),
-            Err(neg) if errno_from(neg) == Errno::WouldBlock => waits.park(u64::MAX),
+            Err(neg) if tairix_rt::errno_from_raw(neg) == Errno::WouldBlock => waits.park(u64::MAX),
             // Anything else retires the ticket: the endpoint was torn down
             // (the composer went away), or the reply could not be claimed.
             // Either way this membership is over and the agent re-offers.

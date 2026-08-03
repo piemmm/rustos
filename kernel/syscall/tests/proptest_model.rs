@@ -542,7 +542,7 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
+    fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64, _flags: u64) -> SyscallResult {
         self.bump();
         Ok(0)
     }

@@ -49,11 +49,11 @@
 //! holds no allocation and imposes no fixed member ceiling (`AGENTS.md`
 //! §24.1); the growable member tier lives in the assembling serve process.
 
-use crate::mirror::{member_faulting, ArrayHealth};
-use crate::superblock::RaidLevel;
+use crate::mirror::member_faulting;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, RaidLevel};
 
 /// One member of a [`StripeArray`]: a child [`Block`] device and whether it
 /// has been dropped by a whole-device fault.

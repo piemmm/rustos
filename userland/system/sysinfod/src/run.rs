@@ -49,11 +49,15 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::net_ipc::{
-        decode_page_reply, NetBondMemberRecord, NetInterfaceCountersRecord,
-        NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord,
-        NetResolverServer, NetSocketRecord, NetstackRequest, NETSTACK_ENDPOINT,
-        NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
+        NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
+    use tairix_abi::raid_admin::{
+        RaidArrayRecord, RaidControlOp, RaidMemberRecord, RAID_CONTROL_ENDPOINT,
+        RAID_CONTROL_MAX_REPLY, RAID_CONTROL_MAX_REQUEST, RAID_LIST_LIMIT_MAX,
+    };
+    use tairix_abi::reply::decode_page_reply;
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
         CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
@@ -342,6 +346,14 @@ mod program {
             Ok(records)
         }
 
+        fn raid_arrays(&self, _caller: &Caller) -> Result<Vec<RaidArrayRecord>, Errno> {
+            page_raid(RaidArraysPage)
+        }
+
+        fn raid_members(&self, _caller: &Caller) -> Result<Vec<RaidMemberRecord>, Errno> {
+            page_raid(RaidMembersPage)
+        }
+
         fn resource_limits(
             &self,
             caller: &Caller,
@@ -504,11 +516,91 @@ mod program {
             let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
                 .map_err(errno_from)?;
             let record_len = P::RECORD_LEN;
-            let (count, body) = decode_page_reply(&reply[..n], record_len)?;
+            let (count, body) =
+                decode_page_reply(&reply[..n], record_len, NETSTACK_LIST_LIMIT_MAX)?;
             for chunk in body.chunks_exact(record_len) {
                 records.push(P::decode(chunk)?);
             }
             if count < NETSTACK_LIST_LIMIT_MAX {
+                return Ok(records);
+            }
+            offset = offset.saturating_add(u32::from(count));
+        }
+    }
+
+    /// One paged RAID composer control read: which operation a page issues
+    /// and how its record bytes decode.
+    ///
+    /// A sibling of [`NetstackPage`]/[`page_netstack`] for a different
+    /// control protocol rather than a reuse of it: the composer's
+    /// [`RaidControlOp::encode`] writes a variable-length frame into a
+    /// caller-supplied buffer and returns the length written, while
+    /// `netstack`'s [`NetstackRequest::to_le_bytes`] returns a fixed-size
+    /// array — the two request shapes do not share a signature to abstract
+    /// over — and the endpoint and reply-size bound each protocol enforces
+    /// also differ. The paging shape (offset/limit, page until short) is
+    /// identical, which is exactly why this trait and [`page_raid`] mirror
+    /// [`NetstackPage`]/[`page_netstack`] structurally rather than each
+    /// query inventing its own loop.
+    trait RaidPage {
+        /// The decoded record type.
+        type Record;
+        /// The record's fixed wire length.
+        const RECORD_LEN: usize;
+        /// Build the control operation for one page window.
+        fn op(&self, offset: u32, limit: u16) -> RaidControlOp;
+        /// Decode one record, failing closed on malformed bytes.
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno>;
+    }
+
+    /// The live-arrays page.
+    struct RaidArraysPage;
+    impl RaidPage for RaidArraysPage {
+        type Record = RaidArrayRecord;
+        const RECORD_LEN: usize = RaidArrayRecord::WIRE_LEN;
+        fn op(&self, offset: u32, limit: u16) -> RaidControlOp {
+            RaidControlOp::ListArrays { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            RaidArrayRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The device-list page (array members and unaffiliated candidates
+    /// alike).
+    struct RaidMembersPage;
+    impl RaidPage for RaidMembersPage {
+        type Record = RaidMemberRecord;
+        const RECORD_LEN: usize = RaidMemberRecord::WIRE_LEN;
+        fn op(&self, offset: u32, limit: u16) -> RaidControlOp {
+            RaidControlOp::ListMembers { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            RaidMemberRecord::from_bytes(chunk)
+        }
+    }
+
+    /// Page one RAID composer control read to completion over the reserved
+    /// [`RAID_CONTROL_ENDPOINT`]. The per-client `CAP_SYSINFO_HW` gate
+    /// already passed in the dispatcher before this runs. A machine with no
+    /// running array composer fails closed with the transport's typed
+    /// error, never a fabricated empty table.
+    fn page_raid<P: RaidPage>(page: P) -> Result<Vec<P::Record>, Errno> {
+        let mut records = Vec::new();
+        let mut request = [0u8; RAID_CONTROL_MAX_REQUEST];
+        let mut reply = [0u8; RAID_CONTROL_MAX_REPLY];
+        let mut offset: u32 = 0;
+        loop {
+            let op = page.op(offset, RAID_LIST_LIMIT_MAX);
+            let request_len = op.encode(&mut request)?;
+            let n = tairix_rt::ipc_call(RAID_CONTROL_ENDPOINT, &request[..request_len], &mut reply)
+                .map_err(errno_from)?;
+            let record_len = P::RECORD_LEN;
+            let (count, body) = decode_page_reply(&reply[..n], record_len, RAID_LIST_LIMIT_MAX)?;
+            for chunk in body.chunks_exact(record_len) {
+                records.push(P::decode(chunk)?);
+            }
+            if count < RAID_LIST_LIMIT_MAX {
                 return Ok(records);
             }
             offset = offset.saturating_add(u32::from(count));

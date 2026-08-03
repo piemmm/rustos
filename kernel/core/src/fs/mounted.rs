@@ -354,6 +354,42 @@ impl<F: 'static> LateFilesystem<F> {
             .collect()
     }
 
+    /// Run `remove` — the orderly hardware-tree removal closure — but only
+    /// while no registered volume is served from one of `endpoints`, holding
+    /// the driver-registry lock across **both** the busy check and `remove`.
+    ///
+    /// That single lock acquisition is the atomicity guarantee: an attach
+    /// registers its volume under the same lock ([`register`](Self::register)
+    /// / [`set_availability`](Self::set_availability)), so no attach can land
+    /// between the check and the removal. A volume whose serving
+    /// block-service endpoint id (`health.dev`) is in `endpoints` makes the
+    /// node busy: the method returns [`Errno::Busy`] and **never calls
+    /// `remove`**, so nothing is retired (fail closed). A registered volume
+    /// with no fault-aware block source (an in-RAM mount) has no serving
+    /// endpoint and can never make a node busy.
+    ///
+    /// The lock order is registry → hardware tree (the `remove` closure takes
+    /// the hardware-tree store's lock while this holds the registry lock);
+    /// the hardware-tree store never reaches back into the filesystem
+    /// registry, so there is no reverse path and no deadlock. The closure is
+    /// a short in-memory tree edit that never parks, so holding the registry
+    /// spin lock across it is safe.
+    fn remove_if_endpoints_idle(
+        &self,
+        endpoints: &[u64],
+        remove: &mut dyn FnMut() -> Result<Vec<u32>, Errno>,
+    ) -> Result<Vec<u32>, Errno> {
+        let drivers = self.drivers.lock();
+        let busy = drivers
+            .iter()
+            .filter_map(|entry| entry.health.as_ref())
+            .any(|source| endpoints.contains(&source.dev));
+        if busy {
+            return Err(Errno::Busy);
+        }
+        remove()
+    }
+
     /// Withdraw the driver registered for `handle` (a runtime volume
     /// detach), returning the registry's shared handle so the caller can
     /// flush and drop it.
@@ -1236,6 +1272,17 @@ where
         // block-health source; a system with no mount table registers no
         // driver and so truthfully reports no volumes.
         self.mount.volume_io_health_records()
+    }
+
+    fn remove_if_endpoints_idle(
+        &self,
+        endpoints: &[u64],
+        remove: &mut dyn FnMut() -> Result<Vec<u32>, Errno>,
+    ) -> Result<Vec<u32>, Errno> {
+        // The registry owns the volume<->endpoint mapping, and an attach
+        // registers under the same lock this holds across the removal, so the
+        // busy check and the removal are atomic against a concurrent attach.
+        self.mount.remove_if_endpoints_idle(endpoints, remove)
     }
 }
 

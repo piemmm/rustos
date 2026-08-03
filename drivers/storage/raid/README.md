@@ -52,6 +52,8 @@ one node and the composer starts whether or not any array member exists yet.
    — re-admitting a member whose backoff has elapsed, advancing a rebuild,
    verifying the array, or writing down where it has got to — and records every
    change in what the array can promise.
+7. It answers the **administration and status endpoint** (below), so arrays can
+   be listed, created, grown, shrunk, and stopped on a running system.
 
 The membership is the agent's own parked call: an accepted member's offer is
 held open and answered only when the membership ends, so no separate liveness
@@ -68,6 +70,80 @@ grace windows. A turn that actually moved a rebuild or a verification pass
 forward comes straight back round instead of parking, so an idle array heals at
 full speed while a busy one keeps yielding to its workload — but every such turn
 does real I/O, so the loop is a worker, never a poll.
+
+## Blank disks are held, never adopted
+
+A whole device the volume manager probed **entirely empty** — no partition
+table, no filesystem signature, no array metadata — is published as a
+`tairix,raid-candidate` node, and its agent offers it down the same rendezvous a
+real member uses. Such a device is registered as an **unaffiliated candidate**:
+held, offered to no array, and kept out of the reassembly view altogether, so no
+assembly, late-join, or rebuild can reach it. Only an explicit administrative
+request may consume it.
+
+That asymmetry is the point. A blank disk plugged into a machine must never be
+drawn into an array by accident, so holding it costs nothing and adopting it
+could cost a disk. Metadata that is *present but damaged* is not blank either:
+it is refused rather than held as a candidate, because treating an unreadable
+superblock as "no superblock" would let a create overwrite a member whose
+metadata merely failed to decode.
+
+## Administration and status endpoint
+
+The reserved `RAID_CONTROL_ENDPOINT` (`lib/abi/src/raid_admin.rs`) is bound on
+the **same wait-set** as the rendezvous, so one park serves both — no second
+thread, no poll. Each request is judged in a fixed order: the caller is
+identified from the kernel's attested call origin, never from the frame; the
+frame is decoded; and the operation's required capability is checked **before
+any state is read or written**. Anything else is `PermissionDenied`, and a
+request whose origin the kernel cannot attest is refused unread.
+
+| Operation | Authority | What it does |
+| --- | --- | --- |
+| `ListArrays` | `CAP_SYSINFO_HW` | Pages the live arrays: identity, level, width, active members, health, rebuild/scrub progress. |
+| `ListMembers` | `CAP_SYSINFO_HW` | Pages every held device — an array member's slot and state, a device whose metadata names an unassembled array (`Held`), or an unaffiliated blank `Candidate`. |
+| `Create` | `CAP_STORAGE_ADMIN` | Creates an array over named blank candidates. |
+| `Add` | `CAP_STORAGE_ADMIN` | Admits a blank candidate into an absent slot and starts its rebuild. |
+| `Remove` | `CAP_STORAGE_ADMIN` | Retires a **faulted** member, vacating its slot. |
+| `Stop` | `CAP_STORAGE_ADMIN` | Retires the array's published node and releases every member. |
+
+`Create` is the strictest path, because it is the only one that deliberately
+destroys what is on a disk. Every named node must currently be a held
+unaffiliated candidate; the width must lie within the level's own floor and
+ceiling; a stripe unit is required exactly when the level is striped and refused
+otherwise; every member's geometry must agree and leave room past the reserved
+metadata. Each device is then **re-read here** — no filesystem, no array
+metadata, no partition table — because the candidate node is a pointer to look,
+never a claim to believe, and a disk may have been written between the probe and
+the request. Only then is the array identity minted from the kernel CSPRNG (a
+caller-supplied identity could collide with a live array and leave two arrays
+indistinguishable to reassembly) and each member stamped at generation 1. A
+stamp that fails rolls the whole create back, so no half-created array is left
+claiming to be whole. A refused create writes nothing at all.
+
+`Add` requires both a held candidate and an absent slot, and stamps the admitted
+disk a generation *behind* the survivors so a restart finds it as the rebuild
+target it is, never a copy trusted as current.
+
+`Remove` refuses a live or rebuilding member: only a faulted one may be retired,
+so a working copy is never dropped by a mistyped request. Retiring one bumps the
+array's generation and re-stamps every survivor at it, so the removed disk —
+which still carries a superblock naming its old slot — can never return claiming
+to be current. Its membership is then released, which wakes its agent to re-offer
+the device.
+
+`Stop` retires the array's node through the kernel's **orderly** removal, which
+refuses with `Busy` while a volume is still attached on an endpoint the node
+declares. That refusal reaches the administrator unchanged, with the array left
+running and nothing released, so an array cannot be stopped out from under a
+mounted filesystem. A retired array's endpoint id is deliberately never recycled:
+a grant forwarded before the stop must not later reach a different array.
+
+Every mutation is audited, allowed or refused, naming the operation and the
+array or device and never a token — `4205` an allowed mutation, `4206` a refused
+one with its errno, `4207` a request whose origin could not be attested, `4208`
+a blank device taken in as a candidate. Reads are not audited: a status poll
+would drown the trail.
 
 ## Data-integrity rules
 
@@ -133,18 +209,26 @@ touches hardware directly and never mounts a filesystem.
 - `CAP_IPC_ENDPOINT` — own the rendezvous the agents offer to and each composed
   array's own block-service endpoint, and issue block calls on each member's
   delegated endpoint.
-- `CAP_IPC_BIND_PRIVILEGED` — the rendezvous id is **reserved**, and binding a
-  reserved id needs this. It is the gate that stops an unprivileged squatter
-  claiming the id first and being handed read/write authority over every array
-  member on the machine as each agent delegates to it in turn. It buys nothing
-  else: the per-array endpoints are ordinary ids.
+- `CAP_IPC_BIND_PRIVILEGED` — the rendezvous and the administration endpoint are
+  both **reserved** ids, and binding a reserved id needs this. It is the gate
+  that stops an unprivileged squatter claiming the rendezvous first and being
+  handed read/write authority over every array member on the machine as each
+  agent delegates to it in turn, or claiming the administration id and answering
+  an administrator's queries with fabricated state. It buys nothing else: the
+  per-array endpoints are ordinary ids.
 - `CAP_SHM` — map each member's delegated data window and create each array's
   own, the buffers every block transfer is staged through.
 - `CAP_HW_EMIT` — publish the composed array as a storage node so the volume
-  manager finds it. The node can only forward transport the composer itself
-  created or was granted, so the emission widens no one's authority.
+  manager finds it, and retire that node again when the array is stopped. The
+  node can only forward transport the composer itself created or was granted, so
+  the emission widens no one's authority.
 - `CAP_LOG_EMIT` — record each admission, refusal, publication, fenced start,
-  maintenance failure, and change in an array's health.
+  maintenance failure, administrative decision, and change in an array's health.
+
+It holds **no** `CAP_STORAGE_ADMIN` of its own. Administrative authority is the
+*caller's*, read from the kernel's attestation of each control call, so the
+composer can carry out an administrator's request and refuse everyone else's
+without ever holding that authority ambiently.
 
 It is deliberately its own bundle, separate from the sibling member agent: one
 signed bundle grants its whole manifest's capability set to every instance
@@ -183,11 +267,12 @@ into transfers:
 
 ## Limitations
 
-- A member is never released once admitted, so a device that vanishes leaves
-  its slot held until the composer restarts.
-- Arrays are discovered from member metadata only. There is no creation or
-  administration surface here; an array is created by writing its members'
-  superblocks.
+- A member is released only when an administrative `Remove` or `Stop` says so, so
+  a device that simply *vanishes* leaves its slot held until the composer
+  restarts.
+- A stopped array's members are released but not re-composed automatically: each
+  agent re-offers its device, and the array reassembles from that metadata as it
+  would after a restart.
 
 ## Runtime load and unload
 
@@ -241,6 +326,25 @@ position rather than starting over, with the array's generation left alone so
 the record stays valid; a finished rebuild is recorded so the next start finds
 the copy current; a position the members refuse is reported and still owed; and
 an array that regains a copy reports rebuilding and then whole, once each.
+
+The administration endpoint's judgement is proven over the same doubles
+(`src/admin/tests.rs`): a blank device is held and reported as available; a
+create over two candidates writes both superblocks at generation 1 and yields an
+assemblable array; a create is refused with **nothing written** when a named
+device is not a held candidate, when it is unknown, when it is no longer blank,
+when the width falls outside the level's floor, when the stripe unit contradicts
+the level, and when the geometries disagree; a create whose second stamp is
+refused leaves no array claiming to be whole; a caller lacking the mutate
+capability is refused before anything is read or written and a caller lacking the
+read capability cannot even list, while a reader may list without the mutate
+grant; a malformed frame is refused without touching state; list paging returns
+the right records and clamps an over-large limit; `Add` refuses an occupied slot
+and a non-candidate device, and stamps an admitted one as the rebuild target it
+is; `Remove` refuses a live member, and vacates a faulted one — faulted by making
+its disk refuse a real write, not by reaching into private state — releasing it
+and leaving the survivors a generation ahead of the disk it dropped; and `Stop`
+releases nothing when the orderly node removal reports busy, while a permitted
+stop tears the array down and releases every member.
 
 The reassembly, escalation and composition arithmetic underneath is proven once
 in `lib/raidmeta` and `lib/raid`.

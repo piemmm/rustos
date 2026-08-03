@@ -354,7 +354,10 @@ mod program {
     /// stays parked on a dead device.
     fn retract_interface(transport: &mut Transport) {
         if transport.node_live {
-            if tairix_rt::hw_remove_node(transport.node_id) < 0 {
+            // A physically-vanished device is a surprise removal: it is never
+            // refused for being in use, so the flag set is empty.
+            if tairix_rt::hw_remove_node(transport.node_id, tairix_abi::HwRemoveFlags::empty()) < 0
+            {
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Warn,

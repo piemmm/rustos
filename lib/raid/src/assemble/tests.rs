@@ -1,11 +1,12 @@
 //! Host tests for the reassembly → member bridge.
 
 use super::{fill_members, AssembleError};
-use crate::mirror::{MemberRole, MemberState, MirrorMember};
+use crate::mirror::{MemberRole, MirrorMember};
 use crate::parity::ParityMember;
-use crate::superblock::SlotDisposition;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
+use tairix_abi::raid::MemberState;
+use tairix_abi::raid::SlotDisposition;
 
 /// A trivial [`Block`] whose only observable is the `id` a test tags it with,
 /// so a placement can be traced back to the device the supplier handed over.

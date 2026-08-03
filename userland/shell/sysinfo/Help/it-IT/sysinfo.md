@@ -40,6 +40,32 @@ Le interrogazioni:
   interrupt associata — il suo id, il task del driver proprietario, il
   numero di interrupt dall'avvio e se la linea è in quarantena (richiede
   `CAP_SYSINFO_HW`).
+- `cpuinfo` — il rapporto sul processore per CPU (un soprainsieme di
+  `/proc/cpuinfo`): modello/produttore, classe di prestazioni, flag delle
+  estensioni ISA, il registro di identità grezzo, la frequenza di clock
+  del core misurata dal vivo (in MHz — o un onesto «unknown» dove non
+  esiste alcun contatore di clock del core) e la frequenza fissa di
+  riferimento o base tempi. Dati pubblici sull'hardware, nessuna
+  capacità richiesta.
+- `storage`, `io` — la salute dell'I/O di archiviazione per volume: una
+  riga per ogni volume a blocchi consapevole dei guasti — un prefisso del
+  suo identificatore durevole, l'endpoint del servizio a blocchi che lo
+  serve, la sua disponibilità corrente
+  (available/degraded/recovering/lost) e i contatori cumulativi degli
+  esiti (completamenti, reset, timeout, errori del supporto, riemissioni)
+  su cui un disco guasto o instabile diventa visibile (richiede
+  `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — gli array RAID composti e i dispositivi che il
+  compositore di array detiene: una riga per array — un prefisso della
+  sua identità, il suo livello, la sua salute
+  (optimal/degraded/recovering/failed), il numero di membri sincronizzati
+  e definiti, la sua unità di striping, il suo numero di blocchi e
+  qualsiasi ricostruzione o verifica in corso — poi una riga per
+  dispositivo — il suo nodo dell'albero hardware, l'array a cui
+  appartiene (un trattino per un candidato non affiliato), il suo slot,
+  il suo ruolo (candidate/held/in-sync/resyncing/faulted), la sua
+  dimensione e la generazione di metadati che porta (richiede
+  `CAP_SYSINFO_HW`).
 - `help` — la guida breve di questo comando.
 
 Senza interrogazione viene mostrata la guida breve.

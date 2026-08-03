@@ -27,7 +27,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::FaultDomainState;
-use tairix_abi::hwtree::{HwResource, HW_NODE_ROOT};
+use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::HwTreeSource;
 use tairix_sync::SpinLock;
@@ -332,6 +332,41 @@ impl HwTreeStore {
             .find(|node| !node.is_root() && node.id() == node_id)
             .map(|node| node.resources().to_vec())
     }
+
+    /// The block-service endpoint resource base ids the live node `node_id`
+    /// declares, but **only** when its parent is exactly `parent_id` — a
+    /// child the caller itself published. Returns [`Errno::NotFound`]
+    /// fail-closed when no live node has that id, or it exists but its parent
+    /// is not `parent_id` (the caller does not own it).
+    ///
+    /// This backs the orderly (stop-if-idle) `hw_remove_node`: the handler
+    /// reads a node's declared endpoints to refuse the removal while a volume
+    /// is still attached on one of them. The ownership gate is the same one
+    /// [`Self::remove_child`] enforces, so a non-owner never learns whether a
+    /// node exists or is busy (fail closed). Only
+    /// [`HwResourceKind::Endpoint`] resources are returned, by their base id;
+    /// a node with no endpoint resource yields an empty vector (it can never
+    /// be busy). The lookup reuses the same lock and node scan as
+    /// [`Self::resolve_resources`], never duplicating the subtree logic.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live node has id `node_id`, or its parent is
+    /// not `parent_id`.
+    pub fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
+        let inner = self.inner.lock();
+        let node = inner
+            .nodes
+            .iter()
+            .find(|node| node.id() == node_id && node.parent() == parent_id)
+            .ok_or(Errno::NotFound)?;
+        Ok(node
+            .resources()
+            .iter()
+            .filter(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
+            .map(HwResource::base)
+            .collect())
+    }
 }
 
 impl Default for HwTreeStore {
@@ -428,6 +463,14 @@ impl HwTreeSource for HwTreeStoreSource {
         // back so the handler can retire per-node kernel state (a vanished
         // display node's seat).
         HW_TREE.remove_child(parent_id, node_id)
+    }
+
+    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
+        // Report the node's declared block-service endpoints from the one
+        // authoritative inventory, ownership-gated on `parent_id` exactly as
+        // `remove` is, so the orderly-removal busy check reasons about the
+        // caller's own node and a non-owner learns nothing (fail closed).
+        HW_TREE.node_endpoints(parent_id, node_id)
     }
 }
 

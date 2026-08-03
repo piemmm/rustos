@@ -35,6 +35,35 @@ Les requêtes :
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — profondeur de file, changements de contexte et préemptions
   par CPU (nécessite `CAP_SYSINFO_KERNEL`).
+- `cpuinfo` — le rapport processeur par CPU (un surensemble de
+  `/proc/cpuinfo`) : modèle/fabricant, classe de performance, indicateurs
+  d'extensions ISA, le registre d'identité brut, la fréquence d'horloge
+  de cœur mesurée en direct (en MHz — ou un « unknown » honnête là où
+  aucun compteur d'horloge de cœur n'existe) et la fréquence de
+  référence/base de temps fixe. Faits matériels publics, aucune
+  capacité requise.
+- `irq`, `irqs` — la table des IRQ du noyau : une ligne par ligne
+  d'interruption associée — son identifiant, la tâche du pilote
+  propriétaire, le nombre d'interruptions depuis le démarrage et si la
+  ligne est en quarantaine (nécessite `CAP_SYSINFO_HW`).
+- `storage`, `io` — la santé des E/S de stockage par volume : une ligne
+  par volume sur blocs conscient des pannes — un préfixe de son
+  identifiant durable, le point d'accès du service de blocs qui le sert,
+  sa disponibilité actuelle (available/degraded/recovering/lost) et les
+  compteurs de résultats cumulés (achèvements, réinitialisations,
+  expirations, erreurs de support, réémissions) sur lesquels un disque
+  défaillant ou instable devient visible (nécessite
+  `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — les grappes RAID composées et les périphériques que
+  détient le compositeur de grappes : une ligne par grappe — un préfixe
+  de son identité, son niveau, sa santé
+  (optimal/degraded/recovering/failed), le nombre de membres synchronisés
+  et définis, son unité d'entrelacement, son nombre de blocs et toute
+  reconstruction ou vérification en cours — puis une ligne par
+  périphérique — son nœud de l'arbre matériel, la grappe à laquelle il
+  appartient (un tiret pour un candidat non affilié), son emplacement,
+  son rôle (candidate/held/in-sync/resyncing/faulted), sa taille et la
+  génération de métadonnées qu'il porte (nécessite `CAP_SYSINFO_HW`).
 - `help` — l'aide courte de cette commande.
 
 Sans requête, l'aide courte est affichée.

@@ -33,15 +33,22 @@ tairix-raid = { path = "../../../lib/raid", version = "=0.0.0" }
 tairix-raidmeta = { path = "../../../lib/raidmeta", version = "=0.0.0" }
 # The shared, bounds-checked partition-window layer: each member is composed
 # through a view that begins past its own reserved metadata, so a member's
-# superblock can never be exposed as array data.
+# superblock can never be exposed as array data. Its scheme-neutral table parse
+# is also how a create re-verifies a named candidate carries no partition
+# scheme before it overwrites the disk.
 tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
+# The filesystem/RAID-member signature probe: a create re-reads each named
+# candidate itself and refuses one that already carries a filesystem or another
+# array's metadata, never trusting the node id as a claim the disk is blank.
+tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }
+# The capability-set type the control endpoint checks the caller's
+# kernel-attested authority against before it touches any state.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the `lib` is pulled in only
 # for the bare-metal targets the binary is actually built for; on the host the
 # binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The shared blkio block client (`RemoteBlock`, opened read/write here) and its
 # production async transport (`RtBlkCall`), so the composer reads and serves the
 # members the same way every other block consumer does.

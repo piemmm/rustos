@@ -465,7 +465,7 @@ mod tests {
     fn write_raid_member(image: &mut [u8], offset: usize, uuid: [u8; 16]) {
         let superblock = tairix_raidmeta::ArraySuperblock {
             array_uuid: uuid,
-            raid_level: tairix_raidmeta::RaidLevel::Mirror,
+            raid_level: tairix_abi::raid::RaidLevel::Mirror,
             member_count: 2,
             member_slot: 0,
             geometry: BlockGeometry {

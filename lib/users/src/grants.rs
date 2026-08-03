@@ -143,6 +143,12 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   principal's session and every service on the machine reaches far
 ///   beyond the caller's own processes, so it is administrative; an
 ///   ordinary session ends only its own work.
+/// * `CAP_STORAGE_ADMIN` — compose raw storage devices and destroy the
+///   on-disk metadata that says how they are composed: creating a RAID
+///   array, admitting or retiring a member, stopping an array
+///   (`plans/FIX-IO.md` `IO6f`). It overwrites disks and changes what a
+///   mounted filesystem is made of, so it belongs to whoever administers
+///   the machine's storage rather than to any session that merely uses it.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -160,6 +166,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::NET_RAW,
     CapabilityId::PROC_CONTROL,
     CapabilityId::SYSTEM_POWER,
+    CapabilityId::STORAGE_ADMIN,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -307,7 +314,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 24);
+        assert_eq!(set.len(), 25);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -328,6 +335,7 @@ mod tests {
             CapabilityId::NET_RAW,
             CapabilityId::PROC_CONTROL,
             CapabilityId::SYSTEM_POWER,
+            CapabilityId::STORAGE_ADMIN,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }

@@ -800,3 +800,66 @@ The assembly decisions, the degraded-start re-stamp that stops a returning
 member masquerading as current, and the reserved-metadata offset that keeps a
 member's superblock out of array data are documented with the composition
 engines in the RAID library page.
+
+#### Blank disks are held, not ignored
+
+A whole device the volume manager probed **entirely empty** — no partition
+table, no filesystem signature, no array metadata — is published as a
+`tairix,raid-candidate` node, and its member agent offers it to the composer
+down the same rendezvous a real member uses. The composer *holds* such a device
+as an **unaffiliated candidate**: it is registered, offered to no array, and
+excluded from the reassembly view entirely, so no assembly, late-join, or
+rebuild can consume it. Only an explicit administrative request may claim it.
+That asymmetry is deliberate — a blank disk plugged into a machine must never be
+drawn into an array by accident, and metadata that is present but *damaged* is
+not blank: it is refused rather than treated as a candidate, so a create can
+never overwrite a member whose superblock merely failed to decode.
+
+#### Administration and status endpoint
+
+Alongside the rendezvous the composer binds the reserved
+`RAID_CONTROL_ENDPOINT` (`lib/abi/src/raid_admin.rs`) on the **same wait-set**,
+so one park serves both and there is no second thread and no poll. Each request
+is judged in a fixed order: the caller's identity is read from the kernel's
+attested call origin (never from the frame), the frame is decoded, and the
+operation's required capability is checked **before any state is read or
+written**; anything else is `PermissionDenied`.
+
+| Operation | Authority | What it does |
+| --- | --- | --- |
+| `ListArrays` | `CAP_SYSINFO_HW` | Pages the live arrays: identity, level, width, active members, health, rebuild/scrub progress. |
+| `ListMembers` | `CAP_SYSINFO_HW` | Pages every held device: an array member's slot and state, a device whose metadata names an unassembled array (`Held`), or an unaffiliated blank `Candidate`. |
+| `Create` | `CAP_STORAGE_ADMIN` | Creates an array over named blank candidates. |
+| `Add` | `CAP_STORAGE_ADMIN` | Admits a blank candidate into an absent slot and starts its rebuild. |
+| `Remove` | `CAP_STORAGE_ADMIN` | Retires a **faulted** member, vacating its slot. |
+| `Stop` | `CAP_STORAGE_ADMIN` | Retires the array's published node and releases every member. |
+
+`Create` is the strictest path, because it is the only one that deliberately
+destroys what is on a disk. Every named node must currently be a held
+unaffiliated candidate; the width is checked against the level's own floor and
+ceiling; a stripe unit is required exactly when the level is striped and refused
+otherwise; and every member's geometry must agree and leave room past the
+reserved metadata. Each device is then **re-read by the composer itself** — no
+filesystem, no array metadata, no partition table — because the candidate node
+is a pointer to look, never a claim to believe, and a disk can have been written
+between the probe and the request. Only then is the array identity minted from
+the kernel CSPRNG (a caller-supplied identity could collide with a live array
+and leave two arrays indistinguishable to reassembly) and each member stamped at
+generation 1. A stamp that fails rolls the whole create back, so no half-created
+array is ever left claiming to be whole.
+
+`Remove` refuses a live or rebuilding member — only a faulted one may be
+retired, so a working copy is never dropped by a mistyped request. Retiring one
+bumps the array's generation and re-stamps every survivor at it, so the removed
+disk, which still carries a superblock naming its old slot, can never return
+claiming to be current. `Stop` uses the kernel's **orderly** node removal, which
+refuses with `Busy` while a volume is still attached on an endpoint the node
+declares; that refusal reaches the administrator unchanged with the array left
+running and nothing released, so an array cannot be stopped out from under a
+mounted filesystem.
+
+Every mutation is audited, allowed or refused, naming the operation and the
+array or device but never a token: `4205` an allowed mutation, `4206` a refused
+one (with the errno), `4207` a request whose origin the kernel could not attest
+(refused unread), and `4208` a blank device taken in as a candidate. Reads are
+not audited — a status poll would drown the trail.

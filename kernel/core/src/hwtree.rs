@@ -121,6 +121,31 @@ pub trait HwTreeSource: Sync {
     ///   never a hint that distinguishes the two.
     fn remove(&self, parent_id: u32, node_id: u32) -> Result<Vec<u32>, Errno>;
 
+    /// Collect the block-service endpoint resource base ids the live node
+    /// `node_id` declares, but **only** when its parent is exactly
+    /// `parent_id` — a node the caller itself published.
+    ///
+    /// This backs the orderly (stop-if-idle) `hw_remove_node`: the handler
+    /// reads a node's declared endpoints so it can refuse the removal while a
+    /// volume is still attached on one of them. The ownership gate is the
+    /// same as [`Self::remove`]: a node whose parent is not `parent_id` is
+    /// reported as [`Errno::NotFound`], so a non-owner never learns whether a
+    /// node exists or is busy (no ambient authority, fail closed).
+    ///
+    /// Only [`tairix_abi::hwtree::HwResourceKind::Endpoint`] resources are
+    /// returned, by their [`base`](tairix_abi::hwtree::HwResource::base) id;
+    /// a node with no endpoint resource yields an empty vector (it can never
+    /// be busy).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
+    ///   build with no store wired never reports endpoints.
+    /// * [`Errno::NotFound`] if no live node has id `node_id`, or its parent
+    ///   is not `parent_id` (the caller does not own it) — fail closed,
+    ///   never a hint that distinguishes the two.
+    fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno>;
+
     /// Record the fault-domain `health` of the live node `node_id` and bump
     /// the generation so every parked `hw_tree_wait` caller (the device
     /// manager) re-reads and reacts to the coherent recovery episode.
@@ -169,6 +194,10 @@ impl HwTreeSource for NullHwTreeSource {
     }
 
     fn remove(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u32>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn node_endpoints(&self, _parent_id: u32, _node_id: u32) -> Result<Vec<u64>, Errno> {
         Err(Errno::NotImplemented)
     }
 

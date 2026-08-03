@@ -208,3 +208,30 @@ been updated. The actual gate output is quoted in the completion report.
 The overall task is done when V1–V5 are all `done` — a clean §1 scan of the
 whole workspace surfaces no violation — and `.junie/next-ai-codereview.md`
 records an empty backlog.
+
+
+---
+
+## Open sweep: the raw-syscall-result → `Errno` conversion
+
+`lib/rt::errno_from_raw` is now the one public, tested conversion from a raw
+`i64` syscall result to an `Errno`, and the four sites that motivated it (the
+private copy in `lib/rt`, and the ones in `drivers/storage/volmgr`,
+`drivers/storage/raid_member`, `drivers/storage/raid`) use it.
+
+Roughly nineteen further private re-implementations remain, and they do **not**
+agree: three different fallbacks are in use for an unrecognised value
+(`NotImplemented`, `NotFound`, and `DeviceFault`), and none guards `i64::MIN`,
+whose negation overflows. A caller therefore gets a different error class for
+the same kernel refusal depending on which crate it happens to be in — the
+divergence duplication invites. Known sites: `drivers/display/framebuffer`,
+`drivers/network/virtio_net_driver`, `lib/blkclient`, `lib/display`,
+`lib/font`, `lib/sandbox`, `tests/integration/blkio_fault_program`,
+`userland/apps/{files,terminal,viewer,widgets}`, `userland/net/netstack`,
+`userland/session/login`, `userland/shell/elsh`, and
+`userland/system/{devmgr,init,journald,seatmgr,sysinfod}`.
+
+The sweep is its own change: it spans a dozen crates, and each site's current
+fallback must be read before it is replaced, because adopting the shared
+`NotImplemented` where a caller today branches on `NotFound` would change that
+caller's behaviour rather than merely deduplicate it.

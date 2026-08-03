@@ -15,12 +15,13 @@ use super::{
 };
 use crate::array::{RaidArray, RaidError};
 use crate::backoff::RetryCadence;
-use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorMember};
+use crate::mirror::{MirrorArray, MirrorMember};
 use crate::stripe::{StripeArray, StripeMember};
 use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 const BS: u32 = 64;
 /// Logical blocks per backing member device.

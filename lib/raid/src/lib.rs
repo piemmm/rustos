@@ -330,6 +330,15 @@
 //! drives every operation through a transient [`RaidArray`] view built over
 //! them, so a member's recorded state (in particular a fault) is carried
 //! forward untouched rather than re-derived from a fresh probe on every call.
+//!
+//! [`RaidLevel`]: tairix_abi::raid::RaidLevel
+//! [`SlotDisposition`]: tairix_abi::raid::SlotDisposition
+//! [`ArrayHealth`]: tairix_abi::raid::ArrayHealth
+//! [`ArrayHealth::Degraded`]: tairix_abi::raid::ArrayHealth::Degraded
+//! [`ArrayHealth::Recovering`]: tairix_abi::raid::ArrayHealth::Recovering
+//! [`ArrayHealth::Failed`]: tairix_abi::raid::ArrayHealth::Failed
+//! [`MemberState::Absent`]: tairix_abi::raid::MemberState::Absent
+//! [`MemberState::Resyncing`]: tairix_abi::raid::MemberState::Resyncing
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -359,15 +368,15 @@ pub use dualparity::{DualParityArray, DualParityError, DualParityMember, SCRATCH
 pub use maintenance::{
     ArrayMaintenance, MaintenanceAction, MaintenanceError, MaintenancePolicy, MemberRetry,
 };
-pub use mirror::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+pub use mirror::{MemberRole, MirrorArray, MirrorError, MirrorMember};
 pub use owned::OwnedRaidArray;
 pub use parity::{ParityArray, ParityError, ParityMember};
 pub use raid10::{Raid10Array, Raid10Error};
 pub use stripe::{StripeArray, StripeError, StripeMember};
 pub use superblock::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, ArrayUuid, AssemblyError, Candidate,
-    CandidateVerdict, DistinctArrays, RaidLevel, RejectReason, SlotDisposition, SuperblockError,
-    FORMAT_VERSION, MAGIC, WIRE_LEN,
+    CandidateVerdict, DistinctArrays, RejectReason, SuperblockError, FORMAT_VERSION, MAGIC,
+    WIRE_LEN,
 };
 pub use triple::{
     TripleParityArray, TripleParityError, TripleParityMember,

@@ -318,7 +318,7 @@ int32_t tairix_sys_call_reply(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3)
 int32_t tairix_sys_users_db_wait(uint64_t a0);
 int32_t tairix_sys_log_emit(void * a0, uintptr_t a1);
 int32_t tairix_sys_hw_emit_node(void * a0, uintptr_t a1);
-int32_t tairix_sys_hw_remove_node(uint64_t a0);
+int32_t tairix_sys_hw_remove_node(uint64_t a0, uint32_t a1);
 uint64_t tairix_sys_msi_alloc(void * a0, uintptr_t a1);
 uint64_t tairix_sys_shm_create(uintptr_t a0, void * a1);
 uint64_t tairix_sys_shm_map(uint64_t a0, void * a1);

@@ -14,9 +14,10 @@ use super::{Admission, ComposerAction, MemberRegistry, MemberStanding};
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::raid_ipc::MemberOffer;
 use tairix_abi::time::Time64;
-use tairix_raid::{ArraySuperblock, ArrayUuid, RaidLevel, RetryCadence, SlotDisposition};
+use tairix_raid::{ArraySuperblock, ArrayUuid, RetryCadence};
 
 const UUID_A: ArrayUuid = [0xA1; 16];
 const UUID_B: ArrayUuid = [0xB2; 16];

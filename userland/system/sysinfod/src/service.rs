@@ -6,13 +6,14 @@ use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
 };
+use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
     spec_for, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
     CpuTimeRecord, CrashRecord, CrashRecordRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
     MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
-    ProcessListRequest, ProcessRecord, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
-    UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
+    ProcessListRequest, ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest,
+    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+    UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -206,6 +207,10 @@ fn dispatch(
         crash_record_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::VOLUME_IO_HEALTH {
         volume_io_health_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::RAID_ARRAYS {
+        raid_array_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::RAID_MEMBERS {
+        raid_member_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -569,6 +574,46 @@ fn volume_io_health_list(
     )
 }
 
+/// Decode the [`RaidListRequest`], apply paging, and pack the selected
+/// [`RaidArrayRecord`]s into `response`.
+fn raid_array_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = RaidListRequest::from_bytes(payload)?;
+    let records = source.raid_arrays(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        RaidArrayRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Decode the [`RaidListRequest`], apply paging, and pack the selected
+/// [`RaidMemberRecord`]s into `response`.
+fn raid_member_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = RaidListRequest::from_bytes(payload)?;
+    let records = source.raid_members(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        RaidMemberRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`IrqListRequest`], apply paging, and pack the selected
 /// [`IrqRecord`]s into `response`.
 fn irq_list(
@@ -723,18 +768,23 @@ mod tests {
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSockProto,
         NetSockState, NetSocketRecord,
     };
+    use tairix_abi::raid::{ArrayHealth, RaidLevel};
+    use tairix_abi::raid_admin::{
+        RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_ARRAY_FLAG_RESYNCING,
+        RAID_SLOT_NONE,
+    };
     use tairix_abi::sysinfo::{
         CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
         CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest, HardwareTreeRequest,
         IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
         MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
-        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
-        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest, IRQ_FLAG_QUARANTINED,
-        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
-        SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest,
+        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
+        IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, RECLAIM_CLASS_COUNT,
+        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
     use tairix_abi::time::{Duration64, Time64};
@@ -902,6 +952,83 @@ mod tests {
         rec.push_frame(0x40);
         rec.push_frame(0x120);
         rec
+    }
+
+    /// Two arrays the composer would report: an optimal mirror and a
+    /// rebuilding parity array, so level, health, and the in-flight flags are
+    /// all exercised by a decode.
+    fn fixture_raid_arrays() -> alloc::vec::Vec<RaidArrayRecord> {
+        alloc::vec![
+            RaidArrayRecord::new(
+                [0x11; 16],
+                RaidLevel::Mirror,
+                ArrayHealth::Optimal,
+                0,
+                2,
+                2,
+                512,
+                0,
+                1_000_000,
+                0x5241_2001,
+                40,
+                1_000_000,
+                1_000_000,
+                7,
+            ),
+            RaidArrayRecord::new(
+                [0x22; 16],
+                RaidLevel::Parity,
+                ArrayHealth::Recovering,
+                RAID_ARRAY_FLAG_RESYNCING,
+                3,
+                2,
+                4096,
+                128,
+                2_000_000,
+                0x5241_2002,
+                41,
+                2_000_000,
+                640_000,
+                9,
+            ),
+        ]
+    }
+
+    /// Three devices the composer holds: an in-sync member, one rebuilding
+    /// into the same array, and an unaffiliated candidate in no slot.
+    fn fixture_raid_members() -> alloc::vec::Vec<RaidMemberRecord> {
+        alloc::vec![
+            RaidMemberRecord::new(
+                [0x22; 16],
+                RaidMemberDisposition::InSync,
+                0,
+                50,
+                0x5241_3001,
+                1_000_000,
+                4096,
+                9,
+            ),
+            RaidMemberRecord::new(
+                [0x22; 16],
+                RaidMemberDisposition::Resyncing,
+                1,
+                51,
+                0x5241_3002,
+                1_000_000,
+                4096,
+                9,
+            ),
+            RaidMemberRecord::new(
+                [0u8; 16],
+                RaidMemberDisposition::Candidate,
+                RAID_SLOT_NONE,
+                52,
+                0x5241_3003,
+                4_000_000,
+                512,
+                0,
+            ),
+        ]
     }
 
     /// In-memory fixture standing in for the kernel's live state.
@@ -1183,6 +1310,15 @@ mod tests {
                     },
                 ),
             ])
+        }
+        fn raid_arrays(&self, _caller: &Caller) -> Result<alloc::vec::Vec<RaidArrayRecord>, Errno> {
+            Ok(fixture_raid_arrays())
+        }
+        fn raid_members(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<RaidMemberRecord>, Errno> {
+            Ok(fixture_raid_members())
         }
         fn resource_limits(
             &self,
@@ -2248,6 +2384,169 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn raid_arrays_is_gated_on_hw_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = RaidListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::RAID_ARRAYS, &request.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_HW` — the composition of the machine's
+        // storage is read under the same authority as the hardware tree — and
+        // the refusal is logged. Nothing is served, so no call ever goes out
+        // to the composer.
+        let denied = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_HW` holder: both arrays,
+        // in order, with level, health, and the rebuild flag intact.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * RaidArrayRecord::WIRE_LEN);
+        let first =
+            RaidArrayRecord::from_bytes(&resp[..RaidArrayRecord::WIRE_LEN]).expect("decode first");
+        let second = RaidArrayRecord::from_bytes(&resp[RaidArrayRecord::WIRE_LEN..n])
+            .expect("decode second");
+        assert_eq!(first.array(), [0x11; 16]);
+        assert_eq!(first.level(), RaidLevel::Mirror);
+        assert_eq!(first.health(), ArrayHealth::Optimal);
+        assert!(!first.resyncing());
+        assert_eq!(first.active_members(), 2);
+        assert_eq!(second.array(), [0x22; 16]);
+        assert_eq!(second.level(), RaidLevel::Parity);
+        assert_eq!(second.health(), ArrayHealth::Recovering);
+        assert!(second.resyncing());
+        assert_eq!(second.resync_cursor(), 640_000);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // A window inside the list is served from its offset.
+        let middle = RaidListRequest {
+            offset: 1,
+            limit: 8,
+            flags: 0,
+        };
+        let req_middle = request_bytes(SysinfoQueryId::RAID_ARRAYS, &middle.to_le_bytes());
+        let n = serve(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
+        assert_eq!(n, RaidArrayRecord::WIRE_LEN);
+        assert_eq!(
+            RaidArrayRecord::from_bytes(&resp[..n])
+                .expect("decode window")
+                .array(),
+            [0x22; 16]
+        );
+
+        // Paging past the last array returns the empty terminator.
+        let end = RaidListRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::RAID_ARRAYS, &end.to_le_bytes());
+        assert_eq!(
+            serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn raid_members_is_gated_on_hw_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = RaidListRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::RAID_MEMBERS, &request.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_HW`; the refusal is logged and no call
+        // reaches the composer.
+        let denied = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        assert_eq!(
+            serve(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_HW` holder: every device
+        // the composer holds, with its disposition, slot, and affiliation.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 3 * RaidMemberRecord::WIRE_LEN);
+        let decoded: alloc::vec::Vec<RaidMemberRecord> = resp[..n]
+            .chunks(RaidMemberRecord::WIRE_LEN)
+            .map(|chunk| RaidMemberRecord::from_bytes(chunk).expect("decode member"))
+            .collect();
+        assert_eq!(decoded[0].disposition(), RaidMemberDisposition::InSync);
+        assert_eq!(decoded[0].slot(), 0);
+        assert_eq!(decoded[0].node(), 50);
+        assert!(!decoded[0].is_unaffiliated());
+        assert_eq!(decoded[1].disposition(), RaidMemberDisposition::Resyncing);
+        assert_eq!(decoded[1].slot(), 1);
+        assert_eq!(decoded[2].disposition(), RaidMemberDisposition::Candidate);
+        assert_eq!(decoded[2].slot(), RAID_SLOT_NONE);
+        assert!(decoded[2].is_unaffiliated());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // A bounded window is served from its offset: the second page of one.
+        let middle = RaidListRequest {
+            offset: 1,
+            limit: 1,
+            flags: 0,
+        };
+        let req_middle = request_bytes(SysinfoQueryId::RAID_MEMBERS, &middle.to_le_bytes());
+        let n = serve(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
+        assert_eq!(n, RaidMemberRecord::WIRE_LEN);
+        assert_eq!(
+            RaidMemberRecord::from_bytes(&resp[..n])
+                .expect("decode window")
+                .slot(),
+            1
+        );
+
+        // Paging past the last device returns the empty terminator.
+        let end = RaidListRequest {
+            offset: 3,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::RAID_MEMBERS, &end.to_le_bytes());
         assert_eq!(
             serve(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

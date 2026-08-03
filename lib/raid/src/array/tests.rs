@@ -9,14 +9,15 @@
 
 use super::{RaidArray, RaidError};
 use crate::dualparity::DualParityError;
-use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+use crate::mirror::{MirrorArray, MirrorError, MirrorMember};
 use crate::parity::{ParityArray, ParityError, ParityMember};
 use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::{StripeArray, StripeMember};
-use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::superblock::ArrayProgress;
 use crate::triple::TripleParityError;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::DriverError;
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 
 const BS: u32 = 64;
 /// Logical blocks per backing member device.

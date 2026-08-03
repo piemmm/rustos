@@ -6,49 +6,11 @@
 //! serve process, `AGENTS.md` §24), so the array imposes no fixed member
 //! ceiling and holds only a borrow.
 
-use crate::superblock::{ArrayProgress, SlotDisposition};
+use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::{BlkDeviceClass, BlkStatus};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
-use tairix_abi::sysinfo::MountAvailability;
-
-/// The membership state of one mirror slot.
-///
-/// A member is only ever a read source while [`InSync`](Self::InSync). A
-/// [`Faulted`](Self::Faulted) member has been dropped from the array (a
-/// whole-device fault, or a failed write/repair) and no longer serves or
-/// receives I/O until it is re-added, but it still *occupies its slot* (its
-/// device is retained for a re-add). A [`Resyncing`](Self::Resyncing) member
-/// is being rebuilt from an in-sync copy: it receives writes to its
-/// already-synced region so it never falls behind, but is not yet a read
-/// source. An [`Absent`](Self::Absent) slot holds no device at all.
-///
-/// The slot's device presence is exactly determined by this state: every
-/// state but [`Absent`](Self::Absent) has a backing device, and
-/// [`Absent`](Self::Absent) has none. The constructors and reconfiguration
-/// operations are the only mutators and they preserve that invariant, so the
-/// two can never drift.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum MemberState {
-    /// A full, current copy. A read source and a write target.
-    InSync,
-    /// Dropped from the array after a whole-device fault or a failed write.
-    /// Neither serves reads nor receives writes until re-added. Its device is
-    /// retained in the slot so [`MirrorArray::readd_member`] can re-probe it.
-    Faulted,
-    /// Being rebuilt from an in-sync copy. Receives writes to its
-    /// already-synced region; becomes [`InSync`](Self::InSync) when the
-    /// rebuild cursor reaches the end of the array.
-    Resyncing,
-    /// No device occupies this slot: a member the array is *defined* to have
-    /// but which is currently missing — never inserted, or removed after a
-    /// fault ([`MirrorArray::remove_member`]). Like a Linux md "removed"
-    /// slot, an absent member reduces the array's redundancy, so the array
-    /// reports [`ArrayHealth::Degraded`] while one is present. A spare can be
-    /// installed into an absent slot with [`MirrorArray::add_member`], which
-    /// then rebuilds it from a surviving copy.
-    Absent,
-}
+use tairix_abi::raid::{ArrayHealth, MemberState, SlotDisposition};
 
 /// Whether a member joining the array holds a copy believed **current** or
 /// one the reassembly proved is **stale** and must be rebuilt before it can
@@ -211,44 +173,6 @@ impl<B: Block> MirrorMember<B> {
     #[must_use]
     pub fn device_mut(&mut self) -> Option<&mut B> {
         self.device.as_mut()
-    }
-}
-
-/// The health of a composed array, ordered best → worst.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ArrayHealth {
-    /// Every member is in sync: full redundancy.
-    Optimal,
-    /// At least one copy is serving, but redundancy is reduced — a member is
-    /// faulted or absent (missing) and none is currently rebuilding. Data is
-    /// safe on the survivors; a tool shows the array as at-risk.
-    Degraded,
-    /// At least one copy is serving and a member is being rebuilt.
-    Recovering,
-    /// No in-sync copy remains: the array cannot serve and fails closed.
-    Failed,
-}
-
-impl ArrayHealth {
-    /// Whether the array can still serve I/O (any state but
-    /// [`Failed`](Self::Failed)).
-    #[must_use]
-    pub const fn is_serving(self) -> bool {
-        !matches!(self, Self::Failed)
-    }
-
-    /// The volume-availability this array health maps to, so a serving
-    /// process can surface array health through the same `sysinfo` mount
-    /// surface a leaf volume uses (`AGENTS.md` §2.2; `plans/FIX-IO.md`
-    /// IO2/IO5) rather than a second vocabulary.
-    #[must_use]
-    pub const fn to_mount_availability(self) -> MountAvailability {
-        match self {
-            Self::Optimal => MountAvailability::Available,
-            Self::Degraded => MountAvailability::Degraded,
-            Self::Recovering => MountAvailability::Recovering,
-            Self::Failed => MountAvailability::UnavailableLost,
-        }
     }
 }
 

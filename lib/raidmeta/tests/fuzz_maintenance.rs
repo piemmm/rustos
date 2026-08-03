@@ -18,8 +18,9 @@
 //! keeps drawing from the same continuing stream until the deadline elapses.
 
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::raid::RaidLevel;
 use tairix_abi::time::Time64;
-use tairix_raidmeta::{ArrayIdentity, ArrayProgress, MaintenanceRecord, RaidLevel};
+use tairix_raidmeta::{ArrayIdentity, ArrayProgress, MaintenanceRecord};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 200_000;

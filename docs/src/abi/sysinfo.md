@@ -58,6 +58,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `IRQ_LIST`              | `CAP_SYSINFO_HW`       | yes     |
 | `CRASH_RECORD`          | `CAP_SYSINFO_KERNEL`   | yes     |
 | `VOLUME_IO_HEALTH`      | `CAP_SYSINFO_KERNEL`   | yes     |
+| `RAID_ARRAYS`           | `CAP_SYSINFO_HW`       | yes     |
+| `RAID_MEMBERS`          | `CAP_SYSINFO_HW`       | yes     |
 | `MEMORY_PRESSURE_BAND`  | none                   | no      |
 | `MEMORY_TOTAL`          | none                   | no      |
 
@@ -184,6 +186,30 @@ kernel-wide operational state:
   per-line `IRQ_LIST` counters and the surface a failing or flapping
   disk becomes visible on; they are kernel-wide storage operational
   state, hence the gate the ungated `MOUNT_LIST` does not carry.
+- `RAID_ARRAYS` — one `RaidArrayRecord` per array the RAID composer
+  serves (paged by a `RaidListRequest`): the array's 128-bit identity,
+  its `RaidLevel`, its `ArrayHealth`, the in-flight scrub/resync flags,
+  its in-sync and defined member tallies, its logical block size and
+  stripe unit, its block count, the block-service endpoint it is served
+  on, the hardware-tree node it is published as, the scrub and resync
+  cursors, and its metadata generation.
+- `RAID_MEMBERS` — one `RaidMemberRecord` per device the composer holds
+  (paged by the same `RaidListRequest`): the array it belongs to (all
+  zero for an unaffiliated candidate), its `RaidMemberDisposition`, the
+  array slot it occupies (`RAID_SLOT_NONE` for none), the hardware-tree
+  node it was offered under, its block-service endpoint, its size, and
+  the metadata generation its own superblock carries.
+
+The two RAID queries are sourced from the composer, not the kernel: the
+broker forwards each read to the composer's reserved control endpoint and
+pages the reply. They are gated like `HARDWARE_TREE` — on
+`CAP_SYSINFO_HW`, and audited — because an array report says which
+storage devices exist and how they are composed, which is the hardware
+view itself rather than kernel operational state; the composer enforces
+the identical bar on a caller that asks it directly, so the query cannot
+be side-stepped. A machine with no running composer fails closed with the
+transport's own error, never a fabricated empty table: "no arrays" and
+"nothing answered" are different answers.
 
 `IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
 `CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which

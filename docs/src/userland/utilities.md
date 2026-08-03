@@ -462,6 +462,107 @@ force flag reaching the kernel, the refusal paths with and without the
 fd-3 suggestion, the service-failure path, and the thirteen-locale
 `OPTIONS` pinning of the bundled `Help/` documents.
 
+## `mdadm` — administer RAID arrays (`userland/apps/mdadm`)
+
+`tairix-mdadm` is the administrator's array tool over the TAIRiX RAID
+composer (`plans/FIX-IO.md` IO6), tracking the reference `mdadm`'s
+option spelling so a user who knows that tool finds this one familiar.
+The inventory is a read: `--detail` and `--examine` call
+`tairix_procinfo::raid_arrays` and `tairix_procinfo::raid_members`, the
+System Information queries the composer answers at the same
+`CAP_SYSINFO_HW` bar the hardware tree is read under. The mutations are
+a posted control frame: `--create`, `--add`, `--remove`, and `--stop`
+encode a `tairix_abi::raid_admin::RaidControlOp` to
+`RAID_CONTROL_ENDPOINT`, and the reply decodes through
+`tairix_abi::reply::decode_status_reply` (or
+`raid_admin::decode_create_reply`, which carries the identity the
+composer minted). The composer is the policy point: it checks the
+caller holds `CAP_STORAGE_ADMIN` against the kernel-attested origin, so
+the tool never tests authority — it reports the refusal.
+
+### Grammar
+
+```
+mdadm --create --level=<L> --raid-devices=<n> [--chunk=<blocks>] <device>...
+mdadm --detail [<array>]
+mdadm --examine
+mdadm --add <array> <device>
+mdadm --remove <array> <device>
+mdadm --stop <array>
+
+  -C, -D, -E, -a, -r, -S   the mode short forms
+  -l, -n, -c               --level, --raid-devices, --chunk
+  -h, -?, --help           show the command's own help
+  -V, --version            print the version
+```
+
+Exactly one mode per invocation: a second, different mode is a usage
+error, as is no mode at all, an unknown option, a value option in a
+mode that does not take it, and a missing or surplus operand. `--` ends
+option parsing, so a `-`-prefixed operand is positional. `--help` and
+`--version` win over any mode, in that order.
+
+### Naming a device and an array
+
+There is no `/dev`, so both operand spellings are TAIRiX's own —
+documented divergences, refused rather than guessed at:
+
+- A **device** is its hardware-tree node id, spelled `node:<id>` (the
+  same name `--detail` and `--examine` print). Any other spelling, and a
+  zero id, is `BadDeviceName`.
+- An **array** is its 128-bit identity as 32 lower-case hexadecimal
+  digits. The full identity resolves, and so does any prefix naming
+  exactly one live array; a prefix matching more than one is
+  `AmbiguousArray` — never a coin-flip — and one matching none is
+  `ArrayNotFound`.
+
+`--create` additionally refuses a device named twice and a member set
+larger than `RAID_CREATE_MAX_MEMBERS` before it posts anything, so the
+diagnostic names the offending operand. The composed levels are `0`,
+`1`, `5`, `6`, `10`, and triple parity (`tp`/`raid-tp`); there is no
+RAID4, so `--level=4` is refused with that reason, and `--chunk` is
+accepted only for a striped level.
+
+### Reports and advisories
+
+`--detail` prints one `mdadm`-shaped block per array — identity header,
+then level, state, raid/active device counts, chunk size for a striped
+level, array size, the published `node:<id>`, endpoint, generation, and
+a `Rebuild Status` or `Scrub Status` position only while one is running.
+`--examine` prints the device table (`Device`, `Array`, `Slot`, `State`,
+`Blocks`), listing array members with their slot and disposition and the
+unaffiliated blank devices a new array can be created over. Three fd-3
+advisories add context the primary output does not carry and never
+change it: `raid.redundancy_reduced` (a `summary`, when an array's
+health is not optimal), `raid.blank_devices_omitted` (an `omission`, in
+the array view that does not list candidates), and `raid.no_arrays` /
+`raid.no_devices` (a `context`, on an empty machine, whose report is
+correctly empty).
+
+### Fail closed
+
+- A refused read says `reading the array inventory requires
+  CAP_SYSINFO_HW`; a refused mutation says `administering arrays
+  requires CAP_STORAGE_ADMIN`. Every other transport or decode failure
+  is a typed service error and the composer's own refusal keeps its
+  `Errno`.
+- Every diagnostic goes to standard error with a non-zero exit: `1` for
+  a runtime refusal (denied capability, unresolved name, composer
+  refusal, output failure), `2` for a command line that did not parse.
+  No input panics.
+
+Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_SYSINFO_HW` +
+`CAP_STORAGE_ADMIN`. `cargo test -p tairix-mdadm` drives the parser
+(every option and refusal, `--`, help/version precedence), the
+resolver (node names, full and partial identities, ambiguity, duplicate
+and oversized member sets), the renderers (an optimal array, a degraded
+array with an absent slot, a rebuild in progress, an empty machine, a
+blank-device listing), and the engine against in-memory reader,
+controller, and output fixtures (each mode's request and rendering, the
+denied read and mutation, a composer refusal, an unresolved name, and
+each advisory record), plus the thirteen-locale `OPTIONS` pinning of
+the bundled `Help/` documents.
+
 ## `df` — report filesystem space usage (`userland/apps/df`)
 
 `tairix-df` is the GNU coreutils `df` (`plans/APPS.md` §12.1 Stage C,

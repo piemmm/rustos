@@ -380,6 +380,39 @@ pub trait FilesystemService: Send + Sync {
     fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
         Vec::new()
     }
+
+    /// Run `remove` — the caller's hardware-tree removal closure — but only
+    /// while no attached volume is served from one of `endpoints`, deciding
+    /// the busy check and the removal together so an attach cannot race in
+    /// between.
+    ///
+    /// This backs the orderly (stop-if-idle) `hw_remove_node`: `endpoints`
+    /// are the block-service endpoint base ids the node being retired
+    /// declares. A real disk-backed service holds its mount registry's lock
+    /// across *both* the busy check and `remove`, so the check and the
+    /// removal are atomic with respect to a concurrent attach (which
+    /// registers under the same lock). If any attached volume is served from
+    /// an endpoint in `endpoints` the service returns [`Errno::Busy`] and
+    /// **never calls `remove`** (fail closed, nothing removed); otherwise it
+    /// calls `remove` and returns its result — the ids of every node the
+    /// removal retired.
+    ///
+    /// The default holds no volume registry, so it can never be busy: it
+    /// simply calls `remove`. A service owning no mount table (the
+    /// fail-closed [`NullFilesystemService`]) thus never spuriously refuses a
+    /// removal.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Busy`] when a volume is still attached on one of `endpoints`;
+    /// otherwise whatever `remove` returns.
+    fn remove_if_endpoints_idle(
+        &self,
+        _endpoints: &[u64],
+        remove: &mut dyn FnMut() -> Result<Vec<u32>, Errno>,
+    ) -> Result<Vec<u32>, Errno> {
+        remove()
+    }
 }
 
 /// The fail-closed default filesystem service: every operation reports

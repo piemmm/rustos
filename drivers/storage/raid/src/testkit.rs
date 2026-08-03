@@ -16,10 +16,9 @@ use crate::service::write_superblock;
 use tairix_abi::blkio::{BlkOp, BlkRequest, BLK_REQUEST_LEN};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
+use tairix_abi::raid::RaidLevel;
 use tairix_abi::time::Time64;
-use tairix_raid::{
-    ArrayIdentity, ArraySuperblock, ArrayUuid, Candidate, RaidLevel, SuperblockError,
-};
+use tairix_raid::{ArrayIdentity, ArraySuperblock, ArrayUuid, Candidate, SuperblockError};
 use tairix_raidmeta::RESERVED_METADATA_BLOCKS;
 
 pub(crate) const UUID_A: ArrayUuid = [0xA1; 16];

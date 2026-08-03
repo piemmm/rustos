@@ -20,9 +20,10 @@ use crate::testkit::{
 };
 
 use tairix_abi::blkio::{decode_completion, BlkHealthState, BlkOp, BLK_COMPLETION_LEN};
+use tairix_abi::raid::{MemberState, RaidLevel};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::DriverError;
-use tairix_raid::{ArraySuperblock, MaintenanceAction, MemberState, RaidError, RaidLevel};
+use tairix_raid::{ArraySuperblock, MaintenanceAction, RaidError};
 use tairix_raidmeta::{ArrayProgress, MaintenanceRecord, RESERVED_METADATA_BLOCKS};
 
 /// How far the test clock advances on every reading.

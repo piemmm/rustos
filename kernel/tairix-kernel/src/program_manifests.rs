@@ -852,6 +852,23 @@ mod tests {
         CapabilityId::CONSOLE_WRITE,
     ];
 
+    // The RAID array administration tool `mdadm` (plans/FIX-IO.md IO6f):
+    // the pure-tool request, plus `CAP_SYSINFO_HW` for the array and
+    // member reads (the composer gates its own read at the bar the
+    // hardware tree is read under, so a caller cannot side-step the
+    // System Information query by asking it directly), plus
+    // `CAP_STORAGE_ADMIN` for the create/add/remove/stop mutations, which
+    // overwrite disks and change what a mounted filesystem is made of.
+    // The composer attests the caller kernel-side and refuses without the
+    // capability; the tool only reports that refusal. Not an embedded
+    // spawn-floor program, so the list lives only in this pin.
+    const RAID_ADMIN_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SYSINFO_HW,
+        CapabilityId::STORAGE_ADMIN,
+    ];
+
     // The device-inventory listing tools `lspci` and `lsusb`
     // (plans/DEVICES.md DEVICE1): the pure-tool request plus
     // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
@@ -1028,6 +1045,7 @@ mod tests {
             ("lspci", AppKind::Command, HW_LIST_TOOL_REQUEST),
             ("lsusb", AppKind::Command, HW_LIST_TOOL_REQUEST),
             ("man", AppKind::Command, MAN_MANIFEST),
+            ("mdadm", AppKind::Command, RAID_ADMIN_TOOL_REQUEST),
             ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
             ("mv", AppKind::Command, FILE_TOOL_REQUEST),
             ("netstack", AppKind::Service, NETSTACK_MANIFEST),

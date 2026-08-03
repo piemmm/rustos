@@ -132,6 +132,19 @@ containing `:` stays reachable as `./name`, and `File::open_resource` remains
 the explicit constructor for a caller that has already classified its target
 (the shell's parsed redirection targets).
 
+## Raw syscall results (`errno_from_raw`)
+
+The low-level wrappers hand back the kernel's raw signed register, so a
+refusal arrives as a negated `Errno` discriminant. `errno_from_raw` is the
+**one** place that becomes a typed error — this runtime's own wrappers and the
+driver programs that issue syscalls directly all recover their `Errno` through
+it, so a refusal cannot be read one way in one program and another way in the
+next. Anything unrecognisable — a code this build has no variant for, a
+magnitude too large for an `i32`, or a success value handed in by mistake —
+fails closed as `Errno::NotImplemented`. It deliberately never becomes
+`Errno::NotFound`, which asserts a named object is absent and which callers act
+on; an unreadable result must not be able to masquerade as that answer.
+
 ## Memory pressure (`pressure` module)
 
 `tairix_rt::pressure` holds the process's single

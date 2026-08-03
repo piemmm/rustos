@@ -39,6 +39,31 @@ Las consultas:
   interrupción vinculada — su identificador, la tarea del controlador
   propietaria, el número de interrupciones desde el arranque y si la
   línea está en cuarentena (necesita `CAP_SYSINFO_HW`).
+- `cpuinfo` — el informe del procesador por CPU (un superconjunto de
+  `/proc/cpuinfo`): modelo/fabricante, clase de rendimiento, indicadores
+  de extensiones ISA, el registro de identidad en bruto, la frecuencia de
+  reloj de núcleo medida en vivo (en MHz — o un honesto «unknown» donde
+  no existe contador de reloj de núcleo) y la frecuencia fija de
+  referencia o base de tiempo. Datos públicos del hardware, no requiere
+  ninguna capacidad.
+- `storage`, `io` — la salud de E/S de almacenamiento por volumen: una
+  fila por cada volumen respaldado por bloques y consciente de fallos —
+  un prefijo de su identificador duradero, el punto final del servicio de
+  bloques que lo sirve, su disponibilidad actual
+  (available/degraded/recovering/lost) y los contadores acumulados de
+  resultados (finalizaciones, reinicios, expiraciones, errores de medio,
+  reintentos) en los que se hace visible un disco defectuoso o
+  inestable (necesita `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — los conjuntos RAID compuestos y los dispositivos que
+  mantiene el compositor de conjuntos: una fila por conjunto — un prefijo
+  de su identidad, su nivel, su salud
+  (optimal/degraded/recovering/failed), el número de miembros
+  sincronizados y definidos, su unidad de franja, su número de bloques y
+  cualquier reconstrucción o verificación en curso — luego una fila por
+  dispositivo — su nodo del árbol de hardware, el conjunto al que
+  pertenece (un guion para un candidato no afiliado), su ranura, su papel
+  (candidate/held/in-sync/resyncing/faulted), su tamaño y la generación
+  de metadatos que porta (necesita `CAP_SYSINFO_HW`).
 - `help` — la ayuda corta de este comando.
 
 Sin consulta, se muestra la ayuda corta.

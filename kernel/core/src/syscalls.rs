@@ -7330,13 +7330,29 @@ where
         Ok(u64::from(node_id))
     }
 
-    fn hw_remove_node(&self, caller: &CallerContext<'_>, node_id: u64) -> SyscallResult {
+    fn hw_remove_node(
+        &self,
+        caller: &CallerContext<'_>,
+        node_id: u64,
+        flags: u64,
+    ) -> SyscallResult {
         // The dispatcher has already checked `CAP_HW_EMIT` — the same
         // privilege publishing requires, since removing a child is the exact
-        // counterpart of emitting one. `node_id` is
-        // a plain `u64`, copied in nothing: a `HwNode::id` is a `u32`, so a
-        // value outside that range names no node and fails closed at the
-        // resolution below — never an out-of-band copy.
+        // counterpart of emitting one.
+        //
+        // Step 3 (validate every input) first, before any authority or state
+        // work: decode the flag word fail-closed. `flags` is a `u64`
+        // register; a value outside `u32` names no flag set, and any reserved
+        // bit is rejected with `OutOfRange`, so an unknown request is never
+        // silently coerced to a default posture.
+        let Ok(flag_bits) = u32::try_from(flags) else {
+            return Err(Errno::OutOfRange);
+        };
+        let flags = tairix_abi::hwtree::HwRemoveFlags::from_bits(flag_bits)?;
+
+        // `node_id` is a plain `u64`, copied in nothing: a `HwNode::id` is a
+        // `u32`, so a value outside that range names no node and fails closed
+        // at the resolution below — never an out-of-band copy.
         let Ok(node_id) = u32::try_from(node_id) else {
             return Err(Errno::NotFound);
         };
@@ -7357,13 +7373,83 @@ where
             parent_id
         };
 
-        // Remove the child (and its whole subtree) from the live hardware
-        // tree, bumping the generation that wakes the device manager's
+        // Two postures. Surprise removal (empty flags) always proceeds: a
+        // device that physically vanished cannot be kept alive by pretending
+        // its volumes are still there. Orderly removal (the `ORDERLY` bit) is
+        // the stop-if-idle posture: an administrator retiring a still-present
+        // device (stopping an assembled RAID array) must not turn a live
+        // mounted volume into a surprise-removal event, so the node is retired
+        // only when no volume is attached on a block-service endpoint it
+        // declares — decided atomically with the removal so an attach cannot
+        // race in between.
+        let removed = if flags.is_orderly() {
+            // Read the node's declared block-service endpoints, ownership-gated
+            // on `parent_id` (a node the caller does not own is `NotFound`, so
+            // a non-owner never learns whether a node is busy). The filesystem
+            // service then holds its mount registry lock across *both* the
+            // busy check and the removal closure, so the "is any volume still
+            // attached on one of these endpoints?" decision and the removal
+            // are one atomic step against a concurrent attach. A build with no
+            // store wired fails closed `NotImplemented`.
+            let endpoints = self.hw_tree.node_endpoints(parent_id, node_id)?;
+            let hw_tree = self.hw_tree;
+            let outcome = self
+                .filesystem
+                .remove_if_endpoints_idle(&endpoints, &mut || hw_tree.remove(parent_id, node_id));
+            match outcome {
+                Ok(removed) => removed,
+                Err(Errno::Busy) => {
+                    // A live volume is still attached: refuse and remove
+                    // nothing (fail closed). This is a security-relevant
+                    // refusal an operator must be able to see, so it is
+                    // audited with the node left in place; no secret is
+                    // logged.
+                    crate::audit::emit(
+                        self.audit,
+                        tairix_log::Level::Warn,
+                        AuditEvent::HwNodeRemoveRefused,
+                        &[Field {
+                            key: "node",
+                            value: tairix_log::FieldValue::UnsignedInt(u64::from(node_id)),
+                        }],
+                    );
+                    return Err(Errno::Busy);
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            // Surprise removal: remove the child (and its whole subtree) from
+            // the live hardware tree unconditionally. The store enforces the
+            // ownership check (`node_id`'s parent must be `parent_id`) and
+            // fails closed `NotFound` otherwise; a build with no store wired
+            // fails closed `NotImplemented`.
+            self.hw_tree.remove(parent_id, node_id)?
+        };
+
+        // The removal bumps the generation that wakes the device manager's
         // reactive watch so it unloads the driver bound to the vanished node
-        // (the same change channel `hw_tree_wait` observes). The store enforces the ownership check (`node_id`'s parent
-        // must be `parent_id`) and fails closed `NotFound` otherwise; a build
-        // with no store wired fails closed `NotImplemented`. Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
-        let removed = self.hw_tree.remove(parent_id, node_id)?;
+        // (the same change channel `hw_tree_wait` observes). Record the
+        // retirement with its posture — a topology change an operator must be
+        // able to attribute; no secret is logged.
+        crate::audit::emit(
+            self.audit,
+            tairix_log::Level::Info,
+            AuditEvent::HwNodeRemoved,
+            &[
+                Field {
+                    key: "node",
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(node_id)),
+                },
+                Field {
+                    key: "mode",
+                    value: tairix_log::FieldValue::Str(if flags.is_orderly() {
+                        "orderly"
+                    } else {
+                        "surprise"
+                    }),
+                },
+            ],
+        );
 
         // Any display node that just left the tree — the named child or a
         // transitive descendant — takes its seat with it, through the same
@@ -24352,6 +24438,11 @@ mod tests {
         // Every `(node_id, health)` the handler recorded through `set_health`,
         // so a test can assert the resolved own-node and health it passed.
         health_set: RwLock<alloc::vec::Vec<(u32, tairix_abi::blkio::FaultDomainState)>>,
+        // The block-service endpoint base ids each node declares, keyed by
+        // node id, so an orderly-removal test can give a node the endpoints
+        // the busy check reasons about. A node absent from the map declares
+        // no endpoint (it can never be busy).
+        endpoints: RwLock<alloc::vec::Vec<(u32, alloc::vec::Vec<u64>)>>,
     }
 
     impl StaticHwTree {
@@ -24363,7 +24454,14 @@ mod tests {
                 removed: RwLock::new(alloc::vec::Vec::new()),
                 unremovable: RwLock::new(alloc::vec::Vec::new()),
                 health_set: RwLock::new(alloc::vec::Vec::new()),
+                endpoints: RwLock::new(alloc::vec::Vec::new()),
             }
+        }
+
+        /// Give node `node_id` the block-service endpoint bases `bases`, so an
+        /// orderly-removal test can drive the busy check against them.
+        fn set_endpoints(&self, node_id: u32, bases: alloc::vec::Vec<u64>) {
+            self.endpoints.write().push((node_id, bases));
         }
     }
 
@@ -24394,6 +24492,28 @@ mod tests {
             }
             self.removed.write().push((parent_id, node_id));
             Ok(alloc::vec![node_id])
+        }
+        fn node_endpoints(
+            &self,
+            _parent_id: u32,
+            node_id: u32,
+        ) -> Result<alloc::vec::Vec<u64>, Errno> {
+            // Model the same fail-closed ownership gate `remove` uses: a node
+            // the caller does not own (listed unremovable) is `NotFound`, so a
+            // non-owner never learns whether it is busy. Otherwise report the
+            // node's declared endpoint bases (none => an empty set, which can
+            // never be busy).
+            if self.unremovable.read().contains(&node_id) {
+                return Err(Errno::NotFound);
+            }
+            let endpoints = self
+                .endpoints
+                .read()
+                .iter()
+                .find(|(id, _)| *id == node_id)
+                .map(|(_, bases)| bases.clone())
+                .unwrap_or_default();
+            Ok(endpoints)
         }
         fn set_health(
             &self,
@@ -25418,7 +25538,7 @@ mod tests {
         // Removing the node destroys the seat with no reboot: the audit
         // names it, and every call naming the dead seat fails closed —
         // including the still-held lease.
-        assert_eq!(h.hw_remove_node(&ctx, 100), Ok(0));
+        assert_eq!(h.hw_remove_node(&ctx, 100, 0), Ok(0));
         let destroyed = sink
             .snapshot()
             .into_iter()
@@ -25568,7 +25688,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_hw_tree(source);
-        assert_eq!(h.hw_remove_node(&ctx, 42), Ok(0));
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0), Ok(0));
         let removed = source.removed.read();
         assert_eq!(removed.len(), 1, "the owned node was removed");
         // The handler passes the emitter's own loaded node (9) as the
@@ -25614,7 +25734,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_hw_tree(source);
-        assert_eq!(h.hw_remove_node(&ctx, 42), Err(Errno::PermissionDenied));
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0), Err(Errno::PermissionDenied));
         assert!(
             source.removed.read().is_empty(),
             "a task with no loaded node removes nothing"
@@ -25655,7 +25775,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_hw_tree(source);
-        assert_eq!(h.hw_remove_node(&ctx, 7), Err(Errno::NotFound));
+        assert_eq!(h.hw_remove_node(&ctx, 7, 0), Err(Errno::NotFound));
         assert!(
             source.removed.read().is_empty(),
             "a node the caller does not own is never removed"
@@ -25694,7 +25814,7 @@ mod tests {
         )
         .with_hw_tree(source);
         assert_eq!(
-            h.hw_remove_node(&ctx, u64::from(u32::MAX) + 1),
+            h.hw_remove_node(&ctx, u64::from(u32::MAX) + 1, 0),
             Err(Errno::NotFound)
         );
         assert!(source.removed.read().is_empty(), "nothing was removed");
@@ -25728,7 +25848,314 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.hw_remove_node(&ctx, 2), Err(Errno::NotImplemented));
+        assert_eq!(h.hw_remove_node(&ctx, 2, 0), Err(Errno::NotImplemented));
+    }
+
+    /// The `HwRemoveFlags::ORDERLY` bit as a syscall flag word.
+    fn orderly_flags() -> u64 {
+        u64::from(tairix_abi::hwtree::HwRemoveFlags::ORDERLY.bits())
+    }
+
+    /// Orderly (stop-if-idle) removal refuses with `Busy` and removes
+    /// nothing while a volume is still attached on a block-service endpoint
+    /// the node declares: stopping a still-mounted array must never become a
+    /// surprise removal (`plans/FIX-IO.md` `IO6f`). The refusal is audited.
+    #[test]
+    fn hw_remove_node_orderly_refuses_a_busy_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        // Node 42 serves block-service endpoint 500, on which a volume is
+        // still attached.
+        source.set_endpoints(42, alloc::vec![500]);
+        let fs: &'static RecordingFs =
+            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs);
+        assert_eq!(
+            h.hw_remove_node(&ctx, 42, orderly_flags()),
+            Err(Errno::Busy)
+        );
+        assert!(
+            source.removed.read().is_empty(),
+            "a busy node is left in place"
+        );
+        let refused = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::HwNodeRemoveRefused.id())
+            .expect("the busy refusal is audited");
+        assert!(refused
+            .fields
+            .iter()
+            .any(|(key, value)| key == "node" && value == "42"));
+    }
+
+    /// Orderly removal of an idle node (no attached volume on any endpoint it
+    /// declares) succeeds and retires the node; the removal is audited with
+    /// its `orderly` posture.
+    #[test]
+    fn hw_remove_node_orderly_removes_an_idle_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        // Node 42 declares an endpoint, but no volume is attached on it.
+        source.set_endpoints(42, alloc::vec![500]);
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs);
+        assert_eq!(h.hw_remove_node(&ctx, 42, orderly_flags()), Ok(0));
+        assert_eq!(
+            *source.removed.read(),
+            alloc::vec![(9, 42)],
+            "an idle node is retired under the caller's own node"
+        );
+        let removed = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::HwNodeRemoved.id())
+            .expect("the removal is audited");
+        assert!(removed
+            .fields
+            .iter()
+            .any(|(key, value)| key == "node" && value == "42"));
+        assert!(removed
+            .fields
+            .iter()
+            .any(|(key, value)| key == "mode" && value == "orderly"));
+    }
+
+    /// Orderly removal of a node declaring *several* endpoints is refused if
+    /// *any one* of them backs an attached volume, removing nothing.
+    #[test]
+    fn hw_remove_node_orderly_refuses_when_any_endpoint_is_busy() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        // The node declares three endpoints; only the middle one is busy.
+        source.set_endpoints(42, alloc::vec![500, 501, 502]);
+        let fs: &'static RecordingFs =
+            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![501])));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs);
+        assert_eq!(
+            h.hw_remove_node(&ctx, 42, orderly_flags()),
+            Err(Errno::Busy)
+        );
+        assert!(
+            source.removed.read().is_empty(),
+            "one busy endpoint refuses the whole removal"
+        );
+    }
+
+    /// A surprise removal (empty flags) retires a node even when a volume is
+    /// attached on its endpoint: a vanished device cannot be kept alive by
+    /// pretending its volumes are still there, and the busy check is never
+    /// consulted.
+    #[test]
+    fn hw_remove_node_surprise_removes_a_busy_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        source.set_endpoints(42, alloc::vec![500]);
+        let fs: &'static RecordingFs =
+            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs);
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0), Ok(0));
+        assert_eq!(
+            *source.removed.read(),
+            alloc::vec![(9, 42)],
+            "a surprise removal always proceeds"
+        );
+        assert!(
+            !fs.calls()
+                .iter()
+                .any(|call| call.starts_with("remove_if_endpoints_idle")),
+            "surprise removal never consults the busy check"
+        );
+    }
+
+    /// An unrecognised flag bit is rejected at the boundary with
+    /// `OutOfRange`, before any authority or state work — nothing is removed
+    /// (validate every input, fail closed).
+    #[test]
+    fn hw_remove_node_rejects_an_unknown_flag_bit() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        // Bit 1 is reserved (only bit 0, ORDERLY, is defined).
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0b10), Err(Errno::OutOfRange));
+        assert!(
+            source.removed.read().is_empty(),
+            "an unknown flag removes nothing"
+        );
+    }
+
+    /// A caller that does not own the node is refused with `NotFound` and
+    /// removes nothing, in **both** postures — a non-owner never learns
+    /// whether the node exists or is busy.
+    #[test]
+    fn hw_remove_node_for_an_unowned_node_is_refused_in_both_modes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        // Node 7 is not owned by the caller: both the removal and the
+        // endpoint lookup model the store's fail-closed `NotFound`.
+        source.unremovable.write().push(7);
+        source.set_endpoints(7, alloc::vec![500]);
+        let fs: &'static RecordingFs =
+            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs);
+        assert_eq!(h.hw_remove_node(&ctx, 7, 0), Err(Errno::NotFound));
+        assert_eq!(
+            h.hw_remove_node(&ctx, 7, orderly_flags()),
+            Err(Errno::NotFound)
+        );
+        assert!(
+            source.removed.read().is_empty(),
+            "a node the caller does not own is never removed, in either mode"
+        );
     }
 
     // ---- ipc_call ----------------------------------------------------
@@ -29700,6 +30127,9 @@ mod tests {
         /// flush has been asked for, so a test can order the flush against
         /// an effect another double records.
         sync_stamp: core::sync::atomic::AtomicU64,
+        /// Block-service endpoint bases that back a still-attached volume, so
+        /// an orderly `hw_remove_node` test can make the busy check refuse.
+        busy_endpoints: Vec<u64>,
         log: std::sync::Mutex<Vec<String>>,
     }
 
@@ -29721,8 +30151,17 @@ mod tests {
                 open_err: None,
                 sync_err: None,
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
+                busy_endpoints: Vec::new(),
                 log: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// A service that reports `endpoints` as backing still-attached
+        /// volumes, so an orderly removal naming any of them is refused busy.
+        fn with_busy_endpoints(endpoints: Vec<u64>) -> Self {
+            let mut fs = Self::new();
+            fs.busy_endpoints = endpoints;
+            fs
         }
 
         /// The shared-clock stamp of the flush, or `None` while none has
@@ -29955,6 +30394,23 @@ mod tests {
                 core::str::from_utf8(key).unwrap_or("<bad>")
             ));
             Ok(())
+        }
+
+        fn remove_if_endpoints_idle(
+            &self,
+            endpoints: &[u64],
+            remove: &mut dyn FnMut() -> Result<Vec<u32>, Errno>,
+        ) -> Result<Vec<u32>, Errno> {
+            self.record(alloc::format!(
+                "remove_if_endpoints_idle endpoints={endpoints:?}"
+            ));
+            // Model the real service: refuse (without running `remove`) while
+            // any named endpoint still backs an attached volume; otherwise run
+            // the removal closure atomically in its place.
+            if endpoints.iter().any(|e| self.busy_endpoints.contains(e)) {
+                return Err(Errno::Busy);
+            }
+            remove()
         }
     }
 

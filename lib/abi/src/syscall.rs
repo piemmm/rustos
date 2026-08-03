@@ -719,8 +719,9 @@ impl SyscallNumber {
     /// subtree — from the live hardware tree (hotplug
     /// removal: a removed node unloads its driver).
     ///
-    /// Argument: `node_id: u64` — the [`crate::HwNode::id`] of the node to
-    /// remove. Returns `0`, or `-errno`.
+    /// Arguments: `node_id: u64` — the [`crate::HwNode::id`] of the node to
+    /// remove; `flags: u32` — the [`crate::HwRemoveFlags`] posture word.
+    /// Returns `0`, or `-errno`.
     ///
     /// Gated by [`crate::CapabilityId::HW_EMIT`], the **same** privilege as
     /// publishing ([`SyscallNumber::HW_EMIT_NODE`]): a user-space **bus**
@@ -739,6 +740,19 @@ impl SyscallNumber {
     /// the driver bound to the vanished node — the
     /// symmetric counterpart of [`SyscallNumber::HW_EMIT_NODE`], which adds a
     /// node and leaves the *load* to the device manager.
+    ///
+    /// `flags` selects the removal posture. [`crate::HwRemoveFlags::empty`]
+    /// is a **surprise removal** — a device that physically vanished — and
+    /// always proceeds: a live volume on a departed device cannot be kept
+    /// alive by pretending the device is still there.
+    /// [`crate::HwRemoveFlags::ORDERLY`] is the **stop-if-idle** posture an
+    /// administrator uses to retire a still-present device (stopping an
+    /// assembled RAID array): the kernel refuses with [`crate::Errno::Busy`],
+    /// removing nothing, while a volume is still attached on a block-service
+    /// endpoint the node declares — the busy check is decided *atomically*
+    /// with the removal, so an attach cannot race in between. A reserved flag
+    /// bit fails closed with [`crate::Errno::OutOfRange`] before any state is
+    /// touched.
     pub const HW_REMOVE_NODE: Self = Self(38);
 
     /// Allocate a message-signalled interrupt (MSI) vector for a PCI

@@ -91,7 +91,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  35 | `users_db_wait`| `u64 timeout_ns`                        | `errno` | `CAP_USERS_READ`  | no      |
 |  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
 |  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
-|  38 | `hw_remove_node` | `u64 node_id`                         | `errno` | `CAP_HW_EMIT`     | yes     |
+|  38 | `hw_remove_node` | `u64 node_id`, `u32 flags`            | `errno` | `CAP_HW_EMIT`     | yes     |
 |  46 | `fs_open`      | `user_ptr` (path), `len`, `u32 flags`   | `u64` (fd)    | `CAP_FS_ACCESS` | yes   |
 |  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
@@ -543,8 +543,9 @@ C stub is `tairix_sys_hw_emit_node`.
 `hw_remove_node` (no. 38) is the exact **mirror** of `hw_emit_node`: hotplug
 removal (`AGENTS.md` §18.4). When a device a bus driver published goes away
 (a USB port-down, a PCIe hot-remove) the driver calls this with the
-`HwNode::id` it wants retired, so the device manager unloads the driver bound
-to the vanished node. It is gated on the **same** `CAP_HW_EMIT`, and the
+`HwNode::id` it wants retired and an empty `HwRemoveFlags` word, so the device
+manager unloads the driver bound to the vanished node. It is gated on the
+**same** `CAP_HW_EMIT`, and the
 kernel bounds it exactly like publication (`AGENTS.md` §4 — no ambient
 authority): it resolves the caller's *own* matched node (the same kernel-side
 task→node record `hw_emit_node` uses) and removes the target **only** when
@@ -561,6 +562,21 @@ security-relevant event that drives an unload). It serves the
 `HwTreeSource::remove` seam; until a store is installed it fails closed with
 `NotImplemented` through `NULL_HW_TREE`. The first-party Rust wrapper is
 `tairix_rt::hw_remove_node`; the C stub is `tairix_sys_hw_remove_node`.
+
+Its `HwRemoveFlags` word selects between the two removals a driver can mean.
+An **empty** word is the surprise removal above: a device that has physically
+vanished must always be retirable, so it is never refused for being in use.
+The `ORDERLY` bit is the deliberate teardown a service performs on a node it
+is retiring by choice — the RAID composer stopping an array
+(`plans/FIX-IO.md` IO6f) — and the kernel refuses it with `Busy`, removing
+nothing, while any volume is still attached on a block-service endpoint the
+node declares. The check is not a separate query the caller makes first,
+because an attach landing between the question and the removal would turn a
+live mount into a surprise removal: the busy scan and the removal happen under
+one acquisition of the same registry lock an attach registers under, so the
+decision is atomic. A refusal is audited alongside the removal itself, and a
+reserved flag bit fails closed (`OutOfRange`) before the caller's authority is
+even resolved.
 
 `ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
 `call_reply` (no. 34) are the two halves of the **synchronous** request/reply

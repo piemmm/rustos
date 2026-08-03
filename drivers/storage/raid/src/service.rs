@@ -26,7 +26,7 @@
 //!
 //! * An array whose surviving members cannot reconstruct every logical block
 //!   is refused, never composed short — the shared
-//!   [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) is the one
+//!   [`RaidLevel::can_serve`](tairix_abi::raid::RaidLevel::can_serve) is the one
 //!   definition of that question.
 //! * An array brought online with a slot the composer cannot see is **fenced**:
 //!   its generation is bumped and every surviving current member is re-stamped
@@ -60,14 +60,14 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
+use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
 use tairix_partition::PartitionBlock;
 use tairix_raid::{
     fill_members, ArrayIdentity, ArraySuperblock, AssembleError, AssembleMember, Candidate,
-    DualParityMember, MirrorMember, OwnedRaidArray, ParityMember, RaidLevel, SlotDisposition,
-    StripeMember, SuperblockError, TripleParityMember,
-    SCRATCH_BLOCKS as DUAL_PARITY_SCRATCH_BLOCKS,
+    DualParityMember, MirrorMember, OwnedRaidArray, ParityMember, StripeMember, SuperblockError,
+    TripleParityMember, SCRATCH_BLOCKS as DUAL_PARITY_SCRATCH_BLOCKS,
     TRIPLE_SCRATCH_BLOCKS as TRIPLE_PARITY_SCRATCH_BLOCKS, WIRE_LEN as SUPERBLOCK_WIRE_LEN,
 };
 use tairix_raidmeta::{
@@ -292,7 +292,7 @@ pub struct Assembled<B: Block> {
 /// each present slot's device from `take_raw` keyed by the candidate tag.
 ///
 /// The slot table is resolved with [`ArrayIdentity::fill_slots`] and refused
-/// unless [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) accepts
+/// unless [`RaidLevel::can_serve`](tairix_abi::raid::RaidLevel::can_serve) accepts
 /// it. An array with a slot the composer cannot see is fenced: the generation
 /// is bumped and each surviving current member is re-stamped at it through
 /// [`write_superblock`] before the array is composed, so the missing disk

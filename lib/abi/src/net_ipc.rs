@@ -22,7 +22,7 @@
 //! than guessing (`AGENTS.md` §5.4).
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
-use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
+use crate::reply::{PAGE_HEADER_LEN, STATUS_REPLY_LEN};
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -354,9 +354,10 @@ pub enum NetstackRequest {
     /// should query — the DHCPv4/DHCPv6-learned servers unioned with any
     /// statically configured ones, aggregated across every managed
     /// interface, deduplicated, and bounded by [`MAX_RESOLVER_SERVERS`].
-    /// The reply is the shared paged frame ([`encode_page_reply`]) of
-    /// [`NetResolverServer`] records — the same count-plus-records shape
-    /// every broker read uses, so no second reply codec exists; the small,
+    /// The reply is the shared paged frame
+    /// ([`crate::reply::encode_page_reply`]) of [`NetResolverServer`]
+    /// records — the same count-plus-records shape every broker read
+    /// uses, so no second reply codec exists; the small,
     /// closed set fits one page. Both the system-information
     /// `net_resolver_servers` read and a userland resolver client consume
     /// this one answer, so the two can never disagree (`plans/DNS.md`
@@ -2191,11 +2192,11 @@ impl NetBondMemberRecord {
 /// address family and the address (`plans/DNS.md` DNS2).
 ///
 /// A record of the [`NetstackRequest::ResolverServers`] broker read,
-/// carried in the shared paged reply ([`encode_page_reply`]) exactly like
-/// every other broker record — there is no bespoke reply codec (§2.2). The
-/// value is the recursive DNS server a stub resolver sends its queries to;
-/// it is public host configuration (the resolv.conf analogue), never a
-/// secret.
+/// carried in the shared paged reply ([`crate::reply::encode_page_reply`])
+/// exactly like every other broker record — there is no bespoke reply
+/// codec. The value is the recursive DNS server a stub resolver sends
+/// its queries to; it is public host configuration (the resolv.conf
+/// analogue), never a secret.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetResolverServer {
     /// The address family of [`addr`](Self::addr).
@@ -2381,76 +2382,10 @@ pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
     + PAGE_HEADER_LEN
     + NETSTACK_LIST_LIMIT_MAX as usize * NetInterfaceStateRecord::WIRE_LEN;
 
-/// Byte length of the page header following the status word: the
-/// record count (2) and a reserved pair that must be zero (2).
-pub const PAGE_HEADER_LEN: usize = 4;
-
-/// Encode a paged reply: the status frame, the count, then `records`
-/// packed back-to-back (each already encoded to its fixed width).
-///
-/// # Errors
-///
-/// * [`Errno::LengthOutOfRange`] — more records than
-///   [`NETSTACK_LIST_LIMIT_MAX`].
-/// * [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
-pub fn encode_page_reply<const RECORD_LEN: usize>(
-    records: &[[u8; RECORD_LEN]],
-    out: &mut [u8],
-) -> Result<usize, Errno> {
-    if records.len() > NETSTACK_LIST_LIMIT_MAX as usize {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let total = STATUS_REPLY_LEN + PAGE_HEADER_LEN + records.len() * RECORD_LEN;
-    if out.len() < total {
-        return Err(Errno::BufferTooSmall);
-    }
-    out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(Ok(())));
-    // Record count fits u16: bounded by NETSTACK_LIST_LIMIT_MAX above.
-    let count = u16::try_from(records.len()).map_err(|_| Errno::LengthOutOfRange)?;
-    put_u16(out, STATUS_REPLY_LEN, count);
-    put_u16(out, STATUS_REPLY_LEN + 2, 0);
-    let mut cursor = STATUS_REPLY_LEN + PAGE_HEADER_LEN;
-    for record in records {
-        out[cursor..cursor + RECORD_LEN].copy_from_slice(record);
-        cursor += RECORD_LEN;
-    }
-    Ok(total)
-}
-
-/// Decode a paged reply's header, returning the record region.
-///
-/// # Errors
-///
-/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold the declared
-///   records.
-/// * [`Errno::BadMagic`] — a dirty reserved pair.
-/// * [`Errno::LengthOutOfRange`] — a count beyond
-///   [`NETSTACK_LIST_LIMIT_MAX`].
-/// * The decoded [`Errno`] itself, when the service refused the
-///   request.
-pub fn decode_page_reply(bytes: &[u8], record_len: usize) -> Result<(u16, &[u8]), Errno> {
-    decode_status_reply(&bytes[..bytes.len().min(STATUS_REPLY_LEN)])?;
-    if bytes.len() < STATUS_REPLY_LEN + PAGE_HEADER_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let count = read_u16(bytes, STATUS_REPLY_LEN);
-    if read_u16(bytes, STATUS_REPLY_LEN + 2) != 0 {
-        return Err(Errno::BadMagic);
-    }
-    if count > NETSTACK_LIST_LIMIT_MAX {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let body = &bytes[STATUS_REPLY_LEN + PAGE_HEADER_LEN..];
-    let need = count as usize * record_len;
-    if body.len() < need {
-        return Err(Errno::BufferTooSmall);
-    }
-    Ok((count, &body[..need]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply::{decode_page_reply, encode_page_reply};
 
     fn name(text: &str) -> [u8; IF_NAME_LEN] {
         let mut out = [0u8; IF_NAME_LEN];
@@ -2637,9 +2572,14 @@ mod tests {
             .to_le_bytes(),
         ];
         let mut out = [0u8; NETSTACK_MAX_REPLY];
-        let written = encode_page_reply(&servers, &mut out).expect("encode");
-        let (count, body) =
-            decode_page_reply(&out[..written], NetResolverServer::WIRE_LEN).expect("decode");
+        let written =
+            encode_page_reply(&servers, NETSTACK_LIST_LIMIT_MAX, &mut out).expect("encode");
+        let (count, body) = decode_page_reply(
+            &out[..written],
+            NetResolverServer::WIRE_LEN,
+            NETSTACK_LIST_LIMIT_MAX,
+        )
+        .expect("decode");
         assert_eq!(count, 2);
         let mut chunks = body.as_chunks::<{ NetResolverServer::WIRE_LEN }>().0.iter();
         assert_eq!(
@@ -3685,46 +3625,12 @@ mod tests {
     }
 
     #[test]
-    fn page_reply_round_trips_and_fails_closed() {
-        let records = [sample_facts().to_le_bytes(), sample_facts().to_le_bytes()];
-        let mut out = [0u8; NETSTACK_MAX_REPLY];
-        let len = encode_page_reply(&records, &mut out).expect("encode");
-        let (count, body) =
-            decode_page_reply(&out[..len], NetInterfaceFactsRecord::WIRE_LEN).expect("decode");
-        assert_eq!(count, 2);
-        assert_eq!(body.len(), 2 * NetInterfaceFactsRecord::WIRE_LEN);
-        for chunk in body.as_chunks::<{ NetInterfaceFactsRecord::WIRE_LEN }>().0 {
-            assert_eq!(
-                NetInterfaceFactsRecord::from_bytes(chunk),
-                Ok(sample_facts())
-            );
-        }
-        // A truncated body fails closed.
-        assert_eq!(
-            decode_page_reply(&out[..len - 1], NetInterfaceFactsRecord::WIRE_LEN),
-            Err(Errno::BufferTooSmall)
-        );
-        // A dirty reserved pair fails closed.
-        let mut dirty = out;
-        dirty[STATUS_REPLY_LEN + 2] = 1;
-        assert_eq!(
-            decode_page_reply(&dirty[..len], NetInterfaceFactsRecord::WIRE_LEN),
-            Err(Errno::BadMagic)
-        );
-        // A refusal decodes to its errno.
-        let refusal = encode_status_reply(Err(Errno::PermissionDenied));
-        assert_eq!(
-            decode_page_reply(&refusal, NetInterfaceFactsRecord::WIRE_LEN),
-            Err(Errno::PermissionDenied)
-        );
-    }
-
-    #[test]
     fn interface_list_reply_reuses_the_page_codec() {
         let names = [name("wan"), name("lan0")];
         let mut out = [0u8; NETSTACK_MAX_REPLY];
-        let len = encode_page_reply(&names, &mut out).expect("encode");
-        let (count, body) = decode_page_reply(&out[..len], IF_NAME_LEN).expect("decode");
+        let len = encode_page_reply(&names, NETSTACK_LIST_LIMIT_MAX, &mut out).expect("encode");
+        let (count, body) =
+            decode_page_reply(&out[..len], IF_NAME_LEN, NETSTACK_LIST_LIMIT_MAX).expect("decode");
         assert_eq!(count, 2);
         assert_eq!(&body[..IF_NAME_LEN], &name("wan"));
         assert_eq!(&body[IF_NAME_LEN..], &name("lan0"));

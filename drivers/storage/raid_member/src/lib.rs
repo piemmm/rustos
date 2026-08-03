@@ -7,12 +7,20 @@
 //! exactly one matched hardware-tree node and receives exactly that node's
 //! resource grants, so no process is born able to reach a whole array. The
 //! member agent closes that gap without widening anyone's authority: matched
-//! to the `tairix,raid-member` node the volume manager emits for a device
-//! whose first block probed as array metadata, it **delegates** that one
-//! device's block transport and data window to the composer's reserved
-//! rendezvous and then offers the device to it. Authority flows one device at
-//! a time, from the process that legitimately holds it, to a rendezvous only
-//! a privileged binder can serve.
+//! to a node the volume manager emits for a device the array subsystem may
+//! reach, it **delegates** that one device's block transport and data window
+//! to the composer's reserved rendezvous and then offers the device to it.
+//! Authority flows one device at a time, from the process that legitimately
+//! holds it, to a rendezvous only a privileged binder can serve.
+//!
+//! Two kinds of device are reached this way, and the agent treats them
+//! identically because the difference is the composer's to determine, not
+//! the agent's: a `tairix,raid-member` node names a device whose first block
+//! probed as array metadata, and a `tairix,raid-candidate` node names a whole
+//! device that probed as carrying nothing at all — the disks a *new* array is
+//! created over, which have no metadata to be recognised by and so would
+//! otherwise be unreachable. In both cases the agent offers the device and
+//! the composer reads it to decide what it is.
 //!
 //! The agent then holds the membership open: the composer answers the offer
 //! only when the membership ends, so one outstanding call carries the whole
@@ -43,23 +51,35 @@ mod agent;
 
 pub use agent::{AgentStep, MemberAgent, REOFFER_BASE_NS, REOFFER_CEILING_NS};
 
-use tairix_abi::raid_ipc::RAID_MEMBER_COMPATIBLE;
+use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
 use tairix_abi::{DriverBindKey, HwMatchKey};
 
-/// Bind priority of the member-agent key.
+/// Bind priority of the member-agent keys.
 ///
-/// A member node carries exactly one compatible string and no other driver
-/// binds it, so the priority only has to be a definite value rather than win a
-/// contest; it matches the storage policy drivers' priority so the resolution
-/// stays uniform across the class.
+/// Each of these nodes carries exactly one compatible string and no other
+/// driver binds it, so the priority only has to be a definite value rather
+/// than win a contest; it matches the storage policy drivers' priority so the
+/// resolution stays uniform across the class.
 const BIND_PRIORITY: u16 = 10;
 
-/// The bind table the signed bundle publishes: the one key naming a device
-/// the volume manager recognised as an array member.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(RAID_MEMBER_COMPATIBLE) {
-        Ok(key) => key,
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// Build the bind key for `compatible` at the agent's priority.
+///
+/// A compatible string too long for a match key is a compile-time error
+/// rather than a driver that silently binds nothing.
+const fn bind_key(compatible: &'static [u8]) -> DriverBindKey {
+    DriverBindKey::new(
+        BIND_PRIORITY,
+        match HwMatchKey::compatible(compatible) {
+            Ok(key) => key,
+            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+        },
+    )
+}
+
+/// The bind table the signed bundle publishes: a device the volume manager
+/// recognised as an array member, and a whole device it found empty enough to
+/// create an array over.
+pub const BIND_KEYS: &[DriverBindKey] = &[
+    bind_key(RAID_MEMBER_COMPATIBLE),
+    bind_key(RAID_CANDIDATE_COMPATIBLE),
+];

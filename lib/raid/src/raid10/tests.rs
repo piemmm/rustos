@@ -2,12 +2,13 @@
 //! [`Block`] double.
 
 use super::{Raid10Array, Raid10Error};
-use crate::mirror::{ArrayHealth, MemberState, MirrorMember};
+use crate::mirror::MirrorMember;
 use crate::superblock::ArrayProgress;
 use core::cell::Cell;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 // Small blocks keep the test doubles' backing arrays well under clippy's
 // large-stack-array threshold even for a four-member array.

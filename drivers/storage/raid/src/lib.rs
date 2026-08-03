@@ -41,12 +41,14 @@
 
 extern crate alloc;
 
+mod admin;
 mod compose;
 mod runtime;
 mod service;
 #[cfg(test)]
 mod testkit;
 
+pub use admin::{handle_control, ControlAudit, ControlEffects, LiveArrays};
 pub use compose::{Admission, ComposerAction, HeldMember, MemberRegistry, MemberStanding};
 pub use runtime::{ArrayHealthEvent, ArrayRuntime, MaintenanceStep};
 pub use service::{

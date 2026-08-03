@@ -44,6 +44,8 @@
 //! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
 //! | 4132 | Info | `VOLUME_RECOVERED`  | audit | A degraded/recovering volume returned to healthy service (the disk came back). Emitted once on the edge back to `Available`; `dev` names the block-service endpoint. |
 //! | 4133 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
+//! | 4140 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
+//! | 4141 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -517,6 +519,27 @@ pub enum AuditEvent {
     /// already recorded by the dispatcher's own audited refusal, so this id
     /// marks only transitions that were allowed to proceed.
     SystemPower,
+    /// An owned hardware-tree node was retired by the `hw_remove_node`
+    /// syscall.
+    ///
+    /// Emitted by the handler after the validated removal, for every
+    /// posture. The `node` field names the removed node and `mode` the
+    /// removal posture (`surprise` for a device that physically vanished,
+    /// `orderly` for an administrator's idle stop-if-idle retirement) — a
+    /// topology change an operator must be able to attribute. It carries no
+    /// secret or capability token.
+    HwNodeRemoved,
+    /// An orderly `hw_remove_node` was refused because the node is still in
+    /// use; nothing was removed (fail closed).
+    ///
+    /// Emitted by the handler when the stop-if-idle posture finds a volume
+    /// still attached on a block-service endpoint the node declares, so the
+    /// removal is refused with [`tairix_abi::Errno::Busy`] to keep a live
+    /// mounted volume from becoming a surprise-removal event. The `node`
+    /// field names the node left in place — a security-relevant refusal an
+    /// operator must be able to see. It carries no secret or capability
+    /// token.
+    HwNodeRemoveRefused,
 }
 
 impl AuditEvent {
@@ -576,6 +599,8 @@ impl AuditEvent {
             Self::VolumeRecovering => 4131,
             Self::VolumeRecovered => 4132,
             Self::SystemPower => 4133,
+            Self::HwNodeRemoved => 4140,
+            Self::HwNodeRemoveRefused => 4141,
         })
     }
 
@@ -637,6 +662,8 @@ impl AuditEvent {
             Self::VolumeRecovering => "volume backing device recovering",
             Self::VolumeRecovered => "volume backing device recovered",
             Self::SystemPower => "system power transition admitted",
+            Self::HwNodeRemoved => "hardware-tree node removed",
+            Self::HwNodeRemoveRefused => "hardware-tree node removal refused (busy)",
         }
     }
 }
@@ -713,6 +740,8 @@ mod tests {
             AuditEvent::VolumeRecovering,
             AuditEvent::VolumeRecovered,
             AuditEvent::SystemPower,
+            AuditEvent::HwNodeRemoved,
+            AuditEvent::HwNodeRemoveRefused,
         ] {
             let id = ev.id().0;
             assert!(
@@ -777,6 +806,8 @@ mod tests {
             AuditEvent::VolumeRecovering.id().0,
             AuditEvent::VolumeRecovered.id().0,
             AuditEvent::SystemPower.id().0,
+            AuditEvent::HwNodeRemoved.id().0,
+            AuditEvent::HwNodeRemoveRefused.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

@@ -38,13 +38,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::{serve_request_recovering, BlkHealth, BlkHealthState, BLK_COMPLETION_LEN};
 use tairix_abi::driver::block::Block;
+use tairix_abi::raid::{ArrayHealth, MemberState};
 use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
 use tairix_partition::PartitionBlock;
 use tairix_raid::{
     ArrayIdentity, ArrayMaintenance, MaintenanceAction, MaintenancePolicy, MemberRetry,
-    MemberState, OwnedRaidArray, RaidError,
+    OwnedRaidArray, RaidError,
 };
 use tairix_raidmeta::{ArrayProgress, MaintenanceRecord};
 
@@ -321,6 +322,97 @@ impl<B: Block> ArrayRuntime<B> {
         self.array
             .add_member(usize::from(slot), view)
             .map_err(|_| ServiceError::Assembly)
+    }
+
+    /// Admit a fresh device into an absent slot of the array, begin rebuilding
+    /// it, and stamp its superblock so a restart finds it as the rebuild
+    /// target it is.
+    ///
+    /// The device is placed exactly as a returning member is, then its
+    /// superblock is written *a generation behind the survivors*: an admitted
+    /// disk holds none of the array's data yet, so on the next assembly it must
+    /// resolve as a stale rebuild target, never a copy trusted as current — the
+    /// safe direction. A stamp the device refuses leaves it serving and
+    /// rebuilding in memory, at the cost of a repeated rebuild after a restart,
+    /// never a stale read.
+    ///
+    /// # Errors
+    ///
+    /// * As [`place_member`](Self::place_member) for a placement the array
+    ///   refuses.
+    /// * [`ServiceError::Device`] — the superblock stamp write failed.
+    /// * [`ServiceError::Assembly`] — the array's own identity could not
+    ///   describe the slot (an out-of-range slot).
+    pub fn admit_member(&mut self, slot: u16, raw: B, now: Time64) -> Result<(), ServiceError> {
+        self.place_member(slot, raw)?;
+        let identity = self.identity;
+        let index = usize::from(slot);
+        self.array.with_array(|view| {
+            let Some(mut record) = identity.member_superblock(slot, now) else {
+                return Err(ServiceError::Assembly);
+            };
+            record.generation = record.generation.saturating_sub(1);
+            let Some(member) = view.member_device_mut(index) else {
+                return Err(ServiceError::Assembly);
+            };
+            write_superblock(member.device_mut(), &record)
+        })
+    }
+
+    /// Retire the faulted member in `slot`, vacating its slot and fencing the
+    /// disk out of the array.
+    ///
+    /// The member must be faulted: a live or rebuilding member is refused, so a
+    /// working copy is never dropped by a mistyped request. Once removed, the
+    /// array's generation is bumped and every surviving current member is
+    /// re-stamped at it, so the retired disk — which still carries a superblock
+    /// naming its old slot — can never return claiming to be current.
+    ///
+    /// # Errors
+    ///
+    /// * [`ServiceError::Assembly`] — the slot is not a faulted member, or a
+    ///   survivor's re-stamp write was refused (the fence is not durable, so
+    ///   the whole retirement fails closed rather than leaving the disk able
+    ///   to masquerade).
+    pub fn retire_member(&mut self, slot: u16, now: Time64) -> Result<(), ServiceError> {
+        self.array
+            .remove_member(usize::from(slot))
+            .map_err(|_| ServiceError::Assembly)?;
+        self.identity = self.identity.bump_generation();
+        self.record_members_current(now)
+            .map_err(|_| ServiceError::Assembly)
+    }
+
+    /// The array's current health.
+    #[must_use]
+    pub fn array_health(&mut self) -> ArrayHealth {
+        self.array.health()
+    }
+
+    /// How many slots currently hold a fully in-sync device.
+    #[must_use]
+    pub fn active_members(&mut self) -> u16 {
+        let count = self.array.member_count();
+        let mut active = 0u16;
+        for index in 0..count {
+            if self.array.member_state(index) == Some(MemberState::InSync) {
+                active = active.saturating_add(1);
+            }
+        }
+        active
+    }
+
+    /// The array's resumable maintenance position (scrub and rebuild cursors).
+    #[must_use]
+    pub fn progress(&mut self) -> ArrayProgress {
+        self.array.progress()
+    }
+
+    /// The [`MemberState`] of the device in `slot`, or [`None`] for an absent
+    /// or out-of-range slot.
+    #[must_use]
+    pub fn member_state(&mut self, slot: u16) -> Option<MemberState> {
+        self.array.member_state(usize::from(slot))
     }
 
     /// Carry out one maintenance decision against the array.

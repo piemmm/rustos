@@ -1732,13 +1732,27 @@ pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
 /// retires the node only when it is a child the caller itself published
 /// (no ambient authority). Returns a `TAIRIX_E_*` code (`0` on
 /// success).
+///
+/// `flags` is the `tairix_abi::hwtree::HwRemoveFlags` bit word. An empty set
+/// (`0`) is a **surprise removal** — a device that physically vanished — and
+/// always proceeds. The `ORDERLY` bit is the **stop-if-idle** posture an
+/// administrator uses to retire a still-present device (stopping an assembled
+/// RAID array): the kernel refuses with `TAIRIX_E_BUSY`, removing nothing,
+/// while a volume is still attached on a block-service endpoint the node
+/// declares, so a live mounted volume is never turned into a surprise
+/// removal. A reserved flag bit fails closed with `TAIRIX_E_OUT_OF_RANGE`.
 #[must_use]
 #[export_name = "tairix_sys_hw_remove_node"]
-pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
+pub extern "C" fn sys_hw_remove_node(node_id: u64, flags: u64) -> i32 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
-    // side of the trap. No memory operand is passed.
-    unsafe { ret_i32(raw_syscall(NUM_HW_REMOVE_NODE, [node_id, 0, 0, 0, 0, 0])) }
+    // `CAP_HW_EMIT`, decodes `flags`, and resolves `node_id` against the live
+    // tree on the far side of the trap. No memory operand is passed.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_HW_REMOVE_NODE,
+            [node_id, flags, 0, 0, 0, 0],
+        ))
+    }
 }
 
 /// `hw_node_health`: publish the fault-domain `health` of the interior node
@@ -2666,7 +2680,7 @@ mod tests {
         (NUM_CALL_CANCEL, "call_cancel", 2),
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
-        (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
+        (NUM_HW_REMOVE_NODE, "hw_remove_node", 2),
         (NUM_HW_NODE_HEALTH, "hw_node_health", 1),
         (NUM_HW_SELF_NODE, "hw_self_node", 0),
         (NUM_MSI_ALLOC, "msi_alloc", 2),

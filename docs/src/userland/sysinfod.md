@@ -64,6 +64,8 @@ a privileged query without first passing its capability gate.
 | `IRQ_LIST`               | `CAP_SYSINFO_HW`     | yes     | packed `IrqRecord`s                 |
 | `CRASH_RECORD`           | `CAP_SYSINFO_KERNEL` | yes     | packed `CrashRecord`s               |
 | `VOLUME_IO_HEALTH`       | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoHealthRecord`s      |
+| `RAID_ARRAYS`            | `CAP_SYSINFO_HW`     | yes     | packed `RaidArrayRecord`s           |
+| `RAID_MEMBERS`           | `CAP_SYSINFO_HW`     | yes     | packed `RaidMemberRecord`s          |
 | `MEMORY_PRESSURE_BAND`   | none                 | no      | `MemoryPressureBand`                |
 | `MEMORY_TOTAL`           | none                 | no      | `MemoryTotal`                       |
 
@@ -89,6 +91,15 @@ not a self-scoped observer. Each `IrqRecord` carries the line id, the
 kernel-attested owning task, the monotonic interrupt count since boot
 (the classic `/proc/interrupts` per-line total), and a quarantine flag
 for a line the kernel's runaway-interrupt safety net has disabled.
+
+`RAID_ARRAYS` and `RAID_MEMBERS` are gated on `CAP_SYSINFO_HW` and
+audited, for the same reason `HARDWARE_TREE` is: an array report says
+which storage devices exist and how they are composed. `RAID_ARRAYS`
+answers one `RaidArrayRecord` per composed array — identity, level,
+health, member tallies, geometry, endpoint, published node, scrub/resync
+cursors, generation — and `RAID_MEMBERS` one `RaidMemberRecord` per
+device the composer holds, including the unaffiliated candidates a new
+array can be built from. Both page with a `RaidListRequest`.
 
 ## Response encoding
 

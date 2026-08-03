@@ -25,15 +25,15 @@
 //! [`StripeMember`](crate::StripeMember) has neither a stale nor an absent
 //! state to build here.
 //!
-//! [`SlotDisposition`]: crate::SlotDisposition
+//! [`SlotDisposition`]: tairix_abi::raid::SlotDisposition
 
 use tairix_abi::driver::block::Block;
 
 use crate::dualparity::DualParityMember;
 use crate::mirror::{MemberRole, MirrorMember};
 use crate::parity::ParityMember;
-use crate::superblock::SlotDisposition;
 use crate::triple::TripleParityMember;
+use tairix_abi::raid::SlotDisposition;
 
 /// A redundant RAID engine member that [`fill_members`] can build directly
 /// from a reassembly verdict.
@@ -134,7 +134,7 @@ pub enum AssembleError {
 /// Each slot is placed through the single role authority
 /// [`MemberRole::for_slot`], so a slot the generation counter proved stale
 /// (`in_sync == false`) becomes a [`MemberRole::Stale`] member — a rebuild
-/// target the engine admits [`Resyncing`](crate::MemberState::Resyncing), never
+/// target the engine admits [`Resyncing`](tairix_abi::raid::MemberState::Resyncing), never
 /// an immediate read source — and the composition layer can never disagree
 /// with the metadata layer on what "in sync" means (`AGENTS.md` §2.2, §5.4,
 /// §26.5). A missing slot becomes an [`AssembleMember::make_absent`] member so

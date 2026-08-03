@@ -1705,10 +1705,24 @@ pub trait SyscallHandlers {
     /// [`Self::hw_emit_node`]. An unknown id, or a node the caller does not
     /// own, fails closed. Returns `Ok(0)` once removed.
     ///
+    /// `flags` is the [`tairix_abi::hwtree::HwRemoveFlags`] word. An empty
+    /// set is a surprise removal (the device physically vanished) and always
+    /// proceeds; the `ORDERLY` bit is the stop-if-idle posture that refuses
+    /// with [`Errno::Busy`], removing nothing, while a volume is still
+    /// attached on a block-service endpoint the node declares. The handler
+    /// decodes and validates `flags` before touching any state, rejecting a
+    /// reserved bit with [`Errno::OutOfRange`] (validate every input, fail
+    /// closed).
+    ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
-    fn hw_remove_node(&self, _caller: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
+    fn hw_remove_node(
+        &self,
+        _caller: &CallerContext<'_>,
+        _node_id: u64,
+        _flags: u64,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2961,8 +2975,9 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::HW_REMOVE_NODE => {
                 // args[0] is the `HwNode::id` to remove (a plain `u64`,
-                // resolved against the live tree by the handler).
-                self.handlers.hw_remove_node(caller, args.0[0])
+                // resolved against the live tree by the handler); args[1] is
+                // the `HwRemoveFlags` word, validated in the handler.
+                self.handlers.hw_remove_node(caller, args.0[0], args.0[1])
             }
             SyscallNumber::HW_NODE_HEALTH => {
                 // args[0] is the `FaultDomainState` discriminant of the
@@ -4255,7 +4270,12 @@ mod tests {
             Ok(0)
         }
 
-        fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
+        fn hw_remove_node(
+            &self,
+            _c: &CallerContext<'_>,
+            _node_id: u64,
+            _flags: u64,
+        ) -> SyscallResult {
             self.record("hw_remove_node");
             Ok(0)
         }

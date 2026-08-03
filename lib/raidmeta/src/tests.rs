@@ -2,10 +2,11 @@
 
 use super::{
     distinct_arrays, ArrayIdentity, ArraySuperblock, AssemblyError, Candidate, CandidateVerdict,
-    RaidLevel, RejectReason, SlotDisposition, SuperblockError, MAGIC, OFF_CHECKSUM, OFF_LEVEL,
-    OFF_MAGIC, OFF_VERSION, WIRE_LEN,
+    RejectReason, SuperblockError, MAGIC, OFF_CHECKSUM, OFF_LEVEL, OFF_MAGIC, OFF_VERSION,
+    WIRE_LEN,
 };
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::time::Time64;
 
 const UUID_A: [u8; 16] = [0xA1; 16];
@@ -231,46 +232,6 @@ fn timestamps_before_1970_and_after_2038_round_trip() {
         let decoded = ArraySuperblock::decode(&bytes).unwrap();
         assert_eq!(decoded.updated_at.secs(), secs);
         assert_eq!(decoded.updated_at.subsec_nanos(), 999_999_999);
-    }
-}
-
-#[test]
-fn raid_level_round_trips_and_fails_closed() {
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::Mirror.as_u8()),
-        Ok(RaidLevel::Mirror)
-    );
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::Stripe.as_u8()),
-        Ok(RaidLevel::Stripe)
-    );
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::Parity.as_u8()),
-        Ok(RaidLevel::Parity)
-    );
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::DualParity.as_u8()),
-        Ok(RaidLevel::DualParity)
-    );
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::TripleParity.as_u8()),
-        Ok(RaidLevel::TripleParity)
-    );
-    assert_eq!(
-        RaidLevel::from_u8(RaidLevel::Raid10.as_u8()),
-        Ok(RaidLevel::Raid10)
-    );
-    assert!(!RaidLevel::Mirror.is_striped());
-    assert!(RaidLevel::Stripe.is_striped());
-    assert!(RaidLevel::Parity.is_striped());
-    assert!(RaidLevel::DualParity.is_striped());
-    assert!(RaidLevel::TripleParity.is_striped());
-    assert!(RaidLevel::Raid10.is_striped());
-    for raw in [0u8, 7, 8, 255] {
-        assert_eq!(
-            RaidLevel::from_u8(raw),
-            Err(SuperblockError::UnknownRaidLevel)
-        );
     }
 }
 
@@ -806,27 +767,6 @@ fn distinct_arrays_composes_with_resolve_for_every_array() {
 }
 
 #[test]
-fn raid_level_member_bounds_are_the_shared_source() {
-    assert_eq!(RaidLevel::Mirror.min_members(), 1);
-    assert_eq!(RaidLevel::Stripe.min_members(), 1);
-    assert_eq!(RaidLevel::Parity.min_members(), 3);
-    assert_eq!(RaidLevel::DualParity.min_members(), 4);
-    assert_eq!(RaidLevel::TripleParity.min_members(), 5);
-    // RAID10 needs two two-copy pairs (four members) to be a stripe of
-    // mirrors rather than a plain mirror.
-    assert_eq!(RaidLevel::Raid10.min_members(), 4);
-    // Only the GF(2^8) parity levels have a real ceiling: 255 data members
-    // plus their syndrome chunks (RAID6 = 257 slots, RAID-TP = 258). Every
-    // other level is bounded only by the on-disk `u16` member-count field.
-    assert_eq!(RaidLevel::Mirror.max_members(), u16::MAX);
-    assert_eq!(RaidLevel::Stripe.max_members(), u16::MAX);
-    assert_eq!(RaidLevel::Parity.max_members(), u16::MAX);
-    assert_eq!(RaidLevel::DualParity.max_members(), 257);
-    assert_eq!(RaidLevel::TripleParity.max_members(), 258);
-    assert_eq!(RaidLevel::Raid10.max_members(), u16::MAX);
-}
-
-#[test]
 fn decode_rejects_too_few_members_for_the_level() {
     // RAID5 needs three members (two data + a parity chunk); two describes an
     // array that cannot exist and is refused at the decode boundary.
@@ -877,147 +817,4 @@ fn decode_admits_the_minimum_and_boundary_member_counts_per_level() {
     let mut triple_max = parity_sb(UUID_A, 258, 0, 1, 64);
     triple_max.raid_level = RaidLevel::TripleParity;
     assert!(ArraySuperblock::decode(&triple_max.encode()).is_ok());
-}
-
-#[test]
-fn is_redundant_is_the_shared_answer_for_every_level() {
-    // Only the RAID0 stripe holds nothing spare, so only it has nothing to
-    // scrub from, rebuild from, or hot-swap.
-    assert!(!RaidLevel::Stripe.is_redundant());
-    assert!(RaidLevel::Mirror.is_redundant());
-    assert!(RaidLevel::Parity.is_redundant());
-    assert!(RaidLevel::DualParity.is_redundant());
-    assert!(RaidLevel::TripleParity.is_redundant());
-    assert!(RaidLevel::Raid10.is_redundant());
-}
-
-#[test]
-fn data_members_is_the_shared_usable_width_per_level() {
-    // A mirror presents one copy's worth regardless of how many copies exist.
-    assert_eq!(RaidLevel::Mirror.data_members(1), Some(1));
-    assert_eq!(RaidLevel::Mirror.data_members(4), Some(1));
-    // A stripe concatenates every member.
-    assert_eq!(RaidLevel::Stripe.data_members(1), Some(1));
-    assert_eq!(RaidLevel::Stripe.data_members(6), Some(6));
-    // Single parity reserves one member's chunk for parity.
-    assert_eq!(RaidLevel::Parity.data_members(3), Some(2));
-    assert_eq!(RaidLevel::Parity.data_members(8), Some(7));
-    // Double parity reserves two (P and Q).
-    assert_eq!(RaidLevel::DualParity.data_members(4), Some(2));
-    assert_eq!(RaidLevel::DualParity.data_members(10), Some(8));
-    // Triple parity reserves three (P, Q, and R).
-    assert_eq!(RaidLevel::TripleParity.data_members(5), Some(2));
-    assert_eq!(RaidLevel::TripleParity.data_members(10), Some(7));
-    // A RAID10 stripe of two-copy mirrors presents half its members.
-    assert_eq!(RaidLevel::Raid10.data_members(4), Some(2));
-    assert_eq!(RaidLevel::Raid10.data_members(10), Some(5));
-}
-
-#[test]
-fn data_members_fails_closed_below_the_structural_floor() {
-    // A width with no data member at all yields `None` rather than underflow:
-    // an empty stripe, and parity levels below the count that leaves any data.
-    assert_eq!(RaidLevel::Stripe.data_members(0), None);
-    assert_eq!(RaidLevel::Parity.data_members(1), None);
-    assert_eq!(RaidLevel::Parity.data_members(0), None);
-    assert_eq!(RaidLevel::DualParity.data_members(2), None);
-    assert_eq!(RaidLevel::DualParity.data_members(0), None);
-    assert_eq!(RaidLevel::TripleParity.data_members(3), None);
-    assert_eq!(RaidLevel::TripleParity.data_members(0), None);
-    // A RAID10 with an odd member count cannot pair its copies.
-    assert_eq!(RaidLevel::Raid10.data_members(5), None);
-    assert_eq!(RaidLevel::Raid10.data_members(0), None);
-    // The mirror is the identity case: always one copy's worth, even at zero
-    // (an empty mirror is rejected earlier by `assemble`, not here).
-    assert_eq!(RaidLevel::Mirror.data_members(0), Some(1));
-}
-
-#[test]
-fn logical_block_count_is_per_member_times_data_members() {
-    // Capacity is each member's block count times the usable width.
-    assert_eq!(RaidLevel::Mirror.logical_block_count(1000, 3), Some(1000));
-    assert_eq!(RaidLevel::Stripe.logical_block_count(1000, 3), Some(3000));
-    assert_eq!(RaidLevel::Parity.logical_block_count(1000, 4), Some(3000));
-    assert_eq!(
-        RaidLevel::DualParity.logical_block_count(1000, 5),
-        Some(3000)
-    );
-}
-
-#[test]
-fn logical_block_count_fails_closed_on_overflow_and_underwidth() {
-    // A product that would overflow `u64` fails closed rather than wrapping to
-    // a smaller array that would truncate addresses.
-    assert_eq!(RaidLevel::Stripe.logical_block_count(u64::MAX, 2), None);
-    assert_eq!(
-        RaidLevel::Parity.logical_block_count(u64::MAX, 3),
-        None,
-        "u64::MAX * 2 overflows"
-    );
-    // Below the structural floor there is no data member to multiply by.
-    assert_eq!(RaidLevel::DualParity.logical_block_count(1000, 2), None);
-    assert_eq!(RaidLevel::Stripe.logical_block_count(1000, 0), None);
-}
-
-/// A slot table whose entries follow `present`: `true` fills the slot with a
-/// current member, `false` leaves it missing.
-fn slots_from<const N: usize>(present: [bool; N]) -> [SlotDisposition; N] {
-    let mut slots = [SlotDisposition::Missing; N];
-    for (tag, slot) in slots.iter_mut().enumerate() {
-        if present[tag] {
-            *slot = SlotDisposition::Present { tag, in_sync: true };
-        }
-    }
-    slots
-}
-
-#[test]
-fn a_stripe_can_serve_only_with_every_member_present() {
-    // No redundancy: a gap is a hole in the logical block space, so the array
-    // is left unassembled rather than serving reads it cannot answer.
-    assert!(RaidLevel::Stripe.can_serve(&slots_from([true, true, true])));
-    assert!(!RaidLevel::Stripe.can_serve(&slots_from([true, false, true])));
-}
-
-#[test]
-fn a_mirror_can_serve_from_any_single_surviving_copy() {
-    assert!(RaidLevel::Mirror.can_serve(&slots_from([false, false, true])));
-    assert!(!RaidLevel::Mirror.can_serve(&slots_from([false, false, false])));
-}
-
-#[test]
-fn each_parity_level_tolerates_exactly_its_syndrome_count_of_losses() {
-    // Single parity reconstructs one lost member and no more.
-    assert!(RaidLevel::Parity.can_serve(&slots_from([true, false, true, true])));
-    assert!(!RaidLevel::Parity.can_serve(&slots_from([true, false, false, true])));
-    // Double parity survives two losses, not three.
-    assert!(RaidLevel::DualParity.can_serve(&slots_from([false, true, true, false, true])));
-    assert!(!RaidLevel::DualParity.can_serve(&slots_from([false, true, false, false, true])));
-    // Triple parity survives three losses, not four.
-    assert!(RaidLevel::TripleParity.can_serve(&slots_from([false, false, true, false, true])));
-    assert!(!RaidLevel::TripleParity.can_serve(&slots_from([false, false, true, false, false])));
-}
-
-#[test]
-fn a_raid10_survives_losses_in_distinct_pairs_but_not_a_lost_pair() {
-    // One copy gone from each of the three columns: every stripe still has a
-    // source, so the array serves.
-    assert!(RaidLevel::Raid10.can_serve(&slots_from([true, false, false, true, true, false])));
-    // Both copies of the middle column gone: its stripes have no source,
-    // however healthy the other columns are.
-    assert!(!RaidLevel::Raid10.can_serve(&slots_from([true, true, false, false, true, true])));
-}
-
-#[test]
-fn can_serve_fails_closed_on_a_width_the_level_cannot_be_composed_from() {
-    // An empty table describes no array at all.
-    assert!(!RaidLevel::Mirror.can_serve(&[]));
-    // Below the level's structural floor: RAID5 needs three members, RAID6
-    // four, RAID-TP five.
-    assert!(!RaidLevel::Parity.can_serve(&slots_from([true, true])));
-    assert!(!RaidLevel::DualParity.can_serve(&slots_from([true, true, true])));
-    assert!(!RaidLevel::TripleParity.can_serve(&slots_from([true, true, true, true])));
-    // An odd RAID10 width pairs no column cleanly, so it is not an array this
-    // level can serve however many members are present.
-    assert!(!RaidLevel::Raid10.can_serve(&slots_from([true, true, true, true, true])));
 }

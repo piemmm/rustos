@@ -63,6 +63,28 @@ use crate::Errno;
 /// back off the device itself.
 pub const RAID_MEMBER_COMPATIBLE: &[u8] = b"tairix,raid-member";
 
+/// The compatible string on the hardware-tree node published for a whole
+/// device that carries nothing at all — no partition table, no filesystem,
+/// and no array metadata.
+///
+/// An array must be *created* before it can be discovered, and a blank disk
+/// has no metadata to be recognised by, so without this node the composer
+/// could never reach the very devices a new array is made from: a driver is
+/// spawned for one matched node and receives exactly that node's grants, and
+/// the volume manager — which probed the device and holds its transport — is
+/// the only task that can hand it on. Publishing the node is how a blank disk
+/// becomes reachable, and it is deliberately narrow: a device with anything
+/// recognisable on it is never published this way, so a disk holding data an
+/// administrator has forgotten about cannot be consumed by a mistyped
+/// identifier.
+///
+/// The node conveys no authority and is not believed: the composer re-reads
+/// the device and refuses to compose anything that is not still blank. Nor
+/// does it grant the composer power an attacker could not already exercise —
+/// only a task that already holds a device's transport can publish a node
+/// re-declaring it.
+pub const RAID_CANDIDATE_COMPATIBLE: &[u8] = b"tairix,raid-candidate";
+
 /// The compatible string on the hardware-tree node the array composer
 /// publishes for an assembled array, served as one logical block device.
 ///

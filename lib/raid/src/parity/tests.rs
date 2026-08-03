@@ -2,11 +2,11 @@
 //! double.
 
 use super::{ParityArray, ParityError, ParityMember};
-use crate::mirror::{ArrayHealth, MemberState};
 use crate::superblock::ArrayProgress;
 use core::cell::RefCell;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 const BS: u32 = 512;
 /// Logical blocks per member.

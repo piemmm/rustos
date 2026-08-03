@@ -21,7 +21,7 @@
 //!   Publishing it would hand a filesystem a device that silently cannot read
 //!   parts of itself, so such an array is left unassembled until the missing
 //!   members arrive — the shared level rule
-//!   [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) is the single
+//!   [`RaidLevel::can_serve`](tairix_abi::raid::RaidLevel::can_serve) is the single
 //!   definition of that question.
 //! - **Starting degraded too eagerly.** Discovery is asynchronous: members
 //!   appear one at a time, and a member that is merely slow — spinning up, or
@@ -65,10 +65,11 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::raid::SlotDisposition;
 use tairix_abi::raid_ipc::MemberOffer;
 use tairix_raid::{
     ArrayIdentity, ArraySuperblock, ArrayUuid, Candidate, CandidateVerdict, RetryCadence,
-    RetryState, SlotDisposition,
+    RetryState,
 };
 
 /// Whether a registered member has been placed into a composed array yet.
@@ -214,7 +215,7 @@ enum Assessment {
 /// says. Two rules keep a broken array off the bus:
 ///
 /// - **An array its members cannot serve is never composed.** The shared
-///   [`RaidLevel::can_serve`](tairix_raid::RaidLevel::can_serve) is the single
+///   [`RaidLevel::can_serve`](tairix_abi::raid::RaidLevel::can_serve) is the single
 ///   definition of that question: a punctured stripe or a twice-punctured
 ///   RAID5 has holes no redundancy can fill, so it is left unassembled until
 ///   the missing members arrive rather than handed to a filesystem as a device
@@ -237,10 +238,18 @@ enum Assessment {
 pub struct MemberRegistry {
     /// One entry per registered member, in registration order.
     members: Vec<HeldMember>,
-    /// The reassembly view of the same members: `candidates[i]` is the
-    /// metadata of `members[i]`, and its `tag` is `i`. Maintained only by
-    /// [`Self::admit`] and [`Self::release`], which keep the two tables the
-    /// same length and the tags in step.
+    /// The metadata read from each member, parallel to [`Self::members`]:
+    /// `metadata[i]` is the superblock decoded from `members[i]`, or [`None`]
+    /// for an unaffiliated blank candidate — a device that carried no array
+    /// metadata and is held for a later create or add. A blank candidate
+    /// belongs to no array and is never drawn into one by reassembly.
+    metadata: Vec<Option<ArraySuperblock>>,
+    /// The reassembly view of the *affiliated* members: one [`Candidate`] per
+    /// member whose metadata decoded, its `tag` that member's index in
+    /// [`Self::members`]. A blank candidate contributes nothing here, so it is
+    /// never placed into an array; rebuilt by [`Self::rebuild_reassembly`]
+    /// whenever the member set changes, keeping every tag in step with its
+    /// member.
     candidates: Vec<Candidate>,
     /// One entry per distinct array among the members.
     arrays: Vec<ArrayState>,
@@ -261,6 +270,7 @@ impl MemberRegistry {
     pub const fn new() -> Self {
         Self {
             members: Vec::new(),
+            metadata: Vec::new(),
             candidates: Vec::new(),
             arrays: Vec::new(),
             scratch: Vec::new(),
@@ -273,12 +283,42 @@ impl MemberRegistry {
         &self.members
     }
 
-    /// The reassembly view of the registered members: `candidates()[i]`
-    /// describes `members()[i]`, and its tag is `i`, so a slot table resolved
+    /// The reassembly view of the *affiliated* registered members: one
+    /// [`Candidate`] per member whose metadata decoded, its `tag` that
+    /// member's index in [`members`](Self::members), so a slot table resolved
     /// from these candidates maps straight back to the member that fills it.
+    ///
+    /// A held blank candidate contributes nothing, so it is never drawn into
+    /// an array; only an explicit administrative create or add consumes it.
     #[must_use]
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    /// The superblock the member at `index` carries, or [`None`] when it is an
+    /// unaffiliated blank candidate (or `index` names no member).
+    #[must_use]
+    pub fn member_superblock(&self, index: usize) -> Option<ArraySuperblock> {
+        self.metadata.get(index).copied().flatten()
+    }
+
+    /// Whether the member at `index` is a held unaffiliated blank candidate:
+    /// a device carrying no array metadata, eligible to be created into a new
+    /// array or added to a live one.
+    #[must_use]
+    pub fn is_candidate(&self, index: usize) -> bool {
+        matches!(self.metadata.get(index), Some(None))
+    }
+
+    /// The index of the held member whose agent offered it under hardware-tree
+    /// node `node`, or [`None`] when the composer holds no such device.
+    ///
+    /// The node id names *which* offered device an administrator means; it
+    /// conveys no authority, and a device the composer does not hold is simply
+    /// not found.
+    #[must_use]
+    pub fn index_of_node(&self, node: u32) -> Option<usize> {
+        self.members.iter().position(|held| held.offer.node == node)
     }
 
     /// The authoritative shape of `array_uuid` as the registered members
@@ -313,7 +353,11 @@ impl MemberRegistry {
         // Reserve every table before touching any of them, so an allocation
         // failure leaves the registry exactly as it was rather than half
         // updated. A reservation a table already has room for costs nothing.
+        // The reassembly view grows by at most one affiliated entry, so
+        // reserving one slot in it keeps its capacity ahead of the affiliated
+        // count and its rebuild below never has to reallocate.
         if self.members.try_reserve(1).is_err()
+            || self.metadata.try_reserve(1).is_err()
             || self.candidates.try_reserve(1).is_err()
             || self.arrays.try_reserve(1).is_err()
         {
@@ -327,10 +371,8 @@ impl MemberRegistry {
             class,
             standing: MemberStanding::Held,
         });
-        self.candidates.push(Candidate {
-            tag: index,
-            superblock,
-        });
+        self.metadata.push(Some(superblock));
+        self.rebuild_reassembly();
         if self.array_index(array_uuid).is_none() {
             self.arrays.push(ArrayState {
                 uuid: array_uuid,
@@ -340,6 +382,73 @@ impl MemberRegistry {
             });
         }
         Admission::Registered { index }
+    }
+
+    /// Register a **blank** member device: one whose first block carries no
+    /// array metadata, offered from a `tairix,raid-candidate` node.
+    ///
+    /// It is held as an unaffiliated candidate: part of no array, never drawn
+    /// into one by reassembly, and available only to an explicit
+    /// administrative create or add. The index-check discipline is identical
+    /// to [`admit`](Self::admit)'s — the returned index is the reassembly tag
+    /// the composer's transport table must line up with.
+    pub fn admit_candidate(
+        &mut self,
+        membership: u64,
+        offer: MemberOffer,
+        class: BlkDeviceClass,
+    ) -> Admission {
+        if self
+            .members
+            .iter()
+            .any(|held| held.offer.endpoint == offer.endpoint)
+        {
+            return Admission::Duplicate;
+        }
+        if self.members.try_reserve(1).is_err() || self.metadata.try_reserve(1).is_err() {
+            return Admission::OutOfMemory;
+        }
+        let index = self.members.len();
+        self.members.push(HeldMember {
+            membership,
+            offer,
+            class,
+            standing: MemberStanding::Held,
+        });
+        // A blank candidate adds no affiliated entry, so the reassembly view is
+        // unchanged; no array state is created, so it can settle nothing and be
+        // assembled into nothing until it is deliberately affiliated.
+        self.metadata.push(None);
+        Admission::Registered { index }
+    }
+
+    /// Record that the blank candidate at `index` has become an affiliated
+    /// member carrying `superblock` — the outcome of a create or an add that
+    /// wrote the device's metadata.
+    ///
+    /// After this the member takes part in reassembly and its array is known,
+    /// so a create yields an assemblable array and an added disk rejoins its
+    /// array on a restart. Refuses (`false`, changing nothing) if `index` is
+    /// not a held blank candidate, or if a table could not grow.
+    pub fn affiliate(&mut self, index: usize, superblock: ArraySuperblock, now_ns: u64) -> bool {
+        if !self.is_candidate(index) {
+            return false;
+        }
+        if self.candidates.try_reserve(1).is_err() || self.arrays.try_reserve(1).is_err() {
+            return false;
+        }
+        let array_uuid = superblock.array_uuid;
+        self.metadata[index] = Some(superblock);
+        self.rebuild_reassembly();
+        if self.array_index(array_uuid).is_none() {
+            self.arrays.push(ArrayState {
+                uuid: array_uuid,
+                first_seen_ns: now_ns,
+                attempt: RetryState::new(),
+                published: false,
+            });
+        }
+        true
     }
 
     /// Remove the member at `index` — its membership ended, or its device went
@@ -352,15 +461,34 @@ impl MemberRegistry {
             return None;
         }
         let member = self.members.remove(index);
-        let candidate = self.candidates.remove(index);
-        for (tag, entry) in self.candidates.iter_mut().enumerate() {
-            entry.tag = tag;
-        }
-        let array_uuid = candidate.superblock.array_uuid;
-        if !self.claims_array(array_uuid) {
-            self.arrays.retain(|state| state.uuid != array_uuid);
+        let meta = self.metadata.remove(index);
+        self.rebuild_reassembly();
+        if let Some(superblock) = meta {
+            let array_uuid = superblock.array_uuid;
+            if !self.claims_array(array_uuid) {
+                self.arrays.retain(|state| state.uuid != array_uuid);
+            }
         }
         Some(member)
+    }
+
+    /// Rebuild the reassembly view from the affiliated members, tagging each
+    /// with its own index in [`members`](Self::members).
+    ///
+    /// Called after any change to the member set, so a tag always names its
+    /// own member. Capacity is reserved by [`admit`](Self::admit) /
+    /// [`affiliate`](Self::affiliate) before a new affiliated entry can appear
+    /// and never shrinks, so the pushes below never reallocate.
+    fn rebuild_reassembly(&mut self) {
+        self.candidates.clear();
+        for (index, meta) in self.metadata.iter().enumerate() {
+            if let Some(superblock) = meta {
+                self.candidates.push(Candidate {
+                    tag: index,
+                    superblock: *superblock,
+                });
+            }
+        }
     }
 
     /// What the composer should do next, given the monotonic clock reading
@@ -403,9 +531,8 @@ impl MemberRegistry {
                 continue;
             };
             let belongs = self
-                .candidates
-                .get(tag)
-                .is_some_and(|candidate| candidate.superblock.array_uuid == array_uuid);
+                .member_superblock(tag)
+                .is_some_and(|superblock| superblock.array_uuid == array_uuid);
             if !belongs {
                 continue;
             }
@@ -485,7 +612,13 @@ impl MemberRegistry {
     /// The first held member that belongs in an array which is already
     /// composed, and whose slot no composed member occupies.
     fn pending_join(&self) -> Option<ComposerAction> {
-        for (index, (candidate, member)) in self.candidates.iter().zip(&self.members).enumerate() {
+        // Walk the reassembly view: each entry's `tag` is its member's index,
+        // and its position is the index `verdict_of` resolves against.
+        for (position, candidate) in self.candidates.iter().enumerate() {
+            let member_index = candidate.tag;
+            let Some(member) = self.members.get(member_index) else {
+                continue;
+            };
             if member.standing != MemberStanding::Held {
                 continue;
             }
@@ -500,7 +633,7 @@ impl MemberRegistry {
                 continue;
             };
             let CandidateVerdict::Placed { slot, in_sync } =
-                identity.verdict_of(&self.candidates, index)
+                identity.verdict_of(&self.candidates, position)
             else {
                 continue;
             };
@@ -509,7 +642,7 @@ impl MemberRegistry {
             }
             return Some(ComposerAction::Join {
                 array_uuid,
-                member: index,
+                member: member_index,
                 slot,
                 in_sync,
             });
@@ -519,13 +652,14 @@ impl MemberRegistry {
 
     /// Whether a composed member of `array_uuid` already occupies `slot`.
     fn slot_is_composed(&self, array_uuid: ArrayUuid, slot: u16) -> bool {
-        self.candidates
+        self.members
             .iter()
-            .zip(&self.members)
-            .any(|(candidate, member)| {
+            .zip(&self.metadata)
+            .any(|(member, meta)| {
                 member.standing == MemberStanding::Composed
-                    && candidate.superblock.array_uuid == array_uuid
-                    && candidate.superblock.member_slot == slot
+                    && meta.as_ref().is_some_and(|superblock| {
+                        superblock.array_uuid == array_uuid && superblock.member_slot == slot
+                    })
             })
     }
 
@@ -552,8 +686,11 @@ impl MemberRegistry {
     /// long the array waits but never restarts the wait.
     fn array_cadence(&self, array_uuid: ArrayUuid) -> RetryCadence {
         let mut widest: Option<BlkDeviceClass> = None;
-        for (candidate, member) in self.candidates.iter().zip(&self.members) {
-            if candidate.superblock.array_uuid == array_uuid {
+        for (member, meta) in self.members.iter().zip(&self.metadata) {
+            if meta
+                .as_ref()
+                .is_some_and(|superblock| superblock.array_uuid == array_uuid)
+            {
                 widest = Some(match widest {
                     Some(held) => held.most_patient(member.class),
                     None => member.class,
@@ -567,9 +704,10 @@ impl MemberRegistry {
 
     /// Whether any registered member claims membership of `array_uuid`.
     fn claims_array(&self, array_uuid: ArrayUuid) -> bool {
-        self.candidates
-            .iter()
-            .any(|candidate| candidate.superblock.array_uuid == array_uuid)
+        self.metadata.iter().any(|meta| {
+            meta.as_ref()
+                .is_some_and(|superblock| superblock.array_uuid == array_uuid)
+        })
     }
 
     /// Where `array_uuid` sits in [`Self::arrays`].

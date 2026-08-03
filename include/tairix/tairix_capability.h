@@ -61,5 +61,6 @@
 #define TAIRIX_CAP_FS_CHOWN ((uint16_t)39u)
 #define TAIRIX_CAP_PROC_CONTROL ((uint16_t)40u)
 #define TAIRIX_CAP_SYSTEM_POWER ((uint16_t)41u)
+#define TAIRIX_CAP_STORAGE_ADMIN ((uint16_t)42u)
 
 #endif /* TAIRIX_CAPABILITY_H */

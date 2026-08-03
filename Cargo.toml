@@ -190,6 +190,7 @@ members = [
     "userland/apps/lspci",
     "userland/apps/lsusb",
     "userland/apps/man",
+    "userland/apps/mdadm",
     "userland/apps/mkdir",
     "userland/apps/mount",
     "userland/apps/mv",

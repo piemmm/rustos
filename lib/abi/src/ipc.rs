@@ -33,7 +33,9 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
 /// manager's control surface
 /// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the RAID array
-/// composer ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]), the per-NIC
+/// composer's member rendezvous
+/// ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]) and its administration and
+/// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the per-NIC
 /// driver device channels
 /// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
 /// `+ NET_CHANNEL_ENDPOINT_COUNT`), and the per-console elevation
@@ -64,6 +66,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::font_ipc::FONT_ENDPOINT
         || id == crate::service_control::SERVICE_CONTROL_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
+        || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
     {
         return true;
     }

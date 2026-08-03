@@ -1018,11 +1018,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::HW_REMOVE_NODE,
         name: "hw_remove_node",
-        arg_count: 1,
+        arg_count: 2,
         args: [
-            // The `HwNode::id` of the node to remove.
+            // The `HwNode::id` of the node to remove, then the
+            // `HwRemoveFlags` word selecting surprise (empty) or orderly
+            // stop-if-idle removal.
             AbiType::U64,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,

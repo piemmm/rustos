@@ -10,7 +10,13 @@ vocabulary (`blkio::BlkStatus`, `DriverError`); it never re-invents it.
 
 The composition engine and the maintenance policy that decides when an array
 heals itself live in the shared `lib/raid` crate, over the on-disk metadata
-layer in `lib/raidmeta`. They sit in `lib/` rather than in a driver because
+layer in `lib/raidmeta`. The array vocabulary those layers share — the RAID
+level (`RaidLevel`), the reassembled slot disposition (`SlotDisposition`), the
+composed-array health (`ArrayHealth`), and the per-slot membership state
+(`MemberState`) — is defined once in the base ABI crate (`tairix_abi::raid`),
+so the on-disk format, the composition engines, the control protocol, the
+reporting records, and the generated C view all name one definition. The engine
+and policy sit in `lib/` rather than in a driver because
 composition is device-agnostic arithmetic over the generic block seam — the
 engines compose devices they are *handed* as `Block` implementations and never
 reach hardware themselves — and because two independent consumers compose
@@ -87,8 +93,8 @@ Two failures are possible, and both lose data:
 - **Serving an array that cannot answer for itself.** A stripe missing a
   member, or a RAID5 missing two, has holes no redundancy can fill; publishing
   it would hand a filesystem a device that silently cannot read parts of
-  itself. `RaidLevel::can_serve` (`lib/raidmeta`, beside `is_redundant` and
-  `data_members`) is the single definition of that question over a reassembled
+  itself. `RaidLevel::can_serve` (`lib/abi`'s `tairix_abi::raid`, beside
+  `is_redundant` and `data_members`) is the single definition of that question over a reassembled
   slot table — every member for a stripe, any one copy for a mirror, one, two,
   or three losses for the parity levels, and no *pair* wholly lost for RAID10 —
   and an array that fails it is left unassembled rather than brought online

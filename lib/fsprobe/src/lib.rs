@@ -424,7 +424,7 @@ mod tests {
     fn raid_member_head(uuid: [u8; 16]) -> [u8; PROBE_HEAD_LEN] {
         let superblock = tairix_raidmeta::ArraySuperblock {
             array_uuid: uuid,
-            raid_level: tairix_raidmeta::RaidLevel::Mirror,
+            raid_level: tairix_abi::raid::RaidLevel::Mirror,
             member_count: 2,
             member_slot: 0,
             geometry: tairix_abi::driver::block::BlockGeometry {

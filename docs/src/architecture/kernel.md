@@ -229,9 +229,16 @@ record under the `log` phase and halts.
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
 | 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
 | 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
+| 4110 | Info  | `SYSTEM_CONFIG_APPLIED`     | audit  |
+| 4111 | Warn  | `SYSTEM_CONFIG_REJECTED`    | audit  |
+| 4120 | Info  | `CPU_OPS_ROUTINE_SELECTED`  | audit  |
+| 4121 | Error | `CRYPTO_SELF_TEST_FAILED`   | audit  |
 | 4130 | Warn  | `VOLUME_DEGRADED`           | audit  |
 | 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
 | 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
+| 4133 | Info  | `SYSTEM_POWER`              | audit  |
+| 4140 | Info  | `HW_NODE_REMOVED`           | audit  |
+| 4141 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
 
 `PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
 authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the
@@ -263,6 +270,21 @@ records, so a removal is never double-counted and a re-insert never fabricates a
 recovery. A user-space block driver that later owns the finer device-level
 health machine (retry/reset/grace entry-expiry) emits those in its own
 event-id range against the same shared transition vocabulary.
+
+`HW_NODE_REMOVED` / `HW_NODE_REMOVE_REFUSED` are the hardware-tree
+retirement pair emitted by `hw_remove_node` (`plans/FIX-IO.md` `IO6f`). A
+completed removal is `HW_NODE_REMOVED` (`Info`), carrying the retired `node`
+and the `mode` the caller asked for — `surprise` for a device that physically
+vanished, `orderly` for a stop-if-idle retirement such as stopping a RAID
+array. An orderly removal refused because a volume is still attached on a
+block-service endpoint the node declares is `HW_NODE_REMOVE_REFUSED`
+(`Warn`, `Errno::Busy`), carrying the `node` left in place: nothing was
+removed, so a live mounted volume can never be turned into a
+surprise-removal event by an administrator's stop request. The busy check and
+the removal happen under a single acquisition of the mount registry's lock, so
+an attach cannot land between them. A surprise removal is never refused — a
+device that is already gone cannot be kept alive by its volumes — and neither
+record carries a capability token or any other secret.
 
 `FS_NODE_MUTATED` / `FS_MUTATION_DENIED` are the filesystem-mutation audit
 pair. Every state-changing filesystem syscall — `fs_mkdir`, `fs_unlink`

@@ -35,10 +35,33 @@ Die Abfragen:
   `CAP_SYSINFO_KERNEL`).
 - `cpu` — Warteschlangentiefe, Kontextwechsel und Präemptionen je CPU
   (benötigt `CAP_SYSINFO_KERNEL`).
+- `cpuinfo` — der Prozessorbericht je CPU (eine Obermenge von
+  `/proc/cpuinfo`): Modell/Hersteller, Leistungsklasse, ISA-Erweiterungs-
+  Flags, das rohe Identitätsregister, die live gemessene Kerntaktrate (in
+  MHz — oder ein ehrliches „unknown“, wo es keinen Kerntaktzähler gibt)
+  und die feste Referenz-/Zeitbasisfrequenz. Öffentliche
+  Hardware-Fakten, keine Capability erforderlich.
 - `irq`, `irqs` — die IRQ-Tabelle des Kernels: eine Zeile je gebundener
   Interrupt-Leitung — ihre Kennung, die besitzende Treiber-Task, die
   Anzahl der Interrupts seit dem Start und ob die Leitung unter
   Quarantäne steht (benötigt `CAP_SYSINFO_HW`).
+- `storage`, `io` — die Speicher-E/A-Gesundheit je Datenträger: eine
+  Zeile je fehlerbewusstem blockgestütztem Datenträger — ein Präfix
+  seiner dauerhaften Kennung, der bedienende Blockdienst-Endpunkt, seine
+  aktuelle Verfügbarkeit (available/degraded/recovering/lost) und die
+  kumulativen Ergebniszähler (Abschlüsse, Resets, Zeitüberschreitungen,
+  Medienfehler, Wiederholungen), an denen eine ausfallende oder
+  flatternde Platte sichtbar wird (benötigt `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — die zusammengesetzten RAID-Verbünde und die Geräte,
+  die der Verbund-Komponist hält: eine Zeile je Verbund — ein Präfix
+  seiner Identität, sein Level, seine Gesundheit
+  (optimal/degraded/recovering/failed), die Anzahl synchroner und
+  definierter Mitglieder, seine Stripe-Einheit, seine Blockzahl und ein
+  laufender Wiederaufbau oder Prüflauf — dann eine Zeile je Gerät —
+  sein Hardwarebaum-Knoten, der Verbund, zu dem es gehört (ein
+  Bindestrich für einen ungebundenen Kandidaten), sein Steckplatz, seine
+  Rolle (candidate/held/in-sync/resyncing/faulted), seine Größe und die
+  Metadaten-Generation, die es trägt (benötigt `CAP_SYSINFO_HW`).
 - `help` — die Kurzhilfe dieses Befehls.
 
 Ohne Abfrage wird die Kurzhilfe angezeigt.

@@ -16,6 +16,7 @@ use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
 };
+use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
     CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord, KernelMemoryStats,
     LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
@@ -394,4 +395,35 @@ pub trait SysinfoSource {
     /// the `offset`/`limit` paging; ordering must be stable across paged
     /// calls.
     fn volume_io_health(&self, caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno>;
+
+    /// Return the live RAID arrays the composer serves: one
+    /// [`RaidArrayRecord`] per array (its identity, level, health, width,
+    /// geometry, the endpoint and node it is published on, and how far a
+    /// running verification pass or rebuild has reached).
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: how a
+    /// machine's storage is composed is hardware topology, not a
+    /// per-principal fact, the same boundary as
+    /// [`hardware_tree`](Self::hardware_tree) and [`seats`](Self::seats). On
+    /// a running system the source forwards to the RAID composer's control
+    /// endpoint; a machine with no running array composer fails closed with
+    /// the transport's typed error, never a fabricated empty table. The
+    /// owned list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn raid_arrays(&self, caller: &Caller) -> Result<Vec<RaidArrayRecord>, Errno>;
+
+    /// Return every device the RAID composer holds: one [`RaidMemberRecord`]
+    /// per array member *and* per unaffiliated candidate a new array could
+    /// be created over.
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed, for the same
+    /// reason as [`raid_arrays`](Self::raid_arrays). A device with no
+    /// filesystem on it has no volume to appear as, so this is how an
+    /// administrator names it when composing an array. On a running system
+    /// the source forwards to the RAID composer's control endpoint; a
+    /// machine with no running array composer fails closed with the
+    /// transport's typed error, never a fabricated empty table. The owned
+    /// list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn raid_members(&self, caller: &Caller) -> Result<Vec<RaidMemberRecord>, Errno>;
 }

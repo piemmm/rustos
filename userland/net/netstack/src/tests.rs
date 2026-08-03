@@ -13,13 +13,14 @@ use tairix_abi::net::{
     SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    decode_page_reply, NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode,
-    NetDnsServers, NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config,
-    NetIpv6Config, NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
-    NetworkSettings, IF_NAME_LEN, NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
+    NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers, NetIfKind,
+    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
+    NetResolverServer, NetSockProto, NetSockState, NetSocketRecord, NetstackRequest,
+    NetworkSettings, IF_NAME_LEN, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+    NET_BOND_MAX_MEMBERS,
 };
-use tairix_abi::reply::decode_status_reply;
+use tairix_abi::reply::{decode_page_reply, decode_status_reply};
 use tairix_abi::{
     CapabilityId, CapabilitySummary, DriverError, Duration64, Errno, Origin, ProcId, TrustDomain,
 };
@@ -639,8 +640,12 @@ fn addr_and_route_add_apply_and_are_audited() {
         limit: 8,
     };
     let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetInterfaceStateRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetInterfaceStateRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 1);
     let record = NetInterfaceStateRecord::from_bytes(body).expect("record");
     assert_eq!(record.name, name("wan"));
@@ -719,7 +724,8 @@ fn interface_list_names_the_managed_interfaces() {
         &NetstackRequest::InterfaceList,
         &mut reply,
     );
-    let (count, body) = decode_page_reply(&reply[..len], IF_NAME_LEN).expect("page");
+    let (count, body) =
+        decode_page_reply(&reply[..len], IF_NAME_LEN, NETSTACK_LIST_LIMIT_MAX).expect("page");
     assert_eq!(count, 2);
     assert_eq!(&body[..IF_NAME_LEN], &name("wan"));
     assert_eq!(&body[IF_NAME_LEN..], &name("lan0"));
@@ -734,8 +740,12 @@ fn facts_page_reports_the_device_report() {
         limit: 8,
     };
     let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetInterfaceFactsRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetInterfaceFactsRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 1);
     let record = NetInterfaceFactsRecord::from_bytes(body).expect("record");
     assert_eq!(record.name, name("wan"));
@@ -755,8 +765,12 @@ fn counters_page_round_trips() {
         limit: 8,
     };
     let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetInterfaceCountersRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetInterfaceCountersRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 1);
     let record = NetInterfaceCountersRecord::from_bytes(body).expect("record");
     assert_eq!(record.name, name("wan"));
@@ -775,8 +789,12 @@ fn rates_page_round_trips_and_a_fresh_interface_reports_zero() {
         window: Duration64::from_secs(1),
     };
     let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetInterfaceRatesRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetInterfaceRatesRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 1);
     let record = NetInterfaceRatesRecord::from_bytes(body).expect("record");
     assert_eq!(record.name, name("wan"));
@@ -2356,7 +2374,12 @@ fn socket_listing_reports_open_sockets_and_is_broker_gated() {
         t(2),
     )
     .expect("broker read");
-    let (count, body) = decode_page_reply(&reply[..len], NetSocketRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetSocketRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 1);
     let decoded = NetSocketRecord::from_bytes(body).expect("record");
     assert_eq!(
@@ -2399,8 +2422,12 @@ fn resolver_servers_is_a_broker_read_and_frames_a_page() {
         t(2),
     )
     .expect("broker read");
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetResolverServer::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetResolverServer::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 0, "no servers learned yet");
     assert!(body.is_empty());
 
@@ -3445,8 +3472,12 @@ fn bond_members_are_listed_with_health_and_are_broker_gated() {
         t(3),
     )
     .expect("broker read");
-    let (count, body) =
-        decode_page_reply(&reply[..len], NetBondMemberRecord::WIRE_LEN).expect("page");
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetBondMemberRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
     assert_eq!(count, 2);
     assert_eq!(
         NetBondMemberRecord::from_bytes(body).expect("record").bond,

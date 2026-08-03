@@ -1165,6 +1165,7 @@ dependencies = [
  "tairix-blkclient",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
  "tairix-raid",
@@ -1869,6 +1870,16 @@ dependencies = [
  "tairix-sandbox",
  "tairix-termcap",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-mdadm"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-procinfo",
+ "tairix-rt",
 ]
 
 [[package]]

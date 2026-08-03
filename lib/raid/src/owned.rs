@@ -52,12 +52,13 @@ use tairix_abi::driver::{BufferClass, DriverError};
 
 use crate::array::{RaidArray, RaidError};
 use crate::dualparity::{DualParityArray, DualParityError, DualParityMember};
-use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+use crate::mirror::{MirrorArray, MirrorError, MirrorMember};
 use crate::parity::{ParityArray, ParityError, ParityMember};
 use crate::raid10::{Raid10Array, Raid10Error};
 use crate::stripe::{StripeArray, StripeError, StripeMember};
-use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::superblock::ArrayProgress;
 use crate::triple::{TripleParityArray, TripleParityError, TripleParityMember};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 
 #[cfg(test)]
 mod tests;

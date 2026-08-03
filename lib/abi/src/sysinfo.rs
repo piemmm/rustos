@@ -385,6 +385,34 @@ impl SysinfoQueryId {
     /// reserve, transition history) does not already guard.
     pub const MEMORY_TOTAL: Self = Self(29);
 
+    /// List the live RAID arrays: one
+    /// [`RaidArrayRecord`](crate::raid_admin::RaidArrayRecord) per array the
+    /// composer serves (its identity, level, health, width, geometry, the
+    /// endpoint and node it is published on, and how far a running
+    /// verification pass or rebuild has reached), paged by a
+    /// [`RaidListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, like [`Self::HARDWARE_TREE`]
+    /// and [`Self::IRQ_LIST`]: how a machine's storage is composed is
+    /// hardware topology, not a per-principal fact, and it names the raw
+    /// devices a filesystem actually rests on. The composer gates its own
+    /// read at the identical bar, so this query is the broker's view of that
+    /// answer rather than a way around it. It exposes no secret and no
+    /// capability token.
+    pub const RAID_ARRAYS: Self = Self(30);
+
+    /// List the devices the RAID composer holds: one
+    /// [`RaidMemberRecord`](crate::raid_admin::RaidMemberRecord) per array
+    /// member *and* per unaffiliated candidate a new array could be created
+    /// over, paged by a [`RaidListRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, for the same reason as
+    /// [`Self::RAID_ARRAYS`]. This is the surface that names a bare disk: a
+    /// device with no filesystem on it has no volume to appear as, so the
+    /// hardware-tree node id reported here is how an administrator names it
+    /// when composing an array.
+    pub const RAID_MEMBERS: Self = Self(31);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -763,6 +791,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "memory_total",
         required_capability: None,
         audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::RAID_ARRAYS,
+        name: "raid_arrays",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::RAID_MEMBERS,
+        name: "raid_members",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
     },
 ];
 
@@ -4043,6 +4083,58 @@ pub struct VolumeIoHealthRequest {
 }
 
 impl VolumeIoHealthRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
+    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// Request payload for [`SysinfoQueryId::RAID_ARRAYS`] and
+/// [`SysinfoQueryId::RAID_MEMBERS`].
+///
+/// One request type serves both because they page identically: `offset` names
+/// the first record to return and `limit` bounds the page. A limit above the
+/// composer's own page bound is clamped by the broker rather than refused,
+/// exactly as the other paged reads behave.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct RaidListRequest {
+    /// Index of the first record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl RaidListRequest {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = 8;
 

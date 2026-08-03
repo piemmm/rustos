@@ -1,12 +1,12 @@
 //! Host tests for the RAID1 mirror over a fault-injecting [`Block`] double.
 
-use super::{ArrayHealth, MemberRole, MemberState, MirrorArray, MirrorError, MirrorMember};
+use super::{MemberRole, MirrorArray, MirrorError, MirrorMember};
 use crate::superblock::ArrayProgress;
-use crate::SlotDisposition;
 use core::cell::Cell;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState, SlotDisposition};
 
 const BS: u32 = 512;
 const NBLK: u64 = 8;

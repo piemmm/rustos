@@ -66,7 +66,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::DriverError;
 
-use crate::mirror::MemberState;
+use tairix_abi::raid::MemberState;
 
 /// Whether a redundant array member contributes to the array-level answers
 /// this module folds.

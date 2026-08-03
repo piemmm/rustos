@@ -52,11 +52,12 @@
 //! the scratch sizing live in the assembling serve process.
 
 use crate::gf256;
-use crate::mirror::{member_faulting, ArrayHealth, MemberRole, MemberState};
-use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::mirror::{member_faulting, MemberRole};
+use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 
 #[cfg(test)]
 mod tests;

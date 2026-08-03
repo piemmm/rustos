@@ -31,6 +31,9 @@
 //!   its `source on target type fstype (options)` row rendering.
 //! * [`for_each_net_socket`], the paged open-socket-table walk the `ss`
 //!   socket-statistics tool renders.
+//! * [`for_each_raid_array`] and [`for_each_raid_member`], the paged
+//!   composed-array and member-device walks the `sysinfo raid` listing and
+//!   the `mdadm` array administrator render.
 //! * [`for_each_resolver_server`], the active recursive-resolver-server walk
 //!   the `state:net/resolver/servers` read renders.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
@@ -64,6 +67,7 @@
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
 //! * [`netsock`] — the open-socket-table paging walk.
+//! * [`raid`] — the composed-array and member-device paging walks.
 //! * [`resolver`] — the active recursive-resolver-server paging walk.
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
 //!   ([`ResourceResponse`], [`InfoValue`], [`Metric`]).
@@ -97,6 +101,7 @@ pub mod list;
 pub mod mount;
 pub mod netsock;
 pub mod process;
+pub mod raid;
 pub mod request;
 pub mod resinfo;
 pub mod resolve;
@@ -120,6 +125,9 @@ pub use process::{
     emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
     PROCESS_PAGE,
 };
+pub use raid::{for_each_raid_array, for_each_raid_member, RAID_PAGE};
+#[cfg(all(freestanding, feature = "program"))]
+pub use raid::{raid_arrays, raid_members};
 pub use request::{call, encode_request, CallError};
 pub use resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,

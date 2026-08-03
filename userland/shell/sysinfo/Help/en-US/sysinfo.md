@@ -49,6 +49,15 @@ The queries:
   counters (completions, resets, timeouts, medium errors, reissues) a
   failing or flapping disk becomes visible on (needs
   `CAP_SYSINFO_KERNEL`).
+- `raid`, `arrays` — the composed RAID arrays and the devices the array
+  composer holds: one row per array — a prefix of its identity, its
+  level, its health (optimal/degraded/recovering/failed), its in-sync
+  and defined member tallies, its stripe unit, its block count, and any
+  rebuild or verification pass in progress — then one row per device —
+  its hardware-tree node, the array it belongs to (a dash for an
+  unaffiliated candidate), its slot, its disposition
+  (candidate/held/in-sync/resyncing/faulted), its size, and the
+  metadata generation it carries (needs `CAP_SYSINFO_HW`).
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

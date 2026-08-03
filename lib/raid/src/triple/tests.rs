@@ -2,11 +2,11 @@
 //! [`Block`] double.
 
 use super::{TripleParityArray, TripleParityError, TripleParityMember, SCRATCH_BLOCKS};
-use crate::mirror::{ArrayHealth, MemberState};
 use crate::superblock::ArrayProgress;
 use core::cell::RefCell;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState};
 
 // A small block size keeps the fault-injecting device doubles off the stack's
 // large-array lint while the array's byte-wise GF math is size-agnostic.

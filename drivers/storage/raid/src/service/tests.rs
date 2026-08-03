@@ -23,9 +23,8 @@ use crate::testkit::{
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::DriverError;
-use tairix_raid::{
-    ArrayHealth, ArraySuperblock, AssembleError, MemberState, RaidLevel, SuperblockError,
-};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
+use tairix_raid::{ArraySuperblock, AssembleError, SuperblockError};
 use tairix_raidmeta::{
     ArrayProgress, MaintenanceRecord, MAINTENANCE_BLOCK, RESERVED_METADATA_BLOCKS, SUPERBLOCK_BLOCK,
 };

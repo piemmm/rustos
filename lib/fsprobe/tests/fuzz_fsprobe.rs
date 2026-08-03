@@ -68,7 +68,7 @@ fn arxfs_head() -> Vec<u8> {
 fn raid_member_head() -> Vec<u8> {
     let superblock = tairix_raidmeta::ArraySuperblock {
         array_uuid: [0x5A; 16],
-        raid_level: tairix_raidmeta::RaidLevel::Mirror,
+        raid_level: tairix_abi::raid::RaidLevel::Mirror,
         member_count: 2,
         member_slot: 0,
         geometry: tairix_abi::driver::block::BlockGeometry {

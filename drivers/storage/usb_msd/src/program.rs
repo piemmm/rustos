@@ -474,7 +474,9 @@ fn bring_up_lun<T: ScsiTransport>(
 /// Retract every published LUN node (device unplugged / fatal exit).
 fn retract_all(luns: &[Option<LunServe>]) {
     for lun in luns.iter().flatten() {
-        let _ = tairix_rt::hw_remove_node(lun.node_id);
+        // A device unplug or fatal exit is a surprise removal, never refused
+        // for being in use, so the flag set is empty.
+        let _ = tairix_rt::hw_remove_node(lun.node_id, tairix_abi::HwRemoveFlags::empty());
     }
 }
 

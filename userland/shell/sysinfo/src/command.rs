@@ -59,6 +59,14 @@ pub enum Command {
     /// endpoint, its current availability, and the folded outcome counters
     /// (`VOLUME_IO_HEALTH`, which the service gates on `CAP_SYSINFO_KERNEL`).
     Storage,
+    /// List the composed RAID arrays and the devices the array composer
+    /// holds — each array's level, health, member tally and rebuild/scrub
+    /// progress, then each device's array affiliation, slot, and disposition
+    /// (`RAID_ARRAYS` and `RAID_MEMBERS`, which the service gates on
+    /// `CAP_SYSINFO_HW`: the composition of the machine's storage is read
+    /// under the same authority as the hardware tree, not the kernel-state
+    /// authority the per-volume `storage` counters need).
+    Raid,
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -94,6 +102,7 @@ pub enum Command {
 /// | `cpuinfo`             | [`Command::CpuInfo`]             |
 /// | `irq`, `irqs`         | [`Command::Irqs`]                |
 /// | `storage`, `io`       | [`Command::Storage`]             |
+/// | `raid`, `arrays`      | [`Command::Raid`]                |
 ///
 /// # Errors
 ///
@@ -118,6 +127,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "cpuinfo" => no_more(rest).map(|()| Command::CpuInfo),
         "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
+        "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
         _ => Err(SysinfoError::Usage),
     }
 }
@@ -192,6 +202,8 @@ mod tests {
         assert_eq!(parse(&["irqs"]), Ok(Command::Irqs));
         assert_eq!(parse(&["storage"]), Ok(Command::Storage));
         assert_eq!(parse(&["io"]), Ok(Command::Storage));
+        assert_eq!(parse(&["raid"]), Ok(Command::Raid));
+        assert_eq!(parse(&["arrays"]), Ok(Command::Raid));
     }
 
     #[test]
@@ -213,6 +225,7 @@ mod tests {
         assert_eq!(parse(&["cpu", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["irq", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["storage", "0"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["raid", "md0"]), Err(SysinfoError::Usage));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

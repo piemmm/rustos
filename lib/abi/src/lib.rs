@@ -45,6 +45,8 @@ pub mod notify_ipc;
 pub mod origin;
 pub mod power;
 pub mod process;
+pub mod raid;
+pub mod raid_admin;
 pub mod raid_ipc;
 pub mod random;
 pub mod reply;
@@ -102,8 +104,8 @@ pub use fs::{
     FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT,
 };
 pub use hwtree::{
-    snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind,
-    HwTreeHeader, HwTreeNodes, MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwRemoveFlags, HwResource,
+    HwResourceKind, HwTreeHeader, HwTreeNodes, MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
     HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID,
     HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
@@ -156,6 +158,7 @@ pub use process::{
     SPAWN_FLAG_SANDBOX, SPAWN_SELF, SPAWN_UID_INHERIT, STDERR, STDIN, STDINFO, STDOUT,
     STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
 };
+pub use raid::{ArrayHealth, MemberState, RaidLevel, SlotDisposition, MAX_PARITY_DATA_MEMBERS};
 pub use random::{RandomFlags, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES};
 pub use rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
 pub use rxe::{

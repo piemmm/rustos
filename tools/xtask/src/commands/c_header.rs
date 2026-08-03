@@ -93,9 +93,10 @@ pub const DEFAULT_INCLUDE_DIR: &str = "include/tairix";
 /// [`Errno`] enum, so this table can never disagree with the frozen
 /// discriminants: only the C spelling lives here, because
 /// Rust offers no way to enumerate an enum's variants at run time. The
-/// in-module `errno_table_matches_the_frozen_enum` test pins the count and
-/// the dense `1..=N` numbering so a newly appended `Errno` variant cannot be
-/// silently omitted from the header.
+/// in-module `errno_table_matches_the_frozen_enum` test pins the dense
+/// `1..=N` numbering *and* that no `Errno` discriminant exists past the last
+/// entry, so a newly appended variant fails the test instead of being
+/// silently dropped from the C view.
 const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("BUFFER_TOO_SMALL", Errno::BufferTooSmall),
     ("BAD_ALIGNMENT", Errno::BadAlignment),
@@ -135,6 +136,9 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("NETWORK_UNREACHABLE", Errno::NetworkUnreachable),
     ("NOT_CONNECTED", Errno::NotConnected),
     ("LIMIT_EXCEEDED", Errno::LimitExceeded),
+    ("MEDIUM_ERROR", Errno::MediumError),
+    ("DEVICE_OFFLINE", Errno::DeviceOffline),
+    ("BUSY", Errno::Busy),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -4277,22 +4281,30 @@ mod tests {
         }
     }
 
-    /// The C errno table must mirror the frozen [`Errno`] enum exactly: a
-    /// dense `1..=N` numbering with no gaps, so appending a new `Errno`
-    /// variant without listing it here fails this test rather than silently
-    /// dropping it from the header.
+    /// The C errno table must mirror the [`Errno`] enum exactly: a dense
+    /// `1..=N` numbering with no gaps, ending at the highest discriminant the
+    /// enum actually defines. Appending a variant to `Errno` without listing
+    /// it here therefore fails this test rather than silently dropping the
+    /// code from the C view a third-party developer compiles against.
     #[test]
     fn errno_table_matches_the_frozen_enum() {
         for (idx, (_name, errno)) in ERRNO_NAMES.iter().enumerate() {
             let expected = i32::try_from(idx + 1).expect("small index");
             assert_eq!(errno.as_i32(), expected, "errno values must be dense 1..=N");
         }
-        // LimitExceeded is the last appended abi-v1 variant
-        // (discriminant 38).
+        let last = ERRNO_NAMES
+            .last()
+            .map(|(_, e)| e.as_i32())
+            .expect("errno table is never empty");
         assert_eq!(
-            ERRNO_NAMES.last().map(|(_, e)| e.as_i32()),
-            Some(Errno::LimitExceeded.as_i32()),
-            "errno table must end at the last frozen variant"
+            last,
+            i32::try_from(ERRNO_NAMES.len()).expect("small table"),
+            "errno table must end at its own length"
+        );
+        assert!(
+            Errno::from_i32(last + 1).is_none(),
+            "Errno defines discriminant {} but the C table stops at {last}",
+            last + 1
         );
     }
 

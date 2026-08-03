@@ -1,8 +1,8 @@
 //! The request dispatcher: the one place a `netstack-v1` request is
 //! decoded, capability-checked, audited, and answered.
 
-use tairix_abi::net_ipc::{encode_page_reply, NetstackRequest, IF_NAME_LEN};
-use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::net_ipc::{NetstackRequest, IF_NAME_LEN, NETSTACK_LIST_LIMIT_MAX};
+use tairix_abi::reply::{encode_page_reply, encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, Errno, Origin};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
@@ -119,7 +119,7 @@ pub fn serve(
     match decoded {
         NetstackRequest::InterfaceList => {
             let names = stack.names();
-            encode_page_reply(&names, response)
+            encode_page_reply(&names, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::AddrAdd {
             iface,
@@ -198,7 +198,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetInterfaceFactsRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::InterfaceState { offset, limit } => {
             let records: alloc::vec::Vec<_> = stack
@@ -206,7 +206,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetInterfaceStateRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::InterfaceCounters { offset, limit } => {
             let records: alloc::vec::Vec<_> = stack
@@ -214,7 +214,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetInterfaceCountersRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::InterfaceRates {
             offset,
@@ -226,7 +226,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetInterfaceRatesRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::Sockets { offset, limit } => {
             let records: alloc::vec::Vec<_> = sockets
@@ -234,7 +234,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetSocketRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::BondMembers { offset, limit } => {
             let records: alloc::vec::Vec<_> = stack
@@ -242,7 +242,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetBondMemberRecord::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         NetstackRequest::ResolverServers => {
             // The active resolver set is small and closed, so it is served
@@ -253,7 +253,7 @@ fn serve_read(
                 .iter()
                 .map(tairix_abi::net_ipc::NetResolverServer::to_le_bytes)
                 .collect();
-            encode_page_reply(&records, response)
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
         // The dispatcher only routes the paged read ops here.
         _ => Err(Errno::NotSupported),

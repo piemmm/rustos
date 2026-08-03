@@ -45,12 +45,13 @@
 //! it holds no allocation and imposes no fixed member ceiling (`AGENTS.md`
 //! §24.1); the growable member tier lives in the assembling serve process.
 
-use crate::mirror::{ArrayHealth, MemberState, MirrorArray, MirrorError, MirrorMember};
+use crate::mirror::{MirrorArray, MirrorError, MirrorMember};
 use crate::stripe::StripeArray;
-use crate::superblock::{ArrayProgress, RaidLevel};
+use crate::superblock::ArrayProgress;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
+use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
 
 /// A reason a RAID10 array could not be assembled. Distinct from
 /// [`DriverError`] (which flows on the I/O path) because these are

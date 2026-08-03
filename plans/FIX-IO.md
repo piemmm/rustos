@@ -909,7 +909,7 @@ Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver
 process is detected and recovered.
 
-### Stage IO6 — RAID / mirror / ARXFS composition. **in progress** (IO6f remains)
+### Stage IO6 — RAID / mirror / ARXFS composition. **in progress** (the QEMU vertical remains)
 
 **Landed (the RAID1 mirror composition engine):** a RAID volume is a **virtual
 block device that composes child block endpoints** through the same fault-aware
@@ -1241,10 +1241,10 @@ The live consumer of all of it is the RAID array-composer driver
 devices an array is made of through the delegation model designed in §2.6
 below and decided against the tree's real grant machinery rather than assumed.
 It now drives that maintenance turn by turn and checkpoints the position to the
-members, so a pass measured in days survives a restart (IO6e). Remaining there
-— **array creation and administration** (IO6f). The ARXFS-native multi-device
-composition consumes the same engine, dispatch, scheduler, and record (§2.2)
-and follows the same staging.
+members, so a pass measured in days survives a restart (IO6e), and it serves the
+audited administration and status surface an array is created and repaired
+through (IO6f). The ARXFS-native multi-device composition consumes the same
+engine, dispatch, scheduler, and record (§2.2) and follows the same staging.
 - **Landed (the RAID0 stripe sibling):** `raid::StripeArray`
   (`lib/raid`) composes child `Block` members
   as one logical device of their *summed* capacity, round-robining fixed-size
@@ -1822,13 +1822,99 @@ the critical path and land first.
   Remaining: driving maintenance from a *fault-domain* recovery signal
   (`fault_domain_wait_timeout` folded into the park) waits on the composer
   owning fault domains for its members, which is IO4 wiring, not IO6e.
-- **IO6f — Array creation and administration.** An array must be *created*
-  before it can be discovered: a system command app (§16.2, §16.7 — `mdadm` is
-  the reference surface) that writes member superblocks through the composer's
-  audited admin path, and reports array/member state and scrub/rebuild progress
-  through the System Information API (§16.6), never a `/proc`-style scrape.
-  Creation is capability-gated and audited like every other destructive storage
-  operation; the composer, which already holds the members, is the only writer.
+- **IO6f — Array creation and administration. done.** An array must be
+  *created* before it can be discovered, and the discovery path IO6c built
+  reaches only disks that already carry array metadata — so the very disks a
+  new array is made from were unreachable. Creation therefore needed a way for
+  a blank disk to reach the composer at all, an authority to write it, and a
+  surface to drive and observe the result.
+  - **A blank disk reaches the composer the same way a member does.** A driver
+    is spawned for one matched node and receives exactly that node's grants,
+    and `volmgr` — which probed the disk and holds its transport — is the only
+    task that can hand it on, so the answer is one more emitted node rather
+    than any new authority. `volmgr` now also emits `tairix,raid-candidate`
+    (`lib/abi::raid_ipc`) for a device whose probe found it *entirely* empty:
+    no partition table, no whole-device filesystem, no array metadata. A disk
+    carrying anything recognisable is never offered, so a mistyped identifier
+    cannot consume data — deliberately stricter than `mdadm`, which will
+    overwrite a filesystem on request. The member agent binds that key
+    alongside `tairix,raid-member` and offers the device through the *same*
+    `MemberOffer` path (§2.2), because what the disk actually is remains the
+    composer's to determine by reading it, never the emitter's to assert. The
+    node grants nothing an attacker could not already exercise: only a task
+    that already holds a device's transport can publish a node re-declaring it.
+  - **A second reserved endpoint, not a second role on the first.**
+    `RAID_CONTROL_ENDPOINT` (`lib/abi::raid_admin`) carries administration and
+    status. It is separate from the membership rendezvous because a membership
+    is a call held outstanding for the life of the array while status calls are
+    short and frequent: sharing one queue would let a flood of status traffic
+    crowd out a member agent trying to register, and a disk that cannot
+    register is a disk missing from its array. Reserved, so a squatter cannot
+    claim it; unrestricted-sender, so the System Information broker can front
+    the reads.
+  - **Authority is per operation, checked kernel-side, and declared once.**
+    `RaidControlOp::required_capability` is the single definition both the
+    composer and its clients read: reads (`ListArrays`/`ListMembers`) require
+    `CAP_SYSINFO_HW` — how a machine's storage is composed is hardware
+    topology, and gating the composer's own read at the identical bar is what
+    stops a caller side-stepping the System Information query by asking the
+    composer directly — and the mutations require the new `CAP_STORAGE_ADMIN`
+    (§5.2: a real class of destructive acts over every device the composer can
+    reach, with a live holder in the administrative ceiling and a live
+    enforcement point in the same change; `CAP_FS_MOUNT` was rejected because
+    every principal who may mount removable media holds it). The composer takes
+    the caller from `call_peer_origin`, never the frame, checks before touching
+    any state, and audits every mutation, allowed or refused.
+  - **Create writes only what it has re-verified.** Every named device must be
+    a *held unaffiliated candidate*, and the composer re-reads each one through
+    the shared probe library to confirm it is still blank — the node is a
+    pointer to look, never a claim to believe. It validates the width against
+    the level's own `min_members`/`max_members`, requires a stripe unit exactly
+    when the level stripes (the same rule `ArraySuperblock::decode` enforces),
+    and requires the members' geometry to agree and to leave room past
+    `RESERVED_METADATA_BLOCKS`. The array identity is minted from the kernel
+    CSPRNG rather than named by the caller, so a request can never collide with
+    a live array's identity and make two arrays indistinguishable to
+    reassembly. A superblock write that fails rolls the whole create back: an
+    array is never left half-created and claiming to be whole.
+  - **Stop cannot orphan a mounted filesystem.** Retiring an array whose
+    volumes are still attached would turn a live mount into a surprise removal,
+    and asking "is it busy?" first would race an attach landing in between, so
+    the check is *atomic with the removal* inside the kernel, which is the only
+    authority that knows the volume registry: `hw_remove_node` gained an
+    `ORDERLY` flag (`HwRemoveFlags`) whose busy scan and node removal happen
+    under one acquisition of the mount registry's lock — the same lock an
+    attach registers under. Busy is refused (`Errno::Busy`, audited) with
+    nothing released. Flags of zero remain the surprise-removal path unchanged,
+    because a device that physically vanished must never be refused.
+  - **Add and remove complete the disk-replacement cycle** the engines already
+    support: `Add` admits a held candidate into an absent slot and stamps its
+    metadata so a restart finds it; `Remove` retires a *faulted* member (never
+    a live one), vacates its slot, and bumps the survivors' generation so the
+    removed disk can never return claiming to be current.
+  - **Reporting is the System Information API, never a scrape** (§16.6):
+    `SysinfoQueryId::RAID_ARRAYS` (30) and `RAID_MEMBERS` (31), both
+    `CAP_SYSINFO_HW` and audited, are sourced by `sysinfod` acting as a client
+    of the composer's control endpoint — the shape the network family already
+    established. A machine with no composer fails closed with the transport's
+    typed error rather than a fabricated empty table. The records
+    (`RaidArrayRecord`, `RaidMemberRecord`) are the *same* types the control
+    protocol returns, so the broker relays rather than re-describes (§2.2), and
+    they live in `lib/abi` so the generated C view carries them. `sysinfo raid`
+    renders both.
+  - **The command app is `mdadm`** (`userland/apps/mdadm`), a self-contained
+    bundle in the system app store tracking the reference tool's option
+    spelling (`-C/--create`, `-l/--level`, `-n/--raid-devices`, `-c/--chunk`,
+    `-D/--detail`, `-E/--examine`, `-a/--add`, `-r/--remove`, `-S/--stop`).
+    Its parsing, name resolution, and rendering are pure and host-tested; only
+    its `Run` binary touches syscalls. The one deliberate divergence is naming:
+    TAIRiX has no `/dev`, so a device is `node:<id>` (the hardware-tree node the
+    composer reports — the only stable name a *bare* disk has, since a disk with
+    no filesystem has no volume to appear as) and an array is its identity or
+    an unambiguous prefix, with an ambiguous prefix refused rather than guessed.
+    Help is authored in the bundle's own `Help/<locale>/` tree.
+
+  Remaining: the QEMU vertical below, shared with the rest of IO6.
 
 ### Tests (§7)
 
@@ -1919,14 +2005,18 @@ submit/complete seam (Stage IO1) — so the downstream stages build on the
 ticketed `CallEndpoint` + wait-set event loop and share it with the in-flight
 HCD async loop (`plans/USB.md`) rather than a parallel mechanism (§2.2). IO6's
 composition **engine** (`lib/raid`) is independent of ARXFS and has
-landed host-side; what remains is the array service's creation and
-administration surface, whose authority model
-is decided and staged in §2.6 (IO6a–IO6f). That reaches further than the stages
-above — it adds a syscall (`call_grant`), fixes the defects in the kernel's
-grant machinery, and touches `devmgr`, `volmgr`, and the hardware-tree
-bootstrap — so it is staged the same way. IO6a–IO6b, the security
-prerequisites, have landed, as have IO6c (the shared `lib/raid` hoist, the
-composition protocol, the emitted member node, and the member agent), IO6d
-(the assembly decisions, the live array service, and the published
-`tairix,raid-array` node `volmgr` mounts through), and IO6e (maintenance
-driving and durable checkpoints); IO6f remains, complete and green on its own.
+landed host-side; the array service that consumes it, whose authority model is
+decided and staged in §2.6 (IO6a–IO6f), reaches further than the stages above
+— it adds two syscalls (`call_grant`, and the orderly mode of
+`hw_remove_node`), fixes the defects in the kernel's grant machinery, and
+touches `devmgr`, `volmgr`, the hardware-tree bootstrap, the System
+Information broker, and the system app store — so it is staged the same way.
+All six sub-stages have landed: IO6a–IO6b (the security prerequisites), IO6c
+(the shared `lib/raid` hoist, the composition protocol, the emitted member
+node, and the member agent), IO6d (the assembly decisions, the live array
+service, and the published `tairix,raid-array` node `volmgr` mounts through),
+IO6e (maintenance driving and durable checkpoints), and IO6f (the blank-device
+discovery path, the audited control endpoint and its `CAP_STORAGE_ADMIN` gate,
+the orderly node retirement that refuses a mounted array, the two System
+Information queries, and the `mdadm` command app). What remains across IO6 is
+the QEMU vertical.

@@ -746,6 +746,7 @@ mod tests {
                 "lspci",
                 "lsusb",
                 "man",
+                "mdadm",
                 "mkdir",
                 "mv",
                 "netstack",
