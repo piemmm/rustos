@@ -4,7 +4,7 @@ use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
 use crate::round::round_rect_coverage;
-use crate::surface::Surface;
+use crate::surface::{Surface, SUBPIXEL};
 
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
@@ -425,6 +425,82 @@ fn fill_polygon_small_shape_only_touches_its_own_bounding_box() {
         edge.a > 0 && edge.a < 255,
         "expected partial coverage near the hypotenuse: {edge:?}"
     );
+}
+
+// ---- device-space (grid-fitted) polygon fill -------------------------
+
+#[test]
+fn a_subpixel_polygon_on_whole_pixels_has_no_fringe() {
+    // The point of the device-space entry: a caller that has rounded its shape
+    // to whole pixels gets exactly those pixels and nothing else, with no
+    // anti-aliased fringe to soften a small mark into a grey smear.
+    let mut s = Surface::new(8, 8).expect("allocates");
+    let rect = [
+        (2 * SUBPIXEL, 3 * SUBPIXEL),
+        (6 * SUBPIXEL, 3 * SUBPIXEL),
+        (6 * SUBPIXEL, 5 * SUBPIXEL),
+        (2 * SUBPIXEL, 5 * SUBPIXEL),
+    ];
+    s.fill_polygon_subpixel(&rect, RED);
+    for y in 0..8 {
+        for x in 0..8 {
+            let inside = (2..6).contains(&x) && (3..5).contains(&y);
+            let want = if inside {
+                RED.premultiply()
+            } else {
+                Pixel::TRANSPARENT
+            };
+            assert_eq!(s.get(x, y), Some(want), "pixel ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_subpixel_polygon_off_the_pixel_grid_is_anti_aliased() {
+    // The same bar shifted half a pixel across covers two columns at partial
+    // alpha instead. That is what grid fitting exists to avoid — and still what
+    // a genuinely fractional shape has to produce.
+    let mut s = Surface::new(4, 4).expect("allocates");
+    let half = SUBPIXEL / 2;
+    let bar = [
+        (SUBPIXEL + half, 0),
+        (2 * SUBPIXEL + half, 0),
+        (2 * SUBPIXEL + half, 4 * SUBPIXEL),
+        (SUBPIXEL + half, 4 * SUBPIXEL),
+    ];
+    s.fill_polygon_subpixel(&bar, RED);
+    for x in [1, 2] {
+        let p = s.get(x, 1).expect("in bounds");
+        assert!(
+            p.a > 0 && p.a < 255,
+            "expected partial coverage at {x}: {p:?}"
+        );
+    }
+}
+
+#[test]
+fn a_subpixel_polygon_is_placed_not_stretched() {
+    // Unlike `fill_polygon`, which maps a design grid across the whole surface,
+    // the device-space entry draws where its coordinates say — so a small mark
+    // needs no square scratch surface and blit to be positioned.
+    let mut s = Surface::new(16, 16).expect("allocates");
+    let square = [
+        (10 * SUBPIXEL, 10 * SUBPIXEL),
+        (12 * SUBPIXEL, 10 * SUBPIXEL),
+        (12 * SUBPIXEL, 12 * SUBPIXEL),
+        (10 * SUBPIXEL, 12 * SUBPIXEL),
+    ];
+    s.fill_polygon_subpixel(&square, RED);
+    assert_eq!(s.get(10, 10), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(12, 12), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_degenerate_subpixel_ring_is_a_no_op() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.fill_polygon_subpixel(&[(0, 0), (4 * SUBPIXEL, 4 * SUBPIXEL)], RED);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
 }
 
 // ---- blit ------------------------------------------------------------

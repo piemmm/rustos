@@ -26,7 +26,7 @@ bundles, under a stable `ThemeId`:
   signal roles the boards' legend fixes (the `*_pressure` set,
   `network_activity`, `recovery`, `success`, `warning`, `denied`), and the
   scroll and window-frame roles
-  (`scroll_track`, `scroll_thumb`, `frame_active`, `frame_inactive`). The
+  (`scroll_track`, `scroll_thumb`, `frame`). The
   roles are named fields, not a free-form map, so a theme can never omit a
   role and a consumer can never request one that does not exist
   (`AGENTS.md` §2.11). `Palette::signal(SignalRole)` is the one place a
@@ -40,21 +40,30 @@ bundles, under a stable `ThemeId`:
     `surface_raised` (the bar fill) in the direction its appearance calls for —
     brighter on dark, deeper on light — and the tests assert that separation on
     both appearances rather than trusting the authored numbers.
-  - The two frame roles are *neutral* tones, not the accent: a focused window
-    takes the brighter grey and an unfocused one the dimmer, so the accent
-    stays reserved for a chosen action and focus is read from the frame's tone
-    (the boards' behaviour). Only the high-contrast shape fallback
-    (`plans/GUI-CONTROLS-DESIGN.md` §15) adds a second inner rim on top of
-    that tone difference.
+  - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
+    a step deeper on light — and it is deliberately **not** a focus signal.
+    Every window wears the same quiet rim at every activation, because the rim
+    is the line the eye reads a window's shape by: brightening it on focus made
+    the boundary the loudest mark on the desktop and left every other window
+    looking switched off. Focus is carried by the title bar, whose text sits at
+    `on_surface` while active and `on_surface_muted` while not, and under heavy
+    contrast the active frame adds a second inner rim line
+    (`plans/GUI-CONTROLS-DESIGN.md` §15) so the distinction is a difference in
+    shape as well as tone.
 - `Metrics` — every logical length the desktop is laid out from, so no
   renderer carries a private constant: the corner radii and
   `border_thickness`; the scrollbar's `scrollbar_breadth` and
   `min_thumb_length`; the control anatomy (`control_height`,
   `control_inset`, `control_gap`, `control_corner_radius`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
-  `selector_extent`, `toggle_track_length`); and the window furniture
+  `chart_height`, `selector_extent`, `toggle_track_length`); and the window
+  furniture
   (`title_bar_height`, `frame_inset`, `window_control_extent`,
   `resize_grabber_extent`, `hit_slop`).
+  - `chart_height` is the one measured instrument that is a *box* rather than
+    a line: a history plot needs vertical room to rise and fall in, so it is
+    several times `progress_thickness`. A trend confined to a track's
+    thickness cannot rise more than a pixel or two whatever it reads.
   - `measured_thickness` is the breadth of a slider's groove and
     `progress_thickness` that of a progress trace's bar. Both are deliberately
     thin instrument lines rather than `control_height` plates, centred in the

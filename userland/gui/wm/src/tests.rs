@@ -2134,7 +2134,7 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).expect("client");
-    let frame_active = c.theme().palette().frame_active.to_array();
+    let rim_color = c.theme().palette().frame.to_array();
     let surface = c.theme().palette().surface.to_array();
     c.composite();
 
@@ -2144,15 +2144,11 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     assert_eq!(frame_pixel(&c, cx, cy), [255, 0, 0, 255]);
 
     // Stage B paints the furniture in the reserved band, not the desktop
-    // background: the outer top-edge rim shows the active frame colour...
+    // background: the outer top-edge rim shows the frame colour...
     let rim_x = u32::try_from(bounds.left() + i32::try_from(bounds.width / 2).unwrap()).unwrap();
     let rim_y = u32::try_from(bounds.top()).unwrap();
-    assert_eq!(frame_pixel(&c, rim_x, rim_y), frame_active);
-    assert_ne!(
-        frame_active,
-        [0, 0, 255, 255],
-        "chrome is not the background"
-    );
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), rim_color);
+    assert_ne!(rim_color, [0, 0, 255, 255], "chrome is not the background");
 
     // ...and the title-bar interior above the client shows the window surface.
     let by = u32::try_from(client.top() - 1).unwrap();
@@ -2274,36 +2270,46 @@ fn decorated_compositor() -> (Compositor, WindowId) {
 }
 
 #[test]
-fn active_and_inactive_frames_use_distinct_rim_colours() {
-    let (mut c, id) = decorated_compositor();
-    let bounds = c.window(id).unwrap().bounds();
-    let rim = Point::new(centre(bounds).x, bounds.top());
-    let rim_x = u32::try_from(rim.x).unwrap();
-    let rim_y = u32::try_from(rim.y).unwrap();
-    let active = c.theme().palette().frame_active.to_array();
-    let inactive = c.theme().palette().frame_inactive.to_array();
+fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
+    let (mut active, id) = decorated_compositor();
+    assert!(active.set_window_title(id, "Documents"));
+    let quiet = active.theme().palette().frame.to_array();
+    active.composite();
+
+    let (mut inactive, other) = decorated_compositor();
+    assert!(inactive.set_window_title(other, "Documents"));
+    assert!(inactive.set_active_frame(other, false));
+    inactive.composite();
+
+    let bounds = active.window(id).unwrap().bounds();
+    let rim_x = u32::try_from(centre(bounds).x).unwrap();
+    let rim_y = u32::try_from(bounds.top()).unwrap();
+
+    // The rim is the one quiet neutral either way: a window's edge does not
+    // change when focus moves elsewhere.
+    assert_eq!(frame_pixel(&active, rim_x, rim_y), quiet);
+    assert_eq!(frame_pixel(&inactive, rim_x, rim_y), quiet);
+
+    // Focus stays visible all the same — the title bar dims its text — so the
+    // two frames are not identical.
     assert_ne!(
-        active, inactive,
-        "the two rim states must be distinguishable"
+        active.frame(),
+        inactive.frame(),
+        "the title bar must still show which window holds focus"
     );
 
-    // A window starts active and paints the active rim.
-    c.composite();
-    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
-
-    // Deactivating repaints the rim to the inactive colour, and reactivating
-    // restores it — the rim state follows the focused window.
-    assert!(c.set_active_frame(id, false));
-    c.composite();
-    assert_eq!(frame_pixel(&c, rim_x, rim_y), inactive);
-    assert!(c.set_active_frame(id, true));
-    c.composite();
-    assert_eq!(frame_pixel(&c, rim_x, rim_y), active);
+    // Toggling activation leaves the rim exactly as it was, both ways.
+    assert!(active.set_active_frame(id, false));
+    active.composite();
+    assert_eq!(frame_pixel(&active, rim_x, rim_y), quiet);
+    assert!(active.set_active_frame(id, true));
+    active.composite();
+    assert_eq!(frame_pixel(&active, rim_x, rim_y), quiet);
 
     // An undecorated or unknown window has no frame to activate.
-    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
-    assert!(!c.set_active_frame(plain, false));
-    assert!(!c.set_active_frame(WindowId(9_999), false));
+    let plain = active.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!active.set_active_frame(plain, false));
+    assert!(!active.set_active_frame(WindowId(9_999), false));
 }
 
 #[test]
@@ -2379,7 +2385,7 @@ fn the_light_theme_draws_the_furniture_chrome() {
     assert!(c.set_theme(Theme::light()));
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
-    let frame_active = c.theme().palette().frame_active.to_array();
+    let rim_color = c.theme().palette().frame.to_array();
     let surface = c.theme().palette().surface.to_array();
     let desktop = c.theme().palette().desktop.to_array();
     c.composite();
@@ -2393,9 +2399,9 @@ fn the_light_theme_draws_the_furniture_chrome() {
             u32::try_from(rim.x).unwrap(),
             u32::try_from(rim.y).unwrap()
         ),
-        frame_active
+        rim_color
     );
-    assert_ne!(frame_active, desktop);
+    assert_ne!(rim_color, desktop);
     let by = u32::try_from(client.top() - 1).unwrap();
     let cx = u32::try_from(client.left() + 2).unwrap();
     assert_eq!(frame_pixel(&c, cx, by), surface);
@@ -2443,7 +2449,7 @@ fn high_contrast_thickens_the_furniture_glyphs() {
         "high contrast changes the glyph rendering"
     );
 
-    // The chrome is still correct: the active rim is drawn.
+    // The chrome is still correct: the rim is drawn.
     let bounds = heavy.window(id).unwrap().bounds();
     let rim = Point::new(centre(bounds).x, bounds.top());
     assert_eq!(
@@ -2452,7 +2458,7 @@ fn high_contrast_thickens_the_furniture_glyphs() {
             u32::try_from(rim.x).unwrap(),
             u32::try_from(rim.y).unwrap()
         ),
-        heavy.theme().palette().frame_active.to_array()
+        heavy.theme().palette().frame.to_array()
     );
 }
 
@@ -2917,7 +2923,7 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
 
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
-    let frame_active = c.theme().palette().frame_active.to_array();
+    let rim_color = c.theme().palette().frame.to_array();
     let surface = c.theme().palette().surface.to_array();
     // `decorated_compositor` clears the screen to the literal `BLUE` test
     // constant, independently of the active theme's own palette colours.
@@ -2931,14 +2937,14 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     let mid_y = u32::try_from(centre(client).y).unwrap();
 
     // Top strip: the rim colour along the outer top edge.
-    assert_eq!(frame_pixel(&c, mid_x, top_y), frame_active);
+    assert_eq!(frame_pixel(&c, mid_x, top_y), rim_color);
     // Bottom strip: the rim colour along the outer bottom edge.
-    assert_eq!(frame_pixel(&c, mid_x, bottom_y), frame_active);
+    assert_eq!(frame_pixel(&c, mid_x, bottom_y), rim_color);
     // Left and right strips: the rim colour at the outer edge, level with a
     // row that crosses the client's own vertical range — the case that now
     // samples the left strip and the right strip together.
-    assert_eq!(frame_pixel(&c, left_x, mid_y), frame_active);
-    assert_eq!(frame_pixel(&c, right_x, mid_y), frame_active);
+    assert_eq!(frame_pixel(&c, left_x, mid_y), rim_color);
+    assert_eq!(frame_pixel(&c, right_x, mid_y), rim_color);
 
     // That same row's client interior still shows the application content,
     // strictly between the two border strips.
@@ -2983,7 +2989,7 @@ fn an_undecorated_window_composites_unaffected_by_the_strip_split() {
 #[test]
 fn resizing_a_decorated_window_still_produces_correct_furniture() {
     let (mut c, id) = decorated_compositor();
-    let frame_active = c.theme().palette().frame_active.to_array();
+    let rim_color = c.theme().palette().frame.to_array();
     // `decorated_compositor` clears the screen to the literal `BLUE` test
     // constant, independently of the active theme's own palette colours.
     let desktop = [0, 0, 255, 255];
@@ -3004,8 +3010,8 @@ fn resizing_a_decorated_window_still_produces_correct_furniture() {
     let mid_x = u32::try_from(centre(bounds).x).unwrap();
     let mid_y = u32::try_from(centre(client).y).unwrap();
 
-    assert_eq!(frame_pixel(&c, mid_x, top_y), frame_active);
-    assert_eq!(frame_pixel(&c, left_x, mid_y), frame_active);
+    assert_eq!(frame_pixel(&c, mid_x, top_y), rim_color);
+    assert_eq!(frame_pixel(&c, left_x, mid_y), rim_color);
     assert_eq!(
         frame_pixel(&c, left_x, top_y),
         desktop,

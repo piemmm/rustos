@@ -83,13 +83,21 @@ pub struct Palette {
     pub scroll_track: Rgba,
     /// The scrollbar thumb.
     pub scroll_thumb: Rgba,
-    /// The Frame Rim of the active (focused) window: a neutral tone, never
-    /// the accent, so the accent stays reserved for a chosen action while
-    /// focus reads as the brighter of two greys.
-    pub frame_active: Rgba,
-    /// The Frame Rim of an inactive window — the quieter of the two neutral
-    /// tones, still legible against the desktop behind it.
-    pub frame_inactive: Rgba,
+    /// The Frame Rim every window wears: one quiet neutral, a step lighter
+    /// than [`surface`](Self::surface) on a dark appearance and a step deeper
+    /// on a light one, so a window's edge separates it from the desktop
+    /// without drawing the eye.
+    ///
+    /// The rim is deliberately *not* a focus signal. A frame that brightened
+    /// when focused made the boundary — the one part of the chrome the eye
+    /// tracks a window's shape by — the loudest thing on the desktop, and
+    /// left every unfocused window looking switched off. Focus is carried by
+    /// the title bar instead: its text sits at
+    /// [`on_surface`](Self::on_surface) while active and
+    /// [`on_surface_muted`](Self::on_surface_muted) while not, and under
+    /// heavy contrast the active frame gains a second, inner rim line so the
+    /// distinction is a difference in shape and not only in tone.
+    pub frame: Rgba,
 }
 
 impl Palette {

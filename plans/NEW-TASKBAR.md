@@ -984,7 +984,8 @@ a live refresh keeps the section, every section's scroll offset, and the
 keyboard focus the user set. Live model: tasks and recovery from the sampled
 process list, the seat report's owner ids joined against those sampled
 names, CPU/memory `ResourceSummary` meters carrying the measured value, a
-bounded rolling CPU sparkline and the pressure the T10 derivation latched.
+bounded rolling CPU history plotted as the band's `Chart` and the pressure the
+T10 derivation latched.
 Actions: task→`ActivateOwner`, restart→`RestartOwner`, force→`signal(Kill)`
 gated on `CAP_PROC_CONTROL` read through `cap_query`, close→destroy; an absent
 authority renders refused and is never attempted, a task id beyond the
@@ -1020,13 +1021,21 @@ is reported on `stderr` and dropped, never retried.
 **Status — the shared controls (`lib/controls`): done.** `meter.rs` adds the
 `Meter` instrument: one resource reading (label, reading text, rounded track
 tinted by the resource's semantic rail through the same `signal_color` lookup
-`Card`'s Pressure Rail uses, optional bounded sparkline), read-only with no
-input or action. `MeterValue::Unmeasured` makes an unmeasurable resource
+`Card`'s Pressure Rail uses), read-only with no input or action. `chart.rs`
+adds its history counterpart, `Chart` (spec §11.35): a bounded
+oldest-to-newest permille series plotted as a line with a quiet filled body,
+tinted by the same rail lookup, mapping its readings across the *whole* box it
+is given — a trend confined to a track's thickness cannot rise more than a
+pixel or two whatever it reads.
+`MeterValue::Unmeasured` makes an unmeasurable resource
 unrepresentable as a real zero, so a denied or absent query draws a quiet
 groove instead of a fabricated `0%`. The `switchboard` composition tiles one
 per resource in an always-visible header band above the Tabs strip (every
 region below shifts by its measured height; an empty resource list collapses
-it to nothing) and the band routes no pointer or key input. `ResourceSummary`
+it to nothing) and the band routes no pointer or key input. A column shows one
+instrument: the `Chart` takes the slot the meter's track would have had
+wherever there is a history to plot, so a resource is never reported twice in
+the same column. `ResourceSummary`
 carries the measured value, pressure and inline bounded history once, feeding
 both the band's `Meter` and the Overview `Card`. `select_section` lets a host
 open on a chosen section and `set_model` refreshes live data in place —

@@ -51,10 +51,10 @@ fn moved(x: i32, y: i32) -> InputEvent {
 
 /// A populated model with enough items to overflow a modest viewport.
 ///
-/// The three resources deliberately span the meter's honest range: CPU is
-/// measured with a history sparkline, Memory is measured with a plain fill
-/// (no history), and Disk is left honestly unmeasured — exactly the "quiet
-/// meter" default a host with no wired query must fall back to.
+/// The three resources deliberately span the band's honest range: CPU is
+/// measured with a plotted history, Memory is measured with a plain track (no
+/// history), and Disk is left honestly unmeasured — exactly the "quiet meter"
+/// default a host with no wired query must fall back to.
 fn model() -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for i in 0..50 {
@@ -571,8 +571,16 @@ fn band_height_shifts_tabs_and_content_down() {
     let with_layout = with_resources.compute_layout(b, scale, &theme, font());
     let without_layout = without_resources.compute_layout(b, scale, &theme, font());
 
-    let expected_height = Meter::measured_height(scale, &theme, font());
+    // Every resource in the model has a history, so each column is the
+    // meter's label and reading over the theme's chart box — taller than the
+    // meter's own track, which the plot replaces.
+    let expected_height = Meter::reading_height(scale, &theme, font())
+        + scale.scale_length(theme.metrics().chart_height);
     assert_eq!(with_layout.band.height, expected_height);
+    assert!(
+        expected_height > Meter::measured_height(scale, &theme, font()),
+        "a plotted resource needs more room than a track"
+    );
     assert_eq!(with_layout.band.top(), with_layout.frame.client.top());
     assert_eq!(with_layout.tabs.top(), with_layout.band.bottom());
 
@@ -1771,7 +1779,9 @@ fn group_button_opens_the_popup_on_its_task() {
 #[test]
 fn group_popup_anchors_below_its_button_inside_the_window() {
     let theme = Theme::dark();
-    let b = bounds();
+    // Tall enough to hold the whole popup below its anchor: the flip-upward
+    // path is a different case, covered by its own test.
+    let b = Rect::new(0, 0, 600, 560);
     let mut sb = Switchboard::new(model());
     open_group_popup_on_first_task(&mut sb, b, &theme);
     let layout = sb.compute_layout(b, Scale::ONE, &theme, font());

@@ -2,7 +2,7 @@
 
 This is the staged build plan for giving every windowed app real window
 decorations — a title bar with Close / Minimize / PutToBack / SizeToggle
-controls, an active/inactive frame rim, and a resize grabber — by rendering
+controls, the frame rim, and a resize grabber — by rendering
 them in the **window manager**, not in any app. It is **binding under
 `AGENTS.md`** — read `AGENTS.md`, `PLAN.md` Stage 7, `plans/GUI-CONTROLS-DESIGN.md`
 (the control/furniture design this consumes), `plans/APPWIN.md` (the window
@@ -172,15 +172,24 @@ guarantees:
 - The title the WM receives on the channel (`WindowTitle`) is rendered in the
   title bar via `Compositor::set_window_title`, not merely used as the taskbar
   label.
-- Active/inactive rim treatment follows the focused window through
-  `Compositor::set_active_frame`; attention requests are preserved rather than
-  clobbered by a focus change.
+- Activation follows the focused window through
+  `Compositor::set_active_frame`, which repaints the title and controls;
+  attention requests are preserved rather than clobbered by a focus change.
+  The rim itself does **not** track focus: every window wears the one quiet
+  `frame` neutral at every activation, because the rim is the line the eye
+  reads a window's shape by — brightening it on focus made the boundary the
+  loudest mark on the desktop and left every other window reading as switched
+  off. The title bar carries focus in its text tone, joined under heavy
+  contrast by a doubled inner rim line so the distinction is a difference in
+  shape too (spec §11.17).
 - A focus change or title edit repaints only the furniture bands
   (`Window::furniture_bands`/`title_band`), never the client — damage stays
   confined to the furniture.
-- Tests cover dark and light theme render, active vs inactive rim, the title
-  being drawn, reduced-motion pixel-identical render, high-contrast glyph
-  thickening, and furniture-confined damage on a focus flip and a title edit.
+- Tests cover dark and light theme render, the one quiet rim tone at either
+  activation (with the two frames still differing, since the title bar shows
+  focus), the title being drawn, reduced-motion pixel-identical render,
+  high-contrast glyph thickening, and furniture-confined damage on a focus
+  flip and a title edit.
 
 No furniture is hit-tested or wired to a lifecycle action yet, and no ABI was
 touched — that is Stage C onward.
@@ -384,8 +393,8 @@ Two gaps that made resizable windows only nominally resizable are closed:
 ## 3. Definition of done
 
 - Files — and every other windowed app — is drawn with a title bar
-  (title + Close/Minimize/PutToBack/SizeToggle), an active/inactive frame rim,
-  and a resize grabber, **without any app drawing its own chrome**. An app crate
+  (title + Close/Minimize/PutToBack/SizeToggle), the frame rim, and a resize
+  grabber, **without any app drawing its own chrome**. An app crate
   may be changed only to *react* to the WM's typed lifecycle events over the
   existing window path (a minimize notice, a new client size on resize/maximize)
   — never to paint or intercept furniture.

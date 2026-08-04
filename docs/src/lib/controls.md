@@ -16,7 +16,7 @@ another.
 | `button` | `Button`, `IconButton`, `SplitButton` |
 | `selector` | `Toggle`, `Checkbox`, `Radio` |
 | `value` | `Slider`, `Progress` |
-| `meter` | `Meter` |
+| `meter`, `chart` | `Meter`, `Chart` |
 | `text` | `TextField`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `collection` | `ListRow`, `TableRow`, `Card`, `Panel` |

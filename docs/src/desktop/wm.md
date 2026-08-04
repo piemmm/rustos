@@ -244,8 +244,8 @@ number of bytes:
 ## Server-side window decorations
 
 Window decorations — a title bar with the four command controls (close,
-minimize, put-to-back, size-toggle), an active/inactive frame rim, and a
-corner resize grabber — are drawn by the **window manager**, never by an
+minimize, put-to-back, size-toggle), the frame rim, and a corner resize
+grabber — are drawn by the **window manager**, never by an
 app (`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
 `plans/COMPOSITOR-WORK.md`). An app supplies only its content surface and
 typed window metadata; it can neither paint over nor receive input from
@@ -303,8 +303,15 @@ the chrome. The furniture family itself lives once in
   output is byte-identical whether the cache is warm, has just been emptied,
   or can retain nothing at all.
 - **Activation and title.** `Compositor::set_active_frame` repaints a
-  window's rim, title, and controls for the focused/unfocused state the
-  `InputRouter` tracks; `Compositor::set_window_title` repaints the title
+  window's title and controls for the focused/unfocused state the
+  `InputRouter` tracks. The *rim* is not part of that: every window wears the
+  one quiet `frame` neutral at every activation, because the rim is the line
+  the eye reads a window's shape by — brightening it on focus made the
+  boundary the loudest mark on the desktop and left every other window looking
+  switched off. Focus is the title bar's to carry (its text sits at
+  `on_surface` while active and `on_surface_muted` while not), joined under
+  heavy contrast by a doubled inner rim line so the distinction is a
+  difference in shape too. `Compositor::set_window_title` repaints the title
   bar with the (untrusted, sanitised) `WindowTitle` the channel already
   carries. Both confine their damage to the furniture bands — a focus flip
   or title edit never recomposites the client (`AGENTS.md` §2.16).

@@ -90,6 +90,57 @@ fn window_control_draws_its_glyph() {
 }
 
 #[test]
+fn axis_aligned_glyph_marks_land_on_whole_pixels() {
+    // The minimize bar and the size-toggle squares are axis-aligned, so grid
+    // fitting leaves them with no anti-aliased fringe at all: every pixel they
+    // touch carries the full glyph colour. Scaling the authored design grid
+    // straight to the box instead — the defect this replaced — put a
+    // 1.4-pixel-wide stroke at a fractional offset, spreading every mark over
+    // two rows at partial alpha so it read as a grey smear rather than a line.
+    let theme = Theme::dark();
+    let ink = premul(theme.palette().on_surface);
+    for kind in [
+        WindowControlKind::Minimize,
+        WindowControlKind::SizeToggle,
+        WindowControlKind::PutToBack,
+    ] {
+        // Sizes that divide the design grid evenly and sizes that do not.
+        for side in [16_u32, 20, 21, 28, 40] {
+            let control = WindowControl::new(kind);
+            let surface = render_control(&control, &theme, side);
+            assert!(
+                opaque_count(&surface) > 0,
+                "{kind:?} at {side} drew nothing"
+            );
+            for p in surface.pixels() {
+                assert!(
+                    p.a == 0 || *p == ink,
+                    "{kind:?} at {side}: partial coverage {p:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_glyph_stroke_is_always_at_least_one_whole_pixel() {
+    // A stroke authored as a fraction of the box rounds to whole pixels, and
+    // rounding must never round it away: a control small enough that its
+    // authored weight is under half a pixel still draws a one-pixel mark rather
+    // than vanishing or fading to a ghost.
+    let theme = Theme::dark();
+    let ink = premul(theme.palette().on_surface);
+    for side in 6..=12_u32 {
+        let control = WindowControl::new(WindowControlKind::Minimize);
+        let surface = render_control(&control, &theme, side);
+        assert!(
+            has_pixel(&surface, ink),
+            "the minimize bar vanished at {side}"
+        );
+    }
+}
+
+#[test]
 fn command_glyphs_are_distinct() {
     let theme = Theme::dark();
     let kinds = [
@@ -608,20 +659,32 @@ fn resize_edges_only_when_resizable() {
 }
 
 #[test]
-fn active_and_inactive_rims_differ() {
+fn the_rim_is_one_quiet_tone_and_the_title_carries_focus() {
     let theme = Theme::dark();
     let bounds = frame_bounds();
     let mut frame = WindowFrame::new(furniture());
+    frame.title_bar_mut().set_title("Documents");
     let mut active = Surface::new(300, 240).expect("surface");
     frame.render(&mut active, bounds, Scale::ONE, &theme, font());
-    assert!(has_pixel(&active, premul(theme.palette().frame_active)));
 
     let mut inactive_furn = furniture();
     inactive_furn.activation = WindowActivationState::Inactive;
     frame.set_furniture(inactive_furn);
     let mut inactive = Surface::new(300, 240).expect("surface");
     frame.render(&mut inactive, bounds, Scale::ONE, &theme, font());
-    assert!(has_pixel(&inactive, premul(theme.palette().frame_inactive)));
+
+    // The rim is the same quiet neutral at either activation: the line the eye
+    // reads a window's shape by does not change when focus moves elsewhere.
+    assert!(has_pixel(&active, premul(theme.palette().frame)));
+    assert!(has_pixel(&inactive, premul(theme.palette().frame)));
+
+    // Focus is still legible, carried by the title bar's text tone.
+    assert_ne!(active.pixels(), inactive.pixels());
+    assert!(has_pixel(&active, premul(theme.palette().on_surface)));
+    assert!(has_pixel(
+        &inactive,
+        premul(theme.palette().on_surface_muted)
+    ));
 }
 
 #[test]

@@ -31,6 +31,21 @@ This crate owns:
   rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10). Only
   the polygon's bounding box, clipped to the surface, is scanned, so a small
   shape on a large canvas costs its own area rather than the whole surface.
+- `Surface::fill_polygon_subpixel` — that same scan converter over vertices
+  already in *device* sub-pixel units (`SUBPIXEL` per pixel) instead of a
+  design grid stretched across the surface. This is how chrome that must stay
+  sharp at a small pixel size is drawn: a caller grid-fits its shape to whole
+  pixels and every axis-aligned edge then lands exactly on a pixel boundary,
+  producing no anti-aliased fringe at all, while a diagonal keeps sub-pixel
+  placement and stays smooth. The shape is *placed*, not stretched, so a glyph
+  needs no square scratch surface and blit to position it.
+- `Surface::stroke_polyline` — the one stroked-line path the desktop shares: a
+  window-furniture diagonal and a history graph's trace are the same primitive
+  at different scales. Each segment is offset along *its own* perpendicular, so
+  every segment keeps its full width whatever its slope, and consecutive
+  segments overlap at the vertex they share — which is what joins them, with no
+  seam and no darkened joint, since compositing an opaque source twice yields
+  the same pixel.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

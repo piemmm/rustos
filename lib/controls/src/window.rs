@@ -28,7 +28,7 @@ use alloc::string::String;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::Theme;
 
 use crate::paint::{
@@ -50,58 +50,151 @@ use crate::state::{
 // the minimize bar, the maximize/restore squares, and the put-to-back stacked
 // plates, so a monochrome theme still tells the four commands apart.
 
-/// The design-grid side every window-command glyph and grip-tooth is authored
-/// on; the glyph rasterises across whatever pixel box the control gives it.
-const GLYPH_GRID: u32 = 100;
+/// The design-grid side every window-command glyph and grip tooth is authored
+/// on. A glyph is authored once against this grid and then grid-fitted to the
+/// device pixels of whatever box it is drawn in (see [`Glyph`]).
+const GLYPH_GRID: i32 = 100;
 
-/// The floor of the square root of a small non-negative `n`, by Newton's
-/// method. Used to normalise a diagonal stroke's perpendicular; a first-party
-/// helper because the workspace minimum Rust version predates `i32::isqrt`.
-fn isqrt(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut x = n;
-    let mut prev = 0;
-    while x != prev {
-        prev = x;
-        x = i32::midpoint(x, n / x);
-    }
-    x
+/// `a / b` rounded to the nearest whole number, for a non-negative `a` and a
+/// positive `b`.
+///
+/// Grid fitting must round, never truncate: truncation drags every fitted
+/// coordinate toward the box's leading edge, so a mark authored symmetrically
+/// in the design grid comes out off-centre and a stroke authored just under
+/// half a pixel disappears rather than becoming the thinnest line that can be
+/// drawn.
+fn round_div(a: i32, b: i32) -> i32 {
+    a.saturating_add(b / 2) / b
 }
 
-/// Draw a filled diagonal stroke from `a` to `b` on a `design`-grid
-/// sub-surface, `thick` grid units wide, so a glyph scales with its box at any
-/// density. The stroke is a quad: both endpoints offset by half the thickness
-/// along the line's true perpendicular, so a rising *and* a falling diagonal
-/// both draw (a fixed offset would collapse one of them to a zero-area line).
-fn diagonal(
-    glyph: &mut Surface,
-    design: u32,
-    a: (i32, i32),
-    b: (i32, i32),
-    thick: i32,
-    color: Color,
-) {
-    let (ax, ay) = a;
-    let (bx, by) = b;
-    let dx = bx - ax;
-    let dy = by - ay;
-    let len = isqrt(dx * dx + dy * dy);
-    if len == 0 {
-        return;
+/// `v` as an unsigned surface coordinate; a negative value clamps to zero.
+fn to_u32(v: i32) -> u32 {
+    u32::try_from(v).unwrap_or(0)
+}
+
+/// A window-furniture glyph being drawn: the square device box it occupies and
+/// the whole-pixel weight its strokes are drawn at.
+///
+/// Furniture marks are only a handful of pixels across, and at that size a
+/// stroke whose width works out fractional has no crisp rendering at all: area
+/// coverage spreads a 1.4-pixel line over two columns at partial alpha and it
+/// reads as a grey smear. Each authored coordinate is therefore rounded to the
+/// whole device pixel it lands nearest and the stroke weight to a whole pixel
+/// too — the same grid fitting a font hinter performs — which keeps the mark
+/// scaling with its box while landing it on the pixel grid.
+///
+/// Axis-aligned marks then need no anti-aliasing whatever and are drawn as
+/// plain span fills. Only a true diagonal, which by definition cannot lie on
+/// pixel boundaries, goes through the scan converter, and it is emitted in
+/// [`SUBPIXEL`] units so its coverage is symmetric about the line.
+struct Glyph {
+    /// The box's left edge on the destination surface, in whole pixels.
+    left: i32,
+    /// The box's top edge on the destination surface, in whole pixels.
+    top: i32,
+    /// The box's side, in whole pixels.
+    side: i32,
+    /// The stroke weight, in whole pixels, never below one.
+    weight: i32,
+}
+
+impl Glyph {
+    /// The glyph box with its top-left corner at `origin`, `side` device pixels
+    /// square, whose strokes are `weight` design-grid units thick.
+    fn new(origin: (u32, u32), side: u32, weight: i32) -> Self {
+        let side = to_i32(side);
+        Self {
+            left: to_i32(origin.0),
+            top: to_i32(origin.1),
+            side,
+            weight: round_div(weight.saturating_mul(side), GLYPH_GRID).max(1),
+        }
     }
-    let h = (thick / 2).max(1);
-    // Perpendicular to (dx, dy) is (-dy, dx), scaled to the half-thickness.
-    let ox = -dy * h / len;
-    let oy = dx * h / len;
-    let points = [
-        (ax + ox, ay + oy),
-        (ax - ox, ay - oy),
-        (bx - ox, by - oy),
-        (bx + ox, by + oy),
-    ];
-    glyph.fill_polygon(&points, design, color);
+
+    /// The whole device pixel design-grid coordinate `d` lands nearest, as an
+    /// offset from the box's own origin.
+    fn px(&self, d: i32) -> i32 {
+        round_div(d.saturating_mul(self.side), GLYPH_GRID)
+    }
+
+    /// Fill the box-relative pixel rectangle `[x.0, x.1) × [y.0, y.1)`.
+    ///
+    /// Every edge is a whole pixel, so this is a plain span fill: crisp by
+    /// construction, and with no scan conversion to pay for.
+    fn fill(&self, surface: &mut Surface, x: (i32, i32), y: (i32, i32), color: Color) {
+        let (x0, x1) = (x.0.max(0), x.1.max(0));
+        let (y0, y1) = (y.0.max(0), y.1.max(0));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        surface.fill_rect(
+            to_u32(self.left.saturating_add(x0)),
+            to_u32(self.top.saturating_add(y0)),
+            to_u32(x1 - x0),
+            to_u32(y1 - y0),
+            color,
+        );
+    }
+
+    /// A horizontal bar one stroke weight tall spanning design columns
+    /// `[x0, x1]`, sitting as near design row `cy` as whole pixels allow.
+    fn bar(&self, surface: &mut Surface, x0: i32, x1: i32, cy: i32, color: Color) {
+        let top = self.px(cy) - self.weight / 2;
+        self.fill(
+            surface,
+            (self.px(x0), self.px(x1)),
+            (top, top + self.weight),
+            color,
+        );
+    }
+
+    /// A hollow square outline between design corners `lo` and `hi`, its four
+    /// edges one stroke weight thick so the interior stays open.
+    fn square(&self, surface: &mut Surface, lo: (i32, i32), hi: (i32, i32), color: Color) {
+        let (x0, y0) = (self.px(lo.0), self.px(lo.1));
+        let (x1, y1) = (self.px(hi.0), self.px(hi.1));
+        let t = self.weight;
+        self.fill(surface, (x0, x1), (y0, y0 + t), color);
+        self.fill(surface, (x0, x1), (y1 - t, y1), color);
+        self.fill(surface, (x0, x0 + t), (y0, y1), color);
+        self.fill(surface, (x1 - t, x1), (y0, y1), color);
+    }
+
+    /// A filled square between design corners `lo` and `hi`.
+    fn plate(&self, surface: &mut Surface, lo: (i32, i32), hi: (i32, i32), color: Color) {
+        self.fill(
+            surface,
+            (self.px(lo.0), self.px(hi.0)),
+            (self.px(lo.1), self.px(hi.1)),
+            color,
+        );
+    }
+
+    /// A diagonal stroke from design point `a` to design point `b`, one stroke
+    /// weight wide measured perpendicular to the line.
+    ///
+    /// A diagonal is the one furniture mark grid fitting cannot make crisp — a
+    /// line at an angle does not lie on pixel boundaries, which is what makes
+    /// it a diagonal — so it goes through the shared stroke path, with its
+    /// endpoints still fitted and its weight still a whole pixel so the
+    /// coverage falls symmetrically about the line.
+    fn diagonal(&self, surface: &mut Surface, a: (i32, i32), b: (i32, i32), color: Color) {
+        let point = |d: (i32, i32)| {
+            (
+                self.left
+                    .saturating_add(self.px(d.0))
+                    .saturating_mul(SUBPIXEL),
+                self.top
+                    .saturating_add(self.px(d.1))
+                    .saturating_mul(SUBPIXEL),
+            )
+        };
+        surface.stroke_polyline(
+            &[point(a), point(b)],
+            self.weight.saturating_mul(SUBPIXEL),
+            color,
+        );
+    }
 }
 
 /// Paint the command glyph for `kind` centred in the content rectangle
@@ -122,98 +215,33 @@ fn paint_command_glyph(
     if side == 0 {
         return;
     }
-    let Some(mut glyph) = Surface::new(side, side) else {
-        return;
-    };
-    let thick = if heavy { 20 } else { 12 };
+    // The mark is square; centre its box in a content rectangle that need not
+    // be, so an off-square control does not push its glyph into one corner.
+    let origin = (x + (w - side) / 2, y + (h - side) / 2);
+    let glyph = Glyph::new(origin, side, if heavy { 20 } else { 12 });
     match kind {
         WindowControlKind::Close => {
-            diagonal(&mut glyph, GLYPH_GRID, (22, 22), (78, 78), thick, color);
-            diagonal(&mut glyph, GLYPH_GRID, (78, 22), (22, 78), thick, color);
+            glyph.diagonal(surface, (22, 22), (78, 78), color);
+            glyph.diagonal(surface, (78, 22), (22, 78), color);
         }
-        WindowControlKind::Minimize => {
-            stroke_bar(&mut glyph, GLYPH_GRID, 20, 80, 62, thick, color);
-        }
+        WindowControlKind::Minimize => glyph.bar(surface, 20, 80, 62, color),
         WindowControlKind::SizeToggle => match next {
-            SizeAction::Maximize => {
-                square_outline(&mut glyph, GLYPH_GRID, 22, 22, 56, thick, color);
-            }
+            SizeAction::Maximize => glyph.square(surface, (22, 22), (78, 78), color),
             SizeAction::Restore => {
                 // Two overlapping square outlines: a back square up-right and
                 // a front square down-left — the classic restore mark.
-                square_outline(&mut glyph, GLYPH_GRID, 34, 18, 44, thick, color);
-                square_outline(&mut glyph, GLYPH_GRID, 18, 34, 44, thick, color);
+                glyph.square(surface, (34, 18), (78, 62), color);
+                glyph.square(surface, (18, 34), (62, 78), color);
             }
         },
         WindowControlKind::PutToBack => {
             // A filled front plate low-left going behind an outlined back
             // plate high-right — a "send to back / down" cue distinct from
             // the restore mark's two outlines.
-            square_outline(&mut glyph, GLYPH_GRID, 40, 16, 42, thick, color);
-            filled_square(&mut glyph, GLYPH_GRID, 16, 40, 42, color);
+            glyph.square(surface, (40, 16), (82, 58), color);
+            glyph.plate(surface, (16, 40), (58, 82), color);
         }
     }
-    surface.blit(to_i32(x), to_i32(y), &glyph);
-}
-
-/// A horizontal bar `thick` grid units tall, centred vertically at `cy`,
-/// spanning `[x0, x1]` on a `design`-grid sub-surface.
-fn stroke_bar(
-    glyph: &mut Surface,
-    design: u32,
-    x0: i32,
-    x1: i32,
-    cy: i32,
-    thick: i32,
-    color: Color,
-) {
-    let t = thick.max(1);
-    let points = [
-        (x0, cy - t / 2),
-        (x1, cy - t / 2),
-        (x1, cy + t / 2),
-        (x0, cy + t / 2),
-    ];
-    glyph.fill_polygon(&points, design, color);
-}
-
-/// A hollow square outline of side `s` at `(ox, oy)` with `thick`-unit edges,
-/// on a `design`-grid sub-surface (four bars, so the interior stays open).
-fn square_outline(
-    glyph: &mut Surface,
-    design: u32,
-    ox: i32,
-    oy: i32,
-    s: i32,
-    thick: i32,
-    color: Color,
-) {
-    let t = thick.max(1);
-    // top, bottom, left, right bars.
-    let top = [(ox, oy), (ox + s, oy), (ox + s, oy + t), (ox, oy + t)];
-    let bottom = [
-        (ox, oy + s - t),
-        (ox + s, oy + s - t),
-        (ox + s, oy + s),
-        (ox, oy + s),
-    ];
-    let left = [(ox, oy), (ox + t, oy), (ox + t, oy + s), (ox, oy + s)];
-    let right = [
-        (ox + s - t, oy),
-        (ox + s, oy),
-        (ox + s, oy + s),
-        (ox + s - t, oy + s),
-    ];
-    glyph.fill_polygon(&top, design, color);
-    glyph.fill_polygon(&bottom, design, color);
-    glyph.fill_polygon(&left, design, color);
-    glyph.fill_polygon(&right, design, color);
-}
-
-/// A filled square of side `s` at `(ox, oy)` on a `design`-grid sub-surface.
-fn filled_square(glyph: &mut Surface, design: u32, ox: i32, oy: i32, s: i32, color: Color) {
-    let points = [(ox, oy), (ox + s, oy), (ox + s, oy + s), (ox, oy + s)];
-    glyph.fill_polygon(&points, design, color);
 }
 
 // --- WindowControl --------------------------------------------------------
@@ -1028,13 +1056,14 @@ pub struct FrameInsets {
 
 /// The window-manager-owned boundary around one client viewport (spec §11.17).
 ///
-/// It draws the Frame Rim (stronger and doubled when active, quieter when
-/// inactive, with a bounded attention dot on an attention request — never an
-/// indefinite pulse), owns the [`TitleBar`], and exposes the client rectangle
-/// the compositor clips the application into and the furniture hit map that
-/// keeps the client and the furniture strictly separate. Activation, theme,
-/// and hover never change the client origin or the outer dimensions: the rim
-/// distinction is colour and a doubled inner line, not a change of geometry.
+/// It draws the Frame Rim — one quiet neutral at every activation, with a
+/// bounded attention dot on an attention request and never an indefinite
+/// pulse — owns the [`TitleBar`], and exposes the client rectangle the
+/// compositor clips the application into and the furniture hit map that keeps
+/// the client and the furniture strictly separate. Focus is the title bar's to
+/// show (its text brightens), joined under heavy contrast by a doubled inner
+/// rim line so the distinction is a difference in shape too. Activation,
+/// theme, and hover never change the client origin or the outer dimensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowFrame {
     furniture: WindowFurnitureState,
@@ -1237,13 +1266,12 @@ impl WindowFrame {
         let radius = scale.scale_length(metrics.window_corner_radius);
         let active = self.furniture.activation != WindowActivationState::Inactive;
 
-        // Frame Rim: brighter when active/attention, quieter when inactive.
-        let rim = if active {
-            Color::from(palette.frame_active)
-        } else {
-            Color::from(palette.frame_inactive)
-        };
-        surface.fill_round_rect(x, y, w, h, radius, rim);
+        // Frame Rim: one quiet neutral, whatever the activation. The rim is
+        // the line the eye reads a window's shape by, so brightening it on
+        // focus made the boundary the loudest mark on the desktop and left
+        // every other window looking switched off. Focus is the title bar's
+        // to carry.
+        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.frame));
 
         // Window body behind the title bar and client viewport.
         if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) {
@@ -1255,11 +1283,11 @@ impl WindowFrame {
                 radius.saturating_sub(border),
                 Color::from(palette.surface),
             );
-            // In high contrast the active frame adds a doubled inner rim line,
-            // so focus reads as a shape difference and not only as the frame
-            // tone; it never changes frame measurements. Outside high contrast
-            // the frame stays a single flat line and the active/inactive tones
-            // carry the distinction.
+            // In high contrast the active frame adds a doubled inner rim line
+            // in the muted foreground, so focus reads as a difference in shape
+            // and not only as the title tone; it never changes frame
+            // measurements. Outside high contrast the frame stays a single flat
+            // line and the title bar carries the distinction alone.
             if active && heavy_contrast(theme) {
                 draw_outline(
                     surface,
@@ -1268,7 +1296,7 @@ impl WindowFrame {
                     iw,
                     ih,
                     border,
-                    Color::from(palette.frame_inactive),
+                    Color::from(palette.on_surface_muted),
                 );
             }
         }
@@ -1392,9 +1420,10 @@ impl ResizeGrabber {
     }
 
     /// Paint the Grip Teeth into `surface` within the visible affordance
-    /// `bounds` for the active theme. The teeth are authored on a design grid
-    /// mapped across `bounds`, so they scale with the affordance the window
-    /// manager already sized through the shared [`Scale`].
+    /// `bounds` for the active theme. The teeth are authored on the shared
+    /// glyph design grid and grid-fitted to the affordance the window manager
+    /// already sized through the shared [`Scale`], so they scale with it while
+    /// keeping a whole-pixel stroke weight.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, _scale: Scale, theme: &Theme) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -1419,18 +1448,14 @@ impl ResizeGrabber {
             }
             _ => Color::from(palette.on_surface),
         };
-        let Some(mut glyph) = Surface::new(side, side) else {
-            return;
-        };
-        let thick = if heavy_contrast(theme) { 16 } else { 10 };
+        let weight = if heavy_contrast(theme) { 16 } else { 10 };
+        // The square glyph box sits at the bottom-right of the affordance.
+        let origin = (x + w.saturating_sub(side), y + h.saturating_sub(side));
+        let glyph = Glyph::new(origin, side, weight);
         // Three diagonal teeth parallel to the bottom-right corner.
-        diagonal(&mut glyph, GLYPH_GRID, (55, 95), (95, 55), thick, color);
-        diagonal(&mut glyph, GLYPH_GRID, (72, 95), (95, 72), thick, color);
-        diagonal(&mut glyph, GLYPH_GRID, (38, 95), (95, 38), thick, color);
-        // Place the square glyph at the bottom-right of the affordance.
-        let gx = x + w - side;
-        let gy = y + h - side;
-        surface.blit(to_i32(gx), to_i32(gy), &glyph);
+        glyph.diagonal(surface, (55, 95), (95, 55), color);
+        glyph.diagonal(surface, (72, 95), (95, 72), color);
+        glyph.diagonal(surface, (38, 95), (95, 38), color);
     }
 
     /// Feed a pointer event, given the grabber's current hit region

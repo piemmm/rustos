@@ -3188,9 +3188,10 @@ intersected with the seat user's ceiling, spawned by the session and calm
 on death) — and **as a live panel** (T11): the monitor now hosts the
 `lib/controls::switchboard` composition as a real window with genuinely
 working actions, implementing `plans/desktop1.png`'s Open Panel. The
-composition gained the shared `Meter` control (rail-tinted rounded track,
-bounded sparkline, an honest `Unmeasured` state that never fabricates a
-zero), the always-visible header resource band it tiles, `select_section`
+composition gained the shared `Meter` control (rail-tinted rounded track, an
+honest `Unmeasured` state that never fabricates a zero) and its history
+counterpart `Chart`, the always-visible header resource band it tiles,
+`select_section`
 (the host chooses the opening section) and `set_model` (an in-place data
 refresh preserving section, per-section scroll, focus and any in-flight
 drag; row-indexed selection/hover/armed presses are dropped so a press can
@@ -3941,13 +3942,17 @@ per-app recipes (§2.2).
   refreshes live data in place (`set_model`, preserving section, per-section
   scroll, focus and any in-flight drag). 38 host tests. The Reactive Alloy
   control set is now complete (Stages A–F).
-- **Instruments: `Meter` — DONE.** `lib/controls::meter` draws one resource
-  reading (label, reading text, rounded track tinted by the resource's
-  semantic rail, optional bounded sparkline) over the shared paint core and
-  the shared rail-colour lookup `Card` uses. `MeterValue::Unmeasured` makes an
+- **Instruments: `Meter` and `Chart` — DONE.** `lib/controls::meter` draws one
+  resource reading (label, reading text, rounded track tinted by the
+  resource's semantic rail) over the shared paint core and the shared
+  rail-colour lookup `Card` uses. `MeterValue::Unmeasured` makes an
   unmeasurable resource unrepresentable as a real zero, so a denied or absent
-  query renders a quiet groove rather than a fabricated `0%`. Read-only: no
-  input, no action. 21 host tests.
+  query renders a quiet groove rather than a fabricated `0%`.
+  `lib/controls::chart` is its history counterpart (spec §11.35): a bounded
+  oldest-to-newest permille series plotted as a line with a quiet filled body,
+  mapping its readings across the *whole* box it is given rather than an
+  instrument groove, and drawn through the one shared stroke path in
+  `lib/raster`. Both read-only: no input, no action. 31 host tests.
 
 ---
 

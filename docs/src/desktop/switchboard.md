@@ -72,7 +72,7 @@ costs no render and no present. What it carries:
 | Pressure | "why is my machine slow": one cause card per resource the **tray's own latches** flag (CPU ≥ 90 % with < 80 % release; memory band ≥ mild), naming the measured culprit — the busiest sampled task for CPU, the largest mapped address space for memory — with a plain-language cause line and recommended actions, each rendered `Ready`, `DisabledByState` (a culprit already at `Low` priority or already stopped) or `DeniedByAuthority` per the same rule the kernel enforces. No latch, no card; no per-task rate yet, a culprit-less card with the one action that is still honest (`Show tasks`) |
 | Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from a task row's `Group` menu; renamed inline; paused/resumed/closed as a set |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
-| Overview | the CPU and memory readings, with the CPU meter's sparkline fed from a bounded rolling history and each meter carrying the pressure the tray derivation itself latched |
+| Overview | the CPU and memory readings, with the CPU column's line graph fed from a bounded rolling history and each meter carrying the pressure the tray derivation itself latched |
 | Jobs | always empty — see below |
 
 A resource the service could not measure this cycle reads `unknown` with an

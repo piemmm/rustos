@@ -1,7 +1,12 @@
 //! The [`Meter`] control: one resource reading, shown as a rounded track
-//! tinted by its resource's semantic rail colour, with an optional history
-//! sparkline (`plans/NEW-TASKBAR.md` T11, `plans/GUI-CONTROLS-DESIGN.md`
-//! value/measured family).
+//! tinted by its resource's semantic rail colour (`plans/NEW-TASKBAR.md` T11,
+//! `plans/GUI-CONTROLS-DESIGN.md` value/measured family).
+//!
+//! A meter says how much of a resource is in use *now*. What it has been doing
+//! over time is a different instrument with a different shape — a
+//! [`Chart`](crate::Chart), which owns a whole box rather than an instrument
+//! groove, because a trend crammed into a track's thickness cannot rise more
+//! than a pixel or two whatever its values are.
 //!
 //! A meter is a read-only instrument, like [`Progress`](crate::Progress): it
 //! carries a label, a display reading, and a validated fraction (or an
@@ -25,7 +30,6 @@
 //! copy of that geometry.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -33,18 +37,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    clamp_permille, draw_outline, progress_thickness, rail_thickness, signal_color, surface_rect,
-    to_i32, FULL,
+    draw_outline, progress_thickness, rail_thickness, signal_color, surface_rect, to_i32, FULL,
 };
 use crate::state::{PressureKind, PressureState, ProgressValue};
-
-/// The most samples a [`Meter`]'s sparkline history may hold.
-///
-/// The sparkline draws inside one meter's own track band, so a series far
-/// beyond a small window could never resolve to individually visible bars;
-/// bounding it here keeps the history a small, owner-controlled window
-/// rather than an unbounded log the render path would have to skip past.
-pub const MAX_HISTORY_SAMPLES: usize = 64;
 
 /// A meter's reading: a validated fraction, or an honest "cannot currently be
 /// measured" state.
@@ -67,13 +62,12 @@ pub enum MeterValue {
 }
 
 /// One resource reading: a label, a display reading, and a measured rounded
-/// track tinted by the resource's semantic rail colour, with an optional
-/// bounded history sparkline (spec §11 value/measured family).
+/// track tinted by the resource's semantic rail colour (spec §11.33).
 ///
 /// A meter is an instrument, not an action: it has no pointer or keyboard
 /// handling and reports nothing back to its owner. The owner supplies every
-/// visible fact (label, reading text, resource kind, pressure emphasis,
-/// value, and history) and re-renders when any of them changes.
+/// visible fact (label, reading text, resource kind, pressure emphasis, and
+/// value) and re-renders when any of them changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Meter {
     label: String,
@@ -81,16 +75,13 @@ pub struct Meter {
     kind: PressureKind,
     pressure: PressureState,
     value: MeterValue,
-    samples: Vec<u16>,
 }
 
 impl Meter {
     /// A meter labelled `label`, showing `reading` as its display text, for
     /// the resource `kind`, at `value` (or [`MeterValue::Unmeasured`] when
     /// the resource cannot currently be read). The meter starts with no
-    /// pressure emphasis and no history; add either with
-    /// [`with_pressure`](Self::with_pressure) or
-    /// [`with_samples`](Self::with_samples).
+    /// pressure emphasis; add it with [`with_pressure`](Self::with_pressure).
     #[must_use]
     pub fn new(
         label: impl Into<String>,
@@ -104,7 +95,6 @@ impl Meter {
             kind,
             pressure: PressureState::None,
             value,
-            samples: Vec::new(),
         }
     }
 
@@ -118,18 +108,23 @@ impl Meter {
         self
     }
 
-    /// This meter with an oldest-to-newest sparkline history. Each sample is
-    /// a permille fraction, clamped fail closed; the series is capped to the
-    /// most recent [`MAX_HISTORY_SAMPLES`], dropping the oldest first.
+    /// The height, in physical pixels, the label and reading lines occupy at
+    /// `scale` before the track beneath them.
+    ///
+    /// A band that shows a resource's *history* rather than its current value
+    /// puts a [`Chart`](crate::Chart) in the slot the track would have taken,
+    /// and needs to know where that slot starts. Exposing the text height —
+    /// rather than having the band subtract a track thickness from
+    /// [`measured_height`](Self::measured_height) — keeps the anatomy's one
+    /// definition here, so the two can never disagree.
     #[must_use]
-    pub fn with_samples(mut self, samples: impl IntoIterator<Item = u16>) -> Self {
-        let mut buf: Vec<u16> = samples.into_iter().map(clamp_permille).collect();
-        if buf.len() > MAX_HISTORY_SAMPLES {
-            let drop = buf.len() - MAX_HISTORY_SAMPLES;
-            buf.drain(..drop);
-        }
-        self.samples = buf;
-        self
+    pub fn reading_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let line_h = font.line_height();
+        line_h
+            .saturating_add(gap)
+            .saturating_add(line_h)
+            .saturating_add(gap)
     }
 
     /// The minimum height, in physical pixels, one meter needs at `scale` to
@@ -141,14 +136,7 @@ impl Meter {
     /// guessing independently.
     #[must_use]
     pub fn measured_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let band = progress_thickness(theme, scale);
-        let line_h = font.line_height();
-        line_h
-            .saturating_add(gap)
-            .saturating_add(line_h)
-            .saturating_add(gap)
-            .saturating_add(band)
+        Self::reading_height(scale, theme, font).saturating_add(progress_thickness(theme, scale))
     }
 
     /// Paint the meter into `surface` at `bounds` for the active theme.
@@ -194,7 +182,7 @@ impl Meter {
     }
 
     /// Paint the rounded track band: the quiet groove, then — for a measured
-    /// value — the tinted fill or sparkline, then the pressure-emphasis
+    /// value — the tinted proportional fill, then the pressure-emphasis
     /// outline when the owner marked this resource as genuinely under load.
     fn paint_track(
         &self,
@@ -218,12 +206,8 @@ impl Meter {
             return;
         };
         let fill = signal_color(theme, self.kind);
-        if self.samples.is_empty() {
-            let fill_w = proportional(w, value.permille()).max(band_h.min(w));
-            surface.fill_round_rect(x, y, fill_w, band_h, radius, fill);
-        } else {
-            paint_sparkline(surface, (x, y, w, band_h), &self.samples, fill);
-        }
+        let fill_w = proportional(w, value.permille()).max(band_h.min(w));
+        surface.fill_round_rect(x, y, fill_w, band_h, radius, fill);
 
         if matches!(self.pressure, PressureState::Under(_)) {
             let thickness = rail_thickness(theme, scale).min(band_h / 2).max(1);
@@ -260,34 +244,4 @@ fn paint_line(
 /// `extent` (arithmetic saturates rather than overflowing).
 fn proportional(extent: u32, permille: u16) -> u32 {
     u32::try_from(u64::from(extent) * u64::from(permille) / u64::from(FULL)).unwrap_or(extent)
-}
-
-/// Paint a bounded, oldest-to-newest sparkline of `samples` (permille) inside
-/// `band`, one bottom-aligned bar per sample sized to its value. A sample of
-/// `0` still draws a minimal one-pixel-tall bar so a lone reading — or a
-/// flat, zero-range series — is never invisible.
-fn paint_sparkline(
-    surface: &mut Surface,
-    band: (u32, u32, u32, u32),
-    samples: &[u16],
-    color: Color,
-) {
-    let (x, y, w, h) = band;
-    let count = samples.len();
-    if count == 0 || w == 0 || h == 0 {
-        return;
-    }
-    let seg_w = (w / u32::try_from(count).unwrap_or(u32::MAX).max(1)).max(1);
-    let right = x.saturating_add(w);
-    for (i, &permille) in samples.iter().enumerate() {
-        let idx = u32::try_from(i).unwrap_or(u32::MAX);
-        let bar_x = x.saturating_add(idx.saturating_mul(seg_w));
-        if bar_x >= right {
-            break;
-        }
-        let bar_w = seg_w.min(right.saturating_sub(bar_x));
-        let bar_h = proportional(h, permille).max(1).min(h);
-        let bar_y = y.saturating_add(h).saturating_sub(bar_h);
-        surface.fill_rect(bar_x, bar_y, bar_w, bar_h, color);
-    }
 }

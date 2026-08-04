@@ -332,7 +332,7 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, active and inactive window-frame roles, scroll track, and scroll thumb. |
+| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb. |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
 | Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, and invisible hit slop. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
@@ -384,7 +384,7 @@ A theme may map multiple semantic roles to the same hue only if it also provides
 | Trace Line | A short-lived cause-and-effect connector. |
 | Action Warmth | A stronger edge treatment for the recommended action. |
 | Authority Mark | A locked, denied, or capability-required marker. |
-| Frame Rim | The window-manager-owned active or inactive perimeter around a client surface. |
+| Frame Rim | The window-manager-owned perimeter around a client surface: one quiet neutral, the same at every activation. |
 | Grip Teeth | A repeated notch shape that marks a resize grabber without relying on color. |
 | Scroll Channel | The quiet track, page regions, and thumb that expose viewport position and extent. |
 
@@ -749,8 +749,9 @@ Panels are containers with stable layout. A panel may have a Focus Field, header
 
 A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 
-- The active frame uses the active Frame Rim, stronger title contrast, and a non-color focus distinction such as a double rim or title-weight change.
-- The inactive frame remains legible and structurally complete, but its accent treatment is quieter.
+- The Frame Rim is one quiet neutral at every activation, a single step away from the window surface. It is the line the eye reads a window's shape by, so it never brightens on focus: a rim that did made the boundary the loudest mark on the desktop and left every unfocused window reading as switched off.
+- Focus is shown inside the frame instead, by the title bar's stronger title contrast, and under high contrast by a non-color distinction as well — a doubled inner rim line or a title-weight change.
+- The inactive frame is structurally identical and equally legible; only its title contrast is quieter.
 - An attention request adds a bounded Signal Bead or rim segment. It does not steal focus and does not pulse indefinitely.
 - Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
 - Frame activation, theme change, and hover do not change the client origin or outer dimensions.
@@ -1014,9 +1015,10 @@ value, and beneath them a thin rounded track — for the header resource band
 - Unmeasured state: a resource with no wired query or a denied capability
   renders the quiet unmeasured track and whatever reading text its owner
   supplies (e.g. an em dash), never a fabricated `0%`.
-- Optional history: a bounded, oldest-to-newest sparkline of prior readings
-  draws inside the same track band in place of the plain proportional fill,
-  for resources whose recent trend matters (e.g. CPU, network).
+- A meter reports the resource *now*. What it has been doing over time is a
+  Chart (§11.35), a different instrument with a different shape, and the two
+  never report the same number at once: a band that plots a resource's history
+  puts the chart in the slot the meter's track would have taken.
 - A meter narrower or shorter than its own label, reading, and track
   degrades by omitting whichever line does not fit, never by drawing past
   its own bounds.
@@ -1061,6 +1063,36 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
 - **Nothing a tile draws escapes its own bounds.** A view may therefore lay
   tiles edge to edge, and bound the grid's paint to the area it owns, without a
   tile bleeding onto its neighbour.
+
+### 11.35 Chart
+
+A chart is the history instrument of the value/measured family: a read-only
+control, like Meter (§11.33) and Progress (§11.7), that plots one bounded
+oldest-to-newest series of readings as a line.
+
+- **A chart owns its box, and its readings map across the whole of it.** Full
+  capacity is the ceiling and nothing at all is the floor, both inset only by
+  the room the line's own weight needs. This is the whole reason it is not a
+  meter variant: a series confined to an instrument track's thickness cannot
+  rise more than a pixel or two whatever its values are, which is a graph that
+  cannot report its own data.
+- **It is a line, not a bar field.** Adjacent readings are joined, because the
+  shape between two samples is the trend the reader is there for. A quiet
+  filled area beneath the line gives it a body, so a low-amplitude series still
+  reads as a shape rather than a wandering hairline; the line stays the thing
+  being read.
+- The trace is tinted by the resource's own semantic rail colour, exactly as a
+  meter's track is (§11.33) — the resource's fixed identity, never the accent
+  and never a transient severity.
+- **An empty series plots nothing at all**, leaving the quiet plate: an honest
+  "nothing recorded yet". A fabricated flat line along the floor would read as
+  a measured idle. A single reading *is* a measurement, so it holds across the
+  box at its own height.
+- Readings run oldest to newest, left to right. The series is bounded and the
+  oldest readings are dropped first, so a chart is a window on a history and
+  never an unbounded log the render path must walk.
+- Out-of-range readings are clamped fail closed, and a box too small to plot in
+  degrades to nothing rather than drawing outside itself.
 
 #### Icon views and the space a line has left over
 
@@ -1298,7 +1330,7 @@ Switchboard should use the same general controls as every other TAIRiX surface.
 
 - Immediately below the title bar sits an always-visible band of resource `Meter` (§11.33) controls, one per resource in the model, spaced evenly across the band's width; the tab strip and every section below it shift down by exactly the band's measured height.
 - The band is an instrument, not a control: it takes no pointer or keyboard input and never emits a `SwitchboardAction`, so a press over it can never reach the tab strip, the section content, or the scrollbar it sits above.
-- Each resource's identity, reading, and Pressure Rail state are the same fact the Overview resource card below shows; there is no second copy of that data, only the meter's own measured value, pressure emphasis, and optional history sparkline layered on top.
+- Each resource's identity, reading, and Pressure Rail state are the same fact the Overview resource card below shows; there is no second copy of that data, only the column's own instrument layered on top — a Chart (§11.35) of the resource's recent history where there is one to plot, the Meter's own track (§11.33) where there is not, never both of the same number.
 - A resource with no wired measurement renders an honestly quiet meter (the unmeasured track, no fabricated fill), never a fabricated reading.
 - A model with no resources collapses the band to zero height; nothing below it moves.
 
@@ -1319,7 +1351,7 @@ Switchboard should use the same general controls as every other TAIRiX surface.
 ### Task list
 
 - `ListRow` for each task.
-- Activity sparkline as row content, not a custom state engine.
+- Activity history as a `Chart` (§11.35) in row content, not a custom state engine.
 - Resource pressure as `PressureRail` on the row.
 - Hung or recovery state as `SignalBead` and `RecoveryState`.
 - Row actions as standard `Button` or `IconButton` controls.

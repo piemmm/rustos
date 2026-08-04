@@ -22,7 +22,7 @@ use tairix_controls::{
     ActionVerdict, ActivityControl, ActivityMember, ActivityState, ActivitySummary, MeterValue,
     PressureAction, PressureCause, PressureControl, PressureKind, PressureState, ProgressValue,
     RecoveryControl, RecoveryItem, RecoveryState, ResourceSummary, Section, SwitchboardAction,
-    SwitchboardModel, TaskSummary, WindowControlKind, MAX_HISTORY_SAMPLES,
+    SwitchboardModel, TaskSummary, WindowControlKind, MAX_CHART_SAMPLES,
 };
 
 use crate::activities::Activities;
@@ -89,17 +89,17 @@ fn controllable(uid: u32, self_uid: Option<u32>, authority: &dyn CapabilityQuery
     self_uid == Some(uid) || authority.holds(CapabilityId::PROC_CONTROL)
 }
 
-/// The rolling meter state the panel's header band needs that no single
-/// [`Sample`] carries: the CPU sparkline's bounded history, and the
-/// pressure verdicts the tray summary's own derivation already reached for
-/// the same readings.
+/// The rolling instrument state the panel's header band needs that no single
+/// [`Sample`] carries: the CPU chart's bounded history, and the pressure
+/// verdicts the tray summary's own derivation already reached for the same
+/// readings.
 ///
-/// The history is held inline, capped at the meter's own
-/// [`MAX_HISTORY_SAMPLES`] window, so recording a sample never allocates
+/// The history is held inline, capped at the chart's own
+/// [`MAX_CHART_SAMPLES`] window, so recording a sample never allocates
 /// and a service that runs for weeks never grows an unbounded log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveMeters {
-    cpu_history: [u16; MAX_HISTORY_SAMPLES],
+    cpu_history: [u16; MAX_CHART_SAMPLES],
     cpu_len: usize,
     cpu_pressured: bool,
     memory_pressured: bool,
@@ -116,7 +116,7 @@ impl LiveMeters {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            cpu_history: [0; MAX_HISTORY_SAMPLES],
+            cpu_history: [0; MAX_CHART_SAMPLES],
             cpu_len: 0,
             cpu_pressured: false,
             memory_pressured: false,
@@ -127,17 +127,17 @@ impl LiveMeters {
     /// latched for the very same reading, so the panel's meter and the tray
     /// icon's rail can never disagree.
     ///
-    /// Only a measured CPU reading enters the sparkline: an interval the
-    /// service could not measure contributes no bar rather than a zero one,
-    /// which would draw as a genuine idle moment. The oldest bar is dropped
-    /// once the window is full.
+    /// Only a measured CPU reading enters the history: an interval the service
+    /// could not measure contributes no point rather than a zero one, which
+    /// would plot as a genuine idle moment. The oldest point is dropped once
+    /// the window is full.
     pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis) {
         self.cpu_pressured = hysteresis.cpu_pressured();
         self.memory_pressured = memory_pressured(sample);
         let Some(busy) = sample.cpu_busy_permille else {
             return;
         };
-        if self.cpu_len == MAX_HISTORY_SAMPLES {
+        if self.cpu_len == MAX_CHART_SAMPLES {
             self.cpu_history.copy_within(1.., 0);
             self.cpu_len -= 1;
         }
@@ -441,9 +441,9 @@ fn build_resources(sample: &Sample, meters: &LiveMeters) -> Vec<ResourceSummary>
             sample.memory_pressure.map(|memory| memory.used_permille),
             meters.memory_pressured(),
             // The memory gauge is refreshed on its own slower cadence and
-            // carried forward between samples, so a per-sample sparkline
-            // would draw one carried reading repeatedly as though every bar
-            // were a fresh measurement.
+            // carried forward between samples, so a per-sample history would
+            // plot one carried reading repeatedly as though every point were a
+            // fresh measurement.
             &[],
         ),
     ]

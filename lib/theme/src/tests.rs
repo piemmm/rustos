@@ -50,8 +50,7 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.danger, l.danger);
     assert_ne!(d.scroll_track, l.scroll_track);
     assert_ne!(d.scroll_thumb, l.scroll_thumb);
-    assert_ne!(d.frame_active, l.frame_active);
-    assert_ne!(d.frame_inactive, l.frame_inactive);
+    assert_ne!(d.frame, l.frame);
     for role in [
         SignalRole::Cpu,
         SignalRole::Memory,
@@ -230,6 +229,9 @@ fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
     // A slider's groove is the thinnest track: the thumb marks the value, so
     // the line only has to be visible.
     assert!(m.measured_thickness < m.progress_thickness);
+    // A chart is a box, not an instrument line: it must have room a track does
+    // not, or a trend cannot rise far enough to be read.
+    assert!(m.progress_thickness < m.chart_height);
     // A progress bar has no thumb, so it reads a little broader — but it stays
     // an instrument line, nowhere near a plate.
     assert!(m.progress_thickness < m.selector_extent);
@@ -500,8 +502,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             denied: Rgba::rgb(200, 90, 90),
             scroll_track: Rgba::rgb(35, 40, 48),
             scroll_thumb: Rgba::rgb(74, 81, 92),
-            frame_active: Rgba::rgb(80, 140, 255),
-            frame_inactive: Rgba::rgb(60, 60, 60),
+            frame: Rgba::rgb(60, 60, 60),
         },
         Metrics {
             window_corner_radius: 4,
@@ -519,6 +520,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             bead_size: 6,
             measured_thickness: 4,
             progress_thickness: 6,
+            chart_height: 40,
             selector_extent: 14,
             toggle_track_length: 24,
             title_bar_height: 24,

@@ -18,12 +18,15 @@
 //!   viewport, so the client can never receive furniture input (the frame's
 //!   hit map enforces this).
 //! - Immediately below the title bar sits an always-visible header resource
-//!   band: one [`Meter`] per [`ResourceSummary`] in the model, spaced evenly
-//!   across the band's width. It is a read-only instrument, not a control —
-//!   it takes no pointer or keyboard input and never produces a
-//!   [`SwitchboardAction`] — so a press over it can never be mistaken for a
-//!   press on the tab strip, the section content, or the scrollbar below it.
-//!   An empty resource list collapses the band to zero height rather than
+//!   band: one column per [`ResourceSummary`] in the model, spaced evenly
+//!   across the band's width. Each column is a [`Meter`]'s label and reading
+//!   over one instrument — a [`Chart`] of the resource's recent history where
+//!   there is one to plot, the meter's own track where there is not, never
+//!   both of the same number. They are read-only instruments, not controls —
+//!   they take no pointer or keyboard input and never produce a
+//!   [`SwitchboardAction`] — so a press over the band can never be mistaken
+//!   for a press on the tab strip, the section content, or the scrollbar below
+//!   it. An empty resource list collapses the band to zero height rather than
 //!   drawing an empty strip.
 //! - A [`Tabs`] strip selects one of the four [`Section`]s (Tasks, Jobs,
 //!   Recovery, Overview). The host chooses which one the panel opens on —
@@ -68,9 +71,10 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction, ButtonContent};
+use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::collection::{Card, CardAction, ListRow, Panel, PanelAction, RowAction};
 use crate::menu::{Menu, MenuAction, MenuItem};
-use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
+use crate::meter::{Meter, MeterValue};
 use crate::paint::{clamp_permille, paint_edge_wake, to_i32, RenderInvariant};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar};
@@ -217,11 +221,12 @@ pub struct RecoveryItem {
 ///
 /// One fact drives two renderings that must never disagree: the Overview
 /// section's resource [`Card`] (identity, numeric reading, and a semantic
-/// Pressure Rail) and the always-visible header band's [`Meter`] (the same
-/// identity and reading, the same rail tint, and — when the caller supplies
-/// one — a bounded history sparkline). [`ResourceSummary::new`] alone leaves
-/// the meter honestly quiet: an unmeasured value at no pressure, never a
-/// fabricated reading; a host that can measure the resource adds
+/// Pressure Rail) and the always-visible header band's column (the same
+/// identity and reading, the same rail tint, and one instrument — a [`Chart`]
+/// of the bounded history where the caller supplies one, the [`Meter`]'s own
+/// track where it does not). [`ResourceSummary::new`] alone leaves the meter
+/// honestly quiet: an unmeasured value at no pressure, never a fabricated
+/// reading; a host that can measure the resource adds
 /// [`with_meter`](Self::with_meter).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceSummary {
@@ -235,7 +240,7 @@ pub struct ResourceSummary {
     pub activity: ActivityState,
     meter: MeterValue,
     meter_pressure: PressureState,
-    history: [u16; MAX_HISTORY_SAMPLES],
+    history: [u16; MAX_CHART_SAMPLES],
     history_len: usize,
 }
 
@@ -261,18 +266,19 @@ impl ResourceSummary {
             activity,
             meter: MeterValue::Unmeasured,
             meter_pressure: PressureState::None,
-            history: [0; MAX_HISTORY_SAMPLES],
+            history: [0; MAX_CHART_SAMPLES],
             history_len: 0,
         }
     }
 
     /// This resource with the header band meter's measured `value`,
-    /// `pressure` emphasis, and an oldest-to-newest sparkline `samples`.
+    /// `pressure` emphasis, and an oldest-to-newest history `samples` for the
+    /// band's [`Chart`].
     ///
     /// Each sample is a permille fraction, clamped fail closed; the series
-    /// is capped to the most recent [`MAX_HISTORY_SAMPLES`], dropping the
+    /// is capped to the most recent [`MAX_CHART_SAMPLES`], dropping the
     /// oldest first, and held inline in this struct — never on the heap — so
-    /// building the model never allocates on the meter's account.
+    /// building the model never allocates on the instruments' account.
     #[must_use]
     pub fn with_meter(
         mut self,
@@ -284,7 +290,7 @@ impl ResourceSummary {
         self.meter_pressure = pressure;
         self.history_len = 0;
         for sample in samples {
-            if self.history_len == MAX_HISTORY_SAMPLES {
+            if self.history_len == MAX_CHART_SAMPLES {
                 self.history.copy_within(1.., 0);
                 self.history_len -= 1;
             }
@@ -695,6 +701,7 @@ struct RecoveryEntry {
 struct ResourceEntry {
     card: Card,
     meter: Meter,
+    chart: Chart,
 }
 
 /// One service rendered as a [`ListRow`] plus its action [`Button`].
@@ -1206,7 +1213,8 @@ impl Switchboard {
         }
     }
 
-    /// Build an Overview resource card and the header band's meter for the
+    /// Build an Overview resource card and the header band's two instruments
+    /// — the meter reading now, the chart of what it has been doing — for the
     /// same resource, from the one summary.
     fn build_resource(res: ResourceSummary) -> ResourceEntry {
         let card = Card::new(res.name.clone())
@@ -1216,10 +1224,11 @@ impl Switchboard {
                     .with_pressure(PressureState::Under(res.kind))
                     .with_activity(res.activity),
             );
+        let chart =
+            Chart::new(res.kind).with_samples(res.history[..res.history_len].iter().copied());
         let meter = Meter::new(res.name, res.reading, res.kind, res.meter)
-            .with_pressure(res.meter_pressure)
-            .with_samples(res.history[..res.history_len].iter().copied());
-        ResourceEntry { card, meter }
+            .with_pressure(res.meter_pressure);
+        ResourceEntry { card, meter, chart }
     }
 
     /// Build an Overview service row + action button.
@@ -1318,16 +1327,59 @@ impl Switchboard {
             .max(1)
     }
 
-    /// The header resource band's measured height: zero when there is
-    /// nothing to show — an empty resource list means no band at all —
-    /// otherwise the one row height every meter in the band shares
-    /// ([`Meter::measured_height`]).
-    fn band_height(scale: Scale, theme: &Theme, font: BitmapFont, has_resources: bool) -> u32 {
-        if has_resources {
-            Meter::measured_height(scale, theme, font)
-        } else {
-            0
+    /// The header resource band's measured height: zero when there is nothing
+    /// to show — an empty resource list means no band at all — otherwise the
+    /// one column height every resource in the band shares.
+    ///
+    /// A column is the [`Meter`]'s label and reading over *one* instrument
+    /// slot: the theme's chart box when any resource has a history to plot,
+    /// otherwise just the meter's own track. Only one instrument reports a
+    /// given resource, so a column never carries both a track and a graph of
+    /// the same number.
+    fn band_height(
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        resources: &[ResourceEntry],
+    ) -> u32 {
+        if resources.is_empty() {
+            return 0;
         }
+        if resources.iter().all(|entry| entry.chart.is_empty()) {
+            return Meter::measured_height(scale, theme, font);
+        }
+        Meter::reading_height(scale, theme, font)
+            .saturating_add(scale.scale_length(theme.metrics().chart_height))
+    }
+
+    /// Split one band column into the rectangle its [`Meter`] draws in and the
+    /// instrument slot beneath the reading.
+    ///
+    /// The meter is handed the whole column when it owns the slot — it draws
+    /// its label, its reading, and its track in the space left over — and only
+    /// the text height when a [`Chart`] owns the slot instead, so the meter's
+    /// own track cannot draw under a graph of the same number.
+    fn band_column_split(
+        column: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        plotted: bool,
+    ) -> (Rect, Option<Rect>) {
+        if !plotted {
+            return (column, None);
+        }
+        let reading_h = Meter::reading_height(scale, theme, font).min(column.height);
+        let slot_h = column.height.saturating_sub(reading_h);
+        let reading = Rect::new(column.left(), column.top(), column.width, reading_h);
+        if slot_h == 0 {
+            return (reading, None);
+        }
+        let top = column.top() + to_i32(reading_h);
+        (
+            reading,
+            Some(Rect::new(column.left(), top, column.width, slot_h)),
+        )
     }
 
     /// The rectangle for the meter at `index` of `count`, evenly spaced
@@ -1418,8 +1470,7 @@ impl Switchboard {
         let frame = self.frame.layout(bounds, scale, theme);
         let client = frame.client;
 
-        let band_h =
-            Self::band_height(scale, theme, font, !self.resources.is_empty()).min(client.height);
+        let band_h = Self::band_height(scale, theme, font, &self.resources).min(client.height);
         let band = Rect::new(client.left(), client.top(), client.width, band_h);
 
         let below_band_top = client.top() + to_i32(band_h);
@@ -1752,10 +1803,13 @@ impl Switchboard {
         }
     }
 
-    /// Paint the always-visible header resource band: every resource's
-    /// meter, evenly spaced across the band's width through
-    /// [`Switchboard::band_meter_rect`]. A zero-height `band` (no resources)
-    /// draws nothing.
+    /// Paint the always-visible header resource band: every resource's meter
+    /// reading over its one instrument, evenly spaced across the band's width
+    /// through [`Switchboard::band_meter_rect`]. A zero-height `band` (no
+    /// resources) draws nothing.
+    ///
+    /// A resource with no history recorded yet keeps its meter's track, so the
+    /// band never shows a graph box with no graph in it.
     fn render_band(
         &self,
         surface: &mut Surface,
@@ -1766,8 +1820,13 @@ impl Switchboard {
     ) {
         let count = self.resources.len();
         for (i, entry) in self.resources.iter().enumerate() {
-            let rect = Self::band_meter_rect(band, i, count, scale, theme);
-            entry.meter.render(surface, rect, scale, theme, font);
+            let column = Self::band_meter_rect(band, i, count, scale, theme);
+            let (reading, slot) =
+                Self::band_column_split(column, scale, theme, font, !entry.chart.is_empty());
+            entry.meter.render(surface, reading, scale, theme, font);
+            if let Some(slot) = slot {
+                entry.chart.render(surface, slot, scale, theme);
+            }
         }
     }
 

@@ -31,4 +31,4 @@ mod tests;
 
 pub use color::{div255, Color, Pixel};
 pub use round::round_rect_coverage;
-pub use surface::Surface;
+pub use surface::{Surface, SUBPIXEL};

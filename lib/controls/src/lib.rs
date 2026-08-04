@@ -81,14 +81,19 @@
 //! failed work, driven only by the state its owner sets — it runs no idle loop
 //! and renders an indeterminate trace statically under reduced motion.
 //!
-//! The [`meter`] module is the resource-instrument family — [`Meter`]. Like
-//! [`Progress`], it is a read-only measured control with no pointer or
-//! keyboard handling; unlike [`Progress`], its track is always tinted by the
-//! resource it represents ([`PressureKind`]) rather than the plain accent, and
-//! it may carry a bounded oldest-to-newest sparkline of prior readings. The
-//! owner's [`PressureState`] still drives the shared Pressure Rail emphasis
-//! exactly as it does for [`Card`] — the resource tint is the meter's fixed
-//! identity, the pressure state is its transient severity.
+//! The [`meter`] and [`chart`] modules are the resource-instrument family —
+//! [`Meter`] and [`Chart`]. Like [`Progress`], both are read-only measured
+//! controls with no pointer or keyboard handling, and unlike [`Progress`] both
+//! are always tinted by the resource they represent ([`PressureKind`]) rather
+//! than the plain accent. They answer different questions: a meter says how
+//! much of a resource is in use *now* and draws one thin proportional track,
+//! while a chart says what it has been *doing* and plots a bounded
+//! oldest-to-newest series as a line across the whole box it is given — a
+//! trend needs vertical room, and a series confined to an instrument groove
+//! cannot rise more than a pixel or two whatever its values are. The owner's
+//! [`PressureState`] still drives the shared Pressure Rail emphasis on a meter
+//! exactly as it does for [`Card`] — the resource tint is the instrument's
+//! fixed identity, the pressure state is its transient severity.
 //!
 //! The [`text`] module is the text-entry family — [`TextField`] and
 //! [`SearchField`]. Both are single-line entries on a quiet Alloy Plate with a
@@ -173,6 +178,7 @@
 extern crate alloc;
 
 pub mod button;
+pub mod chart;
 pub mod collection;
 pub mod combo;
 pub mod decision;
@@ -192,6 +198,7 @@ pub mod value;
 pub mod window;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
+pub use chart::{Chart, MAX_CHART_SAMPLES};
 pub use collection::{
     Card, CardAction, CellAlign, IconTile, ListRow, Panel, PanelAction, PanelEdge, RowAction,
     TableCell, TableRow,
@@ -199,7 +206,7 @@ pub use collection::{
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use menu::{Menu, MenuAction, MenuItem};
-pub use meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
+pub use meter::{Meter, MeterValue};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
@@ -233,6 +240,8 @@ pub use window::{
 
 #[cfg(test)]
 mod button_tests;
+#[cfg(test)]
+mod chart_tests;
 #[cfg(test)]
 mod collection_tests;
 #[cfg(test)]

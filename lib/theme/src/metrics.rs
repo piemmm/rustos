@@ -84,6 +84,16 @@ pub struct Metrics {
     /// glance across a long run without a thumb to mark it. It stays an
     /// instrument line well under [`control_height`](Self::control_height).
     pub progress_thickness: u32,
+    /// The height of a history chart's plot box, in logical pixels.
+    ///
+    /// A chart is the one measured instrument that is a *box* rather than a
+    /// line: a trend has to rise and fall to be read, so it needs vertical
+    /// room that a
+    /// [`progress_thickness`](Self::progress_thickness) track cannot give it.
+    /// It is therefore several times that breadth — a series confined to an
+    /// instrument groove cannot rise more than a pixel or two whatever its
+    /// values are, which is a graph that cannot report its own data.
+    pub chart_height: u32,
     /// The square extent of a boolean selector's glyph — a checkbox box, a
     /// radio circle — and the breadth of a toggle's track, in logical pixels.
     ///

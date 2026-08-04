@@ -84,7 +84,7 @@ control, costs no render and no present.
 | Pressure | one cause card per resource the tray's own latches flag, naming the measured culprit (busiest task for CPU, largest mapped space for memory) with `Ready`/`DisabledByState`/`DeniedByAuthority` verdicts on each action (`src/model.rs::build_pressure`) |
 | Activities | this service's live, session-lifetime task groupings (`src/activities.rs`), members joined against the current sample |
 | Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
-| Overview | the CPU and memory readings, the CPU meter's sparkline fed from a bounded rolling history, each meter carrying the pressure `derive_summary` itself latched |
+| Overview | the CPU and memory readings, the CPU column's line graph fed from a bounded rolling history, each meter carrying the pressure `derive_summary` itself latched |
 | Jobs | always empty — see below |
 
 An **activity** is a named grouping of live processes for the current

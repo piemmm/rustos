@@ -261,9 +261,10 @@ window-manager furniture (`window` — `WindowFrame`/`TitleBar`/`WindowControl`/
 
 The `switchboard` module assembles **Switchboard** (design spec §17) purely
 from the shared controls above — the window furniture, a header band of `Meter`
-instruments, a `Tabs` strip, `ListRow`/`Card`/`Panel`/`Button` content, and one
-vertical `ScrollBar` over the `scroll` engine — with no application-painted
-chrome and no second copy of any control's behaviour. `Switchboard::new` turns
+and `Chart` instruments, a `Tabs` strip, `ListRow`/`Card`/`Panel`/`Button`
+content, and one vertical `ScrollBar` over the `scroll` engine — with no
+application-painted chrome and no second copy of any control's behaviour.
+`Switchboard::new` turns
 a typed `SwitchboardModel`
 (`TaskSummary`/`JobSummary`/`PressureCause`/`ActivitySummary`/`RecoveryItem`/
 `ResourceSummary`/`ServiceSummary`/`SystemAction`) into controls, and
@@ -282,11 +283,14 @@ the user chose — a scrolled list is never snatched back to the top by the
 next sample — and drops the row selection, hover, any open popup, and any
 half-finished press that named a row the refresh may have replaced (an
 in-flight rename survives only while an activity with the same stable id
-remains). The always-visible resource band draws one meter per
-`ResourceSummary` — the same fact the Overview resource cards show — and takes
-no input, so a press over it reaches nothing beneath it. Every interaction
-returns a typed `SwitchboardAction` for the hosting service to authorise, and
-the frame hit map (`furniture_at`) keeps the client viewport strictly separate
+remains). The always-visible resource band draws one column per
+`ResourceSummary` — the same fact the Overview resource cards show — each the
+meter's label and reading over exactly one instrument: a `Chart` of the
+resource's recent history where there is one to plot, the meter's own track
+where there is not, never both of the same number. The band takes no input, so
+a press over it reaches nothing beneath it. Every interaction returns a typed
+`SwitchboardAction` for the hosting service to authorise, and the frame hit
+map (`furniture_at`) keeps the client viewport strictly separate
 from the furniture. A denied action fails closed and renders distinctly from a
 disabled one. It is the proof that no TAIRiX surface needs custom chrome.
 

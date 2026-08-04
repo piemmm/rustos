@@ -3,18 +3,17 @@
 //! These cover the measure/layout entry point at unit and non-unit scale,
 //! the honest unmeasured track (never a fabricated fill), each
 //! [`PressureKind`]'s own rail colour, the [`PressureState`] emphasis
-//! outline, dark/light/high-contrast coverage, reduced motion, the bounded
-//! sparkline history (zero, one, many, saturated, and flat-zero series), and
-//! fail-closed behaviour when a meter is drawn smaller than its content.
-
-use alloc::vec::Vec;
+//! outline, dark/light/high-contrast coverage, reduced motion, the
+//! proportional fill, and fail-closed behaviour when a meter is drawn smaller
+//! than its content. A resource's *history* is a [`Chart`](crate::Chart), and
+//! its own tests live beside it.
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
-use crate::meter::{Meter, MeterValue, MAX_HISTORY_SAMPLES};
+use crate::meter::{Meter, MeterValue};
 use crate::state::{PressureKind, PressureState, ProgressValue};
 use crate::testkit::high_contrast;
 
@@ -30,12 +29,6 @@ fn premul(rgba: tairix_theme::Rgba) -> Pixel {
 
 fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
 /// A theme identical to [`Theme::dark`] but with reduced motion.
@@ -124,18 +117,6 @@ fn unmeasured_meter_shows_only_the_quiet_track() {
     ));
 }
 
-#[test]
-fn unmeasured_meter_ignores_any_supplied_samples() {
-    let theme = Theme::dark();
-    let meter = Meter::new("NET", "—", PressureKind::Network, MeterValue::Unmeasured)
-        .with_samples([1000, 1000, 1000]);
-    let surface = meter_surface(&meter, &theme);
-    assert!(!has_pixel(
-        &surface,
-        premul(theme.palette().network_activity)
-    ));
-}
-
 // --- Each PressureKind resolves its own rail colour ----------------------
 
 #[test]
@@ -208,8 +189,7 @@ fn high_contrast_changes_the_meter_rendering() {
 
 #[test]
 fn reduced_motion_does_not_change_a_static_meter() {
-    let meter = Meter::new("NET", "1.3 MB/s", PressureKind::Network, measured(400))
-        .with_samples([100, 300, 200, 900, 400]);
+    let meter = Meter::new("NET", "1.3 MB/s", PressureKind::Network, measured(400));
     let normal = meter_surface(&meter, &Theme::dark());
     let reduced = meter_surface(&meter, &reduced_motion());
     // Reduced motion changes only the theme's motion policy; a meter has no
@@ -218,10 +198,10 @@ fn reduced_motion_does_not_change_a_static_meter() {
     assert_eq!(normal.pixels(), reduced.pixels());
 }
 
-// --- Sparkline history -----------------------------------------------------
+// --- The proportional fill -------------------------------------------------
 
 #[test]
-fn no_samples_falls_back_to_the_plain_proportional_fill() {
+fn a_higher_reading_fills_further_along_the_track() {
     let theme = Theme::dark();
     let low = Meter::new("CPU", "20%", PressureKind::Cpu, measured(200));
     let high = Meter::new("CPU", "90%", PressureKind::Cpu, measured(900));
@@ -231,114 +211,12 @@ fn no_samples_falls_back_to_the_plain_proportional_fill() {
     assert!(high_extent > low_extent, "a higher value must fill further");
 }
 
-#[test]
-fn single_sample_draws_a_visible_point() {
-    let theme = Theme::dark();
-    let meter = Meter::new("CPU", "0%", PressureKind::Cpu, measured(0)).with_samples([0]);
-    let surface = meter_surface(&meter, &theme);
-    assert!(
-        has_pixel(&surface, premul(theme.palette().cpu_pressure)),
-        "a lone sample must still draw a point, even at value zero"
-    );
-}
-
-#[test]
-fn zero_samples_draws_no_sparkline() {
-    let theme = Theme::dark();
-    let with_empty_history = Meter::new("CPU", "50%", PressureKind::Cpu, measured(500))
-        .with_samples(core::iter::empty());
-    let plain = Meter::new("CPU", "50%", PressureKind::Cpu, measured(500));
-    assert_eq!(
-        meter_surface(&with_empty_history, &theme).pixels(),
-        meter_surface(&plain, &theme).pixels(),
-        "an empty history must render exactly like no history at all"
-    );
-}
-
-#[test]
-fn saturated_series_fills_the_full_track_height() {
-    let theme = Theme::dark();
-    let meter = Meter::new("CPU", "100%", PressureKind::Cpu, measured(1000))
-        .with_samples([1000, 1000, 1000, 1000]);
-    let surface = meter_surface(&meter, &theme);
-    let cpu = premul(theme.palette().cpu_pressure);
-    // A fully saturated bar reaches the very top row of the track band.
-    let top = surface.height() - crate::paint::progress_thickness(&theme, Scale::ONE);
-    assert!(region_has(
-        &surface,
-        (0, surface.width()),
-        (top, top + 1),
-        cpu
-    ));
-}
-
-#[test]
-fn flat_zero_series_still_draws_minimal_points() {
-    let theme = Theme::dark();
-    let meter = Meter::new("CPU", "0%", PressureKind::Cpu, measured(0)).with_samples([0, 0, 0, 0]);
-    let surface = meter_surface(&meter, &theme);
-    assert!(
-        has_pixel(&surface, premul(theme.palette().cpu_pressure)),
-        "a flat zero-range series must still draw its minimal bars"
-    );
-}
-
-#[test]
-fn samples_render_oldest_to_newest_left_to_right() {
-    let theme = Theme::dark();
-    let meter = Meter::new("CPU", "—", PressureKind::Cpu, measured(1000)).with_samples([0, 1000]);
-    let surface = meter_surface(&meter, &theme);
-    let cpu = premul(theme.palette().cpu_pressure);
-    let band = crate::paint::progress_thickness(&theme, Scale::ONE);
-    let top = surface.height() - band;
-    let mid = surface.width() / 2;
-    // Only the newest (rightmost) bar reaches the very top of the band.
-    assert!(!region_has(&surface, (0, mid), (top, top + 1), cpu));
-    assert!(region_has(
-        &surface,
-        (mid, surface.width()),
-        (top, top + 1),
-        cpu
-    ));
-}
-
-#[test]
-fn sample_history_is_capped_and_keeps_the_most_recent() {
-    let theme = Theme::dark();
-    let long: Vec<u16> = (0..MAX_HISTORY_SAMPLES + 10)
-        .map(|i| u16::try_from(i).expect("test index fits in u16"))
-        .collect();
-    let capped = Meter::new("CPU", "—", PressureKind::Cpu, measured(1000)).with_samples(long);
-    // Rendering the over-long history must not panic and must render
-    // identically to supplying only its most recent, already-bounded tail.
-    let tail: Vec<u16> = (10..MAX_HISTORY_SAMPLES + 10)
-        .map(|i| u16::try_from(i).expect("test index fits in u16"))
-        .collect();
-    let bounded = Meter::new("CPU", "—", PressureKind::Cpu, measured(1000)).with_samples(tail);
-    assert_eq!(
-        meter_surface(&capped, &theme).pixels(),
-        meter_surface(&bounded, &theme).pixels()
-    );
-}
-
-#[test]
-fn sample_values_are_clamped_fail_closed() {
-    let theme = Theme::dark();
-    let over = Meter::new("CPU", "—", PressureKind::Cpu, measured(1000)).with_samples([5000]);
-    let clamped = Meter::new("CPU", "—", PressureKind::Cpu, measured(1000)).with_samples([1000]);
-    assert_eq!(
-        meter_surface(&over, &theme).pixels(),
-        meter_surface(&clamped, &theme).pixels()
-    );
-}
-
 // --- Fail-closed clipping --------------------------------------------------
 
 #[test]
 fn a_meter_narrower_and_shorter_than_its_content_still_renders() {
     let theme = Theme::dark();
-    let meter =
-        Meter::new("CPU", "62%", PressureKind::Cpu, measured(620)).with_samples([100, 900, 500]);
+    let meter = Meter::new("CPU", "62%", PressureKind::Cpu, measured(620));
     let mut surface = Surface::new(1, 1).expect("surface");
     // Must not panic, and must not report any pixel outside the 1x1 bound —
     // there is nowhere else for it to have drawn.

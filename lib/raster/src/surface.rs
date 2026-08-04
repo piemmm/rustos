@@ -332,9 +332,92 @@ impl Surface {
                 )
             })
             .collect();
+        self.fill_sampled(&scaled, color);
+    }
 
+    /// Fill an anti-aliased polygon whose vertices are already in *device*
+    /// sub-pixel units — [`SUBPIXEL`] per pixel, measured from this surface's
+    /// own origin — instead of on a design grid stretched across the surface.
+    ///
+    /// This is how chrome that must stay sharp at a small pixel size is drawn.
+    /// A mark only a few pixels across has no crisp rendering if its geometry
+    /// works out fractional: area coverage spreads a 1.4-pixel stroke over two
+    /// columns at partial alpha and it reads as a grey smear rather than a
+    /// line. A caller that has grid-fitted its shape to whole pixels multiplies
+    /// by [`SUBPIXEL`], and every axis-aligned edge then falls exactly on a
+    /// pixel boundary — fully inside or fully outside every sample, so no
+    /// fringe is produced at all — while a diagonal keeps sub-pixel placement
+    /// and stays smooth.
+    ///
+    /// Unlike [`fill_polygon`](Self::fill_polygon) the shape is *placed*, not
+    /// stretched: it is drawn where its coordinates say, so a glyph needs no
+    /// square scratch surface and blit to be positioned.
+    pub fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color) {
+        if polygon.len() < 3 {
+            return;
+        }
+        let scaled: Vec<(i64, i64)> = polygon
+            .iter()
+            .map(|&(x, y)| (i64::from(x), i64::from(y)))
+            .collect();
+        self.fill_sampled(&scaled, color);
+    }
+
+    /// Stroke the open polyline through `points` — vertices in device
+    /// [`SUBPIXEL`] units — `weight` sub-pixel units wide.
+    ///
+    /// This is the one stroked-line path the desktop shares: a furniture
+    /// glyph's diagonal and a history graph's trace are the same primitive at
+    /// different scales, so neither carries its own stroke geometry.
+    ///
+    /// Each segment is filled as a quad offset by half the weight along *that
+    /// segment's own* perpendicular, so a rising and a falling segment both
+    /// draw and every segment keeps its full width whatever its slope — a fixed
+    /// vertical offset would thin a steep segment away to nothing. Consecutive
+    /// quads overlap at the vertex they share, which is what joins them:
+    /// compositing an opaque source twice yields the same pixel, so a joint
+    /// neither seams nor darkens.
+    ///
+    /// Fewer than two points is not a line, and a zero or negative weight is
+    /// not a stroke; both draw nothing rather than guessing.
+    pub fn stroke_polyline(&mut self, points: &[(i32, i32)], weight: i32, color: Color) {
+        if points.len() < 2 || weight <= 0 {
+            return;
+        }
+        let half = weight / 2;
+        for pair in points.windows(2) {
+            let (ax, ay) = pair[0];
+            let (bx, by) = pair[1];
+            let dx = bx.saturating_sub(ax);
+            let dy = by.saturating_sub(ay);
+            let len = isqrt(dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)));
+            if len == 0 {
+                continue;
+            }
+            // Perpendicular to (dx, dy) is (-dy, dx), scaled to the half
+            // weight. Rounding, not truncating, is what keeps a hairline at its
+            // full width instead of fading it toward nothing.
+            let ox = -perpendicular(dy, half, len);
+            let oy = perpendicular(dx, half, len);
+            let quad = [
+                (ax + ox, ay + oy),
+                (ax - ox, ay - oy),
+                (bx - ox, by - oy),
+                (bx + ox, by + oy),
+            ];
+            self.fill_polygon_subpixel(&quad, color);
+        }
+    }
+
+    /// Scan-convert `polygon`, whose vertices are in sample sub-units, and
+    /// composite `color` scaled by each pixel's coverage.
+    ///
+    /// The one scan converter both polygon entry points share: design-grid
+    /// artwork and grid-fitted device-space chrome differ only in how their
+    /// vertices reach these units.
+    fn fill_sampled(&mut self, scaled: &[(i64, i64)], color: Color) {
         let Some((x_start, x_end, y_start, y_end)) =
-            polygon_pixel_bounds(&scaled, self.width, self.height)
+            polygon_pixel_bounds(scaled, self.width, self.height)
         else {
             return;
         };
@@ -347,7 +430,7 @@ impl Surface {
                 continue;
             };
             for (px, dst) in (first..).zip(row.iter_mut()) {
-                let coverage = coverage_at(&scaled, px, py);
+                let coverage = coverage_at(scaled, px, py);
                 if coverage == 0 {
                     continue;
                 }
@@ -498,10 +581,50 @@ impl Surface {
     }
 }
 
-/// Sub-pixel samples per axis for anti-aliased polygon fills. A 4×4 grid
-/// gives 17 distinct coverage levels per pixel, enough for smooth edges
-/// without the cost of a larger kernel.
-pub const SUPERSAMPLE: u32 = 4;
+/// Sub-pixel units per pixel in a device-space polygon
+/// ([`Surface::fill_polygon_subpixel`]): the finest placement the scan
+/// converter can actually resolve.
+///
+/// A vertex at a whole multiple of this is a pixel *boundary*. Every sample
+/// centre sits at an odd sub-unit offset, so such an edge is either inside or
+/// outside all of them and produces no anti-aliased fringe: a shape grid-fitted
+/// to whole pixels draws exactly as sharply as a plain span fill, while
+/// anything between the boundaries still resolves to eighth-pixel accuracy.
+pub const SUBPIXEL: i32 = 8;
+
+/// Sub-pixel samples per axis for anti-aliased polygon fills: half of
+/// [`SUBPIXEL`], so a sample centre lands between the sub-units rather than on
+/// one. A 4×4 grid gives 17 distinct coverage levels per pixel, enough for
+/// smooth edges without the cost of a larger kernel.
+pub const SUPERSAMPLE: u32 = SUBPIXEL.unsigned_abs() / 2;
+
+/// One component of a stroke's half-width offset: `component * half / len`,
+/// rounded to the nearest sub-unit and keeping its sign.
+fn perpendicular(component: i32, half: i32, len: i32) -> i32 {
+    let scaled = component.saturating_mul(half);
+    let rounded = (scaled.saturating_abs().saturating_add(len / 2)) / len;
+    if scaled < 0 {
+        -rounded
+    } else {
+        rounded
+    }
+}
+
+/// The floor of the square root of a non-negative `n`, by Newton's method. A
+/// first-party helper because the workspace minimum Rust version predates
+/// `i32::isqrt`.
+fn isqrt(n: i32) -> i32 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut prev = 0;
+    while x != prev {
+        prev = x;
+        x = i32::midpoint(x, n / x);
+    }
+    x
+}
 
 /// The source indices along one axis whose destination index `origin + i` falls
 /// inside the admitted window `[lo, hi)`, intersected with the source's own

@@ -9,7 +9,7 @@ use tairix_abi::{ProcId, SchedPriority, Signal};
 use tairix_controls::{
     ActionVerdict, ActivityControl, ActivityState, MeterValue, PressureControl, PressureKind,
     PressureState, ProgressValue, RecoveryControl, ResourceSummary, Section, SwitchboardAction,
-    MAX_HISTORY_SAMPLES,
+    MAX_CHART_SAMPLES,
 };
 
 use super::{apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, LiveMeters};
@@ -322,7 +322,7 @@ fn the_memory_meter_carries_the_band_the_sampler_read() {
 }
 
 #[test]
-fn the_cpu_sparkline_records_every_measured_sample_in_order() {
+fn the_cpu_history_records_every_measured_sample_in_order() {
     let samples: Vec<Sample> = [100u16, 200, 300]
         .iter()
         .map(|busy| Sample {
@@ -335,7 +335,7 @@ fn the_cpu_sparkline_records_every_measured_sample_in_order() {
 }
 
 #[test]
-fn an_unmeasurable_interval_contributes_no_sparkline_bar() {
+fn an_unmeasurable_interval_contributes_no_history_point() {
     let samples = alloc::vec![
         Sample {
             cpu_busy_permille: Some(120),
@@ -352,17 +352,17 @@ fn an_unmeasurable_interval_contributes_no_sparkline_bar() {
 }
 
 #[test]
-fn the_cpu_sparkline_is_bounded_and_drops_the_oldest_bar() {
-    let samples: Vec<Sample> = (0..MAX_HISTORY_SAMPLES + 3)
+fn the_cpu_history_is_bounded_and_drops_the_oldest_reading() {
+    let samples: Vec<Sample> = (0..MAX_CHART_SAMPLES + 3)
         .map(|index| Sample {
             cpu_busy_permille: Some(u16::try_from(index).expect("small index")),
             ..Sample::default()
         })
         .collect();
     let meters = meters_over(&samples);
-    assert_eq!(meters.cpu_history().len(), MAX_HISTORY_SAMPLES);
+    assert_eq!(meters.cpu_history().len(), MAX_CHART_SAMPLES);
     assert_eq!(meters.cpu_history().first(), Some(&3));
-    let last = u16::try_from(MAX_HISTORY_SAMPLES + 2).expect("small index");
+    let last = u16::try_from(MAX_CHART_SAMPLES + 2).expect("small index");
     assert_eq!(meters.cpu_history().last(), Some(&last));
 }
 
