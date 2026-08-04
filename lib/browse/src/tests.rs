@@ -1556,14 +1556,14 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
 
 #[test]
 fn the_grid_view_renders_and_hit_tests_the_first_tile() {
-    use crate::render::entry_index_at;
+    use crate::render::{entry_index_at, selection_rect};
     use tairix_geometry::Point;
 
     let font = tairix_font::BitmapFont::inconsolata();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
-    let header = crate::render::chrome_height(font, &theme);
+    browser.select(0).expect("the first entry");
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
     let surface = crate::render(
@@ -1577,16 +1577,28 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     .expect("grid surface");
     assert_eq!(surface.width(), 400);
 
-    // A click just inside the first tile (past the header) resolves to entry 0.
+    // The row shares its leftover width out between its tiles, so the first
+    // tile is asked where it is rather than assumed to hug the window's edge.
+    let first = selection_rect(&browser, font, &theme, vp).expect("the first tile is on screen");
+    assert!(
+        first.left() > 0,
+        "the shared-out width reaches the row's leading end: {first:?}"
+    );
+    // A click just inside that tile resolves to entry 0.
     assert_eq!(
         entry_index_at(
             &browser,
             font,
             &theme,
             vp,
-            Point::new(4, i32::try_from(header + 4).unwrap())
+            Point::new(first.left() + 1, first.top() + 1)
         ),
         Some(0)
+    );
+    // The margin before it belongs to no entry.
+    assert_eq!(
+        entry_index_at(&browser, font, &theme, vp, Point::new(0, first.top() + 1)),
+        None
     );
     // A click on the header resolves to nothing.
     assert_eq!(

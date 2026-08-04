@@ -122,16 +122,19 @@
 //! emits a typed [`ComboAction`].
 //!
 //! The [`collection`] module is the collection controls — [`ListRow`],
-//! [`TableRow`], [`TableCell`], [`Card`], and [`Panel`]. These are the surfaces
-//! that group other state and actions: a row is a hoverable, selectable,
-//! focusable, activatable control drawn from one shared row chrome (background
-//! tint, leading selection/pressure rails, a bottom activity Heat Seam, a
-//! trailing Signal Bead, and a focus ring); a table keeps its columns aligned
-//! while a row's state changes; a card carries its dominant state, progress, and
-//! a count/alert on three edges with footer action [`Button`]s; and a panel is a
-//! stable-layout container with a header, grouped actions, a content region, and
-//! an anchor notch back to its invoker. Each emits a typed action ([`RowAction`],
-//! [`CardAction`], [`PanelAction`]); the owner enforces authority.
+//! [`TableRow`], [`TableCell`], [`IconTile`], [`Card`], and [`Panel`]. These are
+//! the surfaces that group other state and actions: a row is a hoverable,
+//! selectable, focusable, activatable control drawn from one shared row chrome
+//! (background tint, leading selection/pressure rails, a bottom activity Heat
+//! Seam, a trailing Signal Bead, and a focus ring); a table keeps its columns
+//! aligned while a row's state changes; an icon tile is one item of an icon view
+//! — a picture over its name, with no plate of its own, so a folder reads as a
+//! field of pictures and only state paints a panel behind one; a card carries
+//! its dominant state, progress, and a count/alert on three edges with footer
+//! action [`Button`]s; and a panel is a stable-layout container with a header,
+//! grouped actions, a content region, and an anchor notch back to its invoker.
+//! Each interactive one emits a typed action ([`RowAction`], [`CardAction`],
+//! [`PanelAction`]); the owner enforces authority.
 //!
 //! The [`window`] module is the window-manager furniture family —
 //! [`WindowFrame`], [`TitleBar`], the compact [`WindowControl`] command
@@ -190,8 +193,8 @@ pub mod window;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use collection::{
-    Card, CardAction, CellAlign, ListRow, Panel, PanelAction, PanelEdge, RowAction, TableCell,
-    TableRow,
+    Card, CardAction, CellAlign, IconTile, ListRow, Panel, PanelAction, PanelEdge, RowAction,
+    TableCell, TableRow,
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};

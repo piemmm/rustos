@@ -144,10 +144,10 @@ bar-seated by construction; every other family is panel-seated.
 
 ## Owner-supplied icon artwork
 
-A `shell::TaskbarItem`, a `collection::Card` tile, a `collection::ListRow`, and
+A `shell::TaskbarItem`, a `collection::IconTile`, a `collection::ListRow`, and
 a `button::IconButton` each draw an icon whose artwork their owner may already
 hold rasterised (a desktop icon cache, an app bundle's own icon). They share one
-seam: `icon_side(bounds, scale, theme, font)` reports the exact pixel side the
+seam: `icon_side(bounds, scale, theme, …)` reports the exact pixel side the
 icon slot will be drawn into (`0` when the geometry leaves room for none), so the
 owner can ask its cache for artwork at precisely that size; `render(…,
 artwork: Option<&Surface>)` then blits that artwork centred in the slot, or
@@ -250,7 +250,7 @@ orientation at the edge.
 The remaining drawn families are also complete: the value controls
 (`value` — `Slider`/`Progress`), the text entries (`text` — `TextField`/
 `SearchField`), the collection controls (`collection` — `ListRow`/`TableRow`/
-`TableCell`/`Card`/`Panel`), the scrollbar renderer (`scrollbar` — the one
+`TableCell`/`IconTile`/`Card`/`Panel`), the scrollbar renderer (`scrollbar` — the one
 orientation-parameterized `ScrollBar` over the `scroll` engine), the
 window-manager furniture (`window` — `WindowFrame`/`TitleBar`/`WindowControl`/
 `ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —

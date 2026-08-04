@@ -177,7 +177,7 @@ impl DemoWidget {
                 let columns = equal_columns(w.cells().len(), rect.width);
                 w.render(surface, rect, scale, theme, font, &columns);
             }
-            DemoWidget::Card(w) => w.render(surface, rect, scale, theme, font, None),
+            DemoWidget::Card(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Panel(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme, font),
             DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme, font),

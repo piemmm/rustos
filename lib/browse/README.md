@@ -403,6 +403,18 @@ can never diverge in navigation semantics, listing policy, or look.
   the selection on screen, so the renderer and the pointer hit-test can
   never disagree. `ViewMode` selects the view; toggling preserves the
   selection and re-reads nothing.
+  Only whole tiles are ever laid out (`visible_lines` lines of
+  `cells_per_line` tiles), so no tile is cut by an edge. `GridFill` is the
+  grid's policy for the space a line has left over, and it is a property of
+  the *view*: a **resizable** grid takes `Spread`, sharing the leftover width
+  out along the row so the gaps widen by equal amounts and the two end margins
+  match — only the space between the tiles moves, a tile never stretches —
+  while a **fixed** field, the desktop's icon column, takes `FixedPitch` and
+  keeps one tile-plus-gap pitch from the edge its icons hug so an icon does
+  not drift when the area's extent changes. The pitch is the floor under
+  either policy, so a line that fits its tiles exactly is laid out
+  identically, and the axis a grid *scrolls* along is never spread: the space
+  past the last whole line belongs to the next line, one scroll away.
 - **Column formatting** (`format`): `format_size` (binary units — `1.5
   MiB`), `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
   epoch so a stampless file is never given a fabricated date), and
@@ -509,16 +521,20 @@ can never diverge in navigation semantics, listing policy, or look.
   a clickable breadcrumb trail (ancestors in the accent colour, the current
   directory drawn solid and inert) over the `breadcrumb` placement, list
   entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
-  grid entries as shared `Card` tiles, each tile carrying the icon of its
-  registry-classified type above the label — so the file manager and the
-  trusted picker render one coherent themed surface, the selected item carrying
-  the shared selection state. `render`'s trailing `artwork: &mut dyn
-  tairix_icon::IconArtwork` is the draw-site icon lookup: for each grid tile it
-  is asked for the classified `IconKind` at exactly the side `Card::icon_side`
-  reserves, and the tile blits what it returns or draws the built-in vector
-  glyph when it returns `None` — so a missing, oversize, or refused asset
-  degrades to a meaningful icon and can never blank the tile. A caller with no
-  cache passes `tairix_icon::NoArtwork`; the list view is text-only and never
+  grid entries as shared `IconTile`s, each carrying the icon of its
+  registry-classified type above the label and no plate of its own (only a
+  hovered, selected, or focused entry paints a panel behind its icon) — so the
+  file manager and the trusted picker render one coherent themed surface, the
+  selected item carrying the shared selection state. The grid paints inside
+  `GridView::tile_area`, so a tile can never mark the chrome above it or the
+  scrollbar gutter beside it whatever it draws inside its own rectangle.
+  `render`'s trailing `artwork: &mut dyn tairix_icon::IconArtwork` is the
+  draw-site icon lookup: for each grid tile it is asked for the classified
+  `IconKind` at exactly the side `IconTile::icon_side` reserves, and the tile
+  blits what it returns or draws the built-in vector glyph when it returns
+  `None` — so a missing, oversize, or refused asset degrades to a meaningful
+  icon and can never blank the tile. A caller with no cache passes
+  `tairix_icon::NoArtwork`; the list view is text-only and never
   consults the lookup. A vertical `lib/controls` `ScrollBar` is drawn in
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`

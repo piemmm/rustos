@@ -51,8 +51,8 @@ struct WindowRecord {
     /// The compositor window presenting this served window. The window's
     /// content surface lives there and nowhere else: a present converts
     /// its damaged pixels straight into that one owned buffer
-    /// (`Compositor::edit_window_surface`), so the session keeps no second
-    /// copy to convert into and clone from.
+    /// (`Compositor::present_window_content`), so the session keeps no
+    /// second copy to convert into and clone from.
     wm: WindowId,
 }
 
@@ -273,20 +273,26 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // owned copy — and mark dirty only the pixels the conversion
         // genuinely changed, so an app that repaints its whole
         // composition for a one-row highlight costs one row of
-        // recomposition rather than a whole window. The engine validated
-        // the damage against the window's surface and handed a frame
-        // slice sized from the mode, but every index in `convert_damage`
-        // is still checked: a disagreement refuses the present rather
-        // than reading out of bounds, and refuses it before writing
-        // anything. A window the compositor no longer knows fails closed.
-        let Some(result) =
-            self.compositor.edit_window_surface(wm, |content| {
-                match convert_damage(content, surface, frame, damage) {
-                    Ok(changed) => (Ok(()), changed),
-                    Err(err) => (Err(err), Rect::EMPTY),
-                }
-            })
-        else {
+        // recomposition rather than a whole window. The presented mode is
+        // what that surface is sized from, so a frame drawn at a geometry
+        // the window manager has already moved on from still lands: the
+        // frame around the client is the session's, the pixels inside it
+        // are the app's. The engine validated the damage against the
+        // window's surface and handed a frame slice sized from the mode,
+        // but every index in `convert_damage` is still checked: a
+        // disagreement refuses the present rather than reading out of
+        // bounds, and refuses it before writing anything. A window the
+        // compositor no longer knows, or one whose pixels cannot be
+        // allocated, fails closed.
+        let Some(result) = self.compositor.present_window_content(
+            wm,
+            surface.width_px,
+            surface.height_px,
+            |content| match convert_damage(content, surface, frame, damage) {
+                Ok(changed) => (Ok(()), changed),
+                Err(err) => (Err(err), Rect::EMPTY),
+            },
+        ) else {
             return Err(Errno::NotFound);
         };
         result
@@ -294,8 +300,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {
         // The engine validated the new geometry and re-mapped the frame
-        // region; bring the compositor's own content surface to the new
-        // client size so the next present shapes into it. The window id →
+        // region; move the window's frame to reserve the new client size, so
+        // the furniture and the pointer's idea of the window agree with what
+        // the app has re-mapped. The app's own pixels arrive with its next
+        // present, which is what sizes their buffer. The window id →
         // compositor id mapping is unchanged by a resize.
         let Some(record) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
@@ -306,8 +314,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         {
             Ok(())
         } else {
-            // A surface too large to allocate, or a window the compositor no
-            // longer knows: refuse the resize (fail closed), leaving the old
+            // An empty client size, or a window the compositor no longer
+            // knows: refuse the resize (fail closed), leaving the old
             // geometry the engine will keep in step.
             Err(Errno::LengthOutOfRange)
         }
@@ -419,17 +427,22 @@ fn convert_damage(
         }
     }
 
-    let first = damage.x as usize;
-    let last = x_end as usize;
+    let columns = damage.width_px as usize;
     let mut changed = DamageBounds::default();
     for y in damage.y..y_end {
         let offset = row_offset(y)?;
-        let (Some(source), Some(target)) = (
+        let (Some(source), Some((_, target))) = (
             frame.get(offset..offset.saturating_add(span)),
-            surface.row_mut(y).and_then(|row| row.get_mut(first..last)),
+            surface.row_span_mut(y, damage.x, damage.width_px),
         ) else {
             return Err(Errno::OutOfRange);
         };
+        // The surface span is the width the request claimed, or the whole
+        // present is refused: a row shortened for any reason must never
+        // silently convert part of a scanline.
+        if target.len() != columns {
+            return Err(Errno::OutOfRange);
+        }
         // One row address and one bounds check per row, not per pixel: this
         // loop runs over every damaged pixel of every application repaint.
         for (index, (chunk, slot)) in source.chunks_exact(bpp).zip(target).enumerate() {
@@ -703,6 +716,86 @@ mod tests {
         assert_eq!(
             host.window_presented(99, &m, &frame, full),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// A window-manager resize the app has not been told about yet must not
+    /// refuse the app's next present.
+    ///
+    /// A resize-grab shrinks the window's frame on every motion and the app
+    /// is told once, when the drag settles, so an app draining a backlog of
+    /// input presents at the geometry it last knew while the frame is already
+    /// smaller. That present is stale, not hostile: the frame is the window
+    /// manager's, the pixels are the client's, and the client's frame is what
+    /// its buffer is sized from. Refusing it is indistinguishable from a dead
+    /// session, which is what an app exits on.
+    #[test]
+    fn present_survives_a_frame_resize_the_app_has_not_seen() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        let full = DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 8,
+            height_px: 8,
+        };
+        let frame = [0x40u8; 8 * 8 * 4];
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            host.window_opened(1, &m, "w", true).expect("opens");
+            host.window_presented(1, &m, &frame, full)
+                .expect("the first present lands");
+            host.windows.records.get(&1).expect("live").wm
+        };
+        // One motion of a resize-grab: the frame shrinks below the client
+        // geometry the app is still drawing at.
+        let outer = compositor.window(wm).expect("live").bounds();
+        assert!(compositor.resize_window(
+            wm,
+            Rect::new(
+                outer.origin.x,
+                outer.origin.y,
+                outer.width - 4,
+                outer.height - 4,
+            ),
+        ));
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            (4, 4),
+            "the window manager shrank the frame it draws"
+        );
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            pins: &mut RefusingPins,
+        };
+        let mut next = frame;
+        next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
+        host.window_presented(1, &m, &next, full)
+            .expect("a present at the app's own geometry still lands");
+        let content = compositor
+            .window(wm)
+            .expect("composited")
+            .content()
+            .expect("content is retained");
+        assert_eq!(
+            (content.width(), content.height()),
+            (8, 8),
+            "the buffer is the geometry the client presented"
+        );
+        assert_eq!(
+            content.get(0, 0),
+            Some(Color::rgba(0xFF, 0x00, 0x00, 0xFF).premultiply())
         );
     }
 
@@ -1356,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn window_resized_reallocates_the_compositor_surface() {
+    fn window_resized_moves_the_compositor_client_geometry() {
         let (mut shell, mut compositor) = desktop();
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
@@ -1368,7 +1461,8 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let wm = open_one(&mut host, 7);
-        // A resize re-maps the compositor's content surface to the new size.
+        // A resize moves the client geometry the compositor draws and lays
+        // furniture out from; the app's pixels follow with its next present.
         host.window_resized(7, &mode(200, 150, DisplayFormat::Rgba8888))
             .expect("resizes");
         let size = host.compositor.window(wm).expect("live").client_size();

@@ -172,10 +172,13 @@ view*, not a new kind of surface: it lists the folder through the same
 `DirectorySource` seam the trusted file picker uses, orders the listing with
 the shared `sort_entries`, classifies each child with the shared content-type
 registry, and lays its tiles out with the shared `GridView` under
-`GridFlow::ColumnsFromTrailing` — the same cell geometry and hit-test the file
-manager's row-major grid uses, just anchored to the trailing edge and growing
-a new column inward as it fills (`lib/browse::layout`). It paints through the
-shared `grid_tile`/`grid_metrics` and the shell's own icon-artwork lookup, so
+`GridFlow::ColumnsFromTrailing` and `GridFill::FixedPitch` — the same cell
+geometry and hit-test the file manager's row-major grid uses, just anchored to
+the trailing edge, growing a new column inward as it fills, and keeping the
+pitch rather than spreading a column's leftover space as the resizable file
+manager does, so an icon does not drift when the work area's extent changes
+(`lib/browse::layout`). It paints through the shared
+`grid_tile`/`grid_metrics` and the shell's own icon-artwork lookup, so
 a folder shows the shipped folder artwork and a file its content-class
 artwork, falling back to built-in glyphs exactly as the file manager's grid
 does.

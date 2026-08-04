@@ -252,17 +252,68 @@ impl GridFlow {
     }
 }
 
+/// What a grid does with the space a line has left over.
+///
+/// A line holds as many whole tiles as it can, which almost never divides its
+/// run exactly. The two icon views in this system want opposite things done
+/// with the remainder, so this is a policy of the *view*, not of the flow:
+/// either flow can take either.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum GridFill {
+    /// Keep one tile-plus-gap pitch between tiles, measured from the line's
+    /// anchored edge, and leave the remainder at the far end.
+    ///
+    /// This is right for a *fixed* field: the desktop's icons keep the same
+    /// positions relative to the edge they hug whatever the work area's exact
+    /// extent is, so an icon does not walk sideways when the taskbar's band or
+    /// the display mode changes by a few pixels.
+    #[default]
+    FixedPitch,
+    /// Share the remainder out along the line: the tiles keep their size and
+    /// their order but move apart, so the run is filled evenly and the margin
+    /// at each end matches the widened gaps between the tiles.
+    ///
+    /// This is right for a resizable view: the file manager's grid spreads as
+    /// the window widens until one more tile fits, then re-flows into the extra
+    /// column, rather than parking an ever-wider blank margin at the trailing
+    /// edge. The tiles keep the pitch as a floor, so a run that fits its tiles
+    /// exactly is laid out identically under either policy, and a remainder too
+    /// small to widen every gap by one whole gap is simply centred.
+    ///
+    /// The slots are the ones the *line* holds, not the ones the listing fills:
+    /// a part-filled last line leaves its empty slots at the trailing end, so
+    /// every tile still lines up with the one above it.
+    Spread,
+}
+
+/// The pixel metrics of one grid tile: its size, and the gap between tiles.
+///
+/// Grouped rather than passed loose because the three are derived and consumed
+/// together — `render::grid_metrics` measures all three from one font — and
+/// because three bare pixel counts in a positional argument list are easy to
+/// transpose.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct GridMetrics {
+    /// Tile width in pixels.
+    pub cell_width: u32,
+    /// Tile height in pixels.
+    pub cell_height: u32,
+    /// The uniform gap between neighbouring tiles, on both axes.
+    pub gap: u32,
+}
+
 /// The layout of the wrapped icon grid within a content viewport.
 ///
 /// Tiles of `cell_width`×`cell_height` pixels are laid out below a
-/// `header_height`-pixel header, separated by a uniform `gap` on both axes,
-/// wrapping into as many *lines* as the viewport holds. A [`GridFlow`] picks
-/// which axis a line runs along and which edge the first line is anchored to,
-/// so the file manager's scrolling row-major grid and the desktop's
-/// trailing-edge column-major one are the same geometry with one parameter
-/// changed. Like [`ListView`] it holds no selection or scroll state: the
-/// desired scroll offset (in *line* units) is passed to the accessors that
-/// need it, so the view's owner stays the single owner of that cursor.
+/// `header_height`-pixel header, at least a `gap` apart on both axes, wrapping
+/// into as many whole *lines* as the viewport holds. A [`GridFlow`] picks which
+/// axis a line runs along and which edge the first line is anchored to, and a
+/// [`GridFill`] decides what becomes of the space a line has left over, so the
+/// file manager's spreading scrolling grid and the desktop's fixed
+/// trailing-edge column are the same geometry with two parameters changed. Like
+/// [`ListView`] it holds no selection or scroll state: the desired scroll
+/// offset (in *line* units) is passed to the accessors that need it, so the
+/// view's owner stays the single owner of that cursor.
 ///
 /// All arithmetic saturates and every accessor is total: a viewport too small
 /// for even one tile simply has no visible tiles rather than panicking.
@@ -275,30 +326,31 @@ pub struct GridView {
     header_height: u32,
     entry_count: usize,
     flow: GridFlow,
+    fill: GridFill,
 }
 
 impl GridView {
-    /// Lay `entry_count` tiles of `cell_width`×`cell_height` pixels out below
-    /// a `header_height`-pixel header within `viewport`, separated by `gap`
-    /// pixels on both axes, flowing as `flow` describes.
+    /// Lay `entry_count` tiles of the given [`GridMetrics`] out below a
+    /// `header_height`-pixel header within `viewport`, flowing as `flow`
+    /// describes and spending each line's leftover space as `fill` says.
     #[must_use]
     pub const fn new(
         viewport: Rect,
-        cell_width: u32,
-        cell_height: u32,
-        gap: u32,
+        metrics: GridMetrics,
         header_height: u32,
         entry_count: usize,
         flow: GridFlow,
+        fill: GridFill,
     ) -> Self {
         Self {
             viewport,
-            cell_width,
-            cell_height,
-            gap,
+            cell_width: metrics.cell_width,
+            cell_height: metrics.cell_height,
+            gap: metrics.gap,
             header_height,
             entry_count,
             flow,
+            fill,
         }
     }
 
@@ -314,37 +366,61 @@ impl GridView {
         self.viewport.height.saturating_sub(self.list_top())
     }
 
-    /// The centre-to-centre pitch of a column (tile plus one gap).
-    fn col_pitch(&self) -> u32 {
-        self.cell_width.saturating_add(self.gap)
+    /// The rectangle the tiles are laid out in: the viewport below the header,
+    /// in the same space [`Self::cell_rect`] returns its rectangles in.
+    ///
+    /// A renderer confines its paint to this, so the grid can never mark a
+    /// pixel outside the region it was given — the chrome above it or the
+    /// scrollbar gutter beside it — whatever a tile does inside its own
+    /// rectangle. Derived from the same viewport the cells are, so the clip and
+    /// the layout can never disagree.
+    #[must_use]
+    pub fn tile_area(&self) -> Rect {
+        Rect::new(
+            self.viewport.origin.x,
+            self.viewport
+                .origin
+                .y
+                .saturating_add_unsigned(self.list_top()),
+            self.viewport.width,
+            self.list_height(),
+        )
     }
 
-    /// The centre-to-centre pitch of a grid row (tile plus one gap).
-    fn row_pitch(&self) -> u32 {
-        self.cell_height.saturating_add(self.gap)
+    /// The tiles one line holds and where along that line each of them sits —
+    /// down a column for the desktop's flow, across a row for the file
+    /// manager's.
+    ///
+    /// This is the axis the viewport bounds, so it is the one whose leftover
+    /// space the [`GridFill`] policy spends.
+    fn slot_run(&self) -> Run {
+        let (extent, cell) = if self.flow.wraps_down_a_column() {
+            (self.list_height(), self.cell_height)
+        } else {
+            (self.viewport.width, self.cell_width)
+        };
+        Run::new(extent, cell, self.gap, self.fill)
     }
 
-    /// How many whole tiles fit an `extent`-pixel run at `cell`-pixel tiles on
-    /// a `pitch`-pixel stride: zero when not even one fits, otherwise one plus
-    /// however many further pitches the remainder holds.
-    fn tiles_in(extent: u32, cell: u32, pitch: u32) -> usize {
-        if cell == 0 || pitch == 0 || extent < cell {
-            return 0;
-        }
-        usize::try_from((extent - cell) / pitch)
-            .unwrap_or(usize::MAX)
-            .saturating_add(1)
+    /// The lines the tile area shows and where each of them sits.
+    ///
+    /// This is the axis the view scrolls along, so it always keeps the fixed
+    /// pitch whatever the fill policy is: space past the last whole line is the
+    /// next line, one scroll away, not room to spread into.
+    fn line_run(&self) -> Run {
+        let (extent, cell) = if self.flow.wraps_down_a_column() {
+            (self.viewport.width, self.cell_width)
+        } else {
+            (self.list_height(), self.cell_height)
+        };
+        Run::new(extent, cell, self.gap, GridFill::FixedPitch)
     }
 
     /// How many tiles one line holds — tiles down a column for the desktop's
     /// flow, tiles across a row for the file manager's.
     #[must_use]
     pub fn cells_per_line(&self) -> usize {
-        if self.flow.wraps_down_a_column() {
-            Self::tiles_in(self.list_height(), self.cell_height, self.row_pitch())
-        } else {
-            Self::tiles_in(self.viewport.width, self.cell_width, self.col_pitch())
-        }
+        self.slot_run().count
     }
 
     /// The total number of lines the entries occupy (ceiling division by the
@@ -358,19 +434,18 @@ impl GridView {
         self.entry_count.div_ceil(per_line)
     }
 
-    /// How many whole lines fit in the tile area at once — grid rows down the
-    /// viewport for the file manager's flow, icon columns across it for the
-    /// desktop's.
+    /// How many lines the tile area shows at once — grid rows down the viewport
+    /// for the file manager's flow, icon columns across it for the desktop's.
+    ///
+    /// Only whole lines are laid out, so this is at once what a renderer
+    /// paints, what the hit-test inverts, the unit the scroll offset is counted
+    /// and clamped in, and the natural page step.
     #[must_use]
     pub fn visible_lines(&self) -> usize {
         if self.cells_per_line() == 0 {
             return 0;
         }
-        if self.flow.wraps_down_a_column() {
-            Self::tiles_in(self.viewport.width, self.cell_width, self.col_pitch())
-        } else {
-            Self::tiles_in(self.list_height(), self.cell_height, self.row_pitch())
-        }
+        self.line_run().count
     }
 
     /// The clamped scroll window in line units (content lines, visible lines,
@@ -397,14 +472,14 @@ impl GridView {
     #[must_use]
     pub fn visible_range(&self, offset: u64) -> core::ops::Range<usize> {
         let per_line = self.cells_per_line();
-        let visible = self.visible_lines();
-        if per_line == 0 || visible == 0 {
+        let lines = self.visible_lines();
+        if per_line == 0 || lines == 0 {
             return 0..0;
         }
         let start = self.first_visible(offset).saturating_mul(per_line);
         let end = self
             .first_visible(offset)
-            .saturating_add(visible)
+            .saturating_add(lines)
             .saturating_mul(per_line)
             .min(self.entry_count);
         start..end.max(start)
@@ -430,29 +505,20 @@ impl GridView {
     /// the trailing-edge flow measures `x` inward from the viewport's right
     /// edge, so its first column hugs the screen edge whatever the width is.
     fn tile_offsets(&self, line: usize, slot: usize) -> Option<(u32, u32)> {
-        let along = self.row_pitch().checked_mul(
-            u32::try_from(if self.flow.wraps_down_a_column() {
-                slot
-            } else {
-                line
-            })
-            .ok()?,
-        )?;
-        let across = self.col_pitch().checked_mul(
-            u32::try_from(if self.flow.wraps_down_a_column() {
-                line
-            } else {
-                slot
-            })
-            .ok()?,
-        )?;
-        let y = self.list_top().checked_add(along)?;
+        let along_slot = self.slot_run().offset(slot)?;
+        let along_line = self.line_run().offset(line)?;
+        let (inward, down) = if self.flow.wraps_down_a_column() {
+            (along_line, along_slot)
+        } else {
+            (along_slot, along_line)
+        };
+        let y = self.list_top().checked_add(down)?;
         let x = if self.flow.wraps_down_a_column() {
             self.viewport
                 .width
-                .checked_sub(across.checked_add(self.cell_width)?)?
+                .checked_sub(inward.checked_add(self.cell_width)?)?
         } else {
-            across
+            inward
         };
         Some((x, y))
     }
@@ -462,12 +528,12 @@ impl GridView {
     #[must_use]
     pub fn cell_rect(&self, offset: u64, index: usize) -> Option<Rect> {
         let per_line = self.cells_per_line();
-        let visible = self.visible_lines();
-        if per_line == 0 || visible == 0 || index >= self.entry_count {
+        let lines = self.visible_lines();
+        if per_line == 0 || lines == 0 || index >= self.entry_count {
             return None;
         }
         let screen_line = (index / per_line).checked_sub(self.first_visible(offset))?;
-        if screen_line >= visible {
+        if screen_line >= lines {
             return None;
         }
         let (x, y) = self.tile_offsets(screen_line, index % per_line)?;
@@ -480,66 +546,133 @@ impl GridView {
     }
 
     /// The index of the tile at window-local pixel `(x, y)` for the desired
-    /// scroll `offset`, or `None` for the header, a gap between tiles, the
-    /// empty space past the last tile, and any coordinate outside the tile
-    /// area.
+    /// scroll `offset`, or `None` for the header, a margin or gap between
+    /// tiles, the empty space past the last tile, and any coordinate outside
+    /// the tile area.
     ///
     /// The point is taken in the same space [`Self::cell_rect`] returns its
     /// rectangles in, so a viewport placed at a non-zero origin (the item area
     /// inset by the places rail) hit-tests exactly where it paints.
     #[must_use]
     pub fn index_at(&self, offset: u64, x: u32, y: u32) -> Option<usize> {
-        let per_line = self.cells_per_line();
-        let visible = self.visible_lines();
-        if per_line == 0 || visible == 0 {
-            return None;
-        }
+        let slots = self.slot_run();
+        let lines = self.line_run();
         let (x, y) = view_local(self.viewport, x, y)?;
         let top = self.list_top();
         if y < top || y >= self.viewport.height || x >= self.viewport.width {
             return None;
         }
-        // Reject the inter-tile gaps so a click resolves only to a tile the
-        // user actually saw, never the empty space between them. The
-        // trailing-edge flow measures its columns inward from the right edge,
-        // exactly as it paints them.
-        let from_edge = if self.flow.wraps_down_a_column() {
+        // The trailing-edge flow measures its columns inward from the right
+        // edge, exactly as it paints them.
+        let inward = if self.flow.wraps_down_a_column() {
             self.viewport.width.checked_sub(x)?.checked_sub(1)?
         } else {
             x
         };
-        let col = tile_at(from_edge, self.col_pitch(), self.cell_width)?;
-        let row = tile_at(y - top, self.row_pitch(), self.cell_height)?;
-        let (line, slot) = if self.flow.wraps_down_a_column() {
-            (col, row)
+        let down = y - top;
+        let (along_line, along_slot) = if self.flow.wraps_down_a_column() {
+            (inward, down)
         } else {
-            (row, col)
+            (down, inward)
         };
-        if line >= visible || slot >= per_line {
-            return None;
-        }
+        // Each run resolves only its own tiles, so a point in a margin, in a
+        // gap, or past the last line resolves to nothing: a click can land
+        // only on a tile the user actually saw.
+        let line = lines.tile_at(along_line)?;
+        let slot = slots.tile_at(along_slot)?;
         let index = self
             .first_visible(offset)
             .checked_add(line)?
-            .checked_mul(per_line)?
+            .checked_mul(slots.count)?
             .checked_add(slot)?;
         (index < self.entry_count).then_some(index)
     }
 }
 
-/// The tile a within-area coordinate `pos` falls in along one axis, or `None`
-/// when it lands in the gap after a tile. `pitch` is tile-plus-gap and `cell`
-/// the tile size along that axis; the rule is identical on both axes, so it
-/// has one definition.
-fn tile_at(pos: u32, pitch: u32, cell: u32) -> Option<usize> {
-    if pitch == 0 {
-        return None;
+/// The placement of the tiles along one axis of a grid: how many fit, the
+/// stride from one tile's leading edge to the next's, the offset of the first
+/// tile from the run's own leading edge, and the tile size along that axis.
+///
+/// Both axes of both flows are this one calculation, so a [`GridFill`] policy
+/// is applied in exactly one place and the painted geometry
+/// ([`GridView::cell_rect`]) and the hit-test ([`GridView::index_at`]) invert
+/// the very same arithmetic instead of each deriving it.
+struct Run {
+    /// How many tiles the run holds, all of them whole.
+    count: usize,
+    /// The distance from one tile's leading edge to the next's.
+    stride: u32,
+    /// The first tile's leading edge, from the run's own.
+    lead: u32,
+    /// The tile's extent along this axis — what separates a tile from the space
+    /// after it.
+    cell: u32,
+}
+
+impl Run {
+    /// The run of `cell`-pixel tiles an `extent`-pixel axis holds with at least
+    /// `gap` pixels between them, spending the remainder as `fill` says.
+    ///
+    /// Only whole tiles are laid out: a tile the extent could not finish would
+    /// be a part-drawn picture over an unreadable name, and in a field that
+    /// cannot scroll it could never be brought into view.
+    fn new(extent: u32, cell: u32, gap: u32, fill: GridFill) -> Self {
+        // A tile of no extent has no run, which is also what keeps the pitch
+        // below non-zero and the divisions defined.
+        let pitch = cell.saturating_add(gap);
+        if cell == 0 || extent < cell {
+            return Self {
+                count: 0,
+                stride: pitch,
+                lead: 0,
+                cell,
+            };
+        }
+        // One tile fits, plus however many further pitches the rest holds.
+        let count = ((extent - cell) / pitch).saturating_add(1);
+        let stride = match fill {
+            GridFill::FixedPitch => pitch,
+            // An equal share of the extent per tile is what widens the gaps,
+            // and the pitch is its floor: a run that fits its tiles exactly
+            // divides into exactly the pitch, so both policies place it
+            // identically, and a remainder smaller than one gap widens no gap
+            // at all.
+            GridFill::Spread => (extent / count).max(pitch),
+        };
+        let span = stride
+            .saturating_mul(count.saturating_sub(1))
+            .saturating_add(cell);
+        Self {
+            count: usize::try_from(count).unwrap_or(usize::MAX),
+            stride,
+            // A spread run centres what it could not share out, so its two
+            // margins match; a fixed-pitch run stays anchored to its edge.
+            lead: match fill {
+                GridFill::FixedPitch => 0,
+                GridFill::Spread => extent.saturating_sub(span) / 2,
+            },
+            cell,
+        }
     }
-    let within = pos % pitch;
-    if within >= cell {
-        return None;
+
+    /// The offset of tile `index`'s leading edge from the run's own, or `None`
+    /// when that offset does not fit the axis.
+    fn offset(&self, index: usize) -> Option<u32> {
+        let step = u32::try_from(index).ok()?;
+        self.stride.checked_mul(step)?.checked_add(self.lead)
     }
-    usize::try_from(pos / pitch).ok()
+
+    /// The tile the coordinate `pos` — measured from the run's leading edge —
+    /// falls on, or `None` when it lands in a margin, in a gap between tiles,
+    /// or past the last one. The exact inverse of [`Self::offset`].
+    fn tile_at(&self, pos: u32) -> Option<usize> {
+        if self.stride == 0 {
+            return None;
+        }
+        let within_run = pos.checked_sub(self.lead)?;
+        let index = usize::try_from(within_run / self.stride).ok()?;
+        (index < self.count && within_run % self.stride < self.cell).then_some(index)
+    }
 }
 
 /// One of the two item-view geometries, chosen by the browser's [`ViewMode`].
@@ -769,7 +902,8 @@ impl SidebarView {
 
 #[cfg(test)]
 mod tests {
-    use super::{GridFlow, GridView, ListView};
+    use super::{GridFill, GridFlow, GridMetrics, GridView, ListView};
+    use alloc::vec::Vec;
     use tairix_geometry::Rect;
 
     const ROW: u32 = 10;
@@ -866,26 +1000,99 @@ mod tests {
     const CELL: u32 = 40;
     const GAP: u32 = 10;
 
+    /// Square `CELL`-pixel tiles a `GAP` apart — the metrics every grid below
+    /// is laid out with.
+    const TILES: GridMetrics = GridMetrics {
+        cell_width: CELL,
+        cell_height: CELL,
+        gap: GAP,
+    };
+
     /// A grid `cols` columns wide and `rows` rows tall (plus a one-`CELL`
-    /// header) holding `count` tiles, flowing as the file manager's does.
-    /// Width fits exactly `cols` columns: `cols` tiles plus `cols - 1` gaps.
+    /// header) holding `count` tiles, flowing as the file manager's does. The
+    /// viewport fits exactly `cols` columns — `cols` tiles plus `cols - 1` gaps
+    /// — so there is nothing left over and both fill policies agree.
     fn grid(cols: u32, rows: u32, count: usize) -> GridView {
-        grid_flowing(cols, rows, count, GridFlow::RowsFromLeading)
+        grid_flowing(
+            cols,
+            rows,
+            count,
+            GridFlow::RowsFromLeading,
+            GridFill::Spread,
+        )
     }
 
-    /// The same grid under an explicit `flow`.
-    fn grid_flowing(cols: u32, rows: u32, count: usize, flow: GridFlow) -> GridView {
-        let width = CELL * cols + GAP * cols.saturating_sub(1);
-        let height = CELL + (CELL + GAP) * rows;
+    /// The same exact fit under an explicit `flow` and fill policy.
+    fn grid_flowing(
+        cols: u32,
+        rows: u32,
+        count: usize,
+        flow: GridFlow,
+        fill: GridFill,
+    ) -> GridView {
+        grid_sized(
+            CELL * cols + GAP * cols.saturating_sub(1),
+            CELL + (CELL + GAP) * rows,
+            count,
+            flow,
+            fill,
+        )
+    }
+
+    /// A `width`×`height` grid (the height including the one-`CELL` header)
+    /// holding `count` tiles.
+    fn grid_sized(
+        width: u32,
+        height: u32,
+        count: usize,
+        flow: GridFlow,
+        fill: GridFill,
+    ) -> GridView {
         GridView::new(
             Rect::new(0, 0, width, height),
-            CELL,
-            CELL,
-            GAP,
+            TILES,
             CELL,
             count,
             flow,
+            fill,
         )
+    }
+
+    /// A file-manager grid whose viewport is `slack` pixels wider and taller
+    /// than an exact `cols`×`rows` fit — space left over, but not enough for a
+    /// further tile on either axis while `slack` is under one gap plus one tile.
+    fn grid_with_slack(cols: u32, rows: u32, count: usize, slack: u32, fill: GridFill) -> GridView {
+        grid_sized(
+            CELL * cols + GAP * cols.saturating_sub(1) + slack,
+            CELL + (CELL + GAP) * rows + slack,
+            count,
+            GridFlow::RowsFromLeading,
+            fill,
+        )
+    }
+
+    /// The tile rectangles of every entry the grid shows at `offset`, in index
+    /// order.
+    fn shown(g: &GridView, offset: u64, count: usize) -> Vec<Rect> {
+        (0..count)
+            .filter_map(|index| g.cell_rect(offset, index))
+            .collect()
+    }
+
+    /// The four corner pixels of `tile` and its centre — the pixels a hit-test
+    /// must resolve to that tile and to no other.
+    fn corners_and_centre(tile: Rect) -> [(u32, u32); 5] {
+        let left = u32::try_from(tile.left()).expect("on screen");
+        let top = u32::try_from(tile.top()).expect("on screen");
+        let right = left + tile.width - 1;
+        let bottom = top + tile.height - 1;
+        [
+            (left, top),
+            (right, top),
+            (left, bottom),
+            (right, bottom),
+            (left + tile.width / 2, top + tile.height / 2),
+        ]
     }
 
     #[test]
@@ -894,52 +1101,37 @@ mod tests {
         assert_eq!(g.cells_per_line(), 3);
         // Seven tiles across three columns need three rows (ceil).
         assert_eq!(g.lines_total(), 3);
-        // The header plus two row pitches leaves room for two whole rows.
+        // The header plus two row pitches leaves room for exactly two rows.
         assert_eq!(g.visible_lines(), 2);
     }
 
+    /// A viewport with room for no whole tile on either axis shows nothing at
+    /// all, whatever it does with the space it has left over.
     #[test]
-    fn a_grid_too_narrow_or_short_shows_nothing() {
-        let narrow = GridView::new(
-            Rect::new(0, 0, CELL - 1, 500),
-            CELL,
-            CELL,
-            GAP,
-            CELL,
-            5,
-            GridFlow::RowsFromLeading,
-        );
-        assert_eq!(narrow.cells_per_line(), 0);
-        assert_eq!(narrow.visible_lines(), 0);
-        assert_eq!(narrow.cell_rect(0, 0), None);
-        assert_eq!(narrow.index_at(0, 0, CELL), None);
-        assert_eq!(narrow.visible_range(0), 0..0);
-        let short = GridView::new(
-            Rect::new(0, 0, 500, CELL),
-            CELL,
-            CELL,
-            GAP,
-            CELL,
-            5,
-            GridFlow::RowsFromLeading,
-        );
-        assert_eq!(short.visible_lines(), 0);
+    fn a_grid_too_narrow_or_too_short_for_one_tile_shows_nothing() {
+        for fill in [GridFill::FixedPitch, GridFill::Spread] {
+            for (width, height) in [(CELL - 1, 500), (500, CELL), (500, CELL + CELL - 1)] {
+                let g = grid_sized(width, height, 5, GridFlow::RowsFromLeading, fill);
+                assert_eq!(g.visible_lines(), 0, "{fill:?} {width}x{height}");
+                assert_eq!(g.cell_rect(0, 0), None, "{fill:?} {width}x{height}");
+                assert_eq!(g.index_at(0, 0, CELL), None, "{fill:?} {width}x{height}");
+                assert_eq!(g.visible_range(0), 0..0, "{fill:?} {width}x{height}");
+            }
+        }
     }
 
     #[test]
     fn a_desktop_grid_too_narrow_or_short_shows_nothing() {
-        let narrow = grid_flowing(0, 3, 5, GridFlow::ColumnsFromTrailing);
+        let narrow = grid_flowing(0, 3, 5, GridFlow::ColumnsFromTrailing, GridFill::FixedPitch);
         assert_eq!(narrow.visible_lines(), 0);
         assert_eq!(narrow.cell_rect(0, 0), None);
         assert_eq!(narrow.index_at(0, 0, CELL), None);
-        let short = GridView::new(
-            Rect::new(0, 0, 500, CELL),
-            CELL,
-            CELL,
-            GAP,
+        let short = grid_sized(
+            500,
             CELL,
             5,
             GridFlow::ColumnsFromTrailing,
+            GridFill::FixedPitch,
         );
         assert_eq!(short.cells_per_line(), 0);
         assert_eq!(short.visible_range(0), 0..0);
@@ -993,15 +1185,7 @@ mod tests {
     #[test]
     fn grid_reveal_scrolls_by_grid_rows() {
         // Three columns, one visible row, nine tiles → three grid rows.
-        let g = GridView::new(
-            Rect::new(0, 0, CELL * 3 + GAP * 2, CELL + CELL),
-            CELL,
-            CELL,
-            GAP,
-            CELL,
-            9,
-            GridFlow::RowsFromLeading,
-        );
+        let g = grid(3, 1, 9);
         assert_eq!(g.cells_per_line(), 3);
         assert_eq!(g.visible_lines(), 1);
         // Tile 8 sits on grid row 2; revealing it scrolls to offset 2.
@@ -1013,18 +1197,191 @@ mod tests {
     #[test]
     fn the_visible_range_is_exactly_the_tiles_with_rects() {
         for flow in [GridFlow::RowsFromLeading, GridFlow::ColumnsFromTrailing] {
-            let g = grid_flowing(3, 2, 7, flow);
-            for offset in 0..3 {
-                let range = g.visible_range(offset);
-                for index in 0..7 {
-                    assert_eq!(
-                        g.cell_rect(offset, index).is_some(),
-                        range.contains(&index),
-                        "{flow:?} offset {offset} index {index}"
-                    );
+            for fill in [GridFill::FixedPitch, GridFill::Spread] {
+                let g = grid_flowing(3, 2, 7, flow, fill);
+                for offset in 0..3 {
+                    let range = g.visible_range(offset);
+                    for index in 0..7 {
+                        assert_eq!(
+                            g.cell_rect(offset, index).is_some(),
+                            range.contains(&index),
+                            "{flow:?} {fill:?} offset {offset} index {index}"
+                        );
+                    }
                 }
             }
         }
+    }
+
+    // --- The space a line has left over ---------------------------------
+
+    /// Every tile a grid lays out is wholly inside the tile area — no tile is
+    /// ever cut by an edge — and the hit-test resolves each of its corners and
+    /// its centre back to that very tile. Swept over both flows, both fill
+    /// policies, and viewports that divide the tiles evenly and unevenly, so
+    /// the two are proven to invert each other rather than to agree on one
+    /// convenient size.
+    #[test]
+    fn every_laid_out_tile_is_whole_and_hit_tests_to_itself() {
+        const COUNT: usize = 40;
+        for flow in [GridFlow::RowsFromLeading, GridFlow::ColumnsFromTrailing] {
+            for fill in [GridFill::FixedPitch, GridFill::Spread] {
+                for width in (CELL..=CELL * 6).step_by(7) {
+                    for height in (CELL..=CELL * 6).step_by(13) {
+                        let g = grid_sized(width, height, COUNT, flow, fill);
+                        let area = g.tile_area();
+                        for offset in [0, 1] {
+                            for (index, tile) in (0..COUNT)
+                                .filter_map(|i| g.cell_rect(offset, i).map(|rect| (i, rect)))
+                            {
+                                assert!(
+                                    tile.left() >= area.left()
+                                        && tile.top() >= area.top()
+                                        && tile.right() <= area.right()
+                                        && tile.bottom() <= area.bottom(),
+                                    "{tile:?} escapes {area:?}: {flow:?} {fill:?} \
+                                     {width}x{height} offset {offset}"
+                                );
+                                for (x, y) in corners_and_centre(tile) {
+                                    assert_eq!(
+                                        g.index_at(offset, x, y),
+                                        Some(index),
+                                        "({x}, {y}) of {tile:?}: {flow:?} {fill:?} \
+                                         {width}x{height} offset {offset}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A run that fits its tiles exactly has nothing left over, so both
+    /// policies place it identically: the row begins at the leading edge and
+    /// ends at the trailing one.
+    #[test]
+    fn an_exact_fit_is_laid_out_identically_under_either_fill() {
+        let fixed = grid_flowing(3, 2, 7, GridFlow::RowsFromLeading, GridFill::FixedPitch);
+        let spread = grid_flowing(3, 2, 7, GridFlow::RowsFromLeading, GridFill::Spread);
+        assert_eq!(spread.cells_per_line(), fixed.cells_per_line());
+        assert_eq!(shown(&spread, 0, 7), shown(&fixed, 0, 7));
+        let row = shown(&spread, 0, 3);
+        assert_eq!(row[0].left(), 0);
+        assert_eq!(
+            row[2].right(),
+            i32::try_from(CELL * 3 + GAP * 2).expect("small")
+        );
+    }
+
+    /// The leftover width is shared out along the row: the gaps widen by equal
+    /// amounts, the two end margins match, and what is left is under a gap plus
+    /// the pixels that will not divide into one per slot. Nothing is parked as a
+    /// blank strip at the trailing edge.
+    #[test]
+    fn a_spread_row_shares_its_leftover_width_out_evenly() {
+        let slack = 30;
+        let g = grid_with_slack(3, 2, 40, slack, GridFill::Spread);
+        let width = CELL * 3 + GAP * 2 + slack;
+        assert_eq!(g.cells_per_line(), 3, "30px short of a fourth column");
+        let row = shown(&g, 0, 3);
+        let gaps: Vec<i32> = row.windows(2).map(|p| p[1].left() - p[0].right()).collect();
+        assert!(
+            gaps.iter().all(|gap| *gap == gaps[0]),
+            "the gaps stay identical: {gaps:?}"
+        );
+        assert!(
+            gaps[0] > i32::try_from(GAP).expect("small"),
+            "and widened past the minimum: {gaps:?}"
+        );
+        let lead = row[0].left();
+        let trail = i32::try_from(width).expect("small") - row[2].right();
+        assert!(lead > 0 && (lead - trail).abs() <= 1, "{lead} vs {trail}");
+        assert!(
+            lead + trail < gaps[0] + i32::try_from(row.len()).expect("small"),
+            "only one gap's worth plus the indivisible pixels reach the ends: \
+             {lead} + {trail} against {gaps:?}"
+        );
+    }
+
+    /// The fixed field does the opposite with the same viewport: the pitch is
+    /// kept from the anchored edge and the remainder stays at the far end, so an
+    /// icon does not move when the area's extent changes by a few pixels.
+    #[test]
+    fn a_fixed_pitch_row_leaves_its_leftover_width_at_the_far_end() {
+        let slack = 30;
+        let g = grid_with_slack(3, 2, 40, slack, GridFill::FixedPitch);
+        let row = shown(&g, 0, 3);
+        assert_eq!(row[0].left(), 0, "anchored to the leading edge");
+        for pair in row.windows(2) {
+            assert_eq!(
+                pair[1].left() - pair[0].right(),
+                i32::try_from(GAP).unwrap()
+            );
+        }
+        let width = CELL * 3 + GAP * 2 + slack;
+        assert_eq!(
+            i32::try_from(width).expect("small") - row[2].right(),
+            i32::try_from(slack).expect("small"),
+            "the whole remainder is left at the far end"
+        );
+    }
+
+    /// Widening the view spreads the row it has until one more whole tile fits,
+    /// and then re-flows the listing into the extra column. The tiles keep their
+    /// size throughout: only the space between them moves.
+    #[test]
+    fn a_widening_view_spreads_until_one_more_tile_fits_then_re_flows() {
+        let three = CELL * 3 + GAP * 2;
+        let four = CELL * 4 + GAP * 3;
+        for width in three..=four {
+            let g = grid_sized(
+                width,
+                CELL + (CELL + GAP) * 3,
+                40,
+                GridFlow::RowsFromLeading,
+                GridFill::Spread,
+            );
+            let want = if width < four { 3 } else { 4 };
+            assert_eq!(g.cells_per_line(), want, "{width} wide");
+            let row = shown(&g, 0, want);
+            assert!(
+                row.iter().all(|tile| tile.width == CELL),
+                "{width} wide: a tile never stretches"
+            );
+            let spent = row[want - 1].right() - row[0].left();
+            let tiles = i32::try_from(CELL * u32::try_from(want).unwrap()).unwrap();
+            assert!(
+                spent >= tiles + i32::try_from(GAP * u32::try_from(want - 1).unwrap()).unwrap(),
+                "{width} wide: the gaps never fall below the minimum"
+            );
+        }
+    }
+
+    /// The axis the grid scrolls along is never spread: the rows keep the fixed
+    /// pitch below the header and the space past the last whole row belongs to
+    /// the next one, which is reachable by scrolling.
+    #[test]
+    fn spreading_leaves_the_axis_the_grid_scrolls_along_alone() {
+        let slack = 30;
+        let g = grid_with_slack(3, 2, 40, slack, GridFill::Spread);
+        assert_eq!(g.visible_lines(), 2, "30px short of a third row");
+        let first = g.cell_rect(0, 0).expect("laid out");
+        let second = g.cell_rect(0, 3).expect("laid out");
+        assert_eq!(first.top(), i32::try_from(CELL).expect("small"));
+        assert_eq!(
+            second.top() - first.top(),
+            i32::try_from(CELL + GAP).expect("small")
+        );
+        assert!(
+            g.tile_area().bottom() - second.bottom() >= i32::try_from(slack).expect("small"),
+            "the bottom remainder is the next row's, not the visible rows' to share"
+        );
+        // And that row is one scroll away, wholly on screen when it arrives.
+        assert_eq!(g.reveal(0, Some(7)), 1);
+        let third = g.cell_rect(1, 7).expect("laid out");
+        assert!(third.bottom() <= g.tile_area().bottom());
     }
 
     // --- The desktop's trailing-edge icon column ------------------------
@@ -1032,7 +1389,7 @@ mod tests {
     #[test]
     fn the_desktop_column_fills_downward_from_the_trailing_edge() {
         // Three columns' worth of width, two tiles per column, five icons.
-        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing);
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing, GridFill::FixedPitch);
         assert_eq!(g.cells_per_line(), 2, "two icons fit down one column");
         assert_eq!(g.visible_lines(), 3, "three columns fit across");
         assert_eq!(g.lines_total(), 3, "five icons need three columns");
@@ -1068,7 +1425,7 @@ mod tests {
 
     #[test]
     fn the_desktop_hit_test_mirrors_its_tile_rects_and_rejects_gaps() {
-        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing);
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing, GridFill::FixedPitch);
         for index in 0..5 {
             let rect = g.cell_rect(0, index).expect("every icon is on screen");
             let x = u32::try_from(rect.origin.x).unwrap() + CELL / 2;

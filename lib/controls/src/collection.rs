@@ -33,7 +33,7 @@ use crate::paint::{
     paint_icon_slot, plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail,
     seam_thickness, seam_width, surface_rect, to_i32, RenderInvariant,
 };
-use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
+use crate::state::{ControlDisposition, ControlRole, ControlState, PointerState, SelectionState};
 
 /// The outcome of feeding input to a [`ListRow`] or [`TableRow`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -723,11 +723,13 @@ pub enum CardAction {
 /// footer actions share the card's semantic state (the owner sets it) but keep
 /// their own pointer and focus states, so hovering one action does not disturb
 /// the card. The card routes input to its footer and reports [`CardAction`].
+///
+/// A card's plate bounds the group it owns. One item of an icon view is not
+/// such a group and wears no plate of its own: that is an [`IconTile`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Card {
     title: String,
     body: Option<String>,
-    icon: Option<IconKind>,
     role: ControlRole,
     state: ControlState,
     count: Option<u32>,
@@ -741,21 +743,11 @@ impl Card {
         Self {
             title: title.into(),
             body: None,
-            icon: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
             count: None,
             footer: Vec::new(),
         }
-    }
-
-    /// This card with an identifying glyph drawn above the title (e.g. a file
-    /// manager grid tile's file-type icon). A card with no icon keeps its
-    /// title at the top, so status/notification cards are unaffected.
-    #[must_use]
-    pub fn with_icon(mut self, icon: IconKind) -> Self {
-        self.icon = Some(icon);
-        self
     }
 
     /// This card with a body line below the title.
@@ -872,31 +864,7 @@ impl Card {
         rects
     }
 
-    /// The pixel side the card's identifying glyph paints at inside `bounds`.
-    ///
-    /// This is the render geometry itself, exposed so an owner rasterising
-    /// per-entry artwork produces it at exactly the size [`Self::render`] will
-    /// place — the two can never disagree. A card with no icon still reports
-    /// the slot the top band would reserve, so a caller can size artwork
-    /// before deciding to supply it; `0` when the bounds are off-surface or
-    /// too small for a glyph.
-    #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        // The tile's icon band is sized off the plate geometry, not the text
-        // line; the font is accepted only so the query matches the shared
-        // collection-control shape.
-        let _ = font;
-        Self::icon_slot(bounds, scale, theme).map_or(0, |(_, _, side)| side)
-    }
-
     /// Paint the card into `surface` at `bounds` for the active theme.
-    ///
-    /// `artwork` is the entry's own icon, pre-rasterised by the owner (at
-    /// [`Self::icon_side`], through its cache); `None` falls back to the card's
-    /// built-in class glyph. It is used only when the card carries an icon; a
-    /// status or notification card with none ignores it. The artwork is
-    /// decoded and rasterised long before it reaches this call — a control
-    /// never parses image bytes.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -904,7 +872,6 @@ impl Card {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        artwork: Option<&Surface>,
     ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -960,11 +927,9 @@ impl Card {
         let content_left = ix.saturating_add(rail_w).saturating_add(pad);
         let content_right = ix.saturating_add(iw).saturating_sub(pad);
 
-        // An optional identifying glyph centred in a top band; when present the
-        // title sits below it and both centre under it. The top-trailing count
-        // pill / alert bead follows, then the title and body up to whatever
-        // leading edge the badge left, then the footer actions.
-        let title_top = self.paint_icon(surface, bounds, scale, theme, iy, artwork);
+        // The top-trailing count pill / alert bead first, then the title and
+        // body up to whatever leading edge the badge left, then the footer
+        // actions.
         let title_right = self.paint_badge(
             surface,
             (ix, iy, iw, ih),
@@ -975,11 +940,10 @@ impl Card {
         );
         self.paint_title(
             surface,
-            (title_top, content_left, title_right, content_right),
+            (iy, content_left, title_right, content_right),
             pad,
             theme,
             font,
-            self.icon.is_some(),
         );
         for (button, rect) in self
             .footer
@@ -1041,58 +1005,9 @@ impl Card {
         content_right
     }
 
-    /// Paint an optional identifying glyph in the tile's icon slot, returning
-    /// the y the title should start at: the icon's bottom edge when an icon was
-    /// drawn, else `content_top` unchanged. The glyph is tinted like the title
-    /// so the tile reads as one unit.
-    fn paint_icon(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        content_top: u32,
-        artwork: Option<&Surface>,
-    ) -> u32 {
-        let Some(kind) = self.icon else {
-            return content_top;
-        };
-        let Some((x, y, side)) = Self::icon_slot(bounds, scale, theme) else {
-            return content_top;
-        };
-        let fg = foreground(theme, self.state.disposition());
-        paint_icon_slot(surface, x, y, side, kind, fg, artwork);
-        y.saturating_add(side)
-    }
-
-    /// The square icon slot the tile reserves at the top of its content:
-    /// `(x, y, side)`, centred across the content columns and sized to the
-    /// content width but capped so at least the lower two-fifths of the tile
-    /// stays for the label. `None` when the plate is off-surface or leaves no
-    /// room for a glyph.
-    ///
-    /// The one definition of that geometry, so the side an owner rasterises
-    /// artwork at ([`Self::icon_side`]) is exactly the slot [`Self::render`]
-    /// paints it into.
-    fn icon_slot(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
-        let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
-        let rail_w = rail_thickness(theme, scale).min(iw);
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let content_left = ix.saturating_add(rail_w).saturating_add(pad);
-        let content_right = ix.saturating_add(iw).saturating_sub(pad);
-        let avail_w = content_right.saturating_sub(content_left);
-        let side = avail_w.min(ih.saturating_mul(3) / 5);
-        if side == 0 {
-            return None;
-        }
-        let x = content_left.saturating_add((avail_w.saturating_sub(side)) / 2);
-        Some((x, iy.saturating_add(pad), side))
-    }
-
     /// Paint the card title and its optional body line within the content
-    /// columns `(title_top, content_left, title_right, content_right)`. When
-    /// `centered` (an icon sits above), the title and body centre under it;
-    /// otherwise they are leading-aligned at the content's left edge.
+    /// columns `(title_top, content_left, title_right, content_right)`,
+    /// leading-aligned at the content's left edge.
     fn paint_title(
         &self,
         surface: &mut Surface,
@@ -1100,24 +1015,21 @@ impl Card {
         pad: u32,
         theme: &Theme,
         font: BitmapFont,
-        centered: bool,
     ) {
         let (title_top, content_left, title_right, content_right) = cols;
         let fg = foreground(theme, self.state.disposition());
         let title_y = to_i32(title_top) + to_i32(pad);
         if title_right > content_left {
             let fitted = font.truncate_to_width(&self.title, title_right - content_left);
-            let tx = text_x(font, fitted, content_left, title_right, centered);
-            font.draw_text(surface, tx, title_y, fitted, fg);
+            font.draw_text(surface, to_i32(content_left), title_y, fitted, fg);
         }
         if let Some(body) = &self.body {
             let body_y = title_y + to_i32(font.line_height()) + to_i32(pad) / 2;
             if content_right > content_left {
                 let fitted = font.truncate_to_width(body, content_right - content_left);
-                let bx = text_x(font, fitted, content_left, content_right, centered);
                 font.draw_text(
                     surface,
-                    bx,
+                    to_i32(content_left),
                     body_y,
                     fitted,
                     Color::from(theme.palette().on_surface_muted),
@@ -1159,6 +1071,253 @@ impl Card {
             }
         }
         action
+    }
+}
+
+// --- IconTile ----------------------------------------------------------
+
+/// One item of an icon view: a picture with its name beneath it, and no plate
+/// of its own (spec §11.34).
+///
+/// This is the tile a file manager's icon view and the desktop's icon field are
+/// made of. A resting tile paints nothing but its picture and its label, so a
+/// folder of items reads as a field of pictures over whatever lies behind them
+/// — a window's surface, or the desktop wallpaper — rather than as a grid of
+/// boxes. That is what separates it from a [`Card`]: a card is a *grouped
+/// state-and-actions surface* and wears a plate to bound the group it owns; a
+/// tile is one item among many and would only add a box per picture.
+///
+/// State is what makes a tile paint anything behind its picture:
+/// * the pointer wash while hovered or pressed, in the shared plate colours;
+/// * the selection panel, in the palette's selection accent, which also flips
+///   the label and glyph to the on-accent foreground — so selection differs
+///   from a hover by contrast, not merely by hue, and the pointer can never
+///   imitate it;
+/// * the keyboard Focus Ring, through the one shared outline every row and tab
+///   family draws, so a focused tile reads distinctly from a hovered one;
+/// * the Signal Bead of an authority or recovery state, so a denied or
+///   unhealthy item is legible without relying on colour.
+///
+/// The tile renders state and never dispatches. An icon view lays its tiles out
+/// on a geometry it owns and hit-tests pointer input against that same
+/// geometry, so a tile holds no pointer position or press latch of its own —
+/// unlike a [`ListRow`], which is a control the user clicks directly.
+///
+/// Equal tiles draw the same pixels, so a host may use `==` as its repaint
+/// gate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IconTile {
+    label: String,
+    icon: IconKind,
+    state: ControlState,
+}
+
+impl IconTile {
+    /// A resting, unselected tile drawing `icon` above `label`.
+    #[must_use]
+    pub fn new(label: impl Into<String>, icon: IconKind) -> Self {
+        Self {
+            label: label.into(),
+            icon,
+            state: ControlState::idle(),
+        }
+    }
+
+    /// This tile with the given composed state.
+    #[must_use]
+    pub fn with_state(mut self, state: ControlState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The pixel side of the square picture a tile occupying `bounds` draws.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising
+    /// per-entry artwork produces it at exactly the size [`Self::render`] will
+    /// place it — the two can never disagree. It depends only on the tile's
+    /// bounds and the theme's metrics, never on which item the tile shows, so
+    /// an owner can size a whole row of artwork from one query. `0` when the
+    /// bounds are off-surface or leave no room for a picture.
+    #[must_use]
+    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        Self::icon_slot(bounds, scale, theme).map_or(0, |(_, _, side)| side)
+    }
+
+    /// Paint the tile into `surface` at `bounds` for the active theme.
+    ///
+    /// `artwork` is the item's own picture, pre-rasterised by the owner at
+    /// [`Self::icon_side`] through its cache; `None` falls back to the built-in
+    /// glyph for the tile's [`IconKind`], tinted like the label so the tile
+    /// reads as one unit. Artwork is decoded and rasterised long before it
+    /// reaches this call — a control never parses image bytes.
+    ///
+    /// Nothing is drawn outside `bounds`, so a view whose viewport cuts a tile
+    /// short need only clip the surface it hands over.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        artwork: Option<&Surface>,
+    ) {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        if w == 0 || h == 0 {
+            return;
+        }
+        let ink = self.label_color(theme);
+        self.paint_backdrop(surface, (x, y, w, h), scale, theme);
+        let label_top = match Self::icon_slot(bounds, scale, theme) {
+            Some((ix, iy, side)) => {
+                paint_icon_slot(surface, ix, iy, side, self.icon, ink, artwork);
+                iy.saturating_add(side)
+            }
+            None => y,
+        };
+        let bottom = y.saturating_add(h);
+        self.paint_label(surface, (x, w, label_top, bottom), scale, theme, font, ink);
+        self.paint_bead(surface, (x, y, w, h), scale, theme);
+    }
+
+    /// Paint whatever the tile's state puts *behind* its picture: the pointer
+    /// or selection panel, then the keyboard Focus Ring. A resting, unselected,
+    /// unfocused tile paints nothing at all, which is what keeps an icon view a
+    /// field of pictures rather than a grid of plates.
+    fn paint_backdrop(
+        &self,
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let (x, y, w, h) = rect;
+        let palette = theme.palette();
+        // A pressed tile recesses; a selected one takes the selection accent
+        // (its label inverting with it); a hovered one takes the shared pointer
+        // wash, so the pointer never imitates selection. The drag states carry
+        // no wash of their own here, exactly as they carry no tint in the
+        // shared plate colours every other control paints through: the drag
+        // vocabulary is one decision for the whole control set, not one a tile
+        // invents for itself.
+        let panel = match self.state.pointer {
+            PointerState::Pressed => Some(palette.surface_pressed),
+            _ if self.is_selected() => Some(palette.accent),
+            PointerState::Hover => Some(palette.surface_hover),
+            PointerState::None | PointerState::DragSource | PointerState::DragTarget => None,
+        };
+        if let Some(fill) = panel {
+            let radius = scale
+                .scale_length(theme.metrics().control_corner_radius)
+                .min(w / 2)
+                .min(h / 2);
+            surface.fill_round_rect(x, y, w, h, radius, Color::from(fill));
+        }
+        if self.state.focus.focused {
+            draw_outline(
+                surface,
+                x,
+                y,
+                w,
+                h,
+                plate_border(theme, scale).max(1),
+                Color::from(palette.rim_active),
+            );
+        }
+    }
+
+    /// Paint the tile's name, centred under its picture and truncated to the
+    /// tile's width. A name too long for one line is cut rather than wrapped or
+    /// spilled past the tile, and one with no room left for a whole line of text
+    /// is dropped rather than clipped mid-glyph.
+    fn paint_label(
+        &self,
+        surface: &mut Surface,
+        bounds: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        color: Color,
+    ) {
+        let (x, w, top, bottom) = bounds;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let left = x.saturating_add(pad);
+        let right = x.saturating_add(w).saturating_sub(pad);
+        let baseline = top.saturating_add(pad);
+        if right <= left || baseline.saturating_add(font.line_height()) > bottom {
+            return;
+        }
+        let fitted = font.truncate_to_width(&self.label, right - left);
+        let text_left = text_x(font, fitted, left, right, true);
+        font.draw_text(surface, text_left, to_i32(baseline), fitted, color);
+    }
+
+    /// Paint the Signal Bead of an authority or recovery state in the tile's
+    /// top-trailing corner, so a denied or unhealthy item is legible without
+    /// relying on colour. A tile in an ordinary state has no bead.
+    fn paint_bead(
+        &self,
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let Some((color, shape)) = resolve_bead(theme, self.state) else {
+            return;
+        };
+        let (x, y, w, h) = rect;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let size = scale
+            .scale_length(theme.metrics().bead_size)
+            .max(3)
+            .min(w)
+            .min(h);
+        let bx = x.saturating_add(w).saturating_sub(size).saturating_sub(pad);
+        paint_bead(surface, bx, y.saturating_add(pad), size, color, shape);
+    }
+
+    /// Whether the tile is selected (a mixed selection counts, as it does for
+    /// every other collection control).
+    fn is_selected(&self) -> bool {
+        matches!(
+            self.state.selection,
+            SelectionState::Selected | SelectionState::Mixed
+        )
+    }
+
+    /// The colour the tile's label and built-in glyph take: the on-accent
+    /// foreground over a selection panel, otherwise the shared surface
+    /// foreground for the tile's disposition.
+    fn label_color(&self, theme: &Theme) -> Color {
+        if self.is_selected() && self.state.pointer != PointerState::Pressed {
+            return Color::from(theme.palette().on_accent);
+        }
+        foreground(theme, self.state.disposition())
+    }
+
+    /// The square picture slot a tile occupying `bounds` reserves at the top of
+    /// its content: `(x, y, side)`, centred across the tile and capped so at
+    /// least the lower two-fifths of the tile stays for the label. `None` when
+    /// the tile is off-surface or leaves no room for a picture.
+    ///
+    /// The one definition of that geometry, so the side an owner rasterises
+    /// artwork at ([`Self::icon_side`]) is exactly the slot [`Self::render`]
+    /// paints it into.
+    fn icon_slot(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let (_, _, avail_w, avail_h) = inset(x, y, w, h, pad)?;
+        let side = avail_w.min(avail_h.saturating_mul(3) / 5);
+        if side == 0 {
+            return None;
+        }
+        Some((
+            x.saturating_add(pad).saturating_add((avail_w - side) / 2),
+            y.saturating_add(pad),
+            side,
+        ))
     }
 }
 

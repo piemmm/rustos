@@ -174,16 +174,33 @@ and each spurious mark would recomposite a whole window for nothing. A
 replaced *surface* (`set_surface`) is always assumed changed: comparing
 two whole buffers costs more than recompositing the window.
 
-**A content edit reports its own damage.** `edit_window_surface` takes an
-edit returning `(value, Rect)`, where the rectangle is in content-local
-pixels; the compositor translates it by the window's content origin and
-intersects it with the client rectangle, so an empty rectangle marks
-nothing and an over-large one is clipped rather than ever reaching a
-neighbouring window. The edit reports the rectangle rather than the
-caller declaring one up front because only the edit — having compared
-each pixel it wrote against the one already there — knows what truly
-changed; a conservative rectangle handed down beforehand would repaint
-pixels that never moved.
+**A present reports its own damage.** `present_window_content` takes the
+presented frame's extent and a conversion returning `(value, Rect)`, where
+the rectangle is in content-local pixels; the compositor translates it by
+the window's content origin and intersects it with the client rectangle, so
+an empty rectangle marks nothing and an over-large one is clipped rather
+than ever reaching a neighbouring window. The conversion reports the
+rectangle rather than the caller declaring one up front because only the
+conversion — having compared each pixel it wrote against the one already
+there — knows what truly changed; a conservative rectangle handed down
+beforehand would repaint pixels that never moved.
+
+**The frame is the window manager's; the pixels are the client's.** A
+window's content buffer is sized by the frame the *client* presents, never
+by the window manager's own resize: `resize_window` and
+`resize_window_client` move the geometry the compositor draws and lays the
+furniture out from (`Window::client_size`) and do not touch the buffer, and
+`present_window_content` establishes the buffer whenever the one held does
+not describe the presented frame. This is what makes a live resize correct.
+A resize-grab moves the frame on every pointer motion while the app is told
+its new size once, when the drag settles, so in between the app is still
+presenting the geometry it last knew. Reshaping its buffer under it would
+refuse each of those presents, which an app cannot tell from a dead session;
+instead the compositor simply draws the part of the buffer that lands inside
+the client area (`Window::row`), which is exactly what the user should see —
+and the drag costs no per-motion copy of the window's pixels. A buffer
+established afresh carried nothing over, so the whole client area is marked
+dirty rather than the rectangle the conversion reported.
 
 **Cursor damage is the rectangle it left plus the one it reached.** The
 pointer overlay is not damaged as it moves; `composite` diffs the

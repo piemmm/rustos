@@ -45,10 +45,18 @@ pub struct Window {
     /// pixels are optional: `client_size` below keeps the geometry the
     /// rest of the window is laid out from, so nothing else about the
     /// window depends on whether the buffer is currently held.
+    ///
+    /// The buffer's own extent is the geometry the *client* last presented,
+    /// which is not always `client_size`: the window manager resizes the
+    /// frame it draws as a resize-grab moves, while the client learns its
+    /// new size and re-renders afterwards. Whichever is larger, only the
+    /// pixels inside both are drawn ([`Self::client_row`]), so the two
+    /// disagreeing is an ordinary transient, never a fault.
     content: Option<Surface>,
-    /// The client content extent in physical pixels, retained across a
-    /// release so a window with no pixels still has a size, bounds, and
-    /// furniture band.
+    /// The client content extent in physical pixels the window is laid out
+    /// from: what the frame reserves for the client and what the client is
+    /// told to render at. Retained across a release, so a window with no
+    /// pixels still has a size, bounds, and furniture band.
     client_size: (u32, u32),
     opacity: u8,
     corners: Corners,
@@ -230,22 +238,48 @@ impl Window {
             .map_or(0, |surface| surface.payload_bytes())
     }
 
-    /// Borrow the window's content surface mutably for an in-place update
-    /// of its pixels, re-establishing a released buffer first. The caller
-    /// ([`crate::compositor::Compositor::edit_window_surface`]) marks only the content-local
-    /// rectangle the edit itself reports changed, not the whole surface.
+    /// Borrow the window's content buffer to convert a client present of a
+    /// `width` × `height` frame into it, establishing the buffer whenever
+    /// the one held does not describe that frame, and reporting whether it
+    /// had to be.
     ///
-    /// A re-established buffer starts fully transparent, so the window is
-    /// correct only once a full-window present arrives — which is exactly
-    /// what the redraw request the release raised asks the client for.
-    /// Returns `None` when the buffer cannot be allocated, so a present
-    /// under memory pressure is refused rather than half-applied.
-    pub(crate) fn content_mut(&mut self) -> Option<&mut Surface> {
-        if self.content.is_none() {
-            let (w, h) = self.client_size;
-            self.content = Surface::new(w, h);
+    /// **The presented frame is what sizes the buffer.** The pixels are the
+    /// client's, so their extent is the client's to state, and the window
+    /// manager's own resize of the frame it draws never reshapes them. A
+    /// buffer therefore has to be established here in two cases: it was
+    /// released under memory pressure, or the client has re-rendered at a
+    /// new size. An established buffer starts fully transparent and carries
+    /// nothing over, so the window is correct once the client's present has
+    /// been converted into it — which is why a whole-window present is what
+    /// both a redraw request and a resize ask the client for. The caller
+    /// ([`Compositor::present_window_content`]) repaints the whole client
+    /// area when the answer is `true`, and only the rectangle the
+    /// conversion reported otherwise.
+    ///
+    /// Returns `None` only when a buffer of that size cannot be allocated,
+    /// leaving the retained pixels exactly as they were: a present under
+    /// memory exhaustion is refused whole rather than half-applied, and
+    /// never at the cost of blanking a window that still has content.
+    ///
+    /// [`Compositor::present_window_content`]: crate::Compositor::present_window_content
+    pub(crate) fn content_for_present(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Option<(&mut Surface, bool)> {
+        let held = self
+            .content
+            .as_ref()
+            .is_some_and(|content| content.width() == width && content.height() == height);
+        if held {
+            return self.content.as_mut().map(|content| (content, false));
         }
-        self.content.as_mut()
+        // Allocated before the held buffer is given up, so a refusal leaves
+        // the window showing what it was showing.
+        let fresh = Surface::new(width, height)?;
+        self.take_content_wiped();
+        self.content = Some(fresh);
+        self.content.as_mut().map(|content| (content, true))
     }
 
     /// The window's screen rectangle.
@@ -655,13 +689,16 @@ impl Window {
     }
 
     /// Resize this window so its outer rectangle becomes `new_outer`: the
-    /// content surface is reallocated to the implied client size (the outer
-    /// extent minus the reserved frame band), the existing pixels are
-    /// preserved where they still fit (a raw copy, not an alpha blend, so a
-    /// live resize keeps the current content until the client re-renders), the
-    /// origin follows the new top-left, and the decoration is repainted at the
-    /// new size. Returns `false` (changing nothing) when the implied client
-    /// size is empty or its buffer cannot be allocated (fail closed).
+    /// client size becomes the implied one (the outer extent minus the
+    /// reserved frame band), the origin follows the new top-left, and the
+    /// decoration is repainted at the new size. Returns `false` (changing
+    /// nothing) when the implied client size is empty (fail closed).
+    ///
+    /// The client's own pixels are left alone: they are the client's to
+    /// resize, and it does so by presenting at its new size once the resize
+    /// reaches it. Until then the window draws the pixels it has over as
+    /// much of the new client area as they cover, which is what makes a
+    /// live resize-grab track the pointer without the client in the loop.
     pub(crate) fn resize_to_outer(&mut self, new_outer: Rect, scale: Scale, theme: &Theme) -> bool {
         let (band_w, band_h) = match self.band {
             Some(insets) => (
@@ -670,9 +707,10 @@ impl Window {
             ),
             None => (0, 0),
         };
-        let client_w = new_outer.width.saturating_sub(band_w);
-        let client_h = new_outer.height.saturating_sub(band_h);
-        if !self.resize_surface_preserving(client_w, client_h) {
+        if !self.set_client_size(
+            new_outer.width.saturating_sub(band_w),
+            new_outer.height.saturating_sub(band_h),
+        ) {
             return false;
         }
         self.origin = new_outer.origin;
@@ -680,14 +718,13 @@ impl Window {
         true
     }
 
-    /// Reallocate this window's content surface to the given client size in
-    /// place — the origin unchanged — preserving existing pixels where they
-    /// still fit and repainting the decoration at the new size. This is the
-    /// client-driven counterpart to [`resize_to_outer`](Self::resize_to_outer)
-    /// (which sizes from an outer rectangle and moves the origin): the window
+    /// Set this window's client size in place — the origin unchanged —
+    /// repainting the decoration at the new size. This is the client-driven
+    /// counterpart to [`resize_to_outer`](Self::resize_to_outer) (which
+    /// sizes from an outer rectangle and moves the origin): the window
     /// channel's `Resize` hands the session a new *client* content size, so
-    /// the compositor sizes the content directly. Returns `false` (changing
-    /// nothing) when the size is empty or its buffer cannot be allocated.
+    /// the compositor takes it directly. Returns `false` (changing nothing)
+    /// when the size is empty.
     pub(crate) fn resize_client(
         &mut self,
         client_w: u32,
@@ -695,46 +732,22 @@ impl Window {
         scale: Scale,
         theme: &Theme,
     ) -> bool {
-        if !self.resize_surface_preserving(client_w, client_h) {
+        if !self.set_client_size(client_w, client_h) {
             return false;
         }
         self.refresh_band(scale, theme);
         true
     }
 
-    /// Replace the content surface with one of `client_w` × `client_h`,
-    /// copying the existing pixels that still fit (a raw copy, not an alpha
-    /// blend, so a live resize keeps the current content until the client
-    /// re-renders). Returns `false` (leaving the surface untouched) for an
-    /// empty size or an allocation failure — the one definition both
+    /// Adopt `client_w` × `client_h` as the client extent the window is laid
+    /// out from, refusing an empty one — the one definition both
     /// [`resize_to_outer`](Self::resize_to_outer) and
-    /// [`resize_client`](Self::resize_client) share, so the resize copy is
-    /// never restated.
-    fn resize_surface_preserving(&mut self, client_w: u32, client_h: u32) -> bool {
+    /// [`resize_client`](Self::resize_client) share.
+    fn set_client_size(&mut self, client_w: u32, client_h: u32) -> bool {
         if client_w == 0 || client_h == 0 {
             return false;
         }
-        let Some(current) = self.content.as_ref() else {
-            // A released window has no pixels to carry over and allocates
-            // nothing: the redraw its release already asked for arrives at
-            // the new size.
-            self.client_size = (client_w, client_h);
-            return true;
-        };
-        let Some(mut resized) = Surface::new(client_w, client_h) else {
-            return false;
-        };
-        let keep_w = client_w.min(current.width());
-        let keep_h = client_h.min(current.height());
-        for y in 0..keep_h {
-            for x in 0..keep_w {
-                if let Some(pixel) = current.get(x, y) {
-                    resized.set(x, y, pixel);
-                }
-            }
-        }
         self.client_size = (client_w, client_h);
-        self.content = Some(resized);
         true
     }
 

@@ -18,9 +18,12 @@ This crate owns:
   which keeps per-region opacity and rounded-corner coverage correct
   (`AGENTS.md` §10).
 - `Surface` — a dense row-major premultiplied pixel buffer with bounds-checked
-  `get`/`set`, whole-row `row_mut`, `fill`, and clipped
+  `get`/`set`, the `row_span_mut` write seam, `fill`, and clipped
   `fill_rect`/`fill_round_rect`. It is the rendered content of a window for the
   compositor and the painted body of the taskbar.
+- `Surface::with_clip` — the scoped clip window every write is confined to, so a
+  view bounds what it paints to the area it owns even when it hands the surface
+  to code that does not know it is clipped (see below).
 - `Surface::fill_polygon` — the single supersampled, anti-aliased
   filled-polygon scan converter. Vector artwork (pointer cursors in
   `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
@@ -75,10 +78,40 @@ it unchanged and a full-coverage opaque span is a single slice fill rather
 than a per-pixel blend. A translucent source still takes the general
 Porter–Duff path.
 
-`row_mut` is the row-at-a-time write seam for a consumer that composites
+`row_span_mut` is the row-at-a-time write seam for a consumer that composites
 through a mask of its own — `lib/font`'s glyph blitter scales a text colour by
 a coverage bitmap through it — so such a consumer also pays one bounds check
-and one index computation per row instead of per pixel.
+and one index computation per row instead of per pixel. It returns the column
+the span really starts at, so a caller pairing it with its own mask advances
+that mask by whatever leading columns the clip withheld.
+
+## The clip window
+
+`Surface::with_clip(x, y, w, h, paint)` confines every write `paint` makes to
+that rectangle and restores the enclosing window when it returns. This is how a
+view bounds what it draws to the area it owns: the file manager's icon grid
+paints its tiles inside its own item area, so nothing a tile draws can mark the
+chrome above it or the scrollbar gutter beside it — the container states the
+bound once instead of every drawing routine trimming its own geometry to an
+edge. A clipped rounded rectangle keeps the corner arcs of the whole shape, and
+a clipped glyph keeps its own metrics, because only the *writes* are withheld —
+never the geometry, so a shape that straddles the edge is drawn correctly rather
+than distorted.
+
+Two properties make it safe to hand a clipped surface to code that does not know
+it is clipped:
+
+- **A nested window can only narrow.** `with_clip` intersects with the window
+  already in force, so a control handed a clipped surface cannot paint its way
+  back out to the area its host withheld.
+- **There is one enforcement point.** Every write — `set`, the fills, the polygon
+  scan converter, `blit`, and an external mask blitter — reaches pixels through
+  `row_span_mut`, which tests the window and the surface bounds together. No
+  primitive can honour the clip while another forgets it.
+
+The clip also *saves* work rather than costing it: the admitted rows and columns
+are resolved once per call, outside the row loop, so a sprite or fill mostly
+outside a narrow window costs only the sliver that survives it.
 
 ## Why it lives in `lib/`
 

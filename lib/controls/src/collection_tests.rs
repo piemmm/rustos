@@ -1,12 +1,14 @@
-//! Unit tests for the collection controls (spec §11.13–§11.16, §20 checklist).
+//! Unit tests for the collection controls (spec §11.13–§11.16, §11.34, §20
+//! checklist).
 //!
 //! These cover the shared row chrome (hover/selection/pressure rails, the
 //! bottom activity Heat Seam, the recovery/complete/denied Signal Bead, the
 //! focus ring, and the spec §13 disposition), the column-alignment invariant (a
 //! row's content never shifts when its state changes), table cells (alignment
-//! and cell-specific state), the card's three-edge state (leading dominant
-//! rail, bottom progress seam, top-trailing count/alert) with footer actions,
-//! and the panel's header/content layout, header actions, and anchor notch.
+//! and cell-specific state), the icon tile's plateless resting look and its
+//! state marks, the card's three-edge state (leading dominant rail, bottom
+//! progress seam, top-trailing count/alert) with footer actions, and the panel's
+//! header/content layout, header actions, and anchor notch.
 
 use alloc::vec;
 
@@ -19,12 +21,12 @@ use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::collection::{
-    Card, CardAction, CellAlign, ListRow, Panel, PanelAction, PanelEdge, RowAction, TableCell,
-    TableRow,
+    Card, CardAction, CellAlign, IconTile, ListRow, Panel, PanelAction, PanelEdge, RowAction,
+    TableCell, TableRow,
 };
 use crate::state::{
-    ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
-    ProgressValue, RecoveryState, SelectionState,
+    ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
+    PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
 };
 use crate::testkit::high_contrast;
 
@@ -462,6 +464,308 @@ fn table_row_selection_and_activation() {
     assert_eq!(row.on_pointer(&RELEASE, bounds), Some(RowAction::Activated));
 }
 
+// --- IconTile (spec §11.34) --------------------------------------------
+
+const TW: u32 = 72;
+const TH: u32 = 88;
+
+const TILE: Rect = Rect::new(0, 0, TW, TH);
+
+/// Paint a tile with the given state over a surface pre-filled with a colour no
+/// palette uses, so any pixel still carrying it is one the tile left alone.
+/// That is how "a resting tile paints no plate" is checked: the backdrop
+/// survives everywhere the tile did not deliberately draw.
+fn tile_over_backdrop(state: ControlState, theme: &Theme, art: Option<&Surface>) -> Surface {
+    let mut s = Surface::new(TW, TH).expect("surface");
+    s.fill(BEHIND);
+    let tile = IconTile::new("Report.txt", IconKind::Text).with_state(state);
+    tile.render(&mut s, TILE, Scale::ONE, theme, font(), art);
+    s
+}
+
+/// A colour no theme palette uses, standing in for whatever lies behind a tile
+/// (a window's surface, or the desktop wallpaper).
+const BEHIND: Color = Color::rgb(0, 255, 128);
+
+/// How many pixels still show [`BEHIND`] — how much of what lay behind the tile
+/// is still visible through it. Counted rather than divided, so the assertions
+/// below compare exact integers.
+fn behind_pixels(surface: &Surface) -> usize {
+    let want = BEHIND.premultiply();
+    surface.pixels().iter().filter(|p| **p == want).count()
+}
+
+/// A resting tile is a picture and a label over whatever is behind it — no
+/// plate, no rim, no rail. This is the whole point of the control: an icon view
+/// must read as a field of pictures, not a grid of boxes.
+#[test]
+fn a_resting_tile_paints_no_plate_over_what_lies_behind_it() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let s = tile_over_backdrop(ControlState::idle(), &theme, None);
+        let palette = theme.palette();
+        for (name, plate) in [
+            ("rim", palette.rim),
+            ("raised surface", palette.surface_raised),
+            ("surface", palette.surface),
+            ("hover wash", palette.surface_hover),
+            ("accent", palette.accent),
+        ] {
+            assert!(
+                !has_pixel(&s, premul(plate)),
+                "a resting tile drew a {name} plate"
+            );
+        }
+        // Most of the tile is still the backdrop: only the glyph and the label
+        // put ink on it.
+        assert!(
+            behind_pixels(&s) * 2 > s.pixels().len(),
+            "a resting tile covered too much of what lay behind it"
+        );
+        // It did draw its content, tinted with the shared surface foreground.
+        assert!(has_pixel(&s, premul(palette.on_surface)));
+    }
+}
+
+/// Hover and selection are both panels, but they are not the same panel: a
+/// selected tile takes the selection accent *and* flips its label and glyph to
+/// the on-accent foreground, so it differs from a hover in contrast and not
+/// merely in hue, and the pointer can never imitate selection.
+#[test]
+fn hover_selection_and_press_paint_distinct_panels() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+
+    let hovered = tile_over_backdrop(
+        ControlState::idle().with_pointer(PointerState::Hover),
+        &theme,
+        None,
+    );
+    assert!(has_pixel(&hovered, premul(palette.surface_hover)));
+    assert!(!has_pixel(&hovered, premul(palette.accent)));
+    assert!(
+        has_pixel(&hovered, premul(palette.on_surface)),
+        "a hovered tile keeps the ordinary label contrast"
+    );
+
+    let selected = tile_over_backdrop(
+        ControlState::idle().with_selection(SelectionState::Selected),
+        &theme,
+        None,
+    );
+    assert!(has_pixel(&selected, premul(palette.accent)));
+    assert!(!has_pixel(&selected, premul(palette.surface_hover)));
+    assert!(
+        has_pixel(&selected, premul(palette.on_accent)),
+        "a selected tile inverts its label and glyph onto the accent"
+    );
+
+    let pressed = tile_over_backdrop(
+        ControlState::idle().with_pointer(PointerState::Pressed),
+        &theme,
+        None,
+    );
+    assert!(has_pixel(&pressed, premul(palette.surface_pressed)));
+
+    // Each panel covers the tile, so none of them is a mere edge mark: only the
+    // rounded corners can leave the backdrop showing.
+    for s in [&hovered, &selected, &pressed] {
+        assert!(
+            behind_pixels(s) * 10 < s.pixels().len(),
+            "a state panel left the tile bare"
+        );
+    }
+}
+
+/// Keyboard focus draws the shared Focus Ring, so it reads distinctly from a
+/// pointer hover rather than sharing its look.
+#[test]
+fn a_focused_tile_draws_the_shared_focus_ring() {
+    let theme = Theme::dark();
+    let focused = tile_over_backdrop(
+        ControlState::idle().with_focus(FocusState::FOCUSED),
+        &theme,
+        None,
+    );
+    // The ring is on the tile's perimeter, in the active rim colour.
+    assert_eq!(
+        focused.get(0, TH / 2),
+        Some(premul(theme.palette().rim_active))
+    );
+    let hovered = tile_over_backdrop(
+        ControlState::idle().with_pointer(PointerState::Hover),
+        &theme,
+        None,
+    );
+    assert!(
+        !has_pixel(&hovered, premul(theme.palette().rim_active)),
+        "a hover must not imitate the focus ring"
+    );
+}
+
+/// An authority or recovery state shows its shape-coded Signal Bead, so a
+/// denied or unhealthy item is legible without relying on colour.
+#[test]
+fn a_denied_or_unhealthy_tile_shows_its_signal_bead() {
+    let theme = Theme::dark();
+    let denied = tile_over_backdrop(
+        ControlState::idle().with_authority(AuthorityState::Denied),
+        &theme,
+        None,
+    );
+    assert!(has_pixel(&denied, premul(theme.palette().denied)));
+    let hung = tile_over_backdrop(
+        ControlState::idle().with_recovery(RecoveryState::Hung),
+        &theme,
+        None,
+    );
+    assert!(has_pixel(&hung, premul(theme.palette().recovery)));
+}
+
+/// A disabled tile mutes its label rather than vanishing.
+#[test]
+fn a_disabled_tile_mutes_its_label() {
+    let theme = Theme::dark();
+    let s = tile_over_backdrop(ControlState::disabled(), &theme, None);
+    assert!(has_pixel(&s, premul(theme.palette().on_surface_muted)));
+}
+
+/// Paint a tile with `art` in its picture slot and report the artwork's
+/// bounding box, so two placements can be compared without reaching into the
+/// tile's private geometry.
+fn tile_artwork_bbox(theme: &Theme, art: &Surface) -> (u32, u32, u32, u32) {
+    let s = tile_over_backdrop(ControlState::idle(), theme, Some(art));
+    bbox(&s, ART.premultiply()).expect("artwork drawn")
+}
+
+#[test]
+fn a_tile_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
+    let theme = Theme::dark();
+    let side = IconTile::icon_side(TILE, Scale::ONE, &theme);
+    assert!(side > 0, "the tile reserves a picture slot");
+
+    // Slot-sized artwork fills exactly the slot the tile advertised, so an
+    // owner's cache can rasterise at that side and trust the placement.
+    let drawn = tile_artwork_bbox(&theme, &artwork(side, ART));
+    assert_eq!(drawn.2 + 1 - drawn.0, side);
+    assert_eq!(drawn.3 + 1 - drawn.1, side);
+
+    // Without artwork the same tile draws its built-in glyph instead, so a
+    // system with no artwork on disk still shows a meaningful icon.
+    let glyph = tile_over_backdrop(ControlState::idle(), &theme, None);
+    assert!(!has_pixel(&glyph, ART.premultiply()));
+    assert!(has_pixel(&glyph, premul(theme.palette().on_surface)));
+}
+
+#[test]
+fn tile_artwork_sized_differently_from_the_slot_is_centred_in_it() {
+    let theme = Theme::dark();
+    let side = IconTile::icon_side(TILE, Scale::ONE, &theme);
+    assert!(side > 8, "the slot has room to be over- and under-shot");
+
+    // The slot itself, then artwork four pixels smaller and four larger.
+    let slot = tile_artwork_bbox(&theme, &artwork(side, ART));
+    let small = tile_artwork_bbox(&theme, &artwork(side - 4, ART));
+    let large = tile_artwork_bbox(&theme, &artwork(side + 4, ART));
+
+    // Undersized artwork sits wholly inside the slot, inset on every side
+    // rather than pinned to its leading corner.
+    assert!(small.0 > slot.0 && small.1 > slot.1);
+    assert!(small.2 < slot.2 && small.3 < slot.3);
+    // Oversized artwork overhangs the slot on both sides instead of spilling
+    // from one corner.
+    assert!(large.0 < slot.0 && large.2 > slot.2);
+    assert!(large.1 < slot.1 && large.3 > slot.3);
+    // All three share the slot's centre, to within the odd pixel of a size
+    // that cannot be split evenly.
+    for placed in [small, large] {
+        let dx = i64::from(placed.0 + placed.2) - i64::from(slot.0 + slot.2);
+        let dy = i64::from(placed.1 + placed.3) - i64::from(slot.1 + slot.3);
+        assert!(dx.abs() <= 1 && dy.abs() <= 1, "{placed:?} off centre");
+    }
+}
+
+/// The tile leaves the label the lower part of its bounds: the picture never
+/// grows into the space the name needs, however tall the tile is.
+#[test]
+fn the_picture_slot_leaves_the_label_its_share_of_the_tile() {
+    let theme = Theme::dark();
+    for height in [40, TH, 200] {
+        let bounds = Rect::new(0, 0, TW, height);
+        let side = IconTile::icon_side(bounds, Scale::ONE, &theme);
+        assert!(
+            side * 5 <= height * 3,
+            "a {height}-pixel tile gave its picture {side} pixels"
+        );
+    }
+}
+
+/// A tile too small for a picture, or off-surface, draws nothing and never
+/// panics — every accessor stays total.
+#[test]
+fn a_degenerate_tile_draws_nothing() {
+    let theme = Theme::dark();
+    for bounds in [
+        Rect::new(0, 0, 0, 0),
+        Rect::new(0, 0, 1, 1),
+        Rect::new(-40, -40, 8, 8),
+    ] {
+        let mut s = Surface::new(TW, TH).expect("surface");
+        s.fill(BEHIND);
+        IconTile::new("x", IconKind::Text).render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+        assert_eq!(
+            IconTile::icon_side(bounds, Scale::ONE, &theme),
+            0,
+            "a degenerate tile claimed a picture slot"
+        );
+        assert_eq!(
+            behind_pixels(&s),
+            s.pixels().len(),
+            "a degenerate tile painted something"
+        );
+    }
+}
+
+/// Nothing a tile draws escapes its bounds, so a view can lay tiles edge to
+/// edge — and bound the whole grid's paint to the area it owns — without a tile
+/// bleeding onto its neighbour.
+///
+/// Checked at several tile heights, including ones too short for a whole line of
+/// text beneath the picture: such a tile drops its label rather than writing it
+/// over the tile below.
+#[test]
+fn a_tile_paints_only_within_its_bounds() {
+    let theme = Theme::dark();
+    let state = ControlState::idle()
+        .with_selection(SelectionState::Selected)
+        .with_focus(FocusState::FOCUSED);
+    let want = BEHIND.premultiply();
+    for height in [TH, font().line_height() * 2, font().line_height() + 2, 12] {
+        let mut s = Surface::new(TW * 3, height * 3).expect("surface");
+        s.fill(BEHIND);
+        let inner = Rect::new(
+            i32::try_from(TW).expect("small"),
+            i32::try_from(height).expect("small"),
+            TW,
+            height,
+        );
+        IconTile::new("A very long name that cannot fit", IconKind::Folder)
+            .with_state(state)
+            .render(&mut s, inner, Scale::ONE, &theme, font(), None);
+        for y in 0..s.height() {
+            for x in 0..s.width() {
+                let inside = (TW..TW * 2).contains(&x) && (height..height * 2).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        s.get(x, y),
+                        Some(want),
+                        "a {height}-pixel tile painted ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // --- Card (spec §11.15) ------------------------------------------------
 
 const CW: u32 = 220;
@@ -469,14 +773,7 @@ const CH: u32 = 140;
 
 fn card_surface(card: &Card, theme: &Theme) -> Surface {
     let mut s = Surface::new(CW, CH).expect("surface");
-    card.render(
-        &mut s,
-        Rect::new(0, 0, CW, CH),
-        Scale::ONE,
-        theme,
-        font(),
-        None,
-    );
+    card.render(&mut s, Rect::new(0, 0, CW, CH), Scale::ONE, theme, font());
     s
 }
 
@@ -541,98 +838,6 @@ fn card_body_renders() {
     let theme = Theme::dark();
     let s = card_surface(&Card::new("T").with_body("a detail line"), &theme);
     assert!(has_pixel(&s, premul(theme.palette().on_surface_muted)));
-}
-
-#[test]
-fn card_icon_draws_above_the_title() {
-    let theme = Theme::dark();
-    let fg = premul(theme.palette().on_surface);
-    let band = ((CW / 2 - 20, CW / 2 + 20), (6, 60));
-    // An empty-title card with no icon leaves the upper-centre band blank.
-    let plain = card_surface(&Card::new(""), &theme);
-    assert!(!region_has(&plain, band.0, band.1, fg));
-    // Adding a file-type icon fills that band with the tinted glyph, above the
-    // (here empty) label.
-    let iconed = card_surface(&Card::new("").with_icon(IconKind::Folder), &theme);
-    assert!(region_has(&iconed, band.0, band.1, fg));
-}
-
-/// Paint `card` with `art` in its icon slot and report the artwork's bounding
-/// box, so two placements can be compared without reaching into the tile's
-/// private geometry.
-fn card_artwork_bbox(card: &Card, theme: &Theme, art: &Surface) -> (u32, u32, u32, u32) {
-    let mut s = Surface::new(CW, CH).expect("surface");
-    card.render(
-        &mut s,
-        Rect::new(0, 0, CW, CH),
-        Scale::ONE,
-        theme,
-        font(),
-        Some(art),
-    );
-    bbox(&s, ART.premultiply()).expect("artwork drawn")
-}
-
-#[test]
-fn card_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
-    let theme = Theme::dark();
-    let card = Card::new("").with_icon(IconKind::AppBundle);
-    let side = card.icon_side(Rect::new(0, 0, CW, CH), Scale::ONE, &theme, font());
-    assert!(side > 0, "the tile reserves an icon slot");
-
-    // Slot-sized artwork fills exactly the slot the tile advertised.
-    let drawn = card_artwork_bbox(&card, &theme, &artwork(side, ART));
-    assert_eq!(drawn.2 + 1 - drawn.0, side);
-    assert_eq!(drawn.3 + 1 - drawn.1, side);
-
-    // Without artwork the same tile draws its built-in glyph instead.
-    let glyph = card_surface(&card, &theme);
-    assert!(!has_pixel(&glyph, ART.premultiply()));
-    assert!(has_pixel(&glyph, premul(theme.palette().on_surface)));
-}
-
-#[test]
-fn a_card_with_no_icon_ignores_supplied_artwork() {
-    let theme = Theme::dark();
-    let mut s = Surface::new(CW, CH).expect("surface");
-    Card::new("Status").render(
-        &mut s,
-        Rect::new(0, 0, CW, CH),
-        Scale::ONE,
-        &theme,
-        font(),
-        Some(&artwork(16, ART)),
-    );
-    assert!(!has_pixel(&s, ART.premultiply()));
-}
-
-#[test]
-fn artwork_sized_differently_from_the_slot_is_centred_in_it() {
-    let theme = Theme::dark();
-    let card = Card::new("").with_icon(IconKind::AppBundle);
-    let side = card.icon_side(Rect::new(0, 0, CW, CH), Scale::ONE, &theme, font());
-    assert!(side > 8, "the slot has room to be over- and under-shot");
-
-    // The slot itself, then artwork four pixels smaller and four larger.
-    let slot = card_artwork_bbox(&card, &theme, &artwork(side, ART));
-    let small = card_artwork_bbox(&card, &theme, &artwork(side - 4, ART));
-    let large = card_artwork_bbox(&card, &theme, &artwork(side + 4, ART));
-
-    // Undersized artwork sits wholly inside the slot, inset on every side
-    // rather than pinned to its leading corner.
-    assert!(small.0 > slot.0 && small.1 > slot.1);
-    assert!(small.2 < slot.2 && small.3 < slot.3);
-    // Oversized artwork overhangs the slot on both sides instead of spilling
-    // from one corner.
-    assert!(large.0 < slot.0 && large.2 > slot.2);
-    assert!(large.1 < slot.1 && large.3 > slot.3);
-    // All three share the slot's centre, to within the odd pixel of a size
-    // that cannot be split evenly.
-    for placed in [small, large] {
-        let dx = i64::from(placed.0 + placed.2) - i64::from(slot.0 + slot.2);
-        let dy = i64::from(placed.1 + placed.3) - i64::from(slot.1 + slot.3);
-        assert!(dx.abs() <= 1 && dy.abs() <= 1, "{placed:?} off centre");
-    }
 }
 
 #[test]

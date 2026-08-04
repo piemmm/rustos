@@ -47,6 +47,21 @@ fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
     Compositor::new(mode, background, test_chrome_cache(), &NORMAL_PRESSURE)
 }
 
+/// Convert a client present at the window's *current* client size, as the
+/// session's present bridge does, and return the conversion's own value.
+///
+/// A test that presents at a size the window is not laid out for asks for
+/// that size explicitly instead, so a stale-geometry present is always
+/// visible at the call site rather than hidden in a helper.
+fn present_content<T>(
+    comp: &mut Compositor,
+    id: WindowId,
+    convert: impl FnOnce(&mut Surface) -> (T, Rect),
+) -> Option<T> {
+    let (w, h) = comp.window(id)?.client_size();
+    comp.present_window_content(id, w, h, convert)
+}
+
 /// Read the RGBA scan-out bytes of frame pixel `(x, y)`.
 fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     let info = comp.mode();
@@ -613,7 +628,7 @@ fn a_content_edit_marks_only_the_rectangle_it_reports() {
     c.composite();
 
     let green = Color::rgb(0, 255, 0);
-    let edited = c.edit_window_surface(id, |surface| {
+    let edited = present_content(&mut c, id, |surface| {
         surface.set(2, 3, green.premultiply());
         (green, Rect::new(2, 3, 1, 1))
     });
@@ -633,7 +648,7 @@ fn content_damage_is_offset_by_a_decorated_window_frame() {
     let outer = c.window(id).expect("window").bounds();
     assert!(client.left() > outer.left() && client.top() > outer.top());
 
-    let edit = c.edit_window_surface(id, |surface| {
+    let edit = present_content(&mut c, id, |surface| {
         surface.set(0, 0, Color::rgb(0, 255, 0).premultiply());
         ((), Rect::new(0, 0, 2, 2))
     });
@@ -654,7 +669,7 @@ fn content_damage_larger_than_the_window_is_clipped_to_its_client() {
     let client = c.window_client_rect(id).expect("client");
 
     // An over-large report must never reach a neighbouring window's pixels.
-    let edit = c.edit_window_surface(id, |_surface| ((), Rect::new(0, 0, 1_000, 1_000)));
+    let edit = present_content(&mut c, id, |_surface| ((), Rect::new(0, 0, 1_000, 1_000)));
     assert_eq!(edit, Some(()));
     assert_eq!(composite_checked(&mut c).rects(), &[client]);
 }
@@ -666,7 +681,7 @@ fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
     c.composite();
 
     let mut ran = false;
-    let edited = c.edit_window_surface(id, |_surface| {
+    let edited = present_content(&mut c, id, |_surface| {
         ran = true;
         (42_u8, Rect::EMPTY)
     });
@@ -683,7 +698,7 @@ fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
 fn editing_an_unknown_window_never_runs_the_edit() {
     let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let mut ran = false;
-    let edited = c.edit_window_surface(WindowId(9_999), |_surface| {
+    let edited = c.present_window_content(WindowId(9_999), 4, 4, |_surface| {
         ran = true;
         ((), Rect::new(0, 0, 4, 4))
     });
@@ -2596,6 +2611,84 @@ fn a_resize_grab_clamps_to_a_minimum_and_escape_restores() {
 }
 
 #[test]
+fn a_resize_grab_leaves_the_clients_own_pixels_alone() {
+    // The window manager resizes the frame it draws on every motion of a
+    // resize-grab, while the client is told its new size once, when the drag
+    // settles. Reshaping the client's buffer under it would make every
+    // present in between describe a geometry the compositor had already
+    // discarded — a refusal an app cannot tell from a dead session — so the
+    // frame is the window manager's and the pixels stay the client's.
+    let (mut c, id) = decorated_compositor();
+    present_full(&mut c, id, GREEN);
+    let client = c.window(id).expect("window").client_size();
+    let mut router = InputRouter::new();
+    let outer = c.window(id).expect("window").bounds();
+    let corner = Point::new(outer.right() - 1, outer.bottom() - 1);
+    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(press_primary(), &mut c);
+
+    // Shrunk well inside the client, then grown past it again.
+    for delta in [-40, -80, 20] {
+        router.handle(moved(corner.x + delta, corner.y + delta), &mut c);
+        let window = c.window(id).expect("window");
+        assert_ne!(
+            window.client_size(),
+            client,
+            "the frame tracks the pointer, or this proves nothing"
+        );
+        let content = window.content().expect("the client keeps its pixels");
+        assert_eq!(
+            (content.width(), content.height()),
+            client,
+            "the frame resized; the client's buffer did not"
+        );
+        assert!(
+            content.pixels().iter().all(|p| *p == GREEN.premultiply()),
+            "not one client pixel is disturbed by a frame resize"
+        );
+    }
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::ResizeEnded { window: id },
+        "the drag settles, which is when the client is told its new size"
+    );
+}
+
+#[test]
+fn a_present_at_a_new_size_re_establishes_the_buffer_and_repaints_the_client() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(4, 4), opaque(8, 8, RED));
+    c.composite();
+    // The resize has settled: the frame reserves the new client size and the
+    // client re-renders at it.
+    assert!(c.resize_window_client(id, 12, 12));
+    c.composite();
+    let client = c.window_client_rect(id).expect("client");
+    assert_eq!(client, Rect::new(4, 4, 12, 12));
+
+    let blank = c.present_window_content(id, 12, 12, |surface| {
+        let blank = surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT);
+        (blank, Rect::EMPTY)
+    });
+    assert_eq!(
+        blank,
+        Some(true),
+        "a buffer established for a new size carries nothing over"
+    );
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[client],
+        "every client pixel now comes from the fresh buffer, so the empty \
+         rectangle the conversion reported cannot be taken at face value"
+    );
+    assert_eq!(
+        c.window(id).expect("window").client_size(),
+        (12, 12),
+        "the frame and the buffer agree once the resize has settled"
+    );
+}
+
+#[test]
 fn a_command_control_click_emits_its_typed_action() {
     let (mut c, id) = decorated_compositor();
     let mut router = InputRouter::new();
@@ -3512,7 +3605,7 @@ fn app_window(c: &mut Compositor, x: i32, y: i32, client: u32, title: &str) -> W
 /// Fill the whole of the window named by `id` with `color`, exactly as a
 /// client presenting a full-window frame does.
 fn present_full(c: &mut Compositor, id: WindowId, color: Color) {
-    let filled = c.edit_window_surface(id, |surface| {
+    let filled = present_content(c, id, |surface| {
         let (w, h) = (surface.width(), surface.height());
         for y in 0..h {
             for x in 0..w {

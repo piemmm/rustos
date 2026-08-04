@@ -263,7 +263,10 @@ fn coverage_sources(color: Color) -> [Pixel; 256] {
 /// touched, so the loop below walks only pixels that land on it: each row
 /// blends the glyph's coverage bytes against the destination row slice in
 /// step, paying one bounds check and one row-address computation per row
-/// rather than per pixel.
+/// rather than per pixel. The destination span comes from the surface's own
+/// row accessor, so the glyph is confined by any clip window in force — a label
+/// that reaches its view's edge stops there instead of running past it —
+/// without this blitter knowing where that edge is.
 fn draw_coverage_glyph(
     surface: &mut Surface,
     x: i32,
@@ -281,14 +284,27 @@ fn draw_coverage_glyph(
     let Ok(first_row) = u32::try_from(rows.destination) else {
         return;
     };
+    let Ok(first_column) = u32::try_from(columns.destination) else {
+        return;
+    };
+    let Ok(span) = u32::try_from(columns.source.len()) else {
+        return;
+    };
     for (source_row, destination_row) in rows.source.zip(first_row..) {
         let Some(coverage) = glyph_row(glyph, source_row, &columns.source) else {
             continue;
         };
-        let Some(destination) = surface
-            .row_mut(destination_row)
-            .and_then(|row| row.get_mut(columns.destination..))
+        let Some((drawn_from, destination)) =
+            surface.row_span_mut(destination_row, first_column, span)
         else {
+            continue;
+        };
+        // Whatever leading columns a clip window withheld are skipped in the
+        // coverage too, so mask and destination stay in step.
+        let Ok(withheld) = usize::try_from(drawn_from - first_column) else {
+            continue;
+        };
+        let Some(coverage) = coverage.get(withheld..) else {
             continue;
         };
         for (&level, pixel) in coverage.iter().zip(destination.iter_mut()) {
@@ -423,6 +439,45 @@ mod blit_tests {
             }
         }
         surface
+    }
+
+    /// A glyph is confined by the surface's clip window, and every surviving
+    /// pixel is exactly the one an unclipped blit produced: a blitter that
+    /// skipped the destination columns a window withheld without skipping the
+    /// same coverage bytes would slide the glyph sideways into the window.
+    #[test]
+    fn coverage_blit_is_confined_by_the_clip_window() {
+        let glyph = varied_glyph(10, 14);
+        let sources = coverage_sources(Color::rgba(240, 20, 90, 255));
+        // Windows that cut the glyph on each side, through its middle, and
+        // one that misses it entirely.
+        let windows = [
+            (0, 0, 24, 18),
+            (5, 0, 4, 18),
+            (0, 6, 24, 3),
+            (7, 7, 3, 2),
+            (20, 0, 8, 18),
+        ];
+        let untouched = patterned_surface(24, 18);
+        for &(cx, cy, cw, ch) in &windows {
+            let mut clipped = untouched.clone();
+            let mut whole = untouched.clone();
+            clipped.with_clip(cx, cy, cw, ch, |surface| {
+                draw_coverage_glyph(surface, 3, 5, &glyph, 10, &sources);
+            });
+            draw_coverage_glyph(&mut whole, 3, 5, &glyph, 10, &sources);
+            for y in 0..18 {
+                for x in 0..24 {
+                    let inside = (cx..cx + cw).contains(&x) && (cy..cy + ch).contains(&y);
+                    let want = if inside { &whole } else { &untouched };
+                    assert_eq!(
+                        clipped.get(x, y),
+                        want.get(x, y),
+                        "pixel ({x}, {y}) with clip ({cx}, {cy}, {cw}, {ch})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -1433,10 +1433,16 @@ now stands:
   row-major scrolling grid, `ColumnsFromTrailing` for the desktop's
   trailing-edge column that grows a new column inward as it fills — so both
   share one cell geometry, one hit-test, and one set of counts
-  (`cells_per_line`, `lines_total`, `visible_lines`, `visible_range`). The
-  tile is shared too: `grid_tile`, `entry_label`, and `grid_metrics` are
-  public, so the desktop paints the *same* `Card` as the file manager rather
-  than a lookalike — there is no second icon-tile painter.
+  (`cells_per_line`, `lines_total`, `visible_lines`, `visible_range`). The tile
+  is shared too: `grid_tile`, `entry_label`, and `grid_metrics` are public, so
+  the desktop paints the *same* `lib/controls::IconTile` — the plateless
+  picture-over-name item — as the file manager rather than a lookalike; there is
+  no second icon-tile painter. Neither view ever lays out a tile an edge would
+  cut short; the one parameter they deliberately differ in is `GridFill`: the
+  desktop's field takes `FixedPitch`, keeping its icons anchored to the edge they
+  hug whatever the work area's exact extent is, while the file manager's
+  resizable grid takes `Spread` and shares a row's leftover width out between
+  its tiles.
 - **The surface** (`userland/gui/session::desktop`): `Desktop<S:
   DirectorySource>` lists the user's `Desktop` folder through the same
   directory seam the trusted file picker uses, sorts and classifies it with

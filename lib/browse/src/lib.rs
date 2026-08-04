@@ -81,9 +81,10 @@
 //! * [`browser`] — the [`Browser`] navigation model.
 //! * [`layout`](mod@layout) — the [`ListView`]/[`GridView`] item-view geometry
 //!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
-//!   definition the renderer and the pointer hit-test share), plus [`ViewMode`]
-//!   and the [`GridFlow`] that also lays the desktop's trailing-edge icon
-//!   column out of the very same grid.
+//!   definition the renderer and the pointer hit-test share), plus [`ViewMode`],
+//!   the [`GridFlow`] that also lays the desktop's trailing-edge icon column out
+//!   of the very same grid, and the [`GridFill`] policy that decides what a line
+//!   does with the space it has left over.
 //! * [`format`](mod@format) — the size/date column formatting and the
 //!   properties view's date-and-time spelling.
 //! * [`properties`](mod@properties) — the [`Properties`] view model: the
@@ -171,7 +172,9 @@ pub use execute::{
     PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 pub use format::{format_date, format_datetime, format_size};
-pub use layout::{GridFlow, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+pub use layout::{
+    GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
+};
 pub use media::{entry_icon_request, media_for_entry, media_for_name, MediaType};
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};

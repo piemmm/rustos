@@ -466,6 +466,146 @@ fn fill_polygon_composites_over_existing_pixels() {
     assert!(s.pixels().iter().all(|p| *p == blended));
 }
 
+// ---- clip window -----------------------------------------------------
+//
+// Every write path is confined by the clip window, which is what lets a view
+// bound what it draws to the area it owns without any drawing routine trimming
+// its own geometry. Each primitive is checked separately: one honouring the
+// window while another forgets it would leak paint onto a neighbour's pixels.
+
+#[test]
+fn clip_confines_a_rect_fill() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.with_clip(1, 1, 2, 2, |s| s.fill_rect(0, 0, 4, 4, RED));
+    for y in 0..4 {
+        for x in 0..4 {
+            let inside = (1..3).contains(&x) && (1..3).contains(&y);
+            let expected = if inside {
+                RED.premultiply()
+            } else {
+                Pixel::TRANSPARENT
+            };
+            assert_eq!(s.get(x, y), Some(expected), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn clip_confines_a_whole_surface_fill() {
+    let mut s = Surface::new(3, 3).expect("allocates");
+    s.with_clip(0, 0, 3, 1, |s| s.fill(RED));
+    assert_eq!(s.get(2, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 1), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn clip_confines_a_rounded_fill_without_re_rounding_it() {
+    // The full shape's own corner coverage, for comparison.
+    let mut whole = Surface::new(8, 8).expect("allocates");
+    whole.fill_round_rect(0, 0, 8, 8, 3, RED);
+
+    // The same shape drawn through a window that cuts its left half: the
+    // surviving pixels must be identical to the whole shape's, so a clipped
+    // tile keeps the corner arcs of the tile rather than of the sliver.
+    let mut cut = Surface::new(8, 8).expect("allocates");
+    cut.with_clip(4, 0, 4, 8, |s| s.fill_round_rect(0, 0, 8, 8, 3, RED));
+    for y in 0..8 {
+        for x in 0..8 {
+            let expected = if x < 4 {
+                Pixel::TRANSPARENT
+            } else {
+                whole.get(x, y).expect("in bounds")
+            };
+            assert_eq!(cut.get(x, y), Some(expected), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn clip_confines_a_polygon_fill() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    let square = [(0, 0), (4, 0), (4, 4), (0, 4)];
+    s.with_clip(2, 2, 2, 2, |s| s.fill_polygon(&square, 4, RED));
+    assert_eq!(s.get(3, 3), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Pixel::TRANSPARENT));
+}
+
+/// A sprite is clipped on every side, and the surviving pixels keep their
+/// source alignment — a blit that skipped clipped columns in the destination
+/// but not in the source would smear the sprite sideways.
+#[test]
+fn clip_confines_a_blit_and_keeps_the_source_aligned() {
+    let mut src = Surface::new(4, 1).expect("allocates");
+    for x in 0..4 {
+        // A distinct alpha per column, so a misalignment is visible.
+        src.set(
+            x,
+            0,
+            Color::rgba(255, 0, 0, 60 + 40 * u8::try_from(x).expect("small")).premultiply(),
+        );
+    }
+    let mut dst = Surface::new(4, 1).expect("allocates");
+    dst.with_clip(1, 0, 2, 1, |s| s.blit(0, 0, &src));
+    assert_eq!(dst.get(0, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(dst.get(1, 0), src.get(1, 0));
+    assert_eq!(dst.get(2, 0), src.get(2, 0));
+    assert_eq!(dst.get(3, 0), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn clip_confines_a_single_pixel_write() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_clip(0, 0, 1, 1, |s| {
+        s.set(0, 0, RED.premultiply());
+        s.set(1, 1, RED.premultiply());
+    });
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(Pixel::TRANSPARENT));
+}
+
+/// A row span is the one place a write is confined, so it reports the column
+/// it really starts at: a caller pairing it with its own mask (the glyph
+/// blitter) advances that mask by the difference.
+#[test]
+fn row_span_reports_the_column_the_clip_left() {
+    let mut s = Surface::new(8, 2).expect("allocates");
+    s.with_clip(3, 0, 2, 2, |s| {
+        let (first, span) = s.row_span_mut(0, 0, 8).expect("row admitted");
+        assert_eq!(first, 3);
+        assert_eq!(span.len(), 2);
+        assert!(s.row_span_mut(1, 6, 2).is_none(), "columns past the window");
+    });
+    assert!(
+        s.row_span_mut(1, 6, 2).is_some(),
+        "the window is restored on return"
+    );
+}
+
+/// A nested window can only narrow: a control handed a clipped surface must
+/// not be able to paint its way back out to what its host withheld.
+#[test]
+fn a_nested_clip_can_only_narrow() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.with_clip(1, 1, 2, 2, |s| {
+        s.with_clip(0, 0, 4, 4, |s| s.fill_rect(0, 0, 4, 4, RED));
+    });
+    assert_eq!(s.get(1, 1), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(3, 3), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn an_empty_clip_admits_nothing_and_restores() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_clip(0, 0, 0, 0, |s| s.fill(RED));
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+    // A window entirely off-surface is equally empty, not wrapped.
+    s.with_clip(9, 9, 4, 4, |s| s.fill(RED));
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+    s.fill(BLUE);
+    assert!(s.pixels().iter().all(|p| *p == BLUE.premultiply()));
+}
+
 // ---- CachedBytes: Surface plugs into the shared reclaim cache --------
 
 #[test]

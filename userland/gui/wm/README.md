@@ -24,12 +24,24 @@ router**:
   outright. An update that changes nothing marks nothing: a `move_window`
   to the origin the window already has, `set_corners`/`set_visible`/
   `set_opacity` to the current value, still return `true` (only an unknown
-  id returns `false`) but repaint no pixel. A content edit reports its own
-  damage — `edit_window_surface` takes an edit returning `(value, Rect)`
-  in content-local pixels, translated into the window's client rectangle
-  and clipped to it — because only the edit, having compared the pixels it
-  wrote against the ones already there, knows what truly changed. A
-  replaced *surface* is always assumed changed.
+  id returns `false`) but repaint no pixel. A present reports its own
+  damage — `present_window_content` takes the presented frame's extent and
+  a conversion returning `(value, Rect)` in content-local pixels,
+  translated into the window's client rectangle and clipped to it —
+  because only the conversion, having compared the pixels it wrote against
+  the ones already there, knows what truly changed. A replaced *surface*
+  is always assumed changed.
+- The frame is the window manager's; the pixels are the client's. A
+  window's content buffer is sized by the frame the **client** presents:
+  `resize_window`/`resize_window_client` move the geometry the compositor
+  draws and lays furniture out from and never touch the buffer, and
+  `present_window_content` establishes it whenever the one held does not
+  describe the presented frame. A resize-grab therefore moves the frame on
+  every pointer motion while the app, told its new size only once the drag
+  settles, keeps presenting the geometry it last knew — accepted, with the
+  part that lands inside the client area drawn, instead of refused as it
+  would be if the window manager had reshaped the buffer under the app.
+  A drag costs no per-motion copy of the window's pixels.
 - The `Compositor`: a z-ordered window stack composited over an opaque
   background into a `DisplayMode`-shaped byte frame, presented through a
   `Display` seam. `present` composites and then moves only what changed:

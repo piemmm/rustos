@@ -172,7 +172,20 @@ column inward as it fills, but both share one cell geometry and one hit-test
 `grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
 shows the shipped folder artwork, a file its content-class artwork, and an
 application bundle the icon it carries in its own `Resources/`, falling back
-to built-in glyphs exactly as the file manager's grid does.
+to built-in glyphs exactly as the file manager's grid does. Each icon is a
+shared `lib/controls` `IconTile` — the picture over its name with no plate of
+its own, so the icons sit on the wallpaper rather than in a row of boxes, and
+only a hovered, selected, or focused icon paints a panel behind itself.
+
+The one place the desktop's geometry deliberately differs from the file
+manager's is what it does with the space a column has left over: the field
+takes `GridFill::FixedPitch`, keeping one tile-plus-gap pitch from the edge its
+icons hug. It is a fixed field rather than resizable content, so an icon stays
+where the user last saw it whatever the work area's exact extent is — it does
+not drift when the taskbar's band or the display mode changes by a few pixels.
+The file manager's resizable grid takes `Spread` instead and shares a row's
+leftover width out between its tiles (see [Rendering](apps.md#rendering)).
+Neither ever lays out a tile an edge would cut.
 
 **Pointer and keyboard.** A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared

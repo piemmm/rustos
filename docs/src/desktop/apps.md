@@ -452,8 +452,10 @@ one coherent themed surface rather than a browser-private row painter
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
 (`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
 at the epoch so a stampless file is never given a fabricated date, §21). In the
-**grid** view each entry is a shared `lib/controls` `Card` tile carrying its
-file-type icon above that same label, wrapped into as many columns as fit the
+**grid** view each entry is a shared `lib/controls` `IconTile` — its file-type
+icon over that same label, with no plate of its own, so a folder reads as a field
+of icons rather than a grid of boxes and only a hovered, selected, or focused
+entry paints a panel behind its icon — wrapped into as many columns as fit the
 width; the two views share one selection model, so toggling never moves the
 selection or re-reads the directory. The icon is the shared registry's
 (`media_for_entry(entry, parent).icon()`, above): one classification both the
@@ -461,8 +463,8 @@ file manager and the trusted picker draw from (`AGENTS.md` §2.2) and a
 **display hint only** — it decides a glyph, never an operation; authority stays
 in the VFS and the launcher. `render` takes a
 trailing `artwork: &mut dyn tairix_icon::IconArtwork` lookup and asks it for
-each tile's icon at the exact `Card::icon_side` the tile reserves, blitting the
-real icon artwork when the system ships and can decode it and drawing the
+each tile's icon at the exact `IconTile::icon_side` the tile reserves, blitting
+the real icon artwork when the system ships and can decode it and drawing the
 built-in vector glyph when it cannot — so a missing or refused asset degrades
 to a meaningful icon and can never blank the tile (`AGENTS.md` §10). A tile
 for an application bundle names the bundle itself in that request
@@ -492,9 +494,27 @@ of counts (`cells_per_line`, `lines_total`, `visible_lines`, and the
 `visible_range(offset)` the painter iterates), so the two surfaces cannot
 drift apart (`AGENTS.md` §2.2). The tile itself is shared the same way: the
 `render` helpers `grid_metrics`, `grid_tile`, and `entry_label` are public, so
-the desktop paints the *same* `Card` tile — same icon side, same label
+the desktop paints the *same* `IconTile` — same icon side, same label
 elision, same selection state — as the file manager's grid rather than a
-lookalike. A vertical
+lookalike.
+
+Only whole tiles are ever laid out — no icon is cut by an edge — and the two
+surfaces differ in one deliberate parameter: the `GridFill` policy for the space
+a line has left over once it has fitted as many whole tiles as it can. The file
+manager's window is **resizable**, so its grid takes `Spread`: the leftover width
+is shared out along the row, so the gaps between the tiles widen by equal amounts
+and the margins at the two ends match, and widening the window past one more tile
+re-flows the listing into an extra column. Only the space between the tiles
+moves; a tile never stretches, so its icon slot, label field, and hit target read
+the same at every window size. The pitch is the floor, so a row that fits its
+tiles exactly is laid out identically under either policy, and the pixels that
+will not divide into one per gap are left as the two matching end margins rather
+than making one gap wider than another. The axis the grid *scrolls* along is
+never spread: rows keep the fixed pitch below the header, because the space past
+the last whole row belongs to the next row, one scroll away. The desktop's icon
+field takes `FixedPitch` instead — it is a fixed field, not resizable content, so
+keeping the pitch anchored to the edge its icons hug means an icon stays where
+the user last saw it whatever the work area's exact extent is. A vertical
 `lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
 same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
 (`scroll_lines`), and a selection-moving key reveals the selection the least it
@@ -555,7 +575,7 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   glyph, and the refusal itself is cached so a broken asset is not re-read every
   frame.
 - **Only what is drawn is decoded.** The renderer asks the lookup for the
-  visible tiles alone, at the exact `Card::icon_side` each tile reserves, so a
+  visible tiles alone, at the exact `IconTile::icon_side` each tile reserves, so a
   hundred-entry directory costs one read and one decode per *visible kind* — not
   per entry — and scrolling decodes only the kinds that just came into view.
   Nothing pre-warms an icon for an entry that is scrolled out of sight.

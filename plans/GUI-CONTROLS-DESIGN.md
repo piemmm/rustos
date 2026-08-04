@@ -737,10 +737,9 @@ Cards group state and actions.
 - The bottom edge carries progress.
 - The top trailing corner carries count or alert beads.
 - Footer actions share the card's semantic state but keep their own pointer and focus states.
-- A card may carry an optional identifying glyph above its title (e.g. a file
-  manager grid tile's file-type icon); when present, the title and body centre
-  beneath it. A card with no glyph keeps its title at the top, so
-  notification/resource cards are unaffected.
+- A card's plate bounds the group it owns. One item of an icon view is not such
+  a group and carries no plate: that is an `IconTile` (§11.34), never a card
+  with an icon.
 
 ### 11.16 Panel
 
@@ -1021,6 +1020,74 @@ value, and beneath them a thin rounded track — for the header resource band
 - A meter narrower or shorter than its own label, reading, and track
   degrades by omitting whichever line does not fit, never by drawing past
   its own bounds.
+
+### 11.34 IconTile
+
+An `IconTile` is one item of an icon view: a picture with its name beneath it.
+It is the tile a file manager's icon view and the desktop's icon field are made
+of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
+(§11.15).
+
+- **A resting tile has no plate, rim, or rail of its own.** It paints only its
+  picture and its label over whatever lies behind it — a window's surface, or
+  the desktop wallpaper — so a folder reads as a field of pictures rather than a
+  grid of boxes. A tile is not a Card: a card's plate bounds a group it owns,
+  while a plate per item would draw a box around every icon.
+- Only *state* paints anything behind the picture:
+  - Hover and press take the shared pointer wash (`surface_hover` /
+    `surface_pressed`) as a rounded panel across the whole tile.
+  - **Selection takes the selection accent and inverts the tile's label and
+    glyph to the on-accent foreground.** Selection therefore differs from hover
+    in contrast, not merely in hue, and the pointer can never imitate it (§11.13
+    states the same rule for rows).
+  - Keyboard focus draws the shared Focus Ring, so a focused tile reads
+    distinctly from a hovered one.
+  - An authority or recovery state shows its shape-coded Signal Bead (§12.4) in
+    the top-trailing corner, so a denied or unhealthy item is legible without
+    relying on colour.
+- The picture occupies a square slot across the top of the tile, capped so the
+  lower part always remains for the label; the label is centred beneath it and
+  truncated to the tile's width rather than wrapped or spilled. There is exactly
+  one definition of that slot geometry, and an owner queries it to rasterise
+  artwork at precisely the side the tile will draw it in.
+- Artwork reaches the tile already decoded and rasterised (§10 of the charter,
+  `plans/ICONS.md`); a tile with none falls back to the built-in glyph for its
+  icon kind, tinted like its label, so a system with no artwork on disk still
+  shows a meaningful icon.
+- A tile renders state and never dispatches: an icon view owns the layout and
+  hit-tests pointer input against that same geometry, so a tile holds no pointer
+  position or press latch of its own (unlike a row, which the user clicks
+  directly).
+- **Nothing a tile draws escapes its own bounds.** A view may therefore lay
+  tiles edge to edge, and bound the grid's paint to the area it owns, without a
+  tile bleeding onto its neighbour.
+
+#### Icon views and the space a line has left over
+
+An icon view lays its tiles out on a wrapped grid. **Only whole tiles are laid
+out**: a tile an edge would cut short is not placed at all, because a
+part-drawn picture over an unreadable name is not a legible item. As many whole
+tiles as the line holds almost never divide the line exactly, so the view
+chooses one of two fill policies for what is left over. This is a property of
+the *view*, not of the tile.
+
+- **A resizable icon view spreads.** The leftover space is shared out along the
+  line: the gaps between the tiles widen by equal amounts and the margins at the
+  two ends match, so the line reads as filled rather than as a listing that
+  stopped short of a widening blank margin. Widening the view past one more
+  whole tile re-flows the content into an extra slot.
+- **A tile never stretches to fill space.** Only the space *between* tiles
+  moves, so a tile's picture slot, label field, and hit target read the same at
+  every size, and every tile still lines up with the one above it — including on
+  a part-filled last line, whose empty slots stay at the trailing end.
+- **The pitch is the floor, and the scroll axis is never spread.** A line that
+  fits its tiles exactly is laid out identically under either policy; and the
+  axis the view scrolls along keeps the fixed pitch, because the space past its
+  last whole line belongs to the next line, one scroll away.
+- **A fixed icon field keeps the pitch.** The desktop's icon field is not
+  resizable content: keeping one tile-plus-gap pitch from the edge its icons hug
+  means an icon stays where the user last saw it whatever the field's exact
+  extent is, rather than drifting when that extent changes by a few pixels.
 
 ---
 

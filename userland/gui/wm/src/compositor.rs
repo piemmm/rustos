@@ -671,43 +671,62 @@ impl Compositor {
         })
     }
 
-    /// Edit a window's content surface **in place**, marking dirty only the
-    /// content-local rectangle the edit reports it changed, and return the
-    /// edit's own value — or `None` for an unknown `id`.
+    /// Convert a client's presented frame of `width` × `height` pixels
+    /// **into** a window's own content buffer, marking dirty only the
+    /// content-local rectangle the conversion reports it changed, and
+    /// return the conversion's own value — or `None` for an unknown `id`,
+    /// or a buffer of that size that cannot be allocated.
     ///
     /// Unlike [`set_surface`](Self::set_surface), the caller writes into
     /// the window's existing buffer rather than handing over a fresh one,
     /// so a presenter applying a per-frame damage region into the
     /// window's persistent content needs no second copy of the surface to
-    /// convert into and clone from. The edit reports its own damage rather
-    /// than the caller declaring one up front, because only the edit
-    /// itself — by comparing each converted pixel against the one already
-    /// there — learns which pixels genuinely changed; a rectangle handed
-    /// down before the edit runs would have to be conservative and repaint
-    /// pixels that never moved.
+    /// convert into and clone from. The conversion reports its own damage
+    /// rather than the caller declaring one up front, because only the
+    /// conversion itself — by comparing each converted pixel against the
+    /// one already there — learns which pixels genuinely changed; a
+    /// rectangle handed down before it runs would have to be conservative
+    /// and repaint pixels that never moved.
+    ///
+    /// **The presented extent is the buffer's.** The pixels are the
+    /// client's, so the client's frame is what its buffer is sized from — a
+    /// window-manager resize of the frame *around* the client
+    /// ([`resize_window`](Self::resize_window),
+    /// [`resize_window_client`](Self::resize_window_client)) never reshapes
+    /// them, and a client that has re-rendered at a new size, or whose
+    /// pixels were released under memory pressure, gets a buffer to present
+    /// into rather than a refusal. Where the buffer was established afresh,
+    /// the whole client area is marked dirty, because every pixel of it now
+    /// comes from a buffer that carried nothing over.
     ///
     /// The reported `Rect` is in content-surface-local pixels (origin at
     /// the content's top-left). It is translated by the window's content
     /// origin and intersected with its client rectangle
     /// ([`Window::client_rect`]), so an empty rectangle marks nothing and
     /// an over-large one is clipped rather than ever reaching into a
-    /// neighbouring window. The edit must not resize the surface (a
-    /// window's dimensions are fixed for its lifetime).
-    pub fn edit_window_surface<T>(
+    /// neighbouring window.
+    pub fn present_window_content<T>(
         &mut self,
         id: WindowId,
-        edit: impl FnOnce(&mut Surface) -> (T, Rect),
+        width: u32,
+        height: u32,
+        convert: impl FnOnce(&mut Surface) -> (T, Rect),
     ) -> Option<T> {
         let window = self.windows.iter_mut().find(|w| w.id() == id)?;
-        let (out, local_damage) = edit(window.content_mut()?);
+        let (content, established) = window.content_for_present(width, height)?;
+        let (out, local_damage) = convert(content);
         let client = window.client_rect();
-        let screen_damage = Rect::new(
-            client.left().saturating_add(local_damage.left()),
-            client.top().saturating_add(local_damage.top()),
-            local_damage.width,
-            local_damage.height,
-        )
-        .intersection(&client);
+        let screen_damage = if established {
+            client
+        } else {
+            Rect::new(
+                client.left().saturating_add(local_damage.left()),
+                client.top().saturating_add(local_damage.top()),
+                local_damage.width,
+                local_damage.height,
+            )
+            .intersection(&client)
+        };
         self.damage.add(screen_damage);
         Some(out)
     }
@@ -1460,10 +1479,11 @@ impl Compositor {
     /// `false`. A no-op update (a move to the same origin, corners set to
     /// what they already were, a visibility flip to the current value)
     /// therefore repaints nothing: the caller learns the true outcome
-    /// only by attempting the change, exactly as [`edit_window_surface`]
-    /// learns a content edit's true damage only by performing it.
+    /// only by attempting the change, exactly as
+    /// [`present_window_content`] learns a present's true damage only by
+    /// converting it.
     ///
-    /// [`edit_window_surface`]: Self::edit_window_surface
+    /// [`present_window_content`]: Self::present_window_content
     fn mutate(&mut self, id: WindowId, change: impl FnOnce(&mut Window) -> bool) -> bool {
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
@@ -1522,8 +1542,8 @@ impl Compositor {
         else {
             return;
         };
-        let (Some(last_col), Some(first_byte), Some(row_bytes)) = (
-            first_col.checked_add(cols),
+        let (Ok(left), Some(first_byte), Some(row_bytes)) = (
+            u32::try_from(area.left()),
             first_col.checked_mul(4),
             cols.checked_mul(4),
         ) else {
@@ -1551,10 +1571,7 @@ impl Compositor {
             );
             let cursor_row = cursor.and_then(|c| c.local_row(y));
             let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
-            let Some(back_row) = back
-                .row_mut(py)
-                .and_then(|row| row.get_mut(first_col..last_col))
-            else {
+            let Some((_, back_row)) = back.row_span_mut(py, left, area.width) else {
                 continue;
             };
             let Some(frame_row) = (py as usize)

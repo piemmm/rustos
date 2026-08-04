@@ -390,11 +390,27 @@ offset, and both views land complete (§27) behind one `layout::ViewLayout`
 dispatch that the renderer and the pointer hit-test share (§2.2):
 
 - **Two views, one model.** `layout::ListView` (full-width rows) and
-  `layout::GridView` (a wrapped grid of `lib/controls` `Card` tiles) take an
-  explicit scroll offset and share one `reveal` rule + the `scroll::ScrollRange`
-  clamp. `Browser::set_view_mode` toggles the view keeping the selection on the
-  same entry and re-reading nothing; the icon glyph above each grid tile's
-  label is FM3 (the tile is complete without it here).
+  `layout::GridView` (a wrapped grid of `lib/controls` `IconTile` items — a
+  picture over its name, no plate per entry) take an explicit scroll offset and
+  share one `reveal` rule + the `scroll::ScrollRange` clamp.
+  `Browser::set_view_mode` toggles the view keeping the selection on the same
+  entry and re-reading nothing; the picture above each grid tile's label is FM3
+  (the tile is complete without it here).
+- **The grid lays out only whole tiles and spreads a row's leftover width**
+  (`layout::GridFill::Spread`, the policy a *resizable* view takes): no tile is
+  ever cut by an edge, and the width left over once the row has fitted as many
+  whole tiles as it can is shared out along it — the gaps widen by equal amounts
+  and the two end margins match — so widening the window spreads the row until
+  one more tile fits and then re-flows into the extra column. Only the space
+  between tiles moves: a tile never stretches, so its picture slot, label field,
+  and hit target read the same at every window size, and a part-filled last row
+  still lines up with the rows above it. The pitch is the floor (an exact fit is
+  laid out identically under either policy) and the *scroll* axis is never
+  spread — space past the last whole row belongs to the next row, one scroll
+  away, which `visible_lines` counts. The renderer confines its paint to
+  `GridView::tile_area`, so nothing a tile draws can encroach on the scrollbar
+  gutter or the chrome. The desktop's fixed icon field takes `FixedPitch`
+  instead, keeping its icons anchored to the edge they hug.
 - **Scrolling** is the drawn `lib/controls` `ScrollBar` in a reserved
   right-edge gutter over that same `ScrollRange`; the wheel routes through the
   shared `scroll::ScrollModel` (`render::scroll_lines`), and a selection-moving
@@ -402,8 +418,10 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   Interactive thumb-drag arrives with the FM4 pointer routing; the browser owns
   the one offset both the bar and the views read.
 - **Hit-testing** is `render::entry_index_at`, a point (x, y) test through
-  `ViewLayout` that resolves list rows and grid tiles alike (rejecting the
-  header, inter-tile gaps, and the scrollbar gutter). The picker adopts it.
+  `ViewLayout` that resolves list rows and grid tiles alike, rejecting the
+  header, the inter-tile gaps, the spread row's end margins, and the scrollbar
+  gutter. It inverts exactly the arithmetic that placed each tile, so a click
+  can only ever land on the tile the user saw. The picker adopts it.
 - Host-tested in `lib/browse` (list + grid layout/hit-test at degenerate and
   normal sizes, `reveal` in both units, the view-toggle selection-preserve, the
   wheel-scroll clamp, and the drawn scrollbar thumb tracking the offset); the
@@ -434,25 +452,28 @@ unknown/extensionless/dotfile name — one classification shared by manager and
 picker, and the same one the "Open With…" association reads (§2.2). It is a
 display *hint* only; it gates no operation (authority stays in the VFS and the
 launcher, §4/§5.4). The
-glyph is now drawn: `lib/controls::Card` gained an optional `with_icon`
-identifying glyph rendered above a centred title (a card with no icon is
-unchanged, so notification/resource cards are unaffected), and `render`'s grid
-tile sets it from the registry — so the FM2b grid tile is complete. The tile
-also takes the owner-supplied artwork seam: `render`'s trailing
-`&mut dyn tairix_icon::IconArtwork` is asked for each tile's kind at exactly
-the side `Card::icon_side` reserves, and the tile blits what it returns or
-draws the built-in glyph, so real icon artwork lands without a second draw
-path (the manager and the picker pass `NoArtwork` until their caches land).
+picture is drawn by `lib/controls::IconTile`, the plateless icon-view item
+(`plans/GUI-CONTROLS-DESIGN.md` §11.34): a square picture slot over a centred,
+truncated label, with hover/press/selection/focus/bead marks and nothing at all
+behind a resting tile, and `render`'s grid tile sets its kind from the registry
+— so the FM2b grid tile is complete. The tile takes the owner-supplied artwork
+seam: `render`'s trailing `&mut dyn tairix_icon::IconArtwork` is asked for each
+tile's kind at exactly the side `IconTile::icon_side` reserves, and the tile
+blits what it returns or draws the built-in glyph, so real icon artwork lands
+without a second draw path (the manager and the picker pass `NoArtwork` until
+their caches land).
 
 Host-tested: `lib/icon` (the new glyphs draw, `index`↔`ICON_KINDS` round-trip,
 `for_asset` mappings, per-kind SVG load/fallback over the full set),
-`lib/controls` (a card icon draws above the label, no-icon card unchanged,
-artwork blitted / glyph fallback / off-size artwork centred), and
+`lib/controls` (a resting tile paints no plate/rim/panel over a backdrop in
+either theme, hover vs selection vs press are distinct, focus draws the shared
+ring, the bead states show, artwork blitted / glyph fallback / off-size artwork
+centred, and nothing escapes the tile's bounds), and
 `lib/browse` (the registry: every extension→type→icon row, spelling
 round-trip, kind-before-extension, case-insensitivity,
 unknown/extensionless/dotfile/trailing-dot → generic, last-extension-wins).
 Docs: `docs/src/desktop/apps.md`,
-`plans/GUI-CONTROLS-DESIGN.md` §11.15, `lib/icon`/`lib/browse` README + rustdoc.
+`plans/GUI-CONTROLS-DESIGN.md` §11.34, `lib/icon`/`lib/browse` README + rustdoc.
 
 ### FM4a — the engine navigation model: history + breadcrumb `[x]`
 

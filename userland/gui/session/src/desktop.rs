@@ -7,9 +7,10 @@
 //! listing with the shared [`sort_entries`]; it classifies each child with the
 //! shared content-type registry; and it lays its tiles out with the shared
 //! [`GridView`], differing from the file manager's grid only in its
-//! [`GridFlow`] — the desktop's column hugs the trailing edge and grows a new
-//! column inward as it fills. There is no second grid, no second sort, and no
-//! second classifier anywhere in this module.
+//! [`GridFlow`] and [`GridFill`] — the desktop's column hugs the trailing edge,
+//! grows a new column inward as it fills, and keeps a fixed pitch so an icon
+//! does not drift when the work area changes size. There is no second grid, no
+//! second sort, and no second classifier anywhere in this module.
 //!
 //! What the desktop *owns* is the behaviour a folder-on-the-screen needs:
 //! hover feedback, a selection, keyboard navigation while it holds focus, and
@@ -54,9 +55,10 @@ use alloc::vec::Vec;
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, AppAssociation, ClickKind,
-    DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFlow, GridView, SortMode,
+    DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill, GridFlow, GridView, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
+use tairix_controls::IconTile;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -300,7 +302,6 @@ impl<S: DirectorySource> Desktop<S> {
     /// can never be drawn under the bar or hit-tested through it.
     #[must_use]
     pub fn layout(&self, work_area: Rect, scale: Scale, font: BitmapFont) -> GridView {
-        let (cell_width, cell_height, gap) = grid_metrics(font);
         let margin = scale.scale_length(DESKTOP_MARGIN);
         let viewport = Rect::new(
             work_area.origin.x.saturating_add_unsigned(margin),
@@ -308,18 +309,21 @@ impl<S: DirectorySource> Desktop<S> {
             work_area.width.saturating_sub(margin.saturating_mul(2)),
             work_area.height.saturating_sub(margin.saturating_mul(2)),
         );
+        // The field is fixed, not resizable: keeping the pitch anchored to the
+        // edge the icons hug means an icon stays where the user last saw it
+        // whatever the work area's exact extent is, rather than drifting as the
+        // file manager's spreading grid deliberately does.
         GridView::new(
             viewport,
-            cell_width,
-            cell_height,
-            gap,
+            grid_metrics(font),
             0,
             self.entries.len(),
             GridFlow::ColumnsFromTrailing,
+            GridFill::FixedPitch,
         )
     }
 
-    /// Paint the visible icons into `surface` through the shared card tile,
+    /// Paint the visible icons into `surface` through the shared icon tile,
     /// resolving each one's artwork from `artwork` at exactly the slot side
     /// the tile will draw it in.
     ///
@@ -329,7 +333,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// names itself in its request, so it draws the icon it carries in its own
     /// `Resources/` rather than the generic bundle picture. An icon whose
     /// artwork the lookup declines falls back to the shared class glyph inside
-    /// the card, so a system with no `/System/Graphics` still shows a
+    /// the tile, so a system with no `/System/Graphics` still shows a
     /// meaningful desktop.
     pub fn render(
         &self,
@@ -353,7 +357,7 @@ impl<S: DirectorySource> Desktop<S> {
             };
             let kind = media_for_entry(entry, &self.folder).icon();
             let tile = grid_tile(entry, self.icon_state(index), kind);
-            let side = tile.icon_side(bounds, scale, theme, font);
+            let side = IconTile::icon_side(bounds, scale, theme);
             let request = entry_icon_request(&dir, entry, kind, &mut bundle);
             let art = artwork.artwork(request, side);
             tile.render(surface, bounds, scale, theme, font, art);

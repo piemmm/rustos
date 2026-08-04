@@ -187,15 +187,12 @@ impl Notification {
                 }
             }
         }
-        // A notification card carries no per-entry artwork; it always draws
-        // its built-in class glyph.
         self.card.render(
             surface,
             self.card_bounds(bounds, scale, theme, font),
             scale,
             theme,
             font,
-            None,
         );
     }
 

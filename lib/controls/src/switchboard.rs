@@ -1866,9 +1866,7 @@ impl Switchboard {
                 item.width,
                 item.height.saturating_sub(gap),
             );
-            entry
-                .card
-                .render(surface, card_rect, scale, theme, font, None);
+            entry.card.render(surface, card_rect, scale, theme, font);
         }
     }
 
@@ -1962,7 +1960,7 @@ impl Switchboard {
                 item.width,
                 item.height.saturating_sub(gap),
             );
-            card.render(surface, card_rect, scale, theme, font, None);
+            card.render(surface, card_rect, scale, theme, font);
         }
     }
 
@@ -2022,7 +2020,7 @@ impl Switchboard {
                 break;
             }
             let rect = Rect::new(pc.left(), top, pc.width, card_h.saturating_sub(gap));
-            entry.card.render(surface, rect, scale, theme, font, None);
+            entry.card.render(surface, rect, scale, theme, font);
         }
 
         let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);

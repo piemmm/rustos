@@ -80,11 +80,11 @@ everything else is panel-seated.
 ## Owner-supplied icon artwork
 
 Four controls draw an icon whose artwork their owner may already hold
-rasterised: a `shell::TaskbarItem`, a `collection::Card` tile, a
+rasterised: a `shell::TaskbarItem`, a `collection::IconTile`, a
 `collection::ListRow`, and a `button::IconButton`. Each offers the same pair —
 one query and one parameter:
 
-- `icon_side(bounds, scale, theme, font) -> u32` reports the exact pixel side
+- `icon_side(bounds, scale, theme, …) -> u32` reports the exact pixel side
   the control's icon slot will be drawn into, and `0` when the geometry leaves
   room for none. An owner asks its cache for artwork at precisely that size
   rather than guessing one and rescaling at draw time.
@@ -102,6 +102,32 @@ ignores the parameter entirely. A control never decodes an image — artwork
 reaches it already decoded and rasterised through the desktop's sandboxed
 asset path (`AGENTS.md` §19.5), so a malformed file can only fail to produce
 artwork, never reach a drawing path.
+
+## The icon-view tile
+
+`collection::IconTile` is one item of an icon view — a picture with its name
+beneath it — and it is what the file manager's grid and the desktop's icon field
+are both made of, so the two cannot drift into lookalikes.
+
+A resting tile draws **only** its picture and its label: no plate, no rim, no
+rail. That is the point of the control. An icon view is a field of many items,
+and a plate per item would put a box around every icon; whatever lies behind the
+tile — a window's surface, or the desktop wallpaper — shows through instead. A
+`Card` is the opposite case and keeps its plate: a card's plate bounds the one
+group of state and actions it owns.
+
+Only state paints anything behind the picture, and each state uses the mark the
+language already owns for it: the shared pointer wash for hover and press, the
+selection accent for a selected tile (whose label and glyph invert onto it, so
+selection differs from a hover in contrast rather than only in hue), the shared
+focus ring for the keyboard, and the shape-coded Signal Bead for a denied or
+unhealthy item. Nothing a tile draws escapes its bounds, so a view may lay tiles
+edge to edge — and bound the whole grid's paint to the area it owns — without a
+tile bleeding onto its neighbour.
+
+A tile renders state and never dispatches. The view owns the grid geometry and
+hit-tests pointer input against that same geometry, so a tile carries no pointer
+position or press latch of its own, unlike a `ListRow` the user clicks directly.
 
 ## Grouped focus and anchored edges
 

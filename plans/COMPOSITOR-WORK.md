@@ -199,9 +199,21 @@ typed outcomes, entirely inside `userland/gui/wm`. What it now guarantees:
   `MoveEnded`); a resize-edge press begins a resize-grab that drives the shared
   `ResizeGrabber` (`ResizeEvent`), recomputes the clamped outer rectangle per
   edge (minimum-client floor `MIN_CLIENT_W`/`H`), and applies it through
-  `Compositor::resize_window` (content surface reallocated, pixels preserved,
-  origin + decoration following), reporting `Resized`/`ResizeEnded`; Escape
-  cancels and restores the pre-drag geometry exactly.
+  `Compositor::resize_window` (client geometry, origin, and decoration
+  following), reporting `Resized`/`ResizeEnded`; Escape cancels and restores
+  the pre-drag geometry exactly.
+- **The frame is the window manager's; the pixels are the client's.** Neither
+  `Compositor::resize_window` nor `resize_window_client` touches the client's
+  content buffer: they move the geometry the compositor draws and lays
+  furniture out from. The buffer is sized by the frame the *client* presents
+  (`Compositor::present_window_content` establishes it when the one held
+  describes a different geometry), and the compositor draws the part of it
+  that lands inside the client area. This is what makes the live drag correct:
+  the frame moves on every motion while the app is told its new size once, at
+  `ResizeEnded`, so in between the app is still presenting the geometry it
+  last knew — reshaping its buffer under it would refuse every one of those
+  presents, which an app cannot distinguish from a dead session (it exits).
+  It also costs no per-motion copy of the window's pixels.
 - A command-control press captures the frame (`control_grab`), feeds the click
   to `TitleBar::on_pointer`, and emits `InputResponse::WindowControl { window,
   control }` on the completed release. Keyboard control activation routes
@@ -257,28 +269,26 @@ guarantees:
 - **The resize protocol is complete.** The ABI gained `WindowEvent::Minimized`,
   `WindowEvent::Resized`, and `WindowRequest::Resize` (a resizable app re-maps its
   frame region at the new size, keeping the window id/owner/endpoint/taskbar
-  entry); the engine's `WindowHost::window_resized` reallocates the compositor's
-  content surface (`Compositor::resize_window_client`). An interactive
-  resize-grab (`ResizeEnded`) forwards the settled client size to the app the
-  same way, once, at the end of the drag.
+  entry); the engine's `WindowHost::window_resized` moves the compositor's
+  client geometry to the size the app re-mapped (`resize_window_client`), and
+  the app's next present sizes its buffer. An interactive resize-grab
+  (`ResizeEnded`) forwards the settled client size to the app the same way,
+  once, at the end of the drag.
 - **Force-quit** is **not** a title-bar control — it remains the separate
   capability-checked recovery path.
-- **Resizability is per-window, and decorations are still off in the running
-  desktop.** The mechanism (grabber, size-toggle, resize protocol) is complete
-  and tested, but no served window opts into a frame yet, so — as with Stages
-  A–C — there is no behavioural change in the live session. Turning decorations
-  on (and deciding which apps present as resizable, re-rendering on `Resized`) is
-  Stage E. The default apps present fixed-size windows today and treat
-  `Minimized`/`Resized` as honest no-ops (a fixed-size window the WM decorates
-  non-resizable never receives a size change); a future resizable app handles
-  `Resized` by re-mapping its region via `WindowClient::resize`.
+- **Resizability is per-window and opt-in.** The mechanism (grabber,
+  size-toggle, resize protocol) is per-app: an app that renders at one size is
+  offered neither affordance and never receives a `Resized`, and treats
+  `Minimized`/`Resized` as honest no-ops. A resizable app handles `Resized` by
+  re-mapping its region via `WindowClient::resize` (Stage F).
 - **Tests** cover: Close yields `CloseRequested` for the owning window and
   nothing for a non-served window; a resize/close/present against a foreign or
   dead window is refused fail-closed (`lib/window`); minimize hides the window +
   marks the taskbar entry + emits `Minimized`; put-to-back restacks with no
   event; size-toggle maximizes to the work area then restores and emits
-  `Resized`; and the engine `Resize` re-maps the region and the host reallocates
-  the surface.
+  `Resized`; the engine `Resize` re-maps the region and the host moves the
+  window's client geometry; and a resize-grab leaves the client's own pixels
+  untouched while a present at a new geometry establishes their buffer.
 
 ### Stage E — Decorations live, documented, gated — DONE
 

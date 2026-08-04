@@ -10,8 +10,8 @@
 //!
 //! The top row is a path bar showing the current directory; below it the
 //! current directory is drawn in whichever [`ViewMode`] the browser holds — a
-//! column of full-width [`TableRow`]s (list) or a wrapped grid of [`Card`]
-//! tiles (grid) — over the one shared selection state, with a drawn
+//! column of full-width [`TableRow`]s (list) or a wrapped grid of
+//! [`IconTile`]s (grid) — over the one shared selection state, with a drawn
 //! [`ScrollBar`] in a reserved right-edge gutter. Painting through the same
 //! collection controls the trusted picker uses keeps the two views one coherent
 //! themed surface (§2.2). The visible window, each item's rectangle, the scroll
@@ -20,7 +20,10 @@
 //! can never disagree.
 //!
 //! Every length saturates and every blit clips, so a degenerate viewport paints
-//! nothing rather than panicking.
+//! nothing rather than panicking. The grid additionally confines its paint to
+//! the item area ([`GridView::tile_area`]), so a tile can never mark the chrome
+//! above it or the scrollbar gutter beside it whatever it draws inside its own
+//! rectangle.
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -35,7 +38,7 @@ use tairix_controls::state::{
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    Card, Checkbox, IconButton, ListRow, Menu, MenuItem, Panel, ScrollAction, ScrollBar,
+    Checkbox, IconButton, IconTile, ListRow, Menu, MenuItem, Panel, ScrollAction, ScrollBar,
     ScrollPart, TableCell, TableRow, Toolbar,
 };
 use tairix_font::BitmapFont;
@@ -54,7 +57,9 @@ use crate::chrome::{
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
-use crate::layout::{GridFlow, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+use crate::layout::{
+    GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
+};
 use crate::media::{entry_icon_request, media_for_entry};
 use crate::open_with::AppAssociation;
 use crate::places::{self, Place, Places};
@@ -525,14 +530,14 @@ fn draw_list<S: DirectorySource>(
     }
 }
 
-/// Draw the visible icon-grid tiles below the path bar as shared [`Card`]s,
-/// giving the selected entry the card's selection state.
+/// Draw the visible icon-grid tiles below the path bar as shared [`IconTile`]s,
+/// giving the selected entry the tile's selection state.
 ///
 /// Each tile's icon is the shared content-type classification
 /// ([`media_for_entry`]): the entry's [`MediaType`](crate::media::MediaType)
 /// decides an [`IconKind`], and `artwork` is asked for a
-/// pre-rasterised surface at the tile's [`Card::icon_side`] slot. When it
-/// supplies one the tile draws that artwork; otherwise the card falls back to
+/// pre-rasterised surface at the tile's [`IconTile::icon_side`] slot. When it
+/// supplies one the tile draws that artwork; otherwise the tile falls back to
 /// the built-in glyph for the kind. The classification is resolved once here so
 /// the manager and picker draw the same icon for the same entry.
 ///
@@ -541,6 +546,13 @@ fn draw_list<S: DirectorySource>(
 /// `Resources/` over the generic bundle artwork. Only the tiles actually on
 /// screen are asked for, so browsing a store of a thousand applications reads
 /// and decodes only the ones in view.
+///
+/// The grid lays out only whole tiles and spreads each row's leftover width
+/// between them ([`GridFill::Spread`]), so a widened window shares the extra
+/// space out evenly until one more tile fits. Painting is confined to the item
+/// area, so no tile can encroach on the scrollbar gutter beside it or the
+/// chrome above it whatever it draws inside its own rectangle, and no tile has
+/// to know it sits at an edge.
 fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
     font: BitmapFont,
@@ -550,6 +562,9 @@ fn draw_grid<S: DirectorySource>(
     artwork: &mut dyn IconArtwork,
 ) {
     let view = grid_view(browser, font, theme, content);
+    let Some((area_x, area_y, area_w, area_h)) = area_pixels(view.tile_area()) else {
+        return;
+    };
     let offset = browser.scroll_offset();
     let selected = browser.selected_index();
     let parent = browser.components();
@@ -558,24 +573,40 @@ fn draw_grid<S: DirectorySource>(
     // into one reused buffer rather than allocating a path per tile.
     let dir = crate::vfs::spell_absolute_path(parent);
     let mut bundle = String::new();
-    for index in view.visible_range(offset) {
-        let Some(entry) = entries.get(index) else {
-            break;
-        };
-        let Some(bounds) = view.cell_rect(offset, index) else {
-            continue;
-        };
-        let kind = media_for_entry(entry, parent).icon();
-        let request = entry_icon_request(&dir, entry, kind, &mut bundle);
-        let mut state = ControlState::idle();
-        if selected == Some(index) {
-            state.selection = SelectionState::Selected;
+    surface.with_clip(area_x, area_y, area_w, area_h, |surface| {
+        for index in view.visible_range(offset) {
+            let Some(entry) = entries.get(index) else {
+                break;
+            };
+            let Some(bounds) = view.cell_rect(offset, index) else {
+                continue;
+            };
+            let kind = media_for_entry(entry, parent).icon();
+            let request = entry_icon_request(&dir, entry, kind, &mut bundle);
+            let mut state = ControlState::idle();
+            if selected == Some(index) {
+                state.selection = SelectionState::Selected;
+            }
+            let tile = grid_tile(entry, state, kind);
+            let side = IconTile::icon_side(bounds, Scale::ONE, theme);
+            let art = artwork.artwork(request, side);
+            tile.render(surface, bounds, Scale::ONE, theme, font, art);
         }
-        let tile = grid_tile(entry, state, kind);
-        let side = tile.icon_side(bounds, Scale::ONE, theme, font);
-        let art = artwork.artwork(request, side);
-        tile.render(surface, bounds, Scale::ONE, theme, font, art);
+    });
+}
+
+/// A screen rectangle as surface pixels `(x, y, w, h)`, or `None` when it is
+/// off-surface or empty — the shape a clip window is asked for.
+fn area_pixels(area: Rect) -> Option<(u32, u32, u32, u32)> {
+    if area.width == 0 || area.height == 0 {
+        return None;
     }
+    Some((
+        u32::try_from(area.left()).ok()?,
+        u32::try_from(area.top()).ok()?,
+        area.width,
+        area.height,
+    ))
 }
 
 /// Draw the vertical [`ScrollBar`] in the reserved right-edge gutter, spanning
@@ -709,16 +740,14 @@ fn entry_row(entry: &Entry, selected: bool) -> TableRow {
     row
 }
 
-/// Build the [`Card`] tile for one grid entry: the entry's file-type `icon`
+/// Build the [`IconTile`] for one grid entry: the entry's file-type `icon`
 /// above its label, carrying the shared selection state when selected. The
 /// `icon` is the shared content-type classification
 /// ([`media_for_entry`]) resolved by the caller — a display hint only, decided
 /// once so the manager and picker draw the same glyph for the same entry.
 #[must_use]
-pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> Card {
-    Card::new(entry_label(entry))
-        .with_icon(icon)
-        .with_state(state)
+pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
+    IconTile::new(entry_label(entry), icon).with_state(state)
 }
 
 /// The name shown for an entry: a directory is suffixed with `/` so its kind
@@ -784,12 +813,13 @@ fn content_viewport(viewport: Rect, theme: &Theme) -> Rect {
 /// a different [`GridFlow`], so the two views can never disagree about how big
 /// an icon tile is.
 #[must_use]
-pub fn grid_metrics(font: BitmapFont) -> (u32, u32, u32) {
+pub fn grid_metrics(font: BitmapFont) -> GridMetrics {
     let glyph = font.glyph_height().max(1);
-    let cell_width = glyph.saturating_mul(6).max(48);
-    let cell_height = glyph.saturating_mul(5).max(48);
-    let gap = (glyph / 2).max(2);
-    (cell_width, cell_height, gap)
+    GridMetrics {
+        cell_width: glyph.saturating_mul(6).max(48),
+        cell_height: glyph.saturating_mul(5).max(48),
+        gap: (glyph / 2).max(2),
+    }
 }
 
 /// The height in pixels of the command toolbar strip at the top of the window:
@@ -977,21 +1007,24 @@ fn list_view<S: DirectorySource>(
 }
 
 /// The [`GridView`] for `browser` at the given content viewport.
+///
+/// The window is resizable, so the grid spreads ([`GridFill::Spread`]): a row's
+/// leftover width is shared out evenly between its tiles rather than parked as
+/// a blank margin at the trailing edge, and widening the window past one more
+/// tile re-flows the listing into the extra column.
 fn grid_view<S: DirectorySource>(
     browser: &Browser<S>,
     font: BitmapFont,
     theme: &Theme,
     content: Rect,
 ) -> GridView {
-    let (cell_width, cell_height, gap) = grid_metrics(font);
     GridView::new(
         content,
-        cell_width,
-        cell_height,
-        gap,
+        grid_metrics(font),
         chrome_height(font, theme),
         browser.entries().len(),
         GridFlow::RowsFromLeading,
+        GridFill::Spread,
     )
 }
 
