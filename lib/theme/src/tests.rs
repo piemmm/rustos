@@ -4,8 +4,8 @@ use alloc::string::String;
 
 use crate::motion::MotionInteraction;
 use crate::{
-    Appearance, Contrast, CursorKind, CursorSet, Density, FontWeight, Fonts, Metrics, MotionTheme,
-    Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
+    Appearance, Contrast, CursorKind, CursorSet, Density, FamilyKey, FontWeight, Fonts, Metrics,
+    MotionTheme, Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
 };
 
 #[test]
@@ -238,9 +238,14 @@ fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
     assert!(m.measured_thickness >= 1);
 }
 
+/// The key a test names a family by.
+fn key(name: &str) -> FamilyKey {
+    FamilyKey::new(name).expect("a well-formed family key")
+}
+
 #[test]
 fn the_ladder_derives_every_role_from_one_base_size() {
-    let fonts = Fonts::ladder("Board Sans", "Board Mono", 18);
+    let fonts = Fonts::ladder(key("board-sans"), key("board-mono"), 18);
 
     assert_eq!(fonts.base_size_px(), 18);
     // Body is the base by definition, so a theme authors one number.
@@ -258,7 +263,7 @@ fn the_ladder_derives_every_role_from_one_base_size() {
 
 #[test]
 fn the_ladder_carries_the_boards_weights_and_families() {
-    let fonts = Fonts::ladder("Board Sans", "Board Mono", 18);
+    let fonts = Fonts::ladder(key("board-sans"), key("board-mono"), 18);
 
     // On the boards the hierarchy is carried mostly by weight: titling text
     // is medium, column headers and metric readouts are bold, and running
@@ -273,24 +278,59 @@ fn the_ladder_carries_the_boards_weights_and_families() {
     assert_eq!(fonts.spec(TextRole::Monospace).weight, FontWeight::Regular);
 
     // Only the fixed-width role leaves the UI family.
-    assert_eq!(fonts.ui_family(), "Board Sans");
-    assert_eq!(fonts.monospace_family(), "Board Mono");
-    assert_eq!(fonts.spec(TextRole::Monospace).family, "Board Mono");
+    assert_eq!(fonts.ui_family(), key("board-sans"));
+    assert_eq!(fonts.monospace_family(), key("board-mono"));
+    assert_eq!(fonts.spec(TextRole::Monospace).family, key("board-mono"));
     for role in TextRole::ALL {
         if role != TextRole::Monospace {
-            assert_eq!(fonts.spec(role).family, "Board Sans", "{role:?}");
+            assert_eq!(fonts.spec(role).family, key("board-sans"), "{role:?}");
         }
     }
 }
 
 #[test]
+fn a_chosen_ui_family_replaces_every_role_but_the_fixed_width_one() {
+    let chosen = key("noto-serif");
+    let dark = Theme::dark();
+    let shipped = *dark.fonts();
+    let fonts = shipped.with_ui_family(chosen);
+
+    assert_eq!(fonts.ui_family(), chosen);
+    assert_eq!(fonts.monospace_family(), shipped.monospace_family());
+    assert_eq!(fonts.base_size_px(), shipped.base_size_px());
+    for role in TextRole::ALL {
+        let expected = if role == TextRole::Monospace {
+            shipped.monospace_family()
+        } else {
+            chosen
+        };
+        assert_eq!(fonts.spec(role).family, expected, "{role:?}");
+        // Choosing a family retunes nothing else about the ladder.
+        assert_eq!(fonts.spec(role).size_px, shipped.spec(role).size_px);
+        assert_eq!(fonts.spec(role).weight, shipped.spec(role).weight);
+    }
+}
+
+#[test]
+fn the_shipped_themes_name_families_the_store_installs() {
+    let dark = Theme::dark();
+    let fonts = dark.fonts();
+    // The spellings must survive the key grammar, or the desktop would fall
+    // back to the fixed-pitch family for its interface text.
+    assert_eq!(fonts.ui_family().as_str(), "inter");
+    assert_eq!(fonts.monospace_family().as_str(), "mono");
+    let light = Theme::light();
+    assert_eq!(light.fonts(), fonts);
+}
+
+#[test]
 fn an_out_of_range_base_size_is_clamped_rather_than_accepted() {
     assert_eq!(
-        Fonts::ladder("S", "M", 0).base_size_px(),
+        Fonts::ladder(key("s"), key("m"), 0).base_size_px(),
         Fonts::MIN_BASE_SIZE_PX
     );
     assert_eq!(
-        Fonts::ladder("S", "M", u16::MAX).base_size_px(),
+        Fonts::ladder(key("s"), key("m"), u16::MAX).base_size_px(),
         Fonts::MAX_BASE_SIZE_PX
     );
 }
@@ -487,7 +527,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             resize_grabber_extent: 14,
             hit_slop: 3,
         },
-        Fonts::ladder("Test Sans", "Test Mono", 15),
+        Fonts::ladder(key("test-sans"), key("test-mono"), 15),
         CursorSet {
             arrow: String::from("c.arrow"),
             text: String::from("c.text"),

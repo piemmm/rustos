@@ -1,8 +1,9 @@
 // GENERATED FILE — DO NOT EDIT.
 //
 // Emitted by `cargo xtask font-atlas --write` from the committed
-// primary face `lib/font/assets/Inconsolata-EX.ttf` (SIL OFL 1.1;
-// see `lib/font/assets/OFL.txt`).
+// primary face `lib/font/assets/mono/Inconsolata-EX.ttf`
+// (SIL OFL 1.1; see
+// `lib/font/assets/mono/OFL-Inconsolata-MPLUS1Code.txt`).
 // `cargo xtask font-atlas` (run by `ci`)
 // fails closed if this file drifts from a fresh generation
 // (AGENTS.md §2.2: generated views are never hand-maintained).

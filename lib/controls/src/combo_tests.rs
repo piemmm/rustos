@@ -24,7 +24,7 @@ const ROW_H: u32 = 28;
 const BORDER: u32 = 1;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {

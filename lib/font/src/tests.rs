@@ -154,6 +154,7 @@ fn fallback_never_panics_and_is_the_replacement_character() {
 mod render {
     use alloc::boxed::Box;
 
+    use tairix_abi::font_ipc::FamilyKey;
     use tairix_log::DiscardSink;
     use tairix_raster::{Color, Surface};
     use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
@@ -164,6 +165,12 @@ mod render {
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
     const WHITE: Color = Color::rgb(255, 255, 255);
+
+    /// A family the shared test transport serves as proportional (see
+    /// `client::SolidTestTransport`).
+    fn proportional_family() -> FamilyKey {
+        FamilyKey::new("inter").expect("a well-formed family key")
+    }
 
     /// Install the shared solid test transport (`client::SolidTestTransport`).
     /// Every draw test installs the same transport, so the process-global
@@ -177,59 +184,62 @@ mod render {
     }
 
     #[test]
-    fn metrics_are_the_atlas_cell() {
-        let font = BitmapFont::inconsolata();
-        assert_eq!(font.glyph_width(), atlas::CELL_WIDTH);
+    fn console_metrics_are_the_atlas_cell() {
+        install();
+        let font = BitmapFont::console();
+        assert_eq!(font.cell_width(), atlas::CELL_WIDTH);
         assert_eq!(font.glyph_height(), atlas::CELL_HEIGHT);
-        assert_eq!(font.advance(), atlas::CELL_WIDTH);
+        assert_eq!(font.monospace_advance(), Some(atlas::CELL_WIDTH));
         assert_eq!(font.line_height(), atlas::CELL_HEIGHT);
     }
 
     #[test]
     fn text_width_is_cells_times_advance() {
-        let font = BitmapFont::inconsolata();
+        install();
+        let font = BitmapFont::console();
         assert_eq!(font.text_width(""), 0);
-        assert_eq!(font.text_width("abc"), 3 * font.advance());
+        assert_eq!(font.text_width("abc"), 3 * font.cell_width());
         // Chars, not bytes: a two-byte UTF-8 scalar is still one cell.
-        assert_eq!(font.text_width("é"), font.advance());
-        assert_eq!(font.text_width("日本"), 4 * font.advance());
-        assert_eq!(font.text_width("한글"), 4 * font.advance());
+        assert_eq!(font.text_width("é"), font.cell_width());
+        assert_eq!(font.text_width("日本"), 4 * font.cell_width());
+        assert_eq!(font.text_width("한글"), 4 * font.cell_width());
     }
 
     #[test]
     fn truncate_to_width_cuts_on_char_boundaries() {
-        let font = BitmapFont::inconsolata();
-        let advance = font.advance();
-        assert_eq!(font.truncate_to_width("hello", 5 * advance), "hello");
-        assert_eq!(font.truncate_to_width("hello", 3 * advance), "hel");
-        assert_eq!(font.truncate_to_width("hello", advance - 1), "");
-        assert_eq!(font.truncate_to_width("ééé", 2 * advance), "éé");
-        assert_eq!(font.truncate_to_width("a日本", 3 * advance), "a日");
-        assert_eq!(font.truncate_to_width("日本", advance), "");
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.truncate_to_width("hello", 5 * cell), "hello");
+        assert_eq!(font.truncate_to_width("hello", 3 * cell), "hel");
+        assert_eq!(font.truncate_to_width("hello", cell - 1), "");
+        assert_eq!(font.truncate_to_width("ééé", 2 * cell), "éé");
+        assert_eq!(font.truncate_to_width("a日本", 3 * cell), "a日");
+        assert_eq!(font.truncate_to_width("日本", cell), "");
     }
 
     #[test]
     fn draw_text_advances_the_pen_and_leaves_ink() {
         install();
-        let font = BitmapFont::inconsolata();
+        let font = BitmapFont::console();
         let mut surface = surface();
         let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
-        assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+        assert_eq!(pen, i32::try_from(font.text_width("Hi")).expect("fits"));
         assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
     }
 
     #[test]
     fn draw_text_paints_wide_glyphs_across_two_cells() {
         install();
-        let font = BitmapFont::inconsolata();
+        let font = BitmapFont::console();
         // Wide (CJK) scalars advance two cells; the service returns a two-cell
         // bitmap, so ink reaches the continuation cell.
         for (text, language) in [("日", "Japanese"), ("한", "Korean")] {
             let mut surface = surface();
             let pen = font.draw_text(&mut surface, 0, 0, text, WHITE);
-            assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+            assert_eq!(pen, i32::try_from(2 * font.cell_width()).expect("fits"));
             assert!(
-                (font.advance()..2 * font.advance()).any(|x| {
+                (font.cell_width()..2 * font.cell_width()).any(|x| {
                     (0..font.glyph_height())
                         .any(|y| surface.get(x, y).is_some_and(|pixel| pixel.a > 0))
                 }),
@@ -241,7 +251,7 @@ mod render {
     #[test]
     fn full_coverage_keeps_the_callers_colour() {
         install();
-        let font = BitmapFont::inconsolata();
+        let font = BitmapFont::console();
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);
         // Full 8-bit coverage (255) must map to the caller's exact colour, not
@@ -253,7 +263,7 @@ mod render {
     #[test]
     fn offscreen_text_clips_without_panicking() {
         install();
-        let font = BitmapFont::inconsolata();
+        let font = BitmapFont::console();
         let mut surface = surface();
         font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);
         font.draw_text(&mut surface, i32::MAX - 3, i32::MAX - 3, "clip", WHITE);
@@ -267,7 +277,7 @@ mod render {
         // unmapped scalar to the U+FFFD fallback is the service's job (tested
         // in `fontd`). Here the scalar still produces a drawn glyph rather than
         // being silently dropped.
-        let font = BitmapFont::inconsolata();
+        let font = BitmapFont::console();
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "🦀", WHITE);
         assert!(surface.pixels().iter().any(|p| p.a > 0));
@@ -275,11 +285,12 @@ mod render {
 
     #[test]
     fn native_height_is_the_default_font() {
+        install();
         // Exactly the native cell height is the console font, so nothing about
         // console-size rendering changes.
         assert_eq!(
-            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT),
-            BitmapFont::inconsolata()
+            BitmapFont::monospace(atlas::CELL_HEIGHT),
+            BitmapFont::console()
         );
     }
 
@@ -288,11 +299,11 @@ mod render {
         // A larger-than-native size is honoured (no longer clamped to native),
         // but a pathologically huge request clamps to the bound.
         assert_eq!(
-            BitmapFont::with_pixel_height(atlas::CELL_HEIGHT + 100).glyph_height(),
+            BitmapFont::monospace(atlas::CELL_HEIGHT + 100).glyph_height(),
             atlas::CELL_HEIGHT + 100
         );
         assert_eq!(
-            BitmapFont::with_pixel_height(10_000).glyph_height(),
+            BitmapFont::monospace(10_000).glyph_height(),
             BitmapFont::MAX_PIXEL_HEIGHT
         );
     }
@@ -303,18 +314,18 @@ mod render {
         // A size well above native asks the service to rasterise a large
         // glyph from the outline (never an upscaled bitmap): metrics and ink
         // both scale up with the cell height.
-        let big = BitmapFont::with_pixel_height(200);
+        let big = BitmapFont::monospace(200);
         assert_eq!(big.glyph_height(), 200);
-        assert!(big.advance() > BitmapFont::inconsolata().advance());
+        assert!(big.cell_width() > BitmapFont::console().cell_width());
 
         let ink = |font: BitmapFont| {
             let mut surface =
-                Surface::new(font.advance() * 2, font.glyph_height()).expect("surface");
+                Surface::new(font.cell_width() * 2, font.glyph_height()).expect("surface");
             font.draw_text(&mut surface, 0, 0, "R", WHITE);
             surface.pixels().iter().filter(|p| p.a > 0).count()
         };
         let large_ink = ink(big);
-        let small_ink = ink(BitmapFont::with_pixel_height(14));
+        let small_ink = ink(BitmapFont::monospace(14));
         assert!(
             large_ink > 1000,
             "200px glyph has too little ink: {large_ink}"
@@ -327,33 +338,33 @@ mod render {
 
     #[test]
     fn pixel_height_clamps_to_the_legible_range() {
-        let tiny = BitmapFont::with_pixel_height(1);
+        let tiny = BitmapFont::monospace(1);
         assert_eq!(tiny.glyph_height(), BitmapFont::MIN_PIXEL_HEIGHT);
     }
 
     #[test]
     fn scaled_metrics_track_the_cell_height() {
+        install();
         // Half the native height renders roughly half-size text while keeping
         // the width-to-height ratio: advance = round(15 * 14 / 28) = 8.
-        let font = BitmapFont::with_pixel_height(14);
+        let font = BitmapFont::monospace(14);
         assert_eq!(font.glyph_height(), 14);
         assert_eq!(font.line_height(), 14);
-        assert_eq!(font.advance(), 8);
-        assert_eq!(font.glyph_width(), 8);
-        assert_eq!(font.text_width("abc"), 3 * font.advance());
-        assert_eq!(font.text_width("日"), 2 * font.advance());
-        assert_eq!(font.advance() * 2, font.text_width("ab"));
+        assert_eq!(font.cell_width(), 8);
+        assert_eq!(font.text_width("abc"), 3 * font.cell_width());
+        assert_eq!(font.text_width("日"), 2 * font.cell_width());
+        assert_eq!(font.cell_width() * 2, font.text_width("ab"));
         // Every non-native cell height stays strictly smaller than native.
-        assert!(font.advance() < BitmapFont::inconsolata().advance());
+        assert!(font.cell_width() < BitmapFont::console().cell_width());
     }
 
     #[test]
     fn scaled_text_advances_by_the_scaled_metric_and_leaves_ink() {
         install();
-        let font = BitmapFont::with_pixel_height(14);
+        let font = BitmapFont::monospace(14);
         let mut surface = surface();
         let pen = font.draw_text(&mut surface, 0, 0, "Hi", WHITE);
-        assert_eq!(pen, i32::try_from(2 * font.advance()).expect("fits"));
+        assert_eq!(pen, i32::try_from(2 * font.cell_width()).expect("fits"));
         assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
         // Ink stays within the scaled cell box: nothing is drawn at or below
         // the scaled cell height, so a smaller font really is smaller.
@@ -369,7 +380,7 @@ mod render {
         install();
         // Full coverage stays the caller's exact colour at a non-native size
         // too.
-        let font = BitmapFont::with_pixel_height(14);
+        let font = BitmapFont::monospace(14);
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "█", WHITE);
         let px = surface.get(1, 1).expect("in bounds");
@@ -385,7 +396,7 @@ mod render {
         // same text must paint the same pixels in all three states: with no
         // cache installed at all, served from a cache, and after memory
         // pressure has emptied one.
-        let font = BitmapFont::with_pixel_height(13);
+        let font = BitmapFont::monospace(13);
         let mut uncached = surface();
         font.draw_text(&mut uncached, 0, 0, "cache me", WHITE);
 
@@ -415,11 +426,11 @@ mod render {
     #[test]
     fn scaled_wide_glyph_paints_its_continuation_cell() {
         install();
-        let font = BitmapFont::with_pixel_height(16);
+        let font = BitmapFont::monospace(16);
         let mut surface = surface();
         font.draw_text(&mut surface, 0, 0, "日", WHITE);
         assert!(
-            (font.advance()..2 * font.advance()).any(|x| {
+            (font.cell_width()..2 * font.cell_width()).any(|x| {
                 (0..font.glyph_height()).any(|y| surface.get(x, y).is_some_and(|p| p.a > 0))
             }),
             "wide glyph has no ink in its continuation cell when scaled"
@@ -429,10 +440,130 @@ mod render {
     #[test]
     fn scaled_offscreen_text_clips_without_panicking() {
         install();
-        let font = BitmapFont::with_pixel_height(12);
+        let font = BitmapFont::monospace(12);
         let mut surface = surface();
         font.draw_text(&mut surface, -1000, -1000, "clip", WHITE);
         font.draw_text(&mut surface, i32::MAX - 3, i32::MAX - 3, "clip", WHITE);
         assert!(surface.pixels().iter().all(|p| p.a == 0));
+    }
+
+    // -- Proportional-family coverage -----------------------------------
+
+    #[test]
+    fn a_proportional_family_reports_no_monospace_advance() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        assert_eq!(font.monospace_advance(), None);
+    }
+
+    #[test]
+    fn a_proportional_familys_glyphs_have_varying_advances() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 24);
+        let widths = ['i', 'M', 'x', 'W'].map(|ch| font.advance(ch));
+        assert!(
+            widths.iter().any(|&w| w != widths[0]),
+            "advances must genuinely differ across scalars: {widths:?}"
+        );
+        // `text_width` sums the real per-glyph advances rather than
+        // multiplying a character count by one cell width.
+        let text = "iMxW";
+        let expected: u32 = text.chars().map(|ch| font.advance(ch)).sum();
+        assert_eq!(font.text_width(text), expected);
+    }
+
+    #[test]
+    fn a_proportional_labels_measured_width_centres_it_in_its_box() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let label = "Settings";
+        let box_width = 200u32;
+        let measured = font.text_width(label);
+        assert!(
+            measured > 0 && measured < box_width,
+            "label must fit: {measured}"
+        );
+        let left_margin = (box_width - measured) / 2;
+        // A caller centring by measurement (rather than a guessed column
+        // count) leaves equal, non-degenerate margins on both sides.
+        let right_margin = box_width - measured - left_margin;
+        assert!(left_margin.abs_diff(right_margin) <= 1);
+    }
+
+    #[test]
+    fn proportional_truncation_respects_each_glyphs_own_advance() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let text = "iMxWiMxW";
+        let full_width = font.text_width(text);
+        // Truncating to the full width returns the whole string.
+        assert_eq!(font.truncate_to_width(text, full_width), text);
+        // Truncating to less than the first character's own advance yields
+        // the empty string, not a guessed one-column prefix.
+        let first_advance = font.advance(text.chars().next().expect("non-empty"));
+        assert_eq!(font.truncate_to_width(text, first_advance - 1), "");
+        // A width that lands exactly on a prefix boundary keeps exactly that
+        // many real characters, verified by re-measuring the prefix.
+        let mut boundary = 0u32;
+        let mut prefix_len = 0usize;
+        for ch in text.chars().take(text.chars().count() - 1) {
+            boundary += font.advance(ch);
+            prefix_len += ch.len_utf8();
+        }
+        assert_eq!(font.truncate_to_width(text, boundary), &text[..prefix_len]);
+    }
+
+    /// The hit-test every proportional-aware caller must use: walk
+    /// characters accumulating real advances until the click x falls within
+    /// the current glyph's box.
+    fn hit_test(font: BitmapFont, text: &str, x: u32) -> usize {
+        let mut pen = 0u32;
+        for (index, ch) in text.char_indices() {
+            let advance = font.advance(ch);
+            if x < pen + advance {
+                return index;
+            }
+            pen += advance;
+        }
+        text.len()
+    }
+
+    #[test]
+    fn a_click_hit_test_maps_x_to_a_character_index_by_accumulating_advances() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let text = "iMxW";
+        let first_advance = font.advance('i');
+        assert_eq!(hit_test(font, text, 0), 0);
+        assert_eq!(hit_test(font, text, first_advance), 'i'.len_utf8());
+        assert_eq!(hit_test(font, text, font.text_width(text) + 1), text.len());
+    }
+
+    #[test]
+    fn draw_text_offsets_a_glyph_by_its_own_left_bearing() {
+        install();
+        // The test transport reports a zero left bearing, so this pins the
+        // pen-plus-bearing contract against a regression that ignores
+        // `left` entirely: moving the font's own advance forward must still
+        // land ink starting no earlier than the pen.
+        let font = BitmapFont::new(proportional_family(), 20);
+        let mut surface = surface();
+        font.draw_text(&mut surface, 5, 0, "M", WHITE);
+        assert!(
+            (0..5)
+                .all(|x| (0..font.glyph_height())
+                    .all(|y| surface.get(x, y).is_none_or(|p| p.a == 0))),
+            "ink must not appear left of the pen when the bearing is zero"
+        );
+        assert!(surface.pixels().iter().any(|p| p.a > 0), "no ink was drawn");
+    }
+
+    #[test]
+    fn families_and_metrics_reach_the_bitmap_font() {
+        install();
+        let entries = crate::client::families();
+        assert!(entries.iter().any(|entry| entry.key == FamilyKey::MONO));
+        let metrics = BitmapFont::console().metrics();
+        assert_eq!(metrics.pixel_height, atlas::CELL_HEIGHT);
     }
 }

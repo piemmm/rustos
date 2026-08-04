@@ -99,7 +99,7 @@ fn places() -> Places {
 
 /// The font the rail is measured in.
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 /// The centre of the rail row at `index`.

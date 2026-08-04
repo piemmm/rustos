@@ -28,7 +28,7 @@ use crate::window::{
 };
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {

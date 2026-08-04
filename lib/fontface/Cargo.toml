@@ -11,6 +11,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# The wire `FamilyKey`/`FamilyKind` types a `FontFamily` manifest names a
+# family and its layout by, shared with the font-service protocol so a
+# family key means the same thing on disk and on the wire.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
 [dev-dependencies]
 # The shared per-run PRNG seed + wall-clock budget seam for the deterministic
 # `fuzz_face` face-parser/rasteriser fuzz harness (§19.6).

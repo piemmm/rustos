@@ -1,0 +1,5 @@
+label = Noto Sans fallback
+kind = fallback
+face = NotoSansHebrew-Variable.ttf
+face = NotoSansSC-Variable.ttf
+face = NotoSansKR-Variable.ttf

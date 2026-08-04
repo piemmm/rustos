@@ -14,7 +14,7 @@ use crate::widget::DemoWidget;
 
 /// A 14px font, as the `Run` binary resolves at the theme's UI size.
 fn font() -> BitmapFont {
-    BitmapFont::with_pixel_height(14)
+    BitmapFont::monospace(14)
 }
 
 /// A press-then-release click sequence at `point`, each preceded by the move

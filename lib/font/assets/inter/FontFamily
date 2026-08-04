@@ -1,0 +1,4 @@
+label = Inter
+kind = proportional
+face = Inter-Variable.ttf
+fallback = sans-fallback

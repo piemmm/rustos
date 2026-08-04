@@ -202,7 +202,7 @@ fn wheel(panel: &mut Panel, lines: i32) -> u64 {
         WINDOW,
         Scale::ONE,
         &Theme::dark(),
-        BitmapFont::inconsolata(),
+        BitmapFont::console(),
     );
     view.scroll_offset()
 }
@@ -216,7 +216,7 @@ fn pointer_move(panel: &mut Panel, to: Point) {
         WINDOW,
         Scale::ONE,
         &Theme::dark(),
-        BitmapFont::inconsolata(),
+        BitmapFont::console(),
     );
 }
 

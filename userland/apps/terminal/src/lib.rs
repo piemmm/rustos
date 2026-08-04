@@ -114,14 +114,21 @@ pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
 /// Width in pixels of the terminal's window: the grid rendered with the
-/// shared monospace face, one advance per column. Derived from the same
-/// metrics the renderer draws with, so the window and the paint can never
-/// disagree; the QEMU vertical's runner imports it for its click
-/// coordinates exactly as it imports the file browser's.
-pub const WIN_WIDTH: u32 = tairix_font::BitmapFont::inconsolata().advance() * COLS as u32;
+/// shared monospace face, one advance per column. [`BitmapFont::console`]'s
+/// cell width and line height are fetched from the font service at runtime,
+/// so they cannot appear in a `const` initialiser; this is computed instead
+/// from the compiled-in console-atlas geometry
+/// ([`tairix_font::atlas::CELL_WIDTH`]) that font falls back to and, absent a
+/// running service, actually renders at — the same single source of truth,
+/// evaluated at compile time. The QEMU vertical's runner imports it for its
+/// click coordinates exactly as it imports the file browser's.
+///
+/// [`BitmapFont::console`]: tairix_font::BitmapFont::console
+pub const WIN_WIDTH: u32 = tairix_font::atlas::CELL_WIDTH * COLS as u32;
 
-/// Height in pixels of the terminal's window: one line height per row.
-pub const WIN_HEIGHT: u32 = tairix_font::BitmapFont::inconsolata().line_height() * ROWS as u32;
+/// Height in pixels of the terminal's window: one line height per row, from
+/// the same compiled-in console-atlas geometry [`WIN_WIDTH`] derives from.
+pub const WIN_HEIGHT: u32 = tairix_font::atlas::CELL_HEIGHT * ROWS as u32;
 
 #[cfg(test)]
 mod tests;

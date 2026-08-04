@@ -1289,6 +1289,49 @@ and `the_callers_budget_reaches_the_park` (`kernel/virtio`),
 
 ---
 
+## D5 — root-unlock login vertical failed once under a loaded gate
+
+Status: **open, unreproduced, not diagnosed**. Observed once during a
+`cargo xtask ci` run whose QEMU verticals overlapped the pipeline's own image
+builds; a second and third full run of the same pipeline on the same tree
+passed, and the vertical is green now.
+
+Symptom, from the guest log the harness dumped:
+
+```
+id=4138 root-unlock: gave up; no users database installed (reboot required)
+        cause=console_unreadable
+id=4139 root-unlock: gave up fail-closed; login refused until reboot
+id=5004 syscall rejected ... comm=login sc=users_db_read err=12
+id=5004 syscall rejected ... comm=login sc=fs_open err=12
+id=10006 console error task=8 stage=username errno=7
+```
+
+The interesting part is `cause=console_unreadable` alongside `users_db_read`
+and two `fs_open` calls all refused with the same errno: login concluded no
+users database is installed *because it could not read the console*, and then
+fell closed. Whether the console read failed first and the database reads are
+its consequence, or all four share one cause, is exactly what is not yet
+known.
+
+**This is not to be closed as a load flake.** A wall-clock or readiness
+window that is met on an idle host and missed when the pipeline is also
+compiling is a load-dependent defect, not an environment blip, and a green
+re-run is not evidence it is gone. The fix is structural — a budget sized to
+the work, a completion signal, or bounded concurrency so guests do not
+oversubscribe the host — never a retry.
+
+**Next step.** Reproduce deliberately under host load (run the vertical while
+the host is saturated) rather than waiting for it to recur, then follow the
+refused `fs_open`/`users_db_read` errno back to which admission actually
+denied it. It carries a regression test when the fix lands.
+
+Suspected-unrelated to the font work that surfaced it (fonts changed the
+image payload and `login` is what starts the font service, so the coupling is
+worth ruling out first rather than assuming).
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

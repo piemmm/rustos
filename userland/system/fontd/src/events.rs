@@ -20,19 +20,29 @@ pub const FONTD_RANGE_END: u32 = 18_000;
 /// font service came up before the desktop.
 pub const SERVICE_READY: EventId = EventId(17_001);
 
-/// The service could not come up: a face failed to load or parse, or the
-/// reserved endpoint could not be bound (already held, or no registry). A
-/// security- and availability-relevant decision — the service fails closed and
-/// exits rather than serving forged or absent coverage.
+/// The service could not come up at all: the store could not be listed, or
+/// not a single family in it was usable, or the reserved endpoint could not
+/// be bound (already held, or no registry). A security- and
+/// availability-relevant decision — the service fails closed and exits
+/// rather than serving forged or absent coverage.
 pub const SERVICE_UNAVAILABLE: EventId = EventId(17_002);
+
+/// One `/System/Fonts` directory was skipped during discovery: its name is
+/// not a valid family key, it carries no readable manifest, or its manifest
+/// does not parse. Never fatal on its own — the store may still hold other
+/// usable families — but recorded so an operator can see a family did not
+/// come up.
+pub const FAMILY_SKIPPED: EventId = EventId(17_003);
 
 #[cfg(test)]
 mod tests {
-    use super::{FONTD_RANGE_END, FONTD_RANGE_START, SERVICE_READY, SERVICE_UNAVAILABLE};
+    use super::{
+        FAMILY_SKIPPED, FONTD_RANGE_END, FONTD_RANGE_START, SERVICE_READY, SERVICE_UNAVAILABLE,
+    };
 
     #[test]
     fn ids_are_inside_reserved_range() {
-        for id in [SERVICE_READY, SERVICE_UNAVAILABLE] {
+        for id in [SERVICE_READY, SERVICE_UNAVAILABLE, FAMILY_SKIPPED] {
             assert!(id.0 >= FONTD_RANGE_START && id.0 < FONTD_RANGE_END);
         }
     }
@@ -40,5 +50,7 @@ mod tests {
     #[test]
     fn ids_are_unique() {
         assert_ne!(SERVICE_READY.0, SERVICE_UNAVAILABLE.0);
+        assert_ne!(SERVICE_READY.0, FAMILY_SKIPPED.0);
+        assert_ne!(SERVICE_UNAVAILABLE.0, FAMILY_SKIPPED.0);
     }
 }

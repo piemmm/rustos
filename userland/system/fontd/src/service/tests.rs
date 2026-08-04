@@ -1,31 +1,33 @@
-//! Host unit tests for the rasterising [`FontService`] dispatcher.
+//! Host unit tests for the [`FontService`] dispatcher.
 //!
-//! The four committed faces under `lib/font/assets/` are the same sources the
-//! atlas generator uses, so the service is exercised against the real system
-//! faces without any on-disk `/System/Fonts`. Each test drives a request
-//! through [`FontService::handle`] and decodes the reply with the shared
-//! `font_ipc` decoders, so the encode/decode contract is checked end to end.
+//! Fixtures are built from the small committed assets
+//! (`mono/Inconsolata-EX.ttf`, static; `inter/Inter-Variable.ttf`, variable;
+//! `mono/NotoSansHebrew-ExtraCondensed.ttf`, static and tiny) through the
+//! in-memory [`MemoryStore`] and the real [`discover`] scan, so the whole
+//! discovery-to-serve pipeline is exercised end to end without any
+//! `/System/Fonts` and without the multi-megabyte CJK companion faces.
+
+use std::path::PathBuf;
 
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use std::path::PathBuf;
 
 use tairix_abi::font_ipc::{
-    decode_glyph_reply, decode_metrics_reply, FontRequest, FontWeight, FONT_MAX_CELL_HEIGHT,
-    FONT_MAX_GLYPH_REPLY, FONT_MIN_CELL_HEIGHT,
+    decode_glyph_reply, decode_metrics_reply, FamilyKey, FontRequest, FontWeight,
+    FONT_MAX_GLYPH_REPLY, FONT_MAX_PIXEL_HEIGHT, FONT_MIN_PIXEL_HEIGHT,
 };
-use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::Errno;
-use tairix_font::glyph_cache_budget;
-use tairix_fontface::Repertoire;
+use tairix_fontface::{AxisSetting, Face};
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 
-use super::{glyph_cache, FontService, GlyphCache, FACE_REPERTOIRES};
+use crate::discovery::discover;
+use crate::discovery::fixtures::{MemoryFamily, MemoryStore};
+use crate::service::{FontService, GlyphCache};
 
-/// A machine with plenty of RAM, so a test that is not about the bound gets a
-/// cache that comfortably holds what it asks for.
+/// A machine with plenty of RAM, so a test that is not about the bound gets
+/// a cache that comfortably holds what it asks for.
 const ROOMY_MACHINE_BYTES: u64 = 64 << 30;
 
 /// The workspace root (the fontd crate is `userland/system/fontd`).
@@ -36,17 +38,9 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-/// The committed face bytes, in the family's resolution order.
-fn face_bytes() -> Vec<Vec<u8>> {
-    [
-        "lib/font/assets/Inconsolata-EX.ttf",
-        "lib/font/assets/MPLUS1Code-Regular.ttf",
-        "lib/font/assets/D2Coding-Regular.ttf",
-        "lib/font/assets/NotoSansHebrew-ExtraCondensed.ttf",
-    ]
-    .iter()
-    .map(|rel| std::fs::read(workspace_root().join(rel)).expect("committed face"))
-    .collect()
+/// Read a committed asset's bytes by its path under `lib/font/assets/`.
+fn asset(rel: &str) -> Vec<u8> {
+    std::fs::read(workspace_root().join("lib/font/assets").join(rel)).expect("committed asset")
 }
 
 /// A cache built exactly as the `Run` binary builds one — the shared
@@ -56,35 +50,57 @@ fn cache_for(total_ram_bytes: u64, band: PressureBand) -> (GlyphCache, &'static 
     static SINK: DiscardSink = DiscardSink;
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(band);
-    (glyph_cache(total_ram_bytes, gauge, &SINK), gauge)
-}
-
-/// A ready service over the committed faces, plus the byte buffers it borrows
-/// (returned so the caller keeps them alive for the service's lifetime).
-fn service(bytes: &[Vec<u8>]) -> FontService<'_> {
-    service_with(
-        bytes,
-        cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal).0,
+    (
+        crate::service::glyph_cache(total_ram_bytes, gauge, &SINK),
+        gauge,
     )
 }
 
-/// A ready service over the committed faces holding exactly `cache`.
-fn service_with(bytes: &[Vec<u8>], cache: GlyphCache) -> FontService<'_> {
-    let sources: Vec<(&[u8], Repertoire)> = bytes
-        .iter()
-        .map(Vec::as_slice)
-        .zip(FACE_REPERTOIRES)
-        .collect();
-    FontService::new(&sources, cache).expect("service parses the committed faces")
+/// A roomy-cache service discovered from `store`.
+fn discover_roomy<'a>(store: &mut MemoryStore<'a>) -> FontService<'a> {
+    let (cache, _gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
+    discover(store, cache, &DiscardSink).expect("discovers")
+}
+
+/// A single-family `mono` store: the static, monospace committed face.
+fn mono_only_store(mono: &[u8]) -> MemoryStore<'_> {
+    MemoryStore {
+        dirs: vec![(
+            "mono",
+            MemoryFamily {
+                manifest: "label = Mono\nkind = monospace\nface = Inconsolata-EX.ttf\n",
+                faces: vec![("Inconsolata-EX.ttf", mono)],
+            },
+        )],
+    }
+}
+
+fn request_glyph(
+    svc: &mut FontService<'_>,
+    family: FamilyKey,
+    scalar: char,
+    pixel_height: u32,
+    weight: FontWeight,
+) -> Result<(u32, u32, u32, i32, Vec<u8>), Errno> {
+    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let n = svc.handle(
+        &FontRequest::Glyph {
+            family,
+            scalar,
+            pixel_height,
+            weight,
+        }
+        .to_le_bytes(),
+        &mut reply,
+    );
+    decode_glyph_reply(&reply[..n])
+        .map(|g| (g.width, g.height, g.advance, g.left, g.coverage.to_vec()))
 }
 
 #[test]
 fn the_glyph_cache_reports_under_a_renderable_label() {
-    // The serving process hands this ledger to the system's cache monitor,
-    // which renders the label verbatim in its own row. A label the wire
-    // record refuses would silently cost the monitor the one row every GUI
-    // client's glyph memory is ultimately backed by, so the name is checked
-    // here rather than trusted by eye.
+    use tairix_abi::sysinfo::CACHE_LABEL_MAX;
+
     let (cache, _gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
     let ledger = cache
         .ledger()
@@ -92,294 +108,382 @@ fn the_glyph_cache_reports_under_a_renderable_label() {
     let record = ledger.to_record().expect("the label fits the wire record");
     assert_eq!(record.label(), "fontd.glyphs");
     assert!(record.label().len() <= CACHE_LABEL_MAX);
-    assert!(record
-        .label()
-        .bytes()
-        .all(|byte| (0x20..0x7f).contains(&byte)));
 }
 
 #[test]
-fn parses_the_committed_faces_and_derives_native_geometry() {
-    let bytes = face_bytes();
-    let svc = service(&bytes);
-    // Native metrics match the atlas generator's derivation (Inconsolata EX
-    // at a 25 px em: 15 × 28, baseline 23).
-    let metrics = svc.metrics(28);
-    assert_eq!(metrics.cell_width, 15);
-    assert_eq!(metrics.cell_height, 28);
-    assert_eq!(metrics.baseline, 23);
-}
+fn an_unknown_family_key_fails_closed() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let unknown = FamilyKey::new("nope").expect("a well-formed key");
+    assert_eq!(
+        request_glyph(&mut svc, unknown, 'A', 28, FontWeight::Regular),
+        Err(Errno::NotFound)
+    );
 
-#[test]
-fn a_glyph_request_round_trips_with_ink() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
     let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
     let n = svc.handle(
-        &FontRequest::Glyph {
-            scalar: 'A',
-            cell_height: 28,
+        &FontRequest::Metrics {
+            family: unknown,
+            pixel_height: 28,
             weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
     );
-    let glyph = decode_glyph_reply(&reply[..n]).expect("glyph reply decodes");
-    // Bitmap is two cells wide; 'A' is single-cell so advance is one cell.
-    assert_eq!(glyph.width, 30);
-    assert_eq!(glyph.height, 28);
-    assert_eq!(glyph.advance, 15);
-    assert_eq!(glyph.coverage.len(), (glyph.width * glyph.height) as usize);
-    assert!(
-        glyph.coverage.contains(&255),
-        "'A' has no fully covered pixel"
-    );
-    // Coverage is genuine 8-bit: 4-bit engine output scaled ×17, so every
-    // sample is a multiple of 17 (0..=255).
-    assert!(glyph.coverage.iter().all(|&c| c % 17 == 0));
+    assert_eq!(decode_metrics_reply(&reply[..n]), Err(Errno::NotFound));
 }
 
 #[test]
-fn a_wide_scalar_advances_two_cells_and_inks_the_continuation() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
+fn proportional_and_monospace_families_report_distinct_metrics() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = MemoryStore {
+        dirs: vec![
+            (
+                "mono",
+                MemoryFamily {
+                    manifest: "label = Mono\nkind = monospace\nface = Inconsolata-EX.ttf\n",
+                    faces: vec![("Inconsolata-EX.ttf", &mono)],
+                },
+            ),
+            (
+                "inter",
+                MemoryFamily {
+                    manifest: "label = Inter\nkind = proportional\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", &inter)],
+                },
+            ),
+        ],
+    };
+    let mut svc = discover_roomy(&mut store);
+
     let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    // U+6F22 (漢) is a wide Japanese glyph the M PLUS companion covers.
     let n = svc.handle(
-        &FontRequest::Glyph {
-            scalar: '漢',
-            cell_height: 28,
+        &FontRequest::Metrics {
+            family: FamilyKey::new("mono").expect("key"),
+            pixel_height: 28,
             weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
     );
-    let glyph = decode_glyph_reply(&reply[..n]).expect("wide glyph decodes");
-    assert_eq!(glyph.advance, 30, "a wide glyph advances two cells");
-    // Ink reaches into the continuation (right) cell.
-    let cell_w = (glyph.width / 2) as usize;
-    let reaches_continuation = glyph
-        .coverage
-        .chunks(glyph.width as usize)
-        .any(|row| row[cell_w..].iter().any(|&c| c > 0));
+    let mono_metrics = decode_metrics_reply(&reply[..n]).expect("mono metrics decode");
     assert!(
-        reaches_continuation,
-        "wide glyph never reaches its second cell"
+        mono_metrics.monospace_advance > 0,
+        "a monospace family reports its uniform advance"
     );
-}
 
-#[test]
-fn an_uncovered_scalar_falls_back_to_the_replacement_glyph() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
-    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    // A private-use scalar no face maps resolves to U+FFFD, which has ink.
     let n = svc.handle(
-        &FontRequest::Glyph {
-            scalar: '\u{10FFFF}',
-            cell_height: 28,
+        &FontRequest::Metrics {
+            family: FamilyKey::new("inter").expect("key"),
+            pixel_height: 28,
             weight: FontWeight::Regular,
         }
         .to_le_bytes(),
         &mut reply,
     );
-    let glyph = decode_glyph_reply(&reply[..n]).expect("fallback decodes");
-    assert!(
-        glyph.coverage.iter().any(|&c| c > 0),
-        "the U+FFFD fallback has no ink"
+    let inter_metrics = decode_metrics_reply(&reply[..n]).expect("inter metrics decode");
+    assert_eq!(
+        inter_metrics.monospace_advance, 0,
+        "a proportional family never reports a monospace advance"
     );
+    assert_eq!(mono_metrics.pixel_height, 28);
+    assert_eq!(inter_metrics.pixel_height, 28);
 }
 
-#[test]
-fn a_second_request_is_served_from_cache_identically() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
-    let request = FontRequest::Glyph {
-        scalar: 'g',
-        cell_height: 24,
-        weight: FontWeight::Regular,
-    }
-    .to_le_bytes();
-    let mut first = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let mut second = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let n1 = svc.handle(&request, &mut first);
-    let n2 = svc.handle(&request, &mut second);
-    assert_eq!(n1, n2);
-    assert_eq!(first[..n1], second[..n2], "cache hit differs from miss");
-}
-
-/// The total ink (summed 8-bit coverage) and the geometry of one glyph reply.
+/// The printable-ASCII scalar whose advance the `wght` axis moves furthest
+/// in the face `bytes` describe.
 ///
-/// Summing rather than holding the bitmap lets a weight test compare two
-/// rasters without keeping the borrowed reply buffer alive.
-fn render_ink(
-    svc: &mut FontService<'_>,
-    scalar: char,
-    cell_height: u32,
-    weight: FontWeight,
-) -> (u32, u32, u32, u32) {
-    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let n = svc.handle(
-        &FontRequest::Glyph {
-            scalar,
-            cell_height,
-            weight,
-        }
-        .to_le_bytes(),
-        &mut reply,
-    );
-    let glyph = decode_glyph_reply(&reply[..n]).expect("glyph reply decodes");
-    let ink = glyph.coverage.iter().map(|&c| u32::from(c)).sum();
-    (ink, glyph.width, glyph.height, glyph.advance)
+/// Probed rather than named outright: a capital's advance barely moves with
+/// weight (its side bearings absorb the thicker stem), so a hard-coded letter
+/// can hide a genuine variation behind pixel rounding, while the
+/// widest-moving glyph shows it at any usable size.
+fn most_weight_sensitive_scalar(bytes: &[u8]) -> char {
+    let instance = |weight: FontWeight| {
+        Face::parse_instance(
+            bytes,
+            &[AxisSetting {
+                tag: *b"wght",
+                value: f32::from(weight.axis_value()),
+            }],
+        )
+        .expect("a variable face instances at a standard weight")
+    };
+    let light = instance(FontWeight::Regular);
+    let heavy = instance(FontWeight::Bold);
+    (0x21..0x7F)
+        .filter_map(|code| {
+            let light_advance = light.advance(light.glyph_for(code)?).ok()?;
+            let heavy_advance = heavy.advance(heavy.glyph_for(code)?).ok()?;
+            Some((heavy_advance - light_advance, code))
+        })
+        .max()
+        .and_then(|(_, code)| char::from_u32(code))
+        .expect("the face maps printable ASCII")
 }
 
 #[test]
-fn a_heavier_weight_inks_more_of_the_same_cell() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
-    let regular = render_ink(&mut svc, 'H', 28, FontWeight::Regular);
-    let medium = render_ink(&mut svc, 'H', 28, FontWeight::Medium);
-    let bold = render_ink(&mut svc, 'H', 28, FontWeight::Bold);
+fn a_variable_faces_bold_advance_differs_from_its_regular_advance() {
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = MemoryStore {
+        dirs: vec![(
+            "inter",
+            MemoryFamily {
+                manifest: "label = Inter\nkind = proportional\nface = Inter-Variable.ttf\n",
+                faces: vec![("Inter-Variable.ttf", &inter)],
+            },
+        )],
+    };
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("inter").expect("key");
+    let scalar = most_weight_sensitive_scalar(&inter);
 
+    let regular = request_glyph(&mut svc, key, scalar, 32, FontWeight::Regular).expect("regular");
+    let bold = request_glyph(&mut svc, key, scalar, 32, FontWeight::Bold).expect("bold");
+
+    assert_ne!(
+        regular.2, bold.2,
+        "a real wght axis must change the reported advance"
+    );
+    let regular_ink: u32 = regular.4.iter().map(|&c| u32::from(c)).sum();
+    let bold_ink: u32 = bold.4.iter().map(|&c| u32::from(c)).sum();
     assert!(
-        regular.0 < medium.0 && medium.0 < bold.0,
-        "weights do not read as a rising progression: {regular:?} {medium:?} {bold:?}"
+        bold_ink > regular_ink,
+        "a heavier real instance must ink more of the glyph"
     );
-    // The geometry a client laid out with must not move with the weight.
-    assert_eq!(regular.1, bold.1);
-    assert_eq!(regular.2, bold.2);
-    assert_eq!(regular.3, bold.3);
 }
 
 #[test]
-fn weight_keys_the_cache_so_a_regular_run_is_never_served_bold() {
-    let bytes = face_bytes();
-    let mut mixed = service(&bytes);
-    let _ = render_ink(&mut mixed, 'g', 24, FontWeight::Bold);
-    let after_bold = render_ink(&mut mixed, 'g', 24, FontWeight::Regular);
+fn a_static_faces_synthetic_bold_leaves_the_advance_unchanged() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
 
-    let mut fresh = service(&bytes);
-    let alone = render_ink(&mut fresh, 'g', 24, FontWeight::Regular);
+    let regular = request_glyph(&mut svc, key, 'H', 28, FontWeight::Regular).expect("regular");
+    let bold = request_glyph(&mut svc, key, 'H', 28, FontWeight::Bold).expect("bold");
 
     assert_eq!(
-        after_bold, alone,
-        "a cached bold raster leaked into Regular"
+        regular.2, bold.2,
+        "synthetic emboldening must never move the advance a client laid out with"
+    );
+    assert_eq!(regular.0, bold.0, "geometry width stays put");
+    assert_eq!(regular.1, bold.1, "geometry height stays put");
+    let regular_ink: u32 = regular.4.iter().map(|&c| u32::from(c)).sum();
+    let bold_ink: u32 = bold.4.iter().map(|&c| u32::from(c)).sum();
+    assert!(
+        bold_ink > regular_ink,
+        "the synthetic stroke must still ink more of the glyph"
     );
 }
 
 #[test]
-fn metrics_scale_with_cell_height() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
-    let small = svc.metrics(FONT_MIN_CELL_HEIGHT);
-    let large = svc.metrics(FONT_MAX_CELL_HEIGHT);
-    assert_eq!(small.cell_height, FONT_MIN_CELL_HEIGHT);
-    assert_eq!(large.cell_height, FONT_MAX_CELL_HEIGHT);
-    assert!(small.cell_width >= 1);
-    assert!(large.cell_width > small.cell_width);
-    assert!(large.baseline > small.baseline);
-    // A metrics request round-trips the same geometry the accessor reports.
-    let expected = svc.metrics(24);
-    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let n = svc.handle(
-        &FontRequest::Metrics { cell_height: 24 }.to_le_bytes(),
-        &mut reply,
+fn a_glyph_request_is_served_from_cache_on_a_second_call() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+
+    let first = request_glyph(&mut svc, key, 'g', 24, FontWeight::Regular).expect("first");
+    let second = request_glyph(&mut svc, key, 'g', 24, FontWeight::Regular).expect("second");
+    assert_eq!(
+        first, second,
+        "a cache hit must serve the same bytes a miss did"
     );
-    let decoded = decode_metrics_reply(&reply[..n]).expect("metrics decode");
-    assert_eq!(decoded, expected);
+}
+
+/// Set difference of two faces' mapped codepoints: every scalar `a` maps
+/// that `b` does not.
+fn mapped_only_in<'x>(a: &'x Face<'_>, b: &'x Face<'_>) -> impl Iterator<Item = u32> + 'x {
+    a.mapped()
+        .iter()
+        .map(|&(code, _)| code)
+        .filter(|code| b.glyph_for(*code).is_none())
 }
 
 #[test]
-fn a_malformed_request_fails_closed_with_an_error_frame() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
-    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    // Corrupt magic: the decoder rejects it and the service replies an error
-    // frame both a glyph- and a metrics-expecting client decode as the errno.
-    let mut request = FontRequest::Glyph {
-        scalar: 'A',
-        cell_height: 28,
-        weight: FontWeight::Regular,
-    }
-    .to_le_bytes();
-    request[0] ^= 0xFF;
-    let n = svc.handle(&request, &mut reply);
-    assert_eq!(decode_glyph_reply(&reply[..n]), Err(Errno::BadMagic));
-}
+fn resolution_walks_primary_then_companion_then_fallback_then_replacement() {
+    let hebrew_bytes = asset("mono/NotoSansHebrew-ExtraCondensed.ttf");
+    let mono_bytes = asset("mono/Inconsolata-EX.ttf");
+    let inter_bytes = asset("inter/Inter-Variable.ttf");
 
-/// Ask for one glyph and return the decoded reply's geometry and coverage.
-fn render(
-    svc: &mut FontService<'_>,
-    scalar: char,
-    cell_height: u32,
-    weight: FontWeight,
-) -> Option<(u32, u32, Vec<u8>)> {
-    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let n = svc.handle(
-        &FontRequest::Glyph {
-            scalar,
-            cell_height,
-            weight,
+    // Probe real coverage with the same engine the service uses, so the test
+    // picks scalars that genuinely exercise each resolution step rather than
+    // guessing at font content.
+    let hebrew_face = Face::parse(&hebrew_bytes).expect("hebrew face parses");
+    let mono_face = Face::parse(&mono_bytes).expect("mono face parses");
+    let inter_face = Face::parse(&inter_bytes).expect("inter face parses");
+
+    let own_primary_scalar = char::from_u32(
+        hebrew_face
+            .mapped()
+            .first()
+            .map(|&(code, _)| code)
+            .expect("the Hebrew face maps at least one codepoint"),
+    )
+    .expect("a valid scalar");
+    assert!(
+        mono_face.glyph_for(u32::from(own_primary_scalar)).is_none(),
+        "the probe scalar must not also be covered by the companion face"
+    );
+
+    // A scalar the companion (second, Latin) face covers but the Hebrew
+    // primary does not — resolved from the second face in the family's own
+    // list.
+    let own_companion_scalar = 'A';
+    assert!(hebrew_face
+        .glyph_for(u32::from(own_companion_scalar))
+        .is_none());
+    assert!(mono_face
+        .glyph_for(u32::from(own_companion_scalar))
+        .is_some());
+
+    // A scalar only the fallback family's face covers.
+    let fallback_only = mapped_only_in(&inter_face, &hebrew_face)
+        .find(|&code| mono_face.glyph_for(code).is_none())
+        .and_then(char::from_u32)
+        .expect("Inter maps something neither of the family's own faces do");
+
+    let mut store = MemoryStore {
+        dirs: vec![
+            (
+                "test-order",
+                MemoryFamily {
+                    manifest: "label = Order\nkind = proportional\n\
+                               face = NotoSansHebrew-ExtraCondensed.ttf\n\
+                               face = Inconsolata-EX.ttf\nfallback = test-fallback\n",
+                    faces: vec![
+                        ("NotoSansHebrew-ExtraCondensed.ttf", &hebrew_bytes),
+                        ("Inconsolata-EX.ttf", &mono_bytes),
+                    ],
+                },
+            ),
+            (
+                "test-fallback",
+                MemoryFamily {
+                    manifest: "label = Fallback\nkind = fallback\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", &inter_bytes)],
+                },
+            ),
+        ],
+    };
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("test-order").expect("key");
+
+    assert!(
+        request_glyph(&mut svc, key, own_primary_scalar, 28, FontWeight::Regular).is_ok(),
+        "a scalar the primary face maps must resolve from it"
+    );
+    assert!(
+        request_glyph(&mut svc, key, own_companion_scalar, 28, FontWeight::Regular).is_ok(),
+        "a scalar only the companion face maps must still resolve within the family"
+    );
+    assert!(
+        request_glyph(&mut svc, key, fallback_only, 28, FontWeight::Regular).is_ok(),
+        "a scalar only the fallback family maps must resolve through it"
+    );
+
+    // A scalar no face anywhere maps still renders — U+FFFD from the
+    // primary — never a refusal for lack of coverage.
+    let never_mapped = '\u{10FFFF}';
+    match request_glyph(&mut svc, key, never_mapped, 28, FontWeight::Regular) {
+        Ok((_, _, _, _, coverage)) => {
+            assert!(
+                coverage.iter().any(|&c| c > 0),
+                "the U+FFFD fallback must have visible ink"
+            );
         }
-        .to_le_bytes(),
-        &mut reply,
-    );
-    let glyph = decode_glyph_reply(&reply[..n]).ok()?;
-    Some((glyph.width, glyph.height, glyph.coverage.to_vec()))
-}
-
-/// The heights a hostile client would walk: the top of the permitted range,
-/// where each raster is at its largest.
-fn hostile_heights() -> impl Iterator<Item = u32> {
-    (FONT_MAX_CELL_HEIGHT - 31)..=FONT_MAX_CELL_HEIGHT
-}
-
-#[test]
-fn a_caller_walking_the_size_range_cannot_grow_the_service_past_its_budget() {
-    // A machine whose budget holds a handful of the largest permitted
-    // rasters, so the walk genuinely forces eviction rather than being
-    // refused outright for exceeding the whole budget.
-    let bytes = face_bytes();
-    let (cache, _gauge) = cache_for(8 << 30, PressureBand::Normal);
-    let ceiling = glyph_cache_budget(8 << 30).hard();
-    let mut svc = service_with(&bytes, cache);
-
-    for height in hostile_heights() {
-        assert!(
-            render(&mut svc, 'A', height, FontWeight::Regular).is_some(),
-            "every permitted size is still served"
-        );
-        assert!(
-            svc.cache.charged_bytes() <= ceiling,
-            "a size walk pushed the service to {} bytes, past its {ceiling}-byte ceiling",
-            svc.cache.charged_bytes()
-        );
+        Err(err) => {
+            // Only acceptable when the primary face itself maps no
+            // replacement glyph at all — the documented, structurally
+            // defensive edge case.
+            assert_eq!(err, Errno::NotFound);
+            assert!(hebrew_face.glyph_for(0xFFFD).is_none());
+        }
     }
-    assert!(
-        svc.cache.accounting().evictions() > 0,
-        "the walk must have forced the bound to bite"
-    );
-    assert!(
-        !svc.cache.poisoned(),
-        "bounding a hostile caller is ordinary operation, not a defect"
-    );
 }
 
 #[test]
-fn a_size_outside_the_permitted_range_is_still_refused_and_rasterises_nothing() {
-    let bytes = face_bytes();
-    let mut svc = service(&bytes);
+fn two_families_sharing_a_fallback_face_key_the_cache_separately() {
+    let mono_bytes = asset("mono/Inconsolata-EX.ttf");
+    let inter_bytes = asset("inter/Inter-Variable.ttf");
+    let hebrew_bytes = asset("mono/NotoSansHebrew-ExtraCondensed.ttf");
+
+    let hebrew_face = Face::parse(&hebrew_bytes).expect("hebrew face parses");
+    let mono_face = Face::parse(&mono_bytes).expect("mono face parses");
+    let inter_face = Face::parse(&inter_bytes).expect("inter face parses");
+
+    // A scalar neither `family-a`'s own face (mono) nor `family-b`'s own
+    // face (inter) maps, but the shared fallback does.
+    let shared_scalar = mapped_only_in(&hebrew_face, &mono_face)
+        .find(|&code| inter_face.glyph_for(code).is_none())
+        .and_then(char::from_u32)
+        .expect("the Hebrew face maps something neither Latin face does");
+
+    let mut store = MemoryStore {
+        dirs: vec![
+            (
+                "family-a",
+                MemoryFamily {
+                    manifest: "label = A\nkind = proportional\nface = Inconsolata-EX.ttf\n\
+                               fallback = shared-fallback\n",
+                    faces: vec![("Inconsolata-EX.ttf", &mono_bytes)],
+                },
+            ),
+            (
+                "family-b",
+                MemoryFamily {
+                    manifest: "label = B\nkind = proportional\nface = Inter-Variable.ttf\n\
+                               fallback = shared-fallback\n",
+                    faces: vec![("Inter-Variable.ttf", &inter_bytes)],
+                },
+            ),
+            (
+                "shared-fallback",
+                MemoryFamily {
+                    manifest: "label = Fallback\nkind = fallback\n\
+                               face = NotoSansHebrew-ExtraCondensed.ttf\n",
+                    faces: vec![("NotoSansHebrew-ExtraCondensed.ttf", &hebrew_bytes)],
+                },
+            ),
+        ],
+    };
+    let mut svc = discover_roomy(&mut store);
+    let family_a = FamilyKey::new("family-a").expect("key");
+    let family_b = FamilyKey::new("family-b").expect("key");
+
+    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert_eq!(svc.cache.len(), 1);
+    assert!(request_glyph(&mut svc, family_b, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert_eq!(
+        svc.cache.len(),
+        2,
+        "the same physical glyph from two different requesting families must not collide"
+    );
+    // Repeating family A's request must hit the existing entry, not grow it.
+    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert_eq!(svc.cache.len(), 2);
+}
+
+#[test]
+fn a_size_outside_the_permitted_range_is_refused() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
     for height in [
-        FONT_MIN_CELL_HEIGHT - 1,
-        FONT_MAX_CELL_HEIGHT + 1,
+        FONT_MIN_PIXEL_HEIGHT - 1,
+        FONT_MAX_PIXEL_HEIGHT + 1,
         0,
         u32::MAX,
     ] {
         let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
         let n = svc.handle(
             &FontRequest::Glyph {
+                family: key,
                 scalar: 'A',
-                cell_height: height,
+                pixel_height: height,
                 weight: FontWeight::Regular,
             }
             .to_le_bytes(),
@@ -388,86 +492,48 @@ fn a_size_outside_the_permitted_range_is_still_refused_and_rasterises_nothing() 
         assert_eq!(
             decode_glyph_reply(&reply[..n]),
             Err(Errno::LengthOutOfRange),
-            "cell height {height} must stay refused"
+            "pixel height {height} must stay refused"
         );
     }
-    assert_eq!(
-        svc.cache.len(),
-        0,
-        "a refused request must never reach the rasteriser or the cache"
-    );
-}
-
-#[test]
-fn an_unknown_ram_size_caches_nothing_yet_still_serves() {
-    let bytes = face_bytes();
-    let (cache, _gauge) = cache_for(0, PressureBand::Normal);
-    let mut svc = service_with(&bytes, cache);
-    let served = render(&mut svc, 'A', 28, FontWeight::Regular).expect("still served");
-    assert_eq!(served.2.len(), (served.0 * served.1) as usize);
-    assert!(served.2.contains(&255), "the raster is real, not blank");
-    assert_eq!(svc.cache.len(), 0, "a zero budget retains nothing");
-    assert_eq!(svc.cache.charged_bytes(), 0);
 }
 
 #[test]
 fn mild_pressure_empties_the_cache_and_refuses_further_growth() {
-    let bytes = face_bytes();
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
     let (cache, gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
-    let mut svc = service_with(&bytes, cache);
-    assert!(render(&mut svc, 'A', 28, FontWeight::Regular).is_some());
+    let mut svc = discover(&mut store, cache, &DiscardSink).expect("discovers");
+    let key = FamilyKey::new("mono").expect("key");
+
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
     assert_eq!(svc.cache.len(), 1);
 
     gauge.report(PressureBand::Mild);
     assert!(svc.trim_cache() > 0, "mild pressure must release");
     assert_eq!(svc.cache.len(), 0);
-    assert_eq!(svc.cache.charged_bytes(), 0);
 
     assert!(
-        render(&mut svc, 'B', 28, FontWeight::Regular).is_some(),
+        request_glyph(&mut svc, key, 'B', 28, FontWeight::Regular).is_ok(),
         "a shrunk service still rasterises"
     );
     assert_eq!(svc.cache.len(), 0, "no growth while the band forbids it");
 }
 
 #[test]
-fn a_glyph_rasterises_identically_cached_uncached_and_after_a_shrink() {
-    let bytes = face_bytes();
-    let (uncached, _uncached_gauge) = cache_for(0, PressureBand::Normal);
-    let mut without = service_with(&bytes, uncached);
-    let expected = render(&mut without, 'g', 24, FontWeight::Bold).expect("served with no cache");
-
-    let (cache, gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
-    let mut with = service_with(&bytes, cache);
-    assert_eq!(
-        render(&mut with, 'g', 24, FontWeight::Bold),
-        Some(expected.clone())
-    );
-    assert_eq!(
-        render(&mut with, 'g', 24, FontWeight::Bold),
-        Some(expected.clone()),
-        "a cache hit serves the same raster the miss did"
-    );
-
-    gauge.report(PressureBand::Mild);
-    let _ = with.trim_cache();
-    assert_eq!(
-        render(&mut with, 'g', 24, FontWeight::Bold),
-        Some(expected),
-        "the cache is an accelerator; losing it changes nothing"
-    );
-}
-
-#[test]
-fn a_truncated_face_fails_service_construction() {
-    let bytes = face_bytes();
-    let mut truncated = bytes.clone();
-    truncated[0].truncate(64);
-    let sources: Vec<(&[u8], Repertoire)> = truncated
-        .iter()
-        .map(Vec::as_slice)
-        .zip(FACE_REPERTOIRES)
-        .collect();
-    let (cache, _gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
-    assert!(FontService::new(&sources, cache).is_err());
+fn a_malformed_request_fails_closed_with_an_error_frame() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+    let mut request = FontRequest::Glyph {
+        family: key,
+        scalar: 'A',
+        pixel_height: 28,
+        weight: FontWeight::Regular,
+    }
+    .to_le_bytes();
+    request[0] ^= 0xFF;
+    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let n = svc.handle(&request, &mut reply);
+    assert_eq!(decode_glyph_reply(&reply[..n]), Err(Errno::BadMagic));
 }

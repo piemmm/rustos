@@ -61,7 +61,7 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `tools/xtask` exposes the closed subcommand set (§7/§14/§17.5): `build`,
   `test`, `clippy`, `fmt`, `docs-check`, `abi-check`, `c-header`,
   `font-atlas` (generates/verifies the Inconsolata glyph atlas in
-  `lib/font/src/` from the committed OFL face in `lib/font/assets/`),
+  `lib/font/src/` from the committed OFL face in `lib/font/assets/mono/`),
   `deps-check`, `cfg-check`, `coverage`, `ci`, `image`.
 - CI: `.github/workflows/ci.yml` runs `cargo xtask ci` per push/PR;
   `soak.yml` runs nightly soaks on a self-hosted Linux runner. `tools/ci/`
@@ -3246,22 +3246,45 @@ Shipped (headless-testable, model + renderer over injected seams):
   font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a
   U+FFFD fallback — that `lib/fbcon` draws verbatim, plus, behind the `render`
   feature, a thin cached `FONT_ENDPOINT` client of the `fontd` service that
-  holds no font data of its own),
-  `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser and
-  merged-family resolution, used by both the `font-atlas` generator and the
-  runtime `lib/font` so the atlas and live text share one rasteriser, §2.2),
+  holds no font data of its own and lays proportional and fixed-pitch text
+  out through one per-glyph-advance path; its `assets/` tree is the shipped
+  `/System/Fonts` store, one directory per family),
+  `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser,
+  variable-font instancing, and family resolution, used by both the
+  `font-atlas` generator and the `fontd` service so the atlas and live text
+  share one rasteriser, §2.2; its `store` module is the one `FontFamily`
+  manifest parser the image builder and the service both read),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
   - **Font-as-OS-service (done, `plans/FONT-SERVICE.md`).** Text rendering is
     a single sandboxed OS resource: the sandboxed `fontd` service
     (`userland/system/fontd`, `/System/Services/fontd.app`) is the only
-    process that holds a font face or runs the TrueType rasteriser. It owns
-    the four `/System/Fonts` faces, rasterises in a §19.5 minimum-capability
-    sandbox, and serves 8-bit glyph coverage over the reserved `FONT_ENDPOINT`
-    (`lib/abi/src/font_ipc.rs`). `lib/font`'s render path is a thin cached
-    client with the ~10 MB of embedded atlas + TTF faces deleted, so no GUI
-    `Run` image carries a font payload; the kernel/`lib/fbcon` boot console
-    keeps only the small primary-face console-atlas subset (boot floor).
-    `fontd` is **not** a boot-floor service — text is a graphics-only resource,
+    process that holds a font face or runs the TrueType rasteriser. It
+    discovers the `/System/Fonts` store, rasterises in a §19.5
+    minimum-capability sandbox, and serves 8-bit glyph coverage over the
+    reserved `FONT_ENDPOINT` (`lib/abi/src/font_ipc.rs`). `lib/font`'s render
+    path is a thin cached client with the ~10 MB of embedded atlas + TTF faces
+    deleted, so no GUI `Run` image carries a font payload; the
+    kernel/`lib/fbcon` boot console keeps only the small primary-face
+    console-atlas subset (boot floor).
+  - **Selectable font families, proportional desktop text.** The store is one
+    directory per family (`FontFamily` manifest + its ordered faces), so
+    shipping a family is dropping a directory into `lib/font/assets/` — no
+    list anywhere names a face. Shipped: `inter` (the default proportional UI
+    face the design boards are set in), `noto-sans`, `noto-serif`, the
+    fixed-pitch `mono` (the console-atlas source), and the non-selectable
+    `sans-fallback` carrying Hebrew + Chinese/Japanese/Korean coverage once
+    for all three proportional families. The protocol is family-aware and
+    every glyph reply carries its own advance and left bearing, so desktop
+    chrome is genuinely proportional while the terminal keeps its grid. Faces
+    are upstream **variable** fonts committed unmodified, instanced at a real
+    `wght` by `lib/fontface` (`fvar`/`avar`/`gvar`+IUP/`HVAR`). A theme names
+    its families as validated keys and `Fonts::with_ui_family` applies a
+    user's choice; `FontRequest::Families` reports what the store holds so a
+    settings surface offers exactly that. **Remaining:** the desktop-side
+    picker — a system-menu row per family, persisted per user and validated
+    against the reported list on session start.
+  - **`fontd` starts with the desktop, not at boot** — text is a
+    graphics-only resource,
     so `login` starts it (as its uid-15 account, via `CAP_SPAWN_AS_USER`) the
     first login round a machine is display-capable, covering both a graphical
     login and the shell `desktop` command and never a headless/text boot

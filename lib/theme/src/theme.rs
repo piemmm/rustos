@@ -13,7 +13,7 @@ use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
 use crate::motion::{Contrast, Density, MotionTheme};
 use crate::palette::Palette;
-use crate::typography::Fonts;
+use crate::typography::{FamilyKey, Fonts};
 use crate::Rgba;
 
 /// A stable identifier for a theme.
@@ -316,11 +316,27 @@ fn common_motion() -> MotionTheme {
 /// the type scale. The base is measured from the reference boards, where body
 /// text fills a little under two thirds of a control's height.
 fn common_fonts() -> Fonts {
-    Fonts::ladder("TAIRiX Sans", "TAIRiX Mono", BASE_TEXT_SIZE_PX)
+    Fonts::ladder(UI_FAMILY, MONOSPACE_FAMILY, BASE_TEXT_SIZE_PX)
 }
 
 /// The logical-pixel body size both built-in themes author their ladder at.
 const BASE_TEXT_SIZE_PX: u16 = 18;
+
+/// The proportional family the shipped themes draw interface text in: the
+/// humanist sans the design boards are set in, installed as `/System/Fonts`
+/// `inter`. A user's own choice replaces it through
+/// [`Fonts::with_ui_family`](crate::Fonts::with_ui_family).
+///
+/// A spelling the key grammar refuses would leave the desktop with no UI
+/// family at all, so the fallback is the fixed-pitch family every image
+/// ships; the crate's tests assert the shipped spelling resolves.
+const UI_FAMILY: FamilyKey = match FamilyKey::new("inter") {
+    Ok(key) => key,
+    Err(_) => FamilyKey::MONO,
+};
+
+/// The fixed-pitch family the shipped themes draw terminal and code text in.
+const MONOSPACE_FAMILY: FamilyKey = FamilyKey::MONO;
 
 /// The cursor set shared by both built-in themes.
 fn common_cursors() -> CursorSet {

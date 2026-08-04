@@ -22,7 +22,7 @@ const H: u32 = 28;
 const EACH: u32 = W / 3;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {

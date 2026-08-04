@@ -4,37 +4,44 @@ use alloc::vec::Vec;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::{CellGeometry, Face, FontFamily, Repertoire, ATLAS_EM_PX};
+use crate::{CellGeometry, Face, FontFamily, ATLAS_EM_PX};
 
 /// The native cell height the atlas is authored at (ascent 23 + descent 5).
 const NATIVE_HEIGHT: u32 = 28;
 
-fn asset(name: &str) -> Vec<u8> {
+/// Read a committed face by its `<family>/<file>` path under
+/// `lib/font/assets`.
+pub(crate) fn asset(rel: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../font/assets")
-        .join(name);
+        .join(rel);
     fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// The count of inked (non-zero coverage) bytes in a bitmap.
+pub(crate) fn ink(bitmap: &[u8]) -> usize {
+    bitmap.iter().filter(|&&c| c > 0).count()
+}
+
 fn primary_bytes() -> Vec<u8> {
-    asset("Inconsolata-EX.ttf")
+    asset("mono/Inconsolata-EX.ttf")
 }
 
 fn family_bytes() -> [Vec<u8>; 4] {
     [
-        asset("Inconsolata-EX.ttf"),
-        asset("MPLUS1Code-Regular.ttf"),
-        asset("D2Coding-Regular.ttf"),
-        asset("NotoSansHebrew-ExtraCondensed.ttf"),
+        asset("mono/Inconsolata-EX.ttf"),
+        asset("mono/MPLUS1Code-Regular.ttf"),
+        asset("mono/D2Coding-Regular.ttf"),
+        asset("mono/NotoSansHebrew-ExtraCondensed.ttf"),
     ]
 }
 
 fn family_from(bytes: &[Vec<u8>; 4]) -> FontFamily<'_> {
     FontFamily::parse(&[
-        (bytes[0].as_slice(), Repertoire::Full),
-        (bytes[1].as_slice(), Repertoire::Full),
-        (bytes[2].as_slice(), Repertoire::Korean),
-        (bytes[3].as_slice(), Repertoire::Full),
+        bytes[0].as_slice(),
+        bytes[1].as_slice(),
+        bytes[2].as_slice(),
+        bytes[3].as_slice(),
     ])
     .expect("family parses")
 }
@@ -54,10 +61,6 @@ fn runtime_geometry(face: &Face<'_>, advance: u16, height: u32) -> (CellGeometry
         },
         px_per_em,
     )
-}
-
-fn ink(bitmap: &[u8]) -> usize {
-    bitmap.iter().filter(|&&c| c > 0).count()
 }
 
 #[test]
@@ -149,11 +152,17 @@ fn merged_repertoire_is_sorted_and_deduplicated() {
         merged.windows(2).all(|w| w[0].0 < w[1].0),
         "merged repertoire is not strictly ascending / deduplicated"
     );
-    // ASCII 'A' comes from face 0; a Hangul syllable from the Korean face (2).
+    // ASCII 'A' comes from the primary face; its merged entry agrees with
+    // resolution (earliest face wins) for every codepoint.
     let a = merged.iter().find(|&&(code, ..)| code == u32::from('A'));
     assert_eq!(a.map(|&(_, face, _)| face), Some(0));
-    let hangul = merged.iter().find(|&&(code, ..)| code == 0xAC00);
-    assert_eq!(hangul.map(|&(_, face, _)| face), Some(2));
+    for &(code, face, glyph) in merged.iter().step_by(97) {
+        assert_eq!(
+            family.resolve(code),
+            Some((face, glyph)),
+            "merged entry disagrees with resolve at U+{code:04X}"
+        );
+    }
 }
 
 #[test]

@@ -21,7 +21,7 @@ use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::high_contrast;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn scale2() -> Scale {

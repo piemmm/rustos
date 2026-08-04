@@ -150,8 +150,8 @@ pub fn visible_rows() -> usize {
 /// shared monospace face.
 #[must_use]
 pub fn visible_cols_for(width_px: u32) -> usize {
-    let font = BitmapFont::inconsolata();
-    let advance = font.advance();
+    let font = BitmapFont::console();
+    let advance = font.cell_width();
     if advance == 0 {
         return 0;
     }
@@ -166,7 +166,7 @@ pub fn visible_cols() -> usize {
 
 /// Height in pixels of one drawn text line.
 fn line_height() -> u32 {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
         .glyph_height()
         .saturating_add(LINE_PADDING * 2)
 }
@@ -196,7 +196,7 @@ pub fn render_lines(
 
 /// The one painter behind both renderers, sized to the current window.
 fn render_slice(lines: &[String], theme: &Theme, width_px: u32, height_px: u32) -> Option<Surface> {
-    let font = BitmapFont::inconsolata();
+    let font = BitmapFont::console();
     let line = line_height();
     let mut surface = Surface::new(width_px, height_px)?;
     let palette = theme.palette();

@@ -51,13 +51,13 @@ pub fn render<S: ShellSource>(
     theme: &Theme,
     viewport: Rect,
 ) -> Option<Surface> {
-    let font = BitmapFont::inconsolata();
+    let font = BitmapFont::console();
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
 
     let grid = terminal.grid();
-    let cell_width = font.advance();
+    let cell_width = font.cell_width();
     let line_height = font.line_height();
 
     draw_cells(&mut surface, font, grid, palette, cell_width, line_height);

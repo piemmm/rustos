@@ -27,22 +27,28 @@
 //! With the `render` feature, [`BitmapFont`] is a thin, cached client of the
 //! OS font service `fontd` (`plans/FONT-SERVICE.md`): it parses no TrueType
 //! and holds no face, and [`BitmapFont::draw_text`] fetches each glyph's 8-bit
-//! coverage from the service over `FONT_ENDPOINT` (see [`client`]) and blits
-//! it. `fontd` owns the four `/System/Fonts` faces and rasterises every scalar
-//! and size on demand in a minimum-capability sandbox, so a malformed face
-//! faults only that sandbox, never a compositor or terminal.
-//! The transport is injected: a program links it with `tairix-font/rt`, a host
-//! test installs a mock ([`set_font_transport`]); with no transport a draw
-//! composites nothing (fail closed) rather than reaching for local font data.
+//! coverage, and each family's line metrics, from the service over
+//! `FONT_ENDPOINT` (see [`client`]) and blits it. `fontd` owns the installed
+//! `/System/Fonts` faces and rasterises every family, scalar, and size on
+//! demand in a minimum-capability sandbox, so a malformed face faults only
+//! that sandbox, never a compositor or terminal. The transport is injected: a
+//! program links it with `tairix-font/rt`, a host test installs a mock
+//! ([`set_font_transport`]); with no transport a draw composites nothing
+//! (fail closed) rather than reaching for local font data.
 //!
-//! A [`BitmapFont`] renders at a chosen cell height in physical pixels.
-//! [`BitmapFont::inconsolata`] keeps the native size (what the text console
-//! draws), while [`BitmapFont::with_pixel_height`] renders at any other size:
-//! the desktop resolves a comfortable size from the theme's logical font size
-//! and the DPI scale. Every metric scales with the cell height, so the font
-//! stays monospaced; the cell model is one scalar per grid entry, a wide
-//! Japanese or Korean bitmap covering the lead and continuation cells reserved
-//! by `tairix_vt::char_width`.
+//! A [`BitmapFont`] names a **family** ([`FamilyKey`]) and renders it at a
+//! chosen pixel height in physical pixels. [`BitmapFont::console`] keeps the
+//! fixed-pitch built-in family at its native size (what the text console
+//! draws), [`BitmapFont::monospace`] renders that same family at any other
+//! size, and [`BitmapFont::new`]
+//! renders any family at any size — the desktop resolves a comfortable size
+//! from the theme's logical font size and the DPI scale. A monospace family
+//! shares one advance for every glyph; a proportional family advances each
+//! glyph by its own reported width, so [`BitmapFont::advance`],
+//! [`BitmapFont::text_width`], and [`BitmapFont::truncate_to_width`] measure
+//! through the per-glyph advance either way. The cell model for a monospace
+//! grid stays one scalar per grid entry, a wide Japanese or Korean bitmap
+//! covering the lead and continuation cells reserved by `tairix_vt::char_width`.
 //!
 //! # A shared cache declaration for the whole endpoint
 //!
@@ -74,10 +80,12 @@ pub mod glyph_cache;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "render")]
+pub use client::{
+    families, set_font_transport, set_glyph_cache, FontTransport, GlyphCache, GlyphKey,
+};
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
-#[cfg(feature = "render")]
-pub use client::{set_font_transport, set_glyph_cache, FontTransport, GlyphCache, GlyphKey};
 #[cfg(feature = "render")]
 pub use font::BitmapFont;
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
@@ -85,3 +93,5 @@ pub use glyph::{lookup, lookup_or_fallback, Glyph};
 pub use glyph_cache::{
     glyph_cache_budget, glyph_cache_candidate, CachedGlyph, GLYPH_CACHE_ENTRY_METADATA_BYTES,
 };
+#[cfg(feature = "render")]
+pub use tairix_abi::font_ipc::{FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontWeight};

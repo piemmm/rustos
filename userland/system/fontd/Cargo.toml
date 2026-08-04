@@ -38,11 +38,8 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # engine the atlas generator and this service share (`AGENTS.md` §2.2). Only
 # this service ever parses a face at runtime (§19.5).
 tairix-fontface = { path = "../../../lib/fontface", version = "=0.0.0" }
-# Unicode terminal-cell width, so a glyph's pen advance is the same
-# one-or-two-cell notion `lib/vt` / the client / the atlas use.
-tairix-vt = { path = "../../../lib/vt", version = "=0.0.0", default-features = false }
-# §19.4 structured audit log: face-load and bind decisions are recorded
-# through a `tairix_log::Sink`.
+# §19.4 structured audit log: startup, skipped-family, and bind decisions are
+# recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The one shared cached-glyph declaration — the retained value type, its
 # classification, and the RAM-derived byte budget — that this service and the

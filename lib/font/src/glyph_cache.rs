@@ -52,29 +52,38 @@ use tairix_reclaim::{
 };
 
 /// One rasterised glyph bitmap as either side of the font-service boundary
-/// retains it: the geometry the service reported plus the owned row-major
-/// 8-bit coverage payload.
+/// retains it: the geometry the service reported, its pen advance and left
+/// side bearing, and the owned row-major 8-bit coverage payload.
 ///
-/// The reply's `advance` is not part of this value: both the client and the
-/// service derive the pen advance from their own monospace geometry, so it
-/// is never cached state.
+/// A proportional family reports a different advance and bearing per glyph,
+/// so both travel with the bitmap rather than being re-derived from a
+/// monospace cell width the way the old monospace-only client did.
 #[derive(Debug, Eq, PartialEq)]
 pub struct CachedGlyph {
     /// Bitmap width in pixels.
     pub width: u32,
     /// Bitmap height in pixels.
     pub height: u32,
+    /// The pen advance for this glyph in pixels. Zero for a combining mark
+    /// that occupies no space of its own.
+    pub advance: u32,
+    /// The bitmap's left edge relative to the pen, in pixels. Negative when
+    /// the outline reaches back over the preceding glyph.
+    pub left: i32,
     /// Row-major 8-bit coverage, exactly `width * height` bytes.
     pub data: Box<[u8]>,
 }
 
 impl CachedGlyph {
-    /// Build a cached glyph from its rasterised geometry and coverage.
+    /// Build a cached glyph from its rasterised geometry, advance, bearing,
+    /// and coverage.
     #[must_use]
-    pub const fn new(width: u32, height: u32, data: Box<[u8]>) -> Self {
+    pub const fn new(width: u32, height: u32, advance: u32, left: i32, data: Box<[u8]>) -> Self {
         Self {
             width,
             height,
+            advance,
+            left,
             data,
         }
     }
@@ -94,11 +103,11 @@ impl CachedBytes for CachedGlyph {
 }
 
 /// The per-entry bookkeeping bytes a glyph cache declares to the
-/// classification gate: the widest cache key in use (the service's
-/// `(face, glyph, cell_height, weight)`, four `u32`/`u16` fields) plus the
-/// fixed overhead of one `BTreeMap` entry and one recency-index slot, with
-/// headroom.
-pub const GLYPH_CACHE_ENTRY_METADATA_BYTES: usize = 64;
+/// classification gate: the widest cache key in use (the render-path
+/// client's `(scalar, family, pixel_height, weight)`, a 16-byte family key
+/// plus three `u32`/`u16` fields) plus the fixed overhead of one `BTreeMap`
+/// entry and one recency-index slot, with headroom.
+pub const GLYPH_CACHE_ENTRY_METADATA_BYTES: usize = 80;
 
 /// The classification every glyph cache declares: a rasterised glyph is
 /// expensive to reproduce (an outline rasterisation pass, or — from the
@@ -188,7 +197,7 @@ mod tests {
             .sensitivity();
         assert_ne!(sensitivity, Sensitivity::Public);
 
-        let mut glyph = CachedGlyph::new(4, 4, vec![0xFF; 16].into_boxed_slice());
+        let mut glyph = CachedGlyph::new(4, 4, 4, 0, vec![0xFF; 16].into_boxed_slice());
         assert_eq!(glyph.payload_bytes(), 16);
         glyph.wipe();
         assert!(glyph.data.iter().all(|&b| b == 0));

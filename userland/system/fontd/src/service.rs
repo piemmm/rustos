@@ -1,89 +1,95 @@
-//! The rasterising font-service dispatcher: the host-testable core that turns
-//! one decoded [`FontRequest`] into a framed
-//! `font-v1` reply.
+//! The font-service dispatcher: the host-testable core that turns one
+//! decoded [`FontRequest`] into a framed `font-v1` reply.
 //!
-//! [`FontService`] owns the parsed system faces (borrowed byte sources), the
-//! native cell geometry derived once from the primary face, and a bounded
-//! `(face, glyph, cell height, weight)` cache of already-rasterised 8-bit
-//! coverage. [`FontService::handle`] is the whole request pipeline: decode,
-//! dispatch, and emit a reply — always producing bytes, an error frame on any
+//! [`FontService`] owns the discovered families (built by
+//! [`crate::discovery::discover`]), each holding its faces behind a face
+//! cache that reads and parses a face's bytes on first use and
+//! retains the parsed instances for the service's life. [`FontService::handle`]
+//! is the whole request pipeline: decode, resolve, rasterise (or serve from
+//! cache), and emit a reply — always producing bytes, an error frame on any
 //! failure, so a caller never blocks on a dropped reply (fail closed).
 //!
-//! The service is the *only* process that parses a face or runs the outline
-//! rasteriser: a client sends a scalar and a cell height and receives the
-//! small coverage bitmap it blits, never a font byte.
+//! # Resolution
+//!
+//! A scalar resolves within the requested family's own faces, in manifest
+//! order; if none maps it, within the family's declared fallback family's
+//! faces, in the same order; if still nothing maps it, U+FFFD is rendered
+//! from the requested family's primary face. Every glyph in one family's run
+//! shares the geometry (pixels-per-em, baseline, box height) the requested
+//! family's primary face defines at the requested pixel height, even when
+//! the glyph itself came from a fallback face — so mixing scripts never
+//! shifts the baseline or the line box mid-run.
+//!
+//! # Weights
+//!
+//! A face that declares a `wght` axis is instanced at the exact requested
+//! weight, whose advance genuinely differs from another weight's; the
+//! instanced [`Face`] is parsed once per distinct weight actually requested
+//! and cached. A face with no such axis keeps its one default instance and
+//! is thickened afterwards by the synthetic `embolden` transform, which
+//! leaves its advance untouched.
 //!
 //! # The cache a hostile caller cannot grow
 //!
-//! The cell height is caller-supplied, so the size of what a request makes
-//! this service retain is caller-influenced: a client walking the permitted
-//! height range would drive an entry-counted cache into hundreds of
-//! megabytes. The cache is therefore bounded in **bytes**, by a budget
-//! derived from the machine's own RAM, through the shared reclaimable-memory
-//! model — the same [`tairix_reclaim::ReclaimCache`] the render-path client
-//! on the other side of this endpoint uses, declared once in
-//! [`tairix_font::glyph_cache`]. However many distinct sizes a caller asks
-//! for, the retained bytes stay under that ceiling and the least recently
-//! used rasters are released (and overwritten) to make room.
-//!
-//! Bounding retention is not input validation and does not replace it: the
-//! permitted scalar, cell-height, and weight ranges are checked by the wire
-//! decode in [`tairix_abi::font_ipc`] before a request reaches this module,
-//! and an out-of-range request is refused rather than rasterised.
-//!
-//! # Byte-identical rendering
-//!
-//! The engine produces 4-bit coverage (`0..=15`), exactly as the atlas
-//! generator does; each sample is scaled `×17` to the protocol's 8-bit
-//! sample (`15 → 255`). The geometry for a requested cell height scales the
-//! native cell the same way `lib/font`'s blitter always has (round-to-nearest
-//! against the native height), so text drawn through the service is
-//! byte-for-byte what the in-process blitter produced before it.
+//! The pixel height is caller-supplied, so the size of what a request makes
+//! this service retain is caller-influenced. The cache is therefore bounded
+//! in **bytes**, by a budget derived from the machine's own RAM, through the
+//! shared reclaimable-memory model — the same [`tairix_reclaim::ReclaimCache`]
+//! the render-path client on the other side of this endpoint uses, declared
+//! once in [`tairix_font::glyph_cache`]. The key names the requesting family,
+//! the family whose face actually supplied the glyph, that face's index,
+//! the glyph id, the pixel height, and the weight, so two families can never
+//! collide on the same slot even when they share a fallback face.
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    encode_glyph_error_reply, encode_glyph_reply, encode_metrics_reply, FontMetrics, FontRequest,
-    FontWeight, FONT_METRICS_REPLY_LEN,
+    encode_families_reply, encode_glyph_error_reply, encode_glyph_reply, encode_metrics_reply,
+    FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontRequest, FontWeight, FONT_FAMILY_KEY_LEN,
+    FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
-use tairix_fontface::{CellGeometry, FontFamily, Repertoire, ATLAS_EM_PX};
+use tairix_fontface::{AxisSetting, Face};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
-use tairix_vt::char_width;
 
+use crate::discovery::FaceLoad;
 use crate::embolden::{embolden, stroke_subpixels, SUBPIXEL};
 
-/// The four committed faces, in resolution order, scoped exactly as the atlas
-/// generator scopes them so the service resolves every scalar to the same face
-/// the console atlas would: Inconsolata EX (Latin, Greek,
-/// Cyrillic, box drawing, …), M PLUS 1 Code (Japanese), `D2Coding` (Korean
-/// only), Noto Sans Hebrew (Hebrew).
-pub const FACE_REPERTOIRES: [Repertoire; 4] = [
-    Repertoire::Full,
-    Repertoire::Full,
-    Repertoire::Korean,
-    Repertoire::Full,
-];
-
-/// The cache key: the resolved face index, glyph id, the cell height the
-/// glyph was rasterised at (cell width and baseline are a fixed function of
-/// the height, so the height alone keys the geometry), and the weight it was
-/// emboldened to — a heavier weight is a different raster of the same outline,
-/// so it must not collide with the regular one.
-pub type GlyphKey = (u32, u32, u32, u16);
+/// The service's glyph-cache key: the requesting family (which drives the
+/// shared geometry a run renders at), the family whose faces actually
+/// supplied the glyph (its own, or its declared fallback), the face's index
+/// within that resolved family, the glyph id, the pixel height, and the
+/// wire weight.
+///
+/// The requesting and resolved families are both part of the key because two
+/// families sharing the same fallback face can legitimately compute
+/// different geometry for the very same physical glyph — their own primary
+/// faces differ — so the same glyph can rasterise to two different bitmaps;
+/// keying by the resolved face alone would risk serving one family's raster
+/// to the other.
+pub type GlyphKey = (
+    [u8; FONT_FAMILY_KEY_LEN],
+    [u8; FONT_FAMILY_KEY_LEN],
+    u32,
+    u32,
+    u32,
+    u16,
+);
 
 /// The service's rasterised-glyph cache: the shared bounded, classified,
 /// pressure-governed cache holding [`CachedGlyph`] coverage under a
 /// [`GlyphKey`].
 ///
 /// The generation token is `()` because nothing invalidates a raster while
-/// the service lives: the faces are parsed once at startup and never
-/// reloaded, so the same glyph at the same height and weight rasterises to
-/// the same bytes every time. Entries leave by eviction, by memory pressure,
-/// or with the service itself — the owner-teardown invalidation the shared
-/// classification declares.
+/// the service lives: a face's bytes never change once read, so the same
+/// glyph at the same height and weight rasterises to the same bytes every
+/// time. Entries leave by eviction, by memory pressure, or with the service
+/// itself — the owner-teardown invalidation the shared classification
+/// declares.
 pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, ()>;
 
 /// The audit label the service's cache is named by in reclaim records.
@@ -128,47 +134,255 @@ pub fn glyph_cache(
     cache
 }
 
+/// One face's lazily-read bytes and its cached parsed instances.
+///
+/// The face's bytes are read on first use ([`FaceLoad::load`]) and retained
+/// for the service's life. The default (unvaried) instance is parsed once
+/// and used for every codepoint lookup and as the geometry source, since a
+/// face's `cmap` and vertical metrics never change with variation in this
+/// engine. A face declaring a `wght` axis additionally caches one instanced
+/// [`Face`] per distinct [`FontWeight`] actually requested; a face with no
+/// such axis reuses the one default instance for every weight and relies on
+/// synthetic emboldening instead.
+pub(crate) struct FaceCache<'a> {
+    loader: Box<dyn FaceLoad<'a> + 'a>,
+    bytes: Option<&'a [u8]>,
+    default: Option<Face<'a>>,
+    has_wght: bool,
+    weighted: Vec<(FontWeight, Face<'a>)>,
+}
+
+impl<'a> FaceCache<'a> {
+    /// A face whose bytes will be obtained from `loader` on first use.
+    pub(crate) fn new(loader: Box<dyn FaceLoad<'a> + 'a>) -> Self {
+        Self {
+            loader,
+            bytes: None,
+            default: None,
+            has_wght: false,
+            weighted: Vec::new(),
+        }
+    }
+
+    /// This face's bytes, reading them on the first call and retaining them
+    /// for the service's life.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`FaceLoad::load`] raises when the face cannot be read.
+    fn face_bytes(&mut self) -> Result<&'a [u8], Errno> {
+        if self.bytes.is_none() {
+            self.bytes = Some(self.loader.load()?);
+        }
+        self.bytes.ok_or(Errno::BadMagic)
+    }
+
+    /// Read this face's bytes and parse its default instance, if either has
+    /// not already happened.
+    fn ensure_default(&mut self) -> Result<(), Errno> {
+        if self.default.is_some() {
+            return Ok(());
+        }
+        let bytes = self.face_bytes()?;
+        let face = Face::parse(bytes).map_err(|_| Errno::BadMagic)?;
+        self.has_wght = face.axes().iter().any(|axis| axis.tag == *b"wght");
+        self.default = Some(face);
+        Ok(())
+    }
+
+    /// The default (unvaried) instance: the source of `cmap` lookups and of
+    /// the family's shared geometry.
+    fn default_face(&mut self) -> Result<&Face<'a>, Errno> {
+        self.ensure_default()?;
+        self.default.as_ref().ok_or(Errno::BadMagic)
+    }
+
+    /// Whether this face declares a `wght` axis, so a heavier weight is a
+    /// real instance rather than synthetic emboldening.
+    fn has_wght(&mut self) -> Result<bool, Errno> {
+        self.ensure_default()?;
+        Ok(self.has_wght)
+    }
+
+    /// The instance to rasterise `weight` from: the cached `wght`-instanced
+    /// face when the face declares that axis, else the one default instance
+    /// (synthetic emboldening applies the weight afterwards, on the coverage
+    /// this instance rasterises).
+    fn instance_for(&mut self, weight: FontWeight) -> Result<&Face<'a>, Errno> {
+        self.ensure_default()?;
+        if !self.has_wght {
+            return self.default_face();
+        }
+        if !self.weighted.iter().any(|&(w, _)| w == weight) {
+            let bytes = self.face_bytes()?;
+            let settings = [AxisSetting {
+                tag: *b"wght",
+                value: f32::from(weight.axis_value()),
+            }];
+            let face = Face::parse_instance(bytes, &settings).map_err(|_| Errno::BadMagic)?;
+            self.weighted.push((weight, face));
+        }
+        self.weighted
+            .iter()
+            .find_map(|(w, face)| (*w == weight).then_some(face))
+            .ok_or(Errno::BadMagic)
+    }
+}
+
+/// One discovered family: its manifest facts plus its lazily-loaded faces.
+pub(crate) struct FamilyRuntime<'a> {
+    key: FamilyKey,
+    label: String,
+    /// How the family lays text out, or `None` for a fallback-role family a
+    /// user never selects directly.
+    kind: Option<FamilyKind>,
+    /// The family's own faces, in manifest (resolution) order; index `0` is
+    /// always the primary face.
+    faces: Vec<FaceCache<'a>>,
+    /// The family whose faces extend this one's coverage, if any.
+    fallback: Option<FamilyKey>,
+}
+
+impl<'a> FamilyRuntime<'a> {
+    pub(crate) fn new(
+        key: FamilyKey,
+        label: String,
+        kind: Option<FamilyKind>,
+        faces: Vec<FaceCache<'a>>,
+        fallback: Option<FamilyKey>,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            kind,
+            faces,
+            fallback,
+        }
+    }
+}
+
+/// Where one resolved glyph came from: the family whose face set supplied
+/// it (the requested family itself, or its fallback), that family's face
+/// index, and the glyph id within that face.
+struct GlyphSource {
+    resolved_family_index: usize,
+    resolved_family_key: FamilyKey,
+    face_index: usize,
+    glyph: u16,
+}
+
+/// A family's shared line geometry at one pixel height: the pixels-per-em
+/// every resolved face in a run rasterises at, the baseline row, the box
+/// height (the requested pixel height, echoed), the line height, and — when
+/// the family is monospace and its primary face really is uniform — the
+/// one advance every glyph shares.
+struct FamilyGeometry {
+    px_per_em: f64,
+    baseline: u32,
+    height: u32,
+    line_height: u32,
+    monospace_advance: u32,
+}
+
+/// Scale a non-negative font-unit `value` to whole pixels at `pixel_height`
+/// over vertical-metric denominator `denom` (`ascent + descent`), rounding
+/// up.
+///
+/// Ceiling (rather than round-to-nearest) matches the atlas generator's own
+/// vertical-metric derivation: a baseline or line-gap row that would
+/// otherwise clip its ink by rounding down instead grows by at most one
+/// pixel.
+fn scale_up_px(value: i32, pixel_height: u32, denom: i64) -> Result<u32, Errno> {
+    if denom <= 0 || value < 0 {
+        return Err(Errno::BadMagic);
+    }
+    let px = (i64::from(value) * i64::from(pixel_height) + denom - 1) / denom;
+    u32::try_from(px).map_err(|_| Errno::BadMagic)
+}
+
+/// Scale a non-negative font-unit `value` to whole pixels at `pixel_height`
+/// over vertical-metric denominator `denom`, rounding to the nearest pixel.
+///
+/// Used for the monospace advance report, where a rounded width (rather than
+/// a ceiling) is what a character grid should be built from — exactly the
+/// convention `lib/fontface`'s own cell-width derivation uses.
+fn round_px(value: i64, pixel_height: u32, denom: i64) -> Result<u32, Errno> {
+    if denom <= 0 || value < 0 {
+        return Err(Errno::BadMagic);
+    }
+    let px = (value * i64::from(pixel_height) + denom / 2) / denom;
+    u32::try_from(px).map_err(|_| Errno::BadMagic)
+}
+
+/// Round a non-negative pixel measurement to the nearest whole pixel.
+///
+/// The saturating float-to-integer cast (guaranteed since Rust 1.45) makes
+/// this total: a non-finite or negative input yields `0` rather than an
+/// undefined bit pattern, and an absurdly large advance clamps to `u32::MAX`
+/// rather than wrapping.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite/non-negative guard above and the saturating cast \
+              together bound the result to 0..=u32::MAX, so neither \
+              truncation nor sign loss the lints warn about is a defect here"
+)]
+fn round_pixel_measurement(value: f64) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else {
+        (value + 0.5) as u32
+    }
+}
+
 /// The sandboxed font service's rasterising core.
 ///
-/// It borrows the face byte sources for its lifetime; the `Run` binary reads
-/// the `/System/Fonts` faces into owned buffers once at startup and hands them
-/// here, and host tests hand it the committed repository faces.
-///
-/// The glyph cache is injected rather than built here: sizing it needs the
+/// Built by [`crate::discovery::discover`], which discovers the families and
+/// injects the byte-budgeted glyph cache: sizing that cache needs the
 /// machine's RAM figure, and governing it needs the process's own pressure
-/// gauge and audit sink — none of which this host-testable core may reach for
-/// itself. [`glyph_cache`] assembles one from those three.
+/// gauge and audit sink — none of which this host-testable core may reach
+/// for itself.
 pub struct FontService<'a> {
-    family: FontFamily<'a>,
-    /// The native cell geometry — the size the atlas is authored at — derived
-    /// once from the primary face. Every requested height scales from this.
-    native: CellGeometry,
+    families: Vec<FamilyRuntime<'a>>,
+    index: Vec<(FamilyKey, usize)>,
     cache: GlyphCache,
 }
 
 impl<'a> FontService<'a> {
-    /// Parse `sources` (each `(face bytes, repertoire)`) into the merged
-    /// family and derive the native cell geometry.
+    /// Build a service directly from already-discovered `families`.
     ///
-    /// # Errors
-    ///
-    /// [`Errno::BadMagic`] if a face fails to parse or the primary face does
-    /// not yield a uniform monospace advance — the service cannot serve
-    /// coverage it cannot rasterise, so it fails closed at startup rather than
-    /// binding a broken endpoint.
-    pub fn new(sources: &[(&'a [u8], Repertoire)], cache: GlyphCache) -> Result<Self, Errno> {
-        let family = FontFamily::parse(sources).map_err(|_| Errno::BadMagic)?;
-        let advance = family
-            .primary()
-            .uniform_advance()
-            .map_err(|_| Errno::BadMagic)?;
-        let native = CellGeometry::derive(family.primary(), advance, ATLAS_EM_PX)
-            .map_err(|_| Errno::BadMagic)?;
-        Ok(Self {
-            family,
-            native,
+    /// Only [`crate::discovery::discover`] calls this: it is the one place
+    /// that has already validated there is at least one usable family and
+    /// built the index this type serves lookups from.
+    pub(crate) fn from_families(families: Vec<FamilyRuntime<'a>>, cache: GlyphCache) -> Self {
+        let index = families
+            .iter()
+            .enumerate()
+            .map(|(position, family)| (family.key, position))
+            .collect();
+        Self {
+            families,
+            index,
             cache,
-        })
+        }
+    }
+
+    /// The number of discovered families (selectable and fallback-role
+    /// alike).
+    #[cfg(test)]
+    pub(crate) fn family_count(&self) -> usize {
+        self.families.len()
+    }
+
+    /// The discovered families' labels, in discovery order — used by tests
+    /// to check that discovery order does not depend on the store's own
+    /// listing order.
+    #[cfg(test)]
+    pub(crate) fn family_labels(&self) -> Vec<String> {
+        self.families
+            .iter()
+            .map(|family| family.label.clone())
+            .collect()
     }
 
     /// Release whatever the live memory-pressure band no longer permits the
@@ -182,164 +396,299 @@ impl<'a> FontService<'a> {
         self.cache.enforce_pressure()
     }
 
-    /// The cell geometry for a `cell_height`-pixel cell: the native cell
-    /// scaled by `cell_height / native_height`, rounded to the nearest whole
-    /// pixel exactly as `lib/font`'s blitter rounds it, never below one pixel
-    /// wide.
-    fn geometry_for(&self, cell_height: u32) -> CellGeometry {
-        let nh = self.native.height;
-        let scale = |value: u32| (value.saturating_mul(cell_height) + nh / 2) / nh;
-        let width = scale(self.native.width).max(1);
-        CellGeometry {
-            width,
-            height: cell_height,
-            baseline: scale(self.native.baseline),
+    /// The position of family `key` in [`Self::families`], if discovered.
+    fn index_of(&self, key: FamilyKey) -> Option<usize> {
+        self.index
+            .iter()
+            .find_map(|&(k, position)| (k == key).then_some(position))
+    }
+
+    /// The first face in `family_index`'s own faces whose `cmap` maps
+    /// `code`, as `(face index, glyph)`.
+    fn resolve_within(&mut self, family_index: usize, code: u32) -> Option<(usize, u16)> {
+        let family = self.families.get_mut(family_index)?;
+        for (face_index, face) in family.faces.iter_mut().enumerate() {
+            if let Ok(default_face) = face.default_face() {
+                if let Some(glyph) = default_face.glyph_for(code) {
+                    return Some((face_index, glyph));
+                }
+            }
         }
+        None
     }
 
-    /// The pixels-per-em to rasterise at so a `cell_height`-tall cell is
-    /// proportional to the native atlas cell (the reference size scaled
-    /// linearly).
-    fn px_per_em(&self, cell_height: u32) -> f64 {
-        f64::from(ATLAS_EM_PX) * f64::from(cell_height) / f64::from(self.native.height)
-    }
-
-    /// The same rasterised em size in 1/256 px, which is what the weight
-    /// stroke is derived from.
+    /// Resolve `scalar` for a [`FontRequest::Glyph`] naming `family_index`:
+    /// the family's own faces, then its fallback family's faces, then
+    /// U+FFFD from the family's primary face.
     ///
-    /// The em is an exact rational of the cell height, so this is computed in
-    /// integers: the stroke a weight adds is a fixed-point pixel count and has
-    /// no use for a rounded float.
-    fn em_subpixels(&self, cell_height: u32) -> u32 {
-        let numerator = u64::from(ATLAS_EM_PX) * u64::from(cell_height) * u64::from(SUBPIXEL);
-        let em = numerator / u64::from(self.native.height.max(1));
-        u32::try_from(em).unwrap_or(u32::MAX)
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] only in the structurally-impossible case that even
+    /// the primary face cannot yield U+FFFD — every shipped face maps it, so
+    /// this is a defensive fail-closed rather than an expected outcome.
+    fn resolve(&mut self, family_index: usize, scalar: char) -> Result<GlyphSource, Errno> {
+        let code = u32::from(scalar);
+        if let Some((face_index, glyph)) = self.resolve_within(family_index, code) {
+            let key = self.families.get(family_index).ok_or(Errno::NotFound)?.key;
+            return Ok(GlyphSource {
+                resolved_family_index: family_index,
+                resolved_family_key: key,
+                face_index,
+                glyph,
+            });
+        }
+        let fallback_key = self
+            .families
+            .get(family_index)
+            .ok_or(Errno::NotFound)?
+            .fallback;
+        if let Some(fallback_key) = fallback_key {
+            if let Some(fallback_index) = self.index_of(fallback_key) {
+                if let Some((face_index, glyph)) = self.resolve_within(fallback_index, code) {
+                    return Ok(GlyphSource {
+                        resolved_family_index: fallback_index,
+                        resolved_family_key: fallback_key,
+                        face_index,
+                        glyph,
+                    });
+                }
+            }
+        }
+        // Neither the family nor its fallback covers this scalar: fall back
+        // to the replacement glyph from the requested family's own primary
+        // face, never refusing the request for lack of coverage.
+        let replacement = u32::from(char::REPLACEMENT_CHARACTER);
+        let family = self.families.get_mut(family_index).ok_or(Errno::NotFound)?;
+        let primary = family.faces.first_mut().ok_or(Errno::NotFound)?;
+        let glyph = primary
+            .default_face()
+            .ok()
+            .and_then(|face| face.glyph_for(replacement))
+            .ok_or(Errno::NotFound)?;
+        let key = family.key;
+        Ok(GlyphSource {
+            resolved_family_index: family_index,
+            resolved_family_key: key,
+            face_index: 0,
+            glyph,
+        })
     }
 
-    /// The monospace cell metrics for a `cell_height`-tall cell.
-    #[must_use]
-    pub fn metrics(&self, cell_height: u32) -> FontMetrics {
-        let geometry = self.geometry_for(cell_height);
-        FontMetrics {
-            cell_width: geometry.width,
-            cell_height: geometry.height,
+    /// The shared line geometry `family_index`'s primary face defines at
+    /// `pixel_height`, computing the monospace advance only when
+    /// `want_monospace_advance` (the glyph path never needs it).
+    fn primary_geometry(
+        &mut self,
+        family_index: usize,
+        pixel_height: u32,
+        want_monospace_advance: bool,
+    ) -> Result<FamilyGeometry, Errno> {
+        let is_monospace = want_monospace_advance
+            && self
+                .families
+                .get(family_index)
+                .and_then(|family| family.kind)
+                == Some(FamilyKind::Monospace);
+        let family = self.families.get_mut(family_index).ok_or(Errno::NotFound)?;
+        let primary = family.faces.first_mut().ok_or(Errno::NotFound)?;
+        let face = primary.default_face()?;
+        let ascent = face.ascent();
+        let descent = face.descent();
+        let denom = i64::from(ascent) + i64::from(descent);
+        if denom <= 0 {
+            return Err(Errno::BadMagic);
+        }
+        let baseline = scale_up_px(ascent, pixel_height, denom)?.min(pixel_height);
+        let line_gap_rows = scale_up_px(face.line_gap().max(0), pixel_height, denom)?;
+        // Built from the same lossless `i32 -> f64` widenings as `denom`
+        // rather than converting `denom` itself, which — being `i64` — has
+        // no lossless `f64` conversion clippy can see is safe here.
+        let denom_f64 = f64::from(ascent) + f64::from(descent);
+        let px_per_em = f64::from(pixel_height) * f64::from(face.units_per_em()) / denom_f64;
+        let monospace_advance = if is_monospace {
+            match face.uniform_advance() {
+                Ok(units) => round_px(i64::from(units), pixel_height, denom)?,
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
+        Ok(FamilyGeometry {
+            px_per_em,
+            baseline,
+            height: pixel_height,
+            line_height: pixel_height.saturating_add(line_gap_rows),
+            monospace_advance,
+        })
+    }
+
+    /// `family`'s [`FontMetrics`] at `pixel_height`.
+    ///
+    /// The requested `weight` does not currently change the result: this
+    /// engine derives ascent, descent, line gap, and the monospace advance
+    /// from a face's static tables, none of which this format varies by
+    /// weight axis. The parameter is accepted (and validated by the wire
+    /// decode) so the protocol stays ready for a face whose vertical metrics
+    /// genuinely do vary once that is modelled.
+    fn metrics_for(
+        &mut self,
+        family: FamilyKey,
+        pixel_height: u32,
+        _weight: FontWeight,
+    ) -> Result<FontMetrics, Errno> {
+        let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
+        let geometry = self.primary_geometry(family_index, pixel_height, true)?;
+        Ok(FontMetrics {
+            pixel_height: geometry.height,
             baseline: geometry.baseline,
-        }
+            line_height: geometry.line_height,
+            monospace_advance: geometry.monospace_advance,
+        })
     }
 
-    /// Handle one request frame, writing the reply into `reply` and returning
-    /// its length.
+    /// The installed selectable families — never a fallback-role family —
+    /// in discovery order, framed as a [`FontRequest::Families`] reply.
+    pub(crate) fn families_reply(&self, reply: &mut [u8]) -> Result<usize, Errno> {
+        let mut entries: Vec<FamilyEntry> = Vec::new();
+        for family in &self.families {
+            if let Some(kind) = family.kind {
+                entries.push(FamilyEntry::new(family.key, &family.label, kind)?);
+            }
+        }
+        encode_families_reply(reply, Ok(&entries))
+    }
+
+    /// Resolve, rasterise (or fetch cached), and frame `scalar` from
+    /// `family` at `pixel_height` in `weight` as a successful glyph reply.
+    fn glyph_reply(
+        &mut self,
+        family: FamilyKey,
+        scalar: char,
+        pixel_height: u32,
+        weight: FontWeight,
+        reply: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
+        let geometry = self.primary_geometry(family_index, pixel_height, false)?;
+        let source = self.resolve(family_index, scalar)?;
+        let key: GlyphKey = (
+            family.to_wire(),
+            source.resolved_family_key.to_wire(),
+            u32::try_from(source.face_index).unwrap_or(u32::MAX),
+            u32::from(source.glyph),
+            pixel_height,
+            weight.to_wire(),
+        );
+        let Self {
+            families, cache, ..
+        } = self;
+        let served = cache
+            .get_or_build(&(), key, || {
+                build_glyph(families, &source, &geometry, weight)
+            })
+            .ok_or(Errno::NotFound)?;
+        encode_glyph_reply(
+            reply,
+            &tairix_abi::font_ipc::GlyphCoverage {
+                width: served.width,
+                height: served.height,
+                advance: served.advance,
+                left: served.left,
+                coverage: &served.data,
+            },
+        )
+    }
+
+    /// Handle one request frame, writing the reply into `reply` and
+    /// returning its length.
     ///
-    /// Always produces a reply: a malformed request or a rasterisation failure
-    /// becomes a status-word error frame (which both a glyph-expecting and a
-    /// metrics-expecting client decode as the carried [`Errno`]), never a
-    /// dropped reply. `reply` must be at least
-    /// [`tairix_abi::font_ipc::FONT_MAX_GLYPH_REPLY`] bytes; a `0` return means
-    /// even the error frame did not fit (structurally impossible for a
-    /// correctly sized buffer) and the caller drops the reply, so the client
-    /// fails closed on decode.
+    /// Always produces a reply: a malformed request or a resolution/
+    /// rasterisation failure becomes a status-word error frame (which every
+    /// kind of client decodes as the carried [`Errno`]), never a dropped
+    /// reply. A `0` return means even the error frame did not fit
+    /// (structurally impossible for a correctly sized buffer) and the caller
+    /// drops the reply, so the client fails closed on decode.
     pub fn handle(&mut self, request: &[u8], reply: &mut [u8]) -> usize {
         match FontRequest::from_bytes(request) {
             Ok(FontRequest::Glyph {
+                family,
                 scalar,
-                cell_height,
+                pixel_height,
                 weight,
-            }) => match self.glyph_reply(scalar, cell_height, weight, reply) {
+            }) => match self.glyph_reply(family, scalar, pixel_height, weight, reply) {
                 Ok(len) => len,
                 Err(err) => error_frame(reply, err),
             },
-            Ok(FontRequest::Metrics { cell_height }) => {
-                let bytes = encode_metrics_reply(Ok(self.metrics(cell_height)));
+            Ok(FontRequest::Metrics {
+                family,
+                pixel_height,
+                weight,
+            }) => {
+                let result = self.metrics_for(family, pixel_height, weight);
+                let bytes = encode_metrics_reply(result);
                 if reply.len() < FONT_METRICS_REPLY_LEN {
                     return 0;
                 }
                 reply[..FONT_METRICS_REPLY_LEN].copy_from_slice(&bytes);
                 FONT_METRICS_REPLY_LEN
             }
+            Ok(FontRequest::Families) => match self.families_reply(reply) {
+                Ok(len) => len,
+                Err(err) => error_frame(reply, err),
+            },
             Err(err) => error_frame(reply, err),
         }
     }
-
-    /// Rasterise (or fetch cached) coverage for `scalar` at `cell_height` and
-    /// frame it as a successful glyph reply in `reply`.
-    fn glyph_reply(
-        &mut self,
-        scalar: char,
-        cell_height: u32,
-        weight: FontWeight,
-        reply: &mut [u8],
-    ) -> Result<usize, Errno> {
-        let geometry = self.geometry_for(cell_height);
-        // A glyph may cover two cells, so the bitmap is always two cells wide;
-        // a one-cell glyph leaves the continuation cell transparent. The
-        // client clips a narrow glyph to `advance`.
-        let bitmap_width = geometry.width.saturating_mul(2);
-        let code = u32::from(scalar);
-        let (face, glyph) = self
-            .family
-            .resolve(code)
-            .or_else(|| self.family.resolve(u32::from(char::REPLACEMENT_CHARACTER)))
-            .ok_or(Errno::NotFound)?;
-        // The family holds a handful of faces, so the index always fits a
-        // `u32`; a structurally impossible overflow keys a distinct slot.
-        let key: GlyphKey = (
-            u32::try_from(face).unwrap_or(u32::MAX),
-            u32::from(glyph),
-            cell_height,
-            weight.to_wire(),
-        );
-        let advance = geometry
-            .width
-            .saturating_mul(u32::from(char_width(scalar)))
-            .max(1);
-        let px_per_em = self.px_per_em(cell_height);
-        let stroke = stroke_subpixels(self.em_subpixels(cell_height), weight);
-
-        // The rasteriser reads the family while the cache is borrowed to
-        // admit what it produces, so the two fields are split apart here
-        // rather than reached through `self` inside the build closure.
-        let Self { family, cache, .. } = self;
-        let served = cache
-            .get_or_build(&(), key, || {
-                rasterise(
-                    family,
-                    face,
-                    glyph,
-                    &geometry,
-                    px_per_em,
-                    bitmap_width,
-                    stroke,
-                )
-            })
-            .ok_or(Errno::NotFound)?;
-        encode_glyph_reply(reply, served.width, served.height, advance, &served.data)
-    }
 }
 
-/// Rasterise one glyph at `geometry` and thicken it by `stroke`, yielding the
-/// 8-bit coverage bitmap a reply carries.
+/// Rasterise the glyph `source` resolved to, at the requesting family's
+/// shared `geometry`, in `weight` — yielding the [`CachedGlyph`] the reply is
+/// served from.
 ///
-/// `None` when the engine cannot rasterise the outline; the caller turns that
-/// into a refused request rather than an empty bitmap.
-fn rasterise(
-    family: &FontFamily<'_>,
-    face: usize,
-    glyph: u16,
-    geometry: &CellGeometry,
-    px_per_em: f64,
-    bitmap_width: u32,
-    stroke: u32,
+/// `None` when the resolved face's bytes cannot be read or parsed, or the
+/// outline cannot be rasterised — the caller turns that into a refused
+/// request rather than an empty bitmap.
+fn build_glyph(
+    families: &mut [FamilyRuntime<'_>],
+    source: &GlyphSource,
+    geometry: &FamilyGeometry,
+    weight: FontWeight,
 ) -> Option<CachedGlyph> {
-    let raw = family
-        .rasterise(face, glyph, geometry, px_per_em, bitmap_width)
+    let px_per_em = geometry.px_per_em;
+    let face_cache = families
+        .get_mut(source.resolved_family_index)?
+        .faces
+        .get_mut(source.face_index)?;
+    let has_wght = face_cache.has_wght().ok()?;
+    let face = face_cache.instance_for(weight).ok()?;
+    let raster = face
+        .rasterise_proportional(source.glyph, px_per_em, geometry.baseline, geometry.height)
         .ok()?;
+    let advance_units = f64::from(face.advance(source.glyph).ok()?).max(0.0);
+    let units_per_em = face.units_per_em();
+    if units_per_em <= 0 {
+        return None;
+    }
+    let advance = round_pixel_measurement(advance_units * px_per_em / f64::from(units_per_em));
     // 4-bit engine coverage (`0..=15`) → 8-bit protocol sample; `15 → 255`.
-    let mut coverage: Box<[u8]> = raw
+    let width = usize::try_from(raster.width).unwrap_or(0);
+    let mut coverage: Box<[u8]> = raster
+        .coverage
         .iter()
         .map(|&nibble| nibble.saturating_mul(17))
         .collect();
-    embolden(&mut coverage, bitmap_width as usize, stroke);
-    Some(CachedGlyph::new(bitmap_width, geometry.height, coverage))
+    if !has_wght {
+        let em_subpixels = round_pixel_measurement(px_per_em * f64::from(SUBPIXEL));
+        let stroke = stroke_subpixels(em_subpixels, weight);
+        embolden(&mut coverage, width, stroke);
+    }
+    Some(CachedGlyph::new(
+        raster.width,
+        raster.height,
+        advance,
+        raster.left,
+        coverage,
+    ))
 }
 
 /// Frame a status-word error reply into `reply`, returning its length (`0`

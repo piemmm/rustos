@@ -85,9 +85,8 @@ A long-running user-space system service shipped as a signed
 through the normal signature + capability + interface-hash gate (§18.3) —
 never baked into the kernel.
 
-- **Owns the font payload**, loaded **once** from `/System/Fonts/` at start
-  (the four committed TrueType faces). No font bytes live in any other
-  process.
+- **Owns the font payload**: it scans `/System/Fonts/` at start and reads
+  each face's bytes on first use. No font bytes live in any other process.
 - **Rasterises in a §19.5 sandbox.** The TrueType parse + outline
   rasterisation (`lib/fontface`) runs only in this service, a
   minimum-capability address space: it requests only
@@ -100,15 +99,16 @@ never baked into the kernel.
   space means even a malformed face faults only this sandbox, never a
   compositor or terminal.
 - **Serves glyph coverage** over the reserved `FONT_ENDPOINT` (§2.2): a
-  [`FontRequest::Glyph { scalar, cell_height }`] reply is the 8-bit coverage
-  bitmap the client blits. The service resolves the scalar to the covering
-  face (Latin→Inconsolata, JP→MPLUS, KR→D2Coding, HE→Noto, else U+FFFD),
-  rasterises once at the requested cell height (4-bit engine coverage scaled
-  ×17 to the protocol's 8-bit samples — byte-identical to the old
-  atlas/scaled blitter), and memoises in the byte-budgeted `(face, glyph,
-  height, weight)` cache of §3.1. It also answers
-  [`FontRequest::Metrics`] from `CellGeometry::derive` for any client that
-  holds no geometry of its own.
+  [`FontRequest::Glyph { family, scalar, pixel_height, weight }`] reply is the
+  8-bit coverage bitmap the client blits, with the pen advance and left side
+  bearing to place it by. The service resolves the scalar within the named
+  family — its own faces in order, then its fallback family's faces, else
+  U+FFFD — rasterises once at the requested size (4-bit engine coverage scaled
+  ×17 to the protocol's 8-bit samples), and memoises in the byte-budgeted
+  `(family, face, glyph, height, weight)` cache of §3.1. It also answers
+  [`FontRequest::Metrics`] with the family's line metrics, and
+  [`FontRequest::Families`] with the installed selectable families so a
+  settings surface offers exactly what the store holds.
 
 ### 2.2 `FONT_ENDPOINT` — the IPC protocol (`lib/abi/src/font_ipc.rs`)
 
@@ -121,11 +121,16 @@ follows (`cargo xtask c-header`).
 
 - Reserved id `FONT_ENDPOINT` (ASCII-hex-spelled, per the existing
   convention; register with `crate::ipc::is_reserved_endpoint`).
-- Requests: `Glyph { scalar: u32, cell_height: u32, weight }` and a one-shot
-  `Metrics { cell_height }` returning the monospace cell geometry the client
-  needs to lay text out. Fixed max request length; reject anything else,
-  fail closed (§5.4).
-- Reply: `{ width, height, advance, bytes[coverage] }`, length-bounded.
+- Requests: `Glyph { family, scalar, pixel_height, weight }`, `Metrics {
+  family, pixel_height, weight }` returning the line metrics the client lays
+  text out with, and `Families` listing the installed selectable families.
+  One fixed request length; every field an operation does not use must be
+  zero, and anything else is refused, fail closed (§5.4).
+- Replies: a glyph `{ width, height, advance, left, bytes[coverage] }`
+  (length-bounded; `width == 0` is an ink-less glyph such as a space), the
+  metrics `{ pixel_height, baseline, line_height, monospace_advance }`, and
+  the family list. `monospace_advance == 0` *is* the statement that a family
+  is proportional, so a caller cannot mistake one for the other.
 - **No new capability** (§5.2): drawing text is not a security boundary, so
   the endpoint is callable by any process (the *action* still validates every
   field and fails closed). The service holds the only privileged thing — the
@@ -133,15 +138,21 @@ follows (`cargo xtask c-header`).
 
 ### 2.3 `lib/font` becomes the thin client (+ protocol reuse)
 
-`lib/font` keeps its public shape for consumers (`BitmapFont::draw_text`,
-`with_pixel_height`, the `glyph`/blitter surface) but its body changes:
+`lib/font` is the drawing front end every surface uses:
 
-- The `render` path no longer embeds TTFs or runs `lib/fontface`
-  in-process. It sends a `FONT_ENDPOINT` request and blits the returned
-  coverage, caching replies locally per `(scalar, height, weight)` in the
-  byte-budgeted cache of §3.1, so steady-state redraws issue no IPC.
-- The `include_bytes!` of the four faces (`cache.rs`) and the full atlas
-  (`atlas.rs` / `atlas_coverage.bin`) are **deleted** from the crate (§2.14).
+- A `BitmapFont` is a `(family, pixel height, weight)` triple. It sends a
+  `FONT_ENDPOINT` request and blits the returned coverage, caching replies
+  locally per `(family, scalar, height, weight)` in the byte-budgeted cache
+  of §3.1, so steady-state redraws issue no IPC. Line metrics are fetched
+  once per `(family, height, weight)` and cached beside them; with no
+  transport installed they fall back to the compiled-in console geometry, so
+  a dead service degrades to unrendered text rather than broken layout.
+- Layout is **per-glyph**: `text_width`, `truncate_to_width`, and
+  `draw_text` accumulate each glyph's own advance and place it at its own
+  bearing. A monospace family keeps a fast path over its single advance, so
+  the terminal grid pays no per-glyph arithmetic.
+- No TrueType bytes and no outline rasteriser live in the crate: only the
+  compiled-in console atlas (§2.4) the boot console draws from.
 - Protocol request/reply encoders live in `lib/abi::font_ipc` and are shared
   by client and service (§2.2), never re-spelled.
 
@@ -162,14 +173,36 @@ atlas artifact.
 
 ### 2.5 `/System/Fonts` — the one on-disk font store
 
-The image builder plants the four committed TrueType faces under
-`/System/Fonts/` **once** (`tools/mkimage` + `tools/xtask` image pipeline),
-read-only within the read-only `/System` (§16.2). No atlas artifact is
-planted — `fontd` derives everything from the faces. `fontd` opens the faces
-at startup with a one-shot read authorised by its `CAP_FS_ACCESS` and then
-holds only the parsed in-memory faces; it retains no open fd for its serving
-lifetime, and `/System` is read-only so the reach never writes (minimum
-authority, §19.5, §5.4).
+The store is a directory per family, planted verbatim from
+`lib/font/assets/<family>/` by the image pipeline (`tools/mkimage` +
+`tools/xtask`), read-only within the read-only `/System` (§16.2). A
+directory is a family exactly when it carries a `FontFamily` manifest
+(`lib/fontface`'s `store` module parses it on both the build and the service
+side, so the two can never disagree):
+
+```
+/System/Fonts/<key>/FontFamily     label, kind, ordered faces, fallback key
+/System/Fonts/<key>/<face>.ttf     the faces that manifest lists
+```
+
+`kind` is `proportional`, `monospace`, or `fallback`; a fallback family is
+coverage only and is never offered to a user, which is how the three
+proportional families share one set of Hebrew and CJK faces instead of
+embedding three copies. Resolution is by order alone — the primary face owns
+Latin, and a companion is reached only for what the primary does not map —
+so there is no per-face script table to keep in step with the faces.
+
+No atlas artifact is planted: `fontd` derives everything from the faces.
+Adding a family is dropping its directory into `lib/font/assets/`; nothing
+in the kernel, the service, or the image builder names a face.
+
+`fontd` scans the store at startup and reads only the manifests — kilobytes.
+A face's bytes are read on first use through the read-only handle opened
+then, so a session that never draws Chinese never pays for the 17 MB
+Chinese face, and a machine with little RAM is not charged for coverage it
+is not using. The service uses its `CAP_FS_ACCESS` only against the store,
+and `/System` is read-only so the reach can never write (minimum authority,
+§19.5, §5.4).
 
 ### 2.6 Secondary defect — shippable image ships debug userland
 
@@ -184,27 +217,45 @@ ships release-built userland/drivers, `debug` stays debug, and QEMU
 integration-test images stay debug (fast iteration). This is independent of
 the font work and is fixed in its own step.
 
+### 2.7 Variable faces and real weights
+
+The shipped faces are upstream **variable** fonts, committed unmodified.
+`lib/fontface` instantiates a design-axis coordinate at parse time
+(`fvar`/`avar` normalisation, `gvar` tuple deltas with IUP, `HVAR` advance
+variations), so `FontWeight` renders the weight the type designer drew
+rather than a synthesised approximation, and the advance changes with it as
+it should. A face with no `wght` axis is thickened instead by the service's
+bounded sub-pixel stroke, which leaves its advance alone. This is why the
+store ships one file per family rather than one per weight, and why a
+family's manifest names no weights.
+
 ---
 
 ## 3. Status — done
 
 The migration is complete: the ~10 MB font payload no longer lives in any app.
-`/System/Fonts` holds the four committed TrueType faces; `fontd` is the only
-process that parses a face or runs the outline rasteriser, and every other
-process draws through the thin `lib/font` client over `FONT_ENDPOINT`.
+`/System/Fonts` holds one directory per family — `inter`, `noto-sans`,
+`noto-serif`, the `mono` console family, and the shared `sans-fallback`
+coverage set — discovered at startup; `fontd` is the only process that parses a
+face or runs the outline rasteriser, and every other process draws through the
+thin `lib/font` client over `FONT_ENDPOINT`.
 
 Load-bearing facts a future reader needs:
 
 - **Protocol** (`lib/abi/src/font_ipc.rs`, `FONT_ENDPOINT = 0x464E_5400`,
-  registered in `is_reserved_endpoint` as a privileged bind). A fixed 20-byte
-  `FontRequest` — `Glyph { scalar: char, cell_height, weight }` / `Metrics {
-  cell_height }`, the scalar a `char` so a surrogate is unrepresentable and the
-  weight a closed `FontWeight` decoded from its wire value — and a
-  status-framed reply: a glyph reply (`width`, `height`, `advance`, then
-  `width*height` 8-bit samples, bounded by `FONT_MAX_GLYPH_REPLY`) or the
-  `FontMetrics { cell_width, cell_height, baseline }`. One shared
-  `glyph_coverage_len` bound governs encode and decode. Cell height is bounded
-  by `FONT_MIN/MAX_CELL_HEIGHT` (8..=512) — a validation bound. Not part of the
+  registered in `is_reserved_endpoint` as a privileged bind). A fixed 36-byte
+  `FontRequest` — `Glyph { family, scalar: char, pixel_height, weight }` /
+  `Metrics { family, pixel_height, weight }` / `Families`, the family a
+  validated `FamilyKey` and the scalar a `char` so a stray byte or a surrogate
+  is unrepresentable, the weight a closed `FontWeight` decoded from its wire
+  value — and a status-framed reply: a glyph reply (`width`, `height`,
+  `advance`, `left`, then `width*height` 8-bit samples, bounded by
+  `FONT_MAX_GLYPH_REPLY`; `width == 0` is an ink-less glyph), the
+  `FontMetrics { pixel_height, baseline, line_height, monospace_advance }`
+  (where `monospace_advance == 0` *means* proportional), or up to
+  `FONT_MAX_FAMILIES` `FamilyEntry` (key, label, kind) rows. One shared
+  `glyph_coverage_len` bound governs encode and decode. Pixel height is bounded
+  by `FONT_MIN/MAX_PIXEL_HEIGHT` (8..=512) — a validation bound. Not part of the
   curated C-ABI surface, so the generated C headers carry no font view. The
   request/reply decoders are in the `fuzz_decode` harness; the `lib/fontface`
   TrueType parser has its own `tests/fuzz_face.rs`.
@@ -216,31 +267,40 @@ Load-bearing facts a future reader needs:
   boot/headless console shows U+FFFD for a CJK/Hebrew scalar. There is no
   precomputed full-Unicode atlas artifact.
 - **Service** (`userland/system/fontd`, `/System/Services/fontd.app`). A dual
-  library + `Run`-binary crate modelled on `sysinfod`. The host-testable
-  `FontService` dispatcher owns the parsed faces and a byte-budgeted `(face,
-  glyph, cell height, weight)` glyph cache (§3.1), resolves a scalar to its
-  covering face, rasterises through the shared `lib/fontface` engine (4-bit
-  `×17` → the protocol's 8-bit samples; a `Regular` request is byte-identical
-  to the old blitter), thickens the coverage to the requested weight, and
-  always emits a reply (status-word error frame on failure, fail closed). The
-  `Run` binary serves from a wait set carrying both `FONT_ENDPOINT` and the
-  kernel's `WaitSourceKind::MemoryPressure` source, so it reacts to a band
-  change while idle without polling either. Its manifest requests
-  `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the one-shot startup read of the
-  faces through the secured VFS — `fs_open` is capability-gated regardless of
-  the file's mode; `/System` is read-only so no write reach), and
-  `CAP_LOG_EMIT`, and the `fontd` service account (uid 15, `FONTD_CEILING`)
-  grants exactly those three.
-- **Synthesised weights** (`userland/system/fontd/src/embolden.rs`). The four
-  committed faces ship one weight each, so a theme's `Medium`/`Bold` role is
-  rasterised from the same outline and thickened in the service: a stroke of
-  em/48 (Medium) or em/24 (Bold) — the strength a stroke-widening rasteriser
-  applies for a synthetic bold, as FreeType's `FT_GlyphSlot_Embolden` does —
-  carried in 1/256 px fixed point and applied to the 8-bit coverage, never the
-  outline. The stroke is **horizontal only**, so the baseline, cell height, and
-  pen advance are unchanged and layout is weight-independent; `Regular` adds a
-  zero stroke. A weighted face added to `/System/Fonts` later would replace the
-  synthesis without changing the protocol or the theme ladder.
+  library + `Run`-binary crate modelled on `sysinfod`. `discovery::discover`
+  scans the store through the injected `FontStore`/`FaceLoad` seams (bounded to
+  `FONT_MAX_FAMILIES`, sorted by key, a malformed family skipped with a
+  `FAMILY_SKIPPED` warning, an empty store fatal), so the whole
+  discovery-to-serve pipeline is host-tested from an in-memory fixture. The
+  host-testable `FontService` dispatcher owns those families, their lazily-read
+  faces and per-weight parsed instances, and a byte-budgeted `(requesting
+  family, resolved family, face, glyph, pixel height, weight)` glyph cache
+  (§3.1) — both families in the key because two families sharing a fallback
+  face rasterise it at their own primary face's geometry. It resolves a scalar
+  through the family's own faces, then its fallback family's, then U+FFFD;
+  rasterises through the shared `lib/fontface` engine at the primary face's
+  geometry (4-bit `×17` → the protocol's 8-bit samples) so a run shares one
+  baseline and box height; and always emits a reply (status-word error frame on
+  failure, fail closed — an unknown family key is `NotFound`, never a
+  substitution). The `Run` binary serves from a wait set carrying both
+  `FONT_ENDPOINT` and the kernel's `WaitSourceKind::MemoryPressure` source, so
+  it reacts to a band change while idle without polling either. Its manifest
+  requests `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the manifest scan and
+  the first-use face reads through the secured VFS — `fs_open` is
+  capability-gated regardless of the file's mode; `/System` is read-only so no
+  write reach), and `CAP_LOG_EMIT`, and the `fontd` service account (uid 15,
+  `FONTD_CEILING`) grants exactly those three.
+- **Weights.** A face declaring a `wght` axis is instanced at the requested
+  weight's OpenType coordinate (400/500/700) and cached per (face, weight), so
+  the glyph *and* its advance are the ones the designer drew (§2.7). Only a
+  face without that axis falls to the synthetic stroke
+  (`userland/system/fontd/src/embolden.rs`): em/48 (Medium) or em/24 (Bold) —
+  the strength a stroke-widening rasteriser applies for a synthetic bold, as
+  FreeType's `FT_GlyphSlot_Embolden` does — carried in 1/256 px fixed point and
+  applied to the 8-bit coverage, never the outline. That stroke is
+  **horizontal only**, so the baseline, box height, and pen advance are
+  unchanged and a synthetic bold run occupies exactly what its regular twin
+  would; `Regular` adds a zero stroke.
 - **Client** (`lib/font`, `render` feature). `BitmapFont` is a thin cached
   `FONT_ENDPOINT` client with the same public API; the four TTF embeds
   (`cache.rs`) and the full atlas are deleted. The transport is a
@@ -249,10 +309,13 @@ Load-bearing facts a future reader needs:
   no transport a draw fails closed. Its glyph cache (§3.1) is installed
   through the parallel `set_glyph_cache` seam and defaults lazily under `rt`.
   GUI `Run` images no longer carry the ~10 MB `R` LOAD segment.
-- **Image + discovery.** `image_apps::system_font_files` plants the four faces
-  under `/System/Fonts` in the shared `app_store_files`, and `fontd.app` is
-  auto-discovered under `/System/Services`. `fontd` is **not** a boot-floor
-  service (`init`'s `DEFAULT_CONFIG` does not name it): text rendering is a
+- **Image + discovery.** `image_apps::system_font_files` plants every family
+  directory under `lib/font/assets/` — its `FontFamily` manifest and exactly
+  the faces that manifest names — at `/System/Fonts/<key>/` in the shared
+  `app_store_files` (discovered from the assets tree, never a list), and
+  `fontd.app` is auto-discovered under `/System/Services`. `fontd` is **not** a
+  boot-floor service (`init`'s `DEFAULT_CONFIG` does not name it): text
+  rendering is a
   graphics-only resource, so **`login` starts `fontd`** (as its uid-15 service
   account, via `CAP_SPAWN_AS_USER`) the first login round a machine is
   display-capable — covering both a graphical login and the shell's `desktop`
@@ -285,8 +348,9 @@ kind of memory, so they are **one declaration**, in `lib/font/src/glyph_cache.rs
 (feature `glyph-cache`, pulled in by `render`; `fontd` depends on that feature
 alone, so it takes none of the drawing dependencies):
 
-- `CachedGlyph` — the retained value (`width`, `height`, owned coverage) and
-  its `CachedBytes` impl: payload is the coverage length, `wipe` zeroes it.
+- `CachedGlyph` — the retained value (`width`, `height`, `advance`, `left`,
+  owned coverage) and its `CachedBytes` impl: payload is the coverage length,
+  `wipe` zeroes it.
 - `glyph_cache_candidate(owner)` — class `DisposableUi`, `RebuildCost::Expensive`,
   `Sensitivity::UserData` (so every released entry is overwritten — the set of
   cached glyphs reveals which characters a user has had displayed),
@@ -299,18 +363,19 @@ alone, so it takes none of the drawing dependencies):
   slower, never a hand-picked fallback.
 
 Each side builds its own `tairix_reclaim::ReclaimCache` from that declaration
-with its own key (the client's `(scalar, height, weight)`, the service's
-`(face, glyph, height, weight)`) and a `()` generation, since nothing
-invalidates a glyph while the faces are loaded. Both are owned by
-`ReclaimOwner::UserlandProcess` (`"font-client"` / `"fontd"`), the variant for
-a cache that cannot resolve a numeric task id.
+with its own key (the client's `(scalar, family, pixel height, weight)`, the
+service's `(requesting family, resolved family, face, glyph, pixel height,
+weight)`) and a `()` generation, since nothing invalidates a glyph while the
+faces are loaded. Both are owned by `ReclaimOwner::UserlandProcess`
+(`"font-client"` / `"fontd"`), the variant for a cache that cannot resolve a
+numeric task id.
 
-Why this matters on the service side: the cell height is **caller-supplied**,
-and the widest permitted bitmap is `FONT_MAX_GLYPH_WIDTH × FONT_MAX_CELL_HEIGHT`
-(512 KiB), so an entry-counted bound was a byte bound in the hundreds of
-megabytes a hostile client could walk it up to. The byte budget closes that;
-the protocol's own size validation (§2.2) is a separate, unchanged security
-bound and is what refuses an out-of-range request in the first place.
+Why this matters on the service side: the pixel height is **caller-supplied**,
+and the widest permitted bitmap is `FONT_MAX_GLYPH_WIDTH ×
+FONT_MAX_PIXEL_HEIGHT` (512 KiB), so an entry-counted bound was a byte bound in
+the hundreds of megabytes a hostile client could walk it up to. The byte budget
+closes that; the protocol's own size validation (§2.2) is a separate, unchanged
+security bound and is what refuses an out-of-range request in the first place.
 
 ## 4. Cross-references
 

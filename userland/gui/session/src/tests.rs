@@ -842,7 +842,7 @@ fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
             taskbar_corner_radius,
             ..*base.metrics()
         },
-        base.fonts().clone(),
+        *base.fonts(),
         base.cursors().clone(),
         base.motion(),
         base.density(),

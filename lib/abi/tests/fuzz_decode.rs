@@ -30,7 +30,8 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use tairix_abi::font_ipc::{
-    decode_glyph_reply, decode_metrics_reply, encode_glyph_reply, FontRequest, FONT_MAX_GLYPH_REPLY,
+    decode_families_reply, decode_glyph_reply, decode_metrics_reply, encode_families_reply,
+    encode_glyph_reply, FamilyKey, FontRequest, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY,
 };
 use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use tairix_abi::input::{KeyInput, PointerInput};
@@ -385,10 +386,11 @@ fn exercise_display_ipc(bytes: &[u8]) {
 
 /// Drive the font-service protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted font request must round-trip through its
-/// encoder, and the glyph-coverage and metrics reply decoders — untrusted
-/// service output a text-drawing client parses — must refuse a corrupt frame
-/// cleanly, never panic. An accepted glyph reply additionally round-trips
-/// through its encoder, exercising the variable-length coverage framing.
+/// encoder, and the glyph-coverage, metrics, and family-list reply decoders
+/// — untrusted service output a text-drawing client parses — must refuse a
+/// corrupt frame cleanly, never panic. An accepted glyph or family reply
+/// additionally round-trips through its encoder, exercising the
+/// variable-length coverage and record framing.
 fn exercise_font_ipc(bytes: &[u8]) {
     if let Ok(request) = FontRequest::from_bytes(bytes) {
         let redecoded = FontRequest::from_bytes(&request.to_le_bytes())
@@ -397,17 +399,29 @@ fn exercise_font_ipc(bytes: &[u8]) {
     }
     if let Ok(coverage) = decode_glyph_reply(bytes) {
         let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
-        let len = encode_glyph_reply(
-            &mut buf,
-            coverage.width,
-            coverage.height,
-            coverage.advance,
-            coverage.coverage,
-        )
-        .expect("round-trip encode of an accepted glyph reply must succeed");
+        let len = encode_glyph_reply(&mut buf, &coverage)
+            .expect("round-trip encode of an accepted glyph reply must succeed");
         let redecoded = decode_glyph_reply(&buf[..len])
             .expect("round-trip of an accepted glyph reply must succeed");
         assert_eq!(coverage, redecoded);
+    }
+    if let Ok(list) = decode_families_reply(bytes) {
+        let mut buf = vec![0u8; FONT_MAX_FAMILIES_REPLY];
+        let len = encode_families_reply(&mut buf, Ok(list.entries()))
+            .expect("round-trip encode of an accepted family list must succeed");
+        let redecoded = decode_families_reply(&buf[..len])
+            .expect("round-trip of an accepted family list must succeed");
+        assert_eq!(list, redecoded);
+    }
+    // A family key is built from bytes a client may take from a stored
+    // preference, so its spelling check is attacker-reachable on its own.
+    if bytes.len() >= 16 {
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&bytes[..16]);
+        if let Ok(key) = FamilyKey::from_wire(key) {
+            assert_eq!(FamilyKey::from_wire(key.to_wire()), Ok(key));
+            assert!(!key.as_str().is_empty());
+        }
     }
     let _ = decode_metrics_reply(bytes);
 }

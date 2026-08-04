@@ -33,7 +33,7 @@ use crate::testkit::high_contrast;
 use crate::window::FurniturePart;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 const PRESS: InputEvent = InputEvent::PointerPressed {

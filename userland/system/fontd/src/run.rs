@@ -6,29 +6,32 @@
 //! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
 //! userland runtime `tairix-rt` — never the C ABI. `tairix-rt` provides
 //! `_start`, the per-process stack canary, the panic handler, the
-//! `#[global_allocator]`, the filesystem read wrappers used to load
+//! `#[global_allocator]`, the filesystem read wrappers used to discover
 //! `/System/Fonts`, and the endpoint syscall wrappers (`call_create`/
 //! `call_recv`/`call_reply`); `tairix_rt::entry!` names this program's `main`.
 //!
 //! # What this service does
 //!
-//! At startup `fontd` reads the four committed TrueType faces from
-//! `/System/Fonts/` (a one-shot open authorised by the manifest's
-//! `CAP_FS_ACCESS`; `/System` is mounted read-only so it holds no write reach
-//! and keeps no open fd afterwards), parses them into
-//! the sandboxed [`FontService`](tairix_fontd::FontService) rasteriser, binds
-//! the well-known [`FONT_ENDPOINT`](tairix_abi::font_ipc::FONT_ENDPOINT) (a
-//! reserved rendezvous, so binding it needs the manifest's
-//! `CAP_IPC_BIND_PRIVILEGED`: a squatter could otherwise feed forged coverage
-//! to the compositor and every app), and blocks in a serve loop — receive a
-//! request, rasterise/serve the reply, reply. The endpoint is
-//! unrestricted-sender: drawing text is not a security boundary, so any
-//! process may ask, and the reply path validates every field and fails
-//! closed.
+//! At startup `fontd` lists `/System/Fonts` (a one-shot open authorised by the
+//! manifest's `CAP_FS_ACCESS`; `/System` is mounted read-only so it holds no
+//! write reach) and, for every subdirectory that carries a readable
+//! `FontFamily` manifest, opens its declared face files — without reading
+//! their bytes yet — and keeps the open handles for the service's life. A
+//! face's bytes are read, once, the first time a request actually needs that
+//! face: a session that never draws a script never pays for the face that
+//! covers it. Discovery then binds the well-known
+//! [`FONT_ENDPOINT`](tairix_abi::font_ipc::FONT_ENDPOINT) (a reserved
+//! rendezvous, so binding it needs the manifest's `CAP_IPC_BIND_PRIVILEGED`: a
+//! squatter could otherwise feed forged coverage to the compositor and every
+//! app), and blocks in a serve loop — receive a request, rasterise/serve the
+//! reply, reply. The endpoint is unrestricted-sender: drawing text is not a
+//! security boundary, so any process may ask, and the reply path validates
+//! every field and fails closed.
 //!
-//! If a face cannot be loaded or parsed, or the endpoint cannot be bound, the
-//! service records `SERVICE_UNAVAILABLE` and exits fail-closed; PID 1
-//! supervises and relaunches. It never serves forged or absent coverage.
+//! If the store cannot be listed, no family in it is usable, or the endpoint
+//! cannot be bound, the service records `SERVICE_UNAVAILABLE` and exits
+//! fail-closed; PID 1 supervises and relaunches. It never serves forged or
+//! absent coverage.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -46,18 +49,22 @@
 mod program {
     extern crate alloc;
 
+    use alloc::boxed::Box;
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     use tairix_abi::font_ipc::{FontRequest, FONT_ENDPOINT, FONT_MAX_GLYPH_REPLY};
+    use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
+    use tairix_fontd::discovery::{discover, FaceLoad, FontStore};
     use tairix_fontd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
-    use tairix_fontd::{glyph_cache, FontService, FACE_REPERTOIRES};
-    use tairix_fontface::Repertoire;
+    use tairix_fontd::FontService;
+    use tairix_fontface::FAMILY_MANIFEST;
     use tairix_log::{Event, EventId, Level};
     use tairix_procinfo::IpcTransport;
     use tairix_reclaim::PressureBand;
-    use tairix_rt::LogSink;
+    use tairix_rt::{File, LogSink};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -102,38 +109,8 @@ mod program {
         tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
     }
 
-    /// The four committed faces the service loads, in the family's resolution
-    /// order — the same order and scoping [`FACE_REPERTOIRES`] declares.
-    const FACE_PATHS: [&[u8]; 4] = [
-        b"/System/Fonts/Inconsolata-EX.ttf",
-        b"/System/Fonts/MPLUS1Code-Regular.ttf",
-        b"/System/Fonts/D2Coding-Regular.ttf",
-        b"/System/Fonts/NotoSansHebrew-ExtraCondensed.ttf",
-    ];
-
-    /// Read the whole regular file at `path` into an owned buffer.
-    ///
-    /// Stats for the length, then reads at successive offsets until the file
-    /// is consumed. Returns the raw negative kernel result (`-errno`) of the
-    /// failing syscall.
-    fn read_file(path: &[u8]) -> Result<Vec<u8>, i64> {
-        let file = tairix_rt::open(path)?;
-        let size = usize::try_from(file.stat()?.size).unwrap_or(usize::MAX);
-        let mut buf = alloc::vec![0u8; size];
-        let mut done = 0usize;
-        while done < size {
-            let read = file.read_at(done as u64, &mut buf[done..])?;
-            if read == 0 {
-                break;
-            }
-            done += read;
-        }
-        buf.truncate(done);
-        Ok(buf)
-    }
-
-    /// Record a startup outcome. Recorded through the kernel audit log so an
-    /// operator can see the font service came up (or failed closed) before the
+    /// Record a startup or runtime outcome. Recorded through the kernel audit
+    /// log so an operator can see the font service's state before the
     /// desktop.
     fn record(id: EventId, level: Level, message: &str) {
         let _ = tairix_log::log(
@@ -147,26 +124,113 @@ mod program {
         );
     }
 
-    /// Read the four committed faces into owned buffers, in the family's
-    /// resolution order.
+    /// The store's root directory. Every family lives one level below it.
+    const FONT_STORE_ROOT: &[u8] = b"/System/Fonts/";
+
+    /// The path of `name` inside family directory `dir`.
+    fn family_path(dir: &str, name: &str) -> Vec<u8> {
+        let mut path = Vec::with_capacity(FONT_STORE_ROOT.len() + dir.len() + 1 + name.len());
+        path.extend_from_slice(FONT_STORE_ROOT);
+        path.extend_from_slice(dir.as_bytes());
+        path.push(b'/');
+        path.extend_from_slice(name.as_bytes());
+        path
+    }
+
+    /// Read the whole of already-open `file` into an owned buffer.
     ///
-    /// `None` — recorded, failing closed — if any face is unreadable: a
-    /// service missing a face would serve blanks for the scripts that face
-    /// covers, which is worse than not coming up at all.
-    fn load_faces() -> Option<Vec<Vec<u8>>> {
-        let mut faces: Vec<Vec<u8>> = Vec::with_capacity(FACE_PATHS.len());
-        for path in FACE_PATHS {
-            let Ok(bytes) = read_file(path) else {
-                record(
-                    SERVICE_UNAVAILABLE,
-                    Level::Warn,
-                    "fontd: cannot read a /System/Fonts face",
-                );
-                return None;
-            };
-            faces.push(bytes);
+    /// Stats for the length, then reads at successive offsets until the file
+    /// is consumed. Used both for the small manifest text (read once, at
+    /// discovery) and for a face's bytes (read once, on first use).
+    ///
+    /// The buffer is reserved fallibly, so a face larger than the heap can
+    /// hold refuses the read rather than aborting the service; the family is
+    /// then skipped or the glyph refused, and the rest of the store still
+    /// serves.
+    fn read_all(file: &File) -> Result<Vec<u8>, Errno> {
+        let size = usize::try_from(file.stat().map_err(Errno::from_syscall)?.size)
+            .map_err(|_| Errno::LengthOutOfRange)?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(size)
+            .map_err(|_| Errno::OutOfMemory)?;
+        buf.resize(size, 0);
+        let mut done = 0usize;
+        while done < size {
+            let read = file
+                .read_at(done as u64, &mut buf[done..])
+                .map_err(Errno::from_syscall)?;
+            if read == 0 {
+                break;
+            }
+            done += read;
         }
-        Some(faces)
+        buf.truncate(done);
+        Ok(buf)
+    }
+
+    /// A face whose bytes are read once, on first use, from the handle
+    /// opened at discovery time — never re-opened, never read early.
+    ///
+    /// The leaked, boxed byte slice this hands back is retained for the
+    /// service's life; the leak is bounded by the store's own size (one
+    /// family's declared faces, read at most once each), not by anything a
+    /// caller can grow, so it never becomes an unbounded-growth surface.
+    struct RealFaceLoad {
+        /// The still-open handle, present until the first successful read.
+        file: Option<File>,
+        /// The leaked bytes, once read.
+        bytes: Option<&'static [u8]>,
+    }
+
+    impl FaceLoad<'static> for RealFaceLoad {
+        fn load(&mut self) -> Result<&'static [u8], Errno> {
+            if let Some(bytes) = self.bytes {
+                return Ok(bytes);
+            }
+            let file = self.file.take().ok_or(Errno::NotFound)?;
+            let bytes = read_all(&file)?;
+            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            self.bytes = Some(leaked);
+            Ok(leaked)
+        }
+    }
+
+    /// The real `/System/Fonts` store, read through `tairix-rt`.
+    struct RealFontStore;
+
+    impl FontStore<'static> for RealFontStore {
+        fn family_dirs(&mut self) -> Result<Vec<String>, Errno> {
+            let stream = tairix_rt::read_dir_all(&FONT_STORE_ROOT[..FONT_STORE_ROOT.len() - 1])
+                .map_err(Errno::from_syscall)?;
+            let mut dirs = Vec::new();
+            for entry in DirEntries::new(&stream) {
+                let entry = entry?;
+                if !entry.kind.is_dir() {
+                    continue;
+                }
+                if let Ok(name) = core::str::from_utf8(entry.name) {
+                    dirs.push(String::from(name));
+                }
+            }
+            Ok(dirs)
+        }
+
+        fn read_manifest(&mut self, dir: &str) -> Option<String> {
+            let path = family_path(dir, FAMILY_MANIFEST);
+            let file = File::open(&path, OpenFlags::READ).ok()?;
+            let bytes = read_all(&file).ok()?;
+            String::from_utf8(bytes).ok()
+        }
+
+        fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'static> + 'static> {
+            let path = family_path(dir, face);
+            // A face that fails to open here still yields a loader: the
+            // failure surfaces from `load()` on first use, exactly as a face
+            // that opened but failed to read or parse would, so discovery
+            // never has to special-case "opened" versus "will fail".
+            let file = File::open(&path, OpenFlags::READ).ok();
+            Box::new(RealFaceLoad { file, bytes: None })
+        }
     }
 
     /// Bind `FONT_ENDPOINT` and return the wait-set watching it alongside the
@@ -292,34 +356,27 @@ mod program {
         }
     }
 
-    /// Load the faces, bind the endpoint, and serve requests for the life of
-    /// the service. Returns a non-zero exit code on any fail-closed startup
-    /// error.
+    /// Discover the store, bind the endpoint, and serve requests for the life
+    /// of the service. Returns a non-zero exit code on any fail-closed
+    /// startup error.
     fn main() -> i32 {
-        let Some(faces) = load_faces() else {
-            return 1;
-        };
-        let sources: Vec<(&[u8], Repertoire)> = faces
-            .iter()
-            .map(Vec::as_slice)
-            .zip(FACE_REPERTOIRES)
-            .collect();
         // The cache is sized from the machine's own RAM, never a hand-picked
         // ceiling: a reading the System Information service cannot supply is
         // zero, which admits nothing and leaves every glyph rasterised on
         // demand — slower, never wrong.
         let total_ram = tairix_procinfo::memory_total_bytes(&IpcTransport).unwrap_or(0);
-        let cache = glyph_cache(total_ram, tairix_rt::pressure::gauge(), &LOG_SINK);
+        let cache = tairix_fontd::glyph_cache(total_ram, tairix_rt::pressure::gauge(), &LOG_SINK);
         // From here on the registry may hold this process's glyph-cache row,
         // so every return path — startup failure or the serve loop's own
         // fail-loud exit — must withdraw it; a dropped guard does that once,
         // unconditionally.
         let _cache_report_guard = CacheReportGuard;
-        let Ok(mut service) = FontService::new(&sources, cache) else {
+        let mut store = RealFontStore;
+        let Ok(mut service) = discover(&mut store, cache, &LOG_SINK) else {
             record(
                 SERVICE_UNAVAILABLE,
                 Level::Warn,
-                "fontd: a /System/Fonts face failed to parse",
+                "fontd: the /System/Fonts store has no usable family",
             );
             return 1;
         };

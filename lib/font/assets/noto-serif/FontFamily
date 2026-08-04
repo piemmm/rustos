@@ -1,0 +1,4 @@
+label = Noto Serif
+kind = proportional
+face = NotoSerif-Variable.ttf
+fallback = sans-fallback

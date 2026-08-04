@@ -22,7 +22,7 @@ const GAP: u32 = 8;
 const CH: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {

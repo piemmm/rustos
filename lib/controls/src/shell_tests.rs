@@ -31,7 +31,7 @@ use crate::state::{
 use crate::testkit::high_contrast;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn scale2() -> Scale {

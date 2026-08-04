@@ -19,7 +19,7 @@
 //! and size on demand from `/System/Fonts` through this same `lib/fontface`
 //! engine. There is therefore exactly one compiled-in atlas (this console
 //! subset) and one runtime rasterisation source (the faces `fontd` loads) —
-//! no duplicated full-Unicode artifact (`AGENTS.md` §2.2).
+//! never a duplicated full-Unicode artifact.
 //!
 //! The generator is deliberately first-party and deterministic: the shared
 //! `lib/fontface` engine (a minimal TrueType reader
@@ -27,9 +27,9 @@
 //! rasteriser — quadratic outlines flattened to segments, non-zero winding,
 //! 4 sample rows per pixel row with exact horizontal span coverage) turns each
 //! outline into coverage. That one engine also renders the font service's
-//! glyphs, so the console atlas and live text share a rasteriser (`AGENTS.md`
-//! §2.2). Identical input bytes produce identical output bytes on every host,
-//! so the drift guard is meaningful.
+//! glyphs, so the console atlas and live text share one rasteriser rather
+//! than each carrying its own. Identical input bytes produce identical output
+//! bytes on every host, so the drift guard is meaningful.
 //!
 //! Pixel geometry: the em square is `tairix_fontface::ATLAS_EM_PX` pixels
 //! tall. Inconsolata is
@@ -50,11 +50,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tairix_fontface::{CellGeometry, FontError, FontFamily, Repertoire, ATLAS_EM_PX};
+use tairix_fontface::{CellGeometry, FontError, FontFamily, ATLAS_EM_PX};
 
 /// Workspace-relative path of the committed primary TrueType source (the
 /// only face compiled into the console atlas).
-pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/Inconsolata-EX.ttf";
+pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/mono/Inconsolata-EX.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -98,11 +98,11 @@ struct Atlas {
     fallback: u32,
 }
 
-/// Rasterise an ordered family of scoped faces into an [`Atlas`].
+/// Rasterise an ordered family of faces into an [`Atlas`].
 ///
 /// For an overlapping codepoint, the earliest face supplies the outline.
-fn build_atlas(face_data: &[(&[u8], Repertoire)]) -> Result<Atlas, String> {
-    let family = FontFamily::parse(face_data).map_err(engine_err)?;
+fn build_atlas(faces: &[&[u8]]) -> Result<Atlas, String> {
+    let family = FontFamily::parse(faces).map_err(engine_err)?;
     let primary = family.primary();
     let advance = primary.uniform_advance().map_err(engine_err)?;
     let geometry = CellGeometry::derive(primary, advance, ATLAS_EM_PX).map_err(engine_err)?;
@@ -200,8 +200,9 @@ impl Atlas {
             "// GENERATED FILE — DO NOT EDIT.\n\
              //\n\
              // Emitted by `cargo xtask font-atlas --write` from the committed\n\
-             // primary face `lib/font/assets/Inconsolata-EX.ttf` (SIL OFL 1.1;\n\
-             // see `lib/font/assets/OFL.txt`).\n\
+             // primary face `lib/font/assets/mono/Inconsolata-EX.ttf`\n\
+             // (SIL OFL 1.1; see\n\
+             // `lib/font/assets/mono/OFL-Inconsolata-MPLUS1Code.txt`).\n\
              // `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
@@ -382,7 +383,7 @@ fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
     let path = workspace_root.join(DEFAULT_TTF_PATH);
     let primary = std::fs::read(&path)
         .map_err(|e| format!("font-atlas: cannot read {}: {e}", path.display()))?;
-    let atlas = build_atlas(&[(&primary, Repertoire::Full)])?;
+    let atlas = build_atlas(&[&primary])?;
     Ok((atlas.render_rust(), atlas.coverage_bytes()?))
 }
 
@@ -441,7 +442,7 @@ mod tests {
 
     fn committed_atlas() -> Atlas {
         let primary = committed_face();
-        build_atlas(&[(&primary, Repertoire::Full)]).expect("atlas builds")
+        build_atlas(&[&primary]).expect("atlas builds")
     }
 
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
@@ -649,8 +650,8 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         let face = committed_face();
-        let a = build_atlas(&[(&face, Repertoire::Full)]).expect("atlas builds");
-        let b = build_atlas(&[(&face, Repertoire::Full)]).expect("atlas builds");
+        let a = build_atlas(&[&face]).expect("atlas builds");
+        let b = build_atlas(&[&face]).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
         assert_eq!(
             a.coverage_bytes().expect("first encoding succeeds"),
@@ -662,7 +663,7 @@ mod tests {
     fn truncated_face_fails_closed() {
         let face = committed_face();
         assert!(build_atlas(&[]).is_err());
-        assert!(build_atlas(&[(&face[..64], Repertoire::Full)]).is_err());
-        assert!(build_atlas(&[(&face[..face.len() / 2], Repertoire::Full)]).is_err());
+        assert!(build_atlas(&[&face[..64]]).is_err());
+        assert!(build_atlas(&[&face[..face.len() / 2]]).is_err());
     }
 }

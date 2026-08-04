@@ -64,3 +64,22 @@ pub(crate) fn fmin(a: f64, b: f64) -> f64 {
 pub(crate) fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
     fmin(fmax(x, lo), hi)
 }
+
+/// Round `x` to the nearest integer, halves toward positive infinity (i.e.
+/// `floor(x + 0.5)`), returned as an `i32`.
+///
+/// This is the round-half-up rule a reference instancer applies when turning a
+/// fractional variation delta into an integer font-unit correction, so
+/// computed advances agree with it.
+///
+/// Callers only pass variation advance/position deltas in font units — a few
+/// thousand at most, far inside `i32` — so the round result cannot overflow.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the value is a font-unit advance/position delta bounded to a few \
+              thousand, well within i32, so the truncation the lint warns about \
+              cannot occur"
+)]
+pub(crate) fn round_i32(x: f64) -> i32 {
+    floor(x + 0.5) as i32
+}

@@ -219,13 +219,14 @@ pub const SEATMGR_CEILING: &[CapabilityId] = &[
 ];
 
 /// The `fontd` service account's grant ceiling: bind the reserved
-/// `FONT_ENDPOINT`, read its committed faces, and emit its audit records —
-/// nothing more. The one-shot startup read of the four `/System/Fonts` faces
-/// goes through the secured VFS, so it needs `CAP_FS_ACCESS`; the VFS still
-/// authorises every path per-inode under the service's attested identity,
-/// and `/System` is mounted read-only so this reach can never write. The
-/// font-parser sandbox holds no spawn or network authority, and the
-/// untrusted TrueType parse runs in its own isolated address space.
+/// `FONT_ENDPOINT`, read the installed faces, and emit its audit records —
+/// nothing more. Scanning the `/System/Fonts` family manifests and reading a
+/// face on first use both go through the secured VFS, so it needs
+/// `CAP_FS_ACCESS`; the VFS still authorises every path per-inode under the
+/// service's attested identity, and `/System` is mounted read-only so this
+/// reach can never write. The font-parser sandbox holds no spawn or network
+/// authority, and the untrusted TrueType parse runs in its own isolated
+/// address space.
 pub const FONTD_CEILING: &[CapabilityId] = &[
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::FS_ACCESS,

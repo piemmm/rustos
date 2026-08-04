@@ -3,7 +3,7 @@
 //! A theme names text by the job it does — a panel heading, a list item's
 //! title, its secondary detail line, a column header, a metric readout — not
 //! by the widget that draws it. Each role resolves to a [`FontSpec`]: the
-//! family name of an installed face under `/System/Fonts` plus a size and a
+//! key of an installed family under `/System/Fonts` plus a size and a
 //! weight. This crate stores the reference, it does not rasterise glyphs.
 //!
 //! Sizes are *logical* pixels at the reference density
@@ -23,17 +23,20 @@
 //! number, so the whole desktop's type scales together and no two roles can
 //! silently drift apart.
 
-use alloc::string::String;
-
 /// The weight a text role is set in.
 ///
 /// This is the font service's own weight type, re-exported rather than
 /// restated: the weight a theme names is exactly the value a glyph request
-/// carries, so there is one definition for both. The shipped faces are
-/// Regular-only, so the heavier weights are synthesised by the service as a
-/// bounded thickening of the same outline coverage, leaving the advance — and
-/// therefore every layout — unchanged.
+/// carries, so there is one definition for both. A variable face renders the
+/// weight from its own design axis; a face without one is thickened by the
+/// service instead.
 pub use tairix_abi::font_ipc::FontWeight;
+
+/// The key naming an installed family under `/System/Fonts`.
+///
+/// This is the font service's own key type, re-exported rather than
+/// restated, so a theme cannot name a family a request could not carry.
+pub use tairix_abi::font_ipc::FamilyKey;
 
 /// The job a run of text does, which is what a theme sizes and weights.
 ///
@@ -96,11 +99,11 @@ impl TextRole {
     }
 }
 
-/// A reference to one font face at one size and weight.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A reference to one font family at one size and weight.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FontSpec {
-    /// Family name of an installed face under `/System/Fonts`.
-    pub family: String,
+    /// The installed family under `/System/Fonts` this role is drawn from.
+    pub family: FamilyKey,
     /// Nominal size in logical pixels at the reference density (scaled to
     /// physical pixels by `tairix_geometry::Scale`).
     pub size_px: u16,
@@ -111,9 +114,9 @@ pub struct FontSpec {
 impl FontSpec {
     /// A font specification from its parts.
     #[must_use]
-    pub fn new(family: impl Into<String>, size_px: u16, weight: FontWeight) -> Self {
+    pub const fn new(family: FamilyKey, size_px: u16, weight: FontWeight) -> Self {
         Self {
-            family: family.into(),
+            family,
             size_px,
             weight,
         }
@@ -183,10 +186,10 @@ const LADDER: [Rung; 8] = [
 /// Build one with [`Fonts::ladder`]: it derives every role from a single base
 /// size through the boards' one shared ladder, so a theme authors *one*
 /// number and the whole scale follows.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Fonts {
-    ui_family: String,
-    monospace_family: String,
+    ui_family: FamilyKey,
+    monospace_family: FamilyKey,
     base_size_px: u16,
     specs: [FontSpec; 8],
 }
@@ -213,22 +216,16 @@ impl Fonts {
     /// so a theme cannot author text too small to read or too large to
     /// rasterise.
     #[must_use]
-    pub fn ladder(
-        ui_family: impl Into<String>,
-        monospace_family: impl Into<String>,
-        base_size_px: u16,
-    ) -> Self {
-        let ui_family = ui_family.into();
-        let monospace_family = monospace_family.into();
+    pub fn ladder(ui_family: FamilyKey, monospace_family: FamilyKey, base_size_px: u16) -> Self {
         let base = base_size_px.clamp(Self::MIN_BASE_SIZE_PX, Self::MAX_BASE_SIZE_PX);
         let specs = core::array::from_fn(|i| {
             let rung = &LADDER[i];
             let family = if matches!(rung.role, TextRole::Monospace) {
-                &monospace_family
+                monospace_family
             } else {
-                &ui_family
+                ui_family
             };
-            FontSpec::new(family.clone(), rung_size(base, rung.percent), rung.weight)
+            FontSpec::new(family, rung_size(base, rung.percent), rung.weight)
         });
         Self {
             ui_family,
@@ -246,20 +243,30 @@ impl Fonts {
 
     /// The family every non-monospace role is drawn in.
     #[must_use]
-    pub fn ui_family(&self) -> &str {
-        &self.ui_family
+    pub const fn ui_family(&self) -> FamilyKey {
+        self.ui_family
     }
 
     /// The family the [`TextRole::Monospace`] role is drawn in.
     #[must_use]
-    pub fn monospace_family(&self) -> &str {
-        &self.monospace_family
+    pub const fn monospace_family(&self) -> FamilyKey {
+        self.monospace_family
+    }
+
+    /// The same ladder with every non-monospace role redrawn in `family`.
+    ///
+    /// A user's chosen desktop font is applied here rather than by rebuilding
+    /// the theme, so the choice cannot drift from the ladder's sizes and
+    /// weights and the fixed-width role keeps its own family.
+    #[must_use]
+    pub fn with_ui_family(self, family: FamilyKey) -> Self {
+        Self::ladder(family, self.monospace_family, self.base_size_px)
     }
 
     /// The authored base (body) size in logical pixels, from which every rung
     /// of the ladder derives.
     #[must_use]
-    pub fn base_size_px(&self) -> u16 {
+    pub const fn base_size_px(&self) -> u16 {
         self.base_size_px
     }
 }

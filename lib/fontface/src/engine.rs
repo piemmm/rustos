@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::mathf;
+use crate::variations::{self, Axis, AxisSetting, Gvar, VarTables};
 use crate::FontError;
 
 /// Coverage sample rows per pixel row (vertical supersampling).
@@ -15,41 +16,55 @@ const SAMPLE_ROWS: u32 = 4;
 /// atlas's native size, invisible at 16 coverage levels.
 const QUAD_SEGMENTS: u32 = 8;
 
-const fn err(what: &'static str) -> FontError {
+/// Widest proportional glyph, in pixels, the engine will lay out.
+///
+/// A tight proportional bitmap is sized from a glyph's own ink, so a corrupt
+/// outline with runaway coordinates could otherwise demand an unbounded
+/// allocation; a width past this bound fails closed. A validation bound, not a
+/// capacity — legitimate glyphs are a small multiple of the em.
+const MAX_PROPORTIONAL_WIDTH: u32 = 1 << 14;
+
+pub(crate) const fn err(what: &'static str) -> FontError {
     FontError::new(what)
 }
 
 /// Big-endian field reads over the raw font bytes, each bounds-checked.
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     data: &'a [u8],
 }
 
 impl Reader<'_> {
-    fn u8(&self, at: usize) -> Result<u8, FontError> {
+    pub(crate) fn u8(&self, at: usize) -> Result<u8, FontError> {
         self.data.get(at).copied().ok_or(err("truncated u8"))
     }
 
-    fn i8(&self, at: usize) -> Result<i8, FontError> {
+    pub(crate) fn i8(&self, at: usize) -> Result<i8, FontError> {
         Ok(i8::from_be_bytes([self.u8(at)?]))
     }
 
-    fn u16(&self, at: usize) -> Result<u16, FontError> {
+    pub(crate) fn u16(&self, at: usize) -> Result<u16, FontError> {
         let b = self.data.get(at..at + 2).ok_or(err("truncated u16"))?;
         Ok(u16::from_be_bytes([b[0], b[1]]))
     }
 
-    fn i16(&self, at: usize) -> Result<i16, FontError> {
+    pub(crate) fn i16(&self, at: usize) -> Result<i16, FontError> {
         let b = self.data.get(at..at + 2).ok_or(err("truncated i16"))?;
         Ok(i16::from_be_bytes([b[0], b[1]]))
     }
 
-    fn u32(&self, at: usize) -> Result<u32, FontError> {
+    pub(crate) fn u32(&self, at: usize) -> Result<u32, FontError> {
         let b = self.data.get(at..at + 4).ok_or(err("truncated u32"))?;
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
+
+    pub(crate) fn i32(&self, at: usize) -> Result<i32, FontError> {
+        let b = self.data.get(at..at + 4).ok_or(err("truncated i32"))?;
+        Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
 }
 
-/// Offsets of the tables the engine needs, from the table directory.
+/// Offsets of the tables the engine needs, from the table directory. The
+/// variation tables are optional: a static face declares none.
 struct Tables {
     head: usize,
     maxp: usize,
@@ -58,6 +73,10 @@ struct Tables {
     hmtx: usize,
     loca: usize,
     glyf: usize,
+    fvar: Option<usize>,
+    avar: Option<usize>,
+    gvar: Option<usize>,
+    hvar: Option<usize>,
 }
 
 impl Tables {
@@ -70,6 +89,10 @@ impl Tables {
         let mut hmtx = None;
         let mut loca = None;
         let mut glyf = None;
+        let mut fvar = None;
+        let mut avar = None;
+        let mut gvar = None;
+        let mut hvar = None;
         for i in 0..count {
             let entry = 12 + 16 * i;
             let tag = [
@@ -87,6 +110,10 @@ impl Tables {
                 b"hmtx" => hmtx = Some(offset),
                 b"loca" => loca = Some(offset),
                 b"glyf" => glyf = Some(offset),
+                b"fvar" => fvar = Some(offset),
+                b"avar" => avar = Some(offset),
+                b"gvar" => gvar = Some(offset),
+                b"HVAR" => hvar = Some(offset),
                 _ => {}
             }
         }
@@ -98,27 +125,43 @@ impl Tables {
             hmtx: hmtx.ok_or(err("missing hmtx table"))?,
             loca: loca.ok_or(err("missing loca table"))?,
             glyf: glyf.ok_or(err("missing glyf table"))?,
+            fvar,
+            avar,
+            gvar,
+            hvar,
         })
     }
 }
 
 /// A parsed TrueType face: the tables and metrics the rasteriser needs, plus
 /// the sorted `(codepoint, glyph)` pairs from its `cmap`.
+///
+/// A variable face is parsed *instanced*: the requested axis settings are
+/// resolved once into normalised `coords`, and every outline and advance is
+/// varied against them on demand. A static face carries no axes and no
+/// `coords`, so it behaves exactly as an unvaried TrueType face.
 pub struct Face<'a> {
     r: Reader<'a>,
     tables: Tables,
     units_per_em: i32,
     ascent: i32,
     descent: i32,
+    line_gap: i32,
     glyph_count: u16,
     advance_count: u16,
     long_loca: bool,
     mapped: Vec<(u32, u16)>,
+    axes: Vec<Axis>,
+    coords: Vec<f32>,
+    var: Option<VarTables>,
 }
 
 impl<'a> Face<'a> {
-    /// Parse `data` (a TrueType `glyf`-outline face) into its tables and
-    /// codepoint map, failing closed on any malformed or unsupported table.
+    /// Parse `data` (a TrueType `glyf`-outline face) at its default instance.
+    ///
+    /// Equivalent to [`parse_instance`](Self::parse_instance) with no settings,
+    /// so a variable face renders at every axis's default and a static face is
+    /// unchanged.
     ///
     /// # Errors
     ///
@@ -126,6 +169,25 @@ impl<'a> Face<'a> {
     /// truncated, the vertical metrics are non-positive, or the `cmap` has no
     /// format-4 subtable.
     pub fn parse(data: &'a [u8]) -> Result<Self, FontError> {
+        Self::parse_instance(data, &[])
+    }
+
+    /// Parse `data` and instance it at the given axis `settings`.
+    ///
+    /// Each setting is resolved against the face's `fvar` axes: its value is
+    /// clamped into the axis range, normalised to `-1..0..+1`, and remapped
+    /// through `avar` when present. Axes no setting names stay at their
+    /// default, and a setting for an axis the face does not declare is ignored.
+    /// A face without `fvar` accepts any settings and applies no variation, so
+    /// its output is byte-identical to an unvaried parse.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FontError`] when a required table is missing, a field is
+    /// truncated, the vertical metrics are non-positive, the `cmap` has no
+    /// format-4 subtable, or a variation table (`fvar`/`avar`/`gvar`) is
+    /// malformed.
+    pub fn parse_instance(data: &'a [u8], settings: &[AxisSetting]) -> Result<Self, FontError> {
         let r = Reader { data };
         let tables = Tables::locate(&r)?;
         let units_per_em = i32::from(r.u16(tables.head + 18)?);
@@ -142,22 +204,39 @@ impl<'a> Face<'a> {
         if ascent <= 0 || descent < 0 {
             return Err(err("non-positive vertical metrics"));
         }
+        let line_gap = i32::from(r.i16(tables.hhea + 8)?);
         let advance_count = r.u16(tables.hhea + 34)?;
         if advance_count == 0 {
             return Err(err("numberOfHMetrics is zero"));
         }
         let glyph_count = r.u16(tables.maxp + 4)?;
         let mapped = parse_cmap_format4(&r, tables.cmap)?;
+        let axes = match tables.fvar {
+            Some(fvar) => variations::parse_fvar(&r, fvar)?,
+            None => Vec::new(),
+        };
+        let coords = resolve_coords(&r, &axes, tables.avar, settings)?;
+        let var = match (tables.fvar, tables.gvar) {
+            (Some(_), Some(gvar)) => Some(VarTables {
+                gvar: Gvar::parse(&r, gvar, axes.len())?,
+                hvar: tables.hvar,
+            }),
+            _ => None,
+        };
         Ok(Self {
             r,
             tables,
             units_per_em,
             ascent,
             descent,
+            line_gap,
             glyph_count,
             advance_count,
             long_loca,
             mapped,
+            axes,
+            coords,
+            var,
         })
     }
 
@@ -193,17 +272,67 @@ impl<'a> Face<'a> {
         Some(self.mapped[index].1)
     }
 
-    /// The advance width of `glyph` in font units.
-    fn advance(&self, glyph: u16) -> Result<u16, FontError> {
+    /// The variation axes the face declares, empty for a static face.
+    #[must_use]
+    pub fn axes(&self) -> &[Axis] {
+        &self.axes
+    }
+
+    /// Whether the face is variable — it declares both an `fvar` axis set and
+    /// `gvar` outline deltas, so instancing it changes its glyphs.
+    #[must_use]
+    pub fn is_variable(&self) -> bool {
+        self.var.is_some()
+    }
+
+    /// The `hhea` line gap in font units — the extra leading between lines on
+    /// top of ascent plus descent.
+    #[must_use]
+    pub fn line_gap(&self) -> i32 {
+        self.line_gap
+    }
+
+    /// The unvaried advance width of `glyph` in font units, straight from
+    /// `hmtx`.
+    fn base_advance(&self, glyph: u16) -> Result<u16, FontError> {
         let index = glyph.min(self.advance_count - 1);
         self.r.u16(self.tables.hmtx + 4 * usize::from(index))
+    }
+
+    /// The advance width of `glyph` in font units at the instanced coordinate.
+    ///
+    /// For a variable face the `hmtx` base is corrected by the `HVAR` advance
+    /// delta when present, else derived from the glyph's varied phantom points;
+    /// for a static face it is the `hmtx` value unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FontError`] when `hmtx` is truncated or a variation store is
+    /// malformed.
+    pub fn advance(&self, glyph: u16) -> Result<i32, FontError> {
+        let base = i32::from(self.base_advance(glyph)?);
+        let Some(var) = &self.var else {
+            return Ok(base);
+        };
+        let delta = if let Some(hvar) = var.hvar {
+            variations::hvar_advance_delta(&self.r, hvar, &self.coords, glyph)?
+        } else {
+            let n = self.point_count(glyph)?;
+            let mut deltas = vec![(0.0, 0.0); n + 4];
+            var.gvar
+                .deltas(&self.r, &self.coords, glyph, n, None, &mut deltas)?;
+            mathf::round_i32(deltas[n + 1].0 - deltas[n].0)
+        };
+        Ok(base + delta)
     }
 
     /// The one advance width every mapped spacing glyph shares, in font units.
     ///
     /// The cell grid only works over a strictly monospace face: every mapped
     /// glyph must advance by this uniform width or by zero (a combining mark).
-    /// A face mixing two spacing widths fails closed here.
+    /// A face mixing two spacing widths fails closed here. This is the
+    /// unvaried `hmtx` width — the monospace faces the cell grid serves are
+    /// static, so instancing does not enter into it.
     ///
     /// # Errors
     ///
@@ -212,7 +341,7 @@ impl<'a> Face<'a> {
     pub fn uniform_advance(&self) -> Result<u16, FontError> {
         let mut uniform = None;
         for &(_, glyph) in &self.mapped {
-            let advance = self.advance(glyph)?;
+            let advance = self.base_advance(glyph)?;
             if advance == 0 {
                 continue;
             }
@@ -223,6 +352,24 @@ impl<'a> Face<'a> {
             }
         }
         uniform.ok_or(err("face maps no spacing glyphs"))
+    }
+
+    /// The number of outline points `glyph` contributes to a `gvar` tuple: the
+    /// point count of a simple glyph, the component count of a composite, or
+    /// zero for an empty glyph (which still carries four phantom points).
+    fn point_count(&self, glyph: u16) -> Result<usize, FontError> {
+        let Some((start, _)) = self.glyf_range(glyph)? else {
+            return Ok(0);
+        };
+        let contour_count = self.r.i16(start)?;
+        if contour_count < 0 {
+            return Ok(decode_components(&self.r, start)?.len());
+        }
+        let contour_count = usize::from(contour_count.unsigned_abs());
+        if contour_count == 0 {
+            return Ok(0);
+        }
+        Ok(usize::from(self.r.u16(start + 10 + 2 * (contour_count - 1))?) + 1)
     }
 
     /// The `glyf` byte range of `glyph`, or `None` for an empty outline.
@@ -277,6 +424,153 @@ impl<'a> Face<'a> {
         outline_glyph(self, glyph, &mut sink, 0)?;
         Ok(rasterise(&sink.segments, geometry, bitmap_width))
     }
+
+    /// Rasterise `glyph` proportionally: a bitmap tight to the glyph's own ink
+    /// in x, positioned by its left bearing rather than inside a fixed cell.
+    ///
+    /// The outline is scaled by `px_per_em / units_per_em` and laid out with
+    /// the baseline `baseline` pixel rows below the top of a `height`-row box.
+    /// The returned [`GlyphRaster`] covers only the inked columns: `left` is
+    /// the integer pixel column of the leftmost ink relative to the pen origin
+    /// (it may be negative), `width` reaches the rightmost ink, and ink above
+    /// or below the box is clipped to the `0..height` rows. A glyph with no
+    /// ink (a space) yields `width == 0`, `left == 0`, and empty coverage.
+    /// Coverage keeps the 4-bit (`0..=15`) row-major convention
+    /// [`rasterise_glyph`](Self::rasterise_glyph) returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FontError`] on a malformed outline, or when the glyph's ink
+    /// is implausibly wide (a corrupt outline), which fails closed rather than
+    /// demanding an unbounded bitmap.
+    pub fn rasterise_proportional(
+        &self,
+        glyph: u16,
+        px_per_em: f64,
+        baseline: u32,
+        height: u32,
+    ) -> Result<GlyphRaster, FontError> {
+        let mut sink = OutlineSink {
+            segments: Vec::new(),
+            scale: px_per_em / f64::from(self.units_per_em),
+            origin_x: 0.0,
+            baseline_y: f64::from(baseline),
+            transform: Affine::IDENTITY,
+        };
+        outline_glyph(self, glyph, &mut sink, 0)?;
+        let Some(left_edge) = ink_left_edge(&sink.segments) else {
+            return Ok(GlyphRaster {
+                width: 0,
+                height,
+                left: 0,
+                coverage: Vec::new(),
+            });
+        };
+        let (left, width) = ink_extent(&sink.segments, left_edge)?;
+        if width == 0 {
+            return Ok(GlyphRaster {
+                width: 0,
+                height,
+                left: 0,
+                coverage: Vec::new(),
+            });
+        }
+        for segment in &mut sink.segments {
+            segment.x0 -= left_edge;
+            segment.x1 -= left_edge;
+        }
+        let geometry = CellGeometry {
+            width,
+            height,
+            baseline,
+        };
+        let coverage = rasterise(&sink.segments, &geometry, width);
+        Ok(GlyphRaster {
+            width,
+            height,
+            left,
+            coverage,
+        })
+    }
+}
+
+/// A glyph rasterised proportionally: a coverage bitmap tight to the ink in x,
+/// plus where that ink sits relative to the pen origin.
+///
+/// `coverage` is `width × height` bytes of 4-bit (`0..=15`) coverage,
+/// row-major. `left` is the pixel column of the leftmost inked pixel relative
+/// to the pen origin and may be negative; a caller blits the bitmap at
+/// `pen_x + left`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlyphRaster {
+    /// Bitmap width in pixels (the inked horizontal extent; `0` when blank).
+    pub width: u32,
+    /// Bitmap height in pixels (the requested box height).
+    pub height: u32,
+    /// The leftmost inked column relative to the pen origin, possibly negative.
+    pub left: i32,
+    /// `width × height` bytes of 4-bit coverage, row-major.
+    pub coverage: Vec<u8>,
+}
+
+/// Resolve the requested axis `settings` into normalised coordinates, one per
+/// declared axis, remapped through `avar` when the face carries it. A static
+/// face (no axes) resolves to no coordinates.
+fn resolve_coords(
+    r: &Reader<'_>,
+    axes: &[Axis],
+    avar: Option<usize>,
+    settings: &[AxisSetting],
+) -> Result<Vec<f32>, FontError> {
+    if axes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut coords: Vec<f32> = axes
+        .iter()
+        .map(|axis| variations::normalise_axis(axis, settings))
+        .collect();
+    if let Some(avar) = avar {
+        variations::apply_avar(r, avar, &mut coords)?;
+    }
+    Ok(coords)
+}
+
+/// The floored leftmost-ink x of a set of segments in pixel space, or `None`
+/// when there are no segments (no ink).
+fn ink_left_edge(segments: &[Segment]) -> Option<f64> {
+    if segments.is_empty() {
+        return None;
+    }
+    let mut min_x = f64::INFINITY;
+    for segment in segments {
+        min_x = mathf::fmin(min_x, mathf::fmin(segment.x0, segment.x1));
+    }
+    Some(mathf::floor(min_x))
+}
+
+/// The `(left, width)` of the tight ink box: `left` the floored leftmost ink
+/// column, `width` the pixels out to the ceiled rightmost ink.
+///
+/// # Errors
+///
+/// A [`FontError`] when the width exceeds [`MAX_PROPORTIONAL_WIDTH`].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the width is a non-negative integer-valued f64 (ceil minus \
+              floor) already checked against MAX_PROPORTIONAL_WIDTH, so the \
+              cast to u32 cannot truncate or lose a sign"
+)]
+fn ink_extent(segments: &[Segment], left_edge: f64) -> Result<(i32, u32), FontError> {
+    let mut max_x = f64::NEG_INFINITY;
+    for segment in segments {
+        max_x = mathf::fmax(max_x, mathf::fmax(segment.x0, segment.x1));
+    }
+    let width = mathf::ceil(max_x) - left_edge;
+    if width > f64::from(MAX_PROPORTIONAL_WIDTH) {
+        return Err(err("proportional glyph ink is implausibly wide"));
+    }
+    Ok((mathf::round_i32(left_edge), width as u32))
 }
 
 /// Decode the first format-4 (BMP segment-mapped) `cmap` subtable into a
@@ -459,29 +753,32 @@ fn outline_glyph(
     let Some((start, end)) = face.glyf_range(glyph)? else {
         return Ok(());
     };
-    let r = &face.r;
-    let contour_count = r.i16(start)?;
+    let contour_count = face.r.i16(start)?;
     if contour_count >= 0 {
         outline_simple(
-            r,
+            face,
+            glyph,
             start,
             end,
             usize::from(contour_count.unsigned_abs()),
             sink,
         )
     } else {
-        outline_composite(face, start, sink, depth)
+        outline_composite(face, glyph, start, sink, depth)
     }
 }
 
-/// Decode a simple glyph's contours into `sink`.
+/// Decode a simple glyph's contours into `sink`, applying its `gvar` deltas
+/// (with IUP for untouched points) when the face is instanced.
 fn outline_simple(
-    r: &Reader<'_>,
+    face: &Face<'_>,
+    glyph: u16,
     start: usize,
     end: usize,
     contour_count: usize,
     sink: &mut OutlineSink,
 ) -> Result<(), FontError> {
+    let r = &face.r;
     let mut at = start + 10;
     let mut contour_ends = Vec::with_capacity(contour_count);
     for _ in 0..contour_count {
@@ -544,6 +841,28 @@ fn outline_simple(
         return Err(err("simple glyph overruns its loca range"));
     }
 
+    let mut coords: Vec<(f64, f64)> = (0..point_count)
+        .map(|i| (f64::from(xs[i]), f64::from(ys[i])))
+        .collect();
+    if let Some(var) = &face.var {
+        let base = coords.clone();
+        let mut deltas = vec![(0.0, 0.0); point_count + 4];
+        let applied = var.gvar.deltas(
+            r,
+            &face.coords,
+            glyph,
+            point_count,
+            Some((&contour_ends, &base)),
+            &mut deltas,
+        )?;
+        if applied {
+            for (point, delta) in coords.iter_mut().zip(&deltas) {
+                point.0 += delta.0;
+                point.1 += delta.1;
+            }
+        }
+    }
+
     let mut first = 0usize;
     for &contour_end in &contour_ends {
         let last = usize::from(contour_end);
@@ -552,8 +871,8 @@ fn outline_simple(
         }
         let points: Vec<Point> = (first..=last)
             .map(|i| Point {
-                x: f64::from(xs[i]),
-                y: f64::from(ys[i]),
+                x: coords[i].0,
+                y: coords[i].1,
                 on_curve: flags[i] & 0x01 != 0,
             })
             .collect();
@@ -624,23 +943,33 @@ fn emit_contour(points: &[Point], sink: &mut OutlineSink) {
     }
 }
 
-/// Decode a composite glyph: recurse into each component with its affine
-/// transform composed onto the sink.
-fn outline_composite(
-    face: &Face<'_>,
-    start: usize,
-    sink: &mut OutlineSink,
-    depth: u32,
-) -> Result<(), FontError> {
-    let r = &face.r;
+/// One decoded component of a composite glyph: which glyph it places, its
+/// placement offset in font units, and its 2×2 affine scale terms.
+#[derive(Copy, Clone)]
+struct Component {
+    glyph: u16,
+    dx: f64,
+    dy: f64,
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+}
+
+/// Decode a composite glyph's component records.
+///
+/// Only plain xy offsets are supported; point-matching args and Apple's
+/// scaled-component-offset interpretation fail closed. The count is bounded so
+/// a malformed record with the more-components flag stuck set cannot loop
+/// without limit.
+fn decode_components(r: &Reader<'_>, start: usize) -> Result<Vec<Component>, FontError> {
     let mut at = start + 10;
+    let mut components = Vec::new();
     loop {
         let flags = r.u16(at)?;
-        let component = r.u16(at + 2)?;
+        let glyph = r.u16(at + 2)?;
         at += 4;
-        let args_are_words = flags & 0x0001 != 0;
-        let args_are_xy = flags & 0x0002 != 0;
-        if !args_are_xy {
+        if flags & 0x0002 == 0 {
             return Err(err("composite point-matching args unsupported"));
         }
         // SCALED_COMPONENT_OFFSET (the Apple interpretation) would rescale the
@@ -650,7 +979,7 @@ fn outline_composite(
         if flags & 0x0800 != 0 {
             return Err(err("composite scaled component offset unsupported"));
         }
-        let (dx, dy) = if args_are_words {
+        let (dx, dy) = if flags & 0x0001 != 0 {
             let v = (f64::from(r.i16(at)?), f64::from(r.i16(at + 2)?));
             at += 4;
             v
@@ -681,20 +1010,63 @@ fn outline_composite(
         } else {
             (1.0, 0.0, 0.0, 1.0)
         };
-        let saved = sink.transform;
-        sink.transform = saved.then(&Affine {
+        components.push(Component {
+            glyph,
+            dx,
+            dy,
             a: x_scale,
             b: scale01,
             c: scale10,
             d: y_scale,
-            dx,
-            dy,
         });
-        outline_glyph(face, component, sink, depth + 1)?;
-        sink.transform = saved;
         if flags & 0x0020 == 0 {
             break;
         }
+        if components.len() > usize::from(u16::MAX) {
+            return Err(err("composite has too many components"));
+        }
+    }
+    Ok(components)
+}
+
+/// Decode a composite glyph: recurse into each component with its affine
+/// transform composed onto the sink. When the face is instanced, the `gvar`
+/// deltas for the composite shift each component's placement offset before it
+/// recurses (and the component itself is varied by its own `gvar` data).
+fn outline_composite(
+    face: &Face<'_>,
+    glyph: u16,
+    start: usize,
+    sink: &mut OutlineSink,
+    depth: u32,
+) -> Result<(), FontError> {
+    let components = decode_components(&face.r, start)?;
+    let mut offsets: Vec<(f64, f64)> = components.iter().map(|c| (c.dx, c.dy)).collect();
+    if let Some(var) = &face.var {
+        let n = components.len();
+        let mut deltas = vec![(0.0, 0.0); n + 4];
+        if var
+            .gvar
+            .deltas(&face.r, &face.coords, glyph, n, None, &mut deltas)?
+        {
+            for (offset, delta) in offsets.iter_mut().zip(&deltas) {
+                offset.0 += delta.0;
+                offset.1 += delta.1;
+            }
+        }
+    }
+    for (component, &(dx, dy)) in components.iter().zip(&offsets) {
+        let saved = sink.transform;
+        sink.transform = saved.then(&Affine {
+            a: component.a,
+            b: component.b,
+            c: component.c,
+            d: component.d,
+            dx,
+            dy,
+        });
+        outline_glyph(face, component.glyph, sink, depth + 1)?;
+        sink.transform = saved;
     }
     Ok(())
 }

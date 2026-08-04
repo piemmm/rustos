@@ -25,7 +25,7 @@ const W: u32 = 160;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {

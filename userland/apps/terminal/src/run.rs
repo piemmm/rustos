@@ -117,12 +117,13 @@ mod program {
     /// The character grid `(cols, rows)` that fits a `width_px` × `height_px`
     /// client, from the shared monospace face's advance and line height (the
     /// same metrics [`WIN_WIDTH`]/[`WIN_HEIGHT`] and the renderer derive the
-    /// grid from, §2.2). Floored so the grid never exceeds the surface (no
-    /// clipped cell), at least `1`×`1`, and capped at [`MAX_DIMENSION`] so a
-    /// huge window never asks for an unbounded grid (fail closed).
+    /// grid from, so window sizing and rendering can never disagree). Floored
+    /// so the grid never exceeds the surface (no clipped cell), at least
+    /// `1`×`1`, and capped at [`MAX_DIMENSION`] so a huge window never asks
+    /// for an unbounded grid (fail closed).
     fn grid_dims(width_px: u32, height_px: u32) -> (u16, u16) {
-        let advance = BitmapFont::inconsolata().advance().max(1);
-        let line_height = BitmapFont::inconsolata().line_height().max(1);
+        let advance = BitmapFont::console().cell_width().max(1);
+        let line_height = BitmapFont::console().line_height().max(1);
         let cols = (width_px / advance).clamp(1, u32::from(MAX_DIMENSION)) as u16;
         let rows = (height_px / line_height).clamp(1, u32::from(MAX_DIMENSION)) as u16;
         (cols, rows)

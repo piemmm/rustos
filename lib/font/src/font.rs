@@ -2,11 +2,26 @@
 //! [`Surface`].
 //!
 //! [`BitmapFont`] is a thin, cached front end to the sandboxed OS font
-//! service (`fontd`): it holds only the monospace layout metrics (cell size,
-//! pen advance, baseline, line height) derived from the console-atlas
-//! geometry constants, and fetches each glyph's coverage bitmap from the
-//! service over [`crate::client`]. No font outline or face lives in this
-//! process.
+//! service (`fontd`): it names a **family**, a pixel height, and a weight,
+//! and fetches both a family's line metrics and each glyph's coverage
+//! bitmap from the service over [`crate::client`]. No font outline or face
+//! lives in this process.
+//!
+//! # Monospace and proportional families draw through one path
+//!
+//! A family is either fixed-pitch (every glyph shares one advance,
+//! [`BitmapFont::monospace_advance`] reports it) or proportional (each
+//! glyph advances by its own reported width). [`BitmapFont::advance`],
+//! [`BitmapFont::text_width`], [`BitmapFont::truncate_to_width`], and
+//! [`BitmapFont::draw_text`] all measure through the per-glyph advance the
+//! service reports, so the same code lays out either kind of family — a
+//! monospace family simply reports the same advance for every glyph. A
+//! caller that must draw a character grid (a terminal, a hex view) uses
+//! [`BitmapFont::monospace`] or [`BitmapFont::new`] with a monospace family
+//! and reads [`BitmapFont::cell_width`] for its column width; desktop chrome
+//! measures with [`BitmapFont::text_width`]/[`BitmapFont::advance`] instead
+//! of multiplying a character count by a cell width.
+//!
 //! [`BitmapFont::draw_text`] composites each fetched glyph onto a `lib/raster`
 //! [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path: the text colour is premultiplied once, scaled per
@@ -16,124 +31,122 @@
 
 use core::ops::Range;
 
-use tairix_abi::font_ipc::FontWeight;
+use tairix_abi::font_ipc::{FamilyKey, FontMetrics, FontWeight};
 use tairix_geometry::Scale;
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Fonts, TextRole};
-use tairix_vt::{char_width, truncate_to_width as truncate_to_columns};
+use tairix_vt::char_width;
 
 use crate::atlas;
 use crate::client;
 
-/// The system monospace bitmap font: the layout metrics a client needs to
-/// draw text, backed by the sandboxed font service for glyph coverage.
+/// A family, pixel height, and weight to draw with: the reference a client
+/// needs to fetch a family's line metrics and any glyph's coverage bitmap
+/// from the sandboxed font service.
 ///
-/// The face's uniform advance already carries the inter-glyph side bearings
-/// and its ascent + descent carry the line box, so the pen advances by
-/// exactly the cell width and lines by exactly the cell height.
-///
-/// A font renders at a chosen **cell height in physical pixels**. The metrics
-/// derive from one native size ([`atlas::CELL_HEIGHT`], the console-atlas
-/// geometry); [`inconsolata`] keeps that size, while [`with_pixel_height`]
-/// asks for any other cell — the desktop resolves a comfortable physical size
-/// from the theme's logical font size and the DPI scale. Every glyph is
-/// rasterised by the font service **directly from the TrueType outline** at
-/// the requested size, so text is crisp whether tiny or very large — never a
-/// stretched bitmap. Every derived metric (advance, cell width, baseline, line
-/// height) scales with the cell height, keeping the font monospaced and its
-/// width-to-height ratio constant.
-///
-/// [`inconsolata`]: Self::inconsolata
-/// [`with_pixel_height`]: Self::with_pixel_height
+/// A font renders at a chosen **pixel height in physical pixels**.
+/// [`console`](Self::console) keeps the compiled-in console-atlas cell
+/// height (what the text console draws), [`monospace`](Self::monospace)
+/// renders the fixed-pitch [`FamilyKey::MONO`] family at any other size, and
+/// [`new`](Self::new) renders any family at any size — the desktop resolves
+/// a comfortable physical size from the theme's logical font size and the
+/// DPI scale. Every glyph is rasterised by the font service **directly from
+/// the TrueType outline** at the requested size, so text is crisp whether
+/// tiny or very large — never a stretched bitmap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BitmapFont {
-    /// The cell height this font renders at, in physical pixels, always in
-    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
-    cell_height: u32,
-    /// The weight glyphs are requested in. A heavier weight thickens the
-    /// coverage the service returns and leaves every metric alone, so it is
-    /// not part of any layout arithmetic below.
+    /// The family to render glyphs from.
+    family: FamilyKey,
+    /// The line-box height this font renders at, in physical pixels, always
+    /// in [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
+    pixel_height: u32,
+    /// The weight glyphs are requested in.
     weight: FontWeight,
 }
 
 impl Default for BitmapFont {
-    /// The native-size built-in family ([`inconsolata`](Self::inconsolata)).
+    /// The console family at its native size ([`console`](Self::console)).
     fn default() -> Self {
-        Self::inconsolata()
+        Self::console()
     }
 }
 
 impl BitmapFont {
-    /// The smallest cell height a font may render at, in physical pixels.
+    /// The smallest pixel height a font may render at, in physical pixels.
     ///
-    /// Below this a monospace glyph loses the distinguishing strokes that keep
-    /// text legible, so [`with_pixel_height`](Self::with_pixel_height) never
-    /// renders smaller.
+    /// Below this a glyph loses the distinguishing strokes that keep text
+    /// legible, so [`new`](Self::new) never renders smaller.
     pub const MIN_PIXEL_HEIGHT: u32 = 8;
 
-    /// The largest cell height a font may render at, in physical pixels.
+    /// The largest pixel height a font may render at, in physical pixels.
     ///
-    /// The outline rasteriser produces a crisp glyph at any size, but a cell
-    /// this tall is already a large heading; the bound caps the size of a
-    /// single cached bitmap so a pathological request cannot demand an
+    /// The outline rasteriser produces a crisp glyph at any size, but a line
+    /// box this tall is already a large heading; the bound caps the size of
+    /// a single cached bitmap so a pathological request cannot demand an
     /// unbounded rasterisation.
     pub const MAX_PIXEL_HEIGHT: u32 = 512;
 
-    /// The built-in family at its **native** cell size (the console-atlas
-    /// geometry). This is the size the text console renders at.
+    /// The fixed-pitch [`FamilyKey::MONO`] family at the compiled-in
+    /// console-atlas cell height: what the text console (`lib/fbcon`) and
+    /// the boot console draw.
     #[must_use]
-    pub const fn inconsolata() -> Self {
+    pub const fn console() -> Self {
         Self {
-            cell_height: atlas::CELL_HEIGHT,
+            family: FamilyKey::MONO,
+            pixel_height: atlas::CELL_HEIGHT,
             weight: FontWeight::Regular,
         }
     }
 
-    /// The built-in family rendered at a cell height of `pixels` physical
-    /// pixels, clamped to
+    /// The fixed-pitch [`FamilyKey::MONO`] family rendered at `pixel_height`
+    /// physical pixels, clamped to
     /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
     ///
-    /// The desktop uses this to render UI text at the theme's requested size.
+    /// A character-grid drawer (the terminal, a hex view) that needs a
+    /// specific size but is not drawing from a theme uses this rather than
+    /// [`new`](Self::new).
+    #[must_use]
+    pub const fn monospace(pixel_height: u32) -> Self {
+        Self::new(FamilyKey::MONO, pixel_height)
+    }
+
+    /// `family` rendered at `pixel_height` physical pixels, clamped to
+    /// [`MIN_PIXEL_HEIGHT`](Self::MIN_PIXEL_HEIGHT)..=[`MAX_PIXEL_HEIGHT`](Self::MAX_PIXEL_HEIGHT).
+    ///
     /// Every height rasterises each glyph from the outline (in the font
     /// service) at that exact size, so both smaller and larger text stay
-    /// crisply anti-aliased rather than stretched from a fixed bitmap. Asking
-    /// for exactly the native height yields [`inconsolata`](Self::inconsolata).
+    /// crisply anti-aliased rather than stretched from a fixed bitmap.
     #[must_use]
-    pub const fn with_pixel_height(pixels: u32) -> Self {
-        let cell_height = if pixels < Self::MIN_PIXEL_HEIGHT {
-            Self::MIN_PIXEL_HEIGHT
-        } else if pixels > Self::MAX_PIXEL_HEIGHT {
-            Self::MAX_PIXEL_HEIGHT
-        } else {
-            pixels
-        };
+    pub const fn new(family: FamilyKey, pixel_height: u32) -> Self {
+        let pixel_height = clamp_pixel_height(pixel_height);
         Self {
-            cell_height,
+            family,
+            pixel_height,
             weight: FontWeight::Regular,
         }
     }
 
     /// The font a theme's `role` resolves to at `scale`: the role's authored
-    /// logical size converted to a physical cell height through the one shared
-    /// DPI scale, set in the weight the theme names.
+    /// family and logical size converted to a physical pixel height through
+    /// the one shared DPI scale, set in the weight the theme names.
     ///
     /// This is the only place a themed text role becomes a drawable font, so
-    /// every surface — window furniture, the taskbar, a control label, an app's
-    /// own text — sizes and weights a role identically and none of them repeats
-    /// the logical-to-physical conversion.
+    /// every surface — window furniture, the taskbar, a control label, an
+    /// app's own text — sizes, families, and weights a role identically and
+    /// none of them repeats the logical-to-physical conversion.
     #[must_use]
     pub fn for_role(fonts: &Fonts, role: TextRole, scale: Scale) -> Self {
         let spec = fonts.spec(role);
-        Self::with_pixel_height(scale.scale_length(u32::from(spec.size_px)))
-            .with_weight(spec.weight)
+        Self::new(spec.family, scale.scale_length(u32::from(spec.size_px))).with_weight(spec.weight)
     }
 
     /// The same font set in `weight`.
     ///
     /// The desktop draws a text role in the weight its theme names
     /// (`tairix_theme::FontSpec::weight`); a heavier weight is a different
-    /// raster of the same outline at the same advance, so switching weight
-    /// never moves a glyph or reflows a label.
+    /// raster of the same outline at (for a variable face) its own advance,
+    /// so switching weight never moves a glyph laid out with the weight it
+    /// was measured in.
     #[must_use]
     pub const fn with_weight(self, weight: FontWeight) -> Self {
         Self { weight, ..self }
@@ -145,55 +158,109 @@ impl BitmapFont {
         self.weight
     }
 
-    /// The glyph cell width in pixels: the native cell width scaled to this
-    /// font's cell height (rounded to a whole pixel, never below one).
+    /// The family glyphs are requested from.
     #[must_use]
-    pub const fn glyph_width(self) -> u32 {
-        let scaled =
-            (atlas::CELL_WIDTH * self.cell_height + atlas::CELL_HEIGHT / 2) / atlas::CELL_HEIGHT;
-        if scaled == 0 {
-            1
-        } else {
-            scaled
+    pub const fn family(self) -> FamilyKey {
+        self.family
+    }
+
+    /// The line-box height this font renders at, in physical pixels.
+    #[must_use]
+    pub const fn pixel_height(self) -> u32 {
+        self.pixel_height
+    }
+
+    /// This font's line metrics, fetched from the font service once per
+    /// `(family, pixel_height, weight)` and cached in this process
+    /// ([`crate::client`]).
+    ///
+    /// When no transport is installed, or the service refuses the request,
+    /// this falls back to the compiled-in console-atlas geometry scaled to
+    /// [`pixel_height`](Self::pixel_height) — exactly the scaling the
+    /// monospace-only client used before a font service existed. This keeps
+    /// `lib/fbcon` and the boot console (which never install a transport)
+    /// laying text out correctly with no service running at all, and leaves
+    /// a desktop whose font service has died drawing at a sane approximate
+    /// size instead of collapsing to zero.
+    #[must_use]
+    pub fn metrics(self) -> FontMetrics {
+        client::metrics(self.family, self.pixel_height, self.weight)
+    }
+
+    /// The vertical distance between baselines in pixels.
+    #[must_use]
+    pub fn line_height(self) -> u32 {
+        self.metrics().line_height
+    }
+
+    /// The baseline row within the line box (pixel rows below its top).
+    #[must_use]
+    pub fn baseline(self) -> u32 {
+        self.metrics().baseline
+    }
+
+    /// The glyph line-box height in pixels (same as
+    /// [`pixel_height`](Self::pixel_height)).
+    #[must_use]
+    pub const fn glyph_height(self) -> u32 {
+        self.pixel_height
+    }
+
+    /// The advance every glyph of this font shares, or `None` when the
+    /// family is proportional.
+    #[must_use]
+    pub fn monospace_advance(self) -> Option<u32> {
+        let advance = self.metrics().monospace_advance;
+        (advance != 0).then_some(advance)
+    }
+
+    /// The column width a grid-drawing caller should use: the family's
+    /// monospace advance, or — for a proportional family — the advance of
+    /// `'0'` (digits are tabular in the shipped faces, so this is a sane
+    /// column width even though the family is not truly fixed-pitch).
+    #[must_use]
+    pub fn cell_width(self) -> u32 {
+        match self.monospace_advance() {
+            Some(advance) => advance,
+            None => self.advance('0'),
         }
     }
 
-    /// The glyph cell height in pixels.
+    /// The pen advance for one character, in pixels.
+    ///
+    /// A monospace family advances by its shared cell width times
+    /// [`char_width`] (so a wide CJK scalar reserves two cells); a
+    /// proportional family advances by the glyph's own reported width,
+    /// fetched (and cached) from the font service. A glyph the service
+    /// cannot supply (no transport installed, a refused request) advances by
+    /// zero rather than composing a guessed width.
     #[must_use]
-    pub const fn glyph_height(self) -> u32 {
-        self.cell_height
+    pub fn advance(self, ch: char) -> u32 {
+        if let Some(cell) = self.monospace_advance() {
+            return cell.saturating_mul(u32::from(char_width(ch)));
+        }
+        client::with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
+            glyph.advance
+        })
+        .unwrap_or(0)
     }
 
-    /// The baseline row within the cell (pixel rows above the baseline): the
-    /// native atlas baseline scaled to this font's cell height, so a resized
-    /// glyph sits on the baseline exactly as the native cell does.
-    #[must_use]
-    pub const fn baseline(self) -> u32 {
-        (atlas::BASELINE * self.cell_height + atlas::CELL_HEIGHT / 2) / atlas::CELL_HEIGHT
-    }
-
-    /// The horizontal pen advance per character in pixels (the cell width).
-    #[must_use]
-    pub const fn advance(self) -> u32 {
-        self.glyph_width()
-    }
-
-    /// The vertical distance between baselines in pixels (the cell height).
-    #[must_use]
-    pub const fn line_height(self) -> u32 {
-        self.cell_height
-    }
-
-    /// The pixel width of `text` rendered on one line, including two-cell
-    /// advances for wide Unicode scalars. An empty string is zero wide.
+    /// The pixel width of `text` rendered on one line: the sum of each
+    /// character's [`advance`](Self::advance).
     ///
     /// Arithmetic saturates, so a pathologically long string reports
-    /// [`u32::MAX`] rather than wrapping.
+    /// [`u32::MAX`] rather than wrapping. A monospace family takes the O(1)
+    /// fast path of multiplying by the shared cell width instead of fetching
+    /// each character's advance individually.
     #[must_use]
     pub fn text_width(self, text: &str) -> u32 {
-        text.chars().fold(0, |width, ch| {
-            width.saturating_add(self.advance().saturating_mul(u32::from(char_width(ch))))
-        })
+        if let Some(cell) = self.monospace_advance() {
+            return text.chars().fold(0, |width, ch| {
+                width.saturating_add(cell.saturating_mul(u32::from(char_width(ch))))
+            });
+        }
+        text.chars()
+            .fold(0, |width, ch| width.saturating_add(self.advance(ch)))
     }
 
     /// The longest prefix of `text` whose rendered width fits within `width`
@@ -204,41 +271,66 @@ impl BitmapFont {
     /// titles, the file browser's path bar and entry names), so the
     /// fit-to-width arithmetic lives in one place rather than being repeated
     /// per consumer. A `width` too small for even one glyph yields the empty
-    /// string; a `text` that already fits is returned whole.
+    /// string; a `text` that already fits is returned whole. A proportional
+    /// family walks real per-glyph advances rather than a column count, so
+    /// truncation respects each glyph's own width.
     #[must_use]
     pub fn truncate_to_width(self, text: &str, width: u32) -> &str {
-        truncate_to_columns(text, (width / self.advance()) as usize)
+        if let Some(cell) = self.monospace_advance() {
+            return tairix_vt::truncate_to_width(text, (width / cell.max(1)) as usize);
+        }
+        let mut used = 0u32;
+        let mut end = 0usize;
+        for ch in text.chars() {
+            let next = used.saturating_add(self.advance(ch));
+            if next > width {
+                break;
+            }
+            used = next;
+            end += ch.len_utf8();
+        }
+        &text[..end]
     }
 
-    /// Draw `text` onto `surface` with its top-left corner at `(x, y)` in
+    /// Draw `text` onto `surface` with its pen starting at `(x, y)` in
     /// `color`, returning the pen x-coordinate after the last glyph.
     ///
-    /// The pen advances by [`advance`](Self::advance) per terminal cell. Each
-    /// glyph's coverage is fetched from the font service (cached client-side)
-    /// at this font's cell height and composited over the destination at its
-    /// anti-aliased coverage, so translucent text and glyph edges blend
-    /// correctly. Pixels that fall outside the surface (including at negative
-    /// coordinates) are skipped, so off-screen text clips rather than
-    /// panicking. A scalar the faces do not cover draws the U+FFFD replacement
-    /// glyph (the service's fallback) rather than being silently dropped; if
-    /// the service is unreachable the glyph composites nothing (fail closed)
-    /// rather than reaching for any local font data.
+    /// The pen advances by each character's own [`advance`](Self::advance).
+    /// Each glyph's coverage is fetched from the font service (cached
+    /// client-side) at this font's family, pixel height, and weight, and
+    /// composited over the destination at its anti-aliased coverage, offset
+    /// from the pen by its own left side bearing — so anti-aliased edges,
+    /// translucent text, and a proportional family's varying bearings all
+    /// come out right. Pixels that fall outside the surface (including at
+    /// negative coordinates) are skipped, so off-screen text clips rather
+    /// than panicking. A scalar the faces do not cover draws the U+FFFD
+    /// replacement glyph (the service's fallback) rather than being silently
+    /// dropped; if the service is unreachable the glyph composites nothing
+    /// (fail closed) rather than reaching for any local font data.
     pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
         let sources = coverage_sources(color);
-        let advance = self.advance();
         let mut pen = x;
         for ch in text.chars() {
-            let cells = u32::from(char_width(ch));
-            let step_advance = advance.saturating_mul(cells);
-            // A glyph may span two cells; the service returns a bitmap two
-            // cells wide, so a narrow glyph is clipped to its own advance.
-            client::with_glyph(ch, self.cell_height, self.weight, |glyph| {
-                let visible = step_advance.min(glyph.width);
-                draw_coverage_glyph(surface, pen, y, glyph, visible, &sources);
+            let advance = self.advance(ch);
+            client::with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
+                let origin_x = pen.saturating_add(glyph.left);
+                draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
             });
-            pen = pen.saturating_add(advance_step(step_advance));
+            pen = pen.saturating_add(advance_step(advance));
         }
         pen
+    }
+}
+
+/// Clamp a requested pixel height into
+/// [`BitmapFont::MIN_PIXEL_HEIGHT`]..=[`BitmapFont::MAX_PIXEL_HEIGHT`].
+const fn clamp_pixel_height(pixels: u32) -> u32 {
+    if pixels < BitmapFont::MIN_PIXEL_HEIGHT {
+        BitmapFont::MIN_PIXEL_HEIGHT
+    } else if pixels > BitmapFont::MAX_PIXEL_HEIGHT {
+        BitmapFont::MAX_PIXEL_HEIGHT
+    } else {
+        pixels
     }
 }
 
@@ -423,6 +515,8 @@ mod blit_tests {
         CachedGlyph {
             width,
             height,
+            advance: width,
+            left: 0,
             data: Box::from(data.as_slice()),
         }
     }

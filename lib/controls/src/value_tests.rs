@@ -25,7 +25,7 @@ const W: u32 = 200;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -82,7 +82,7 @@ fn reduced_motion() -> Theme {
         base.appearance(),
         *base.palette(),
         *base.metrics(),
-        base.fonts().clone(),
+        *base.fonts(),
         base.cursors().clone(),
         base.motion().with_reduced_motion(true),
         base.density(),

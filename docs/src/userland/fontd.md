@@ -10,8 +10,9 @@ coverage over the reserved `FONT_ENDPOINT`, through the thin
 `/System/Services/fontd.app/Run`.
 
 The crate is `no_std` and depends only on the audited `lib/*` crates
-`tairix-abi`, `tairix-fontface`, `tairix-vt`, and `tairix-log`, so a userland
-service never links a kernel or driver crate (`AGENTS.md` §17.4).
+`tairix-abi`, `tairix-fontface`, `tairix-log`, `tairix-reclaim`, and
+`tairix-font`'s shared cached-glyph declaration, so a userland service never
+links a kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Why a service
 
@@ -35,48 +36,92 @@ capabilities and its account ceiling grants exactly the same three:
 - `CAP_IPC_BIND_PRIVILEGED` — to bind the reserved well-known `FONT_ENDPOINT`,
   so a squatter cannot claim the rendezvous first and feed forged glyph
   coverage to the compositor and every app.
-- `CAP_FS_ACCESS` — for the one-shot startup read of the four committed
-  `/System/Fonts` faces through the secured VFS, which still authorises every
-  path per-inode under the service's attested identity. `/System` is mounted
-  read-only, so this reach can never write.
+- `CAP_FS_ACCESS` — for the startup scan of the `/System/Fonts` family
+  manifests and the first-use read of each face, through the secured VFS,
+  which still authorises every path per-inode under the service's attested
+  identity. `/System` is mounted read-only, so this reach can never write.
 - `CAP_LOG_EMIT` — for its structured audit records (the `17000` event range:
-  `SERVICE_READY`, `SERVICE_UNAVAILABLE`).
+  `SERVICE_READY`, `SERVICE_UNAVAILABLE`, `FAMILY_SKIPPED`).
 
-It requests **no** spawn or network authority, and keeps no open descriptor
-after the startup read — once parsed, the service retains only the in-memory
-faces. The untrusted TrueType parse runs in this service's own isolated address
-space, so even a malformed face — the classic font-parser attack surface —
-faults only this sandbox, never a compositor or a terminal. Serving glyph
-coverage needs no capability of its own: drawing text is not a security
-boundary (§5.2), and the *reply path* still validates every field and fails
-closed on a corrupt frame (§5.4).
+It requests **no** spawn or network authority. The only descriptors it holds
+are the read-only face handles opened while scanning the store, each released
+as soon as that face's bytes have been read; from then on the service retains
+only the in-memory faces. The untrusted TrueType parse runs in this service's
+own isolated address space, so even a malformed face — the classic font-parser
+attack surface — faults only this sandbox, never a compositor or a terminal.
+Serving glyph coverage needs no capability of its own: drawing text is not a
+security boundary (§5.2), and the *reply path* still validates every field and
+fails closed on a corrupt frame (§5.4).
+
+## The store, discovered not hardcoded
+
+`/System/Fonts` holds one directory per family, each carrying a `FontFamily`
+manifest (`tairix_fontface::FamilyManifest`) naming the family's label, its
+kind (`proportional`, `monospace`, or the coverage-only `fallback` role), its
+faces in resolution order, and optionally one fallback family whose faces
+extend its coverage. Nothing in the service names a family or a face: adding a
+family is dropping its directory into the store (the image builder plants
+exactly what `lib/font/assets/` holds), so the shipped set — `inter`,
+`noto-sans`, `noto-serif`, the `mono` console family, and the shared
+`sans-fallback` coverage set — is data, not code.
+
+Discovery is bounded to `FONT_MAX_FAMILIES` directories and sorted by
+directory name, so what the service offers does not depend on how the
+filesystem happens to list the store. A directory whose name is not a valid
+family key, that carries no readable manifest, or whose manifest does not parse
+is **skipped with a logged warning** (`FAMILY_SKIPPED`) — one bad family never
+takes the store down. A store with not one usable family *is* fatal: the
+service records `SERVICE_UNAVAILABLE` and exits rather than serving fabricated
+coverage.
+
+**A face's bytes are read on first use, never at startup.** Discovery opens
+each declared face read-only and keeps the handle; the bytes are read once, the
+first time a request actually resolves to that face, and are retained for the
+service's life. A session that never draws Chinese never pays for the Chinese
+face — which matters on a small machine, where the shipped CJK companions are
+tens of megabytes. What is retained is bounded by the store's own size, not by
+anything a caller can grow.
 
 ## The dispatcher
 
 The host-testable core is `FontService`, the rasterising dispatcher. It owns
-the parsed faces and a byte-budgeted `(face, glyph, cell height, weight)`
-coverage cache, and turns one decoded `FontRequest` into a framed reply:
+the discovered families, their lazily-loaded faces and per-weight parsed
+instances, and a byte-budgeted coverage cache, and turns one decoded
+`FontRequest` into a framed reply:
 
-1. Resolve the requested Unicode scalar to the covering face —
-   Latin/Greek/Cyrillic to Inconsolata EX, Japanese to M PLUS 1 Code, Korean
-   to D2Coding, Hebrew to Noto Sans Hebrew, else U+FFFD.
-2. Rasterise once at the requested cell height through the shared
-   `tairix-fontface` engine (the 4-bit coverage engine scaled ×17 to the
-   protocol's 8-bit samples — byte-identical to the atlas the old blitter
-   produced), and memoise the result.
+1. Resolve the requested scalar within the named family: its own faces in
+   manifest order, then its declared fallback family's faces in the same
+   order, then U+FFFD from the family's primary face. A scalar is never
+   refused for lack of coverage; an *unknown family key* is refused with
+   `Errno::NotFound` and never silently substituted.
+2. Rasterise once at the geometry the family's **primary** face defines at the
+   requested pixel height — pixels per em, baseline row, box height — even
+   when the glyph came from a fallback face, so mixing scripts never shifts
+   the baseline or the line box mid-run. The shared `tairix-fontface` engine
+   produces 4-bit coverage scaled ×17 to the protocol's 8-bit samples, and
+   the result is memoised.
 3. Emit the reply. `handle` **always** emits a reply, framing a status-word
    error frame on any failure so both the glyph and metrics clients decode a
    definite outcome (fail closed).
 
-The face bytes are injected (borrowed) rather than embedded, so the
-security-relevant rasterise-and-cache logic is exhaustively host-tested against
-the committed repository faces with no on-disk `/System/Fonts`. The
-`tairix-fontface` TrueType parser additionally carries its own fuzz harness
-(`AGENTS.md` §19.6).
+`Metrics` answers from the family's primary face: the echoed pixel height, the
+baseline row, the line height (pixel height plus the face's own line gap), and
+a `monospace_advance` that is non-zero **only** when the manifest says
+`monospace` *and* the face really does advance uniformly — a proportional
+family always reports `0`, which is how a client learns it must ask per glyph.
+`Families` lists the selectable families only; a `fallback`-role family exists
+to extend another's coverage and is never offered to a user.
+
+The store is reached through two injected seams (`FontStore` for the scan,
+`FaceLoad` for one face's bytes), so the whole discovery-to-serve pipeline is
+exhaustively host-tested against an in-memory fixture built from the small
+committed faces — no on-disk `/System/Fonts`, and no multi-megabyte face in a
+test binary. The `tairix-fontface` TrueType parser additionally carries its own
+fuzz harness (`AGENTS.md` §19.6).
 
 ## What a caller can make the service hold
 
-The requested cell height comes from the caller, so the *size* of what a
+The requested pixel height comes from the caller, so the *size* of what a
 request makes the service retain is caller-influenced: a client walking the
 permitted height range at the widest permitted bitmap would drive an
 entry-counted cache into hundreds of megabytes. The cache is therefore bounded
@@ -88,8 +133,15 @@ side of the endpoint uses, so the two cannot drift apart. However many
 distinct sizes a caller asks for, the retained bytes stay under that ceiling
 and the least recently used rasters are released and overwritten to make room.
 
+The key names the **requesting** family, the family whose face actually
+supplied the glyph, that face's index, the glyph id, the pixel height, and the
+weight. Both families are in the key because two families sharing one fallback
+face derive their geometry from their own primary faces, so the very same
+physical glyph can legitimately rasterise to two different bitmaps — keying by
+the resolved face alone could serve one family's raster to the other.
+
 Bounding retention is not input validation and does not replace it: the
-permitted scalar, cell-height, and weight ranges are checked by the
+permitted scalar, pixel-height, and weight ranges are checked by the
 `tairix_abi::font_ipc` wire decode before a request reaches the dispatcher,
 and an out-of-range request is refused with an error frame rather than
 rasterised.
@@ -115,49 +167,56 @@ the same ABI discipline as the syscall table (§9): versioned, hashed, and
 frozen on the first release (mutable now — `abi-v1` is not frozen). It is not
 part of the curated C-ABI surface, so the generated C headers are unchanged.
 
-- A fixed 20-byte `FontRequest` in: `Glyph { scalar, cell_height, weight }` or
-  `Metrics { cell_height }`. The scalar is carried as a `char`, so a surrogate
-  or out-of-range code point is unrepresentable in an accepted request; the
-  cell height is bounded by `FONT_MIN_CELL_HEIGHT`/`FONT_MAX_CELL_HEIGHT`
-  (8..=512) — a validation bound, not a capacity. The `weight` is a closed
-  `FontWeight` (`Regular`, `Medium`, `Bold`) decoded from its wire value, so an
-  unknown weight is refused rather than coerced. The reserved tail of every
-  frame must be zero, so a smuggled field is a decode failure, never silently
-  ignored.
-- A status-framed reply out: a glyph reply is `width`, `height`, `advance`, and
-  the `width * height` 8-bit coverage samples (bounded by
-  `FONT_MAX_GLYPH_REPLY`); a metrics reply is the monospace `FontMetrics`
-  (`cell_width`, `cell_height`, `baseline`) for a client that holds no geometry
-  of its own. One shared `glyph_coverage_len` bounds check governs both encode
-  and decode, so producer and consumer cannot diverge.
+- A fixed 36-byte `FontRequest` in: `Glyph { family, scalar, pixel_height,
+  weight }`, `Metrics { family, pixel_height, weight }`, or `Families`. The
+  family is a validated `FamilyKey` (a `FONT_FAMILY_KEY_LEN`-byte lower-case
+  key, so a path separator or a stray byte is unrepresentable in an accepted
+  request); the scalar is carried as a `char`, so a surrogate or out-of-range
+  code point is likewise unrepresentable; the pixel height is bounded by
+  `FONT_MIN_PIXEL_HEIGHT`/`FONT_MAX_PIXEL_HEIGHT` (8..=512) — a validation
+  bound, not a capacity. The `weight` is a closed `FontWeight` (`Regular`,
+  `Medium`, `Bold`) decoded from its wire value, so an unknown weight is
+  refused rather than coerced. Every field an operation does not use, and the
+  reserved halfword, must be zero, so a smuggled field is a decode failure,
+  never silently ignored.
+- A status-framed reply out: a glyph reply is `width`, `height`, `advance`,
+  `left`, and the `width * height` 8-bit coverage samples (bounded by
+  `FONT_MAX_GLYPH_REPLY`; `width == 0` is an ink-less glyph such as a space);
+  a metrics reply is `FontMetrics { pixel_height, baseline, line_height,
+  monospace_advance }`, where a `monospace_advance` of `0` *means*
+  proportional; a families reply is up to `FONT_MAX_FAMILIES` entries of
+  (key, label, kind). One shared `glyph_coverage_len` bounds check governs both
+  encode and decode, so producer and consumer cannot diverge.
 
-## Weights are synthesised, and never change layout
+## Weights: real where the face has an axis, synthetic where it does not
 
-A theme names a weight per text role (see [Desktop theming](../desktop/theming.md)),
-but the four committed `/System/Fonts` faces ship one weight each. A heavier run
-is therefore rasterised from the *same* outline and thickened inside the
-service: `Medium` adds a stroke of em/48 and `Bold` em/24 — the strength a
-stroke-widening rasteriser applies for a synthetic bold — carried in 1/256 px
-fixed point so the thickening is a smooth function of the rendered size rather
-than a whole-pixel jump.
+A theme names a weight per text role (see [Desktop theming](../desktop/theming.md)).
+The shipped proportional families are **variable** faces, so a weight is a real
+design instance: the face is instanced at the requested weight's OpenType
+`wght` coordinate (400 / 500 / 700), which changes the outlines *and* the
+advances the service reports — a bold run is genuinely wider than its regular
+twin, exactly as the designer drew it. Each distinct weight actually asked for
+is parsed once per face and kept, so no request re-parses a face.
 
-Two properties make this safe to put on the text path:
+A face with no `wght` axis — the static console faces — has one design
+instance, and the requested weight is synthesised instead: `Medium` adds a
+stroke of em/48 and `Bold` em/24, carried in 1/256 px fixed point so the
+thickening is a smooth function of the rendered size rather than a whole-pixel
+jump. Two properties make that safe to put on the text path:
 
 - **The stroke is horizontal only.** A vertical smear would push an ascender or
-  descender out of the cell the client laid out, contradicting the geometry
-  `FontMetrics` promised. A horizontal one stays inside the (up to two-cell)
-  bitmap and leaves the baseline, cell height, and pen advance untouched, so a
-  bold run occupies exactly the cells its regular twin would and every layout
-  is weight-independent.
+  descender out of the box the client laid out, contradicting the geometry
+  `FontMetrics` promised. A horizontal one stays inside the bitmap and leaves
+  the baseline, box height, and pen advance untouched, so a synthetically bold
+  run occupies exactly what its regular twin would.
 - **It transforms coverage, not outlines.** Thickening the 8-bit alpha samples
   keeps the whole operation inside the sandbox that already owns the raster,
   needs no second rasterisation pass, and cannot move a control point. A
   `Regular` request adds a stroke of zero and is byte-identical to the
   pre-weight output.
 
-The weight is part of the service's cache key alongside the face, glyph, and
-cell height, so each (glyph, size, weight) is emboldened once and the hot path
-is a cache read.
+The weight is part of the service's cache key, so each
+(family, glyph, size, weight) is rendered once and the hot path is a cache read.
 
 ## Startup and discovery
 

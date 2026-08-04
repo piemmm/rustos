@@ -21,7 +21,7 @@ use crate::testkit::high_contrast;
 const W: u32 = 96;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: tairix_theme::Rgba) -> Pixel {
@@ -47,7 +47,7 @@ fn reduced_motion() -> Theme {
         base.appearance(),
         *base.palette(),
         *base.metrics(),
-        base.fonts().clone(),
+        *base.fonts(),
         base.cursors().clone(),
         base.motion().with_reduced_motion(true),
         base.density(),

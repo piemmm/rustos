@@ -34,7 +34,7 @@ const W: u32 = 200;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::inconsolata()
+    BitmapFont::console()
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -368,7 +368,7 @@ fn drag_selects_a_range_then_typing_replaces_it() {
     let theme = Theme::dark();
     let mut field = TextField::new().with_text("abcdef");
     field.set_focused(true);
-    let advance = font().advance();
+    let advance = font().cell_width();
     // Press at the start, drag several cells right, release: selects a run.
     field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme, font());
     field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
@@ -542,7 +542,7 @@ fn reduced_motion() -> Theme {
         base.appearance(),
         *base.palette(),
         *base.metrics(),
-        base.fonts().clone(),
+        *base.fonts(),
         base.cursors().clone(),
         base.motion().with_reduced_motion(true),
         base.density(),

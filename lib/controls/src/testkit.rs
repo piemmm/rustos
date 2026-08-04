@@ -22,7 +22,7 @@ pub(crate) fn high_contrast() -> Theme {
         base.appearance(),
         *base.palette(),
         *base.metrics(),
-        base.fonts().clone(),
+        *base.fonts(),
         base.cursors().clone(),
         base.motion(),
         base.density(),

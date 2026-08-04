@@ -180,7 +180,7 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
 #[test]
 fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let window = Rect::new(0, 0, 400, 400);
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
     let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
@@ -217,7 +217,7 @@ fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
 #[test]
 fn the_content_area_is_inset_by_the_rail_and_untouched_without_one() {
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let window = Rect::new(0, 0, 400, 300);
     let places = Places::new(&home(), &[]);
     let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
@@ -268,7 +268,7 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     // The selection reaches the drawn rail: the frame differs once the
     // browser stands on a place.
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let viewport = Rect::new(0, 0, 400, 300);
     let chrome = crate::ManagerChrome {
         tools: &[],
@@ -612,7 +612,7 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
     let surface = crate::render(
         &browser,
         &theme,
-        tairix_font::BitmapFont::inconsolata(),
+        tairix_font::BitmapFont::console(),
         Rect::new(0, 0, 200, 120),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -627,7 +627,7 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(1).expect("select second entry");
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let row_height = font.glyph_height() + 4;
     let header = crate::render::chrome_height(font, &theme);
     let surface = crate::render(
@@ -680,7 +680,7 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     let surface = crate::render(
         &browser,
         &theme,
-        tairix_font::BitmapFont::inconsolata(),
+        tairix_font::BitmapFont::console(),
         Rect::new(0, 0, 4, 3),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -835,7 +835,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
     use crate::render::{chrome_height, entry_index_at, row_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
@@ -891,7 +891,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
     use crate::render::{chrome_height, entry_index_at, reveal_selection, row_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(font);
@@ -1002,7 +1002,7 @@ fn render_crumb_at_mirrors_the_drawn_path_bar() {
     use crate::render::{chrome_height, crumb_at, toolbar_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     // The path bar sits below the toolbar strip; a click lands on a crumb only
     // within that band, so hit-test at its vertical middle.
@@ -1350,7 +1350,7 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
 fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
     use crate::render::{row_height, scroll_lines};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     let row = row_height(font);
@@ -1382,7 +1382,7 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     use tairix_controls::{ScrollBar, ScrollOrientation};
     use tairix_geometry::Scale;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(40);
     let row = row_height(font);
@@ -1417,7 +1417,7 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
 fn scrollbar_bounds_matches_the_reserved_gutter() {
     use crate::render::scrollbar_bounds;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 200, 200);
     let header = crate::render::chrome_height(font, &theme);
@@ -1438,7 +1438,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
     use tairix_geometry::Point;
     use tairix_input::{InputEvent, PointerButton};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(40);
     let row = row_height(font);
@@ -1479,7 +1479,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     use tairix_geometry::{Point, Scale};
     use tairix_input::{InputEvent, PointerButton};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(60);
     let row = row_height(font);
@@ -1559,7 +1559,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     use crate::render::{entry_index_at, selection_rect};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
@@ -1641,7 +1641,7 @@ fn shows(surface: &Surface, color: Color) -> bool {
 
 #[test]
 fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_returns() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
@@ -1687,7 +1687,7 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
 
 #[test]
 fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let browser = many_files(20);
     let mut artwork = RecordingArtwork::new(24, Color::rgb(255, 0, 255));
@@ -1825,7 +1825,7 @@ fn grid_surface<S: DirectorySource>(
     crate::render(
         browser,
         &Theme::dark(),
-        tairix_font::BitmapFont::inconsolata(),
+        tairix_font::BitmapFont::console(),
         vp,
         &crate::ManagerChrome::none(),
         artwork,
@@ -2446,7 +2446,7 @@ mod rename_model {
 
     #[test]
     fn selection_rect_locates_the_selected_row_and_is_none_when_empty() {
-        let font = tairix_font::BitmapFont::inconsolata();
+        let font = tairix_font::BitmapFont::console();
         let theme = Theme::dark();
         let viewport = Rect::new(0, 0, 200, 200);
 
@@ -4634,7 +4634,7 @@ fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
     use crate::chrome::ContextMenuModel;
     use crate::render::{build_context_menu, context_menu_rect};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     // A window comfortably larger than the menu, so a mid-window anchor fits.
     let vp = Rect::new(0, 0, 800, 600);
@@ -4672,7 +4672,7 @@ fn draw_context_menu_paints_into_the_surface_without_panicking() {
     use crate::render::{build_context_menu, draw_context_menu};
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     let browser = Browser::open_root(activation_source()).expect("root");
@@ -4700,7 +4700,7 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
     use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
     use crate::render::{build_context_menu, context_menu_command_at};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     // A selection, no clipboard: the item commands are enabled, Paste disabled.
@@ -4750,7 +4750,7 @@ fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
     use crate::chrome::{ContextMenuModel, CONTEXT_COMMANDS};
     use crate::render::{build_context_menu, context_menu_command_at, context_menu_command_rect};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     // A selection so the item commands (Delete among them) are enabled.
@@ -4804,7 +4804,7 @@ fn build_open_with_menu_lists_each_candidate_application_by_name_in_order() {
 fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
     use crate::render::{build_open_with_menu, open_with_index_at};
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     let mut store = open_with_store();
@@ -5020,7 +5020,7 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
     use crate::render::{chrome_height, toolbar_command_at, toolbar_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, chrome_height(font, &theme) + 40);
 
@@ -5086,7 +5086,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     // (the Empty Trash tool's own enable state is exercised separately).
     let tool_model = ManagerToolModel::new(true);
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, crate::render::chrome_height(font, &theme) + 40);
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
@@ -5395,7 +5395,7 @@ fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
 
 #[test]
 fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     // A generous window: the panel fits and is centered within it.
@@ -5425,7 +5425,7 @@ fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_properties_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5505,7 +5505,7 @@ use tairix_geometry::Point;
 
 #[test]
 fn permission_toggle_cells_are_pairwise_non_overlapping() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 480);
     let cells = permission_toggle_cells(vp, font, &theme).expect("grid fits the default popup");
@@ -5573,7 +5573,7 @@ fn permission_cells_report_exactly_the_set_rwx_bits() {
 fn draw_properties_editable_paints_the_toggles_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 480);
     let props = Properties::from_stat(
@@ -5593,7 +5593,7 @@ fn draw_properties_editable_paints_the_toggles_without_panicking() {
 
 #[test]
 fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     // The editable Properties popup is tall enough to hold the metadata fields
     // plus the labelled permissions grid at the default window height.
@@ -5638,7 +5638,7 @@ use tairix_controls::text::TextField;
 
 #[test]
 fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5684,7 +5684,7 @@ fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
 fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5783,7 +5783,7 @@ fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
 
 #[test]
 fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     let vp = Rect::new(0, 0, 480, 320);
@@ -5811,7 +5811,7 @@ fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
@@ -5828,7 +5828,7 @@ fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
 
 #[test]
 fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
@@ -5980,7 +5980,7 @@ fn progress_cancel_is_latched_and_shown() {
 
 #[test]
 fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     let vp = Rect::new(0, 0, 480, 320);
@@ -6003,7 +6003,7 @@ fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let mut model = ProgressModel::new(ProgressOp::Copy);
@@ -6021,7 +6021,7 @@ fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
 
 #[test]
 fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::inconsolata();
+    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
 
