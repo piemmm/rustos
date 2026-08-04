@@ -1054,7 +1054,9 @@ impl Runner {
             || !spec.pointer_script.is_empty()
             || !spec.screendumps.is_empty()
             || !spec.monitor_commands.is_empty())
-        .then(MonitorSocket::reserve);
+        .then(|| ReservedSocket::reserve("mon"))
+        .transpose()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         if let Some(mon) = &monitor {
             cmd.arg("-chardev");
             let mut chardev = OsString::from("socket,id=tairix-mon,server=on,wait=off,path=");
@@ -1184,7 +1186,7 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
 fn supervise(
     mut child: Child,
     spec: &Spec,
-    monitor: Option<&MonitorSocket>,
+    monitor: Option<&ReservedSocket>,
 ) -> io::Result<Outcome> {
     // The guest is supervised on an *inactivity* deadline, not an absolute
     // one: it is declared hung only once `spec.timeout` elapses with no new
@@ -1306,7 +1308,7 @@ struct WaitLoop<'a> {
     /// The test spec: deadline, injections, and optional completion gate.
     spec: &'a Spec,
     /// The QMP monitor connection, when the spec drives one.
-    monitor: Option<&'a MonitorSocket>,
+    monitor: Option<&'a ReservedSocket>,
     /// The serial-drain thread handle, polled for an early drain failure.
     reader: &'a mut Option<std::thread::JoinHandle<io::Result<()>>>,
     /// The stderr-drain thread handle, polled for an early drain failure.
@@ -1667,32 +1669,79 @@ enum DoneReason {
     DrainFailed(String),
 }
 
-/// A reserved path for QEMU's monitor unix socket.
+/// The longest unix-socket path this host can bind, including its
+/// terminating NUL.
 ///
-/// The path is unique per run (process id + a monotonic counter) so
-/// parallel runs in one process (the `cargo xtask` soak) never collide.
-/// QEMU creates the socket (`server=on`); dropping this removes the
-/// socket file so a run leaves no stray socket behind.
-struct MonitorSocket {
+/// A unix socket's address is a fixed `sun_path` array, not a heap string:
+/// 108 bytes on Linux, 104 on macOS/BSD. Taking the smaller of the two makes
+/// a path that passes here bindable on every host we build on, so a naming
+/// mistake fails the same way everywhere instead of only on the tighter
+/// platform. This is a bound the OS ABI dictates, not a capacity to grow.
+const SOCKET_PATH_MAX: usize = 104;
+
+/// A reserved path for a unix socket one QEMU run uses, removed when this is
+/// dropped so a run leaves no stray socket behind.
+///
+/// Both of the run's socket kinds hold one: QEMU's monitor socket (which QEMU
+/// itself creates, `server=on`) and each netstack wire's datagram pair. One
+/// definition names them all and enforces the length bound in one place.
+pub struct ReservedSocket {
     path: PathBuf,
 }
 
-impl MonitorSocket {
-    fn reserve() -> Self {
+impl ReservedSocket {
+    /// Reserve a short, unique temp-directory path for one socket of this run,
+    /// named `tairix-qemu-<role>-<pid>-<n>.sock`.
+    ///
+    /// `role` is a short fixed word naming the wire's end (`mon`, `net0q`,
+    /// `net0p`, …). The process id and a monotonic counter make the path
+    /// unique across concurrent runs both between processes and within one
+    /// (the `cargo xtask` soak runs several guests at once).
+    ///
+    /// # The name must not carry the caller's identity
+    ///
+    /// A unix socket's address is a fixed `sun_path` array — 108 bytes on
+    /// Linux, 104 on macOS — and the temp directory alone can consume half of
+    /// it, since macOS hands out a 49-byte per-user directory. A name built
+    /// from a test's package or binary name therefore overflows the bound on a
+    /// perfectly ordinary host, and does so *deterministically for the
+    /// longest-named tests only*, which reads like a mysterious per-test
+    /// failure rather than the naming bug it is. The reserved name is a
+    /// bounded constant shape instead, and a run's identity lives where it is
+    /// actually useful for debugging: the `.pcap` capture and the serial log
+    /// beside the kernel image.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with the measured length when even this shape cannot fit
+    /// the bound, rather than deferring an opaque `bind` error to the caller.
+    pub fn reserve(role: &str) -> Result<Self, String> {
         use std::sync::atomic::AtomicU64;
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("tairix-qemu-mon-{}-{}.sock", std::process::id(), n));
-        Self { path }
+        let path = std::env::temp_dir().join(format!(
+            "tairix-qemu-{role}-{}-{n}.sock",
+            std::process::id()
+        ));
+        let len = path.as_os_str().len();
+        if len >= SOCKET_PATH_MAX {
+            return Err(format!(
+                "socket path {} is {len} bytes, over the {SOCKET_PATH_MAX}-byte unix-socket limit \
+                 (set TMPDIR to a shorter directory)",
+                path.display()
+            ));
+        }
+        Ok(Self { path })
     }
 
-    fn path(&self) -> &Path {
+    /// The reserved path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
-impl Drop for MonitorSocket {
+impl Drop for ReservedSocket {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -2114,7 +2163,7 @@ impl InjectionState {
     fn drive_monitor_commands(
         &mut self,
         spec: &Spec,
-        monitor: Option<&MonitorSocket>,
+        monitor: Option<&ReservedSocket>,
         monitor_seen: &[Arc<AtomicBool>],
     ) -> Result<(), String> {
         if let Some(command) = spec.monitor_commands.get(self.monitor_step) {
@@ -2138,7 +2187,7 @@ impl InjectionState {
     fn drive(
         &mut self,
         spec: &Spec,
-        monitor: Option<&MonitorSocket>,
+        monitor: Option<&ReservedSocket>,
         markers: &InjectionMarkers<'_>,
     ) -> Result<(), String> {
         // Safe to unwrap inside the closures: each `*_sent` flag is only
@@ -2259,7 +2308,7 @@ impl InjectionState {
     /// Returns the failing injection's message (`what` names it).
     fn send(
         &mut self,
-        monitor: Option<&MonitorSocket>,
+        monitor: Option<&ReservedSocket>,
         what: &str,
         command: &str,
     ) -> Result<(), String> {
@@ -2942,6 +2991,41 @@ mod tests {
             PathBuf::from("/tmp/net.peer.sock")
         );
         assert_eq!(s.net_devices[0].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
+    }
+
+    #[test]
+    fn reserved_socket_paths_fit_the_unix_socket_bound() {
+        // The bound is what makes a wire bindable on every host: a name built
+        // from a long test-binary name overflowed `sun_path` under macOS's
+        // 49-byte temp directory, and did so only for the longest-named
+        // tests, which read like a per-test mystery rather than a naming bug.
+        for role in ["mon", "net0q", "net0p", "net1q", "net1p"] {
+            let sock = ReservedSocket::reserve(role).expect("reserve");
+            let len = sock.path().as_os_str().len();
+            assert!(
+                len < SOCKET_PATH_MAX,
+                "{} is {len} bytes, over the {SOCKET_PATH_MAX}-byte bound",
+                sock.path().display()
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_socket_paths_are_unique_within_a_process() {
+        // Concurrent runs in one process (the soak) must never share a wire.
+        let a = ReservedSocket::reserve("net0p").expect("reserve");
+        let b = ReservedSocket::reserve("net0p").expect("reserve");
+        assert_ne!(a.path(), b.path());
+    }
+
+    #[test]
+    fn dropping_a_reserved_socket_removes_its_file() {
+        let sock = ReservedSocket::reserve("droptest").expect("reserve");
+        let path = sock.path().to_path_buf();
+        std::fs::write(&path, b"").expect("create socket stand-in");
+        assert!(path.exists());
+        drop(sock);
+        assert!(!path.exists(), "a run leaves no stray socket behind");
     }
 
     #[test]

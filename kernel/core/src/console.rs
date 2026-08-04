@@ -338,6 +338,12 @@ impl InputRing {
 /// [`ConsoleInput`] half (the seat registry's text sink) of a
 /// keyboard-backed console (`plans/PI.md` P11).
 ///
+/// A read takes at most one line ([`tairix_tty::read_bounded`]), so what a
+/// user typed ahead of the current line survives a reader that is only
+/// entitled to that line: the type-ahead stays in the terminal for whoever
+/// reads next, which across a login's hand-over to the session shell is a
+/// different process.
+///
 /// The video console installs one of these so a directly attached
 /// keyboard's decoded bytes — encoded and pushed by the seat
 /// registry (`crate::seat`) while the seat is unowned —
@@ -374,20 +380,32 @@ impl ConsoleInputQueue {
         }
     }
 
-    /// Drain up to `buf.len()` queued bytes into `buf`, zeroing each
+    /// Drain **at most one line** of queued input into `buf`, zeroing each
     /// drained slot in the ring (a transited credential
     /// is not retained), and return the number drained.
+    ///
+    /// The bound is the shared terminal read bound
+    /// ([`tairix_tty::read_bounded`]): the drain stops after the line
+    /// delimiter, so type-ahead queued behind the line this reader asked for
+    /// stays in the terminal for whoever reads next. That reader is often a
+    /// *different process* — a login authenticates and launches the session
+    /// shell, a shell runs a foreground child — and bytes taken past the
+    /// delimiter would leave with the reader that took them and be lost. The
+    /// whole take runs under the ring lock, so a burst arriving mid-drain
+    /// cannot widen it.
     fn drain(&self, buf: &mut [u8]) -> usize {
         let mut ring = self.ring.lock();
-        let take = core::cmp::min(ring.len, buf.len());
-        for slot in buf.iter_mut().take(take) {
+        tairix_tty::read_bounded(buf, || {
+            if ring.len == 0 {
+                return None;
+            }
             let idx = ring.head % CONSOLE_INPUT_QUEUE_CAPACITY;
-            *slot = ring.buf[idx];
+            let byte = ring.buf[idx];
             ring.buf[idx] = 0;
             ring.head = (ring.head + 1) % CONSOLE_INPUT_QUEUE_CAPACITY;
             ring.len -= 1;
-        }
-        take
+            Some(byte)
+        })
     }
 
     /// Free space, in bytes, currently available in the ring.
@@ -941,7 +959,7 @@ impl SecretFeedback {
                 continue;
             }
             for &literal in step.literal() {
-                let render = if literal == control::CR || literal == control::LF {
+                let render = if tairix_tty::is_line_delimiter(literal) {
                     state.len = 0;
                     state.indicator.input(SecretInput::Submitted, now_ns)
                 } else if control::is_line_erase(literal) {
@@ -1935,6 +1953,70 @@ mod tests {
         assert_eq!(queue.read(&mut []), Ok(0));
         let mut buf = [0u8; 8];
         assert_eq!(queue.read(&mut buf), Ok(4));
+    }
+
+    #[test]
+    fn input_queue_read_stops_at_the_end_of_a_line() {
+        let queue = ConsoleInputQueue::new();
+        // The type-ahead a user gets through before the prompts drain it:
+        // a username line, a password line, and the command typed at the
+        // shell the login is about to launch.
+        assert_eq!(queue.push(b"root\nroot\ndesktop\n"), Ok(18));
+        // Each reader asks for a whole buffer and is handed exactly the line
+        // in front of it. The bound is what keeps the third line queued
+        // across the login -> shell hand-over: a read that returned it to
+        // `login` would strand it in that process, and the keystrokes the
+        // user typed would be gone.
+        let mut buf = [0u8; 64];
+        assert_eq!(queue.read(&mut buf), Ok(5));
+        assert_eq!(&buf[..5], b"root\n");
+        assert_eq!(queue.read(&mut buf), Ok(5));
+        assert_eq!(&buf[..5], b"root\n");
+        assert_eq!(queue.read(&mut buf), Ok(8));
+        assert_eq!(&buf[..8], b"desktop\n");
+        assert_eq!(queue.read(&mut buf), Ok(0));
+    }
+
+    #[test]
+    fn input_queue_read_leaves_a_partly_typed_next_line_queued() {
+        let queue = ConsoleInputQueue::new();
+        // Keystrokes arrive one at a time, so a prompt's read races the
+        // start of the next line: here two characters of it had landed when
+        // the password's Return was consumed. Both stay queued.
+        assert_eq!(queue.push(b"root\nde"), Ok(7));
+        let mut buf = [0u8; 64];
+        assert_eq!(queue.read(&mut buf), Ok(5));
+        assert_eq!(&buf[..5], b"root\n");
+        // The rest of the line arrives and the next reader sees it whole.
+        assert_eq!(queue.push(b"sktop\n"), Ok(6));
+        assert_eq!(queue.read(&mut buf), Ok(8));
+        assert_eq!(&buf[..8], b"desktop\n");
+    }
+
+    #[test]
+    fn input_queue_read_never_splits_a_key_sequence() {
+        let queue = ConsoleInputQueue::new();
+        // No key's escape sequence carries a line delimiter, so the bound
+        // hands a full-screen reader whole sequences.
+        assert_eq!(queue.push(b"\x1b[A\x1b[3~"), Ok(7));
+        let mut buf = [0u8; 64];
+        assert_eq!(queue.read(&mut buf), Ok(7));
+        assert_eq!(&buf[..7], b"\x1b[A\x1b[3~");
+    }
+
+    #[test]
+    fn input_queue_read_zeroes_the_line_it_drained() {
+        let queue = ConsoleInputQueue::new();
+        // A password transits this ring: the bound must not leave the
+        // consumed cleartext behind in the buffer.
+        assert_eq!(queue.push(b"secret\nrest"), Ok(11));
+        let mut buf = [0u8; 64];
+        assert_eq!(queue.read(&mut buf), Ok(7));
+        let ring = queue.ring.lock();
+        assert!(
+            ring.buf[..7].iter().all(|&byte| byte == 0),
+            "every drained slot is zeroed as it leaves the ring"
+        );
     }
 
     /// Build a keyboard-style console (queue as both read and input halves)

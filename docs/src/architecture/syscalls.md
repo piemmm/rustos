@@ -1450,6 +1450,40 @@ Rust surface is the `tairix_rt::io` trait layer (`Stdin`, `Stdout`, `Stderr`,
 `StdInfo`, a borrowed `Stream` over any descriptor, and the owning `File`); a
 program never names `console_*` or a device (`AGENTS.md` §20, §2.2).
 
+### The terminal read bound: a read takes at most one line
+
+A `stream_read` on a **terminal**-backed input descriptor — the console's
+type-ahead queue, or a pty slave end — returns **at most one line**: bytes up
+to and including the first delimiter (`CR` or `LF`), leaving everything typed
+behind it queued. The bound is one shared definition, `tairix_tty::read_bounded`
+(`lib/tty`), applied by both terminals inside their queue lock, so a burst
+arriving mid-drain cannot widen the read (`AGENTS.md` §2.2, §23.2).
+
+This is what makes **type-ahead survive a change of reader**. A terminal's
+queued input belongs to the terminal, not to whichever process happens to read
+first, and the reader changes constantly: `login` authenticates and launches
+the session shell on the *same* console (`CONSOLE_INHERIT`), a shell runs a
+foreground child, an app exits back to its prompt. Every terminal reader buffers
+what one read hands it — a curses screen decodes a whole chunk into events, a
+shell's line editor into its own queue — so bytes taken past the current line
+become that process's private property and vanish with it. Unbounded, `login`
+reading the password line also drained the command the user had already typed
+for the shell, and those keystrokes were silently gone: accepted, echoed, and
+never executed. Bounding the *queue* makes the loss unrepresentable for every
+reader, including programs whose code we do not control, instead of trusting
+each one to ask only for what it will consume (`AGENTS.md` §5.4 fails closed by
+construction).
+
+The bound only ever *shortens* a read a caller already loops on: input arrives
+one keystroke at a time, so every terminal reader handles a short read, and a
+bounded read still returns at least one byte whenever any byte is queued — it
+never parks a reader that has input waiting, and never returns the `Ok(0)`
+that means "nothing yet". No key's escape sequence carries a delimiter, so a
+bound never splits an arrow or Delete sequence. Program **output** travelling
+the other way (a pty master reading its shell's output) is a byte stream, not
+terminal input: it has no line boundary worth stopping at and is drained in
+full.
+
 ## Argument validation
 
 Every register slot of `RawArgs` is validated against the `AbiType`

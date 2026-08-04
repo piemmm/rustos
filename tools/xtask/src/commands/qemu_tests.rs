@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tairix_itest_harness::pie::PieArch;
-use tairix_qemu::{Outcome, Runner, Spec};
+use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -7884,33 +7884,45 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
 const MEMTEST_TAKEOVER_LOOP_MARKER: &str = "memtest: completed test loop";
 
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
-/// `netpeer` link peer, returning the updated spec and the running peer (if
-/// any). Every frame is captured to a `<binary>.pcap` beside the kernel image
-/// so a failing run leaves the on-wire exchange to inspect. The socket paths
-/// live in the temp dir: unix datagram paths are length-bounded (108 bytes)
-/// and the target dir can exceed that; the per-binary + per-process name keeps
-/// concurrent runs on private wires. Kept out of [`finish_run`] so that
-/// function stays within the line budget.
+/// `netpeer` link peer, returning the updated spec, the running peer (if any),
+/// and the wire's reserved socket paths. Every frame is captured to a
+/// `<binary>.pcap` beside the kernel image so a failing run leaves the on-wire
+/// exchange to inspect.
+///
+/// The socket paths are minted by [`ReservedSocket`], which keeps them short
+/// enough to bind (a unix socket's `sun_path` is 104 bytes on macOS and the
+/// temp directory alone can take half of that) and unique per wire per
+/// process, so concurrent runs stay on private wires. The returned guards must
+/// outlive the run: dropping one removes its socket file. Kept out of
+/// [`finish_run`] so that function stays within the line budget.
 fn attach_net_peer(
     t: &QemuTest,
     kernel: &Path,
     mut spec: Spec,
-) -> Result<(Spec, Option<super::netpeer::NetPeer>), String> {
+) -> Result<(Spec, Option<super::netpeer::NetPeer>, Vec<ReservedSocket>), String> {
     let mut peer = None;
+    let mut socks: Vec<ReservedSocket> = Vec::new();
+    // One minting definition for every wire end: reserve the short path, keep
+    // the guard alive in `socks` for the run, and hand back the path itself.
+    let wire = |socks: &mut Vec<ReservedSocket>, role: &str| {
+        let guard = ReservedSocket::reserve(role)
+            .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
+        let path = guard.path().to_path_buf();
+        socks.push(guard);
+        Ok::<PathBuf, String>(path)
+    };
     match t.netstack_peer {
         NetPeerMode::None => {}
         // The bond vertical: two NICs (the bond's two members) on two private
         // wires, one bond peer serving both, and a mid-flow monitor `set_link`
         // that drops the primary member's carrier once the flow is established.
         NetPeerMode::Bond => {
-            let sock_base =
-                std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
             // Two private wires, one per bond member. `net0` carries the
             // primary member ([`GUEST_MAC`]); `net1` the backup ([`GUEST_MAC_2`]).
-            let p_qemu = sock_base.with_extension("net0.qemu.sock");
-            let p_peer = sock_base.with_extension("net0.peer.sock");
-            let b_qemu = sock_base.with_extension("net1.qemu.sock");
-            let b_peer = sock_base.with_extension("net1.peer.sock");
+            let p_qemu = wire(&mut socks, "net0q")?;
+            let p_peer = wire(&mut socks, "net0p")?;
+            let b_qemu = wire(&mut socks, "net1q")?;
+            let b_peer = wire(&mut socks, "net1p")?;
             let started = super::netpeer::NetPeer::spawn_bond(&p_qemu, &p_peer, &b_qemu, &b_peer);
             peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
             // Attach the two members in order, each with its pinned MAC and
@@ -7948,10 +7960,8 @@ fn attach_net_peer(
         // derives its link-local from it).
         _ => {
             let pcap = kernel.with_extension("pcap");
-            let sock_base =
-                std::env::temp_dir().join(format!("{}-{}", t.binary, std::process::id()));
-            let qemu_sock = sock_base.with_extension("qemu.sock");
-            let peer_sock = sock_base.with_extension("peer.sock");
+            let qemu_sock = wire(&mut socks, "net0q")?;
+            let peer_sock = wire(&mut socks, "net0p")?;
             let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock)
                 .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
             // These four roles all prove success through the peer's inbound
@@ -7985,7 +7995,7 @@ fn attach_net_peer(
             );
         }
     }
-    Ok((spec, peer))
+    Ok((spec, peer, socks))
 }
 
 /// Attach `t`'s remaining devices (network capture, display, input, the
@@ -7993,7 +8003,9 @@ fn attach_net_peer(
 /// `kernel` is the enrolment's binary path, which names the sibling capture
 /// file.
 fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
-    let (mut spec, peer) = attach_net_peer(t, kernel, spec)?;
+    // `_wire_socks` is held for the whole run: dropping a reserved socket
+    // removes its file, which would pull the wire out from under the guest.
+    let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
 
     // The `memtest` takeover verticals test all of RAM *continuously* and
     // never stop on their own (`plans/NEW-SUPERVISOR.md` §9 Stage E): the

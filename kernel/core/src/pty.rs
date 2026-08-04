@@ -303,7 +303,7 @@ impl PtyMasterEnd {
     pub fn read(&self, out: &mut [u8]) -> PtyReadStep {
         let mut state = self.pty.state.lock();
         let slaves = state.slaves;
-        drain(&mut state.output, slaves, out)
+        drain(&mut state.output, slaves, out, DrainBound::Available)
     }
 
     /// Whether a master read would complete without parking: buffered output,
@@ -336,15 +336,20 @@ impl PtySlaveEnd {
         &self.pty
     }
 
-    /// One non-blocking slave read step: drain the input ring into `out`, then,
-    /// in the cooked (echoing) mode, echo the consumed bytes onto the output
-    /// ring (best-effort — a full output ring drops the echo rather than
-    /// failing the read).
+    /// One non-blocking slave read step: drain **at most one line** of the
+    /// input ring into `out`, then, in the cooked (echoing) mode, echo the
+    /// consumed bytes onto the output ring (best-effort — a full output ring
+    /// drops the echo rather than failing the read).
+    ///
+    /// The slave end is a terminal, so its input carries the same read bound
+    /// the console's type-ahead queue applies
+    /// ([`tairix_tty::read_bounded`]): a shell reading its prompt cannot take
+    /// the keystrokes typed ahead for the child it is about to run.
     #[must_use]
     pub fn read(&self, out: &mut [u8]) -> PtyReadStep {
         let mut state = self.pty.state.lock();
         let masters = state.masters;
-        let step = drain(&mut state.input, masters, out);
+        let step = drain(&mut state.input, masters, out, DrainBound::Line);
         if let PtyReadStep::Read(n) = step {
             if state.mode.echoes() && n > 0 {
                 let PtyState {
@@ -394,10 +399,25 @@ impl PtySlaveEnd {
     }
 }
 
-/// Drain up to `out.len()` bytes from `ring` into `out`, reporting end-of-stream
-/// when the ring is empty and `peers` (the count of live peer ends that could
-/// still produce) is zero. Shared by both read directions.
-fn drain(ring: &mut VecDeque<u8>, peers: usize, out: &mut [u8]) -> PtyReadStep {
+/// How much of a ring one read step may take: the two directions of a pty are
+/// bounded differently, and each call site says which it is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DrainBound {
+    /// At most one line — the terminal-input bound the slave side reads under
+    /// ([`tairix_tty::read_bounded`]): keystrokes queued behind the line the
+    /// reader asked for stay in the pty for whoever reads next, which for a
+    /// shell running a foreground child is a different process.
+    Line,
+    /// Everything queued that fits. Program output on its way to the terminal
+    /// is a byte stream, not terminal input: it has no reader to protect it
+    /// from and no line boundary worth stopping at.
+    Available,
+}
+
+/// Drain from `ring` into `out` under `bound`, reporting end-of-stream when the
+/// ring is empty and `peers` (the count of live peer ends that could still
+/// produce) is zero. Shared by both read directions.
+fn drain(ring: &mut VecDeque<u8>, peers: usize, out: &mut [u8], bound: DrainBound) -> PtyReadStep {
     if ring.is_empty() {
         return if peers == 0 {
             PtyReadStep::Eof
@@ -408,13 +428,19 @@ fn drain(ring: &mut VecDeque<u8>, peers: usize, out: &mut [u8]) -> PtyReadStep {
     if out.is_empty() {
         return PtyReadStep::Read(0);
     }
-    let n = out.len().min(ring.len());
-    for slot in out.iter_mut().take(n) {
-        match ring.pop_front() {
-            Some(byte) => *slot = byte,
-            None => break,
+    let n = match bound {
+        DrainBound::Line => tairix_tty::read_bounded(out, || ring.pop_front()),
+        DrainBound::Available => {
+            let n = out.len().min(ring.len());
+            for slot in out.iter_mut().take(n) {
+                match ring.pop_front() {
+                    Some(byte) => *slot = byte,
+                    None => break,
+                }
+            }
+            n
         }
-    }
+    };
     PtyReadStep::Read(n)
 }
 
@@ -523,6 +549,35 @@ mod tests {
         assert_eq!(m.read(&mut out), PtyReadStep::Empty);
         // Drained with a live master: the slave parks, not EOF.
         assert_eq!(s.read(&mut out), PtyReadStep::Empty);
+    }
+
+    #[test]
+    fn a_slave_read_stops_at_the_end_of_a_line() {
+        let (m, s) = pty();
+        m.pty().set_input_mode(InputMode::Raw);
+        // Two commands typed at the terminal before the shell read either.
+        assert_eq!(wrote(m.write(b"sleep 3600\ntrue\n", true)).0, 16);
+        let mut out = [0u8; 64];
+        // The shell is handed the first line only: the second stays in the
+        // pty, so the keystrokes survive the shell running the foreground
+        // job the first line asked for.
+        assert_eq!(s.read(&mut out), PtyReadStep::Read(11));
+        assert_eq!(&out[..11], b"sleep 3600\n");
+        assert_eq!(s.read(&mut out), PtyReadStep::Read(5));
+        assert_eq!(&out[..5], b"true\n");
+        assert_eq!(s.read(&mut out), PtyReadStep::Empty);
+    }
+
+    #[test]
+    fn a_master_read_is_not_bounded_by_program_output_lines() {
+        let (m, s) = pty();
+        // Program output is a byte stream on its way to the terminal, not
+        // terminal input: the terminal drains every buffered line at once.
+        assert_eq!(s.write(b"one\ntwo\n"), PtyWriteStep::Wrote(8));
+        let mut out = [0u8; 64];
+        // `ONLCR` expands each bare line feed to CR LF.
+        assert_eq!(m.read(&mut out), PtyReadStep::Read(10));
+        assert_eq!(&out[..10], b"one\r\ntwo\r\n");
     }
 
     #[test]

@@ -4,10 +4,11 @@
 //! a *line discipline* that cooks bytes in both directions — it echoes what
 //! the user types, turns the Return key and a program's bare line feeds into
 //! a carriage-return/line-feed pair so the cursor both drops a row and
-//! returns to column zero, rubs out the previous character on Backspace, and
-//! turns `Ctrl-C`/`Ctrl-Z` into job-control signals for the foreground job.
-//! TAIRiX has exactly **one** definition of that discipline, and this crate
-//! is it.
+//! returns to column zero, rubs out the previous character on Backspace,
+//! turns `Ctrl-C`/`Ctrl-Z` into job-control signals for the foreground job,
+//! and bounds a read at the end of a line so type-ahead survives the reader
+//! that is only entitled to the line in front of it. TAIRiX has exactly
+//! **one** definition of that discipline, and this crate is it.
 //!
 //! Two consumers drive the same code (`AGENTS.md` §2.2): the kernel console
 //! device (`kernel/core::console`) that a hardware-console-backed shell reads
@@ -27,7 +28,11 @@
 //! - [`EchoLine::echo`] applies the input local-echo through a *best-effort*
 //!   sink (echo is cosmetic, so a short write or device error is swallowed
 //!   rather than failing the read the user asked for).
-//! - [`job_control_signal`] is pure classification with no sink at all.
+//! - [`read_bounded`] applies the input read bound through the caller's
+//!   *queue* as a closure, so the console's type-ahead ring and the pty's
+//!   input ring share one rule for where a read stops.
+//! - [`job_control_signal`] and [`is_line_delimiter`] are pure classification
+//!   with no sink at all.
 //!
 //! # Assembled, not re-implemented
 //!
@@ -62,6 +67,61 @@ pub const STOP_BYTE: u8 = 0x1A;
 /// before flushing. Purely a device-round-trip optimisation; the discipline
 /// is correct for any positive value (a control byte flushes early anyway).
 const ECHO_RUN: usize = 64;
+
+/// Whether `byte` ends a line of terminal input: the carriage return a
+/// terminal sends for the Return key, or the line feed a piped or pty writer
+/// sends for it (the shared [`tairix_vt::control`] vocabulary, so "what ends a
+/// line" has one definition on the echo path, the secret-marker path, and the
+/// read bound below).
+#[must_use]
+pub const fn is_line_delimiter(byte: u8) -> bool {
+    matches!(byte, control::CR | control::LF)
+}
+
+/// Take **at most one line** of terminal input from `next` into `out`, and
+/// report how many bytes were taken.
+///
+/// This is the terminal read bound: bytes are taken until `out` is full,
+/// `next` is exhausted, or a line delimiter has been taken — the delimiter is
+/// included, and everything queued behind it is left where it was.
+///
+/// # Why a terminal read stops at the line boundary
+///
+/// A terminal's queued input belongs to the *terminal*, not to whichever
+/// process happens to read first. A reader that took bytes past the line it
+/// was asked for would own them privately, and a reader that then hands the
+/// terminal on — a login that authenticates and launches the session shell, a
+/// shell that runs a foreground child — takes those bytes with it and the
+/// keystrokes are gone: what the user typed ahead was accepted, echoed, and
+/// then silently lost. Stopping at the delimiter makes that unrepresentable
+/// for every reader, including one whose code we do not control, rather than
+/// trusting each program to ask for no more than it will consume.
+///
+/// Every terminal reader already handles a short read — input arrives one
+/// keystroke at a time — so a bound can only shorten a read a caller loops on,
+/// never change what it eventually sees. No key's escape sequence carries a
+/// delimiter, so a bound never splits one.
+///
+/// `next` yields the queue's next byte and removes it, so a byte it hands over
+/// is always placed in `out`: nothing is taken that is not delivered.
+#[must_use]
+pub fn read_bounded<F>(out: &mut [u8], mut next: F) -> usize
+where
+    F: FnMut() -> Option<u8>,
+{
+    let mut taken = 0usize;
+    for slot in out.iter_mut() {
+        let Some(byte) = next() else {
+            break;
+        };
+        *slot = byte;
+        taken += 1;
+        if is_line_delimiter(byte) {
+            break;
+        }
+    }
+    taken
+}
 
 /// Classify one input byte as a cooked-mode job-control signal, if it is one.
 ///
@@ -250,7 +310,7 @@ impl EchoLine {
                 continue;
             }
             for &literal in step.literal() {
-                if literal == control::CR || literal == control::LF {
+                if is_line_delimiter(literal) {
                     flush(&mut emit, &run, &mut run_len);
                     emit(b"\r\n");
                     self.col = 0;

@@ -4,13 +4,112 @@
 //! pseudo-terminal depend on: `ONLCR` output translation with POSIX
 //! short-write accounting ([`write_cooked`]), the local-echo state machine
 //! with bounded rub-out and split Delete-sequence handling
-//! ([`EchoLine::echo`]), and the `^C`/`^Z` classifier ([`job_control_signal`]).
+//! ([`EchoLine::echo`]), the `^C`/`^Z` classifier ([`job_control_signal`]),
+//! and the read bound that keeps type-ahead in the terminal
+//! ([`read_bounded`]).
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, Signal};
 
-use super::{job_control_signal, write_cooked, EchoLine, INTERRUPT_BYTE, STOP_BYTE};
+use super::{
+    is_line_delimiter, job_control_signal, read_bounded, write_cooked, EchoLine, INTERRUPT_BYTE,
+    STOP_BYTE,
+};
+
+/// A queue that hands out bytes destructively, like a terminal's input ring.
+fn queue(bytes: &[u8]) -> VecDeque<u8> {
+    bytes.iter().copied().collect()
+}
+
+#[test]
+fn is_line_delimiter_matches_only_cr_and_lf() {
+    assert!(is_line_delimiter(b'\r'));
+    assert!(is_line_delimiter(b'\n'));
+    assert!(!is_line_delimiter(b'a'));
+    assert!(!is_line_delimiter(0x1b));
+    assert!(!is_line_delimiter(0x00));
+    assert!(!is_line_delimiter(0x7f));
+}
+
+#[test]
+fn read_bounded_stops_after_the_first_delimiter() {
+    // The defect this bound exists for: a reader asked for a whole buffer
+    // while three lines were queued. It gets the first line and nothing
+    // more; the rest stays queued for whoever reads next — which may be a
+    // different process.
+    let mut input = queue(b"root\nroot\ndesktop\n");
+    let mut out = [0u8; 64];
+
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"root\n");
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"root\n");
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"desktop\n");
+    assert_eq!(read_bounded(&mut out, || input.pop_front()), 0);
+}
+
+#[test]
+fn read_bounded_treats_a_carriage_return_as_the_end_of_a_line() {
+    // A terminal sends CR for the Return key, so the bound must hold for it
+    // exactly as for LF.
+    let mut input = queue(b"root\rnext");
+    let mut out = [0u8; 32];
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"root\r");
+    assert_eq!(input.len(), 4, "the following line is left queued");
+}
+
+#[test]
+fn read_bounded_returns_a_partial_line_when_no_delimiter_is_queued() {
+    // Mid-line input is delivered as it arrives; the bound only ever stops a
+    // read early, it never waits for a line to complete.
+    let mut input = queue(b"desk");
+    let mut out = [0u8; 32];
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"desk");
+    assert!(input.is_empty());
+}
+
+#[test]
+fn read_bounded_never_splits_a_key_escape_sequence() {
+    // No key sequence carries a delimiter, so an arrow key crosses the bound
+    // whole — the decoder is never handed half a sequence.
+    let mut input = queue(b"\x1b[A\x1b[B\r");
+    let mut out = [0u8; 32];
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"\x1b[A\x1b[B\r");
+}
+
+#[test]
+fn read_bounded_takes_no_byte_it_cannot_deliver() {
+    // A full destination stops the take: a byte removed from the queue is
+    // always placed in `out`, so a bounded read can never drop one.
+    let mut input = queue(b"abcdef\n");
+    let mut out = [0u8; 3];
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"abc");
+    assert_eq!(input.len(), 4, "only the delivered bytes were taken");
+}
+
+#[test]
+fn read_bounded_into_an_empty_destination_takes_nothing() {
+    let mut input = queue(b"a\n");
+    assert_eq!(read_bounded(&mut [], || input.pop_front()), 0);
+    assert_eq!(input.len(), 2);
+}
+
+#[test]
+fn read_bounded_delivers_a_lone_delimiter() {
+    // An empty line (Return on its own) is one byte, delivered on its own.
+    let mut input = queue(b"\nrest");
+    let mut out = [0u8; 8];
+    let taken = read_bounded(&mut out, || input.pop_front());
+    assert_eq!(&out[..taken], b"\n");
+    assert_eq!(input.len(), 4);
+}
 
 #[test]
 fn job_control_signal_maps_only_ctrl_c_and_ctrl_z() {

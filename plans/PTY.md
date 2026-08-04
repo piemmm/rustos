@@ -83,11 +83,15 @@ terminal (master)                                     shell (slave)
   suppressed. This is the shell's own line editor's precondition (it echoes
   itself in raw mode).
 - **Slave read** (the shell reading stdin): drains the input ring, cooked
-  or raw per the current `InputMode`, exactly as the console reader does.
+  or raw per the current `InputMode`, exactly as the console reader does —
+  including the **read bound**: at most one line per read, so type-ahead
+  meant for the next reader (the foreground child the shell is about to run)
+  stays in the pty instead of leaving inside the shell's own event queue.
 - **Slave write** (program/prompt output): pushed through the **output
   discipline** (`ONLCR`) onto the output ring.
-- **Master read** (the terminal rendering): drains the output ring raw and
-  feeds it to the screen grid.
+- **Master read** (the terminal rendering): drains the output ring raw, in
+  full — program output is a byte stream, not terminal input, so the
+  one-line read bound does not apply to it — and feeds it to the screen grid.
 
 ### The shared line discipline (§2.2 — one definition)
 
@@ -100,7 +104,10 @@ into a shared `no_std` component so the console device and the pty share
   the input-echo state machine (today's `EchoLine` + `EraseSeq` assembly),
   the `ONLCR` output transform (today's `ConsoleWrite::write_output`
   default), the cooked-mode `Ctrl-C`/`Ctrl-Z`→`Signal` classifier (today's
-  `ConsoleInput::push`), and the `InputMode` echo/signal predicates. It is
+  `ConsoleInput::push`), the terminal **read bound** (`read_bounded` /
+  `is_line_delimiter` — a terminal read stops after the line delimiter, so
+  queued type-ahead belongs to the terminal and not to whichever process
+  read first), and the `InputMode` echo/signal predicates. It is
   sink-agnostic: it operates on borrowed buffers / emits typed events, so
   both a `ConsoleWrite` device and a pty ring can drive it.
 - `kernel/core/src/console.rs` is **rewritten in place** to call `lib/tty`
