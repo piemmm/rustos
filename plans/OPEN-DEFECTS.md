@@ -1516,6 +1516,81 @@ path), so a soft stall can never be dressed up as a hard lockup.
 
 ---
 
+## D25 — a nested reader on the address-space registry wedged three CPUs — DONE
+
+**State:** fixed. `terminal_size`'s pty-slave arm held an `aspaces` **reader**
+across `with_caller_aspace`, which takes a second reader on that same lock.
+`tairix_sync::RwLock` is writer-preference — `read()` blocks while
+`pending_writers > 0`, and `write()` registers its intent *before* draining
+readers — so the inner acquisition is refused the moment any other CPU calls
+`aspaces.write()`, and the outer guard it is nested inside is exactly what that
+writer waits for. Neither side can ever be granted, and every later
+`aspaces.read()` (`stream_read`'s among them) queues behind the pending writer.
+A `RwLockReadGuard` is a value with a `Drop` impl, so the outer borrow lives to
+the end of its block, not to its last use.
+
+**Report it explains.** A desktop under QEMU `virt` (4 vCPUs, aarch64 debug
+image) froze with cpu 0 in `k_site=syscall k_detail=0xd` (`STREAM_READ`) and
+cpu 3 in `k_site=user_switch`, both with `k_seq` identical across the soft and
+hard records — one call each, no loop. `k_lock=scheduler.rs:753 k_lock_state=held`
+is *not* diagnostic: that is `task.body.lock()`, legitimately held for the whole
+off-CPU lifetime of any parked task. The accompanying `stuck_irq=77
+stuck_state=pending` (the virtio mouse, mmio slot 29) is a consequence: every
+device SPI is routed to cpu 0 alone (`CPU0_TARGET`), so a wedged cpu 0 leaves
+its lines asserted and untaken. As under D24, the hard-lockup label and its
+live-GIC `stuck_irq` story are the misclassification described there, not the
+mechanism.
+
+**Fix.** The arm takes the owned geometry bytes and releases the reader before
+the copy-out, so no acquisition of that lock nests. An audit of all 25
+held-guard `aspaces` sites found this to be the only nesting and no AB-BA cycle
+(`record_fault_exit` already drops its `aspaces` reader before taking `caps`);
+the ~186 immediate-drop `self.aspaces.read().method()` forms cannot nest by
+construction.
+
+**Why it hid.** `RwLock` reported nothing to the lockup watchdog, while
+`SpinLock` publishes its whole acquire/hold/release lifecycle, so a CPU
+spinning in `read()`/`write()` was invisible and the report named a stale
+spinlock site instead. `RwLock` now mirrors `SpinLock` through the same
+`lockwatch` seam, and its rustdoc states the recursive-read prohibition.
+
+**Also fixed, same path.** `parked_stream_read` polled before registering on
+`PIPE_WAITQ`, and `pipe_wake` latches nothing — a peer producing bytes between
+the poll and the registration woke nobody, so the reader parked on data that
+had already arrived. It now registers before the first poll and stays
+registered until the loop exits, matching `BlockingConsoleRead::read_until`.
+
+**Regression cover.** Six `lib/sync` tests pin the grant/refuse semantics and
+guard-drop release that make nesting fatal. Neither interleaving is reachable
+from a host test — there is no controllable point between the two acquisitions,
+nor between the poll and the registration — and a timing-based thread test
+would be the load-dependent flake the charter forbids, so the source-level
+invariant is the guard, as for D23.
+
+---
+
+## D26 — a mouse scroll produces no input event at all
+
+**State:** open. Diagnosed while tracing D25; not a lockup, a functional gap.
+
+**Mechanism.** QEMU's HID mouse reports wheel motion as `EV_KEY` with
+`BTN_GEAR_UP`/`BTN_GEAR_DOWN` (`0x150`/`0x151`), not as `EV_REL`/`REL_WHEEL`.
+`PointerInput::from_device_event` accepts only the contiguous pointer-button
+range (`0x110..0x113`), and `VirtioKeyboardConsole::feed` has no mapping for
+those codes either, so the `virtio_kbd` pump's `pointer_inject`-else-`key_inject`
+pair rejects both ways and the event is discarded. `lib/virtio_input`'s
+`decode_event` *does* map `REL_WHEEL` to `Scroll`, so the vocabulary is not the
+gap — the device's actual encoding never reaches it. Horizontal wheel never
+arrives at all: QEMU drops it host-side (`unmapped button: 7 [wheel-left]`).
+
+**Fix direction.** Map the gear-button codes onto the existing `Scroll` event
+in the one shared device-event decode, so a wheel reaches the seat and the
+compositor by the same path a wheel over `REL_WHEEL` already would; no second
+decode and no new vocabulary. Belongs with the display/input work
+(`plans/DISPLAY.md`), with a decode unit test per encoding.
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

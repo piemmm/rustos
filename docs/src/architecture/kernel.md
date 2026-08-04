@@ -503,8 +503,12 @@ The recorded value is a source string, so no runtime (KASLR-relocatable)
 address is disclosed even though it is a pointer internally; `k_lock` is
 omitted when the core holds no recorded lock. A shippable build compiles the
 whole facility out (the `lock-diagnostics` feature, off), so a production lock
-is a bare compare-and-swap. `RwLock`/`McsLock` are not instrumented: they do
-not mask interrupts, so a wedge there is a soft lockup the live `pc`/`k_bt`
+is a bare compare-and-swap. `RwLock` reports the same lifecycle: it is
+writer-preference, so a reader that blocks behind a registered writer can wedge
+indefinitely, and without a site the report names only whatever spinlock the
+core happened to be holding — a stale crumb that points at the wrong code.
+`McsLock` is not instrumented: it does not mask interrupts and hands the lock
+on in queue order, so a wedge there is a soft lockup the live `pc`/`k_bt`
 already localise.
 
 Read `k_lock` for what it is: the innermost lock the core had *recorded*, not

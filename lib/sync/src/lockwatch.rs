@@ -83,7 +83,7 @@ fn dispatch(event: LockEvent, site_ptr: usize) {
 /// of the acquiring call).
 #[inline]
 pub fn note(event: LockEvent, site: &'static Location<'static>) {
-    dispatch(event, site as *const Location<'static> as usize);
+    dispatch(event, core::ptr::from_ref(site) as usize);
 }
 
 /// Report the release (drop) of the CPU's current lock.

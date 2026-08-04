@@ -31,13 +31,15 @@ allocate does not belong in this crate.
 
 - `lock-diagnostics` (off by default) — debug-only lock-site observation
   for the lockup watchdog (`plans/WATCHDOG.md`). When on, the spinning
-  locks (`SpinLock`, which `IrqSafeSpinLock` wraps) become
+  locks (`SpinLock`, which `IrqSafeSpinLock` wraps, and `RwLock`) become
   `#[track_caller]` and report their acquire/hold/release lifecycle,
   tagged with the acquiring call's source `file:line`, to an observer
   installed through the `lockwatch` module; the kernel records it per CPU
-  so a wedged core's lockup report names the exact spinlock it is stuck
-  on. A `tairix-kernel-core` `watchdog-diagnostics` (non-shippable
-  `debug`-image) build turns it on. With the feature off the whole
-  facility — the `track_caller` shim, the notes, and the `lockwatch`
-  module — is compiled out, so a production lock is a bare
+  so a wedged core's lockup report names the exact lock it is stuck on.
+  A reader or writer spinning inside `RwLock` is otherwise invisible to a
+  watchdog that only samples IRQ-masking spinlocks, so it reports through
+  the same seam. A `tairix-kernel-core` `watchdog-diagnostics`
+  (non-shippable `debug`-image) build turns it on. With the feature off
+  the whole facility — the `track_caller` shim, the notes, and the
+  `lockwatch` module — is compiled out, so a production lock is a bare
   compare-and-swap.

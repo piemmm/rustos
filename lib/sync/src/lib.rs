@@ -458,6 +458,84 @@ mod tests {
         assert!(l.try_read().is_some());
     }
 
+    // These exercise the lock-diagnostics instrumentation added to
+    // `RwLock` (mirroring `SpinLock`'s `lockwatch` reporting): they run
+    // unmodified whether or not the `lock-diagnostics` feature is on, and
+    // pin the grant/refuse semantics the instrumentation must never change.
+    // No observer is installed here — see the long comment in
+    // `lockwatch::tests` for why a unit test must never install the
+    // process-global observer — so what these lock in is behaviour, not
+    // the emitted events themselves (a broken `note`/`note_release` call
+    // would still surface as a panic under `--features lock-diagnostics`,
+    // since an uninstalled observer is a no-op that never panics).
+
+    #[test]
+    fn rwlock_try_read_fails_without_mutating_state_when_writer_held() {
+        let l = RwLock::new(0u32);
+        let w = l.write();
+        // A failing `try_read` must publish no diagnostics event and must
+        // leave the state word exactly as it was; repeat it to be sure a
+        // refusal never leaks a partial mutation.
+        assert!(l.try_read().is_none());
+        assert!(l.try_read().is_none());
+        assert_eq!(l.reader_count(), 0);
+        drop(w);
+        assert!(l.try_read().is_some());
+    }
+
+    #[test]
+    fn rwlock_try_write_fails_without_mutating_state_when_reader_held() {
+        let l = RwLock::new(0u32);
+        let r = l.read();
+        // A failing `try_write` registers and then unwinds its own
+        // pending-writer bump; assert it never leaks that bump.
+        assert!(l.try_write().is_none());
+        assert!(l.try_write().is_none());
+        assert!(!l.is_write_pending());
+        assert_eq!(l.reader_count(), 1);
+        drop(r);
+        assert!(l.try_write().is_some());
+    }
+
+    #[test]
+    fn rwlock_try_read_succeeds_and_guard_drop_releases() {
+        let l = RwLock::new(5u32);
+        let g = l.try_read().expect("uncontended try_read must succeed");
+        assert_eq!(*g, 5);
+        assert_eq!(l.reader_count(), 1);
+        drop(g);
+        assert_eq!(l.reader_count(), 0);
+    }
+
+    #[test]
+    fn rwlock_try_write_succeeds_and_guard_drop_releases() {
+        let l = RwLock::new(5u32);
+        let mut g = l.try_write().expect("uncontended try_write must succeed");
+        *g = 6;
+        drop(g);
+        assert!(!l.is_write_pending());
+        assert_eq!(*l.read(), 6);
+    }
+
+    #[test]
+    fn rwlock_spinning_read_and_write_grant_after_release() {
+        // Exercises the spinning `read`/`write` acquire paths (the
+        // `Acquiring` -> `Acquired` transition), not just the
+        // non-spinning `try_*` ones.
+        let l = RwLock::new(1u32);
+        {
+            let g = l.read();
+            assert_eq!(*g, 1);
+        }
+        assert_eq!(l.reader_count(), 0);
+        {
+            let mut g = l.write();
+            *g = 2;
+        }
+        assert!(!l.is_write_pending());
+        assert_eq!(*l.read(), 2);
+    }
+
     #[test]
     fn mcs_lock_into_inner_and_get_mut() {
         let mut l = McsLock::new(0u32);

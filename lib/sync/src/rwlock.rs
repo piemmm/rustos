@@ -20,6 +20,18 @@
 //! - For read-mostly data where readers must never block: use
 //!   [`SeqLock`](crate::seqlock::SeqLock) instead.
 //!
+//! # Recursive acquisition is forbidden
+//!
+//! Because the lock is writer-preference, acquiring a second
+//! [`read`](RwLock::read) on a thread that already holds a
+//! [`RwLockReadGuard`] for the *same* lock is a self-deadlock as soon as
+//! any other CPU registers a pending writer: the writer's intent blocks
+//! every new reader (including the recursive one), and the writer itself
+//! then waits forever for the first, still-held read guard to drop. There
+//! is no reentrant variant. Callers must never call `read`/`write` again
+//! on a lock they are already holding a guard for; restructure the code
+//! to take the guard once and pass the reference down instead.
+//!
 //! # Ordering guarantees
 //!
 //! - A successful [`read`](RwLock::read) performs an [`Acquire`] read on
@@ -37,6 +49,18 @@
 //! # IRQ level
 //!
 //! Process / kernel-thread context only. Never from an interrupt handler.
+//!
+//! # Lock diagnostics
+//!
+//! With the `lock-diagnostics` feature, `read`/`write` (and their
+//! non-spinning `try_*` counterparts) report their acquire/hold/release
+//! lifecycle to the [`lockwatch`](crate::lockwatch) seam, exactly like
+//! [`SpinLock`](crate::spinlock::SpinLock). A reader or writer spinning
+//! here is otherwise invisible to a lockup watchdog that only samples
+//! IRQ-masking spinlocks, so a CPU wedged in `read`/`write` needs to be
+//! nameable too. With the feature off this instrumentation, and the
+//! `#[track_caller]` shim it needs, compile away entirely and a
+//! production lock is the bare atomics below.
 //!
 //! [`Acquire`]: core::sync::atomic::Ordering::Acquire
 //! [`Release`]: core::sync::atomic::Ordering::Release
@@ -119,10 +143,12 @@ impl<T> RwLock<T> {
 }
 
 impl<T: ?Sized> RwLock<T> {
-    /// Try to acquire a shared (reader) lock without spinning.
-    ///
-    /// Fails (`None`) if a writer holds the lock *or* one is pending.
-    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+    /// The uninstrumented reader-acquire attempt, shared by the public
+    /// [`Self::try_read`] and [`Self::read`] so the lock-diagnostics site
+    /// note is emitted exactly once per acquisition (never doubled by
+    /// `read` delegating to `try_read`).
+    #[inline]
+    fn raw_try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
         let mut cur = self.state.load(Ordering::Relaxed);
         loop {
             if writer_held(cur) || pending_writers(cur) > 0 {
@@ -144,10 +170,37 @@ impl<T: ?Sized> RwLock<T> {
         }
     }
 
+    /// Try to acquire a shared (reader) lock without spinning.
+    ///
+    /// Fails (`None`) if a writer holds the lock *or* one is pending.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        let guard = self.raw_try_read()?;
+        // Record the successful non-spinning acquire against the caller's
+        // source site so a wedge while holding this guard names it.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(
+            crate::lockwatch::LockEvent::TryAcquired,
+            core::panic::Location::caller(),
+        );
+        Some(guard)
+    }
+
     /// Acquire a shared (reader) lock, spinning until it is granted.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        // Publish the acquiring site *before* spinning, so a CPU that
+        // wedges spinning for a lock a writer never releases has its
+        // report name the contended lock (marked `acquiring`); the
+        // successful-acquire note below then promotes it to `held`.
+        #[cfg(feature = "lock-diagnostics")]
+        let site = core::panic::Location::caller();
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(crate::lockwatch::LockEvent::Acquiring, site);
         loop {
-            if let Some(g) = self.try_read() {
+            if let Some(g) = self.raw_try_read() {
+                #[cfg(feature = "lock-diagnostics")]
+                crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
                 return g;
             }
             // Spin until both writer and pending-writer flags clear.
@@ -161,6 +214,7 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     /// Try to acquire the exclusive (writer) lock without spinning.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         // First register intent so concurrent readers back off.
         let prev = self.state.fetch_add(PENDING_ONE, Ordering::Relaxed);
@@ -185,6 +239,15 @@ impl<T: ?Sized> RwLock<T> {
                 )
                 .is_ok()
             {
+                // Record the successful non-spinning acquire against the
+                // caller's source site so a wedge while holding this
+                // guard names it. There was no spin phase, so this is the
+                // only note this acquisition emits.
+                #[cfg(feature = "lock-diagnostics")]
+                crate::lockwatch::note(
+                    crate::lockwatch::LockEvent::TryAcquired,
+                    core::panic::Location::caller(),
+                );
                 return Some(RwLockWriteGuard { lock: self });
             }
             self.state.fetch_sub(PENDING_ONE, Ordering::Relaxed);
@@ -195,7 +258,16 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     /// Acquire the exclusive (writer) lock, spinning until granted.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        // Publish the acquiring site *before* spinning, so a CPU that
+        // wedges spinning for a lock it can never take has its report
+        // name the contended lock (marked `acquiring`); the
+        // successful-acquire note below then promotes it to `held`.
+        #[cfg(feature = "lock-diagnostics")]
+        let site = core::panic::Location::caller();
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(crate::lockwatch::LockEvent::Acquiring, site);
         // Step 1: register pending-writer intent. This blocks new
         // readers, achieving writer preference.
         self.state.fetch_add(PENDING_ONE, Ordering::Relaxed);
@@ -212,6 +284,8 @@ impl<T: ?Sized> RwLock<T> {
                     )
                     .is_ok()
                 {
+                    #[cfg(feature = "lock-diagnostics")]
+                    crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
                     return RwLockWriteGuard { lock: self };
                 }
             } else {
@@ -274,6 +348,11 @@ impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
         // Release pairs with the next writer's Acquire CAS.
         self.lock.state.fetch_sub(READER_ONE, Ordering::Release);
+        // Drop the lock-diagnostics record this guard's acquisition pushed.
+        // Every `RwLockReadGuard` corresponds to exactly one acquire note
+        // (`try_read`/`read`), so the release note balances it one-to-one.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note_release();
     }
 }
 
@@ -303,5 +382,10 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
         // Clear WRITER_BIT with a Release store-equivalent RMW so readers
         // and the next writer observe our mutations.
         self.lock.state.fetch_and(!WRITER_BIT, Ordering::Release);
+        // Drop the lock-diagnostics record this guard's acquisition pushed.
+        // Every `RwLockWriteGuard` corresponds to exactly one acquire note
+        // (`try_write`/`write`), so the release note balances it one-to-one.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note_release();
     }
 }

@@ -2660,14 +2660,27 @@ where
                 now.saturating_add(timeout_ns)
             })
         };
-        loop {
+        // Register on the wake queue *before* the first poll, and stay
+        // registered across every re-poll until the read leaves this loop. A
+        // wake carries no state: `pipe_wake` unparks whoever is registered at
+        // that instant and is otherwise dropped. Registering only once the
+        // poll has already reported nothing leaves a window in which a peer
+        // can produce its bytes, wake nobody, and leave this task to park on
+        // data that has already arrived — a read that sleeps until the *next*
+        // write, or forever if none comes. Registering first makes the wake
+        // and the poll overlap, so one of the two always observes the bytes.
+        crate::waitq::PIPE_WAITQ.register(caller.task_id.0, deadline);
+        if deadline != crate::waitq::NO_DEADLINE {
+            crate::waitq::rearm_timed_wakeup();
+        }
+        let outcome = loop {
             match step(&mut data) {
                 StreamReadStep::Read(n) => {
                     // Space freed: a writer parked on the full ring can
                     // proceed. Wake before the copy-out so the producer
                     // overlaps with the consumer's copy.
                     crate::waitq::pipe_wake();
-                    return match self.with_caller_aspace(caller, |space, physmap| {
+                    break match self.with_caller_aspace(caller, |space, physmap| {
                         copy_out(space, physmap, VirtAddr::new(buf), &data[..n])
                     }) {
                         Some(Ok(())) => Ok(n as u64),
@@ -2675,7 +2688,7 @@ where
                         None => Err(Errno::BadAddress),
                     };
                 }
-                StreamReadStep::Eof => return Ok(0),
+                StreamReadStep::Eof => break Ok(0),
                 StreamReadStep::Empty => {
                     // A bounded wait that has elapsed reports `TimedOut`
                     // only after the re-check above found nothing, so a
@@ -2683,35 +2696,35 @@ where
                     if deadline != crate::waitq::NO_DEADLINE {
                         match crate::waitq::wait_now_ns() {
                             Some(now) if now < deadline => {}
-                            _ => return Err(Errno::TimedOut),
+                            _ => break Err(Errno::TimedOut),
                         }
                     }
-                    // Park off the run queue until a peer produces bytes
-                    // or closes (the `wait`/`irq_wait` interlock: register
-                    // before the park so a racing wake is never lost).
+                    // Park off the run queue until a peer produces bytes or
+                    // closes; the registration above is already live, so a
+                    // wake racing this park is never lost.
                     let cpu = SchedulerArch::current_cpu(self.arch);
-                    crate::waitq::PIPE_WAITQ.register(caller.task_id.0, deadline);
-                    if deadline != crate::waitq::NO_DEADLINE {
-                        crate::waitq::rearm_timed_wakeup();
-                    }
                     let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
-                    crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
                     if deadline != crate::waitq::NO_DEADLINE {
                         crate::waitq::rearm_timed_wakeup();
                     }
                     if !parked {
-                        return Err(Errno::NotImplemented);
+                        break Err(Errno::NotImplemented);
                     }
                     // A doomed waiter never re-parks: a termination deferred
                     // against this task unwinds the wait so the kill lands at
                     // the syscall boundary (the errno never reaches user
                     // space).
                     if crate::procsignal::kill_pending(caller.task_id.0) {
-                        return Err(Errno::Interrupted);
+                        break Err(Errno::Interrupted);
                     }
                 }
             }
+        };
+        crate::waitq::PIPE_WAITQ.deregister(caller.task_id.0);
+        if deadline != crate::waitq::NO_DEADLINE {
+            crate::waitq::rearm_timed_wakeup();
         }
+        outcome
     }
 
     /// The one parking write loop every byte-stream backing shares: stage
@@ -4277,18 +4290,28 @@ where
         // A pty slave is a *tty* whose geometry is always known (its master
         // set it at create/resize), so route there first if `fd` is a
         // pty-slave descriptor of the caller.
-        {
-            let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
-                let bytes = pty.geometry().to_le_bytes();
-                return match self.with_caller_aspace(caller, |space, physmap| {
-                    copy_out(space, physmap, VirtAddr::new(out), &bytes)
-                }) {
-                    Some(Ok(())) => Ok(bytes.len() as u64),
-                    Some(Err(err)) => Err(copy_fault_errno(err)),
-                    None => Err(Errno::BadAddress),
-                };
-            }
+        //
+        // The registry reader is released with the owned geometry bytes in
+        // hand, *before* the copy-out: `with_caller_aspace` takes its own
+        // reader on this same lock, and the lock is writer-preference — a
+        // writer registering its intent between the two acquisitions blocks
+        // the inner one, which can then never be granted because the outer
+        // one it is nested inside is what the writer is waiting to drain.
+        // Owning the bytes across the release costs nothing and keeps every
+        // acquisition of this lock non-nested.
+        let pty_geometry = self
+            .aspaces
+            .read()
+            .pty_slave(caller.task_id, fd)
+            .map(|pty| pty.geometry().to_le_bytes());
+        if let Some(bytes) = pty_geometry {
+            return match self.with_caller_aspace(caller, |space, physmap| {
+                copy_out(space, physmap, VirtAddr::new(out), &bytes)
+            }) {
+                Some(Ok(())) => Ok(bytes.len() as u64),
+                Some(Err(err)) => Err(copy_fault_errno(err)),
+                None => Err(Errno::BadAddress),
+            };
         }
         // Resolve `fd` against the caller's per-process descriptor table
         // first: only an open standard stream names a console. A descriptor
