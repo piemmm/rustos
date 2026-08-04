@@ -1449,6 +1449,73 @@ QEMU vertical.
 
 ---
 
+## D24 — a mutating memory syscall re-froze the whole address space
+
+**State:** the two hot paths (`mem_map`, `mem_unmap`) are fixed; the sibling
+mapping syscalls listed under *Remaining* still pay the wholesale cost.
+
+**Mechanism.** The registry holds a frozen `Send + Sync` snapshot of a task's
+mappings for the user-copy path. `AddressSpace::freeze` rebuilds it by walking
+the page table and allocating a fresh `BTreeMap` node for **every resident
+page of the task**, and `tairix_kalloc` places a node by scanning its free
+list (`carve` first-fit, `insert_hole` sorted insert). A wholesale re-freeze
+therefore costs *resident pages × hole count* — the "O(N²), tens of seconds
+under emulation" the `note_faulted_page` doc already named for the fault path
+— and the kernel is non-preemptible, so the CPU's dispatch loop makes no
+progress for the whole call.
+
+**Report it explains.** A desktop under QEMU `virt` (4 vCPUs, aarch64 debug
+image) froze with cpu 0 inside a single `mem_unmap`: `k_site=syscall
+k_detail=0xf` (`MEM_UNMAP`), `k_seq` identical across two reports 0.73 s apart
+(one call, not a loop), `stalled_ms=10000 context=kernel`. The soft record
+carried no `observer`, so it came from `check_stall` on cpu 0's **own** timer
+tick — the core was still taking maskable interrupts while making no dispatch
+progress, which is a long in-kernel computation, not a lock or a wedge.
+
+**Fix.** Every path that knows *which* pages changed publishes them as
+in-place deltas (`AddressSpaceRegistry::note_faulted_page`) instead:
+`mem_unmap` drops exactly the region it released (cost proportional to that
+region, which it already walked), and `mem_map` publishes nothing, because
+`MemMap::reserve` commits no frame and writes no page-table entry, so the
+snapshot is unchanged by construction. A snapshot that cannot absorb a delta
+falls back to the wholesale re-freeze, so the delta is never a correctness
+dependency.
+
+Removing by delta also closes a **fail-open** hole: the wholesale re-freeze is
+a documented no-op when no live space is published on the current CPU, so a
+released region's pages stayed translating in the snapshot the copy path
+walks — reachable memory the task no longer owns, whose frames the allocator
+is free to hand to another task. The regression test
+(`mem_unmap_drops_the_released_pages_from_the_snapshot`) drives exactly that
+case and fails on the pre-fix source with "a released page must not stay
+reachable through the snapshot".
+
+**Remaining.** `mmio_map`, `dma_alloc`, `file_map`, `file_unmap`, `shm_map`,
+`shm_grant` and `call_grant` still call the wholesale re-freeze. Each maps or
+releases a known region, so each can publish deltas the same way — an eager
+mapping needs the resolved `(frame, flags)` per page, i.e. one `translate` per
+page of *its own* region rather than of the whole address space. They are
+one-shot window setups rather than per-allocation paths, which is why they are
+staged here and not folded into the same change; the stall class is identical
+and they are not to be left indefinitely.
+
+Also unfixed, and **separate**: the same report's `id=4082 cpu hard lockup
+detected cpu=0 observer=1 … sampled=pre_silence stuck_irq=77` is a
+**misclassification**. cpu 0 was demonstrably still taking maskable
+interrupts, so it was not silent to interrupts at all; only its Group-0/FIQ
+liveness cadence had stopped. `DAIF.F` is masked by exception entry and is
+re-cleared only on a *sync* entry, so an interrupt that preempts an EL0 task
+carries the mask across the context switch into the dispatcher and every
+in-kernel body it then runs — the debug sampler goes blind there, `last_seen_ns`
+goes stale, and the buddy detector reports a hard lockup with a `stuck_irq`
+story read live from the GIC that has nothing to do with the real stall. The
+detector is honest about what it measured; the *channel* it measures is not
+always deliverable. Fixing this means re-establishing the probed FIQ posture
+after an interrupt-driven preemptive switch (aarch64 `preempt`/`kthread` switch
+path), so a soft stall can never be dressed up as a hard lockup.
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

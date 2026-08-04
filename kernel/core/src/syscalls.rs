@@ -1498,6 +1498,44 @@ where
         }
     }
 
+    /// Publish the teardown of the `page_count`-page region based at `base`
+    /// into `task`'s registry snapshot as one in-place delta per page, and
+    /// report whether the snapshot absorbed every one.
+    ///
+    /// Every page of a released region is unmapped by construction, so each
+    /// delta is a removal and none needs a translation. The cost is the
+    /// region the release already walked, never the whole address space —
+    /// which matters because a wholesale [`Self::refreeze_task_aspace`]
+    /// rebuilds the snapshot with a page-table walk *and* a fresh heap node
+    /// per resident page of the task, and the kernel heap places a node by
+    /// scanning its free list. A task with a large resident set therefore
+    /// paid its page count times that list's length inside one
+    /// non-preemptible syscall: tens of seconds under emulation, during
+    /// which the CPU's dispatch loop makes no progress at all and the
+    /// session appears frozen.
+    ///
+    /// It is also what makes the removal unconditional. The wholesale
+    /// re-freeze is a documented no-op for a task with no live space
+    /// published on this CPU, which would leave freed pages translating in
+    /// the snapshot the copy path walks — reachable memory the task no
+    /// longer owns. Removing by delta cannot silently skip that.
+    ///
+    /// A snapshot that cannot absorb an in-place delta (the host double)
+    /// answers `false` for that page, and the caller falls back to the
+    /// wholesale re-freeze — so this is a cost reduction, never a
+    /// correctness dependency.
+    fn publish_region_teardown(&self, task: SecTaskId, base: u64, page_count: u64) -> bool {
+        let mut aspaces = self.aspaces.write();
+        (0..page_count).fold(true, |absorbed, index| {
+            let page = index
+                .checked_mul(PAGE_SIZE as u64)
+                .and_then(|offset| base.checked_add(offset))
+                .and_then(|va| Page::from_addr(VirtAddr::new(va)).ok());
+            let applied = page.is_some_and(|page| aspaces.note_faulted_page(task, page, None));
+            applied && absorbed
+        })
+    }
+
     /// Record a fault-kill of `task` and reclaim its kernel resources —
     /// the involuntary sibling of the `exit` handler, driven by the
     /// user-fault resolver when an abort is fatal to the task.
@@ -5445,18 +5483,27 @@ where
         let base = self.mem_map.reserve(len, flags, addr_hint)?;
         // The reservation grew the caller's mapped address space: record it
         // so the anonymous fault path can tell a legitimate first-touch of
-        // this region apart from a wild access (fail closed on a miss),
+        // this region apart from a wild access (fail closed on a miss), and
         // charge the page-rounded size against the task's address-space
         // accounting (the reservation is what the `AddressSpaceBytes`
-        // ceiling bounds), and re-freeze the registry snapshot. `charged`
-        // is a whole number of pages by construction.
+        // ceiling bounds). `charged` is a whole number of pages by
+        // construction.
         let page_count = charged / PAGE_SIZE as u64;
         {
             let mut aspaces = self.aspaces.write();
             aspaces.record_anon_region(caller.task_id, base, page_count);
             aspaces.charge_aspace_bytes(caller.task_id, charged);
         }
-        self.refreeze_caller_aspace(caller);
+        // The registry snapshot needs no republishing: `MemMap::reserve`
+        // commits no frame and makes no page-table entry, so the live
+        // space's mappings — and therefore the snapshot frozen from them —
+        // are exactly what they were before the call. Each page is
+        // published as it faults in (`resolve_anon_fault`), one in-place
+        // delta at a time. Re-freezing here would rebuild the whole
+        // snapshot, a page-table walk and a heap node per resident page of
+        // the task, to arrive back at the same answer — the cost that
+        // stalled a CPU's dispatch loop for the whole of one
+        // non-preemptible syscall on a task with a large resident set.
         Ok(base)
     }
 
@@ -5712,21 +5759,29 @@ where
         let result = self.mem_map.unmap(base, len).map(|()| 0);
         // The unmap shrank the caller's live space; drop the region record,
         // credit the page-rounded size back to the task's address-space
-        // accounting (the same figure `mem_map` charged), and re-freeze the
-        // registry snapshot so the freed pages are dropped from it too —
-        // leaving them in the stale snapshot would let the copy path read or
-        // write memory the task no longer owns (fail closed, never expose
-        // freed memory). Only on success: a failed unmap left the mappings —
-        // and the accounting — unchanged. The credit saturates at zero, so a
-        // `len` that rounds larger than the live total can never underflow
-        // into a bogus huge usage.
+        // accounting (the same figure `mem_map` charged), and drop the freed
+        // pages from the registry snapshot too — leaving them in a stale
+        // snapshot would let the copy path read or write memory the task no
+        // longer owns (fail closed, never expose freed memory). Only on
+        // success: a failed unmap left the mappings — and the accounting —
+        // unchanged. The credit saturates at zero, so a `len` that rounds
+        // larger than the live total can never underflow into a bogus huge
+        // usage.
+        //
+        // The pages are dropped as in-place deltas over the region just
+        // released, so the work is proportional to that region rather than
+        // to the caller's whole resident set, and the removal happens even
+        // when no live space is published on this CPU. Only a snapshot that
+        // cannot absorb a delta falls back to the wholesale re-freeze.
         if result.is_ok() {
             let credited = page_count * PAGE_SIZE as u64;
             let mut aspaces = self.aspaces.write();
             aspaces.remove_anon_region(caller.task_id, base);
             aspaces.credit_aspace_bytes(caller.task_id, credited);
             drop(aspaces);
-            self.refreeze_caller_aspace(caller);
+            if !self.publish_region_teardown(caller.task_id, base, page_count) {
+                self.refreeze_caller_aspace(caller);
+            }
         }
         result
     }
@@ -21327,14 +21382,18 @@ mod tests {
     }
 
     /// The metal regression for the login `spawn err=18` (`BadAddress`):
-    /// the registry's frozen snapshot is taken at spawn and was never
-    /// refreshed when `mem_map` grew the live space, so `copy_in` of a
-    /// heap-allocated pointer (the shell path `login` passed to `spawn`)
-    /// found it unmapped. After a successful `mem_map` the handler must
-    /// re-freeze the caller's live space into the registry, so the next
-    /// `with_caller_aspace` copy sees the new region.
+    /// the registry's frozen snapshot is taken at spawn, so a page of a
+    /// region the caller mapped afterwards was absent from it and `copy_in`
+    /// of a heap-allocated pointer (the shell path `login` passed to
+    /// `spawn`) found it unmapped.
+    ///
+    /// `mem_map` itself reserves address space and commits no page, so the
+    /// publish happens where the page actually appears: the anonymous fault
+    /// path, one in-place delta per faulted page. This drives both halves —
+    /// reserve, then fault the page in — and asserts the caller's snapshot
+    /// reaches it afterwards.
     #[test]
-    fn mem_map_refreezes_the_caller_snapshot_so_a_new_region_is_reachable() {
+    fn a_faulted_page_of_a_mapped_region_becomes_reachable_through_the_snapshot() {
         install_trace_filter();
         let sink = make_sink();
         // `with_cpus(1)` reports current CPU 0 — the slot the live space is
@@ -21356,8 +21415,10 @@ mod tests {
         };
 
         // The page the "grown heap" lives at — absent from the spawn-time
-        // snapshot, present in the live space.
-        let heap = Page::from_addr(VirtAddr::new(0x4000)).expect("aligned");
+        // snapshot, backed by the fault path below. `RecordingMemMap`
+        // fabricates the reservation base as `0x5000_0000 | addr_hint`, so a
+        // `FIXED` request hinting `0x4000` reserves the region here.
+        let heap = Page::from_addr(VirtAddr::new(0x5000_4000)).expect("aligned");
 
         // Register the spawn-time snapshot: an empty space (no heap page).
         {
@@ -21381,9 +21442,8 @@ mod tests {
             .translate(heap)
             .is_none());
 
-        // Publish a live space that maps the heap page (what the producer
-        // would have mapped). `mem_map`'s fake producer returns `Ok`, which
-        // must trigger the re-freeze.
+        // Publish a live space holding the page the fault path will back —
+        // the state after the producer committed that one page.
         let mut live_space = AddressSpace::new(HostPageTable::new());
         live_space
             .map(heap, Frame(9), MapFlags::READ | MapFlags::USER)
@@ -21398,17 +21458,119 @@ mod tests {
         )
         .with_mem_map(producer);
 
-        h.mem_map(&ctx, 0x1000, tairix_abi::MapFlags::FIXED, 0x4000)
-            .expect("mem_map succeeds");
+        assert_eq!(
+            h.mem_map(&ctx, 0x1000, tairix_abi::MapFlags::FIXED, 0x4000),
+            Ok(0x5000_4000),
+            "the region is reserved at the producer's base"
+        );
 
-        // The re-freeze published the live space's mappings: the heap page
-        // now resolves through the registry, so a subsequent `copy_in`
-        // (e.g. `spawn`'s path argument) would reach it.
+        // The reservation alone publishes nothing: it commits no frame and
+        // makes no page-table entry, so re-freezing to reach the same answer
+        // would be per-call work proportional to the caller's whole resident
+        // set rather than to this call.
+        assert!(aspaces
+            .read()
+            .resolve(SecTaskId(2))
+            .expect("registered")
+            .0
+            .translate(heap)
+            .is_none());
+
+        // First touch of the reserved region: the fault path backs the page
+        // and publishes it.
+        assert!(h.resolve_anon_fault(SecTaskId(2), 0x5000_4000 + 0x40));
+
+        // The page now resolves through the registry, so a subsequent
+        // `copy_in` (e.g. `spawn`'s path argument) reaches it.
         let reg = aspaces.read();
         let (space, _) = reg.resolve(SecTaskId(2)).expect("still registered");
         let (frame, flags) = space.translate(heap).expect("heap page now visible");
         assert_eq!(frame, Frame(9));
         assert!(flags.contains(MapFlags::USER));
+    }
+
+    /// Releasing a region drops exactly its pages from the caller's
+    /// snapshot, and does so **without** a live space published on this CPU.
+    ///
+    /// Two defects in one: the wholesale re-freeze this replaces is a
+    /// documented no-op when no live space is published, so the freed pages
+    /// stayed translating in the snapshot the copy path walks — reachable
+    /// memory the task no longer owns, whose frames the allocator is free to
+    /// hand to another task. And it rebuilt the whole snapshot, a page-table
+    /// walk and a heap node per resident page, inside one non-preemptible
+    /// syscall: the stall that froze a CPU's dispatch loop for ten seconds
+    /// inside `mem_unmap`. Publishing the released region as in-place deltas
+    /// fixes both — the removal cannot be skipped, and the cost is the
+    /// region, not the address space.
+    #[test]
+    fn mem_unmap_drops_the_released_pages_from_the_snapshot() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // A two-page region at 0x10_0000, both pages resident, plus a page
+        // outside it that must survive the release untouched.
+        let first = Page::from_addr(VirtAddr::new(0x10_0000)).expect("aligned");
+        let second = Page::from_addr(VirtAddr::new(0x10_1000)).expect("aligned");
+        let elsewhere = Page::from_addr(VirtAddr::new(0x20_0000)).expect("aligned");
+        {
+            let mut resident = AddressSpace::new(HostPageTable::new());
+            for (page, frame) in [
+                (first, Frame(11)),
+                (second, Frame(12)),
+                (elsewhere, Frame(13)),
+            ] {
+                resident
+                    .map(page, frame, MapFlags::READ | MapFlags::USER)
+                    .expect("map page");
+            }
+            let physmap = SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE);
+            aspaces
+                .write()
+                .register(SecTaskId(2), Box::new(resident.freeze()), Box::new(physmap))
+                .expect("register snapshot");
+            aspaces
+                .write()
+                .record_anon_region(SecTaskId(2), 0x10_0000, 2);
+        }
+
+        // No live space is published for this CPU — the case the wholesale
+        // re-freeze silently skipped.
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x2000), Ok(0));
+
+        let reg = aspaces.read();
+        let (space, _) = reg.resolve(SecTaskId(2)).expect("still registered");
+        assert!(
+            space.translate(first).is_none(),
+            "a released page must not stay reachable through the snapshot"
+        );
+        assert!(
+            space.translate(second).is_none(),
+            "every released page is dropped, not just the first"
+        );
+        assert_eq!(
+            space.translate(elsewhere),
+            Some((Frame(13), MapFlags::READ | MapFlags::USER)),
+            "a page outside the released region is untouched"
+        );
     }
 
     /// `mem_unmap` forwards `(base, len)` to the producer and reports

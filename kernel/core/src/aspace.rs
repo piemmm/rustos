@@ -830,14 +830,18 @@ impl AddressSpaceRegistry {
     /// place — record `page → mapping` (`Some` on a fresh backing, `None`
     /// on an unmap) — returning `true` when the snapshot absorbed it.
     ///
-    /// This is the demand-fault resolver's fast path: it backs one page per
-    /// fault, so updating the one entry keeps per-fault work O(log n) instead
-    /// of re-freezing the whole address space (which would make touching a
-    /// large mapping O(N²), tens of seconds under emulation). A snapshot that
-    /// cannot absorb an in-place delta (the host double), or a task with no
-    /// entry, returns `false` and the caller falls back to a full re-freeze —
-    /// so this is a pure optimisation, never a correctness dependency. The
-    /// physical map is untouched (it is the shared kernel direct map).
+    /// This is how every caller that knows *which* pages changed publishes
+    /// them: the demand-fault resolver backs one page per fault, and a
+    /// released region drops its own pages. Updating just those entries keeps
+    /// the work O(log n) per page instead of re-freezing the whole address
+    /// space — a re-freeze walks the page table and allocates a fresh node
+    /// for every resident page of the task, which makes touching a large
+    /// mapping O(N²), tens of seconds under emulation, inside one
+    /// non-preemptible syscall. A snapshot that cannot absorb an in-place
+    /// delta (the host double), or a task with no entry, returns `false` and
+    /// the caller falls back to a full re-freeze — so this is a pure
+    /// optimisation, never a correctness dependency. The physical map is
+    /// untouched (it is the shared kernel direct map).
     pub fn note_faulted_page(
         &mut self,
         task: TaskId,

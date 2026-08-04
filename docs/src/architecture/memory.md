@@ -744,13 +744,36 @@ reserved region — read or write, offered *after* stack growth and *before*
 the write-fatal file rule (§7o) — is resolved by
 `resolve_anon_fault`, which backs the single covering page with one fresh
 zeroed `RW|USER` frame through the `mem_map` producer's single-page commit
-and re-freezes the registry snapshot. Per-fault kernel work is therefore
-**one page**, so a task touching a large mapping is preemptible between
-faults; this is what replaced the earlier eager commit, whose single
+and publishes that one page into the registry snapshot as an in-place
+delta (`AddressSpaceRegistry::note_faulted_page`). Per-fault kernel work is
+therefore **one page**, so a task touching a large mapping is preemptible
+between faults; this is what replaced the earlier eager commit, whose single
 `mem_map` syscall zeroed and mapped the whole region in one
 non-preemptible pass and, under a memory-stress workload (`stress --vm`),
 monopolised the CPU for the entire loop and starved every interrupt (the
 serial console stuttered and the machine appeared to lock up).
+
+**Publishing to the snapshot costs the pages that changed, never the whole
+address space.** The registry holds a frozen, `Send + Sync` snapshot of the
+task's mappings for the user-copy path to walk, so every change to the live
+space must reach it. Rebuilding it wholesale (`AddressSpace::freeze`) walks
+the page table *and* allocates a fresh node for **every resident page of the
+task**, and the kernel heap places a node by scanning its free list — so a
+task with a large resident set paid its page count times that list's length,
+inside one non-preemptible syscall. That is tens of seconds under emulation,
+during which the CPU's dispatch loop makes no progress at all and the session
+appears frozen (observed as a ten-second in-kernel stall inside `mem_unmap`
+while the desktop was live). Every path that knows *which* pages changed
+therefore publishes them as in-place deltas instead: the fault paths publish
+the one page they backed, and `mem_unmap` drops exactly the pages of the
+region it released. `mem_map` publishes nothing at all — a reservation commits
+no frame and writes no page-table entry, so the snapshot is already correct.
+Removing by delta is also what makes the removal unconditional: the wholesale
+re-freeze is a no-op for a task with no live space published on the current
+CPU, which would leave freed pages still translating in the snapshot the copy
+path walks. A snapshot that cannot absorb an in-place delta falls back to the
+wholesale re-freeze, so the delta is a cost reduction, never a correctness
+dependency.
 
 **Reservation is commit-accounted — TAIRiX does not overcommit anonymous
 memory.** `mem_map` reserves *physical headroom* for every page of the
