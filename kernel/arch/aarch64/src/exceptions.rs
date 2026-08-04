@@ -835,6 +835,14 @@ fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
     crate::kernel_arch::halt_current_cpu();
 }
 
+/// The ordering invariant of this port's two `eret` sequences, pinned
+/// against their sources: the trap trampoline's epilogue and the EL0 entry
+/// both mask every asynchronous exception before they program
+/// `ELR_EL1`/`SPSR_EL1`.
+#[cfg(test)]
+#[path = "eret_tests.rs"]
+mod eret_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

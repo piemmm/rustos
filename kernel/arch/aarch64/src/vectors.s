@@ -36,6 +36,21 @@
 //      user-kthread runtime, `plans/SPAWN.md` SP2 — without this, a parked
 //      `wait`/`yield` would `eret` to the wrong task's PC/stack). A handler
 //      that must not return (an unhandled fault) parks the CPU instead.
+//   4. Every asynchronous exception is masked for the whole return
+//      sequence, from the `ELR_EL1`/`SPSR_EL1` write to the `eret`. Those
+//      two registers are single-copy: an exception taken once they hold
+//      this context's return state overwrites both in hardware, and the
+//      nested handler's own return restores *its* saved pair, so this
+//      `eret` would resume at the nested handler's return address in the
+//      nested handler's PSTATE — re-entering this epilogue at EL1 with the
+//      frame already popped, which walks `sp` up off the kernel stack one
+//      frame per turn until the loads fault, and faults recursively with
+//      `DAIF` masked (a silent, unrecoverable wedge). The debug watchdog's
+//      Group-0/FIQ cadence is a live source of exactly that exception: the
+//      syscall/fault handler runs with `DAIF.F` clear so a wedged core can
+//      be sampled (`plans/WATCHDOG.md`). Masking here keeps the sampler out
+//      of the restore tail only — never out of the handler body, which is
+//      the span worth observing.
 
 .section .text
 .balign 0x800
@@ -203,6 +218,14 @@ tairix_aarch64_trap_common:
     // before the symmetric restore + `eret`.
     mov     x1, sp
     bl      tairix_aarch64_trap_handler
+
+    // Close the return sequence to asynchronous exceptions before the
+    // return state goes into ELR_EL1/SPSR_EL1: an FIQ, IRQ or SError taken
+    // between that write and the `eret` below overwrites both registers,
+    // and the nested handler restores its own pair, destroying this
+    // context's resume irrecoverably (invariant 4 above). `eret` reloads
+    // PSTATE from SPSR_EL1, so the mask does not reach the resumed context.
+    msr     DAIFSet, #0xf
 
     // Restore the per-exception return state (using x2/x3 as scratch before
     // they are reloaded from their GP slots below) so `eret` returns to the

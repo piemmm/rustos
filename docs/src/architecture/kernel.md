@@ -487,10 +487,11 @@ and any frame that does not resolve against the registered image base is
 skipped rather than disclosed raw (fail closed — never a fabricated stack,
 never an absolute address).
 
-The record also names the **stuck spinlock** `k_lock`. A GICv2 hard lockup
-is, by construction, a core spinning on or holding an `IrqSafeSpinLock` with
-interrupts masked — the one thing the maskable liveness sample cannot observe
-from *inside*. So in a diagnostics build the spinning lock family
+The record also names the **stuck spinlock** `k_lock`. On a GICv2 board with
+no non-maskable channel a hard lockup is, by construction, a core spinning on
+or holding an `IrqSafeSpinLock` with interrupts masked — the one thing the
+maskable liveness sample cannot observe from *inside*. So in a diagnostics
+build the spinning lock family
 (`SpinLock::{lock,try_lock}`, which `IrqSafeSpinLock` wraps) is
 `#[track_caller]` and reports its acquire/hold/release lifecycle — with the
 acquiring call's **source `file:line`** — through the `lib/sync` `lockwatch`
@@ -505,6 +506,16 @@ whole facility out (the `lock-diagnostics` feature, off), so a production lock
 is a bare compare-and-swap. `RwLock`/`McsLock` are not instrumented: they do
 not mask interrupts, so a wedge there is a soft lockup the live `pc`/`k_bt`
 already localise.
+
+Read `k_lock` for what it is: the innermost lock the core had *recorded*, not
+a verdict. Where the port's non-maskable FIQ self-sample is live
+(`plans/WATCHDOG.md`) an `IrqSafeSpinLock` hold leaves `DAIF.F` clear and so
+stays sampleable, which means a lock wedge there is *not* silent — a
+`k_lock_state=held` beside a `pre_silence` sample then names the section the
+core was inside when it went silent, and the wedge itself lies elsewhere (a
+never-retired interrupt, or a return-state corruption that turns into a
+recursive `DAIF`-masked fault). `k_lock_state=acquiring` is the contended-lock
+verdict; `held` is context.
 
 The record also carries a **fresh cross-core PC** `live_pc` when the port can
 read one. A hard lockup's own `pc`/`k_bt` are stale (`pre_silence`), and on a

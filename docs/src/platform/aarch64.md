@@ -1083,7 +1083,22 @@ system-register/assembly/MMIO operations to the freestanding target.
   would return to the wrong task's PC/stack (the SP2 resumable
   user-kthread runtime; a parked `wait`/`yield` depends on it). The first
   31 frame slots are the `[u64; SAVED_GPRS]` view `syscall_entry` reads,
-  so their offsets are fixed.
+  so their offsets are fixed. The write-back runs with every
+  asynchronous exception masked (`DAIFSet, #0xf` ahead of the
+  `ELR_EL1`/`SPSR_EL1` write; `eret` reloads PSTATE from `SPSR_EL1`, so
+  the mask never reaches the resumed context). Those two registers are
+  single-copy: an FIQ, IRQ or SError taken once they hold this context's
+  return state overwrites both, and the nested handler's own return
+  restores *its* saved pair — so the interrupted `eret` resumes the
+  epilogue itself, at EL1, with the frame already popped, walking `sp`
+  one frame per turn off the kernel stack until the loads fault and then
+  faulting recursively with `DAIF` masked: a silent, unrecoverable wedge
+  that surfaces only as a bare hard lockup. The debug watchdog's
+  Group-0/FIQ cadence sample is a live source of exactly that exception,
+  because the syscall/fault path deliberately runs with `DAIF.F` clear so
+  that a wedged core can be sampled. The same masking closes the
+  `enter_user` EL0-entry `eret` (`userentry`), whose `ELR_EL1`/`SPSR_EL1`
+  writes are the same single-copy window.
 - **Syscall entry** (`syscall_entry`). The `svc` exception class decode
   and the `x8`/`x0`–`x5` → `tairix_abi` `[u64; SYSCALL_MAX_ARGS]`
   marshalling, with a set-once dispatch callback (the same shape the

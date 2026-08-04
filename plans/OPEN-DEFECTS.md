@@ -37,12 +37,14 @@ The open items, in priority order:
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
-- **D6 — `docs-check` cross-crate rustdoc failure documenting
-  `tairix-kernel` — NON-REPRODUCING.** Formerly a `cargo xtask ci`
-  `docs-check` failure (`error[E0432]: unresolved import
-  tairix_abi::driver::virtio_pci::virtio_pci_window_resource`); it does
-  not reproduce on the pinned toolchain from a full `cargo clean`. Kept on
-  record with its reproduction procedure in case it recurs.
+- **D6 — `docs-check` cross-crate resolution failure — RECURRED, CAUSE
+  NAMED.** A `docs-check` build failing to resolve real, unconditional
+  `pub` items in sibling crates. The recurrence was a **poisoned build
+  cache** — truncated zero-byte rmeta left by a `cargo` build killed
+  mid-flight, accepted as fresh by the next build — cleared by
+  `cargo clean -p` of the named crates. The original instance survived a
+  full `cargo clean`, so its cause is still unconfirmed and the entry stays
+  on record with both procedures.
 - **D10 — `autoload-input-qemu-aarch64` intermittent terminal-focus
   freeze — DONE.** The QEMU vertical intermittently timed out at the AW4
   terminal stage. Root cause was a fragile *test-harness* readiness gate
@@ -97,7 +99,16 @@ The open items, in priority order:
   debug-only per-CPU lock-site record (`lib/sync` `lock-diagnostics` →
   `kernel/core` observer → `CpuState::lock_sites`, rendered
   `k_lock=<file>:<line>` on `id=4085`) so the next reproduction names the
-  culprit spinlock. The structural fix is OPEN, blocked on that evidence.
+  culprit spinlock. That evidence has since arrived and points *away* from a
+  deadlock: the reproduction detailed under D23 records `k_lock_state=held`
+  (not `acquiring`), and on this configuration an `IrqSafeSpinLock` hold
+  leaves `DAIF.F` clear and therefore stays sampleable — so a lock wedge
+  could not have been silent. D23's exception-return corruption is a proven,
+  reachable mechanism for a silent wedge on exactly this image, and is the
+  leading candidate for this defect too. **Remaining:** re-run
+  `stress --cpu 20` on the D23-fixed debug image; if it no longer wedges,
+  close this against D23, and if it does, the surviving report is fresh
+  evidence for a genuinely separate defect.
 - **D14 — `sysmon-qemu-aarch64` load-dependent 120 s timeout under
   concurrent `cargo xtask ci` — OPEN (to root-cause).** The single-CPU,
   full-boot `sysmon` acceptance vertical (unlock + PBKDF2 + interactive
@@ -339,19 +350,32 @@ The open items, in priority order:
   bounded guest concurrency or a real completion signal, never a third bump.
   Reproduced again under a whole-project `ci`; the same run measures the
   lone-run cost at ~30 s, bounding the gap at >12× (detail below).
+- **D23 — the debug FIQ self-sample corrupted the aarch64 exception-return
+  window — DONE.** A desktop session on the QEMU-`virt` **debug** image hard
+  locked a secondary core with a `pre_silence` PC *inside* the trap
+  trampoline's return epilogue. That epilogue programmed the single-copy
+  `ELR_EL1`/`SPSR_EL1` pair ~40 instructions before its `eret`; the debug
+  watchdog's Group-0/FIQ cadence — the one asynchronous exception that can
+  land there — overwrote both, so the interrupted `eret` re-entered the
+  epilogue at EL1 with its frame popped and climbed `sp` off the kernel
+  stack into a recursive, `DAIF`-masked abort storm: silent, no panic, no
+  recovery. Both `eret` sequences now mask asynchronous exceptions before
+  they program the return state. Detail below.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
-is a rustdoc/docs-build failure, D10 was a fragile QEMU-harness
+is a docs-build resolution failure (recurrence root-caused to a poisoned
+build cache), D10 was a fragile QEMU-harness
 readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
 (closed), D19/D20 were the `autoload-input-qemu-aarch64` count-drift
 (closed: marker-based sequencing + file-manager choreography moved to host
 tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
-reported — and D22 is a load-dependent QEMU-harness timeout whose mechanism is
-not yet named. Do not collapse the open items into one change; land each on
-its own whole-project-green gate (§7).
+reported — D22 is a load-dependent QEMU-harness timeout whose mechanism is
+not yet named, and D23 was an observer-perturbs-the-observed defect the debug
+watchdog's own non-maskable sample exposed (fixed). Do not collapse the open
+items into one change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -562,12 +586,12 @@ tested protocol, and the vertical now runs it.
 
 ---
 
-## D6 — `docs-check` cross-crate rustdoc failure documenting `tairix-kernel` — NON-REPRODUCING (monitoring)
+## D6 — `docs-check` cross-crate resolution failure — recurred; cause was a stale build cache
 
-**State:** does **not** reproduce on the pinned toolchain
-(`nightly-2026-07-03`); `docs-check` is green. Kept on record — not
-deleted — so that a recurrence has its prior context and its
-reproduction procedure to hand.
+**State:** `docs-check` is green. The failure recurred once since, with a
+named and cleared cause (below), so the class is no longer a mystery — but
+the entry stays on record because the *mergeable-info* suspicion for the
+original instance was never confirmed.
 
 **Prior symptom (historical).** `cargo xtask ci` → `docs-check`
 (`cargo doc --workspace --no-deps --document-private-items
@@ -595,14 +619,37 @@ tairix-kernel --no-deps` succeeds too). `cargo xtask docs-check`
 `sccache`/`RUSTC_WRAPPER` and no shared `CARGO_TARGET_DIR`, so this is not
 a stale-cache artefact.
 
-**If it recurs.** Treat it as a real cross-crate-rustdoc / mergeable-info
-defect (not a load flake, §7): capture whether it appears only under the
-concurrent `cargo xtask ci` static-gate group (memory pressure) vs.
-standalone, and the structural fix is to drop `-Z rustdoc-mergeable-info`
-from `run_docs_check` (`tools/xtask/src/commands.rs`) — the mergeable-info
-model is a doc-build *speed* optimisation, and correctness of the doc
-build takes precedence (§2.16). Do not reinstate the flag until the
-resolution failure is root-caused in rustdoc.
+**Recurrence, root-caused: a corrupt/stale build cache.** The same shape
+appeared again with three different symbols — `tairix_tty::read_bounded`,
+`tairix_tty::is_line_delimiter` (from `kernel/core`) and
+`tairix_qemu::ReservedSocket` (from `tools/xtask`) — each a real,
+unconditional `pub` item in a feature-less crate, and each *recently added*
+(`ReservedSocket` by the then-latest commit). It reproduced standalone under
+`cargo xtask docs-check`, not only inside the concurrent gate group, and
+vanished permanently after `cargo clean -p` of the four crates involved.
+The cache held rmeta from a pre-commit revision alongside **zero-byte**
+`.rmeta` files timestamped to the minute a nested `cargo` build was killed
+mid-flight, so the mechanism is an interrupted build leaving truncated
+metadata that a later build accepted as fresh — the errors came from *rustc*
+checking a dependent crate, not from rustdoc.
+
+**Consequences for the two theories.** This instance is **not** evidence for
+the mergeable-info suspicion, so do **not** drop `-Z rustdoc-mergeable-info`
+on its account; and the original entry's "not a stale-cache artefact" holds
+only for the original instance, where a full `cargo clean` had already been
+tried. Killing a `cargo` process mid-build is now a known way to poison the
+cache: `cargo clean -p <crate>` for the crates named in the error is the
+correct first response, and a green re-run *after* such a clean is a real
+fix, not a retry.
+
+**If it recurs without a killed build behind it.** Treat it as a real
+cross-crate-rustdoc / mergeable-info defect (not a load flake): confirm
+`cargo clean -p` does *not* clear it, capture whether it appears only under
+the concurrent `cargo xtask ci` static-gate group (memory pressure) vs.
+standalone, and the structural fix is then to drop
+`-Z rustdoc-mergeable-info` from `run_docs_check`
+(`tools/xtask/src/commands.rs`) — the mergeable-info model is a doc-build
+*speed* optimisation, and correctness of the doc build takes precedence.
 
 ---
 
@@ -1329,6 +1376,76 @@ denied it. It carries a regression test when the fix lands.
 Suspected-unrelated to the font work that surfaced it (fonts changed the
 image payload and `login` is what starts the font service, so the coupling is
 worth ruling out first rather than assuming).
+
+---
+
+## D23 — the debug FIQ self-sample corrupted the exception-return window
+
+Status: **done**. Reported as a hard lock while running the desktop on
+`images/tairix-aarch64-rpi-debug.img` under `qemu-system-aarch64 -M virt`
+with four vCPUs, ~18 s after launching a second `files.app` window:
+
+```
+id=4082 cpu hard lockup detected cpu=3 observer=1 stalled_ms=10044
+        context=kernel sampled=pre_silence
+id=4085 cpu lockup diagnostic detail cpu=3 observer=1 pc=+0x00000000001ee840
+        pstate=0x0000000060000385 k_site=user_switch k_seq=38818
+        k_lock=kernel/sched/cfq/src/scheduler.rs k_lock_line=753
+        k_lock_state=held k_bt=+0x00000000001ee840
+id=4084 cpu lockup recovery requested cpu=3 kind=hard outcome=attention
+```
+
+**Reading the record.** `pc=+0x1ee840` resolves (image base `0x80000`) to
+`tairix_aarch64_trap_common+0xb0` — the instruction *two* past the
+`msr SPSR_EL1` in the trampoline's return epilogue. `pstate` decodes to EL1h
+with `I`/`A`/`D` masked and **`F` clear**, so the only asynchronous exception
+that could be taken there was an FIQ: on this board the boot probe reports
+Group 0 deliverable, and the sync handler clears `DAIF.F` so a wedged core
+can be sampled. The record is therefore not a coincidence — it is the
+sampler catching itself in the act, one instruction before the damage.
+
+**Mechanism.** `ELR_EL1` and `SPSR_EL1` are single-copy: taking an exception
+overwrites both. The epilogue programmed them and then ran ~40 further
+instructions (`SP_EL0`, FPCR/FPSR, `q0`–`q31`, the GP restores, `add sp`)
+before its `eret`. An FIQ in that window returns through its own handler,
+which restores *its* saved pair, so the victim's `eret` resumes the epilogue
+itself at EL1 with the frame already popped: each turn restores garbage from
+the stack above and adds another 816 bytes to `sp`, walking off the kernel
+stack until a load faults, and the fault then recurs with `DAIF` masked — a
+silent, unrecoverable wedge that never reaches the panic printer, which is
+why the log ends without diagnostics.
+
+**Reachability is narrow and exact.** Only a `watchdog-diagnostics` build on a
+single-Security-state GIC routes the cadence to FIQ, so the window is live on
+the **debug image under QEMU** and nowhere else: a shippable image never
+clears `DAIF.F` in the kernel, and a real Pi 4's GIC-400 probes `Unsupported`.
+The QEMU integration verticals do not enable the feature either, so D15's
+freeze is *not* this defect. D16's Pi-4 wedge shares the `k_site=user_switch`
+breadcrumb but not the cause (it is I-cache/fault-handling, fixed there).
+
+**The sibling ports are structurally unaffected**, so there is no common
+logic to hoist: x86_64's `iretq` consumes its return state from the *stack*,
+which a nested interrupt pushes below rather than overwriting, and riscv64's
+epilogue restores `sstatus` (whose `SIE` is clear in every saved frame)
+*before* `sepc`, with the syscall body re-masking on the way out and no
+non-maskable channel wired. The hazard is specific to a return state held in
+single-copy system registers that an asynchronous exception also writes.
+
+**Fix.** Both of the port's `eret` sequences now close the window: the
+trampoline epilogue (`vectors.s`) and the EL0 entry (`userentry::enter_el0`)
+`msr DAIFSet, #0xf` before programming the return state. `eret` reloads PSTATE
+from `SPSR_EL1`, so the mask never reaches the resumed context and EL0 still
+runs preemptible. The masked span is straight-line, lock-free and MMIO-free,
+so the sampler loses no coverage that could ever wedge (`plans/WATCHDOG.md`
+B4).
+
+**Regression cover.** `kernel/arch/aarch64::exceptions::eret_tests` pins the
+ordering against both sources — mask before the `ELR_EL1`/`SPSR_EL1` write,
+nothing re-enabling before the `eret`. Verified to fail on the pre-fix source
+and pass after. The race itself cannot be entered deterministically from a
+target test, and the assertion is the source-level invariant that makes the
+sequence correct, so the source pin is the regression guard rather than a
+QEMU vertical.
 
 ---
 

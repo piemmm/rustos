@@ -402,7 +402,7 @@ unchanged `WatchdogArch` / `WatchdogSample` surface, with no `kernel/core`
 change; that is a per-port delivery detail for such a board, not a pending
 upgrade to the design here.
 
-## Debug-only FIQ masked-section self-sample (staged, aarch64)
+## Debug-only FIQ masked-section self-sample (done, aarch64; metal delivery pending)
 
 The buddy detector above is the **shippable, complete** design and is
 unchanged. For the **debug** image only (`watchdog-diagnostics`), a
@@ -511,9 +511,32 @@ masked, the sample was kernel-context, and the sampled PC *and*
 masked-section sampler names the section it is stuck in (`sampled=live`, not
 the stale `pre_silence` a buddy sees).
 
-Remaining (B4, `.junie/fix-details.md`): reproduce the D13 `stress --cpu N`
-wedge on the FIQ-enabled debug image (the sampler is now known to be active on
-QEMU) and fix the underlying SMP defect structurally with a regression test.
+**B4 — the sampler's own re-entrancy cost — DONE.** Delivering the cadence as
+a genuine FIQ makes it the one asynchronous exception that *can* interrupt a
+`DAIF.I`-masked kernel section, so every kernel window that is unsafe against
+a nested exception became reachable for the first time. One such window was
+live: the aarch64 trap trampoline's exception-return epilogue programmed the
+single-copy `ELR_EL1`/`SPSR_EL1` pair and then ran ~40 further instructions
+(the `SP_EL0`, FPCR/FPSR, `q0`–`q31` and GP restores) before its `eret`. An FIQ
+taken in that window overwrote both registers, and the sampler's own return
+restored *its* saved pair, so the interrupted `eret` re-entered the epilogue at
+EL1 with the frame already popped — climbing `sp` one 816-byte frame per turn
+off the kernel stack until the loads faulted, then faulting recursively with
+`DAIF` masked: a silent, unrecoverable wedge with no panic output, reported
+only as `CPU_HARD_LOCKUP_DETECTED` with a `pre_silence` PC inside that
+epilogue. Both of the port's `eret` sequences (the trampoline epilogue and the
+`userentry` EL0 entry) now mask every asynchronous exception before they
+program the return state; `eret` reloads PSTATE from `SPSR_EL1`, so the mask
+never reaches the resumed context. Pinned by
+`kernel/arch/aarch64::exceptions::eret_tests`.
+
+The FIQ sampler is therefore blind to the ~45-instruction restore tail of an
+exception return, by design: it is straight-line, lock-free and MMIO-free, so
+it cannot wedge, and no diagnostic value is lost — the handler body, the span
+worth observing, stays fully sampled. A `pre_silence` PC *inside* that tail is
+now a signature worth reading as "the resume state was destroyed", not as "the
+CPU was innocently returning".
+
 Metal delivery on a real Pi 4B stays a boot-time hardware capability
 (`plans/FIX-HARDWARE-FEATURES.md`) — there the probe returns `Unsupported` and
 the buddy detector runs — and is not claimed until a Pi 4B confirms it.

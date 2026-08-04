@@ -2,14 +2,15 @@
 //! ([`tairix_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into EL0 is the `eret`
-//! sequence: program `SP_EL0` with the user stack pointer, `ELR_EL1`
-//! with the entry point, and `SPSR_EL1` to "EL0t with IRQ unmasked" (so
-//! EL0 runs **preemptible** — a generic-timer interrupt taken in user
-//! mode drives the P-1 preemptive reschedule, `plans/PI.md` D2b-2b-A
-//! P-1), set the first-argument register `x0`, then `eret` — a
-//! context-synchronising EL1→EL0 transition. This is the one definition
-//! of that sequence; the CC2/CC3 QEMU verticals reach
-//! it through the HAL rather than copying the `asm!` block.
+//! sequence: mask the asynchronous exceptions, program `SP_EL0` with the
+//! user stack pointer, `ELR_EL1` with the entry point, and `SPSR_EL1` to
+//! "EL0t with IRQ unmasked" (so EL0 runs **preemptible** — a
+//! generic-timer interrupt taken in user mode drives the P-1 preemptive
+//! reschedule, `plans/PI.md` D2b-2b-A P-1), set the first-argument
+//! register `x0`, then `eret` — a context-synchronising EL1→EL0
+//! transition. This is the one definition of that sequence; the CC2/CC3
+//! QEMU verticals reach it through the HAL rather than copying the
+//! `asm!` block.
 
 use tairix_arch_api::{EnterUser, UserEntry};
 
@@ -57,6 +58,16 @@ const SPSR_EL0T_PREEMPTIBLE: u64 = (0b1111 << 6) & !SPSR_DAIF_IRQ;
 
 /// Drop to EL0 at `entry` with `SP_EL0` = `sp` and `x0` set.
 ///
+/// The sequence opens by masking every asynchronous exception, because
+/// `ELR_EL1`/`SPSR_EL1` are single-copy registers: an interrupt taken
+/// once they hold the EL0 entry state overwrites both in hardware, and
+/// the handler's own return restores *its* saved pair, so this `eret`
+/// would jump back to the interrupted `eret` at EL1 and spin there
+/// instead of ever reaching the process. `eret` reloads PSTATE from
+/// `SPSR_EL1`, so the mask never reaches EL0 — the entered task still
+/// runs preemptible. The same reasoning governs the exception-return
+/// epilogue in `vectors.s`.
+///
 /// # Safety
 ///
 /// See [`EnterUser::enter_user`]: `entry` must be a valid EL0-executable
@@ -65,13 +76,16 @@ const SPSR_EL0T_PREEMPTIBLE: u64 = (0b1111 << 6) & !SPSR_DAIF_IRQ;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
-    // `eret` or the EL1 system-register writes). Writing
-    // `SP_EL0`/`ELR_EL1`/`SPSR_EL1` loads the EL0 entry state; `eret`
-    // performs the documented EL1→EL0 transition (a context-synchronising
-    // event). The caller's safety contract guarantees the mapped
-    // entry/stack. `options(noreturn)` matches the divergence.
+    // `eret` or the EL1 system-register writes). Masking `DAIF` only
+    // changes this CPU's exception masks, which the `eret` then replaces
+    // from `SPSR_EL1`. Writing `SP_EL0`/`ELR_EL1`/`SPSR_EL1` loads the EL0
+    // entry state; `eret` performs the documented EL1→EL0 transition (a
+    // context-synchronising event). The caller's safety contract
+    // guarantees the mapped entry/stack. `options(noreturn)` matches the
+    // divergence.
     unsafe {
         core::arch::asm!(
+            "msr DAIFSet, #0xf",
             "msr SP_EL0, {sp}",
             "msr ELR_EL1, {entry}",
             "msr SPSR_EL1, {spsr}",
