@@ -43,10 +43,14 @@ pub const DEFAULT_HOSTNAME: &str = "tairix";
 const DEFAULT_USER: &str = "user";
 
 /// The shell's own fallback search path when the session exported no `PATH`
-/// (the shell run outside a normal login). A defensive default the shell
-/// owns, exactly as an interactive `bash` supplies its own when `PATH` is
-/// unset; the authoritative value is the one login exports.
-const DEFAULT_PATH: &str = "/System/Apps:/Apps";
+/// (the shell run outside a normal login): the machine-wide installed
+/// application store. A defensive default the shell owns, exactly as an
+/// interactive `bash` supplies its own when `PATH` is unset; the
+/// authoritative value is the one login exports. The two system stores and
+/// the user's own two are the fixed, non-overridable prefix the shared
+/// resolution policy already searches first, so repeating them here would be
+/// redundant and would imply they are overridable.
+const DEFAULT_PATH: &str = "/Apps";
 
 /// Mutable shell state: variables, working directory, and `$?`.
 #[derive(Clone, Debug)]
@@ -243,7 +247,7 @@ impl Environment {
         self.export("USER", user);
         self.export("LOGNAME", logname);
         self.export("HOME", home);
-        self.export("SHELL", take("SHELL", "/System/Apps/elsh.app/Run"));
+        self.export("SHELL", take("SHELL", "/System/Commands/elsh.app/Run"));
         self.export("PATH", take("PATH", DEFAULT_PATH));
         self.export("TERM", take("TERM", "xterm-256color"));
         self.export("LANG", take("LANG", "en-US"));
@@ -488,7 +492,7 @@ mod tests {
         env.seed_interactive(|name| match name {
             "USER" => Some("ada".to_string()),
             "HOME" => Some("/Users/ada".to_string()),
-            "SHELL" => Some("/System/Apps/elsh.app/Run".to_string()),
+            "SHELL" => Some("/System/Commands/elsh.app/Run".to_string()),
             "TERM" => Some("xterm-256color".to_string()),
             _ => None,
         });

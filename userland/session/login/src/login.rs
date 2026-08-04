@@ -476,7 +476,7 @@ mod tests {
                     supplementary_gids: Vec::new(),
                     capabilities: self.caps,
                     home: "/Users/ada".to_string(),
-                    shell: "/System/Apps/elsh.app/Run".to_string(),
+                    shell: "/System/Commands/elsh.app/Run".to_string(),
                 })
             } else {
                 Err(Errno::PermissionDenied)
@@ -494,7 +494,7 @@ mod tests {
                     supplementary_gids: Vec::new(),
                     capabilities: self.caps,
                     home: "/Users/ada".to_string(),
-                    shell: "/System/Apps/elsh.app/Run".to_string(),
+                    shell: "/System/Commands/elsh.app/Run".to_string(),
                 })
             } else {
                 Err(Errno::PermissionDenied)

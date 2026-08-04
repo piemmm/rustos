@@ -20,9 +20,10 @@
 //! The runner unlocks the root at the passphrase prompt, authenticates
 //! `root`/`root` at the console login, and types `ping -c 3 fe80::2` at the
 //! shell — the host peer's link-local address, formed from the shared wire
-//! identifier. The store-then-`PATH` resolution finds `/System/Apps/ping.app/
-//! Run`, the disk-backed spawn path verifies the signed bundle, and the tool
-//! runs with `manifest ∩ administrator-ceiling` authority (its manifest
+//! identifier. The store-then-`PATH` resolution finds
+//! `/System/Commands/ping.app/Run`, the disk-backed spawn path verifies the
+//! signed bundle, and the tool runs with `manifest ∩ administrator-ceiling`
+//! authority (its manifest
 //! requests `CAP_NET` + `CAP_NET_RAW`, enforced by the netstack socket
 //! dispatcher against the kernel-attested origin). `ping` opens an ICMP-echo
 //! socket, resolves the peer over Neighbour Discovery, and sends three

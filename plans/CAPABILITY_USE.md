@@ -454,7 +454,7 @@ authorises it; anything not listed is denied.
   pipeline with the encrypted-root disk, unlocks at `Root passphrase: `,
   authenticates `root`/`root`, and drives the spawned shell —
   `cd /Users/root` (CAP_FS_ACCESS, the B3 regression), `pwd`, spawning
-  `/System/Apps/ps.app/Run` (CAP_PROC_SPAWN) — then the negative: a `ulimit`
+  `/System/Commands/ps.app/Run` (CAP_PROC_SPAWN) — then the negative: a `ulimit`
   hard-bound raise is refused with `PermissionDenied` because the
   shell's baseline manifest does not request `CAP_RLIMIT_RAISE` even
   though the ceiling carries it (the intersection binds). PASS keys on
@@ -508,7 +508,7 @@ exist from CU3).
   wired; other ports gain it with their unlock paths via
   `UnlockInstall::admin`).
 - **The first holder** is the interactive `users` tool
-  (`userland/shell/users`, `/System/Apps/users.app/Run`, registry-enrolled):
+  (`userland/shell/users`, `/System/Commands/users.app/Run`, registry-enrolled):
   session logic behind host-tested seams, manifest = console pair +
   `CAP_USER_ADMIN` (deliberately above the baseline — armed only for an
   administrator's intersection, no `CAP_FS_ACCESS`), salt from

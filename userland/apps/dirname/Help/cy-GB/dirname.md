@@ -26,7 +26,7 @@ mae `/` yn ei chwarae ar systemau POSIX.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — argraffu `/System/Apps`.
+- `dirname /System/Commands/top.app` — argraffu `/System/Commands`.
 - `dirname src/lib.rs` — argraffu `src`.
 - `dirname file` — argraffu `.` (dim rhan cyfeiriadur).
 - `dirname Home:/tools` — argraffu `Home:/` (ni ddatgymalir gwreiddyn

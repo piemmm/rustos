@@ -6,7 +6,7 @@
 # with the launching user's grants (the seeded root administrator ceiling):
 # CAP_CONSOLE_WRITE for the PASS/FAIL report on fd 1/2, CAP_CONSOLE_READ for
 # the timed stream_read that replays top's refresh park, CAP_FS_ACCESS and
-# CAP_PROC_SPAWN for the spawn/wait cycles of /System/Apps/true.app/Run, and
+# CAP_PROC_SPAWN for the spawn/wait cycles of /System/Commands/true.app/Run, and
 # CAP_SYSINFO_KERNEL because the KERNEL_MEMORY_STATS query it samples
 # declares that capability (enforced by sysinfod against this process's
 # kernel-attested origin).

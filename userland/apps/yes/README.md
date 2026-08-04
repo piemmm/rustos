@@ -1,7 +1,7 @@
 # `tairix-yes` — repeatedly output a line of text
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/yes.app/` so the shell resolves the bare word
+store bundle `/System/Commands/yes.app/` so the shell resolves the bare word
 `yes` to it. `yes` is the GNU coreutils tool: it writes its operands,
 joined by single spaces — or `y` when none are given — followed by a
 newline, over and over until its output stops accepting bytes (a closed

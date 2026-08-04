@@ -19,7 +19,7 @@
 //! The runner unlocks the root at the passphrase prompt, authenticates
 //! `root`/`root` at the console login, and types the bare command word
 //! `tcpecho` at the shell: the store-then-`PATH` resolution finds
-//! `/System/Apps/tcpecho.app/Run`, the disk-backed spawn path verifies the
+//! `/System/Commands/tcpecho.app/Run`, the disk-backed spawn path verifies the
 //! signed bundle, and the client runs with `manifest ∩ administrator-ceiling`
 //! authority (its manifest requests `CAP_NET`, enforced by the netstack socket
 //! dispatcher against the kernel-attested origin). The client opens a stream

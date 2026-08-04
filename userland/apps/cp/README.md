@@ -16,7 +16,7 @@ engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the copy library and the `cp` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
-`/System/Apps/cp.app` with its thirteen-locale `Help/` tree (plans/APPS.md
+`/System/Commands/cp.app` with its thirteen-locale `Help/` tree (plans/APPS.md
 §12.1 Stage B).
 
 ## Usage

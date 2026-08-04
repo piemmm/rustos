@@ -158,7 +158,8 @@ pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"tairix-kernel-driver-signing
 /// are separate values, checked at separate gates. This is the single
 /// source of the app seed: the image build (`tools/mkimage`'s caller) and
 /// every fixture that plants a kernel-trusted bundle onto the
-/// `/System/Apps` or `/System/Services` store signs from this definition.
+/// `/System/Commands`, `/System/Applications`, or `/System/Services` store
+/// signs from this definition.
 pub const SYSTEM_APP_SIGNING_SEED: [u8; 32] = *b"tairix-system-app-signing/v1!\0\0\0";
 
 /// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is

@@ -86,10 +86,11 @@ pub const BOOT_PART_SECTORS: u32 = 131_072;
 pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
 
 /// Sectors in the read-only `ARXFS` `/System` partition: 128 MiB — the
-/// skeleton plus the signed driver bundles and the discovered command-app
-/// / service store (`/System/Apps`, `/System/Services`), each app a
-/// self-contained `Run` rxe beside its `Help/` tree, with headroom for the
-/// store to keep growing as apps are added.
+/// skeleton plus the signed driver bundles and the discovered program and
+/// service stores (`/System/Commands`, `/System/Applications`,
+/// `/System/Services`), each app a self-contained `Run` rxe beside its
+/// `Help/` tree, with headroom for the stores to keep growing as apps are
+/// added.
 pub const SYSTEM_PART_SECTORS: u32 = 262_144;
 
 /// First sector of the encrypted `ARXFS` data-root partition (contiguous
@@ -472,9 +473,9 @@ pub struct RpiImage {
 /// produces an image with no autoloaded drivers (every node left unbound).
 ///
 /// `apps` is the set of application-bundle files to plant into the read-only
-/// system app and service stores, each as `(components, bytes)` where
+/// system program and service stores, each as `(components, bytes)` where
 /// `components` is the file's path relative to the `/System` volume root
-/// (for example `&[b"Apps", b"ls.app", b"AppInfo"]`) — every program's
+/// (for example `&[b"Commands", b"ls.app", b"AppInfo"]`) — every program's
 /// signed `AppInfo` + `Run` beside its `Help/` tree, so each bundle is a
 /// complete, self-contained on-disk directory (`plans/APPS.md` deliverable
 /// 8). As with `drivers`, the caller composes and signs the files; this
@@ -895,8 +896,8 @@ mod tests {
         let ls_appinfo = crate::library::test_manifest("ls", None, None);
         let login_appinfo = crate::library::test_manifest("login", None, None);
         let app_files: [(&[&[u8]], &[u8]); 4] = [
-            (&[b"Apps", b"ls.app", b"AppInfo"], ls_appinfo.as_slice()),
-            (&[b"Apps", b"ls.app", b"Run"], RUN),
+            (&[b"Commands", b"ls.app", b"AppInfo"], ls_appinfo.as_slice()),
+            (&[b"Commands", b"ls.app", b"Run"], RUN),
             (
                 &[b"Services", b"login.app", b"AppInfo"],
                 login_appinfo.as_slice(),
@@ -937,7 +938,7 @@ mod tests {
         // …and the command app's bundle directory also carries its
         // discovered `Help/` tree, so the on-disk bundle is complete.
         let mut help = sys.root();
-        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"en-US"] {
+        for component in [b"Commands".as_slice(), b"ls.app", b"Help", b"en-US"] {
             help = sys.lookup(help, component).expect("Help path component");
         }
         sys.lookup(help, b"ls.md")
@@ -1064,7 +1065,7 @@ mod tests {
         // belongs to the compiled-in `system` identity, never to a record
         // on disk.
         assert_eq!(record.uid(), DEBUG_UID);
-        assert_eq!(record.shell(), Some("/System/Apps/elsh.app/Run"));
+        assert_eq!(record.shell(), Some("/System/Commands/elsh.app/Run"));
         // The seeded grant is exactly the shared administrator ceiling
         // (session baseline + administrative set) — the B3 regression
         // (`plans/CAPABILITY_USE.md` CU3): a root account without

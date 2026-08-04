@@ -24,7 +24,7 @@ TAIRiX — `dirname Home:/tools` هو `Home:/`. جذر الاسم البديل (
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — طباعة `/System/Apps`.
+- `dirname /System/Commands/top.app` — طباعة `/System/Commands`.
 - `dirname src/lib.rs` — طباعة `src`.
 - `dirname file` — طباعة `.` (لا جزء دليل).
 - `dirname Home:/tools` — طباعة `Home:/` (لا يُفكَّك جذر أبدًا).

@@ -1476,6 +1476,7 @@ name = "tairix-help"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-cmdres",
  "tairix-curses",
  "tairix-fuzzseed",
  "tairix-rt",

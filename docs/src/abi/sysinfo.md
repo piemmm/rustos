@@ -388,9 +388,9 @@ First-party programs do not hand-roll this call: the `program` feature of
 `lib/procinfo` provides `IpcTransport`, the production `Transport` that posts
 a framed request over [`SYSINFO_ENDPOINT`] with `ipc_call` and unwraps the
 reply frame with [`decode_reply`]. It is what the `sysinfo` and `ps` `Run`
-binaries link (registered at `/System/Apps/sysinfo.app/Run` and `/System/Apps/ps.app/Run`),
-so a spawned tool queries the live service; the request/render libraries stay
-testable against in-memory fixtures.
+binaries link (registered at `/System/Commands/sysinfo.app/Run` and
+`/System/Commands/ps.app/Run`), so a spawned tool queries the live service;
+the request/render libraries stay testable against in-memory fixtures.
 
 ## Typed payloads
 

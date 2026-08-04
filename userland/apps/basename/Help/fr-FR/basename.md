@@ -37,7 +37,7 @@ opérande est un nom.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — afficher `top.app`.
+- `basename /System/Commands/top.app` — afficher `top.app`.
 - `basename src/lib.rs .rs` — afficher `lib`.
 - `basename -s .rs -a a.rs b.rs` — afficher `a` puis `b`.
 - `basename Home:/` — afficher `Home:/` (une racine n'est jamais

@@ -48,8 +48,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityQuery, Errno, FileKind,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN, SYSTEM_APP_STORE,
-    SYSTEM_SERVICE_STORE,
+    ProgramKind, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_SUFFIX, MIME_ENTRY_LEN,
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
@@ -152,19 +151,20 @@ impl AppStore {
     /// True when `bundle` lies inside one of the immutable, read-only
     /// system stores, whose contents cannot change for the life of the
     /// boot — the only bundles whose verification result may be cached.
+    /// Every program kind's store is such a store, so the set is derived
+    /// from the one store definition rather than listed again here.
     ///
-    /// A bundle on a writable volume (a user bundle under `/Apps`) is
-    /// never cached: its bytes can change between launches, so every
-    /// launch re-verifies it through the full load gate.
+    /// A bundle on a writable volume (an installed bundle under `/Apps`, a
+    /// bundle in a user's own store) is never cached: its bytes can change
+    /// between launches, so every launch re-verifies it through the full
+    /// load gate.
     #[must_use]
     pub fn cacheable_bundle(bundle: &str) -> bool {
-        [SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE]
-            .iter()
-            .any(|store| {
-                bundle
-                    .strip_prefix(store)
-                    .is_some_and(|rest| rest.starts_with('/'))
-            })
+        ProgramKind::ALL.iter().any(|kind| {
+            bundle
+                .strip_prefix(kind.store())
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
     }
 
     /// Install the semantic launch cache: bounded by `budget`, governed
@@ -207,6 +207,26 @@ impl AppStore {
     #[must_use]
     pub fn cached(&self, bundle: &str) -> Option<Arc<LoadedApp>> {
         self.cache.write().as_mut()?.lookup(bundle)
+    }
+
+    /// Whether a verified image for `bundle` is currently held — an
+    /// advisory existence peek that does not disturb the cache (no LRU
+    /// restamp, no hit/miss accounting, no serving), taking only a read
+    /// lock ([`LaunchCache::contains`]).
+    ///
+    /// The synchronous spawn probe uses this to skip its filesystem
+    /// existence lookup when the bundle is already cached: a hit is proof
+    /// the load gate accepted these immutable read-only-store bytes earlier
+    /// this boot, so the bundle certainly exists. It says nothing about the
+    /// *caller* and grants no authority — the caller's read of the entry
+    /// point is still authorised by the deferred load through the secured
+    /// VFS, so the cache can never widen access.
+    #[must_use]
+    pub fn cached_present(&self, bundle: &str) -> bool {
+        self.cache
+            .read()
+            .as_ref()
+            .is_some_and(|cache| cache.contains(bundle))
     }
 
     /// Record `app` as the verified result for `bundle`. Admission and
@@ -491,7 +511,7 @@ impl<A: KernelArch> Clock for ArchClock<'_, A> {
 /// the load gate judges and the command name the child is attested as.
 #[derive(Debug, Eq, PartialEq)]
 pub struct BundleRunPath<'a> {
-    /// The bundle root directory (e.g. `/System/Apps/ps.app`).
+    /// The bundle root directory (e.g. `/System/Commands/ps.app`).
     pub bundle: &'a str,
     /// The bundle directory's stem — the command/program name (e.g. `ps`).
     pub command: &'a str,
@@ -593,7 +613,7 @@ mod tests {
             sink,
         });
         loader.load(
-            "/System/Apps/ps.app",
+            "/System/Commands/ps.app",
             &CapabilitySet::from_words([u64::MAX; 4]),
         )
     }
@@ -623,8 +643,8 @@ mod tests {
         // document, read only during the walk), and never more.
         let (fs, anchor, _) = composed_bundle(vec![]);
         load(&fs, anchor).expect("loads");
-        let run_reads = fs.read_calls("/System/Apps/ps.app/Run");
-        let help_reads = fs.read_calls("/System/Apps/ps.app/Help/en-US/ps.md");
+        let run_reads = fs.read_calls("/System/Commands/ps.app/Run");
+        let help_reads = fs.read_calls("/System/Commands/ps.app/Help/en-US/ps.md");
         assert!(run_reads > 0, "the Run image must actually be read");
         assert_eq!(
             run_reads, help_reads,
@@ -636,7 +656,7 @@ mod tests {
     fn a_tampered_run_fails_the_content_hash() {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
         fs.files
-            .get_mut("/System/Apps/ps.app/Run")
+            .get_mut("/System/Commands/ps.app/Run")
             .expect("run present")[LoadHeader::WIRE_LEN + Segment::WIRE_LEN] ^= 0xFF;
         assert_eq!(
             load(&fs, anchor),
@@ -658,7 +678,7 @@ mod tests {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
         let appinfo = fs
             .files
-            .get_mut("/System/Apps/ps.app/AppInfo")
+            .get_mut("/System/Commands/ps.app/AppInfo")
             .expect("manifest present");
         // Flip a bit inside the trailing signature field.
         let sig_start = AppInfoHeader::signed_range().end;
@@ -670,7 +690,7 @@ mod tests {
     fn the_content_hash_walk_refuses_a_hostile_deep_tree() {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
         // Nest a file beyond the walk's depth bound inside Resources/.
-        let deep = "/System/Apps/ps.app/Resources/a/b/c/d/e/f/g/h/i/j/x";
+        let deep = "/System/Commands/ps.app/Resources/a/b/c/d/e/f/g/h/i/j/x";
         fs.files.insert(deep.to_string(), vec![1]);
         let err = load(&fs, anchor).expect_err("deep tree refused");
         assert!(matches!(err, AppError::Store(Errno::OutOfRange)));
@@ -680,7 +700,7 @@ mod tests {
     fn an_oversized_appinfo_is_refused_before_decoding() {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
         fs.files.insert(
-            "/System/Apps/ps.app/AppInfo".to_string(),
+            "/System/Commands/ps.app/AppInfo".to_string(),
             vec![0u8; APPINFO_MAX + 1],
         );
         let err = load(&fs, anchor).expect_err("oversized manifest refused");
@@ -689,8 +709,8 @@ mod tests {
 
     #[test]
     fn bundle_run_path_accepts_store_and_user_bundles() {
-        let parsed = bundle_run_path(b"/System/Apps/ps.app/Run").expect("store bundle");
-        assert_eq!(parsed.bundle, "/System/Apps/ps.app");
+        let parsed = bundle_run_path(b"/System/Commands/ps.app/Run").expect("store bundle");
+        assert_eq!(parsed.bundle, "/System/Commands/ps.app");
         assert_eq!(parsed.command, "ps");
         let parsed = bundle_run_path(b"/Apps/Example.app/Run").expect("user bundle");
         assert_eq!(parsed.bundle, "/Apps/Example.app");
@@ -702,16 +722,16 @@ mod tests {
     #[test]
     fn bundle_run_path_rejects_every_malformed_shape() {
         for path in [
-            &b"ps.app/Run"[..],              // relative
-            b"/System/Apps/ps.app",          // no /Run
-            b"/System/Apps/ps/Run",          // bundle dir not .app
-            b"/System/Apps/.app/Run",        // empty stem
-            b"/System/Apps/ps.app/Code/Run", // Run not at bundle root
-            b"/System/../Apps/ps.app/Run",   // traversal
-            b"/System//Apps/ps.app/Run",     // empty component
-            b"/System/./Apps/ps.app/Run",    // dot component
-            b"/Run",                         // no bundle at all
-            b"\xFF\xFEbad/ps.app/Run",       // not UTF-8
+            &b"ps.app/Run"[..],                  // relative
+            b"/System/Commands/ps.app",          // no /Run
+            b"/System/Commands/ps/Run",          // bundle dir not .app
+            b"/System/Commands/.app/Run",        // empty stem
+            b"/System/Commands/ps.app/Code/Run", // Run not at bundle root
+            b"/System/../Apps/ps.app/Run",       // traversal
+            b"/System//Apps/ps.app/Run",         // empty component
+            b"/System/./Apps/ps.app/Run",        // dot component
+            b"/Run",                             // no bundle at all
+            b"\xFF\xFEbad/ps.app/Run",           // not UTF-8
         ] {
             assert!(bundle_run_path(path).is_none(), "{path:?}");
         }
@@ -740,16 +760,22 @@ mod tests {
 
     #[test]
     fn only_readonly_system_store_bundles_are_cacheable() {
-        assert!(AppStore::cacheable_bundle("/System/Apps/ps.app"));
+        assert!(AppStore::cacheable_bundle("/System/Commands/ps.app"));
+        assert!(AppStore::cacheable_bundle("/System/Applications/files.app"));
         assert!(AppStore::cacheable_bundle("/System/Services/login.app"));
         // A writable-volume bundle can change between launches.
         assert!(!AppStore::cacheable_bundle("/Apps/Example.app"));
-        // A sibling directory sharing the store's prefix is not the store.
-        assert!(!AppStore::cacheable_bundle("/System/AppsEvil/ps.app"));
-        // The store root itself is a directory, not a bundle.
-        assert!(!AppStore::cacheable_bundle("/System/Apps"));
+        assert!(!AppStore::cacheable_bundle("/Users/ada/Commands/own.app"));
+        // A sibling directory sharing a store's prefix is not the store.
+        assert!(!AppStore::cacheable_bundle("/System/CommandsEvil/ps.app"));
         assert!(!AppStore::cacheable_bundle(
-            "/Users/mallory/System/Apps/ps.app"
+            "/System/ApplicationsEvil/files.app"
+        ));
+        // A store root itself is a directory, not a bundle.
+        assert!(!AppStore::cacheable_bundle("/System/Commands"));
+        assert!(!AppStore::cacheable_bundle("/System/Applications"));
+        assert!(!AppStore::cacheable_bundle(
+            "/Users/mallory/System/Commands/ps.app"
         ));
     }
 

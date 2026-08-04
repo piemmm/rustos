@@ -21,7 +21,7 @@
 //! The runner unlocks the root at the passphrase prompt, authenticates
 //! `root`/`root` at the console login, and types the bare command word
 //! `tcpserve` at the shell: the store-then-`PATH` resolution finds
-//! `/System/Apps/tcpserve.app/Run`, the disk-backed spawn path verifies the
+//! `/System/Commands/tcpserve.app/Run`, the disk-backed spawn path verifies the
 //! signed bundle, and the server runs with `manifest ∩ administrator-ceiling`
 //! authority (its manifest requests `CAP_NET` **and** `CAP_NET_BIND_PRIVILEGED`,
 //! both enforced by the netstack socket dispatcher against the kernel-attested

@@ -147,7 +147,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
             supplementary_gids: &[tairix_users::STORAGE_GID],
             display_name: "System Administrator",
             home: Some("/Users/root"),
-            shell: Some("/System/Apps/elsh.app/Run"),
+            shell: Some("/System/Commands/elsh.app/Run"),
             capabilities: tairix_users::administrator_ceiling(),
             state: AccountState::Active,
         },

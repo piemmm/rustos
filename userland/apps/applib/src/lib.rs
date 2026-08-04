@@ -63,7 +63,8 @@ use core::fmt;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::{
-    AppInfoHeader, Errno, LibraryCategory, BUNDLE_SUFFIX, SYSTEM_APP_STORE, USER_APP_STORE,
+    AppInfoHeader, Errno, LibraryCategory, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
+    HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
 };
 use tairix_help::{own_short_help, HelpSource};
 use tairix_proglib::{
@@ -124,8 +125,9 @@ pub enum Command<'a> {
     /// Walk the application stores and register every listed bundle the
     /// catalog does not know yet.
     Rescan {
-        /// Rescan the caller's own `<home>/Apps` into their overlay instead
-        /// of the machine stores into the machine catalog.
+        /// Rescan the caller's own `<home>/Commands` and `<home>/Applications`
+        /// into their overlay instead of the machine stores into the machine
+        /// catalog.
         user: bool,
     },
     /// Render `applib`'s own short help (`-h`/`-?`/`--help`) through the
@@ -333,7 +335,8 @@ pub struct Stores<'a> {
     /// resolves against an empty overlay).
     pub user: Option<&'a dyn Store>,
     /// The caller's home directory (the inherited `HOME`), if any: the
-    /// `rescan --user` walk root `<home>/Apps` derives from it.
+    /// `rescan --user` walk roots `<home>/Commands` and `<home>/Applications`
+    /// derive from it.
     pub home: Option<&'a str>,
 }
 
@@ -758,11 +761,18 @@ fn rescan(
             .map(|home| home.strip_suffix('/').unwrap_or(home))
             .filter(|home| !home.is_empty())
             .ok_or(AppLibError::NoHome)?;
-        alloc::vec![format!("{home}/Apps")]
+        alloc::vec![
+            format!("{home}/{HOME_COMMAND_STORE_DIR}"),
+            format!("{home}/{HOME_APPLICATION_STORE_DIR}"),
+        ]
     } else {
-        // The system store first: on a duplicate identifier the shipped
+        // The system stores first: on a duplicate identifier the shipped
         // bundle's record wins the fold deterministically.
-        alloc::vec![String::from(SYSTEM_APP_STORE), String::from(USER_APP_STORE)]
+        alloc::vec![
+            String::from(SYSTEM_COMMAND_STORE),
+            String::from(SYSTEM_APPLICATION_STORE),
+            String::from(INSTALLED_APP_STORE),
+        ]
     };
 
     let mut catalog = load(store, side)?;

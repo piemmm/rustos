@@ -11,11 +11,15 @@ elsh — el intérprete de comandos de TAIRiX
 Ejecuta un intérprete de comandos interactivo — un bucle
 leer-evaluar-imprimir sobre los flujos estándar heredados. Una palabra
 de comando escrita se resuelve primero contra los comandos integrados
-del intérprete, luego en la tienda de aplicaciones del sistema
-(`/System/Apps`), y después en los directorios de la variable `PATH`;
-la tienda se busca antes que `PATH`, de modo que `PATH` nunca puede
-ocultar un comando del sistema. Una palabra no resuelta sale con
-`127`; un paquete resuelto pero no ejecutable sale con `126`.
+del intérprete, luego en la tienda de comandos del sistema
+(`/System/Commands`), la tienda de aplicaciones del sistema
+(`/System/Applications`), la tienda de comandos (`<home>/Commands`) y
+la tienda de aplicaciones (`<home>/Applications`) del propio usuario, y
+después en los directorios de la variable `PATH`; esas cuatro tiendas
+forman un prefijo fijo que el usuario no puede reordenar ni anular, de
+modo que `PATH` nunca puede ocultar un comando del sistema. Una palabra
+no resuelta sale con `127`; un paquete resuelto pero no ejecutable sale
+con `126`.
 
 Los comandos integrados:
 
@@ -50,8 +54,8 @@ referencias de recursos como `sys:random`.
 
 ## ENVIRONMENT
 
-- `PATH` — los directorios buscados después de la tienda de
-  aplicaciones del sistema.
+- `PATH` — los directorios buscados después del prefijo fijo de
+  tiendas.
 - `LANG` — la configuración regional preferida para la ayuda corta (una
   etiqueta BCP-47 como `es-ES`), exportada a cada comando lanzado.
 

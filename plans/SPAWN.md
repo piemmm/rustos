@@ -377,13 +377,13 @@ definition every port installs, §2.2); `kernel_core` threads
 `KernelDispatchHook::new` → `with_frames`/`with_spawn`. The kernel `build.rs`
 was generalised to build **both** `init` and the `Shell` session program
 through one `elf2rxe` helper (§2.2; TAIRiX stays Rust-only, §1), embedding
-`SHELL_RXE` registered under `/System/Apps/elsh.app/Run`. `AdmitError`,
+`SHELL_RXE` registered under `/System/Commands/elsh.app/Run`. `AdmitError`,
 build, and parse failures map onto stable `Errno`s (`NoSpace` /
 `AlreadyExists` / `PermissionDenied` / `BadMagic`); page-table and image
 frames are handed out monotonically (not reclaimed this stage), so a failed
 spawn leaks nothing user-visible (§2.9).
 - `-M virt` vertical landed: `tairix-test-spawn-session-qemu-aarch64` boots
-  the production pipeline, PID 1 `init` spawns `/System/Apps/elsh.app/Run` through
+  the production pipeline, PID 1 `init` spawns `/System/Commands/elsh.app/Run` through
   the `spawn` syscall, both run (proving SP2 timesharing), the session writes
   a gated banner + `exit`s, and `init` observes the returned PID. PASS keys
   on two `ProcessSpawned` (4030) + three audited syscalls (5000) — `init`'s
@@ -396,7 +396,7 @@ follow. **SP3a + SP3b are landed.**
 ### SP4 — `init` launches the `session` program `[x]` (folds into PI.md P6e)
 
 **Landed alongside SP3b.** `init`'s startup config (`session
-/System/Apps/elsh.app/Run`, already parsed, `plans/PI.md` P6b) is now launched
+/System/Commands/elsh.app/Run`, already parsed, `plans/PI.md` P6b) is now launched
 through the SP3 `spawn` syscall (`tairix_rt::spawn`) as a separate, isolated
 process; `init` keeps running when a spawn is refused — the refusal is
 reported on `stderr` (`Sessions::report_launch_failure`) and that entry's

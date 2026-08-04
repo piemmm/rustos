@@ -1,7 +1,7 @@
 # `tairix-rmdir` — remove empty directories
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/rmdir.app/` so the shell resolves the bare
+store bundle `/System/Commands/rmdir.app/` so the shell resolves the bare
 word `rmdir` to it. `rmdir` is the GNU coreutils tool: it removes each
 (empty) directory operand through the kernel's **directory-only**
 `fs_unlink` (`UnlinkFlags::DIRECTORY`) under the caller's attested

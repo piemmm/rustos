@@ -7,8 +7,9 @@ Stability tier: **experimental** (host build tooling).
 
 TAIRiX ships each command app's internationalised command help as a
 structured-Markdown `Help/` tree on the read-only `/System` volume, at
-`/System/Apps/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`), each app's
-bundle resources at `/System/Apps/<name>.app/Resources/<file>`, and the
+`<store>/<name>.app/Help/<locale>/<doc>.md` (`plans/APPS.md`) — where `<store>`
+is the bundle's own declared store — each app's bundle resources at
+`<store>/<name>.app/Resources/<file>`, and the
 desktop's graphics assets — the raster icon masters — under `/System/Graphics`
 (`AGENTS.md` §16.2, §10). The image builder (`tools/mkimage`) and the QEMU
 image fixture must plant all of these onto the volume they author.

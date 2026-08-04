@@ -14,25 +14,44 @@ fn long(len: usize) -> String {
 }
 
 #[test]
-fn the_app_store_leaf_matches_the_one_store_path_definition() {
-    assert_eq!(
-        tairix_abi::USER_APP_STORE,
-        alloc::format!("/{USER_APP_STORE_LEAF}")
-    );
-}
-
-#[test]
-fn the_system_store_leaves_match_the_one_store_path_definition() {
-    assert_eq!(
-        tairix_abi::SYSTEM_APP_STORE,
-        alloc::format!("/{SYSTEM_VIEW_LEAF}/{USER_APP_STORE_LEAF}")
-    );
-}
-
-#[test]
 fn the_users_view_leaf_matches_the_account_home_layout() {
     let home = tairix_users::default_home("ada");
     assert_eq!(home, alloc::format!("/{USERS_VIEW_LEAF}/ada"));
+}
+
+#[test]
+fn every_program_store_path_definition_is_admitted() {
+    let home = tairix_users::default_home("ada");
+    let app = tairix_abi::BUNDLE_SUFFIX;
+    for path in [
+        alloc::format!("{}/Editor{app}", tairix_abi::INSTALLED_APP_STORE),
+        alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_COMMAND_STORE),
+        alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_APPLICATION_STORE),
+        alloc::format!("{home}/{}/Editor{app}", tairix_abi::HOME_COMMAND_STORE_DIR),
+        alloc::format!(
+            "{home}/{}/Editor{app}",
+            tairix_abi::HOME_APPLICATION_STORE_DIR
+        ),
+    ] {
+        assert!(
+            BundlePath::new(&path).is_ok(),
+            "{path:?} names a bundle in a program store"
+        );
+    }
+}
+
+#[test]
+fn the_service_store_path_definition_is_refused() {
+    let path = alloc::format!(
+        "{}/devmgr{}",
+        tairix_abi::SYSTEM_SERVICE_STORE,
+        tairix_abi::BUNDLE_SUFFIX
+    );
+    assert_eq!(
+        BundlePath::new(&path),
+        Err(EntryError::MalformedBundlePath),
+        "a daemon is not a launcher-offered program"
+    );
 }
 
 #[test]
@@ -124,15 +143,19 @@ fn a_display_name_that_would_forge_a_line_is_refused() {
 }
 
 #[test]
-fn a_bundle_path_admits_every_application_store_and_plain_nesting() {
+fn a_bundle_path_admits_every_program_store_and_plain_nesting() {
     for path in [
         "/Apps/Editor.app",
         "/Apps/games/chess.app",
         "/Apps/games/board/chess.app",
-        "/Users/ada/Apps/Editor.app",
-        "/Users/ada/Apps/games/chess.app",
-        "/System/Apps/files.app",
-        "/System/Apps/extras/files.app",
+        "/Users/ada/Commands/tally.app",
+        "/Users/ada/Commands/games/tally.app",
+        "/Users/ada/Applications/Editor.app",
+        "/Users/ada/Applications/games/chess.app",
+        "/System/Commands/ps.app",
+        "/System/Commands/extras/ps.app",
+        "/System/Applications/files.app",
+        "/System/Applications/extras/files.app",
     ] {
         let bundle = BundlePath::new(path).expect("permitted bundle path");
         assert_eq!(bundle.as_str(), path);
@@ -141,7 +164,7 @@ fn a_bundle_path_admits_every_application_store_and_plain_nesting() {
 }
 
 #[test]
-fn a_bundle_path_outside_an_application_store_is_refused() {
+fn a_bundle_path_outside_a_program_store_is_refused() {
     for hostile in [
         "/System/Services/devmgr.app",
         "/System/Drivers/storage/emmc2.app",
@@ -150,8 +173,33 @@ fn a_bundle_path_outside_an_application_store_is_refused() {
         "/Users/ada/Editor.app",
         "/Editor.app",
         "/Apps",
-        "/System/Apps",
+        "/System/Commands",
+        "/System/Applications",
+        "/Users/ada/Commands",
+        "/Users/ada/Applications",
         "",
+    ] {
+        assert_eq!(
+            BundlePath::new(hostile),
+            Err(EntryError::MalformedBundlePath),
+            "{hostile:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_directory_that_merely_starts_like_a_store_is_refused() {
+    for hostile in [
+        "/AppsEvil/Editor.app",
+        "/SystemEvil/Commands/Editor.app",
+        "/System/CommandsEvil/Editor.app",
+        "/System/ApplicationsEvil/Editor.app",
+        "/UsersEvil/ada/Commands/Editor.app",
+        "/Users/ada/CommandsEvil/Editor.app",
+        "/Users/ada/ApplicationsEvil/Editor.app",
+        "/Users/ada/nested/Commands/Editor.app",
+        "/Users/Commands/Editor.app",
+        "/System/Editor.app",
     ] {
         assert_eq!(
             BundlePath::new(hostile),

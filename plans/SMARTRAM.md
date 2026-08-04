@@ -831,8 +831,9 @@ Status: **done** for every part with a current in-tree consumer
   `AppInfo` manifest, the content-hash and syscall-interface-hash
   verdicts, the dynamic-loader library policy decisions, and the
   validated `rxe` entry-point image — for bundles on the immutable
-  read-only system stores (`/System/Apps`, `/System/Services`), once
-  per boot. It is classified through the SMART1 gate (class
+  read-only system stores (`/System/Commands`, `/System/Applications`,
+  `/System/Services`), once per boot. It is classified through the SMART1
+  gate (class
   `SemanticAppCache`, owner `KernelSubsystem("app_store")`, expensive
   to rebuild, system data, generation-invalidated, droppable; a refusal
   poisons it from birth), LRU-bounded with hysteresis under the same

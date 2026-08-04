@@ -50,15 +50,17 @@ mostrarlo. Ocultar es presentación, nunca autoridad: la ejecución de un
 paquete sigue regida por las comprobaciones de firma y capacidad del
 cargador independientemente del catálogo.
 
-`applib rescan` recorre los almacenes de aplicaciones (`/System/Apps` y
-`/Apps`, o el propio `<home>/Apps` del llamador con `--user`), lee el
-manifiesto de cada paquete y registra cada aplicación que solicita ser
-listada y aún no está catalogada. Los registros existentes, incluidos
-los renombramientos y supresiones de un curador, nunca se alteran, y un
-paquete con un manifiesto ilegible o malformado se omite y se cuenta,
-nunca es motivo para abortar. Así es como la biblioteca de un sistema
-nuevo se puebla a sí misma a partir de los paquetes realmente
-instalados, sin ninguna lista mantenida a mano en ninguna parte.
+`applib rescan` recorre los almacenes de aplicaciones
+(`/System/Commands`, `/System/Applications` y `/Apps`, o los propios
+`<home>/Commands` y `<home>/Applications` del llamador con `--user`),
+lee el manifiesto de cada paquete y registra cada aplicación que
+solicita ser listada y aún no está catalogada. Los registros
+existentes, incluidos los renombramientos y supresiones de un curador,
+nunca se alteran, y un paquete con un manifiesto ilegible o malformado
+se omite y se cuenta, nunca es motivo para abortar. Así es como la
+biblioteca de un sistema nuevo se puebla a sí misma a partir de los
+paquetes realmente instalados, sin ninguna lista mantenida a mano en
+ninguna parte.
 
 Por defecto, la herramienta edita el almacén de toda la máquina, que
 solo puede cambiar un principal admitido por la política de escritura
@@ -83,8 +85,9 @@ puede ignorar.
   archivo dentro del `Resources/` del paquete) en lugar del que figura
   en el manifiesto.
 - `--user` — aplicar el cambio a la propia superposición del llamador
-  (o, con `rescan`, recorrer el propio `<home>/Apps` del llamador) en
-  lugar del almacén de toda la máquina.
+  (o, con `rescan`, recorrer los propios `<home>/Commands` y
+  `<home>/Applications` del llamador) en lugar del almacén de toda la
+  máquina.
 - `-h, -?` — mostrar la ayuda corta de este comando.
 
 ## EXAMPLES
@@ -117,7 +120,8 @@ puede ignorar.
 - `LANG` — el locale preferido para la ayuda corta (una etiqueta BCP-47
   como `fr-FR`).
 - `HOME` — el directorio personal del llamador: nombra la superposición
-  por usuario y la raíz de rescan con `--user` `<home>/Apps`.
+  por usuario y las raíces de rescan con `--user` `<home>/Commands` y
+  `<home>/Applications`.
 
 ## SEE ALSO
 

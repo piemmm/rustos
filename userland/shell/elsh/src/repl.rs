@@ -43,6 +43,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, Human, InputMode, Severity, StdInfoKind, StdInfoRecord};
+use tairix_cmdres::CommandEnv;
 use tairix_curses::{Event, Input as KeyDecoder};
 use tairix_vt::control;
 use tairix_vt::line::{LineEditor, LineFeed};
@@ -401,16 +402,24 @@ impl EventStream {
     }
 }
 
-/// The editor's completion seam, closed over the shell's `PATH` and the
-/// injected directory lister: the one shared engine, never a second policy.
+/// The editor's completion seam, closed over the session values the shared
+/// search order reads — `HOME` (the user's own two stores) and `PATH` — and
+/// the injected directory lister: the one shared engine, never a second
+/// policy. Both values are carried because completion must offer exactly the
+/// names the launch path would resolve.
 struct ShellCompleter<'a> {
+    home: Option<String>,
     path_var: Option<String>,
     lister: &'a dyn DirLister,
 }
 
 impl Completer for ShellCompleter<'_> {
     fn complete(&self, line: &str, cursor: usize) -> Completion {
-        complete(line, cursor, self.path_var.as_deref(), self.lister)
+        let env = CommandEnv {
+            home: self.home.as_deref(),
+            path_var: self.path_var.as_deref(),
+        };
+        complete(line, cursor, env, self.lister)
     }
 }
 
@@ -426,6 +435,7 @@ fn read_edited_line(
     lister: &dyn DirLister,
 ) -> Option<ReadOutcome> {
     let completer = ShellCompleter {
+        home: shell.environment().get("HOME").map(String::from),
         path_var: shell.environment().get("PATH").map(String::from),
         lister,
     };
@@ -631,7 +641,7 @@ mod tests {
         }
     }
 
-    /// An in-memory app store for interactive completion tests.
+    /// An in-memory command store for interactive completion tests.
     struct StoreLister;
 
     impl crate::complete::DirLister for StoreLister {
@@ -639,7 +649,7 @@ mod tests {
             &self,
             dir: &str,
         ) -> Result<Vec<crate::complete::DirEntryInfo>, tairix_abi::Errno> {
-            if dir == "/System/Apps" {
+            if dir == tairix_abi::SYSTEM_COMMAND_STORE {
                 return Ok(alloc::vec![crate::complete::DirEntryInfo {
                     name: String::from("cat.app"),
                     is_dir: true,

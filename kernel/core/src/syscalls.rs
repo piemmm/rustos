@@ -3175,6 +3175,76 @@ where
         ))
     }
 
+    /// Cheap synchronous existence check for an on-disk store-bundle spawn,
+    /// so the `spawn` handler keeps its documented contract — `NotFound` for
+    /// an unknown path — without doing the heavy load on the caller's task.
+    ///
+    /// The shape parse (`bundle_run_path`) proves only that `bundle` spells a
+    /// `<root>/<Name>.app` bundle root; it does not touch the volume. This
+    /// probe answers the one further question an ordered command search needs
+    /// — *is a bundle actually there?* — with a single directory-metadata
+    /// lookup under the **same** `(uid, effective)` the deferred load reads
+    /// with ([`SpawnCredential::read_authority`]), so the probe and the load
+    /// can never disagree and the probe never widens authority. It reads the
+    /// bundle *root* only: the megabyte `Run`/`AppInfo` read, the content
+    /// hash, the Ed25519 signature check, and the `rxe` decode all stay
+    /// deferred onto the child (`plans/FIX-DESKTOP.md` §2.1, §2.2). A search
+    /// inherently pays one lookup per candidate, exactly as a POSIX `PATH`
+    /// walk does; only the heavy work must stay off the spawner.
+    ///
+    /// The absent-vs-refused distinction carries the search's security
+    /// property (`plans/APPS.md` §8): **absent** returns [`Errno::NotFound`]
+    /// so the caller's search advances to the next candidate, while a bundle
+    /// that exists but the caller may not read (or that fails for any other
+    /// reason) does **not** report `NotFound` — it admits the loading child,
+    /// so the caller's search *stops* here and the deferred load surfaces the
+    /// real refusal through the child's exit. Mapping a permission denial on
+    /// an existing bundle to `NotFound` would let a search silently skip a
+    /// system bundle it may not read and let a later, user-writable candidate
+    /// win, so a non-absence error deliberately fails toward "present".
+    ///
+    /// Store readiness is preserved: with **no** installed store no bundle
+    /// can exist and the probe fails closed with `NotFound` at once; while the
+    /// `/System` mount is still **pending** the answer is unknowable without
+    /// racing it, so the child is admitted to *park* on the store latch
+    /// (event-woken, never a poll); once the mount resolves to no readable
+    /// store, `NotFound`. A bundle the launch cache already holds was verified
+    /// from the immutable read-only store earlier this boot, so it certainly
+    /// exists — the probe skips its lookup on that cache hit to keep a
+    /// re-launch off the extra I/O, and the deferred load still re-authorises
+    /// the caller's own read.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when the bundle is definitively absent (no store,
+    /// resolved-unavailable store, or a metadata lookup that reports the
+    /// bundle missing). Every other outcome returns `Ok(())`, admitting the
+    /// loading child.
+    fn probe_store_bundle(&self, credential: &SpawnCredential, bundle: &str) -> Result<(), Errno> {
+        let Some(store) = self.app_store else {
+            return Err(Errno::NotFound);
+        };
+        if store.is_pending() {
+            return Ok(());
+        }
+        if !store.is_available() {
+            return Err(Errno::NotFound);
+        }
+        if crate::appspawn::AppStore::cacheable_bundle(bundle) && store.cached_present(bundle) {
+            return Ok(());
+        }
+        let (uid, effective) = credential.read_authority();
+        match self.filesystem.stat(uid, &effective, bundle) {
+            // A definitive absence lets the caller's search advance; every
+            // other outcome — the bundle is present, or present but its
+            // metadata lookup was refused — admits the loading child so the
+            // search stops here and the deferred load surfaces the real
+            // result. A refusal must never read as absence.
+            Err(Errno::NotFound) => Err(Errno::NotFound),
+            _ => Ok(()),
+        }
+    }
+
     /// Decide whether `caller` may signal the process `pid` names when that
     /// process is **not** one of the caller's own children, and record the
     /// decision (`plans/NEW-TASKBAR.md` T11).
@@ -4716,6 +4786,29 @@ where
         // Resolve the child's kernel-attested credential (uid + group set +
         // capability ceiling), never a caller-supplied value.
         let credential = self.resolve_spawn_credential(caller, attach.target_uid)?;
+
+        // For an on-disk store bundle, confirm the bundle *exists* before
+        // admitting a loading child. The shape parse above proves only that
+        // the path spells a `<root>/<Name>.app/Run` entry point, not that any
+        // such bundle is on the volume — so a well-formed path to a bundle
+        // that does not exist would otherwise admit a child that immediately
+        // dies with the reserved load-failure status, and the caller's `spawn`
+        // would wrongly "succeed". That breaks an ordered command search: the
+        // shell resolves a bare word against the fixed store prefix then
+        // `PATH` and advances to the next candidate only on `NotFound`
+        // (`lib/cmdres`; `plans/APPS.md` §8), so a false success on a missing
+        // first candidate strands every later one. The probe restores the
+        // handler's documented contract — `NotFound` for an unknown path —
+        // by paying exactly one cheap metadata lookup per candidate, the same
+        // cost a POSIX `PATH` search pays; the megabyte read + Ed25519 verify
+        // stays deferred onto the child (`plans/FIX-DESKTOP.md` §2.1, §2.2).
+        // A boot-floor registry program is `'static` and build-verified, so it
+        // keeps its zero-I/O path untouched.
+        if program.is_none() {
+            if let Some(parsed) = &bundle {
+                self.probe_store_bundle(&credential, parsed.bundle)?;
+            }
+        }
 
         // Hand the validated `rxe` to the architecture spawn producer,
         // which builds a fresh hardware-isolated address space and admits
@@ -9127,6 +9220,29 @@ impl SpawnCredential {
             ceiling,
         }
     }
+
+    /// The `(uid, effective)` authority a store-bundle read runs under: the
+    /// credential's uid and its account capability ceiling. This is the one
+    /// authority both the synchronous existence probe
+    /// ([`KernelSyscallHandlers::probe_store_bundle`]) and the deferred load
+    /// ([`body_load_bundle`]) read with, so the two can never judge a bundle
+    /// present-or-absent differently.
+    ///
+    /// The ceiling is the right authority because the app's *own* effective
+    /// set is `ceiling ∩ manifest`, which is not yet known at read time (the
+    /// manifest is what is being loaded); "may this user read this bundle to
+    /// launch it" is bounded by the account grant, not the post-load set. A
+    /// system-principal credential (no ceiling) reads under its full system
+    /// identity, exactly as the synchronous predecessor did. This is never
+    /// *wider* than the account allows (`plans/FIX-DESKTOP.md` §2.2).
+    #[must_use]
+    fn read_authority(&self) -> (u32, CapabilitySet) {
+        (
+            self.uid.0,
+            self.ceiling
+                .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4])),
+        )
+    }
 }
 
 /// The admit context the `spawn` syscall handler builds to launch a child
@@ -9741,11 +9857,7 @@ fn build_child_image(
             // under its full system identity, exactly as the synchronous
             // predecessor did); it is never wider than the account allows.
             body_wait_app_store(services, task)?;
-            let uid = seed.credential.uid.0;
-            let effective = seed
-                .credential
-                .ceiling
-                .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4]));
+            let (uid, effective) = seed.credential.read_authority();
             let app = body_load_bundle(services, uid, &effective, bundle)?;
             // The build copies the image bytes before `app` is dropped at the
             // end of this arm, so the borrow of the retained image is sound.
@@ -14579,10 +14691,10 @@ mod tests {
     }
 
     /// Absolute store-bundle entry-point path the disk-spawn tests use.
-    static BUNDLE_PATH: &[u8] = b"/System/Apps/ps.app/Run";
+    static BUNDLE_PATH: &[u8] = b"/System/Commands/ps.app/Run";
     /// The bundle root directory the shared load gate judges (the entry
     /// point's parent), and its command stem.
-    static BUNDLE_ROOT: &str = "/System/Apps/ps.app";
+    static BUNDLE_ROOT: &str = "/System/Commands/ps.app";
     static BUNDLE_COMMAND: &str = "ps";
 
     /// The child's on-disk load plan for the store bundle above.
@@ -14593,14 +14705,14 @@ mod tests {
         }
     }
 
-    /// A bundle-shaped path is admitted **immediately** — the store read and
-    /// verification are deferred onto the child's own first slice
-    /// (`plans/FIX-DESKTOP.md` §2.6.5), so the caller is never blocked on
-    /// disk I/O even with no store wired. The child then fails its own load
-    /// closed (proven by the body tests below); the caller learns only the
-    /// admitted PID.
+    /// With **no** installed application store, a well-formed store-bundle
+    /// path can name no bundle, so the synchronous existence probe fails the
+    /// `spawn` closed with `NotFound` and admits **nothing** — no doomed
+    /// loading child, no deferred load-failure audit. The `spawn` contract
+    /// ("`NotFound` for an unknown path") holds so a caller's ordered command
+    /// search can advance (`plans/FIX-DESKTOP.md` §2.1, `plans/APPS.md` §8).
     #[test]
-    fn spawn_of_a_bundle_path_admits_immediately_without_a_store() {
+    fn spawn_of_a_bundle_path_without_a_store_is_not_found() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -14636,22 +14748,291 @@ mod tests {
             &EMPTY_PROGRAM_REGISTRY,
         );
         let before = sched.live_task_count();
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
+            Err(Errno::NotFound),
+            "no store => the bundle is absent => NotFound, so a search advances"
+        );
+        assert_eq!(
+            sched.live_task_count(),
+            before,
+            "a synchronous NotFound admits no child"
+        );
+    }
+
+    /// With an available store and the bundle present on the volume, the
+    /// store-bundle spawn is admitted synchronously — but the heavy work
+    /// stays deferred: the probe pays only a directory-metadata lookup, so no
+    /// `Run` byte is read and no image is built in the handler
+    /// (`plans/FIX-DESKTOP.md` §2.1, §2.2). The child carries the empty-set
+    /// placeholder record and no address space until it loads itself.
+    #[test]
+    fn spawn_of_an_existing_store_bundle_admits_and_defers_verification() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (memfs, anchor, _run) =
+            crate::test_bundle::composed_bundle(alloc::vec![CapabilityId::CONSOLE_WRITE]);
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        let before = sched.live_task_count();
         let pid = h
             .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
-            .expect("a well-formed bundle path is admitted, not refused");
+            .expect("an existing bundle is admitted as a loading child");
         assert!(
             sched.live_task_count() > before,
             "the child is admitted as a live loading task"
         );
-        // The placeholder record is installed synchronously; the child's own
-        // image and effective set are built later, on its first slice.
+        // The probe reads only bundle *metadata*: the entry-point read stays
+        // on the child's task, so nothing has read `Run` in this handler.
+        let run_path = core::str::from_utf8(BUNDLE_PATH).expect("ASCII bundle path");
+        assert_eq!(
+            memfs.read_calls(run_path),
+            0,
+            "the entry-point read is deferred onto the child, not done in spawn"
+        );
         assert!(
-            table.read().caps_for(SecTaskId(pid)).is_some(),
-            "the loading child has a placeholder record"
+            table
+                .read()
+                .caps_for(SecTaskId(pid))
+                .expect("child record")
+                .effective()
+                .is_empty(),
+            "the admit-time record is the empty-set placeholder"
         );
         assert!(
             !aspaces.read().contains(SecTaskId(pid)),
             "no address space is registered until the child loads"
+        );
+    }
+
+    /// A well-formed path to a bundle that does **not** exist on an available
+    /// store fails the `spawn` closed with `NotFound` synchronously and
+    /// admits nothing — the defect this fix targets: without the probe the
+    /// handler would admit a child that dies with the reserved load-failure
+    /// status and the caller's search would wrongly stop
+    /// (`plans/FIX-DESKTOP.md` §2.1).
+    #[test]
+    fn spawn_of_an_absent_store_bundle_is_not_found_synchronously() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // An available store whose volume holds an *unrelated* bundle, so the
+        // store directory resolves but `ps.app` is genuinely absent.
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(
+            crate::test_bundle::MemFs::new(&[("/System/Commands/other.app/Run", b"x")]),
+        ));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
+        store.note_available();
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        let before = sched.live_task_count();
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0),
+            Err(Errno::NotFound),
+            "an absent bundle is NotFound so a search advances to the next candidate"
+        );
+        assert_eq!(
+            sched.live_task_count(),
+            before,
+            "an absent bundle admits no doomed loading child"
+        );
+    }
+
+    /// A bundle that **exists** but the caller may not inspect (its metadata
+    /// lookup is refused for a non-absence reason) is **not** reported as
+    /// `NotFound`: the child is admitted so the caller's search *stops* here
+    /// and the deferred load surfaces the real refusal through the child's
+    /// exit. Mapping a permission denial to `NotFound` would let a search
+    /// silently skip a system bundle it may not read and let a later
+    /// user-writable candidate win (`plans/APPS.md` §8).
+    #[test]
+    fn spawn_of_a_present_but_unreadable_store_bundle_is_not_skipped() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        // The bundle is present, but every stat of an existing node is refused
+        // — a permission denial, not an absence.
+        let memfs: &'static crate::test_bundle::MemFs =
+            Box::leak(Box::new(memfs.with_stat_error(Errno::PermissionDenied)));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        let before = sched.live_task_count();
+        let pid = h
+            .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("a present-but-refused bundle stops the search, not skips it");
+        assert!(
+            sched.live_task_count() > before,
+            "the child is admitted so the caller's search stops here"
+        );
+        assert!(
+            !aspaces.read().contains(SecTaskId(pid)),
+            "the deferred load, not the handler, will surface the refusal"
+        );
+    }
+
+    /// While the `/System` mount is still **pending**, existence is unknowable
+    /// without racing the mount, so the store-bundle spawn is admitted and the
+    /// child *parks* on the store latch on its own task (event-woken, never a
+    /// poll) — the probe must not regress this into a synchronous failure or a
+    /// busy-wait (`plans/FIX-DESKTOP.md` §2.1, §3).
+    #[test]
+    fn spawn_of_a_bundle_path_with_a_pending_store_admits_to_park() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, BUNDLE_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The store is left pending (its latch unresolved); the filesystem is
+        // irrelevant because the probe never stats while the store is pending.
+        let memfs: &'static crate::test_bundle::MemFs =
+            Box::leak(Box::new(crate::test_bundle::MemFs::new(&[])));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
+        let h = spawn_handler(
+            &sched,
+            &table,
+            &arch,
+            sink,
+            &irq,
+            &ctl,
+            &ipc,
+            &aspaces,
+            &rng,
+            &frames,
+            &EMPTY_PROGRAM_REGISTRY,
+        )
+        .with_filesystem(memfs)
+        .with_app_store(store);
+        let before = sched.live_task_count();
+        let pid = h
+            .spawn(&ctx, 0x1000, BUNDLE_PATH.len(), 0, 0, 0, 0)
+            .expect("a pending store admits the child to park, not a failure");
+        assert!(
+            sched.live_task_count() > before,
+            "the child is admitted and will park on the store latch"
+        );
+        assert!(
+            !aspaces.read().contains(SecTaskId(pid)),
+            "no address space is registered until the store resolves and the child loads"
         );
     }
 
@@ -15180,7 +15561,7 @@ mod tests {
         let (mut memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
         memfs
             .files
-            .get_mut("/System/Apps/ps.app/Run")
+            .get_mut("/System/Commands/ps.app/Run")
             .expect("run present")
             .push(0xFF);
         let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
@@ -23872,7 +24253,7 @@ mod tests {
     /// the held text verbatim (the caller re-parses it), so the double
     /// does not need to be a full valid `users-v1` document.
     static USERS_DB_TEXT: &[u8] =
-        b"users-v1\nroot:0:0::root:/Users/root:/System/Apps/elsh.app/Run\n";
+        b"users-v1\nroot:0:0::root:/Users/root:/System/Commands/elsh.app/Run\n";
 
     /// A recording [`crate::useradmin::UsersAdmin`] double: captures the
     /// forwarded identity and decoded request, and answers a fixed

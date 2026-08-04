@@ -1,7 +1,7 @@
 # `tairix-seq` — print a sequence of numbers
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/seq.app/` so the shell resolves the bare word
+store bundle `/System/Commands/seq.app/` so the shell resolves the bare word
 `seq` to it. `seq` is the GNU coreutils tool: print the numbers from
 FIRST to LAST in steps of INCREMENT (both defaulting to 1), with the GNU
 option surface — `-f`/`--format` (a printf-style floating-point format

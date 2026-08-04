@@ -32,7 +32,7 @@ basename — 从名字中去掉目录和后缀
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — 打印 `top.app`。
+- `basename /System/Commands/top.app` — 打印 `top.app`。
 - `basename src/lib.rs .rs` — 打印 `lib`。
 - `basename -s .rs -a a.rs b.rs` — 打印 `a` 和 `b`。
 - `basename Home:/` — 打印 `Home:/`（根永远不会被剥开）。

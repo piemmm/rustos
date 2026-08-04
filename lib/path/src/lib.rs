@@ -1079,7 +1079,7 @@ mod tests {
     #[test]
     fn alias_root_len_refuses_non_alias_roots() {
         // View, relative, and empty spellings carry no alias root.
-        assert_eq!(alias_root_len("/System/Apps"), None);
+        assert_eq!(alias_root_len("/System/Commands"), None);
         assert_eq!(alias_root_len("notes/todo"), None);
         assert_eq!(alias_root_len(""), None);
         // A resolver spelling and a resource reference are not alias roots.

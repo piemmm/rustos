@@ -18,9 +18,10 @@
 //! * **Command position** (first non-assignment word of a simple command):
 //!   builtin names (the shared `builtin::BUILTIN_NAMES` table) and the `.app` bundles
 //!   of the shared command-search directories
-//!   ([`tairix_cmdres::command_search_dirs`] — the system app store, then the
-//!   `PATH` entries), so completion offers exactly the names the shell would
-//!   resolve. A word spelling a path (it contains `/`) completes as a path.
+//!   ([`tairix_cmdres::command_search_dirs`] — the two system stores, the
+//!   user's own two stores, then the `PATH` entries), so completion offers
+//!   exactly the names the shell would resolve. A word spelling a path (it
+//!   contains `/`) completes as a path.
 //! * **Redirection target**: filesystem paths *and* resource references —
 //!   registered namespaces (`sys:` …) and their well-known selectors
 //!   ([`tairix_resref::KnownNamespace`]), the same registry the redirection
@@ -36,6 +37,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_cmdres::CommandEnv;
 use tairix_resref::KnownNamespace;
 
 pub use tairix_complete::{DirEntryInfo, DirLister};
@@ -96,10 +98,15 @@ enum Role {
 
 /// Compute the completion for `line` with the cursor after character
 /// `cursor` (character index, not byte). Read-only; never changes `$?`.
+///
+/// `env` carries the session's `HOME` and `PATH`: both are needed because the
+/// user's own command and application stores are part of the search order, so
+/// a completion given no home would offer fewer names than the shell can
+/// actually run.
 pub fn complete(
     line: &str,
     cursor: usize,
-    path_var: Option<&str>,
+    env: CommandEnv<'_>,
     lister: &dyn DirLister,
 ) -> Completion {
     let chars: Vec<char> = line.chars().collect();
@@ -137,7 +144,7 @@ pub fn complete(
             if word.contains('/') {
                 path_candidates(&word, lister, &mut candidates);
             } else {
-                command_candidates(&word, path_var, lister, &mut candidates);
+                command_candidates(&word, env, lister, &mut candidates);
             }
         }
         Role::Argument => {
@@ -249,7 +256,7 @@ fn escape_word(name: &str) -> String {
 /// are offered.
 fn command_candidates(
     word: &str,
-    path_var: Option<&str>,
+    env: CommandEnv<'_>,
     lister: &dyn DirLister,
     out: &mut Vec<Candidate>,
 ) {
@@ -262,7 +269,7 @@ fn command_candidates(
             });
         }
     }
-    for dir in tairix_cmdres::command_search_dirs(path_var) {
+    for dir in tairix_cmdres::command_search_dirs(env) {
         let Ok(entries) = lister.list_dir(&dir) else {
             continue;
         };
@@ -349,7 +356,7 @@ fn path_candidates(word: &str, lister: &dyn DirLister, out: &mut Vec<Candidate>)
 
 #[cfg(test)]
 mod tests {
-    use super::{complete, Candidate, DirEntryInfo, DirLister};
+    use super::{complete, Candidate, CommandEnv, DirEntryInfo, DirLister};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use tairix_abi::Errno;
@@ -396,21 +403,52 @@ mod tests {
     }
 
     /// A command-position word completes from builtins and the `.app`
-    /// bundles of the store and `PATH` — exactly the resolvable names.
+    /// bundles of every search directory — both system stores, the user's
+    /// own two, and `PATH` — exactly the resolvable names.
     #[test]
     fn command_position_offers_builtins_and_bundles() {
         let lister = MapLister::new(&[
             (
-                "/System/Apps",
+                "/System/Commands",
                 &[("cat.app", true), ("cp.app", true), ("notes.txt", false)],
             ),
+            ("/System/Applications", &[("calendar.app", true)]),
+            ("/Users/ada/Commands", &[("collate.app", true)]),
+            ("/Users/ada/Applications", &[("chart.app", true)]),
             ("/Users/ada/bin", &[("cargo.app", true)]),
         ]);
-        let result = complete("c", 1, Some("/Users/ada/bin"), &lister);
+        let result = complete(
+            "c",
+            1,
+            CommandEnv {
+                home: Some("/Users/ada"),
+                path_var: Some("/Users/ada/bin"),
+            },
+            &lister,
+        );
         assert_eq!(result.start, 0);
         assert_eq!(result.end, 1);
-        assert_eq!(inserts(&result.candidates), ["cargo", "cat", "cd", "cp"]);
+        assert_eq!(
+            inserts(&result.candidates),
+            ["calendar", "cargo", "cat", "cd", "chart", "collate", "cp"]
+        );
         assert!(result.candidates.iter().all(|c| c.closing == Some(' ')));
+
+        // A session with no home has no user stores to search, so the same
+        // tree offers only the system stores and `PATH`.
+        let homeless = complete(
+            "c",
+            1,
+            CommandEnv {
+                home: None,
+                path_var: Some("/Users/ada/bin"),
+            },
+            &lister,
+        );
+        assert_eq!(
+            inserts(&homeless.candidates),
+            ["calendar", "cargo", "cat", "cd", "cp"]
+        );
     }
 
     /// An argument word completes as a path; directories gain `/` and stay
@@ -421,7 +459,7 @@ mod tests {
             ".",
             &[("notes.txt", false), ("notebooks", true), (".notrc", false)],
         )]);
-        let result = complete("cat no", 6, None, &lister);
+        let result = complete("cat no", 6, CommandEnv::default(), &lister);
         assert_eq!(result.start, 4);
         assert_eq!(
             inserts(&result.candidates),
@@ -431,7 +469,7 @@ mod tests {
         assert_eq!(result.candidates[0].closing, None);
         assert_eq!(result.candidates[1].closing, Some(' '));
 
-        let hidden = complete("cat .no", 7, None, &lister);
+        let hidden = complete("cat .no", 7, CommandEnv::default(), &lister);
         assert_eq!(inserts(&hidden.candidates), [".notrc"]);
     }
 
@@ -439,7 +477,7 @@ mod tests {
     #[test]
     fn argument_completes_subdirectory_paths() {
         let lister = MapLister::new(&[("/Users", &[("ada", true), ("bob", true)])]);
-        let result = complete("ls /Users/a", 11, None, &lister);
+        let result = complete("ls /Users/a", 11, CommandEnv::default(), &lister);
         assert_eq!(inserts(&result.candidates), ["/Users/ada/"]);
     }
 
@@ -448,13 +486,13 @@ mod tests {
     #[test]
     fn redirection_target_offers_resources() {
         let lister = MapLister::new(&[(".", &[("sysinfo.txt", false)])]);
-        let result = complete("echo hi > sys", 13, None, &lister);
+        let result = complete("echo hi > sys", 13, CommandEnv::default(), &lister);
         assert_eq!(inserts(&result.candidates), ["sys:", "sysinfo.txt"]);
 
-        let selectors = complete("cat < sys:", 10, None, &lister);
+        let selectors = complete("cat < sys:", 10, CommandEnv::default(), &lister);
         assert_eq!(inserts(&selectors.candidates), ["sys:null", "sys:random"]);
 
-        let narrowed = complete("cat < sys:r", 11, None, &lister);
+        let narrowed = complete("cat < sys:r", 11, CommandEnv::default(), &lister);
         assert_eq!(inserts(&narrowed.candidates), ["sys:random"]);
     }
 
@@ -463,20 +501,20 @@ mod tests {
     #[test]
     fn argument_completes_resource_references() {
         let lister = MapLister::new(&[(".", &[])]);
-        let result = complete("cat sys:r", 9, None, &lister);
+        let result = complete("cat sys:r", 9, CommandEnv::default(), &lister);
         assert_eq!(inserts(&result.candidates), ["sys:random"]);
         // But an empty argument word does not spam namespaces.
-        let empty = complete("cat ", 4, None, &lister);
+        let empty = complete("cat ", 4, CommandEnv::default(), &lister);
         assert!(empty.candidates.is_empty());
     }
 
     /// The word before a pipe or `;` is a fresh command position.
     #[test]
     fn command_position_resets_after_control_operators() {
-        let lister = MapLister::new(&[("/System/Apps", &[("cat.app", true)])]);
+        let lister = MapLister::new(&[("/System/Commands", &[("cat.app", true)])]);
         for line in ["ls | ca", "ls; ca", "ls && ca", "FOO=1 ca"] {
             let cursor = line.chars().count();
-            let result = complete(line, cursor, None, &lister);
+            let result = complete(line, cursor, CommandEnv::default(), &lister);
             assert_eq!(
                 inserts(&result.candidates),
                 ["cat"],
@@ -491,14 +529,14 @@ mod tests {
     fn degrades_to_nothing_fail_closed() {
         let lister = MapLister::new(&[(".", &[("notes.txt", false)])]);
         for (line, cursor) in [("echo 'no", 8), ("cat \"no", 7), ("cat <<E", 7)] {
-            let result = complete(line, cursor, None, &lister);
+            let result = complete(line, cursor, CommandEnv::default(), &lister);
             assert!(
                 result.candidates.is_empty(),
                 "{line:?} should complete to nothing"
             );
         }
         // A refused listing degrades to no path candidates.
-        let result = complete("cat no", 6, None, &MapLister::new(&[]));
+        let result = complete("cat no", 6, CommandEnv::default(), &MapLister::new(&[]));
         assert!(result.candidates.is_empty());
     }
 
@@ -506,7 +544,7 @@ mod tests {
     #[test]
     fn candidates_are_shell_escaped() {
         let lister = MapLister::new(&[(".", &[("my notes.txt", false)])]);
-        let result = complete("cat my", 6, None, &lister);
+        let result = complete("cat my", 6, CommandEnv::default(), &lister);
         assert_eq!(inserts(&result.candidates), ["my\\ notes.txt"]);
         assert_eq!(result.candidates[0].display, "my notes.txt");
     }
@@ -516,7 +554,7 @@ mod tests {
     #[test]
     fn dup_redirections_do_not_claim_the_next_word() {
         let lister = MapLister::new(&[(".", &[("notes.txt", false)])]);
-        let result = complete("cat 2>&1 no", 11, None, &lister);
+        let result = complete("cat 2>&1 no", 11, CommandEnv::default(), &lister);
         assert_eq!(inserts(&result.candidates), ["notes.txt"]);
     }
 }

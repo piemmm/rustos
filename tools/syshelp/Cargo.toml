@@ -1,6 +1,6 @@
 [package]
 name = "tairix-syshelp"
-description = "Build-discovered system app-store Help payload for image authoring: scans the command-app bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1, AGENTS.md §2.2)."
+description = "Build-discovered system program-store Help payload for image authoring: scans the program bundles' on-disk `Help/` trees and exposes them as data, so the image builder plants help without a hand-maintained per-bundle list (plans/APPS.md §2.1, AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,16 +32,21 @@ path = "src/lib.rs"
 # It is `no_std`; here it links host-only into `build.rs`.
 [build-dependencies]
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
-# The OS filesystem layout's own definition of the two bundle stores
-# (`/System/Apps`, `/System/Services`). Each discovered payload row carries
-# the store its bundle installs to, spelled from these constants rather than
-# a second copy here, so a planted file always lands inside the very bundle
-# directory the composer signed — a file planted into the other store leaves
-# the installed bundle missing content its digest covers and the load gate
-# refuses it. It is `no_std`; here it links host-only into `build.rs`.
+# The OS filesystem layout's own definition of the bundle stores and of the
+# manifest kind that selects between them (`ProgramKind`). Each discovered
+# payload row carries the store its bundle installs to, derived from that one
+# mapping rather than a second copy here, so a planted file always lands
+# inside the very bundle directory the composer signed — a file planted into
+# another store leaves the installed bundle missing content its digest covers
+# and the load gate refuses it. It is `no_std`; here it links host-only into
+# `build.rs`.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 
 [dev-dependencies]
+# The same kind -> store mapping `build.rs` plants by, so the test that holds
+# every emitted row to its bundle's own store judges it against the one
+# definition instead of a second copy that could drift.
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # The one help engine and its one help-tree lint (plans/APPS.md §6, §8.1):
 # the aggregator's tests judge every discovered document through the same
 # shared lint `cargo xtask help-lint` gates on, so a malformed, incomplete,

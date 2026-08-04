@@ -1,7 +1,7 @@
 # `tairix-dirname` — strip the last component from names
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/dirname.app/` so the shell resolves the bare
+store bundle `/System/Commands/dirname.app/` so the shell resolves the bare
 word `dirname` to it. `dirname` is the GNU coreutils tool: it prints each
 path spelling with its last component removed, using the purely lexical
 POSIX algorithm — no operand path is resolved, normalised, or touched on

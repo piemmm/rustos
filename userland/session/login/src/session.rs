@@ -81,11 +81,15 @@ pub struct AuthenticatedUser {
     pub shell: String,
 }
 
-/// The default search path exported to a session: the OS command store
-/// first (`/System/Apps`, the system command apps), then installed
-/// applications (`/Apps`). TAIRiX has no `/usr/bin` (§16), so this is the
-/// analogue of a POSIX login's default `PATH`.
-pub const DEFAULT_PATH: &str = "/System/Apps:/Apps";
+/// The default search path exported to a session: the machine-wide
+/// installed application store (`/Apps`). The two system stores and the
+/// user's own two stores are the fixed, non-overridable prefix the
+/// resolution policy itself searches first (`lib/cmdres`), so they must
+/// never be repeated here — doing so would be redundant and would
+/// misleadingly imply they are just another configurable `PATH` entry.
+/// TAIRiX has no `/usr/bin` (§16), so this is the analogue of a POSIX
+/// login's default `PATH`.
+pub const DEFAULT_PATH: &str = "/Apps";
 
 /// The default `TERM` exported to a session. The system text console
 /// (`lib/fbcon`) renders the xterm 256-colour repertoire, so a session
@@ -121,15 +125,15 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
     ]
 }
 
-/// Absolute path of the `desktop` command app's `Run` binary — the
+/// Absolute path of the `desktop` application's `Run` binary — the
 /// program a [`SessionKind::Graphical`] session launches
-/// (`plans/DISPLAY.md` D7c/D7d). The desktop is a system command app
-/// (`.app` bundle in the system app store, `/System/Apps/`), so the same
-/// bundle a graphical login starts is what a shell user runs by typing
-/// `desktop`. This is the one OS-wide spelling of its entry point: the
-/// launcher spawns it and login's availability probe checks the same
+/// (`plans/DISPLAY.md` D7c/D7d). The desktop is a system application
+/// (`.app` bundle in the system application store, `/System/Applications/`),
+/// so the same bundle a graphical login starts is what a shell user runs by
+/// typing `desktop`. This is the one OS-wide spelling of its entry point:
+/// the launcher spawns it and login's availability probe checks the same
 /// path, so the two can never name different bundles.
-pub const DESKTOP_SESSION_PATH: &str = "/System/Apps/desktop.app/Run";
+pub const DESKTOP_SESSION_PATH: &str = "/System/Applications/desktop.app/Run";
 
 /// Absolute path of the sandboxed OS font service (`fontd`) `Run` binary —
 /// the service the graphical desktop draws text through (`FONT_ENDPOINT`,
@@ -332,14 +336,14 @@ mod tests {
             supplementary_gids: Vec::new(),
             capabilities: CapabilitySet::empty(),
             home: "/Users/ada".to_string(),
-            shell: "/System/Apps/elsh.app/Run".to_string(),
+            shell: "/System/Commands/elsh.app/Run".to_string(),
         };
         let env = session_environment(&user);
         // The identity is drawn from the account, and PWD starts at home.
         assert!(env.contains(&"USER=ada".to_string()));
         assert!(env.contains(&"LOGNAME=ada".to_string()));
         assert!(env.contains(&"HOME=/Users/ada".to_string()));
-        assert!(env.contains(&"SHELL=/System/Apps/elsh.app/Run".to_string()));
+        assert!(env.contains(&"SHELL=/System/Commands/elsh.app/Run".to_string()));
         assert!(env.contains(&"PWD=/Users/ada".to_string()));
         // The locale/path/term defaults are the documented OS values.
         assert!(env.contains(&alloc::format!("PATH={DEFAULT_PATH}")));
@@ -360,19 +364,22 @@ mod tests {
             supplementary_gids: Vec::new(),
             capabilities: CapabilitySet::empty(),
             home: "/Users/ada".to_string(),
-            shell: "/System/Apps/elsh.app/Run".to_string(),
+            shell: "/System/Commands/elsh.app/Run".to_string(),
         };
         assert_eq!(
             super::session_program(&user, SessionKind::Text),
-            "/System/Apps/elsh.app/Run"
+            "/System/Commands/elsh.app/Run"
         );
         assert_eq!(
             super::session_program(&user, SessionKind::Graphical),
             super::DESKTOP_SESSION_PATH
         );
-        // The desktop path is the system-app-store bundle spelling: the
-        // same bundle the shell's `desktop` command word resolves to.
-        assert_eq!(super::DESKTOP_SESSION_PATH, "/System/Apps/desktop.app/Run");
+        // The desktop path is the system-application-store bundle spelling:
+        // the same bundle the shell's `desktop` command word resolves to.
+        assert_eq!(
+            super::DESKTOP_SESSION_PATH,
+            "/System/Applications/desktop.app/Run"
+        );
     }
 
     #[test]

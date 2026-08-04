@@ -10,11 +10,15 @@ elsh — cragen orchmynion TAIRiX
 
 Mae'n rhedeg cragen orchmynion ryngweithiol — dolen darllen-gwerthuso-
 argraffu dros y ffrydiau safonol a etifeddwyd. Datrysir gair gorchymyn
-a deipiwyd yn gyntaf yn erbyn builtins y gragen, yna storfa raglenni'r
-system (`/System/Apps`), yna cyfeiriaduron y newidyn `PATH`; chwilir y
-storfa cyn `PATH`, felly ni all `PATH` byth gysgodi gorchymyn system.
-Mae gair heb ei ddatrys yn gadael â `127`; mae bwndel a ddatryswyd ond
-nad yw'n weithredadwy yn gadael â `126`.
+a deipiwyd yn gyntaf yn erbyn builtins y gragen, yna storfa orchmynion
+y system (`/System/Commands`), storfa raglenni'r system
+(`/System/Applications`), storfa orchmynion (`<home>/Commands`) a
+storfa raglenni (`<home>/Applications`) y defnyddiwr ei hun, yna
+cyfeiriaduron y newidyn `PATH`; mae'r pedair storfa hyn yn rhagddodiad
+sefydlog na all y defnyddiwr ei aildrefnu na'i ddisodli, felly ni all
+`PATH` byth gysgodi gorchymyn system. Mae gair heb ei ddatrys yn gadael
+â `127`; mae bwndel a ddatryswyd ond nad yw'n weithredadwy yn gadael â
+`126`.
 
 Y builtins:
 
@@ -50,7 +54,8 @@ chyfeiriadau adnoddau fel `sys:random`.
 
 ## ENVIRONMENT
 
-- `PATH` — y cyfeiriaduron a chwilir ar ôl storfa raglenni'r system.
+- `PATH` — y cyfeiriaduron a chwilir ar ôl y rhagddodiad sefydlog o
+  storfeydd.
 - `LANG` — y locale a ffefrir ar gyfer y cymorth byr (tag BCP-47 fel
   `cy-GB`), wedi'i hallforio i bob gorchymyn a lansir.
 

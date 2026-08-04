@@ -1110,7 +1110,7 @@ mod tests {
         // naming.
         let app = ProcName::from_path(b"/Apps/Example.app/Run");
         assert_eq!(app.as_str(), "Example");
-        let store = ProcName::from_path(b"/System/Apps/ps.app/Run");
+        let store = ProcName::from_path(b"/System/Commands/ps.app/Run");
         assert_eq!(store.as_str(), "ps");
 
         // Empty components never hide the owning directory.

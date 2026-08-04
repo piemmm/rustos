@@ -8,7 +8,8 @@
 //! each app's bundle resources (e.g. `lspci`'s compiled ID-database table,
 //! `plans/DEVICES.md`) at `/System/<store>/<name>.app/Resources/<file>`,
 //! where `<store>` is the store the bundle's own manifest kind installs it
-//! to — `Apps` for an application, `Services` for a service. It also
+//! to — `Commands` for a command app, `Applications` for a graphical
+//! application, `Services` for a service. It also
 //! ships the desktop's graphics assets — the raster icon masters — under
 //! `/System/Graphics`. The image builder
 //! (`tools/mkimage`) and the QEMU image fixture must plant all of these onto
@@ -58,7 +59,7 @@
 #[derive(Clone, Copy, Debug)]
 pub struct HelpFile {
     /// The `/System` subdirectory of the store this bundle installs to —
-    /// `Apps` for an application, `Services` for a service. Carried per row
+    /// `Commands`, `Applications`, or `Services`. Carried per row
     /// because the payload must land inside the very bundle directory the
     /// composer signed: a file planted into the other store leaves the
     /// installed bundle missing content its manifest's digest covers, and
@@ -96,7 +97,7 @@ pub const HELP_FILES: &[HelpFile] = &include!(concat!(env!("OUT_DIR"), "/help_fi
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceFile {
     /// The `/System` subdirectory of the store this bundle installs to —
-    /// `Apps` for an application, `Services` for a service.
+    /// `Commands`, `Applications`, or `Services`.
     pub store: &'static str,
     /// The bundle directory name, including the `.app` suffix
     /// (e.g. `lspci.app`).
@@ -247,10 +248,10 @@ mod tests {
     /// `Resources/` files, so a row planted into the *other* store leaves
     /// the installed bundle missing content its digest claims and the load
     /// gate refuses the bundle outright — the whole bundle, not just the
-    /// stray file. The walk used to assume every bundle was an application,
-    /// which silently broke the moment a service shipped a payload; this
-    /// re-derives each bundle's store from its own manifest, independently
-    /// of the discovery that produced the rows, and holds every row to it.
+    /// stray file. So this re-reads each bundle's declared kind from its own
+    /// manifest, independently of the discovery that produced the rows, maps
+    /// it through the one shared kind -> store definition, and holds every
+    /// row to it.
     #[test]
     fn a_bundles_payload_is_planted_in_the_store_it_installs_to() {
         use std::collections::BTreeMap;
@@ -284,11 +285,9 @@ mod tests {
                 let (Some(name), Some(kind)) = (value_of("name"), value_of("kind")) else {
                     continue;
                 };
-                let store = if kind == "service" {
-                    "Services"
-                } else {
-                    "Apps"
-                };
+                let store = tairix_abi::ProgramKind::from_key(&kind)
+                    .unwrap_or_else(|| panic!("{name}: unknown kind `{kind}`"))
+                    .store_dir();
                 store_of.insert(format!("{name}.app"), store.to_string());
             }
         }

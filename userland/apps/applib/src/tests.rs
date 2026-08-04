@@ -324,7 +324,7 @@ fn parse_refuses_what_the_grammar_does_not_define() {
 fn list_shows_the_resolved_library_folder_by_folder() {
     let machine = MemStore::new(Some(
         "os.tairix.edit.name Edit\n\
-         os.tairix.edit.bundle /System/Apps/edit.app\n\
+         os.tairix.edit.bundle /System/Commands/edit.app\n\
          os.tairix.edit.category Accessories\n\
          os.tairix.chess.name Chess\n\
          os.tairix.chess.bundle /Apps/chess.app\n\
@@ -344,7 +344,7 @@ fn list_shows_the_resolved_library_folder_by_folder() {
     .expect("lists");
     assert_eq!(
         output.text(),
-        "Accessories\n  os.tairix.edit  My Editor  /System/Apps/edit.app\n\
+        "Accessories\n  os.tairix.edit  My Editor  /System/Commands/edit.app\n\
          Games\n  os.tairix.chess  Chess  /Apps/chess.app\n"
     );
 
@@ -754,9 +754,10 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
     bundles.dir(
-        "/System/Apps",
+        "/System/Commands",
         &[("edit.app", true), ("ls.app", true), ("notes.txt", false)],
     );
+    bundles.dir("/System/Applications", &[("viewer.app", true)]);
     bundles.dir(
         "/Apps",
         &[
@@ -769,11 +770,15 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     // Nested plain subdirectories are walked; bundles are sealed units.
     bundles.dir("/Apps/games", &[("mahjong.app", true)]);
     bundles.manifest(
-        "/System/Apps/edit.app",
+        "/System/Commands/edit.app",
         &manifest_bytes("edit", Some(LibraryCategory::Accessories), None),
     );
     // A command tool with no listing is not a library application.
-    bundles.manifest("/System/Apps/ls.app", &manifest_bytes("ls", None, None));
+    bundles.manifest("/System/Commands/ls.app", &manifest_bytes("ls", None, None));
+    bundles.manifest(
+        "/System/Applications/viewer.app",
+        &manifest_bytes("viewer", Some(LibraryCategory::Graphics), None),
+    );
     bundles.manifest(
         "/Apps/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), None),
@@ -802,7 +807,11 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     let text = machine.text().expect("written");
     // The new bundles are registered under their declared folders…
     assert!(
-        text.contains("os.tairix.edit.bundle /System/Apps/edit.app\n"),
+        text.contains("os.tairix.edit.bundle /System/Commands/edit.app\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("os.tairix.viewer.bundle /System/Applications/viewer.app\n"),
         "{text}"
     );
     assert!(
@@ -821,7 +830,7 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     let info = output.info_text();
     assert!(info.contains("\"code\":\"apps.library_rescan\""), "{info}");
     assert!(
-        info.contains("Registered 2 new application(s); skipped 1."),
+        info.contains("Registered 3 new application(s); skipped 1."),
         "{info}"
     );
 
@@ -844,13 +853,18 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
 }
 
 #[test]
-fn rescan_user_walks_the_home_store_into_the_overlay() {
+fn rescan_user_walks_both_home_stores_into_the_overlay() {
     let machine = MemStore::new(None);
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
-    bundles.dir("/Users/root/Apps", &[("paint.app", true)]);
+    bundles.dir("/Users/root/Commands", &[("edit.app", true)]);
+    bundles.dir("/Users/root/Applications", &[("paint.app", true)]);
     bundles.manifest(
-        "/Users/root/Apps/paint.app",
+        "/Users/root/Commands/edit.app",
+        &manifest_bytes("edit", Some(LibraryCategory::Accessories), None),
+    );
+    bundles.manifest(
+        "/Users/root/Applications/paint.app",
         &manifest_bytes("paint", Some(LibraryCategory::Graphics), None),
     );
     let output = MemOutput::default();
@@ -864,12 +878,14 @@ fn rescan_user_walks_the_home_store_into_the_overlay() {
     )
     .expect("rescans");
     assert_eq!(machine.writes(), 0, "the machine store is untouched");
+    let text = user.text().expect("written");
     assert!(
-        user.text()
-            .expect("written")
-            .contains("os.tairix.paint.bundle /Users/root/Apps/paint.app\n"),
-        "{:?}",
-        user.text()
+        text.contains("os.tairix.edit.bundle /Users/root/Commands/edit.app\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("os.tairix.paint.bundle /Users/root/Applications/paint.app\n"),
+        "{text}"
     );
 }
 
@@ -906,7 +922,7 @@ fn the_rescan_walk_is_bounded() {
     let mut bundles = MemBundles::default();
     let wide: Vec<String> = (0..=MAX_WALK_ENTRIES).map(|i| format!("f{i}")).collect();
     let entries: Vec<(&str, bool)> = wide.iter().map(|name| (name.as_str(), false)).collect();
-    bundles.dir("/System/Apps", &entries);
+    bundles.dir("/System/Commands", &entries);
     assert_eq!(
         run(
             Command::Rescan { user: false },

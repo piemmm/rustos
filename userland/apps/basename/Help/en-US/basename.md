@@ -35,7 +35,7 @@ operand is a name.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — print `top.app`.
+- `basename /System/Commands/top.app` — print `top.app`.
 - `basename src/lib.rs .rs` — print `lib`.
 - `basename -s .rs -a a.rs b.rs` — print `a` and `b`.
 - `basename Home:/` — print `Home:/` (a root is never stripped into).

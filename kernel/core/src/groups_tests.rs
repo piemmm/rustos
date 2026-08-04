@@ -74,7 +74,7 @@ fn user(name: &str, uid: u32, primary: u32, supplementary: &[Gid]) -> UserRecord
             supplementary_gids: supplementary,
             display_name: "",
             home: Some("/Users/test"),
-            shell: Some("/System/Apps/elsh.app/Run"),
+            shell: Some("/System/Commands/elsh.app/Run"),
             capabilities: caps,
             state: AccountState::Active,
         },

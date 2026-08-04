@@ -16,7 +16,7 @@
 //! vertical's disk — no production image ever ships it. The runner unlocks
 //! the root at the passphrase prompt, authenticates `root`/`root` at the
 //! console login, and types the bare command word `memsoak` at the shell:
-//! the store-then-`PATH` resolution finds `/System/Apps/memsoak.app/Run`,
+//! the store-then-`PATH` resolution finds `/System/Commands/memsoak.app/Run`,
 //! the disk-backed spawn path verifies the signed bundle, and the fixture
 //! runs with `manifest ∩ administrator-ceiling` authority (its manifest
 //! requests `CAP_SYSINFO_KERNEL` for the memory query; sysinfod enforces it

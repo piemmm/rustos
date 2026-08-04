@@ -4267,11 +4267,11 @@ static TESTS: &[QemuTest] = &[
     // account's home (`CAP_FS_ACCESS` — the B3 regression), `pwd` proving
     // the move, typing the bare command word `ps` — resolved through the
     // shell's system-app-store search (`plans/APPS.md` §8) to
-    // `/System/Apps/ps.app/Run` and spawned under `CAP_PROC_SPAWN` — and
+    // `/System/Commands/ps.app/Run` and spawned under `CAP_PROC_SPAWN` — and
     // seeing its process-list header, `man man` rendering the store-shipped
     // Help document end to end (`plans/APPS.md` §7 — resolution, the
     // `fs_*` read of the read-only /System volume, and the `lib/help`
-    // render all in one exchange), `ls /System/Apps` listing the system app
+    // render all in one exchange), `ls /System/Commands` listing the command
     // store through the `fs_stat`/`fs_readdir` syscalls (`plans/APPS.md`
     // deliverable 6 — the listing must show `man.app`, an entry only a real
     // directory read produces), then the negative half — a `ulimit` bound
@@ -4327,19 +4327,19 @@ static TESTS: &[QemuTest] = &[
             ("PID  PPID", Duration::ZERO, "ps --bogus\n"),
             // `man man` (plans/APPS.md §7): the spawned tool resolves its
             // own bundle through the shared store-then-PATH policy, reads
-            // `/System/Apps/man.app/Help/en-US/man.md` off the mounted
+            // `/System/Commands/man.app/Help/en-US/man.md` off the mounted
             // read-only /System volume through the `fs_*` syscalls, and
             // streams the rendered page (a serial console attests no
             // geometry, so no pager prompt). `SEE ALSO` is the page's final
             // section heading — seeing it proves the whole document arrived.
             ("usage: ps", Duration::ZERO, "man man\n"),
-            // `ls /System/Apps` (plans/APPS.md deliverable 6): the spawned
+            // `ls /System/Commands` (plans/APPS.md deliverable 6): the spawned
             // tool stats the operand and reads the directory through the
             // `fs_stat`/`fs_readdir` syscalls under its own manifest's
             // `CAP_FS_ACCESS`. `man.app` in the output is an entry only a
             // real directory read of the mounted read-only /System volume
             // produces.
-            ("SEE ALSO", Duration::ZERO, "ls /System/Apps\n"),
+            ("SEE ALSO", Duration::ZERO, "ls /System/Commands\n"),
             ("man.app", Duration::ZERO, "ulimit processes 1000\n"),
             (
                 "root@tairix ~% ",
@@ -5314,7 +5314,7 @@ static TESTS: &[QemuTest] = &[
     // types the fixture account's `root`/`root` at login's video-console
     // prompt — `os.loginType` defaults to text, so login drops to the
     // account's shell — and then the `desktop` command word, which the
-    // shell resolves in the system app store and spawns: the desktop is
+    // shell resolves in the system application store and spawns: the desktop is
     // started exactly the way a user starts it from the command line.
     //
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
@@ -5344,7 +5344,7 @@ static TESTS: &[QemuTest] = &[
     // terminal-window click, after which the runner types `sleep 3600` +
     // Enter at the seat keyboard once the guest's terminal-focus marker
     // appears. The guest PASS gate latches the `appmgr` load of
-    // `/System/Apps/sleep.app` — `sleep` is loaded only by the shell running
+    // `/System/Commands/sleep.app` — `sleep` is loaded only by the shell running
     // the typed command, so this witness is uniquely attributable (no
     // fragile delivery count), and it proves the whole keyboard → session →
     // library popup → terminal → pty → shell → load round trip. The runner
@@ -7151,7 +7151,7 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
     // attributes by), never a display-name literal.
     let bundle = format!(
         "{}/{PIN_APP_NAME}{}",
-        tairix_abi::SYSTEM_APP_STORE,
+        tairix_abi::SYSTEM_APPLICATION_STORE,
         tairix_abi::BUNDLE_SUFFIX
     );
     let taskbar = shell.session().taskbar();
@@ -7385,7 +7385,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // the guest presents after the Library click (search cleared, every
     // folder expanded, scroll at the top).
     let library = taskbar.library();
-    let terminal_bundle = format!("{}/terminal.app", tairix_abi::SYSTEM_APP_STORE);
+    let terminal_bundle = format!("{}/terminal.app", tairix_abi::SYSTEM_APPLICATION_STORE);
     let terminal_index = library
         .rows()
         .iter()
@@ -7578,7 +7578,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 /// exactly where the guest draws them: the app-store bundles that declare
 /// a `library` folder are exactly the seeded catalog's entries.
 fn reconstructed_library() -> Result<tairix_proglib::Catalog, String> {
-    use tairix_itest_harness::app_image::{discover_app_manifests, AppKind};
+    use tairix_itest_harness::app_image::discover_app_manifests;
     use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryEntry};
 
     let userland = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -7592,7 +7592,7 @@ fn reconstructed_library() -> Result<tairix_proglib::Catalog, String> {
     let mut catalog = Catalog::new();
     for app in &discovered {
         let manifest = &app.manifest;
-        if manifest.kind != AppKind::Command {
+        if !manifest.kind.is_searched() {
             continue;
         }
         let Some(folder) = manifest.library else {
@@ -7602,12 +7602,8 @@ fn reconstructed_library() -> Result<tairix_proglib::Catalog, String> {
             |what: &str, e: &dyn core::fmt::Display| format!("desktop pointer script: {what}: {e}");
         let id = EntryId::new(&manifest.id).map_err(|e| fail(&manifest.id, &e))?;
         let name = DisplayName::new(&manifest.name).map_err(|e| fail(&manifest.id, &e))?;
-        let bundle = BundlePath::new(&format!(
-            "{}/{}.app",
-            tairix_abi::SYSTEM_APP_STORE,
-            manifest.name
-        ))
-        .map_err(|e| fail(&manifest.id, &e))?;
+        let bundle = BundlePath::new(&format!("{}/{}.app", manifest.kind.store(), manifest.name))
+            .map_err(|e| fail(&manifest.id, &e))?;
         let icon = match &manifest.library_icon {
             Some(asset) => Some(IconAsset::new(asset).map_err(|e| fail(&manifest.id, &e))?),
             None => None,

@@ -1832,8 +1832,9 @@ Redirection state:
   `man` command's bundle lookup also imports) computes the ordered program-path
   spellings for a command word — explicit paths (containing `/`) bypass the
   search, a trailing `.app` names the bundle and runs its `Run` binary, and
-  a bare word searches the `/System/Apps/` system app store (spelled once in
-  `lib/abi`) then the alias-aware `:`-split `PATH` (empty entries skipped) —
+  a bare word resolves against the fixed, non-overridable five-step search order
+  (§16.8): (1) /System/Commands, (2) /System/Applications, (3) <home>/Commands,
+  (4) <home>/Applications, and (5) the user's PATH —
   and the runtime host attempts the candidates in order (`spawn`'s
   `NotFound` moves to the next, any other refusal is final). The interpreter
   maps a launch `NotFound` onto `127` "command not found" and every other

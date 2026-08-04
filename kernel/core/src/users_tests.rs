@@ -151,7 +151,7 @@ fn valid_db_text() -> String {
             supplementary_gids: &[],
             display_name: "Ada Lovelace",
             home: Some("/Users/ada"),
-            shell: Some("/System/Apps/elsh.app/Run"),
+            shell: Some("/System/Commands/elsh.app/Run"),
             capabilities: tairix_caps::CapabilitySet::empty(),
             state: AccountState::Active,
         },

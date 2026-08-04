@@ -221,12 +221,12 @@ mod kernel {
             .is_some_and(|parent| parent.ends_with('/'))
     }
 
-    /// Whether `bundle` is the pinned application's bundle in the system app
-    /// store, composed from the shared `lib/abi` spellings rather than
-    /// written out as a path.
+    /// Whether `bundle` is the pinned application's bundle in the system
+    /// application store, composed from the shared `lib/abi` spellings
+    /// rather than written out as a path.
     fn is_pinned_bundle(bundle: &str) -> bool {
         bundle
-            .strip_prefix(tairix_abi::SYSTEM_APP_STORE)
+            .strip_prefix(tairix_abi::SYSTEM_APPLICATION_STORE)
             .and_then(|rest| rest.strip_prefix('/'))
             .and_then(|name| name.strip_suffix(tairix_abi::BUNDLE_SUFFIX))
             .is_some_and(|name| name == PIN_APP_NAME)

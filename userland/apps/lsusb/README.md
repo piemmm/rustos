@@ -1,7 +1,7 @@
 # `tairix-lsusb` — list discovered USB devices
 
 A `plans/DEVICES.md` DEVICE1 command app (`AGENTS.md` §3
-`userland/apps/`), registered as the system app store bundle `lsusb.app`
+`userland/apps/`), registered as the system command store bundle `lsusb.app`
 so the shell resolves the bare word `lsusb` to it. `lsusb` lists, one
 line per discovered USB interface, the interface's bus and device
 numbers, its `vendor:product` id, and its vendor and product names. The

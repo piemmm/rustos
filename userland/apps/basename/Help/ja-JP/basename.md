@@ -35,7 +35,7 @@ basename — 名前からディレクトリと接尾辞を取り除く
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — `top.app` を印字する。
+- `basename /System/Commands/top.app` — `top.app` を印字する。
 - `basename src/lib.rs .rs` — `lib` を印字する。
 - `basename -s .rs -a a.rs b.rs` — `a` と `b` を印字する。
 - `basename Home:/` — `Home:/` を印字する（ルートは剥がされない）。

@@ -3062,14 +3062,14 @@ fn a_file_the_registry_cannot_type_is_offered_nothing() {
 fn handles_matches_a_declared_type_case_insensitively() {
     let assoc = AppAssociation::new(
         "viewer",
-        "/System/Apps/viewer.app",
+        "/System/Applications/viewer.app",
         vec!["text/plain".to_string(), "text/markdown".to_string()],
     );
     assert!(assoc.handles("text/plain"));
     assert!(assoc.handles("TEXT/PLAIN"));
     assert!(!assoc.handles("image/png"));
     assert_eq!(assoc.name(), "viewer");
-    assert_eq!(assoc.bundle_path(), "/System/Apps/viewer.app");
+    assert_eq!(assoc.bundle_path(), "/System/Applications/viewer.app");
     assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
 }
 
@@ -3080,7 +3080,7 @@ fn open_with_store() -> MockBundleStore {
         bundles: vec![
             AppAssociation::new(
                 "viewer",
-                "/System/Apps/viewer.app",
+                "/System/Applications/viewer.app",
                 vec!["text/plain".to_string()],
             ),
             AppAssociation::new(
@@ -3313,10 +3313,11 @@ fn build_appinfo(name: &str, icon: Option<&str>, mimes: &[&str]) -> Vec<u8> {
 #[test]
 fn association_from_appinfo_reads_the_name_and_declared_types() {
     let bytes = build_appinfo("viewer", None, &["text/plain", "text/markdown"]);
-    let assoc = crate::open_with::association_from_appinfo("/System/Apps/viewer.app", &bytes)
-        .expect("decodes");
+    let assoc =
+        crate::open_with::association_from_appinfo("/System/Applications/viewer.app", &bytes)
+            .expect("decodes");
     assert_eq!(assoc.name(), "viewer");
-    assert_eq!(assoc.bundle_path(), "/System/Apps/viewer.app");
+    assert_eq!(assoc.bundle_path(), "/System/Applications/viewer.app");
     assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
     // It composes with the matcher exactly as the mock store does.
     assert!(applications_for("notes.txt", core::slice::from_ref(&assoc))
@@ -3329,7 +3330,7 @@ fn association_from_appinfo_reads_a_bundle_that_declares_no_types() {
     // A pure command declares no associations: it decodes to an empty MIME
     // set (never an error) and is simply never an "open with" candidate.
     let bytes = build_appinfo("printf", None, &[]);
-    let assoc = crate::open_with::association_from_appinfo("/System/Apps/printf.app", &bytes)
+    let assoc = crate::open_with::association_from_appinfo("/System/Commands/printf.app", &bytes)
         .expect("decodes");
     assert!(assoc.mime_types().is_empty());
     assert!(applications_for("notes.txt", core::slice::from_ref(&assoc)).is_empty());

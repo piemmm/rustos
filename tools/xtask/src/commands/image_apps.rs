@@ -1,9 +1,11 @@
 //! Cross-compile, compose, and sign the self-contained application bundles
 //! the images ship on the read-only `/System` volume (`plans/APPS.md`
-//! deliverable 8): every command app under `/System/Apps/<name>.app/` and
+//! deliverable 8): every command app under `/System/Commands/<name>.app/`,
+//! every graphical application under `/System/Applications/<name>.app/`, and
 //! every service under `/System/Services/<name>.app/`, each a complete
 //! on-disk bundle — its signed `AppInfo` and `Run` rxe planted beside its
-//! `Help/` tree.
+//! `Help/` tree. Which store a bundle lands in is its manifest's own
+//! declared kind, never a list kept here.
 //!
 //! `tools/mkimage` and the QEMU whole-disk fixture are pure planters: they
 //! lay bundle *bytes* onto the volume but never drive `cargo`. This module
@@ -66,7 +68,8 @@ pub(super) const fn memo_slot(arch: PieArch, profile: ImageProfile) -> usize {
 /// `Help/` documents are planted separately from their own discovered
 /// source (`tairix_syshelp`); the `AppInfo` content hash covers them.
 pub struct BuiltAppBundle {
-    /// The `/System`-volume-relative store directory (`Apps` or `Services`).
+    /// The `/System`-volume-relative store directory (`Commands`,
+    /// `Applications`, or `Services`), from the bundle's declared kind.
     pub store_dir: &'static str,
     /// The bundle directory name (`<name>.app`).
     pub bundle_dir: String,

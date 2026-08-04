@@ -45,8 +45,9 @@ applib — 데스크톱 프로그램 라이브러리 관리
 숨기기는 표시 방식의 문제일 뿐 권한과는 무관합니다. 번들 실행은 카탈로그와
 관계없이 항상 로더의 서명 및 기능(capability) 체크에 의해 제어됩니다.
 
-`applib rescan`은 애플리케이션 저장소(`/System/Apps` 및 `/Apps`,
-또는 `--user` 지정 시 호출자 자신의 `<home>/Apps`)를 검색하고, 각 번들의
+`applib rescan`은 애플리케이션 저장소(`/System/Commands`,
+`/System/Applications` 및 `/Apps`, 또는 `--user` 지정 시 호출자 자신의
+`<home>/Commands` 및 `<home>/Applications`)를 검색하고, 각 번들의
 매니페스트를 읽어 목록 게시를 요청하고 아직 카탈로그에 등록되지 않은 모든
 애플리케이션을 등록합니다. 큐레이터의 이름 변경 및 억제 사항을 포함한 기존
 레코드는 절대 건드리지 않으며, 읽을 수 없거나 형식이 잘못된 매니페스트가
@@ -73,7 +74,8 @@ applib — 데스크톱 프로그램 라이브러리 관리
 - `--icon <asset>` — `add`와 함께 사용 시 매니페스트 아이콘 대신 지정할
   아이콘 자산(번들의 `Resources/` 내 파일 이름)을 지정합니다.
 - `--user` — 시스템 전체 저장소 대신 호출자 고유의 오버레이에 변경 사항을
-  적용합니다(또는 `rescan` 시 호출자 자신의 `<home>/Apps`를 검색합니다).
+  적용합니다(또는 `rescan` 시 호출자 자신의 `<home>/Commands` 및
+  `<home>/Applications`를 검색합니다).
 - `-h, -?` — 이 명령의 짧은 도움말을 표시합니다.
 
 ## EXAMPLES
@@ -100,7 +102,7 @@ applib — 데스크톱 프로그램 라이브러리 관리
 
 - `LANG` — 짧은 도움말의 선호 로케일(`fr-FR`과 같은 BCP-47 태그).
 - `HOME` — 호출자의 홈 디렉터리. 사용자별 오버레이 및 `--user` 재검색
-  루트인 `<home>/Apps`를 지정합니다.
+  루트인 `<home>/Commands` 및 `<home>/Applications`를 지정합니다.
 
 ## SEE ALSO
 

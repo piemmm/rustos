@@ -81,8 +81,8 @@ mod program {
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, Origin, ProcId, SpawnAttach, UnlinkFlags,
         WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
-        ORIGIN_WIRE_LEN, STDIN, STD_STREAM_COUNT, SYSTEM_APP_STORE, USER_APP_STORE,
-        WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        INSTALLED_APP_STORE, ORIGIN_WIRE_LEN, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
+        SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
         build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
@@ -513,8 +513,9 @@ mod program {
     /// file types each declares, read from the on-disk app stores under the
     /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list, §16.5).
     ///
-    /// It walks the machine-wide stores (`/System/Apps` then `/Apps`),
-    /// descending nested plain subdirectories and reading each `<Name>.app`
+    /// It walks the machine-wide stores (`/System/Commands`, then
+    /// `/System/Applications`, then `/Apps`), descending nested plain
+    /// subdirectories and reading each `<Name>.app`
     /// bundle's `AppInfo` manifest for its declared MIME associations
     /// ([`association_from_appinfo`]). The MIME table is a display *hint* only:
     /// a bundle offered here is still launched through the ordinary signed load
@@ -526,7 +527,11 @@ mod program {
     impl BundleSource for RtBundleSource {
         fn installed_bundles(&mut self) -> Result<alloc::vec::Vec<AppAssociation>, Errno> {
             let mut out = alloc::vec::Vec::new();
-            for store in [SYSTEM_APP_STORE, USER_APP_STORE] {
+            for store in [
+                SYSTEM_COMMAND_STORE,
+                SYSTEM_APPLICATION_STORE,
+                INSTALLED_APP_STORE,
+            ] {
                 collect_bundles(store, 0, &mut out);
             }
             Ok(out)

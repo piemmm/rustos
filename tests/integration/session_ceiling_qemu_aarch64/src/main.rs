@@ -26,17 +26,17 @@
 //!    grant omitted `CAP_FS_ACCESS` and every filesystem call was denied).
 //! 2. `pwd` — prints `/Users/root`, proving the chdir actually moved the
 //!    process.
-//! 3. `/System/Apps/ps.app/Run` — `CAP_PROC_SPAWN` admits `spawn`; `ps` runs as
-//!    the same user, queries its self-scoped process list through
+//! 3. `/System/Commands/ps.app/Run` — `CAP_PROC_SPAWN` admits `spawn`; `ps`
+//!    runs as the same user, queries its self-scoped process list through
 //!    `sysinfod`, prints the shared `PID  PPID …` header, and exits.
 //! 4. `man man` — the spawned `man` tool resolves its own bundle through
 //!    the shared store-then-`PATH` policy, reads the planted
-//!    `/System/Apps/man.app/Help/en-US/man.md` off the mounted read-only
+//!    `/System/Commands/man.app/Help/en-US/man.md` off the mounted read-only
 //!    `/System` volume through the `fs_*` syscalls (`CAP_FS_ACCESS` from
 //!    its own manifest), and streams the rendered page; the page's final
 //!    `SEE ALSO` heading is the marker that the whole document arrived
 //!    (`plans/APPS.md` §7).
-//! 5. `ls /System/Apps` — the spawned `ls` tool stats the operand and
+//! 5. `ls /System/Commands` — the spawned `ls` tool stats the operand and
 //!    reads the directory through the `fs_stat`/`fs_readdir` syscalls
 //!    (`CAP_FS_ACCESS` from its own manifest); `man.app` in the listing is
 //!    the marker, an entry only a real directory read of the mounted

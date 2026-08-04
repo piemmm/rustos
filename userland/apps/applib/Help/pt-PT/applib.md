@@ -52,14 +52,15 @@ verificações de assinatura e capacidades (capabilities) do carregador,
 independentemente do catálogo.
 
 `applib rescan` percorre os armazenamentos de aplicações
-(`/System/Apps` e `/Apps`, ou o próprio `<home>/Apps` do chamador sob
-`--user`), lê o manifesto de cada pacote e regista cada aplicação que
-solicite ser listada e ainda não esteja catalogada. Os registos
-existentes — incluindo renomeações e supressões de um curador — nunca
-são perturbados, e um pacote com um manifesto ilegível ou malformado é
+(`/System/Commands`, `/System/Applications` e `/Apps`, ou os próprios
+`<home>/Commands` e `<home>/Applications` do chamador sob `--user`), lê
+o manifesto de cada pacote e regista cada aplicação que solicite ser
+listada e ainda não esteja catalogada. Os registos existentes —
+incluindo renomeações e supressões de um curador — nunca são
+perturbados, e um pacote com um manifesto ilegível ou malformado é
 ignorado e contabilizado, nunca sendo motivo para abortar. É assim que
-a biblioteca de um sistema novo se povoa a partir dos pacotes
-realmente instalados, sem nenhuma lista mantida à mão em lado nenhum.
+a biblioteca de um sistema novo se povoa a partir dos pacotes realmente
+instalados, sem nenhuma lista mantida à mão em lado nenhum.
 
 Por predefinição, a ferramenta edita o armazenamento de toda a
 máquina, que apenas um principal admitido pela política de escrita de
@@ -83,8 +84,9 @@ capturar com `3>records.jsonl` e tudo o resto pode ignorar.
   dentro do diretório `Resources/` do pacote) em vez do ícone no
   manifesto.
 - `--user` — aplicar a alteração à própria sobreposição do utilizador
-  (ou, com `rescan`, percorrer o próprio `<home>/Apps` do utilizador)
-  em vez do armazenamento de toda a máquina.
+  (ou, com `rescan`, percorrer os próprios `<home>/Commands` e
+  `<home>/Applications` do utilizador) em vez do armazenamento de toda
+  a máquina.
 - `-h, -?` — mostrar a ajuda curta deste comando.
 
 ## EXAMPLES
@@ -116,7 +118,8 @@ capturar com `3>records.jsonl` e tudo o resto pode ignorar.
 - `LANG` — o locale preferido para a ajuda curta (uma etiqueta BCP-47
   como `fr-FR`).
 - `HOME` — o diretório pessoal do utilizador: nomeia a sobreposição
-  por utilizador e a raiz de rescan com `--user` `<home>/Apps`.
+  por utilizador e as raízes de rescan com `--user` `<home>/Commands` e
+  `<home>/Applications`.
 
 ## SEE ALSO
 

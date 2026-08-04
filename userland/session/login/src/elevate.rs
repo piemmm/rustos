@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn correct_password_runs_the_program_as_the_account_and_audits() {
-        let (buf, len) = encoded_run("root", "correct", "/System/Apps/users.app/Run");
+        let (buf, len) = encoded_run("root", "correct", "/System/Commands/users.app/Run");
         let launcher = MockLauncher::new(Ok(7));
         let sink = CountSink::default();
         let reply =
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(reply, ElevateReply::Completed { exit_code: 7 });
         assert_eq!(
             launcher.runs.borrow().as_slice(),
-            &[("/System/Apps/users.app/Run".to_string(), 0)]
+            &[("/System/Commands/users.app/Run".to_string(), 0)]
         );
         assert_eq!(sink.count(events::ELEVATE_GRANTED), 1);
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 0);
@@ -423,9 +423,9 @@ mod tests {
     fn wrong_password_and_unknown_account_are_refused_indistinguishably() {
         let launcher = MockLauncher::new(Ok(0));
         let sink = CountSink::default();
-        let (wrong, wrong_len) = encoded_run("root", "wrong", "/System/Apps/users.app/Run");
+        let (wrong, wrong_len) = encoded_run("root", "wrong", "/System/Commands/users.app/Run");
         let (unknown, unknown_len) =
-            encoded_run("mallory", "correct", "/System/Apps/users.app/Run");
+            encoded_run("mallory", "correct", "/System/Commands/users.app/Run");
         let refused_wrong = handle_elevate_request(
             &wrong[..wrong_len],
             1,
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn a_caller_on_another_console_is_refused_before_parsing() {
-        let (buf, len) = encoded_run("root", "correct", "/System/Apps/users.app/Run");
+        let (buf, len) = encoded_run("root", "correct", "/System/Commands/users.app/Run");
         let launcher = MockLauncher::new(Ok(0));
         let sink = CountSink::default();
         let reply =

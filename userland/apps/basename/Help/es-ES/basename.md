@@ -38,7 +38,7 @@ nombre.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — imprimir `top.app`.
+- `basename /System/Commands/top.app` — imprimir `top.app`.
 - `basename src/lib.rs .rs` — imprimir `lib`.
 - `basename -s .rs -a a.rs b.rs` — imprimir `a` y `b`.
 - `basename Home:/` — imprimir `Home:/` (una raíz nunca se recorta).

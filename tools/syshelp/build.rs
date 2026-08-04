@@ -1,11 +1,12 @@
-//! Discover the command-app bundles' `Help/` trees and `Resources/` files
+//! Discover the program bundles' `Help/` trees and `Resources/` files
 //! from the source tree and emit them as embedded `[HelpFile]` /
 //! `[ResourceFile]` tables.
 //!
-//! The image builder plants each command app's internationalised help onto
-//! the read-only `/System/Apps/<name>.app/Help/<locale>/<file>` store, and
+//! The image builder plants each bundle's internationalised help onto the
+//! read-only `/System/<store>/<name>.app/Help/<locale>/<file>` store, and
 //! each app's bundle resources onto
-//! `/System/Apps/<name>.app/Resources/<file>`. The *source of truth* for
+//! `/System/<store>/<name>.app/Resources/<file>`, where `<store>` is the
+//! store the bundle's own declared kind installs it to. The *source of truth* for
 //! both is the bundle's own on-disk directory — never a hand-maintained
 //! per-bundle list in the image builder, which would force an edit to a
 //! central file every time a bundle is added (the duplication the charter
@@ -232,12 +233,14 @@ fn emit_graphics_table(workspace: &Path) {
 /// `crate_dir` and the `/System` store it installs to, from its
 /// `AppInfo.toml` manifest source's `name` and `kind` keys — the same source
 /// of truth the app-bundle composer plants under, never the crate
-/// directory's own name. The store matters as much as the name: a service's
-/// payload planted under the application store would leave the installed
-/// bundle missing content its signed digest covers, and the load gate would
-/// refuse the bundle. A crate that ships a `Help/` or `Resources/` payload
-/// without a readable manifest name and kind is a broken source tree: fail
-/// the build loudly rather than plant the payload under a guessed bundle.
+/// directory's own name. The store matters as much as the name: a payload
+/// planted under the wrong store would leave the installed bundle missing
+/// content its signed digest covers, and the load gate would refuse the
+/// bundle — so the store comes from the one shared kind → store mapping the
+/// composer itself uses. A crate that ships a `Help/` or `Resources/`
+/// payload without a readable manifest name and kind is a broken source
+/// tree: fail the build loudly rather than plant the payload under a
+/// guessed bundle.
 fn bundle_identity(crate_dir: &Path) -> (String, &'static str) {
     let manifest = crate_dir.join("AppInfo.toml");
     let text = fs::read_to_string(&manifest)
@@ -254,25 +257,10 @@ fn bundle_identity(crate_dir: &Path) -> (String, &'static str) {
     };
     let name = value_of("name");
     let kind = value_of("kind");
-    let store = match kind {
-        "service" => store_dir(tairix_abi::SYSTEM_SERVICE_STORE),
-        "command" | "application" => store_dir(tairix_abi::SYSTEM_APP_STORE),
-        other => panic!("{}: unknown kind `{other}`", manifest.display()),
-    };
+    let store = tairix_abi::ProgramKind::from_key(kind)
+        .unwrap_or_else(|| panic!("{}: unknown kind `{kind}`", manifest.display()))
+        .store_dir();
     (format!("{name}.app"), store)
-}
-
-/// The `/System` subdirectory of a store path (`/System/Apps` -> `Apps`).
-///
-/// Derived from the store's one definition in `lib/abi` rather than spelled
-/// again here, so the planted path cannot drift from the path the loader
-/// scans.
-fn store_dir(store: &'static str) -> &'static str {
-    store
-        .rsplit('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or_else(|| panic!("{store} names no directory"))
 }
 
 /// The names of a directory's entries, sorted, so the generated table (and

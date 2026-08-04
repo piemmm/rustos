@@ -121,12 +121,14 @@ A command word resolves through the pure candidate policy
 `tairix_cmdres::resolution_candidates` (`lib/cmdres`, shared with the `man`
 command's bundle lookup and owned by `plans/APPS.md` §8–§9):
 an explicit path (containing `/`) bypasses the search, a trailing `.app`
-names the bundle and runs its `Run` binary, and a bare word searches the
-`/System/Apps/` system app store (spelled once in `lib/abi`) and then the
-alias-aware `:`-split `PATH`, in order. The runtime host attempts the
-candidates in order — the kernel's byte-exact `spawn` answering `NotFound`
-moves to the next — and the kernel authorises every launch; a candidate
-list grants nothing.
+names the bundle and runs its `Run` binary, and a bare word searches a
+fixed prefix — the `/System/Commands/` and `/System/Applications/` system
+stores then the user's own `<home>/Commands/` and `<home>/Applications/`
+(all spelled once in `lib/abi`), which no `PATH` can reorder or override —
+and then the alias-aware `:`-split `PATH`, in order. The runtime host
+attempts the candidates in order — the kernel's byte-exact `spawn`
+answering `NotFound` moves to the next — and the kernel authorises every
+launch; a candidate list grants nothing.
 
 ## Deliberate simplifications
 

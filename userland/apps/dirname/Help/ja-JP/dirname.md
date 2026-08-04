@@ -25,7 +25,7 @@ TAIRiX のストレージフォレストにおける対応物として `dirname 
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — `/System/Apps` を印字する。
+- `dirname /System/Commands/top.app` — `/System/Commands` を印字する。
 - `dirname src/lib.rs` — `src` を印字する。
 - `dirname file` — `.` を印字する（ディレクトリ部分がない）。
 - `dirname Home:/tools` — `Home:/` を印字する（ルートは剥がされない）。

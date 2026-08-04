@@ -27,11 +27,19 @@ This spec also defers to its companions and MUST stay consistent with them:
 The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
 are implementation requirements.
 
-- **App bundle** — a `<Name>.app` directory under an app store (§16.5).
-- **Command app** — an app whose manifest permits command-line execution, so a
+- **App bundle** — a `<Name>.app` directory under a program store (§16.5).
+- **Program kind** — what a bundle's manifest declares itself to be:
+  `command`, `application`, or `service`. It alone decides the store the
+  bundle is planted in; no list of "which programs are commands" exists.
+- **Command app** — an app whose interface is the standard streams, so a
   user can run it by typing its command name at the shell.
-- **System app store** — the OS-provided, read-only, system-signed set of
-  command apps the shell searches first (see "Command resolution").
+- **System command store** — the OS-provided, read-only, system-signed set of
+  command apps (`/System/Commands`), the first directory a bare word is
+  resolved against (see "Command resolution").
+- **System application store** — the OS-provided, read-only, system-signed
+  graphical applications (`/System/Applications`), resolved second.
+- **Program store** — either system store above, or a user's own
+  `<home>/Commands` / `<home>/Applications` pair.
 - **Help document** — one structured Markdown file describing one command
   (our modern replacement for a Unix man page).
 - **Locale** — a BCP-47 language tag (e.g. `en-US`, `fr-FR`). `en-US` is
@@ -49,7 +57,7 @@ Landed: deliverable 1 (`BundleEntry::Help` replaced `Documentation` in place,
 `lib/help` engine), deliverable 3 (the `man.app` command app, §7, with its
 own thirteen-locale `Help/` tree shipped on the read-only `/System` volume and
 the `LANG` locale variable named in §5), deliverable 4 (shell command
-resolution over the `/System/Apps/` system app store, `AGENTS.md` §16.2
+resolution over the `/System/Commands/` system command store, `AGENTS.md` §16.2
 amended), and deliverable 6 for **every store-registered command app**:
 `cat`, `ls`, `ps`, `top`, `sysinfo`, `users`, and `elsh` each ship a thirteen-locale
 `Help/` tree in their bundle (discovered by `tools/syshelp` from the
@@ -320,7 +328,7 @@ The fixed top-level layout of `AGENTS.md` §16.5 carries one documentation
 entry, `Help/` (the former `Documentation/`, merged into it):
 
 ```
-/System/Apps/top.app/            # (or /Apps/Example.app for user apps)
+/System/Commands/top.app/        # (or /Apps/Example.app for installed apps)
 ├── AppInfo            # Signed manifest. Required.
 ├── Run                # Entry-point rxe binary. Required.
 ├── Code/              # Additional rxe binaries / plugins.
@@ -522,7 +530,7 @@ This is binding under `AGENTS.md` §16.5:
   tree through the seam; the `Run` binary carries no help bytes of its own. A
   hand-written `help.rs` that embeds the documents is the defect this forbids.
 - **The image builder discovers help, it does not list it.** The `Help/` trees
-  are planted onto `/System/Apps/<name>.app/Help/` by `tools/mkimage` (and the
+  are planted onto `/System/<store>/<name>.app/Help/` by `tools/mkimage` (and the
   QEMU image fixtures) from data discovered at build time by `tools/syshelp`,
   which scans the command-app bundles' own on-disk `Help/` sources. Adding a
   command app's help is dropping its `Help/` files under
@@ -542,16 +550,18 @@ This is binding under `AGENTS.md` §16.5:
 `man` still exists, but it is TAIRiX'ised: it does **not** read the historical
 troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
 
-- `man` is itself a command app, `man.app`, in the system app store (§8) — it
+- `man` is itself a command app, `man.app`, in the system command store (§8) — it
   is not a shell builtin (it needs no shell-process state, `plans/SHELL.md`).
 - `man <cmd>` resolves `<cmd>` through the **same** command-resolution path the
   shell uses (§9) to find the owning bundle, then renders that bundle's Help
   document for `<cmd>` in the active locale (§5) through `lib/help`.
-- When the ordered store-then-`PATH` candidates find nothing for a bare word,
-  `man` falls back to a **recursive bundle search** of the app stores: the
-  machine-wide `/Apps`, then the user's own `<HOME>/Apps`
-  (`tairix_cmdres::search_roots` — the roots are spelled once, over
-  `tairix_abi::USER_APP_STORE`). The walk is breadth-first over sorted
+- When the ordered candidates (§8) find nothing for a bare word, `man` falls
+  back to a **recursive bundle search** of the stores that may nest bundles:
+  the machine-wide `/Apps`, then the user's own `<HOME>/Commands` and
+  `<HOME>/Applications` (`tairix_cmdres::search_roots` — the roots are
+  spelled once, over `tairix_abi::INSTALLED_APP_STORE` and the home store
+  names). The two system stores are absent by design: they are flat, so the
+  ordered candidates already cover them. The walk is breadth-first over sorted
   listings, so the shallowest match wins deterministically; it never
   descends into another bundle's `.app` directory (a bundle is a sealed
   unit); a missing root or directory lists nothing while any other refusal
@@ -559,7 +569,7 @@ troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
   budget) — an exhausted budget is reported as a truncated search, never
   silently as "command not found". `man moose` therefore finds
   `/Apps/somefolder/anotherfolder/moose.app` or
-  `/Users/<u>/Apps/somefolder/moose.app`. This search is `man`'s only:
+  `/Users/<u>/Commands/somefolder/moose.app`. This search is `man`'s only:
   the shell's *launch* resolution (§8) is unchanged.
 - `man <cmd> <topic>` selects `Help/<locale>/<topic>.md` within `<cmd>`'s
   bundle, for bundles that ship more than one topic.
@@ -568,52 +578,72 @@ troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
   user knows the page was not shown in the requested language. This never
   affects `man`'s exit status or output correctness (§20).
 
-## 8. Command resolution — system app store then user `PATH`
+## 8. Command resolution — the fixed store prefix, then the user `PATH`
 
 Core/system command apps (`top`, `ps`, `ls`, `elsh`, `man`, …) MUST be
-reachable simply by typing their command name. The shell resolves a bare
-command word (after builtins, functions, and command aliases, per
-`plans/SHELL.md`) in this fixed order:
+reachable simply by typing their command name, and so must a graphical
+application (`files`, `terminal`, …). The shell resolves a bare command word
+(after builtins, functions, and command aliases, per `plans/SHELL.md`) against
+a **fixed, non-overridable four-directory prefix**, then the user's `PATH`
+(`AGENTS.md` §16.8):
 
-1. **The system app store first.** The OS-provided command apps. Their store
-   is a dedicated, read-only, system-signed location, `/System/Apps/` (an
-   `AGENTS.md` §16.2 subdirectory — amendment applied, rationale in
-   `PLAN.md` "Charter Amendments"), addressed by the `System:` path alias
-   (`plans/DRIVES.md`). Its path and the bundle suffix are defined **once**
-   in `lib/abi` (`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), shared by the kernel's
-   program registry (`kernel/tairix-kernel/src/spawn_paths.rs`, drift-tested)
-   and the shell. The shell looks for `<word>.app` there and, if the manifest
-   permits execution (§9.1), runs its `Run` binary through `appmgr`
-   (signature + capability + interface-hash checks, §16.5).
-2. **User `PATH` next.** The colon-separated directories in the shell's `PATH`
+1. **`/System/Commands`** — the system command store: the OS-provided command
+   apps, each a command-named bundle. Always first.
+2. **`/System/Applications`** — the system application store: the OS-provided
+   graphical applications, so a desktop application is typeable too.
+3. **`<home>/Commands`** — the user's own command store.
+4. **`<home>/Applications`** — the user's own application store.
+5. **User `PATH`** — the colon-separated directories in the shell's `PATH`
    environment variable (set by `export PATH=…` or a `.profile` in the user's
-   home root), searched left to right. Because an alias path itself contains
-   a `:` (`Home:/tools`), the split is structural and deterministic: a `:`
-   immediately followed by `/` whose preceding text (since the previous
-   separator) is a non-empty name containing no `/` is that entry's alias
-   delimiter, not a separator — so an alias root entry is written `Home:/`,
-   never a bare `Home:`. An empty entry is skipped (never a silent
-   current-directory search). Each entry is resolved through the single
-   shared path parser (`plans/DRIVES.md`), and each candidate is likewise a
-   `<word>.app` bundle launched through `appmgr` — never a raw loose binary
-   (§1).
+   home root), searched left to right.
+
+The prefix is *built from the store definitions in `lib/abi`*
+(`SYSTEM_COMMAND_STORE`, `SYSTEM_APPLICATION_STORE`,
+`HOME_COMMAND_STORE_DIR`, `HOME_APPLICATION_STORE_DIR`, `BUNDLE_SUFFIX`),
+never read from the environment. Two consequences are load-bearing:
+
+- **Nothing a user controls can shadow a system program.** Both system stores
+  are read-only and system-signed and precede every user-writable directory,
+  and no `PATH` value, exported variable, or per-user directory can reorder or
+  remove an entry. A `PATH` entry that repeats a prefix directory is dropped
+  rather than searched again, so late `PATH` text cannot read as moving a
+  store later in the order. This is a security property, not a convenience.
+- **A session needs no `PATH` at all.** With neither `HOME` nor `PATH` set,
+  every system program still resolves. A login session's default `PATH` is
+  therefore only what is genuinely additional (`/Apps`); repeating a store
+  that is already built in would be duplication and would imply, falsely,
+  that the store is overridable.
+
+Steps 3 and 4 are spelled unconditionally whenever `HOME` is set: a store a
+user never created simply matches nothing and the search moves on — existence
+is an I/O question for the host, never a spelling one. Because an alias path
+itself contains a `:` (`Home:/tools`), the `PATH` split is structural and
+deterministic: a `:` immediately followed by `/` whose preceding text (since
+the previous separator) is a non-empty name containing no `/` is that entry's
+alias delimiter, not a separator — so an alias root entry is written `Home:/`,
+never a bare `Home:`. An empty entry is skipped (never a silent
+current-directory search). Each entry is resolved through the single shared
+path parser (`plans/DRIVES.md`), and every candidate is a `<word>.app` bundle
+launched through `appmgr` (signature + capability + interface-hash checks,
+`AGENTS.md` §16.5) — never a raw loose binary (§1).
 
 The candidate *policy* is one pure, exhaustively-tested function,
 `tairix_cmdres::resolution_candidates` (`lib/cmdres`, the shared crate whose
 `bundle_candidates` view the `man` command's bundle lookup imports — one
-policy, two views, §2.2/§17.4):
+policy, two views), taking the session's `CommandEnv { home, path_var }`:
 it computes only the ordered spelling list and grants nothing. The shell's
 `Run` host attempts the candidates in order — the kernel's byte-exact
 `spawn` lookup answering `NotFound` moves to the next candidate (a
 deterministic first-match search, nothing ran), any other refusal is final
 — and the kernel authorises every launch.
 
-Searching the system store **before** `PATH` is a security property, not just
-convenience: a user's `PATH` can never shadow a system command with an
-attacker-supplied bundle of the same name. User-installed GUI/desktop apps live
-in `/Apps` (§16.3) and are launched by the desktop/`appmgr`; they appear on the
-shell command path only if the user explicitly adds `/Apps` (or a bundle path)
-to `PATH`.
+Which store a shipped bundle lands in is decided by its own signed manifest's
+declared kind (`tairix_abi::ProgramKind`: `command`, `application`, or
+`service`) and nothing else; the build refuses two bundles claiming one name,
+so one store cannot shadow a name in another. Machine-wide *installed*
+application bundles live in `/Apps` (`AGENTS.md` §16.3) and are launched by
+the desktop/`appmgr`; they reach the shell command path only if the user adds
+`/Apps` (or a bundle path) to `PATH`.
 
 Resolution is deterministic and fails closed: an unresolved name is
 `command not found` (`127`), and a resolved-but-non-executable bundle is
@@ -752,7 +782,7 @@ invocation.
 
 ## 12.1 GNU coreutils parity — staged plan (§1.1 / `AGENTS.md` §16.7)
 
-The maintainer-approved staging that brings every `/System/Apps` command to
+The maintainer-approved staging that brings every `/System/Commands` command to
 the GNU coreutils surface and fills in the missing commands. Each stage is
 one properly-gated change; a stage's switch set is bounded by what the
 platform floor can honestly implement (userland `FileStat` now carries
@@ -1170,27 +1200,29 @@ both landed; `plans/SHELL.md` command execution):
    `userland/apps/man` resolves the word over `tairix_cmdres::
    bundle_candidates` (first existing bundle wins; `NotFound` moves on, any
    other refusal is final) and then, for a bare word no candidate matched,
-   over the §7 bounded recursive search of `/Apps` and `<HOME>/Apps`
-   (`tairix_cmdres::search_roots`), loads and renders through `lib/help`,
+   over the §7 bounded recursive search of `/Apps` and the user's own two
+   stores (`tairix_cmdres::search_roots`), loads and renders through `lib/help`,
    reads `LANG`/`PATH`/`HOME` from the inherited environment, pages on a
    geometry-attested console (space/return/`q`, echo suppressed) and
    streams otherwise, and emits the §7 `stdinfo` `context` record
    (`help.locale_fallback`) on a locale fallback. Registered as
-   `/System/Apps/man.app/Run` (manifest: console pair + `CAP_FS_ACCESS`);
+   `/System/Commands/man.app/Run` (manifest: console pair + `CAP_FS_ACCESS`);
    its own thirteen-locale `Help/` tree is authored on disk in the bundle and
    read at runtime through the `BundleStore` seam (no help embedded in the
    binary, §6.1) — the tree is discovered by `tools/syshelp` and planted on
    the read-only `/System` volume by `tools/mkimage` and the QEMU image
    fixture; the `session_ceiling` vertical types `man man` end to end.
 4. **Shell command resolution** — **done**:
-   system-app-store-then-`PATH` resolution (§8) and `.app`-suffix invocation
+   the §8 fixed-prefix-then-`PATH` resolution and `.app`-suffix invocation
    (§9) are live. The store/bundle spellings live once in `lib/abi`
-   (`SYSTEM_APP_STORE`/`BUNDLE_SUFFIX`); every OS command app is registered
-   as `/System/Apps/{cat,clear,elsh,ls,man,ps,reset,sysinfo,top,users}.app/Run`
+   (`SYSTEM_COMMAND_STORE`/`SYSTEM_APPLICATION_STORE`/the home store names/
+   `BUNDLE_SUFFIX`); every OS command app is registered as
+   `/System/Commands/{cat,clear,elsh,ls,man,ps,reset,sysinfo,top,users}.app/Run`
    (`spawn_paths.rs`, drift-tested); the pure candidate policy
    (`tairix_cmdres::resolution_candidates` in the shared `lib/cmdres`
-   crate, alias-aware `PATH` split, plus the `bundle_candidates` view for
-   `man`'s bundle lookup) is unit-tested; the interpreter maps launch
+   crate, taking the session's `CommandEnv { home, path_var }`, alias-aware
+   `PATH` split, plus the `bundle_candidates` view for `man`'s bundle lookup)
+   is unit-tested — including that no `PATH` value can displace the prefix; the interpreter maps launch
    failures onto `127`/`126`; the shell passes the typed words and
    exported environment to every launched program over the `spawn`
    startup-strings block (`plans/SPAWN.md` SP8 — the §5 locale variable
@@ -1222,7 +1254,7 @@ both landed; `plans/SHELL.md` command execution):
    `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `sleep`, `tail`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
    `users`, `wc`, `whoami`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
-   `userland/shell`), planted at `/System/Apps/<cmd>.app/Help/`, and served
+   `userland/shell`), planted at `/System/Commands/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary
    (§6.1) — for each tool's §4 `-h`/`-?` short help (a per-locale
    switch-drift unit test pins each tree's `OPTIONS` to its parser, §3.1).
@@ -1263,7 +1295,8 @@ both landed; `plans/SHELL.md` command execution):
    `login`/`devmgr`/`sysinfod` services (a service is an app, §16.2) —
    ships complete on the read-only `/System` volume: its signed `AppInfo`
    + `Run` rxe beside its `Help/` tree, at the bundle-form paths
-   (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`) PID 1
+   (`/System/Commands/<cmd>.app/`, `/System/Applications/<name>.app/`,
+   `/System/Services/<name>.app/`) PID 1
    `init` and the shell name. The binding increment list, with
    per-increment status and the load-bearing invariants, lives in
    `PLAN.md` ("Self-contained bundles"). Increments 1–4 are **done**: the
@@ -1290,7 +1323,7 @@ both landed; `plans/SHELL.md` command execution):
    `spawn_paths.rs`, and `program_manifests.rs` (§2.14); until then those
    two ports carry the embedded registry as their explicitly-justified
    §18.6 boot floor. All prior deliverables' references to
-   `/System/Apps/<cmd>.app/Run` being served from `spawn_paths.rs` are
+   `/System/Commands/<cmd>.app/Run` being served from `spawn_paths.rs` are
    superseded by this on-disk-bundle model.
 
 9. **The standard colour scheme, coloured renders, and box drawing
@@ -1348,13 +1381,15 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
 - **§16.5** — **done**: `Documentation/` replaced by `Help/` in the bundle
   layout (the merge), with the locale-tree role documented; rationale logged
   in PLAN.md "Charter Amendments".
-- **§16.2** — **done**: `Apps/` added under `/System` as the read-only,
-  system-signed system app store (§8), in the §16.2 authoritative
-  subdirectory list; rationale logged in `PLAN.md` "Charter Amendments".
+- **§16.2/§16.3/§16.8** — **done**: `Commands/` and `Applications/` are the
+  read-only, system-signed system program stores in the §16.2 authoritative
+  subdirectory list, each user's home carries the same pair, and §16.8 binds
+  the fixed lookup order (§8); rationale logged in `PLAN.md` "Charter
+  Amendments".
 - **§16.6/§5.2** — **done**: no new capability is introduced for help or
   command resolution (existing file-access and driver/app-load gates
-  suffice, §5.2 minimalism); stated explicitly in the §16.2 `Apps/` entry so
-  none is added speculatively.
+  suffice, §5.2 minimalism); stated explicitly in the §16.2 program-store
+  entries so none is added speculatively.
 - **§16.5 (help authoring)** — **done**: added the binding rule that command
   help is authored once in the bundle's on-disk `Help/` tree and read at
   runtime through the `lib/help` seam — never embedded/compiled into a
@@ -1368,7 +1403,7 @@ Required `AGENTS.md` amendments (each with a one-line rationale in PLAN.md's
   discovered from disk and loaded through the identical verification gate;
   only PID 1 `init` is the compiled-in boot floor. Rationale logged in
   `PLAN.md` "Charter Amendments".
-- **§16.5 (self-containment) / §16.2 (`/System/Apps`)** — **done** (charter);
+- **§16.5 (self-containment) / §16.2 (the `/System` program stores)** — **done** (charter);
   **code migration open (deliverable 8).** Added the binding rule that an
   app *is* its `<Name>.app/` bundle directory: `Run`, `Code/`, `AppInfo`,
   `Resources/`, `DefaultSettings/`, `Help/`, and any app-private static or

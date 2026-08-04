@@ -1,6 +1,6 @@
 # `tairix-users-cli` — interactive account administration
 
-The `users` tool (`/System/Apps/users.app/Run`) is the first holder of the
+The `users` tool (`/System/Commands/users.app/Run`) is the first holder of the
 `CAP_USER_ADMIN`-gated `users_admin` syscall
 (`plans/CAPABILITY_USE.md` CU4). It administers the system's user
 accounts and groups interactively: an administrator's shell spawns it,

@@ -715,7 +715,7 @@ session /Apps/Shell.app/Run login   # the login service
             Err(ConfigError::MissingArgument),
         );
         assert_eq!(
-            StartupConfig::parse("console\nsession System/Apps/elsh.app/Run login\n"),
+            StartupConfig::parse("console\nsession System/Commands/elsh.app/Run login\n"),
             Err(ConfigError::NotAbsolutePath),
         );
     }

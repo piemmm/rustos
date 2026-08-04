@@ -37,7 +37,7 @@ operand yn enw.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — argraffu `top.app`.
+- `basename /System/Commands/top.app` — argraffu `top.app`.
 - `basename src/lib.rs .rs` — argraffu `lib`.
 - `basename -s .rs -a a.rs b.rs` — argraffu `a` a `b`.
 - `basename Home:/` — argraffu `Home:/` (ni ddatgymalir gwreiddyn

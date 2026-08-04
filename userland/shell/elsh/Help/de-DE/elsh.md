@@ -11,11 +11,14 @@ elsh — die TAIRiX-Befehlsshell
 Startet eine interaktive Befehlsshell — eine
 Lese-Auswerte-Ausgabe-Schleife über die geerbten Standardströme. Ein
 getipptes Befehlswort wird zuerst gegen die eingebauten Befehle der
-Shell aufgelöst, dann im System-App-Store (`/System/Apps`), dann in den
-Verzeichnissen der Variablen `PATH`; der Store wird vor `PATH`
-durchsucht, sodass `PATH` nie einen Systembefehl überdecken kann. Ein
-nicht aufgelöstes Wort endet mit `127`; ein aufgelöstes, aber nicht
-ausführbares Bundle endet mit `126`.
+Shell aufgelöst, dann im System-Befehls-Store (`/System/Commands`), im
+System-App-Store (`/System/Applications`), im eigenen Befehls-Store
+(`<home>/Commands`) und App-Store (`<home>/Applications`) des
+Benutzers, dann in den Verzeichnissen der Variablen `PATH`; diese vier
+Stores bilden ein festes Präfix, das der Benutzer weder umordnen noch
+überschreiben kann, sodass `PATH` nie einen Systembefehl überdecken
+kann. Ein nicht aufgelöstes Wort endet mit `127`; ein aufgelöstes, aber
+nicht ausführbares Bundle endet mit `126`.
 
 Die eingebauten Befehle:
 
@@ -51,7 +54,7 @@ Dateipfade und Ressourcenreferenzen wie `sys:random`.
 
 ## ENVIRONMENT
 
-- `PATH` — die nach dem System-App-Store durchsuchten Verzeichnisse.
+- `PATH` — die nach dem festen Store-Präfix durchsuchten Verzeichnisse.
 - `LANG` — die bevorzugte Locale für die Kurzhilfe (ein BCP-47-Tag wie
   `de-DE`), exportiert an jeden gestarteten Befehl.
 

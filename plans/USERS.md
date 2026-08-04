@@ -156,8 +156,8 @@ no-login service account.
     `FIRST_USER_UID`/`FIRST_USER_GID` (§0.3); `useradd`/`groupadd`
     allocate from the user band.
   - The **shape of a home** is policy too, held here once as
-    `HOME_MODE` (`0o700`) and `HOME_SUBDIRS` (`Apps`, `Desktop`,
-    `Documents`, `Library`, `Settings` — `AGENTS.md` §16.3). Every route
+    `HOME_MODE` (`0o700`) and `HOME_SUBDIRS` (`Applications`, `Commands`,
+    `Desktop`, `Documents`, `Library`, `Settings` — `AGENTS.md` §16.3). Every route
     that lays a home down reads it: `provision_home`
     (`kernel/tairix-kernel/src/user_admin_backing.rs`), the image
     builder's seeded home, and the QEMU users-root fixture. The

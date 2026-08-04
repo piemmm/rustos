@@ -38,7 +38,7 @@ ist jeder Operand ein Name.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — `top.app` ausgeben.
+- `basename /System/Commands/top.app` — `top.app` ausgeben.
 - `basename src/lib.rs .rs` — `lib` ausgeben.
 - `basename -s .rs -a a.rs b.rs` — `a` und `b` ausgeben.
 - `basename Home:/` — `Home:/` ausgeben (in eine Wurzel wird nie

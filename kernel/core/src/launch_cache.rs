@@ -437,6 +437,26 @@ impl LaunchCache {
         );
     }
 
+    /// Whether `bundle` is currently resident, without disturbing the
+    /// cache — no LRU restamp, no hit/miss accounting, no pressure
+    /// enforcement (all of which [`Self::lookup`] performs).
+    ///
+    /// This is an advisory *existence* peek for the spawn path's
+    /// synchronous store-bundle probe: a resident entry is proof the load
+    /// gate accepted this bundle's bytes from the immutable read-only
+    /// store earlier this boot, so the bundle certainly exists on disk and
+    /// the probe can skip its filesystem lookup. It grants no authority and
+    /// serves no image — the launch still re-authorises the caller's read
+    /// and re-runs the gate on a miss (`plans/FIX-DESKTOP.md` §2.1). Because
+    /// it does not enforce pressure, a `true` may momentarily outlive an
+    /// entry a concurrent reclaim would drop; that only costs the probe one
+    /// redundant lookup avoided, never a wrong launch decision. A poisoned
+    /// cache reports nothing resident.
+    #[must_use]
+    pub fn contains(&self, bundle: &str) -> bool {
+        !self.poisoned && self.entries.contains_key(bundle)
+    }
+
     /// The keys currently resident, oldest first — test and diagnostics
     /// visibility only; never an authority or serving path.
     #[must_use]

@@ -54,8 +54,9 @@ Darstellung, niemals die Berechtigung: Das Starten eines Pakets wird
 unabhängig vom Katalog weiterhin durch die Signatur- und
 Capability-Prüfungen des Loaders geregelt.
 
-`applib rescan` durchsucht die Anwendungsspeicher (`/System/Apps` und
-`/Apps` oder das eigene `<home>/Apps` des Aufrufers bei `--user`),
+`applib rescan` durchsucht die Anwendungsspeicher (`/System/Commands`,
+`/System/Applications` und `/Apps` oder die eigenen `<home>/Commands`
+und `<home>/Applications` des Aufrufers bei `--user`),
 liest das Manifest jedes Pakets und registriert jede Anwendung, die um
 Listung bittet und noch nicht katalogisiert ist. Bestehende
 Datensätze — einschließlich Umbenennungen und Unterdrückungen durch
@@ -87,8 +88,9 @@ dem Standard-Informationsstrom (fd 3) ausgegeben, den Skripte mit
   innerhalb des `Resources/`-Ordners des Pakets) anstelle des Symbols
   im Manifest.
 - `--user` — die Änderung auf das eigene Overlay des Aufrufers
-  anwenden (oder, bei `rescan`, das eigene `<home>/Apps` des Aufrufers
-  durchsuchen) anstelle des systemweiten Speichers.
+  anwenden (oder, bei `rescan`, die eigenen `<home>/Commands` und
+  `<home>/Applications` des Aufrufers durchsuchen) anstelle des
+  systemweiten Speichers.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES
@@ -122,8 +124,8 @@ dem Standard-Informationsstrom (fd 3) ausgegeben, den Skripte mit
 - `LANG` — die bevorzugte Sprache für die Kurzhilfe (ein
   BCP-47-Kennzeichen wie `fr-FR`).
 - `HOME` — das Home-Verzeichnis des Aufrufers: benennt das
-  benutzerbezogene Overlay und die `--user`-Rescan-Wurzel
-  `<home>/Apps`.
+  benutzerbezogene Overlay und die `--user`-Rescan-Wurzeln
+  `<home>/Commands` und `<home>/Applications`.
 
 ## SEE ALSO
 

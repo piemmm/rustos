@@ -32,7 +32,7 @@ TAIRiX — `basename Home:/` هو `Home:/`. جذر الاسم البديل (`Hom
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — طباعة `top.app`.
+- `basename /System/Commands/top.app` — طباعة `top.app`.
 - `basename src/lib.rs .rs` — طباعة `lib`.
 - `basename -s .rs -a a.rs b.rs` — طباعة `a` و`b`.
 - `basename Home:/` — طباعة `Home:/` (لا يُفكَّك جذر أبدًا).

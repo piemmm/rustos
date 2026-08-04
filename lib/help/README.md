@@ -51,7 +51,9 @@ here once and every consumer imports them.
   bytes — `None` when no document can be served, so the caller falls back to
   its own usage banner and `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource` over
-  the running command app's own `/System/Apps/<word>.app/Help/` tree via the
+  the running program's own `<bundle>/Help/` tree — the bundle located through
+the one shared resolution policy (`lib/cmdres`), so a program's `-h` and
+`man <program>` can never serve different documents — via the
   `tairix-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
   constants. Enabled only by a freestanding `Run` binary; the engine itself
   stays seam-injected and performs no ambient I/O.

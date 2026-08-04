@@ -35,7 +35,7 @@ basename — 이름에서 디렉터리와 접미사 떼어내기
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — `top.app`을 인쇄합니다.
+- `basename /System/Commands/top.app` — `top.app`을 인쇄합니다.
 - `basename src/lib.rs .rs` — `lib`을 인쇄합니다.
 - `basename -s .rs -a a.rs b.rs` — `a`와 `b`를 인쇄합니다.
 - `basename Home:/` — `Home:/`을 인쇄합니다(루트는 결코 벗겨지지

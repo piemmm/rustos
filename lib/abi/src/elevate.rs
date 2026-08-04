@@ -417,7 +417,7 @@ mod tests {
         let req = ElevateRequest::Run {
             username: "root",
             password: "hunter2",
-            program: "/System/Apps/users.app/Run",
+            program: "/System/Commands/users.app/Run",
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");
@@ -493,7 +493,7 @@ mod tests {
         let req = ElevateRequest::Run {
             username: "root",
             password: "pw",
-            program: "/System/Apps/ps.app/Run",
+            program: "/System/Commands/ps.app/Run",
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");

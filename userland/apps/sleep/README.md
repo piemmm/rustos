@@ -1,7 +1,7 @@
 # `tairix-sleep` — pause for a sum of time intervals
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/sleep.app/` so the shell resolves the bare word
+store bundle `/System/Commands/sleep.app/` so the shell resolves the bare word
 `sleep` to it. `sleep` is the GNU coreutils tool: it pauses for the *sum* of
 its `NUMBER[SUFFIX]` operands and then exits. `SUFFIX` is `s` (seconds, the
 default), `m` (minutes), `h` (hours), or `d` (days); `NUMBER` is any

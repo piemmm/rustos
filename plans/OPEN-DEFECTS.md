@@ -306,7 +306,7 @@ The open items, in priority order:
   - The terminal → pty stage now sequences on **guest readiness markers and
     uniquely-attributable witnesses**, not counts: the AW4 round-trip and the
     pty `Ctrl-C` recovery are attributed to the *bundle loads* of
-    `/System/Apps/sleep.app` and `/System/Apps/true.app` (the `appmgr`
+    `/System/Commands/sleep.app` and `/System/Commands/true.app` (the `appmgr`
     `APP_LOADED` `bundle` field), and the typed command is gated on
     `TERMINAL_FOCUSED_MARKER` (first delivery to the second window port).
   - The FM9-a/-b/-c, FM10 and FM11 **file-manager choreography was removed

@@ -27,7 +27,7 @@ Rolle, die `/` auf POSIX-Systemen spielt.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — `/System/Apps` ausgeben.
+- `dirname /System/Commands/top.app` — `/System/Commands` ausgeben.
 - `dirname src/lib.rs` — `src` ausgeben.
 - `dirname file` — `.` ausgeben (kein Verzeichnisteil).
 - `dirname Home:/tools` — `Home:/` ausgeben (in eine Wurzel wird nie

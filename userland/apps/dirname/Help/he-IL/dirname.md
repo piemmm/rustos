@@ -25,7 +25,7 @@ POSIX.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — הדפסת `/System/Apps`.
+- `dirname /System/Commands/top.app` — הדפסת `/System/Commands`.
 - `dirname src/lib.rs` — הדפסת `src`.
 - `dirname file` — הדפסת `.` (אין חלק ספרייה).
 - `dirname Home:/tools` — הדפסת `Home:/` (לעולם אין מפרקים שורש).

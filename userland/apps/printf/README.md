@@ -1,7 +1,7 @@
 # `tairix-printf` — format and print data
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/printf.app/` so the shell resolves the bare word
+store bundle `/System/Commands/printf.app/` so the shell resolves the bare word
 `printf` to it. `printf` is the GNU coreutils tool: print ARGUMENTs under
 the control of FORMAT, a template of literal text, backslash escapes
 (`\n`, `\t`, `\NNN`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`, and `\c`, which ends

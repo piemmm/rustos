@@ -17,7 +17,7 @@
 #![deny(missing_docs)]
 
 /// Bare name of the application the vertical pins and then launches from
-/// its new pin — the bundle is `<system app store>/<name>.app`, composed
+/// its new pin — the bundle is `<system application store>/<name>.app`, composed
 /// from the shared `lib/abi` spellings on both sides rather than written
 /// out here.
 ///

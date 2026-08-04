@@ -3489,7 +3489,7 @@ transfer, landed in increments:
   proves both per-kind `INPUT_DELIVERED` witnesses, the unlock, and the
   `DISPLAY_ENDPOINT` bind (`plans/DISPLAY.md` D7d). **D7d-2 (the desktop
   launch) is done — D7 is complete:** the desktop is the `desktop`
-  command app in the system app store (`desktop.app`, the
+  application in the system application store (`desktop.app`, the
   `userland/gui/session` `Run` binary) — typed as a bare command word at
   the shell, and spawned directly by login when `os.loginType graphical`
   is configured (`lib/sysconfig`) *and* the per-round probe holds (a
@@ -3542,8 +3542,8 @@ transfer, landed in increments:
   loopback. **AW3 is done:** the session serves `WINDOW_ENDPOINT` (bind
   authorised by its live seat lease) from its token-dispatched wait-set
   loop into `DesktopShell`; the files bundle (`CAP_FS_ACCESS` only) lives
-  in the system app store and is spawned from the taskbar's permanent
-  Files button; the autoload
+  in the system application store and is spawned from the taskbar's
+  permanent Files button; the autoload
   QEMU vertical click-drives the whole chain (Files button → launch →
   served-window clicks) with two verified screendumps, gated on
   kernel-attested serial records and the interaction contract in the test
@@ -5129,17 +5129,20 @@ structured-Markdown parser (fixed section model, typed `HelpError`,
 fence-aware section walk), and `render_short`/`render_full` over `lib/vt`
 (widths from `lib/curses`); unit-tested, fuzz-hardened (`fuzz_help` in
 `cargo xtask fuzz`), documented (`docs/src/lib/help.md`); (3) **shell
-command resolution** (`plans/APPS.md` §8–§9) with the §16.2 `/System/Apps/`
-system app store (charter amended, rationale in "Charter Amendments"): the
-store path and bundle suffix are defined once in `lib/abi`
-(`SYSTEM_APP_STORE`, `BUNDLE_SUFFIX`), every OS command app is registered
-as a command-named store bundle (`/System/Apps/{cat,elsh,ls,man,ps,sysinfo,top,users}.app/Run`,
-`kernel/tairix-kernel/src/spawn_paths.rs`, host drift-tested against the
-shared definitions), and the shell resolves a command word through the pure
-candidate policy `tairix_cmdres::resolution_candidates` (hoisted into the
-shared `lib/cmdres` crate, whose `bundle_candidates` view `man`'s bundle
-lookup imports; explicit paths bypass
-the search; `.app` names the bundle; bare words search the store then the
+command resolution** (`plans/APPS.md` §8–§9) with the §16.2/§16.8
+`/System/Commands/` and `/System/Applications/` program stores (charter
+amended, rationale in "Charter Amendments"): the store paths and bundle
+suffix are defined once in `lib/abi` (`SYSTEM_COMMAND_STORE`,
+`SYSTEM_APPLICATION_STORE`, `HOME_COMMAND_STORE_DIR`,
+`HOME_APPLICATION_STORE_DIR`, `BUNDLE_SUFFIX`), every OS program is
+registered as a name-matched bundle in the store its own manifest kind
+selects (`kernel/tairix-kernel/src/program_manifests.rs`, host drift-tested
+against the shared definitions), and the shell resolves a command word
+through the pure candidate policy `tairix_cmdres::resolution_candidates`
+(hoisted into the shared `lib/cmdres` crate, whose `bundle_candidates` view
+`man`'s bundle lookup and every program's own `-h` import; explicit paths
+bypass the search; `.app` names the bundle; bare words search the fixed
+non-overridable prefix — both system stores then the user's own two — then the
 alias-aware `:`-split `PATH`, empty entries skipped) — the `Run` binary's
 host attempts candidates in order (spawn `NotFound` ⇒ next, any other
 refusal final), and the interpreter maps failures onto `127` "command not
@@ -5154,14 +5157,14 @@ over the shared `tairix_cmdres::bundle_candidates` order (first existing
 bundle; `NotFound` moves on, any other refusal final) and then, for a bare
 word no candidate matched, over the bounded breadth-first recursive search
 of `/Apps` and `<HOME>/Apps` (`tairix_cmdres::search_roots` over
-`tairix_abi::USER_APP_STORE`; never descends into a `.app`; an exhausted
+`tairix_abi::INSTALLED_APP_STORE`; never descends into a `.app`; an exhausted
 directory budget is reported, never silently "not found" — `plans/APPS.md`
 §7), renders through
 `lib/help`, reads the now-named `LANG` locale variable (`plans/APPS.md`
 §5), `PATH`, and `HOME` from the inherited environment, pages on a
 geometry-attested console and streams otherwise, and emits the
 `help.locale_fallback` `stdinfo` `context` record on a locale fallback.
-It is registered as `/System/Apps/man.app/Run` (manifest: console pair +
+It is registered as `/System/Commands/man.app/Run` (manifest: console pair +
 `CAP_FS_ACCESS`), ships its own thirteen-locale `Help/` tree (authored on disk
 in the bundle, discovered by `tools/syshelp`, and planted onto the
 read-only `/System` volume's `Apps/` store by `tools/mkimage` and the QEMU
@@ -5371,7 +5374,8 @@ increment landing complete and green:
    (`build_rpi_image`/`build_system_partition`) and the QEMU whole-disk
    fixture (`build_image_with_contents`/`build_image_with_apps`, /System
    grown to 32 MiB) plant each bundle's `AppInfo` + `Run` beside its
-   `Help/` (`/System/Apps/<cmd>.app/`, `/System/Services/<name>.app/`) —
+   `Help/` (`/System/Commands/<cmd>.app/`,
+   `/System/Applications/<app>.app/`, `/System/Services/<name>.app/`) —
    the Pi image and every `EncryptedRootDisk` vertical carry complete
    self-contained bundles, composed once per xtask process and memoised.
    The service paths are bundle-form everywhere: PID 1 `init`'s startup
@@ -6490,6 +6494,23 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-08-04 — Two system program stores and a fixed lookup order.**
+  Amended §16.2/§16.3/§16.5 and added §16.8 (owner decision, `plans/APPS.md`
+  §8): `/System` holds the OS-provided command apps in `Commands/` and the
+  OS-provided graphical applications in `Applications/`, each user's home
+  holds the same pair, and a bare command word resolves against the fixed,
+  non-overridable prefix `/System/Commands`, `/System/Applications`,
+  `<home>/Commands`, `<home>/Applications` before the user's `PATH`. Splitting
+  the store by what a program *is* keeps the coreutils command set (§16.7) one
+  reviewable, GNU-comparable surface instead of mixing it with desktop
+  applications, and building the prefix from the store definitions rather than
+  reading it from the environment makes "a system command cannot be shadowed"
+  a structural property rather than a `PATH` convention. A bundle's own signed
+  manifest kind (`command`/`application`/`service`) is the single place its
+  store is decided, so no list of "which programs are commands" can exist to
+  drift (§2.2). No new capability guards either store — the existing
+  file-access and app-load gates apply (§5.2 minimalism).
+
 - **2026-08-03 — An app's own icon is mandatory, and SVG is the preferred
   form.** Amended §10 (owner decision) to say plainly what the previous
   amendment left implicit: every command-line and graphical app **must** ship
@@ -6607,19 +6628,19 @@ can see *why* a rule exists without diffing the charter's history.
   is a topic → plan table every contributor checks before touching a
   covered area, maintained in the same change that adds or removes a plan.
 
-- **2026-07-07 — Per-user `Apps/`, nested bundle filing, and `man`'s
+- **2026-07-07 — A user's own stores, nested bundle filing, and `man`'s
   recursive help search.** Amended §16.3 (maintainer request): the fixed
-  user-home shape gains `Apps/` (a user's own application bundles), and
-  bundles in `/Apps` or `/Users/<u>/Apps` may be filed in nested plain
-  subdirectories. `man` resolves a bare word through the store-then-`PATH`
-  candidates first and then falls back to a bounded, breadth-first recursive
-  walk of `/Apps` then `<HOME>/Apps` (never descending into a `.app` — a
-  bundle is a sealed unit), so `man moose` finds
-  `/Apps/somefolder/moose.app`'s help wherever it was filed. The roots are
-  spelled once in `lib/cmdres::search_roots` over
-  `tairix_abi::USER_APP_STORE`; the walk fails loud when its directory
-  budget is exhausted rather than masquerading as "not found". Launch is
-  unchanged: the shell still searches only the system store and `PATH`.
+  user-home shape carries the user's own program stores, and bundles in
+  `/Apps` or a user's own store may be filed in nested plain subdirectories.
+  `man` resolves a bare word through the ordered lookup candidates first and
+  then falls back to a bounded, breadth-first recursive walk of `/Apps` then
+  the user's own stores (never descending into a `.app` — a bundle is a
+  sealed unit), so `man moose` finds `/Apps/somefolder/moose.app`'s help
+  wherever it was filed. The roots are spelled once in
+  `lib/cmdres::search_roots` over `tairix_abi::INSTALLED_APP_STORE`; the walk
+  fails loud when its directory budget is exhausted rather than masquerading
+  as "not found". `/Apps` stays off the launch path: the shell searches the
+  §16.8 fixed prefix and `PATH` only.
 
 - **2026-07-06 — Foundational implementations are complete, not minimal.**
   Added §27 (maintainer decision) after kernel building blocks were found
@@ -6679,7 +6700,7 @@ can see *why* a rule exists without diffing the charter's history.
   (the §18.6 boot floor).
 
 - **2026-07-04 — App bundles are self-contained; no app code baked into the
-  kernel.** Amended §16.5 (and the §16.2 `/System/Apps` note) after command
+  kernel.** Amended §16.5 (and the §16.2 program-store note) after command
   apps (`ls`, `ps`, `man`) were found with only `Help/` on disk while their
   `Run` rxe was compiled into the kernel and dispatched by a byte-exact
   in-kernel spawn-path lookup — so browsing `ls.app/` showed only `Help/` and
@@ -6710,14 +6731,6 @@ can see *why* a rule exists without diffing the charter's history.
   `man` command's bundle lookup can import the identical order without a
   forbidden userland→userland dependency (§17.4) and without a second
   resolution policy (§2.2).
-
-- **2026-07-03 — `/System/Apps/`: the system app store.** Amended §16.2
-  (`plans/APPS.md` §8): `/System` gains an `Apps/` subdirectory holding the
-  OS-provided command apps as command-named bundles; the shell resolves a
-  bare command word there *before* the user's `PATH`, so a user-writable
-  directory can never shadow a system command. No new capability guards the
-  store — the existing file-access and app-load gates apply (§5.2
-  minimalism).
 
 - **2026-07-03 — One bundle help tree: `Documentation/` merged into `Help/`.**
   Amended §16.5 (the merge alternative of `plans/APPS.md`, maintainer-chosen):

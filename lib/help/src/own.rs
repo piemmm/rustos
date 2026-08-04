@@ -8,9 +8,9 @@
 //!
 //! The pure [`own_short_help`] helper works over any injected
 //! [`HelpSource`]; the syscall-backed source that reads the running
-//! bundle's own `/System/Apps/<word>.app/Help/` tree is `BundleHelp`
-//! (compiled under the `rt` feature), which a freestanding `Run` binary
-//! constructs with its own command word.
+//! bundle's own `Help/` tree is `BundleHelp` (compiled under the `rt`
+//! feature), which a freestanding `Run` binary constructs with its own
+//! command word.
 
 use alloc::vec::Vec;
 
@@ -53,21 +53,27 @@ pub fn own_short_help(
 
 #[cfg(feature = "rt")]
 mod rt_source {
-    //! The production own-bundle [`HelpSource`]: the running command app's
-    //! `/System/Apps/<word>.app/Help/` tree, read through the
-    //! kernel-authorised `fs_*` syscall wrappers. It adds no authority —
-    //! every path resolution, per-inode permission, and mount-flag check
-    //! happens kernel-side under the caller's attested identity — and the
-    //! bundle directory is spelled from the one shared `lib/abi`
-    //! definition, so it cannot drift from where the image builder plants
-    //! the documents.
+    //! The production own-bundle [`HelpSource`]: the running program's own
+    //! `<bundle>/Help/` tree, read through the kernel-authorised `fs_*`
+    //! syscall wrappers. It adds no authority — every path resolution,
+    //! per-inode permission, and mount-flag check happens kernel-side under
+    //! the caller's attested identity.
+    //!
+    //! The bundle is located through the one shared bundle-resolution policy
+    //! (`tairix_cmdres::bundle_candidates`), the same order `man` walks, so a
+    //! program's own `-h` and `man <program>` can never serve different
+    //! documents. It is resolved with an *empty* environment: a program's own
+    //! bundle is a system-store bundle, and consulting the caller's `HOME` or
+    //! `PATH` would let a user-writable directory answer for a system
+    //! program's help.
 
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntry, FileKind, FS_IO_MAX};
-    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_abi::{BundleEntry, Errno};
+    use tairix_cmdres::{bundle_candidates, CommandEnv};
 
     use crate::doc::MAX_DOC_LEN;
     use crate::locale::{HelpSource, SourceError};
@@ -82,29 +88,32 @@ mod rt_source {
     /// one `fs_readdir` transfer can ever fill and no further.
     const DIR_BUF_MAX: usize = FS_IO_MAX;
 
-    /// A command app's own bundle `Help/` tree in the system app store,
-    /// scoped to one command word at construction.
+    /// A program's own bundle `Help/` tree, scoped to one command word at
+    /// construction.
     ///
     /// A build without the bundle's documents simply has no locales: the
     /// engine then reports "not found" and the caller falls back to its
     /// usage banner, so `-h` never fails.
     pub struct BundleHelp {
-        /// The app's own command word (e.g. `ls`), naming its bundle
-        /// directory `<word>.app` in the system app store.
+        /// The program's own word (e.g. `ls`), naming its bundle directory
+        /// `<word>.app` in whichever system store it was planted in.
         word: &'static str,
     }
 
     impl BundleHelp {
-        /// The `Help/` tree of `word`'s own bundle,
-        /// `/System/Apps/<word>.app/Help/`.
+        /// The `Help/` tree of `word`'s own bundle.
         #[must_use]
         pub const fn new(word: &'static str) -> Self {
             Self { word }
         }
 
-        /// `/System/Apps/<word>.app/Help`.
-        fn help_root(&self) -> String {
-            format!("{SYSTEM_APP_STORE}/{}{BUNDLE_SUFFIX}/Help", self.word)
+        /// The candidate `<bundle>/Help` directories for this program's own
+        /// word, in the one shared resolution order.
+        fn help_roots(&self) -> Vec<String> {
+            bundle_candidates(self.word, CommandEnv::default())
+                .into_iter()
+                .map(|bundle| format!("{bundle}/{}", BundleEntry::Help.as_str()))
+                .collect()
         }
 
         /// Read a directory's raw entry stream, growing the buffer up to
@@ -129,10 +138,14 @@ mod rt_source {
 
     impl HelpSource for BundleHelp {
         fn locale_dirs(&self) -> Result<Vec<String>, SourceError> {
-            let path = self.help_root();
-            // No tree, no locales: the engine reports "not found" and the
-            // caller falls back to its usage banner.
-            let Ok(dir) = tairix_rt::open_dir(path.as_bytes()) else {
+            // The first candidate that has a tree is this program's bundle;
+            // no tree at all means no locales, so the engine reports "not
+            // found" and the caller falls back to its usage banner.
+            let Some(dir) = self
+                .help_roots()
+                .into_iter()
+                .find_map(|path| tairix_rt::open_dir(path.as_bytes()).ok())
+            else {
                 return Ok(Vec::new());
             };
             let bytes = Self::read_dir_bytes(&dir)?;
@@ -155,15 +168,24 @@ mod rt_source {
         }
 
         fn read(&self, locale_dir: &str, file_name: &str) -> Result<Option<Vec<u8>>, SourceError> {
-            let path = format!("{}/{locale_dir}/{file_name}", self.help_root());
-            let file = match tairix_rt::open(path.as_bytes()) {
-                Ok(file) => file,
-                Err(ret) => {
-                    return match Errno::from_syscall(ret) {
-                        Errno::NotFound => Ok(None),
-                        _ => Err(SourceError),
-                    };
+            // Attempted in the one shared candidate order: an absent document
+            // moves to the next candidate, any other refusal is final.
+            let mut opened = None;
+            for root in self.help_roots() {
+                let path = format!("{root}/{locale_dir}/{file_name}");
+                match tairix_rt::open(path.as_bytes()) {
+                    Ok(file) => {
+                        opened = Some(file);
+                        break;
+                    }
+                    Err(ret) => match Errno::from_syscall(ret) {
+                        Errno::NotFound => continue,
+                        _ => return Err(SourceError),
+                    },
                 }
+            }
+            let Some(file) = opened else {
+                return Ok(None);
             };
             // Read at most one byte past the engine's limit: the engine's
             // own document bound then rejects the oversized file, and a

@@ -22,15 +22,16 @@
 //! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
 //! `spawn` syscall and reaps them through `wait`. A command word is resolved
 //! to a runnable bundle through the shared candidate policy
-//! ([`tairix_cmdres::resolution_candidates`]): the system app store first,
-//! then the user's `PATH`, attempted in order. The command's words travel
-//! to the child as its argument vector and the shell's exported variables
-//! (with any `NAME=v cmd` prefix overrides) as its environment, through
-//! the `spawn` startup-strings block. Pipes and redirections run end to
-//! end (`plans/SPAWN.md` SP10): the pure `tairix_elsh::wireplan` planner
-//! lowers each pipeline into pre-opened targets, per-member spawn attach
-//! blocks, and the here-string / multios byte pumps this host executes
-//! over `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
+//! ([`tairix_cmdres::resolution_candidates`]): the two system stores, the
+//! user's own two stores, then their `PATH`, attempted in order. The
+//! command's words travel to the child as its argument vector and the
+//! shell's exported variables (with any `NAME=v cmd` prefix overrides) as
+//! its environment, through the `spawn` startup-strings block. Pipes and
+//! redirections run end to end (`plans/SPAWN.md` SP10): the pure
+//! `tairix_elsh::wireplan` planner lowers each pipeline into pre-opened
+//! targets, per-member spawn attach blocks, and the here-string / multios
+//! byte pumps this host executes over
+//! `fs_open`/`resource_open`/`pipe_create`/`spawn_attached`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -262,14 +263,14 @@ mod program {
     }
 
     /// Spawn one pipeline member with its descriptor wires, resolving the
-    /// command word through the shared candidate policy (the system app
-    /// store first, then `PATH`) and attempting each candidate in order.
-    /// `spawn`'s `NotFound` is a definitive "no program is registered at
-    /// this path, nothing ran", so moving to the next candidate is a
-    /// deterministic first-match search, never a retry; any other refusal
-    /// (a permission or capability denial, a malformed image, a rejected
-    /// wire) is final and reported verbatim. The kernel authorises every
-    /// attempt — a candidate spelling grants nothing.
+    /// command word through the shared candidate policy (the fixed store
+    /// prefix the session's `HOME` spells out, then `PATH`) and attempting
+    /// each candidate in order. `spawn`'s `NotFound` is a definitive "no
+    /// program is registered at this path, nothing ran", so moving to the
+    /// next candidate is a deterministic first-match search, never a retry;
+    /// any other refusal (a permission or capability denial, a malformed
+    /// image, a rejected wire) is final and reported verbatim. The kernel
+    /// authorises every attempt — a candidate spelling grants nothing.
     fn spawn_member(
         spec: &LaunchSpec<'_>,
         command: &ResolvedCommand,
@@ -311,12 +312,20 @@ mod program {
                 PlannedWire::Handle(id) => tairix_abi::FdWire::Handle(fds[id.0]),
             };
         }
-        let path_var = spec
-            .env
-            .iter()
-            .find(|(name, _)| *name == "PATH")
-            .map(|(_, value)| *value);
-        for candidate in tairix_cmdres::resolution_candidates(word, path_var) {
+        // The search order reads both `HOME` (the user's own two stores)
+        // and `PATH` from the exported environment the session inherited,
+        // so the shell runs exactly the bundles its completion offered.
+        let exported = |name: &str| {
+            spec.env
+                .iter()
+                .find(|(seen, _)| *seen == name)
+                .map(|(_, value)| *value)
+        };
+        let search_env = tairix_cmdres::CommandEnv {
+            home: exported("HOME"),
+            path_var: exported("PATH"),
+        };
+        for candidate in tairix_cmdres::resolution_candidates(word, search_env) {
             let ret =
                 tairix_rt::spawn_attached(candidate.as_bytes(), &attach, &arg_bytes, &env_bytes);
             if ret >= 0 {
@@ -453,7 +462,7 @@ mod program {
     /// Launches and reaps external commands through the `spawn` and `wait`
     /// syscalls (`plans/SPAWN.md` SP3 / SP6 / SP10), resolving each command
     /// word to a bundle `Run` path through the shared candidate policy
-    /// (`plans/APPS.md` §8: the system app store first, then `PATH`).
+    /// (`plans/APPS.md` §8: the fixed store prefix first, then `PATH`).
     ///
     /// Redirections and pipelines are lowered by the pure
     /// [`tairix_elsh::wireplan`] planner and executed here: every target is

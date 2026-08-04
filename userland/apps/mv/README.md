@@ -15,7 +15,7 @@ engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
 links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the move library and the `mv` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
-`/System/Apps/mv.app` with its thirteen-locale `Help/` tree (plans/APPS.md
+`/System/Commands/mv.app` with its thirteen-locale `Help/` tree (plans/APPS.md
 §12.1 Stage B). The production seam maps the kernel's dedicated
 `Errno::CrossVolume` rename refusal (the `EXDEV` equivalent) onto the
 copy-then-remove fallback.

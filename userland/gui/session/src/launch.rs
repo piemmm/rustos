@@ -227,19 +227,22 @@ mod tests {
     fn the_table_resolves_a_running_child_by_its_run_path() {
         let mut launched = LaunchTable::new();
         assert!(launched.is_empty());
-        launched.record(10, "Files", "/System/Apps/files.app/Run");
+        launched.record(10, "Files", "/System/Applications/files.app/Run");
         launched.record(11, "Chess", "/Apps/chess.app/Run");
         assert_eq!(launched.len(), 2);
 
         assert_eq!(
-            launched.running_from("/System/Apps/files.app/Run"),
+            launched.running_from("/System/Applications/files.app/Run"),
             Some(10)
         );
         assert_eq!(launched.running_from("/Apps/editor.app/Run"), None);
 
         let reaped = launched.remove(10).expect("recorded");
         assert_eq!(reaped.label, "Files");
-        assert_eq!(launched.running_from("/System/Apps/files.app/Run"), None);
+        assert_eq!(
+            launched.running_from("/System/Applications/files.app/Run"),
+            None
+        );
         assert_eq!(launched.remove(10), None, "a reaped pid is forgotten");
     }
 
@@ -272,8 +275,8 @@ mod tests {
     #[test]
     fn reap_drains_and_reports_only_the_refused_launch() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Files", "/System/Apps/files.app/Run");
-        launched.record(11, "Terminal", "/System/Apps/terminal.app/Run");
+        launched.record(10, "Files", "/System/Applications/files.app/Run");
+        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
 
         let mut script = alloc::vec![
             (10u64, WaitStatus::Exited(LOAD_UNVERIFIED)),
@@ -327,7 +330,7 @@ mod tests {
     #[test]
     fn reap_with_no_zombies_does_nothing() {
         let mut launched = LaunchTable::new();
-        launched.record(3, "Files", "/System/Apps/files.app/Run");
+        launched.record(3, "Files", "/System/Applications/files.app/Run");
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();
 

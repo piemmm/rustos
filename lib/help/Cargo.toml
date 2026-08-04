@@ -9,14 +9,14 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# The production own-bundle `HelpSource` (`BundleHelp`): reads the running
-# command app's own `/System/Apps/<word>.app/Help/` tree through the
-# `tairix-rt` file wrappers, so every `Run` binary shares one syscall-backed
-# source instead of each carrying a private copy (the charter forbids that
-# duplication). Enabled only by a freestanding `Run` binary's target-gated
-# dependency; the engine itself stays seam-injected and performs no ambient
-# I/O.
-rt = ["dep:tairix-abi", "dep:tairix-rt"]
+# The production own-bundle `HelpSource` (`BundleHelp`): locates the running
+# program's own bundle through the one shared resolution policy and reads its
+# `Help/` tree through the `tairix-rt` file wrappers, so every `Run` binary
+# shares one syscall-backed source instead of each carrying a private copy
+# (the charter forbids that duplication). Enabled only by a freestanding `Run`
+# binary's target-gated dependency; the engine itself stays seam-injected and
+# performs no ambient I/O.
+rt = ["dep:tairix-abi", "dep:tairix-cmdres", "dep:tairix-rt"]
 
 # The one help-tree lint (plans/APPS.md §8.1): completeness, required-locale
 # coverage, cross-locale OPTIONS switch-key drift, structural bounds, and the
@@ -29,10 +29,13 @@ lint = []
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 tairix-curses = { path = "../curses", version = "=0.0.0" }
 
-# For the `rt` feature's `BundleHelp` only: the system-app-store/bundle
-# spellings and the `Errno`/`DirEntry` vocabulary (`tairix-abi`), and the
-# kernel-authorised `fs_*` file wrappers (`tairix-rt`).
+# For the `rt` feature's `BundleHelp` only: the bundle-entry and
+# `Errno`/`DirEntry` vocabulary (`tairix-abi`), the one shared bundle
+# candidate policy that locates the running program's own bundle
+# (`tairix-cmdres`, the same order `man` walks), and the kernel-authorised
+# `fs_*` file wrappers (`tairix-rt`).
 tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+tairix-cmdres = { path = "../cmdres", version = "=0.0.0", optional = true }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [lints]

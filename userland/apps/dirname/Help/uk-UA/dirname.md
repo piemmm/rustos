@@ -28,7 +28,7 @@ dirname — прибрати останню складову з назв
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — надрукувати `/System/Apps`.
+- `dirname /System/Commands/top.app` — надрукувати `/System/Commands`.
 - `dirname src/lib.rs` — надрукувати `src`.
 - `dirname file` — надрукувати `.` (немає каталожної частини).
 - `dirname Home:/tools` — надрукувати `Home:/` (корінь ніколи не

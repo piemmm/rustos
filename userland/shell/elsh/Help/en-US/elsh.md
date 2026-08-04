@@ -10,11 +10,14 @@ elsh — the TAIRiX command shell
 
 Runs an interactive command shell — a read-eval-print loop over the
 inherited standard streams. A typed command word is resolved first
-against the shell's builtins, then the system app store
-(`/System/Apps`), then the directories of the `PATH` variable; the
-store is searched before `PATH`, so `PATH` can never shadow a system
-command. An unresolved word exits `127`; a resolved but non-executable
-bundle exits `126`.
+against the shell's builtins, then the system command store
+(`/System/Commands`), the system application store
+(`/System/Applications`), the user's own command store
+(`<home>/Commands`) and application store (`<home>/Applications`),
+then the directories of the `PATH` variable; those four stores are a
+fixed prefix the user cannot reorder or override, so `PATH` can never
+shadow a system command. An unresolved word exits `127`; a resolved
+but non-executable bundle exits `126`.
 
 The builtins:
 
@@ -56,7 +59,7 @@ grammar.
 
 ## ENVIRONMENT
 
-- `PATH` — the directories searched after the system app store.
+- `PATH` — the directories searched after the fixed store prefix.
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such
   as `fr-FR`), exported to every launched command.
 

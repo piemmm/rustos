@@ -10,14 +10,15 @@
 //!
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference, the `PATH` search list, and the `HOME` naming the user's own
-//! `Apps` search root from the inherited environment (plans/APPS.md §5, §7,
-//! and §8 — the shell exports all three; the tool invents no
-//! second source), and runs the parsed command against the two production
-//! seams: `RtStore`, which probes and reads app bundles through the
-//! kernel-authorised `fs_*` syscalls (every per-inode and mount check stays
-//! kernel-side), and `RtConsole`, which writes the page to the inherited
-//! standard output, emits the locale-fallback advisory on fd 3, and drives
-//! the pager from the inherited standard input. The tool binds only to its
+//! `Commands` and `Applications` search roots from the inherited
+//! environment (plans/APPS.md §5, §7, and §8 — the shell exports all
+//! three; the tool invents no second source), and runs the parsed command
+//! against the two production seams: `RtStore`, which probes and reads
+//! app bundles through the kernel-authorised `fs_*` syscalls (every
+//! per-inode and mount check stays kernel-side), and `RtConsole`, which
+//! writes the page to the inherited standard output, emits the
+//! locale-fallback advisory on fd 3, and drives the pager from the
+//! inherited standard input. The tool binds only to its
 //! inherited descriptors, never a console device, and holds no ambient
 //! authority.
 //!

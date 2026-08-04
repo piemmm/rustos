@@ -26,7 +26,7 @@ plays on POSIX systems.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — print `/System/Apps`.
+- `dirname /System/Commands/top.app` — print `/System/Commands`.
 - `dirname src/lib.rs` — print `src`.
 - `dirname file` — print `.` (no directory part).
 - `dirname Home:/tools` — print `Home:/` (a root is never stripped

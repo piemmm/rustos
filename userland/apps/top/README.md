@@ -76,7 +76,7 @@ whole viewer runs against in-memory fixtures with no kernel (`AGENTS.md` §7).
   framebuffer console), else the conventional 80×24 fallback the client applies
   when the size is unknowable (a serial terminal). It binds only its inherited
   descriptors, never a console device (`AGENTS.md` §20). On the host it is an
-  inert stub. The kernel image bakes it as `/System/Apps/top.app/Run` with
+  inert stub. The kernel image bakes it as `/System/Commands/top.app/Run` with
   `CAP_CONSOLE_WRITE` + `CAP_CONSOLE_READ` + `CAP_FS_ACCESS`.
 
 ## Linking

@@ -31,7 +31,8 @@ exception.
   the same layer that already owns the pre-mount console: the compiled-in
   `init` boot floor and the interactive root-unlock policy. It is therefore
   legitimately in-kernel (like `init` and the unlock prompt), **not** a
-  `/System/Apps` bundle. It shrinks toward nothing over time only in the
+  system program bundle (under `/System/Commands` or `/System/Applications`).
+  It shrinks toward nothing over time only in the
   sense that it presents state the kernel already computes; it adds no new
   driver, no new authority.
 - **The boot-screen wording is frozen exactly as specced.** The three

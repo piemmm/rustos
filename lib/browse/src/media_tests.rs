@@ -221,7 +221,13 @@ fn a_bundle_in_the_service_store_is_a_service_and_elsewhere_an_application() {
     assert_eq!(service.as_str(), "application/x-tairix-service");
     assert_eq!(service.icon(), IconKind::ServiceBundle);
 
-    for store in ["/Apps", "/System/Apps", "/Users/ada/Apps"] {
+    for store in [
+        "/Apps",
+        "/System/Commands",
+        "/System/Applications",
+        "/Users/ada/Commands",
+        "/Users/ada/Applications",
+    ] {
         let app = media_for_entry(&bundle("Editor.app"), &components(store));
         assert_eq!(app, MediaType::TairixApp, "{store}");
         assert_eq!(app.as_str(), "application/x-tairix-app");

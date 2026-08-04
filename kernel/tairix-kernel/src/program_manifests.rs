@@ -410,6 +410,7 @@ mod tests {
     //! within the session baseline, so a baseline-only account can run the
     //! whole default toolset.
 
+    use tairix_abi::ProgramKind;
     use tairix_caps::CapabilitySet;
 
     use super::*;
@@ -1010,7 +1011,7 @@ mod tests {
     /// silently diverge from them before it is deleted.
     #[test]
     fn appinfo_sources_match_the_embedded_registry() {
-        use tairix_itest_harness::app_image::{discover_app_manifests, AppKind};
+        use tairix_itest_harness::app_image::discover_app_manifests;
 
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
@@ -1018,66 +1019,70 @@ mod tests {
         // name -> (kind, embedded capability list). PID 1 `init` is
         // deliberately absent: it is the boot floor the boot path enters
         // directly, never a store bundle.
-        let embedded: &[(&str, AppKind, &[CapabilityId])] = &[
-            ("applib", AppKind::Command, PURE_TOOL_REQUEST),
-            ("basename", AppKind::Command, PURE_TOOL_REQUEST),
-            ("cat", AppKind::Command, CAT_MANIFEST),
-            ("chmod", AppKind::Command, PURE_TOOL_REQUEST),
-            ("clear", AppKind::Command, CLEAR_MANIFEST),
-            ("configure", AppKind::Command, PURE_TOOL_REQUEST),
-            ("cp", AppKind::Command, FILE_TOOL_REQUEST),
-            ("desktop", AppKind::Command, DESKTOP_SESSION_REQUEST),
-            ("devmgr", AppKind::Service, DEVMGR_MANIFEST),
-            ("df", AppKind::Command, PURE_TOOL_REQUEST),
-            ("dirname", AppKind::Command, PURE_TOOL_REQUEST),
-            ("du", AppKind::Command, PURE_TOOL_REQUEST),
-            ("edit", AppKind::Command, FILE_TOOL_REQUEST),
-            ("elsh", AppKind::Command, SHELL_MANIFEST),
-            ("false", AppKind::Command, PURE_TOOL_REQUEST),
-            ("files", AppKind::Command, FILES_BROWSER_REQUEST),
-            ("fontd", AppKind::Service, FONTD_MANIFEST),
-            ("fstree", AppKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
-            ("groupadd", AppKind::Command, ADMIN_TOOL_REQUEST),
-            ("head", AppKind::Command, FILE_TOOL_REQUEST),
-            ("host", AppKind::Command, HOST_TOOL_REQUEST),
-            ("login", AppKind::Service, LOGIN_MANIFEST),
-            ("ls", AppKind::Command, LS_MANIFEST),
-            ("lspci", AppKind::Command, HW_LIST_TOOL_REQUEST),
-            ("lsusb", AppKind::Command, HW_LIST_TOOL_REQUEST),
-            ("man", AppKind::Command, MAN_MANIFEST),
-            ("mdadm", AppKind::Command, RAID_ADMIN_TOOL_REQUEST),
-            ("mkdir", AppKind::Command, PURE_TOOL_REQUEST),
-            ("mv", AppKind::Command, FILE_TOOL_REQUEST),
-            ("netstack", AppKind::Service, NETSTACK_MANIFEST),
-            ("ping", AppKind::Command, PING_TOOL_REQUEST),
-            ("printf", AppKind::Command, PURE_TOOL_REQUEST),
-            ("ps", AppKind::Command, PS_MANIFEST),
-            ("reset", AppKind::Command, RESET_MANIFEST),
-            ("rm", AppKind::Command, FILE_TOOL_REQUEST),
-            ("rmdir", AppKind::Command, PURE_TOOL_REQUEST),
-            ("seatmgr", AppKind::Service, SEATMGR_MANIFEST),
-            ("seq", AppKind::Command, PURE_TOOL_REQUEST),
-            ("sleep", AppKind::Command, PURE_TOOL_REQUEST),
-            ("ss", AppKind::Command, SS_TOOL_REQUEST),
-            ("stress", AppKind::Command, STRESS_MANIFEST),
-            ("switchboard", AppKind::Service, SWITCHBOARD_MONITOR_REQUEST),
-            ("sysinfo", AppKind::Command, SYSINFO_MANIFEST),
-            ("sysinfod", AppKind::Service, SYSINFOD_MANIFEST),
-            ("sysmon", AppKind::Command, SYSMON_MANIFEST),
-            ("tail", AppKind::Command, FILE_TOOL_REQUEST),
-            ("tee", AppKind::Command, FILE_TOOL_REQUEST),
-            ("terminal", AppKind::Command, TERMINAL_REQUEST),
-            ("top", AppKind::Command, TOP_MANIFEST),
-            ("true", AppKind::Command, PURE_TOOL_REQUEST),
-            ("unmount", AppKind::Command, UNMOUNT_TOOL_REQUEST),
-            ("useradd", AppKind::Command, ADMIN_TOOL_REQUEST),
-            ("users", AppKind::Command, USERS_TOOL_MANIFEST),
-            ("viewer", AppKind::Command, VIEWER_REQUEST),
-            ("vim", AppKind::Command, FILE_TOOL_REQUEST),
-            ("wc", AppKind::Command, FILE_TOOL_REQUEST),
-            ("whoami", AppKind::Command, PURE_TOOL_REQUEST),
-            ("widgets", AppKind::Command, WIDGETS_GALLERY_REQUEST),
-            ("yes", AppKind::Command, PURE_TOOL_REQUEST),
+        let embedded: &[(&str, ProgramKind, &[CapabilityId])] = &[
+            ("applib", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("cat", ProgramKind::Command, CAT_MANIFEST),
+            ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("clear", ProgramKind::Command, CLEAR_MANIFEST),
+            ("configure", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),
+            ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
+            ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("du", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("elsh", ProgramKind::Command, SHELL_MANIFEST),
+            ("false", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
+            ("fontd", ProgramKind::Service, FONTD_MANIFEST),
+            ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
+            ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+            ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
+            ("login", ProgramKind::Service, LOGIN_MANIFEST),
+            ("ls", ProgramKind::Command, LS_MANIFEST),
+            ("lspci", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
+            ("lsusb", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
+            ("man", ProgramKind::Command, MAN_MANIFEST),
+            ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
+            ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
+            ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
+            ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("ps", ProgramKind::Command, PS_MANIFEST),
+            ("reset", ProgramKind::Command, RESET_MANIFEST),
+            ("rm", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
+            ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
+            ("stress", ProgramKind::Command, STRESS_MANIFEST),
+            (
+                "switchboard",
+                ProgramKind::Service,
+                SWITCHBOARD_MONITOR_REQUEST,
+            ),
+            ("sysinfo", ProgramKind::Command, SYSINFO_MANIFEST),
+            ("sysinfod", ProgramKind::Service, SYSINFOD_MANIFEST),
+            ("sysmon", ProgramKind::Command, SYSMON_MANIFEST),
+            ("tail", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
+            ("top", ProgramKind::Command, TOP_MANIFEST),
+            ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
+            ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+            ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
+            ("viewer", ProgramKind::Application, VIEWER_REQUEST),
+            ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("widgets", ProgramKind::Application, WIDGETS_GALLERY_REQUEST),
+            ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
         ];
 
         assert_registry_matches(&discovered, embedded);
@@ -1089,11 +1094,7 @@ mod tests {
     /// table stays readable in one place.
     fn assert_registry_matches(
         discovered: &[tairix_itest_harness::app_image::DiscoveredApp],
-        embedded: &[(
-            &str,
-            tairix_itest_harness::app_image::AppKind,
-            &[CapabilityId],
-        )],
+        embedded: &[(&str, ProgramKind, &[CapabilityId])],
     ) {
         assert_eq!(discovered.len(), embedded.len());
         for ((name, kind, caps), found) in embedded.iter().zip(discovered) {

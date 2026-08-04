@@ -119,7 +119,7 @@ that sequence lives here once rather than per tool:
   `-h` is clean text. `None` when no document can be served — the caller then
   prints its own usage banner, so `-h` never fails.
 - `BundleHelp` (the `rt` cargo feature) — the production `HelpSource`: the
-  running command app's own `/System/Apps/<word>.app/Help/` tree, read
+  running command app's own `/System/Commands/<word>.app/Help/` tree, read
   through the `tairix-rt` file wrappers. It adds no authority (every
   per-inode and mount check stays kernel-side) and spells the bundle path
   from the shared `lib/abi` store/suffix constants, so it cannot drift from

@@ -127,8 +127,8 @@ three things on the `BootInfo` hand-off:
 - **Runtime `spawn` producer (`with_spawn`).**
   `riscv64::spawn_producer::RiscvProcessSpawn` + the embedded program
   registry mapping `/System/Services/login.app/Run` (the P11 session `init`
-  launches) and `/System/Apps/elsh.app/Run` (the shell login spawns) to their
-  baked `rxe`s, each entry carrying its program's declared capability set
+  launches) and `/System/Commands/elsh.app/Run` (the shell login spawns) to
+  their baked `rxe`s, each entry carrying its program's declared capability set
   and argument vector (§5.2/§16.5 — login additionally holds
   `CAP_PROC_SPAWN` + `CAP_USERS_READ`). When `init` issues the
   `CAP_PROC_SPAWN`-gated `spawn` syscall, the

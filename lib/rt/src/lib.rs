@@ -4915,7 +4915,7 @@ mod tests {
 
     #[test]
     fn spawn_marshals_path_pointer_len_and_inherit() {
-        let path = *b"/System/Apps/elsh.app/Run";
+        let path = *b"/System/Commands/elsh.app/Run";
         let (number, args) = capture(7, || {
             assert_eq!(spawn(&path), 7);
         });
@@ -4935,7 +4935,7 @@ mod tests {
 
     #[test]
     fn spawn_attached_marshals_the_attach_and_strings_blocks() {
-        let path = *b"/System/Apps/wc.app/Run";
+        let path = *b"/System/Commands/wc.app/Run";
         let attach = tairix_abi::SpawnAttach {
             wires: [
                 tairix_abi::FdWire::Handle(4),
@@ -4983,7 +4983,7 @@ mod tests {
 
     #[test]
     fn spawn_with_marshals_the_encoded_startup_strings_block() {
-        let path = *b"/System/Apps/man.app/Run";
+        let path = *b"/System/Commands/man.app/Run";
         let args: [&[u8]; 2] = [b"man", b"ps"];
         let envs: [&[u8]; 1] = [b"LANG=fr-FR"];
         let (number, raw) = capture(11, || {
@@ -5012,7 +5012,7 @@ mod tests {
 
     #[test]
     fn spawn_as_marshals_the_attach_block() {
-        let path = *b"/System/Apps/elsh.app/Run";
+        let path = *b"/System/Commands/elsh.app/Run";
         let (number, args) = capture(9, || {
             // login starting a user's shell on the inherited console under a
             // switched-to uid — both selectors travel inside the attach

@@ -37,7 +37,7 @@
 //!
 //! The bundle's own `Help/` tree is **not** embedded in this crate: it is
 //! authored once in the bundle's on-disk `Help/` directory, planted onto
-//! `/System/Apps/man.app/` by the image builder from that source
+//! `/System/Commands/man.app/` by the image builder from that source
 //! (`tools/syshelp`), and read back at runtime through the [`BundleStore`]
 //! seam. Help is never hardcoded into the program (`plans/APPS.md`).
 //!

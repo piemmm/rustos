@@ -88,12 +88,12 @@
 //!    reserved endpoint id, so the witness is unforgeable by any other
 //!    process in the image).
 //! 5. The `appmgr` `APP_LOADED` record for [`TERMINAL_ROUND_TRIP_BUNDLE`]
-//!    (`/System/Apps/sleep.app`) — the shell resolved and ran the typed
+//!    (`/System/Commands/sleep.app`) — the shell resolved and ran the typed
 //!    command, attributed by the loaded bundle's own name rather than a
 //!    fragile delivery count: the
 //!    desktop session — logged in at the seat keyboard and driven by
 //!    injected pointer clicks — spawned the files bundle from the on-disk
-//!    system app store via the taskbar's permanent Files button, served
+//!    system application store via the taskbar's permanent Files button, served
 //!    its window over the reserved window rendezvous, routed the scripted
 //!    in-window clicks app-ward (`plans/APPWIN.md` AW3), then opened the
 //!    program-library popup from the Library button and spawned the
@@ -106,7 +106,7 @@
 //!    spawn that can occur after the typing gate is the shell executing
 //!    the typed command).
 //! 6. The `appmgr` `APP_LOADED` record for [`CTRL_C_RECOVERY_BUNDLE`]
-//!    (`/System/Apps/true.app`), after the `sleep` round trip — the pty
+//!    (`/System/Commands/true.app`), after the `sleep` round trip — the pty
 //!    `Ctrl-C` job-control round trip (`plans/PTY.md`), attributed by the
 //!    recovered bundle's own name. Once witness 5's `sleep` load latched the
 //!    guest emitted [`CTRL_C_ARM_MARKER`], the runner injected a `Ctrl-C`
@@ -205,10 +205,10 @@ mod kernel {
     /// unlocked the encrypted root end to end), the reserved
     /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
     /// came up on its granted surface), the AW4 shell round trip (the
-    /// `appmgr` load of `/System/Apps/sleep.app` — the windowed terminal
+    /// `appmgr` load of `/System/Commands/sleep.app` — the windowed terminal
     /// received every typed key edge, wrote the line to its hosted shell, and
     /// the shell resolved and ran the typed program), and the pty `Ctrl-C`
-    /// job-control round trip (the `appmgr` load of `/System/Apps/true.app`
+    /// job-control round trip (the `appmgr` load of `/System/Commands/true.app`
     /// after the `sleep` round trip — the recovered `true` the shell could
     /// only run once `Ctrl-C` interrupted the parked foreground `sleep`,
     /// `plans/PTY.md`). The guest exits only after the host has everything it

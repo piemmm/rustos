@@ -240,7 +240,7 @@ reviewed one-line data change, never free-form text:
   reached through the Switchboard → System quick-actions menu (T13), never as
   a library folder. A bundle whose category resolves to a settings surface is
   refused from the library catalog.
-- Command apps (`/System/Apps`, `plans/APPS.md` §8), background services
+- Command apps (`/System/Commands`, `plans/APPS.md` §8), background services
   (`/System/Services`), and any bundle whose manifest declares no `library`
   folder never appear in the library — listing is an explicit manifest
   opt-in, so only user-facing graphical applications do.
@@ -333,7 +333,7 @@ the authority at the right granularity and, if so, uses it.
   `/System/Settings` per-inode policy admits (the system identity).
 - **Per-user overlay:** `/Users/<u>/Settings/ProgramLibrary/library.conf` —
   same grammar; lets a user hide, re-file, or rename an entry, and add
-  entries for their own `/Users/<u>/Apps` bundles, without touching the
+  entries for their own `/Users/<u>/Applications` bundles, without touching the
   system store. Merge policy: the user overlay is applied over the machine
   catalog (user hide/rename/re-file wins; user-only entries append). The
   merge is one pure, exhaustively-tested function in `lib/proglib`.
@@ -462,8 +462,8 @@ What now guarantees §16.5/§18.5's "no compiled-in app list":
   C header is regenerated (`cargo xtask c-header --write`); `lib/appload`
   consumers read the listing off the verified header's own accessors.
 - **The fold (`lib/proglib::Catalog::reconcile`)** + **`applib rescan`** —
-  the walk covers `/System/Apps` then `/Apps` (machine) or the caller's
-  `<home>/Apps` (`--user`), breadth-first in sorted order (deterministic
+  the walk covers the system program stores then `/Apps` (machine) or the caller's
+  own stores (`--user`), breadth-first in sorted order (deterministic
   duplicate resolution), descending nested plain subdirectories but never
   into a sealed `.app`, bounded by `MAX_WALK_DEPTH`/`MAX_WALK_ENTRIES`
   (fail-closed on a tree it cannot believe). Every listed bundle not yet
@@ -716,7 +716,7 @@ The two ways a user creates a pin. What now stands:
   is refused rather than recorded as a pin that can never launch.
 - **The desktop is deliberately not a drag source, and never will be.** An
   installed application lives **only** in an application store — machine-wide
-  `/Apps`, or the user's own `/Users/<u>/Apps`. A `.app` directory a user
+  `/Apps`, or the user's own `/Users/<u>/Applications`. A `.app` directory a user
   drops in their `Desktop` folder is therefore a directory *shaped like* an
   application, not an installed one, and `BundlePath`'s store rule correctly
   refuses it: the pin store may only record something the system can vouch

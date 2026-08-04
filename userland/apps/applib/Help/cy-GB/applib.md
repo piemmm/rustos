@@ -50,8 +50,9 @@ cuddio yn fater o gyflwyniad, nid awdurdod byth: mae lansio bwndel yn
 dal i gael ei reoli gan wiriadau llofnod a galluogrwydd (capability) y
 llwythwr waeth beth fo'r catalog.
 
-Mae `applib rescan` yn cerdded y storfeydd rhaglenni (`/System/Apps` ac
-`/Apps`, neu `<home>/Apps` y defnyddiwr ei hun o dan `--user`), yn darllen
+Mae `applib rescan` yn cerdded y storfeydd rhaglenni (`/System/Commands`,
+`/System/Applications` ac `/Apps`, neu `<home>/Commands` a
+`<home>/Applications` y defnyddiwr ei hun o dan `--user`), yn darllen
 maniffest pob bwndel, ac yn cofrestru pob rhaglen sy'n gofyn am gael ei
 rhestru ac nad yw wedi'i chatalogio eto. Ni amharir byth ar gofnodion
 presennol — gan gynnwys ail-enwi ac ataliadau curadur — ac mae bwndel
@@ -81,8 +82,8 @@ popeth arall ei anwybyddu.
 - `--icon <asset>` — gyda `add`, yr ased eicon (enw ffeil y tu mewn i
   `Resources/` y bwndel) yn lle'r un yn y maniffest.
 - `--user` — cymhwyso'r newid i droslun y defnyddiwr ei hun (neu, gyda
-  `rescan`, cerdded `<home>/Apps` y defnyddiwr ei hun) yn lle'r stôr
-  ar draws y peiriant.
+  `rescan`, cerdded `<home>/Commands` a `<home>/Applications` y
+  defnyddiwr ei hun) yn lle'r stôr ar draws y peiriant.
 - `-h, -?` — dangos help byr y gorchymyn hwn.
 
 ## EXAMPLES
@@ -112,7 +113,8 @@ popeth arall ei anwybyddu.
 
 - `LANG` — y locale dewisol ar gyfer yr help byr (tag BCP-47 fel `fr-FR`).
 - `HOME` — cyfeiriadur cartref y defnyddiwr: yn enwi'r troslun fesul
-  defnyddiwr a gwraidd y rescan `--user` `<home>/Apps`.
+  defnyddiwr a gwreiddiau'r rescan `--user` `<home>/Commands` a
+  `<home>/Applications`.
 
 ## SEE ALSO
 

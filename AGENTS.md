@@ -1461,16 +1461,24 @@ Authoritative subdirectories:
 ```
 /System/
 ├── Kernel/      # Kernel image(s) and boot artifacts for the platform.
-├── Apps/        # System app store: the OS-provided command apps, one
-│                #   command-named §16.5 bundle per command (ps.app, …).
-│                #   Each is a FULL self-contained on-disk bundle — its own
-│                #   Run rxe, AppInfo, Help/, etc. all inside the folder
-│                #   (§16.5) — discovered by scanning the store, never baked
-│                #   into the kernel. The shell resolves a bare command word
-│                #   here *before* the user's PATH, so PATH can never shadow a
-│                #   system command (plans/APPS.md). No new capability guards
-│                #   it: the existing file-access and app-load gates apply.
-│                #   These commands follow GNU coreutils options/output (§16.7).
+├── Commands/    # System command store: the OS-provided command apps, one
+│             #   command-named §16.5 bundle per command (ps.app, …).
+│             #   ALWAYS the first directory a bare command word resolves
+│             #   against, and that position is not overridable (§16.8).
+│             #   These commands follow GNU coreutils options/output (§16.7).
+├── Applications/
+│             # System application store: the OS-provided GRAPHICAL
+│             #   applications, one §16.5 bundle each (files.app,
+│             #   terminal.app, …). Searched second (§16.8), so a desktop
+│             #   application is typeable by name too.
+│             # Both program stores hold FULL self-contained on-disk
+│             #   bundles — each bundle's own Run rxe, AppInfo, Help/, etc.
+│             #   all inside its folder (§16.5) — discovered by scanning
+│             #   the store, never baked into the kernel. Which store a
+│             #   bundle lands in is its own signed manifest's declared
+│             #   kind, never a list held anywhere (§16.5). No new
+│             #   capability guards either store: the existing file-access
+│             #   and app-load gates apply.
 ├── Drivers/     # Loadable drivers (rxe modules) shipped with the OS.
 ├── Libraries/   # The OS-provided shared libraries (see §16.4).
 ├── Fonts/       # System fonts.
@@ -1536,19 +1544,27 @@ defect.
 
 - `/Users/<username>/` is the only place user-owned files live. It
   contains at least `Documents/`, `Settings/`, `Library/` (per-user
-  caches/state, **not** shared libraries), `Apps/` (the user's own
-  application bundles, organisable in nested plain subdirectories; `man`'s
-  recursive bundle search walks it after `/Apps`), and `Desktop/`. The
-  shape is fixed; applications may not invent sibling directories at this
-  level. `/Users` is mounted `nosuid,nodev`.
+  caches/state, **not** shared libraries), `Commands/` and
+  `Applications/` (the user's own two program stores, mirroring the
+  system pair and organisable in nested plain subdirectories), and
+  `Desktop/`. The shape is fixed; applications may not invent sibling
+  directories at this level. `/Users` is mounted `nosuid,nodev`.
+  A store carries the same directory name at every scope, so the user's
+  own stores are exactly the system stores' names under their home; both
+  are on the fixed lookup order (§16.8) after the system pair, which is
+  what makes a user's own commands typeable with no `PATH` edit. `man`'s
+  recursive bundle search walks them after `/Apps`.
 - `/Apps/<Name>.app/` is the only place machine-wide applications live
-  (see §16.5); a user's own bundles live under their `/Users/<u>/Apps/`.
-  Bundles in either store may be filed in nested plain subdirectories
-  (`/Apps/games/chess.app`), and `man`'s recursive bundle search finds
-  their help wherever they are filed — a `.app` directory itself is a
-  sealed unit, never a container of further apps. `/Apps` is mounted
-  `nosuid,nodev`. Apps acquire privilege through capabilities declared
-  in their manifest, never through setuid.
+  (see §16.5); a user's own bundles live under their own two stores above.
+  Bundles in any of these stores may be filed in nested plain
+  subdirectories (`/Apps/games/chess.app`), and `man`'s recursive bundle
+  search finds their help wherever they are filed — a `.app` directory
+  itself is a sealed unit, never a container of further apps. `/Apps` is
+  mounted `nosuid,nodev`. It is deliberately **not** on the fixed lookup
+  order (§16.8): a machine-wide installed bundle is launched by the
+  desktop or by an explicit path, and appears on the command path only if
+  the user adds it to `PATH`. Apps acquire privilege through capabilities
+  declared in their manifest, never through setuid.
 - `/Storage/<volume>/` is where mounted volumes appear (removable media,
   extra disks, network shares). Default mount flags are
   `nosuid,nodev,noexec`; relaxations require `CAP_FS_MOUNT_RELAX` and
@@ -1645,8 +1661,8 @@ or help may live.
   self-contained, hides it from the on-disk bundle a user browses (a bundle
   directory that shows only `Help/` because `Run` lives in the kernel is this
   defect), and bypasses the `appmgr` verification path. An app that is not a
-  complete, launchable, verifiable directory under `/Apps` (or `/System/Apps`
-  for the system app store, §16.2) is a defect, regardless of whether it runs.
+  complete, launchable, verifiable directory under `/Apps` (or one of the
+  `/System` program stores, §16.2) is a defect, regardless of whether it runs.
 - **The bundle is the only home for the app's own libraries.** A static
   library or private shared library used *only* by this app is built into the
   bundle — statically linked into its binaries, or placed in the bundle's
@@ -1657,8 +1673,9 @@ or help may live.
   each consumer's own bundle binary — not a runtime dependency reached for
   outside the folder.
 - **The store is discovered from the on-disk bundles, never from a compiled-in
-  list.** The set of apps (including the system command apps under
-  `/System/Apps`, §16.2) is discovered at runtime by scanning the on-disk
+  list.** The set of apps (including the system programs under
+  `/System/Commands` and `/System/Applications`, §16.2) is discovered at
+  runtime by scanning the on-disk
   bundles and reading each `AppInfo`, exactly as drivers are discovered from
   their signed bundles (§18.3, §18.6). A hand-maintained compiled-in table of
   apps — in the kernel, `tools/mkimage`, a test fixture, or anywhere else — is
@@ -1669,6 +1686,9 @@ or help may live.
 and declares at minimum:
 
 - Bundle identifier, human-readable name, version.
+- The program's kind — `command`, `application`, or `service` — which is
+  what decides the store the bundle installs into (§16.2, §16.8) and is the
+  only place that decision is recorded.
 - Target ABI version (`abi-vN`) and required syscall hashes.
 - The exact set of capabilities the app requests (§5.2). The kernel
   grants only the intersection of these with the launching user's
@@ -1736,7 +1756,7 @@ compatibility", is forbidden.
 
 ### 16.7 System command apps follow GNU coreutils
 
-The OS-provided command apps in the system app store (§16.2) — `ls`, `cat`,
+The OS-provided command apps in the system command store (§16.2) — `ls`, `cat`,
 `cp`, `mv`, `rm`, `ps`, `top`, and the rest of the familiar command set — are
 written to match **GNU coreutils** (and, for the process/system tools, the
 established `procps`/coreutils command surface) as closely as possible. A user
@@ -1785,6 +1805,56 @@ The concrete per-command option/output specifications live in `plans/APPS.md`;
 this section binds the principle. A system command app whose options or output
 needlessly diverge from its GNU coreutils counterpart is a defect (§23),
 regardless of whether it compiles and its tests pass.
+
+### 16.8 Program lookup order — a fixed prefix, then the user's `PATH`
+
+A bare command word resolves against a **fixed, non-overridable prefix** of
+four directories, followed by the user's `PATH`. The order is binding:
+
+1. `/System/Commands` — the system command store. **Always first, and its
+   position cannot be overridden** by any `PATH` value, environment
+   variable, shell setting, or per-user directory.
+2. `/System/Applications` — the system application store.
+3. `<home>/Commands` — the user's own command store (may not exist).
+4. `<home>/Applications` — the user's own application store (may not exist).
+5. Each non-empty `PATH` entry, left to right.
+
+- **The prefix is built, never read.** It comes from the shared store
+  definitions in `lib/abi`, not from the environment, so a session with no
+  `PATH` and no `HOME` still resolves every system program, and no exported
+  value can reorder, remove, or shadow an entry. Both system stores are
+  read-only and system-signed and therefore always precede every
+  user-writable directory: a user's own store cannot shadow a system
+  command, and a `PATH` entry cannot shadow either. This is a security
+  property, not a convenience (§5.4 — fail closed, §4 — no ambient
+  authority).
+- **One definition, one policy.** The candidate order is computed once, by
+  the shared resolution policy (`lib/cmdres`), and every consumer — the
+  shell's launch path, filename completion, `man`'s bundle lookup — reads
+  that one policy rather than re-deriving an order (§2.2). A second copy of
+  the order anywhere is a defect.
+- **A missing store directory is not an error.** Steps 3 and 4 are spelled
+  unconditionally when `HOME` is set; a directory that does not exist simply
+  matches nothing and the search moves on. Existence is the host's I/O
+  question, never a spelling one.
+- **A `PATH` entry that repeats a prefix directory is dropped**, so late
+  `PATH` text cannot read as moving a store later in the order, and no
+  resolution pays for a duplicate lookup (§2.16). An empty `PATH` entry is
+  skipped, never widened into a current-directory search.
+- **A session's default `PATH` never repeats the prefix.** Login exports
+  only what is genuinely additional (`/Apps`, §16.3); listing a store that
+  is already built in would be duplication and would misleadingly imply the
+  store is overridable.
+- **Resolution is deterministic and fails closed.** The first candidate
+  found runs; an unresolved name is `command not found` (`127`) and a
+  resolved-but-non-executable bundle is `command not executable` (`126`).
+  "Try everything until one runs" is forbidden (§2.1).
+
+Which store a shipped bundle lands in is decided by that bundle's own signed
+manifest kind (`command`, `application`, `service`) and by nothing else — no
+list of "which programs are commands" exists in the kernel, the image
+builder, or a fixture (§16.5, §2.2). The build refuses two bundles claiming
+the same name, so one store can never shadow a name in another by accident.
 
 ---
 

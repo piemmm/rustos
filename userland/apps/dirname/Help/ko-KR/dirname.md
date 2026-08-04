@@ -25,7 +25,7 @@ dirname — 이름에서 마지막 구성 요소 떼어내기
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — `/System/Apps`를 인쇄합니다.
+- `dirname /System/Commands/top.app` — `/System/Commands`를 인쇄합니다.
 - `dirname src/lib.rs` — `src`를 인쇄합니다.
 - `dirname file` — `.`을 인쇄합니다(디렉터리 부분이 없음).
 - `dirname Home:/tools` — `Home:/`을 인쇄합니다(루트는 결코 벗겨지지

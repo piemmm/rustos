@@ -195,9 +195,9 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     an invented account).
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the chosen
   session's program — the record's shell of choice for a text session,
-  the OS `desktop` command app
+  the OS `desktop` application
   (`tairix_login::DESKTOP_SESSION_PATH`,
-  `/System/Apps/desktop.app/Run` — the same bundle the shell's
+  `/System/Applications/desktop.app/Run` — the same bundle the shell's
   `desktop` command word resolves to) for a graphical one
   (`session_program`, one mapping defined beside `SessionKind`) — is
   spawned **as the authenticated user** and supervised;

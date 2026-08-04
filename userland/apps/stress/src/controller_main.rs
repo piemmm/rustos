@@ -18,7 +18,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::{
     Errno, Signal, SignalIntakeOp, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
-    CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY,
+    WAIT_PID_ANY,
 };
 use tairix_procinfo::{for_each_mount, IpcTransport};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
@@ -133,7 +134,7 @@ pub fn run(spec: &RunSpec) -> i32 {
     // monitor implementation, never an embedded copy. A refused spawn is
     // a notice (the load is the purpose; the monitor is incidental).
     if spec.monitor {
-        let pid = tairix_rt::spawn(b"/System/Apps/sysmon.app/Run");
+        let pid = tairix_rt::spawn(format!("{SYSTEM_COMMAND_STORE}/sysmon.app/Run").as_bytes());
         if pid >= 0 {
             #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
             let pid = pid as i32;

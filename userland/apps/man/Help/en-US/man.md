@@ -13,13 +13,16 @@ language where a translation exists.
 
 Every TAIRiX program is an application bundle carrying a `Help/` tree: one
 structured document per command or topic, per language. `man` resolves
-`<command>` exactly as the shell does — the system app store first, then
-the directories on `PATH` — so the page shown always documents the program
-the shell would run for the same word. A trailing `.app` names the bundle
-directly. When neither the store nor `PATH` holds the word, `man` searches
-the app stores recursively — `/Apps` first, then the `Apps` folder in your
-home — so a bundle filed away in nested folders is still found; the search
-never looks inside another bundle, and the shallowest match wins.
+`<command>` exactly as the shell does — the fixed store prefix
+`/System/Commands`, `/System/Applications`, `<home>/Commands` and
+`<home>/Applications` first, then the directories on `PATH` — so the page
+shown always documents the program the shell would run for the same word;
+`PATH` can neither reorder nor override that prefix. A trailing `.app`
+names the bundle directly. When none of those holds the word, `man`
+searches the app stores recursively — `/Apps` first, then your own
+`Commands` and `Applications` folders in your home — so a bundle filed
+away in nested folders is still found; the search never looks inside
+another bundle, and the shallowest match wins.
 
 The document is chosen for the locale in the `LANG` environment variable,
 falling back to the same language in another region and finally to the
@@ -52,8 +55,9 @@ is redirected or the console's size is unknown, the whole page streams.
 
 - `LANG` — the preferred locale (a BCP-47 tag such as `fr-FR`).
 - `PATH` — the extra directories searched for `<command>.app` bundles,
-  after the system app store.
-- `HOME` — names your own `Apps` folder for the recursive bundle search.
+  after the fixed store prefix.
+- `HOME` — names your own `Commands` and `Applications` folders for the
+  recursive bundle search.
 
 ## SEE ALSO
 

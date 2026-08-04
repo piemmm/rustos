@@ -28,7 +28,7 @@
 use std::collections::BTreeSet;
 
 use tairix_help::{lint_help_trees, LintDoc, DEFAULT_LOCALE};
-use tairix_itest_harness::app_image::{discover_app_manifests, AppKind};
+use tairix_itest_harness::app_image::discover_app_manifests;
 use tairix_syshelp::HELP_FILES;
 
 use crate::Context;
@@ -45,10 +45,11 @@ pub fn run(ctx: &Context) -> Result<(), String> {
         .collect();
     let mut violations = lint_help_trees(&docs);
 
-    // Coverage: every discovered command app ships its own command word's
-    // canonical document. The discovery walk is the store's build-time
-    // source of truth; a command app absent from the discovered help rows
-    // shipped no `Help/` tree at all.
+    // Coverage: every discovered program a user launches by name — a
+    // command or a graphical application, never a service — ships its own
+    // name's canonical document. The discovery walk is the store's
+    // build-time source of truth; a program absent from the discovered help
+    // rows shipped no `Help/` tree at all.
     let userland = ctx.workspace_root.join("userland");
     let discovered = discover_app_manifests(&userland).map_err(|e| format!("help-lint: {e}"))?;
     let default_docs: BTreeSet<(&str, &str)> = HELP_FILES
@@ -57,14 +58,15 @@ pub fn run(ctx: &Context) -> Result<(), String> {
         .map(|row| (row.bundle, row.file))
         .collect();
     for app in &discovered {
-        if app.manifest.kind != AppKind::Command {
+        if !app.manifest.kind.is_searched() {
             continue;
         }
         let bundle = app.manifest.bundle_dir();
         let file = format!("{}.md", app.manifest.name);
         if !default_docs.contains(&(bundle.as_str(), file.as_str())) {
+            let kind = app.manifest.kind.as_str();
             violations.push(format!(
-                "{bundle}: command app `{}` ships no {DEFAULT_LOCALE}/{file} help document",
+                "{bundle}: {kind} `{}` ships no {DEFAULT_LOCALE}/{file} help document",
                 app.manifest.name
             ));
         }

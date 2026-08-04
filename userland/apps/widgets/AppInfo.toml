@@ -1,8 +1,9 @@
 # Signed-AppInfo manifest source for the `widgets` desktop widget gallery
 # (plans/GUI-CONTROLS-DESIGN.md). Discovered by the build's app-bundle
 # composer, which cross-compiles Run, signs the manifest, and plants the
-# bundle on the read-only /System/Apps store; the desktop session's start
-# menu spawns it (and the shell resolves it by name like any command app).
+# bundle on the read-only /System/Applications store; the desktop session's
+# start menu spawns it (and the shell resolves it by name, like any program
+# in either system store).
 #
 # The capability list is the bundle's request, kept to the minimum the demo
 # needs: CAP_CONSOLE_WRITE for its fail-loud stderr diagnostics, and CAP_SHM
@@ -15,7 +16,7 @@
 id = "os.tairix.widgets"
 name = "widgets"
 version = "0.1.0"
-kind = "command"
+kind = "application"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # The Reactive Alloy control gallery is a windowed development aid: list
 # it in the desktop's program library under the development folder

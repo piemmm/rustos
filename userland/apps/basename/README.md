@@ -1,7 +1,7 @@
 # `tairix-basename` — strip directory and suffix from names
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/basename.app/` so the shell resolves the bare
+store bundle `/System/Commands/basename.app/` so the shell resolves the bare
 word `basename` to it. `basename` is the GNU coreutils tool: it prints
 the final component of each path spelling, optionally with a trailing
 suffix removed, using the purely lexical POSIX algorithm — no operand

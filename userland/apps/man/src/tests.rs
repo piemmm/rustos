@@ -77,7 +77,7 @@ impl FixtureStore {
     fn with_ps() -> Self {
         FixtureStore {
             bundles: alloc::vec![Bundle {
-                dir: "/System/Apps/ps.app",
+                dir: "/System/Commands/ps.app",
                 docs: alloc::vec![("en-US", "ps.md", PS_DOC), ("fr-FR", "ps.md", PS_DOC_FR),],
             }],
             dirs: Vec::new(),
@@ -313,7 +313,7 @@ fn a_path_bundle_serves_a_word_the_store_lacks() {
 #[test]
 fn a_final_refusal_stops_the_probe_rather_than_skipping_it() {
     let mut store = FixtureStore::with_ps();
-    store.denied.push("/System/Apps/hidden.app");
+    store.denied.push("/System/Commands/hidden.app");
     store.bundles.push(Bundle {
         dir: "/Users/root/tools/hidden.app",
         docs: alloc::vec![(
@@ -339,7 +339,7 @@ fn an_explicit_bare_path_names_no_bundle() {
     let store = FixtureStore::with_ps();
     let console = FixtureConsole::stream();
     let err = run(
-        &page("/System/Apps/ps.app/Run"),
+        &page("/System/Commands/ps.app/Run"),
         &Request::default(),
         &store,
         &console,
@@ -347,7 +347,7 @@ fn an_explicit_bare_path_names_no_bundle() {
     .unwrap_err();
     assert_eq!(
         err,
-        ManError::NotABundle(String::from("/System/Apps/ps.app/Run"))
+        ManError::NotABundle(String::from("/System/Commands/ps.app/Run"))
     );
 }
 
@@ -364,7 +364,7 @@ fn an_explicit_bundle_path_opens_its_own_page() {
     let store = FixtureStore::with_ps();
     let console = FixtureConsole::stream();
     run(
-        &page("/System/Apps/ps.app"),
+        &page("/System/Commands/ps.app"),
         &Request::default(),
         &store,
         &console,
@@ -377,7 +377,7 @@ fn an_explicit_bundle_path_opens_its_own_page() {
 fn a_topic_selects_its_own_document_within_the_bundle() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/System/Apps/top.app",
+        dir: "/System/Commands/top.app",
         docs: alloc::vec![
             (
                 "en-US",
@@ -484,10 +484,10 @@ fn a_nested_apps_bundle_is_found_by_the_recursive_search() {
 }
 
 #[test]
-fn the_users_own_apps_folder_is_searched_after_the_shared_store() {
+fn the_users_own_command_store_is_searched_after_the_shared_store() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/Users/ada/Apps/somefolder/moose.app",
+        dir: "/Users/ada/Commands/somefolder/moose.app",
         docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
     });
     let console = FixtureConsole::stream();
@@ -507,19 +507,11 @@ fn the_users_own_apps_folder_is_searched_after_the_shared_store() {
 }
 
 #[test]
-fn a_shared_store_match_wins_over_the_users_own() {
+fn the_users_own_application_store_is_also_searched() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/Apps/moose.app",
+        dir: "/Users/ada/Applications/somefolder/moose.app",
         docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
-    });
-    store.bundles.push(Bundle {
-        dir: "/Users/ada/Apps/moose.app",
-        docs: alloc::vec![(
-            "en-US",
-            "moose.md",
-            "## NAME\n\nmoose — the private copy\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
-        )],
     });
     let console = FixtureConsole::stream();
     let request = Request {
@@ -530,7 +522,53 @@ fn a_shared_store_match_wins_over_the_users_own() {
     };
     run(&page("moose"), &request, &store, &console).expect("page renders");
     assert!(console.output().contains("filed-away app"));
-    assert!(!console.output().contains("private copy"));
+}
+
+/// Precedence between the stores one word can match in. The user's own
+/// command store is on the fixed lookup prefix, so a bundle filed there
+/// answers ahead of the machine-wide installed store, which a bare word
+/// reaches only through the recursive fallback. The system stores stay
+/// unshadowable: a user-writable bundle of the same name can never answer
+/// for a system command.
+#[test]
+fn the_lookup_prefix_orders_the_stores_a_word_can_match_in() {
+    let mut store = FixtureStore::with_ps();
+    store.bundles.push(Bundle {
+        dir: "/Apps/moose.app",
+        docs: alloc::vec![(
+            "en-US",
+            "moose.md",
+            "## NAME\n\nmoose — the installed copy\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
+        )],
+    });
+    store.bundles.push(Bundle {
+        dir: "/Users/ada/Commands/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    let request = Request {
+        locale: None,
+        path: None,
+        home: Some("/Users/ada"),
+        term: None,
+    };
+    let console = FixtureConsole::stream();
+    run(&page("moose"), &request, &store, &console).expect("page renders");
+    assert!(console.output().contains("filed-away app"));
+    assert!(!console.output().contains("installed copy"));
+
+    let mut shadowed = FixtureStore::with_ps();
+    shadowed.bundles.push(Bundle {
+        dir: "/Users/ada/Commands/ps.app",
+        docs: alloc::vec![(
+            "en-US",
+            "ps.md",
+            "## NAME\n\nps — evil twin\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nNot this one.\n",
+        )],
+    });
+    let console = FixtureConsole::stream();
+    run(&page("ps"), &request, &shadowed, &console).expect("page renders");
+    assert!(console.output().contains("list processes"));
+    assert!(!console.output().contains("evil twin"));
 }
 
 #[test]
@@ -654,7 +692,7 @@ fn a_line_longer_than_the_terminal_pages_by_wrapped_rows() {
     let mut store = FixtureStore::with_ps();
     let long = "## NAME\n\ncmd — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaEND_OF_LINE_MARKER\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nBody.\n";
     store.bundles.push(Bundle {
-        dir: "/System/Apps/wide.app",
+        dir: "/System/Commands/wide.app",
         docs: alloc::vec![("en-US", "wide.md", long)],
     });
     // 4 rows → 3 physical page rows; 20 columns forces the summary to wrap.
@@ -698,7 +736,7 @@ fn the_full_page_shows_headings_in_the_requested_language() {
 fn short_help_renders_mans_own_document() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/System/Apps/man.app",
+        dir: "/System/Commands/man.app",
         docs: alloc::vec![("en-US", "man.md", MAN_DOC)],
     });
     let console = FixtureConsole::stream();
@@ -759,7 +797,7 @@ fn a_hostile_renderer_withholds_the_page_and_reports_it() {
 fn short_help_degrades_to_the_usage_banner_when_the_renderer_is_hostile() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/System/Apps/man.app",
+        dir: "/System/Commands/man.app",
         docs: alloc::vec![("en-US", "man.md", MAN_DOC)],
     });
     let console = FixtureConsole::stream();

@@ -932,7 +932,7 @@ mod tests {
                 supplementary_gids: &[],
                 display_name: "",
                 home: Some("/Users/root"),
-                shell: Some("/System/Apps/elsh.app/Run"),
+                shell: Some("/System/Commands/elsh.app/Run"),
                 capabilities: tairix_caps::CapabilitySet::empty(),
                 state: tairix_users::AccountState::Active,
             },

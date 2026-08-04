@@ -1,7 +1,7 @@
 # `tairix-head` — output the first part of files
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/head.app/` so the shell resolves the bare word
+store bundle `/System/Commands/head.app/` so the shell resolves the bare word
 `head` to it. `head` is the GNU coreutils tool: it prints the first 10
 lines of each file operand (or standard input) to standard output, with
 `==> file <==` headers between multiple files. The GNU surface is

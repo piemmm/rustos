@@ -1,7 +1,7 @@
 # `tairix-false` — do nothing, unsuccessfully
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/false.app/` so the shell resolves the bare word
+store bundle `/System/Commands/false.app/` so the shell resolves the bare word
 `false` to it. `false` is the GNU coreutils tool: it ignores every
 argument and exits `1`, giving scripts a command that always fails. A
 **first** argument of `-h`/`-?`/`--help` — the position GNU honours

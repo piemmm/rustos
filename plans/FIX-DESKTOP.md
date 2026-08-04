@@ -142,6 +142,26 @@ fail closed):
 - Path **syntax** resolution: is this a boot-floor registry name or a
   well-formed `<Name>.app/Run` bundle path? A syntactically invalid
   path still returns `NotFound` synchronously.
+- Store-bundle **existence** probe: for a well-formed bundle path, one
+  cheap directory-metadata lookup of the bundle root (`stat`), under the
+  same `(uid, effective)` the deferred load reads with
+  (`SpawnCredential::read_authority`), confirms a bundle is actually
+  there before a loading child is admitted. This keeps the handler's
+  `NotFound`-for-an-unknown-path contract: **absent** → `NotFound`
+  synchronously (so a caller's ordered command search advances to the
+  next candidate, `plans/APPS.md` §8); **present but the caller may not
+  read it, or any other non-absence error** → admit the child (so the
+  search *stops* and the deferred load surfaces the real refusal via the
+  child's exit — a missing bundle a later user-writable candidate could
+  shadow must never be silently skipped). With no store installed the
+  probe fails closed with `NotFound` at once; while the `/System` mount
+  is still pending the child is admitted to *park* on the store latch
+  (the answer is unknowable without racing the mount, and the parent must
+  not block); a bundle the launch cache already holds skips the lookup
+  (already proven present this boot). Only this one metadata lookup is
+  synchronous — a search inherently pays one lookup per candidate, like a
+  POSIX `PATH` walk; the bundle read, content hash, signature verify, and
+  `rxe` decode all stay deferred (§2.2).
 - The attach/startup-strings block validation and the standard-stream
   wiring (owner-checked parent descriptors) — unchanged, synchronous.
 - Credential resolution (`resolve_spawn_credential`, incl. the
@@ -157,10 +177,12 @@ child's task, before it enters user mode:
   parking the *child* costs the parent nothing.
 - `load_store_bundle`: the VFS read of the entry point and the
   `AppLoader` signature/hash verification (with the existing
-  `LaunchCache` still hoisting verification off re-launches). The VFS
-  read is re-authorised under the child's own kernel-attested
-  credential (`§5.4`), which is *more* correct than authorising under
-  the caller.
+  `LaunchCache` still hoisting verification off re-launches). Only the
+  *existence* of the bundle root is confirmed synchronously (§2.1's cheap
+  metadata probe); the megabyte read + cryptography this bullet covers is
+  what must stay off the caller. The VFS read is re-authorised under the
+  child's own kernel-attested credential (`§5.4`), which is *more*
+  correct than authorising under the caller.
   - **Under which authority (resolved).** The child's credential
     (`SpawnCredential`, resolved synchronously at admit — §2.1) carries
     the child's `uid` and its account **capability ceiling** (the stored
@@ -177,10 +199,11 @@ child's task, before it enters user mode:
     did. This is never *wider* than the account allows and fails closed
     on a refused read (the child exits `LOAD_NOT_FOUND`, §2.3).
   - `load_store_bundle` therefore takes an explicit
-    `(uid, effective_caps)` pair rather than a borrowed `CallerContext`,
-    so the same code path serves both the (now historical) caller-side
-    read and the child-side read under the child's own credential — one
-    definition, no fork (`§2.2`).
+    `(uid, effective_caps)` pair rather than a borrowed `CallerContext`.
+    That pair comes from one shared source, `SpawnCredential::read_authority`,
+    which both the child-side read here and the synchronous existence probe
+    (§2.1) call, so the probe and the load can never judge a bundle
+    present-or-absent differently — one definition, no fork (`§2.2`).
 - The image is **prepared** into the child's fresh address space —
   segment regions reserved and, per §2.6, either faulted in on demand
   from the verified shared image or (until §2.6 lands) eagerly built.

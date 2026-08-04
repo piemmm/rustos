@@ -14,7 +14,7 @@
 //! ```text
 //! tairix-users-v1
 //! # username:uid:gid:supplementary:display name:home:shell:caps:state:password
-//! root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
+//! root:1000:1000::System Administrator:/Users/root:/System/Commands/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$…$…
 //! devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
 //! ```
 //!
@@ -263,7 +263,7 @@ mod tests {
                 supplementary_gids: &[],
                 display_name: "",
                 home: Some("/Users/test"),
-                shell: Some("/System/Apps/elsh.app/Run"),
+                shell: Some("/System/Commands/elsh.app/Run"),
                 capabilities,
                 state,
             },

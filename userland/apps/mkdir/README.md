@@ -1,7 +1,7 @@
 # `tairix-mkdir` — make directories
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/mkdir.app/` so the shell resolves the bare
+store bundle `/System/Commands/mkdir.app/` so the shell resolves the bare
 word `mkdir` to it. `mkdir` is the GNU coreutils tool: it creates each
 directory operand through the kernel's `fs_mkdir` under the caller's
 attested identity. The implemented GNU surface is `-p`/`--parents`

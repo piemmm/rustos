@@ -1,7 +1,7 @@
 # `tairix-lspci` — list discovered PCI/PCIe devices
 
 A `plans/DEVICES.md` DEVICE1 command app (`AGENTS.md` §3
-`userland/apps/`), registered as the system app store bundle `lspci.app`
+`userland/apps/`), registered as the system command store bundle `lspci.app`
 so the shell resolves the bare word `lspci` to it. `lspci` lists, one
 line per discovered PCI/PCIe function, a small bus-order listing number,
 the function's class, and its vendor and device names. The option surface

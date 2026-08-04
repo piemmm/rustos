@@ -1,6 +1,6 @@
 [package]
 name = "tairix-cmdres"
-description = "TAIRiX shared command-word resolution policy (plans/APPS.md §8–§9): the one pure definition of which application-bundle paths a typed command word may name, in the fixed, deterministic search order — the read-only system app store first (so a user's PATH can never shadow a system command), then the user's PATH with its alias-aware `:` split. The shell's launch path and the `man` command's bundle lookup both import this instead of embedding a second resolution policy (AGENTS.md §2.2). Spelling only: it performs no I/O, checks no permission, and grants nothing — the kernel authorises every launch. no_std + alloc, never panics."
+description = "TAIRiX shared command-word resolution policy (plans/APPS.md §8–§9, AGENTS.md §16.8): the one pure definition of which application-bundle paths a typed command word may name, in the fixed, deterministic search order — the non-overridable prefix /System/Commands, /System/Applications, <home>/Commands, <home>/Applications (built from the store definitions, never read from the environment, so no PATH value can reorder it or shadow a system command), then the user's PATH with its alias-aware `:` split. The shell's launch path, its tab completion, and the `man` command's bundle lookup all import this instead of embedding a second resolution policy (AGENTS.md §2.2). Spelling only: it performs no I/O, checks no permission, and grants nothing — the kernel authorises every launch. no_std + alloc, never panics."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The store spellings the policy is computed from: `SYSTEM_APP_STORE`,
-# `BUNDLE_SUFFIX`, and the bundle `Run` entry-point name are the `lib/abi`
-# definitions the kernel's program registry is drift-tested against, so the
-# candidates this crate spells and the paths the kernel registers can never
-# diverge (§2.2).
+# The store spellings the policy is computed from: the two system program
+# stores, the home-relative per-user store names, the machine-wide installed
+# store, `BUNDLE_SUFFIX`, and the bundle `Run` entry-point name are the
+# `lib/abi` definitions the kernel's program registry is drift-tested against,
+# so the candidates this crate spells and the paths the kernel registers can
+# never diverge (§2.2).
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [lints]

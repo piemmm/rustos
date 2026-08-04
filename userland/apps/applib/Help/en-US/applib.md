@@ -45,14 +45,16 @@ cannot resurrect it — and `applib show` re-shows it. Hiding is
 presentation, never authority: launching a bundle is still governed by
 the loader's signature and capability checks regardless of the catalog.
 
-`applib rescan` walks the application stores (`/System/Apps` and `/Apps`,
-or the caller's own `<home>/Apps` under `--user`), reads each bundle's
-manifest, and registers every application that asks to be listed and is
-not yet catalogued. Existing records — including a curator's renames and
-suppressions — are never disturbed, and a bundle with an unreadable or
-malformed manifest is skipped and counted, never a reason to abort. This
-is how a fresh system's library populates itself from the bundles
-actually installed, with no hand-maintained list anywhere.
+`applib rescan` walks the application stores (`/System/Commands`,
+`/System/Applications`, and `/Apps`, or the caller's own
+`<home>/Commands` and `<home>/Applications` under `--user`), reads each
+bundle's manifest, and registers every application that asks to be
+listed and is not yet catalogued. Existing records — including a
+curator's renames and suppressions — are never disturbed, and a bundle
+with an unreadable or malformed manifest is skipped and counted, never a
+reason to abort. This is how a fresh system's library populates itself
+from the bundles actually installed, with no hand-maintained list
+anywhere.
 
 By default the tool edits the machine-wide store, which only a principal
 admitted by the `/System/Settings` write policy can change; an ordinary
@@ -73,8 +75,8 @@ everything else may ignore.
 - `--icon <asset>` — with `add`, the icon asset (a file name inside the
   bundle's own `Resources/`) instead of the manifest's.
 - `--user` — apply the change to the caller's own overlay (or, with
-  `rescan`, walk the caller's own `<home>/Apps`) instead of the
-  machine-wide store.
+  `rescan`, walk the caller's own `<home>/Commands` and
+  `<home>/Applications`) instead of the machine-wide store.
 - `-h, -?` — show this command's own short help.
 
 ## EXAMPLES
@@ -104,7 +106,7 @@ everything else may ignore.
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such as
   `fr-FR`).
 - `HOME` — the caller's home directory: names the per-user overlay and
-  the `--user` rescan root `<home>/Apps`.
+  the `--user` rescan roots `<home>/Commands` and `<home>/Applications`.
 
 ## SEE ALSO
 

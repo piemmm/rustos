@@ -88,7 +88,7 @@ fn record(username: &str, uid: u32, grants: CapabilitySet, password: &[u8]) -> U
             supplementary_gids: &[],
             display_name: "",
             home: Some("/Users/test"),
-            shell: Some("/System/Apps/elsh.app/Run"),
+            shell: Some("/System/Commands/elsh.app/Run"),
             capabilities: grants,
             state: AccountState::Active,
         },
@@ -183,7 +183,7 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
         supplementary_gids,
         display_name: "Grace Hopper",
         home: "/Users/grace",
-        shell: "/System/Apps/elsh.app/Run",
+        shell: "/System/Commands/elsh.app/Run",
         grants,
         password_record: &password,
     });
@@ -232,7 +232,7 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
         supplementary_gids,
         display_name: "",
         home: "/Users/mallory",
-        shell: "/System/Apps/elsh.app/Run",
+        shell: "/System/Commands/elsh.app/Run",
         grants,
         password_record: &password,
     });
@@ -395,7 +395,7 @@ fn duplicate_accounts_and_groups_are_refused() {
         supplementary_gids,
         display_name: "",
         home: "/Users/ada2",
-        shell: "/System/Apps/elsh.app/Run",
+        shell: "/System/Commands/elsh.app/Run",
         grants,
         password_record: &password,
     });
@@ -457,7 +457,7 @@ fn modify_user_replaces_identity_fields_and_provisions_a_changed_home() {
                 supplementary_gids,
                 display_name: "Ada Lovelace",
                 home: "/Users/ada",
-                shell: "/System/Apps/elsh.app/Run",
+                shell: "/System/Commands/elsh.app/Run",
             }),
         ),
         Ok(0)

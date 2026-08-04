@@ -10,7 +10,7 @@ use core::ops::Range;
 
 use tairix_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
 use tairix_abi::{Errno, BUNDLE_SUFFIX};
-use tairix_cmdres::{bundle_candidates, search_roots};
+use tairix_cmdres::{bundle_candidates, search_roots, CommandEnv};
 use tairix_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
 use tairix_log::Sink;
 use tairix_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode, Styling};
@@ -64,8 +64,9 @@ pub struct Request<'a> {
     /// The `PATH` variable, if set: the user-extendable half of the
     /// store-then-`PATH` bundle search (plans/APPS.md §8).
     pub path: Option<&'a str>,
-    /// The `HOME` variable, if set: names the user's own `<home>/Apps`
-    /// root for the recursive bundle search (plans/APPS.md §7).
+    /// The `HOME` variable, if set: names the user's own `<home>/Commands`
+    /// and `<home>/Applications` roots for the recursive bundle search
+    /// (plans/APPS.md §7).
     pub home: Option<&'a str>,
     /// The `TERM` variable, if set: the terminal type, which decides how
     /// much colour the rendered page uses (plans/APPS.md §12.2). It is only
@@ -197,10 +198,17 @@ fn document_word(word: &str) -> &str {
 /// shell's launch rule, so the page shown always documents the program the
 /// shell would run. When every ordered candidate is absent, a bare word
 /// falls back to the recursive app-store search: the machine-wide `/Apps`
-/// store, then the user's own `<home>/Apps`, walked breadth-first so the
-/// shallowest (most visible) copy of a bundle wins.
+/// store, then the user's own `<home>/Commands` and `<home>/Applications`,
+/// walked breadth-first so the shallowest (most visible) copy of a bundle
+/// wins.
 fn resolve(word: &str, request: &Request<'_>, store: &dyn BundleStore) -> Result<String, ManError> {
-    let candidates = bundle_candidates(word, request.path);
+    let candidates = bundle_candidates(
+        word,
+        CommandEnv {
+            home: request.home,
+            path_var: request.path,
+        },
+    );
     if candidates.is_empty() {
         return Err(ManError::NotABundle(String::from(word)));
     }

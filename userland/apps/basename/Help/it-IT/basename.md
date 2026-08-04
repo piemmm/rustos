@@ -37,7 +37,7 @@ un nome.
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — stampare `top.app`.
+- `basename /System/Commands/top.app` — stampare `top.app`.
 - `basename src/lib.rs .rs` — stampare `lib`.
 - `basename -s .rs -a a.rs b.rs` — stampare `a` e `b`.
 - `basename Home:/` — stampare `Home:/` (una radice non viene mai

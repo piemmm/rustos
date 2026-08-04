@@ -15,13 +15,13 @@ use alloc::format;
 use alloc::string::String;
 
 /// The login shell a created interactive account starts: the `Run` binary
-/// of the default shell's application bundle in the system app store.
+/// of the default shell's application bundle in the system command store.
 ///
 /// The spelling is pinned to the store layout constants
-/// (`tairix_abi::SYSTEM_APP_STORE`, `tairix_abi::BUNDLE_SUFFIX`) by a unit
-/// test below, so it cannot drift from where the image builder plants the
-/// bundle.
-pub const DEFAULT_SHELL: &str = "/System/Apps/elsh.app/Run";
+/// (`tairix_abi::SYSTEM_COMMAND_STORE`, `tairix_abi::BUNDLE_SUFFIX`) by a
+/// unit test below, so it cannot drift from where the image builder plants
+/// the bundle.
+pub const DEFAULT_SHELL: &str = "/System/Commands/elsh.app/Run";
 
 /// The default home directory for the account named `username`: the
 /// `/Users/<name>` layout the installed-system contract fixes.
@@ -47,12 +47,26 @@ pub const HOME_MODE: u32 = 0o700;
 /// inventing a sibling beside it. They are created **with** the account
 /// rather than on first use, because the write paths that land in them are
 /// one level deeper — a per-user settings store under `Settings/`, an
-/// app-scoped cache under `Library/`, the user's own bundles under `Apps/`
-/// — and a writer that creates only its immediate parent would fail on a
-/// brand-new account the first time anything was saved.
+/// app-scoped cache under `Library/`, the user's own bundles under
+/// `Commands/` and `Applications/` — and a writer that creates only its
+/// immediate parent would fail on a brand-new account the first time
+/// anything was saved.
+///
+/// The user's own two program stores are the third and fourth directories a
+/// bare command word is resolved against (`tairix_cmdres`), so provisioning
+/// them with the account is what makes a user's own commands typeable
+/// without any `PATH` edit. Their names are pinned to the shared store
+/// definitions by a unit test below.
 ///
 /// Sorted and duplicate-free, so a fresh home lists deterministically.
-pub const HOME_SUBDIRS: [&str; 5] = ["Apps", "Desktop", "Documents", "Library", "Settings"];
+pub const HOME_SUBDIRS: [&str; 6] = [
+    "Applications",
+    "Commands",
+    "Desktop",
+    "Documents",
+    "Library",
+    "Settings",
+];
 
 /// First uid the interactive-user range starts at; everything below is
 /// reserved for the system account (`uid 0`) and the service accounts.
@@ -124,14 +138,26 @@ mod tests {
         default_home, next_id, IdRange, DEFAULT_SHELL, FIRST_USER_UID, HOME_MODE, HOME_SUBDIRS,
     };
     use alloc::format;
-    use tairix_abi::{BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_abi::{
+        BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, SYSTEM_COMMAND_STORE,
+    };
 
     #[test]
     fn the_default_shell_is_the_store_bundle_run_binary() {
         assert_eq!(
             DEFAULT_SHELL,
-            format!("{SYSTEM_APP_STORE}/elsh{BUNDLE_SUFFIX}/Run")
+            format!("{SYSTEM_COMMAND_STORE}/elsh{BUNDLE_SUFFIX}/Run")
         );
+    }
+
+    /// A provisioned home carries the user's own two program stores under
+    /// exactly the names command resolution searches; a drift here would
+    /// leave a fresh account's own commands unreachable.
+    #[test]
+    fn a_provisioned_home_carries_the_users_own_program_stores() {
+        for store in [HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR] {
+            assert!(HOME_SUBDIRS.contains(&store), "{store} is not provisioned");
+        }
     }
 
     #[test]

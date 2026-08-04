@@ -10,13 +10,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
+use tairix_abi::ProgramKind;
 use tairix_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileId, FileKind, FileStat, NodeTimes,
     OpenFlags, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
-use tairix_itest_harness::app_image::{compose_signed_appinfo, AppKind, AppManifestSource};
+use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
@@ -40,6 +41,7 @@ pub(crate) const SEED: [u8; 32] = [7u8; 32];
 pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
     read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
+    stat_error: Option<Errno>,
 }
 
 impl MemFs {
@@ -50,7 +52,18 @@ impl MemFs {
                 .map(|(path, bytes)| ((*path).to_string(), bytes.to_vec()))
                 .collect(),
             read_calls: std::sync::Mutex::new(BTreeMap::new()),
+            stat_error: None,
         }
+    }
+
+    /// Make [`FilesystemService::stat`] of a node that *exists* fail with
+    /// `errno` instead of resolving, modelling a bundle that is present on
+    /// the volume but the caller may not inspect (a permission denial). A
+    /// genuinely absent path still reports [`Errno::NotFound`], so the spawn
+    /// probe's absent-vs-present-but-refused distinction can be exercised.
+    pub(crate) fn with_stat_error(mut self, errno: Errno) -> Self {
+        self.stat_error = Some(errno);
+        self
     }
 
     /// How many times [`FilesystemService::read`] was called for `path`.
@@ -163,9 +176,25 @@ impl FilesystemService for MemFs {
     }
 
     fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+        let file = self.files.get(path);
+        // A directory iff any file lives beneath it.
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        let is_dir = self.files.keys().any(|p| p.starts_with(&prefix));
+        // A configured refusal shadows an *existing* node only: a present
+        // bundle the caller may not inspect fails with the given errno, while
+        // a genuinely absent path still reports absence.
+        if let Some(err) = self.stat_error {
+            if file.is_some() || is_dir {
+                return Err(err);
+            }
+        }
         // A regular file present in the flat map reports its real byte
         // length, so the bundle store's `read_file` reserves exactly it.
-        if let Some(body) = self.files.get(path) {
+        if let Some(body) = file {
             return Ok(FileStat {
                 kind: FileKind::Regular,
                 size: body.len() as u64,
@@ -177,13 +206,7 @@ impl FilesystemService for MemFs {
                 times: NodeTimes::default(),
             });
         }
-        // Otherwise a directory iff any file lives beneath it.
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
-        if self.files.keys().any(|p| p.starts_with(&prefix)) {
+        if is_dir {
             return Ok(FileStat {
                 kind: FileKind::Directory,
                 size: 0,
@@ -320,7 +343,7 @@ pub(crate) fn tiny_run() -> Vec<u8> {
 }
 
 /// Compose a signed `ps` bundle (manifest + `Run` + one help document) in a
-/// [`MemFs`] under `/System/Apps/ps.app`, returning the filesystem, the
+/// [`MemFs`] under `/System/Commands/ps.app`, returning the filesystem, the
 /// signer's public key, and the `Run` bytes.
 ///
 /// The `AppInfo` is composed and signed by the **same** host composer the
@@ -333,7 +356,7 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
         id: "os.tairix.ps".to_string(),
         name: "ps".to_string(),
         version: "1.0".to_string(),
-        kind: AppKind::Command,
+        kind: ProgramKind::Command,
         capabilities: caps,
         associations: Vec::new(),
         library: None,
@@ -356,9 +379,9 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
     )
     .expect("composes");
     let fs = MemFs::new(&[
-        ("/System/Apps/ps.app/AppInfo", composed.bytes.as_slice()),
-        ("/System/Apps/ps.app/Run", run.as_slice()),
-        ("/System/Apps/ps.app/Help/en-US/ps.md", help.as_slice()),
+        ("/System/Commands/ps.app/AppInfo", composed.bytes.as_slice()),
+        ("/System/Commands/ps.app/Run", run.as_slice()),
+        ("/System/Commands/ps.app/Help/en-US/ps.md", help.as_slice()),
     ]);
     (fs, composed.signer_pubkey, run)
 }
@@ -397,7 +420,7 @@ pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppEr
         sink,
     });
     loader.load(
-        "/System/Apps/ps.app",
+        "/System/Commands/ps.app",
         &CapabilitySet::from_words([u64::MAX; 4]),
     )
 }

@@ -23,7 +23,7 @@ dirname — 去掉名字的最后一个部件
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — 打印 `/System/Apps`。
+- `dirname /System/Commands/top.app` — 打印 `/System/Commands`。
 - `dirname src/lib.rs` — 打印 `src`。
 - `dirname file` — 打印 `.`（没有目录部分）。
 - `dirname Home:/tools` — 打印 `Home:/`（根永远不会被剥开）。

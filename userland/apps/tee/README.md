@@ -1,7 +1,7 @@
 # `tairix-tee` — read from standard input and write to standard output and files
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/tee.app/` so the shell resolves the bare word
+store bundle `/System/Commands/tee.app/` so the shell resolves the bare word
 `tee` to it. `tee` is the GNU coreutils tool: it copies standard input to
 standard output and to each file operand (created if absent; overwritten,
 or appended with `-a`), so a pipeline's data can be seen and captured at

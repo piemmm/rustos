@@ -1,7 +1,7 @@
 # `tairix-du` — estimate file space usage
 
 A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
-registered as the system app store bundle `du.app` so the shell resolves
+registered as the system command store bundle `du.app` so the shell resolves
 the bare word `du` to it. `du` walks each of its path operands and
 reports, per directory (post-order), the on-disk storage its tree
 occupies; with no operand it walks the current directory (`.`). The

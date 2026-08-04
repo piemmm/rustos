@@ -40,8 +40,9 @@ applib — 管理桌面的程序库
 隐藏仅关乎展示，而非权限：无论目录如何设置，启动包始终受加载器的签名和
 能力（capability）检查约束。
 
-`applib rescan` 遍历应用程序存储（`/System/Apps` 和 `/Apps`，或者在指定
-`--user` 时遍历调用者自身的 `<home>/Apps`），读取每个包的清单，
+`applib rescan` 遍历应用程序存储（`/System/Commands`、`/System/Applications`
+和 `/Apps`，或者在指定 `--user` 时遍历调用者自身的 `<home>/Commands` 和
+`<home>/Applications`），读取每个包的清单，
 并注册每一个请求列出且尚未编目的应用程序。现有记录（包括管理员的重命名和屏蔽）
 绝不会被干扰，且清单不可读或畸形的包将被跳过并计数，绝不会因此中止任务。
 这就是新系统的程序库如何根据实际安装的包自动填充，而无需任何手动维护的列表。
@@ -62,7 +63,7 @@ applib — 管理桌面的程序库
 - `--icon <asset>` — 配合 `add` 使用时，指定图标资产（包内 `Resources/` 下的文件名），
   而非清单中的图标。
 - `--user` — 将更改应用于调用者自身的覆盖层（或者在 `rescan` 时遍历调用者自身的
-  `<home>/Apps`），而非系统级存储。
+  `<home>/Commands` 和 `<home>/Applications`），而非系统级存储。
 - `-h, -?` — 显示本命令自己的简短帮助。
 
 ## EXAMPLES
@@ -85,7 +86,7 @@ applib — 管理桌面的程序库
 ## ENVIRONMENT
 
 - `LANG` — 简短帮助的首选语言（BCP-47 标签，如 `fr-FR`）。
-- `HOME` — 调用者的主目录：命名用户级覆盖层和 `--user` 重新扫描根目录 `<home>/Apps`。
+- `HOME` — 调用者的主目录：命名用户级覆盖层和 `--user` 重新扫描根目录 `<home>/Commands` 和 `<home>/Applications`。
 
 ## SEE ALSO
 

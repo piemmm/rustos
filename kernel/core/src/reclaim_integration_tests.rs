@@ -76,7 +76,7 @@ fn warmed_pair(
     assert!(fs_cache.accounting().class_bytes(ReclaimClass::FsMetadata) > 0);
 
     let mut launch = LaunchCache::new(budget(), pressure, sink());
-    launch.insert("/System/Apps/ps.app", &verified_app());
+    launch.insert("/System/Commands/ps.app", &verified_app());
     assert!(
         launch
             .accounting()
@@ -119,7 +119,7 @@ fn touch(fs_cache: &mut CachedFs<RwMockFs>, launch: &mut LaunchCache) {
     let root = fs_cache.root();
     let _ = fs_cache.lookup(root, b"dir");
     let _ = fs_cache.node_info(root);
-    let _ = launch.lookup("/System/Apps/ps.app");
+    let _ = launch.lookup("/System/Commands/ps.app");
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn bench_evidence_warm_passes_avoid_the_rebuild_work() {
     let lookup_misses = launch.accounting().misses();
     let started = std::time::Instant::now();
     for _ in 0..PASSES {
-        assert!(launch.lookup("/System/Apps/ps.app").is_some());
+        assert!(launch.lookup("/System/Commands/ps.app").is_some());
     }
     let warm_launch = started.elapsed();
     assert_eq!(

@@ -111,7 +111,7 @@ mod tests {
                 supplementary_gids: &[Gid(4)],
                 display_name: "Ada Lovelace",
                 home: Some("/Users/ada"),
-                shell: Some("/System/Apps/elsh.app/Run"),
+                shell: Some("/System/Commands/elsh.app/Run"),
                 capabilities,
                 state: AccountState::Active,
             },
@@ -128,7 +128,7 @@ mod tests {
                 supplementary_gids: &[],
                 display_name: "",
                 home: Some("/Users/mallory"),
-                shell: Some("/System/Apps/elsh.app/Run"),
+                shell: Some("/System/Commands/elsh.app/Run"),
                 capabilities: CapabilitySet::empty(),
                 state: AccountState::Locked,
             },
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(user.supplementary_gids, vec![Gid(4)]);
         assert!(user.capabilities.contains(CapabilityId::PROC_SPAWN));
         assert!(!user.capabilities.contains(CapabilityId::USER_ADMIN));
-        assert_eq!(user.shell, "/System/Apps/elsh.app/Run");
+        assert_eq!(user.shell, "/System/Commands/elsh.app/Run");
     }
 
     #[test]

@@ -13,7 +13,9 @@ use alloc::string::{String, ToString};
 use core::fmt;
 
 use tairix_abi::{
-    LibraryCategory, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, LIBRARY_ICON_MAX,
+    LibraryCategory, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
+    HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, LIBRARY_ICON_MAX, SYSTEM_APPLICATION_STORE,
+    SYSTEM_COMMAND_STORE,
 };
 
 /// Maximum length, in bytes, of an entry identifier: the bundle identifier
@@ -26,7 +28,7 @@ pub const MAX_ENTRY_ID_LEN: usize = BUNDLE_ID_MAX;
 pub const MAX_DISPLAY_NAME_LEN: usize = BUNDLE_NAME_MAX;
 
 /// Maximum length, in bytes, of an entry's bundle path. The store lists
-/// bundles in the two app stores, whose paths are short; a longer spelling
+/// bundles in the program stores, whose paths are short; a longer spelling
 /// is a malformed store, not a workload.
 pub const MAX_BUNDLE_PATH_LEN: usize = 512;
 
@@ -36,26 +38,13 @@ pub const MAX_BUNDLE_PATH_LEN: usize = 512;
 /// it is derived from can never disagree on width.
 pub const MAX_ICON_ASSET_LEN: usize = LIBRARY_ICON_MAX;
 
-/// The `/`-view component naming the machine-wide application store,
-/// derived from the one store-path definition
-/// ([`tairix_abi::USER_APP_STORE`]) rather than spelled a second time. A
-/// unit test pins the two together, so moving the store cannot leave this
-/// check matching a stale directory.
-const USER_APP_STORE_LEAF: &str = "Apps";
-
 /// The `/`-view component naming the per-user home directories, under
-/// which each account's own application store lives
-/// (`/Users/<name>/Apps`). Pinned by a unit test to the home-directory
-/// layout the account-authoring policy fixes
-/// (`tairix_users::policy::default_home`), the single definition of that
-/// spelling.
+/// which each account's own program stores live
+/// (`/Users/<name>/Commands`, `/Users/<name>/Applications`). Pinned by a
+/// unit test to the home-directory layout the account-authoring policy
+/// fixes (`tairix_users::policy::default_home`), the single definition of
+/// that spelling.
 const USERS_VIEW_LEAF: &str = "Users";
-
-/// The `/`-view component naming the read-only `/System` subtree, under
-/// which the system app store lives (`/System/Apps`). Pinned by a unit
-/// test to the one store-path definition
-/// ([`tairix_abi::SYSTEM_APP_STORE`]).
-const SYSTEM_VIEW_LEAF: &str = "System";
 
 /// Why a program-library entry field was refused.
 ///
@@ -80,7 +69,7 @@ pub enum EntryError {
     /// The bundle path exceeded [`MAX_BUNDLE_PATH_LEN`].
     BundlePathTooLong,
     /// The bundle path was not a valid absolute path, or did not name a
-    /// `.app` directory inside a permitted application store.
+    /// `.app` directory inside a permitted program store.
     MalformedBundlePath,
     /// The icon asset name exceeded [`MAX_ICON_ASSET_LEN`].
     IconAssetTooLong,
@@ -223,33 +212,63 @@ impl fmt::Display for DisplayName {
     }
 }
 
-/// The application stores a library entry may name a bundle in, expressed
-/// as the leading `/`-view components of a bundle path.
+/// The program stores a library entry may name a bundle in, expressed as
+/// the leading `/`-view components of a bundle path.
 ///
-/// The machine-wide store is `/Apps`; a user's own store is
-/// `/Users/<name>/Apps`; and the read-only system app store
-/// (`/System/Apps`) holds the OS-shipped programs, among them the
+/// The machine-wide store is [`INSTALLED_APP_STORE`]; the OS-provided
+/// system stores are [`SYSTEM_COMMAND_STORE`] and
+/// [`SYSTEM_APPLICATION_STORE`], holding the OS-shipped commands and
 /// graphical applications a fresh install's library lists (the file
-/// manager, the terminal). The service store is deliberately absent:
-/// daemons are not the user-facing applications a launcher offers, and a
-/// catalog claiming one is malformed.
+/// manager, the terminal); and a user's own stores are the
+/// [`HOME_COMMAND_STORE_DIR`] and [`HOME_APPLICATION_STORE_DIR`]
+/// directories under their home. Both program kinds are accepted at every
+/// scope — a command app may legitimately list itself in the launcher
+/// too — but the service store is deliberately absent: daemons are not
+/// the user-facing programs a launcher offers, and a catalog claiming one
+/// is malformed.
 ///
 /// Every store permits plain nesting (`/Apps/games/chess.app`), so only
 /// the prefix is fixed here; the depth beneath it is not.
 fn store_body(components: &[String]) -> Option<&[String]> {
-    match components {
-        [store, rest @ ..] if store == USER_APP_STORE_LEAF => Some(rest),
-        [system, store, rest @ ..]
-            if system == SYSTEM_VIEW_LEAF && store == USER_APP_STORE_LEAF =>
-        {
-            Some(rest)
+    for store in [
+        INSTALLED_APP_STORE,
+        SYSTEM_COMMAND_STORE,
+        SYSTEM_APPLICATION_STORE,
+    ] {
+        if let Some(rest) = strip_store_prefix(components, store) {
+            return Some(rest);
         }
+    }
+    match components {
         [users, _account, store, rest @ ..]
-            if users == USERS_VIEW_LEAF && store == USER_APP_STORE_LEAF =>
+            if users == USERS_VIEW_LEAF
+                && (store == HOME_COMMAND_STORE_DIR || store == HOME_APPLICATION_STORE_DIR) =>
         {
             Some(rest)
         }
         _ => None,
+    }
+}
+
+/// Strip `store`'s own leading components from `components`, or `None`
+/// when `components` does not begin with them.
+///
+/// The store path is spelled once in `lib/abi`; this compares against that
+/// one definition component-wise rather than carrying a second literal.
+fn strip_store_prefix<'a>(components: &'a [String], store: &str) -> Option<&'a [String]> {
+    let mut expected = store.split('/').filter(|part| !part.is_empty());
+    let mut rest = components;
+    loop {
+        let Some(part) = expected.next() else {
+            return Some(rest);
+        };
+        let [head, tail @ ..] = rest else {
+            return None;
+        };
+        if head != part {
+            return None;
+        }
+        rest = tail;
     }
 }
 
@@ -262,7 +281,7 @@ fn store_body(components: &[String]) -> Option<&[String]> {
 /// re-reads rather than preserving a redundant `.`/`..` detour.
 ///
 /// The path parses under the one shared path-spelling parser, is rooted in
-/// the `/` session view, sits inside one of the application stores a
+/// the `/` session view, sits inside one of the program stores a
 /// launcher may start a bundle from, and ends at a `<name>.app` directory
 /// whose ancestors are plain directories — a bundle is a sealed unit,
 /// never a container of further bundles. Confining the path here is what

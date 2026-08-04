@@ -1,7 +1,7 @@
 # `tairix-wc` — print newline, word, and byte counts for each file
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/wc.app/` so the shell resolves the bare word
+store bundle `/System/Commands/wc.app/` so the shell resolves the bare word
 `wc` to it. `wc` is the GNU coreutils tool: it counts lines, words,
 characters, bytes, and the maximum line display width of each file
 operand (or standard input), printing one aligned row per input in the

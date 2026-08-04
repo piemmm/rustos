@@ -1,7 +1,7 @@
 # `tairix-whoami` — print the current user's account name
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/whoami.app/` so the shell resolves the bare word
+store bundle `/System/Commands/whoami.app/` so the shell resolves the bare word
 `whoami` to it. `whoami` is the GNU coreutils tool: it prints the user name
 associated with the caller's identity and nothing else. It takes no
 operands (`extra operand`) and knows no options beyond the reserved

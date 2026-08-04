@@ -27,7 +27,7 @@ exactement le rôle que `/` joue sur les systèmes POSIX.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — afficher `/System/Apps`.
+- `dirname /System/Commands/top.app` — afficher `/System/Commands`.
 - `dirname src/lib.rs` — afficher `src`.
 - `dirname file` — afficher `.` (pas de partie répertoire).
 - `dirname Home:/tools` — afficher `Home:/` (une racine n'est jamais

@@ -13,15 +13,17 @@ chynnwys, yn eich iaith chi pan fo cyfieithiad ar gael.
 
 Mae pob rhaglen TAIRiX yn fwndel rhaglen sy'n cario coeden `Help/`: un
 ddogfen strwythuredig i bob gorchymyn neu bwnc, i bob iaith. Mae `man` yn
-datrys `<command>` yn union fel y gragen — storfa raglenni'r system yn
-gyntaf, yna'r cyfeiriaduron ar `PATH` — felly mae'r dudalen a ddangosir
-bob amser yn disgrifio'r rhaglen y byddai'r gragen yn ei rhedeg am yr un
-gair. Mae ôl-ddodiad `.app` yn enwi'r bwndel yn uniongyrchol. Pan nad yw'r
-storfa na `PATH` yn cynnwys y gair, mae `man` yn chwilio'r storfeydd
-rhaglenni yn ailadroddus — `/Apps` yn gyntaf, yna'r ffolder `Apps` yn eich
-cartref — felly mae bwndel a gadwyd mewn ffolderi nythog yn dal i gael ei
-ganfod; nid yw'r chwilio byth yn edrych y tu mewn i fwndel arall, a'r
-cydweddiad basaf sy'n ennill.
+datrys `<command>` yn union fel y gragen — y rhagddodiad sefydlog o
+storfeydd `/System/Commands`, `/System/Applications`, `<home>/Commands` a
+`<home>/Applications` yn gyntaf, yna'r cyfeiriaduron ar `PATH` — felly
+mae'r dudalen a ddangosir bob amser yn disgrifio'r rhaglen y byddai'r
+gragen yn ei rhedeg am yr un gair; ni all `PATH` ei aildrefnu na'i
+ddisodli. Mae ôl-ddodiad `.app` yn enwi'r bwndel yn uniongyrchol. Pan nad
+yw'r un o'r rhain yn cynnwys y gair, mae `man` yn chwilio'r storfeydd
+rhaglenni yn ailadroddus — `/Apps` yn gyntaf, yna'r ffolderi `Commands`
+ac `Applications` yn eich cartref — felly mae bwndel a gadwyd mewn
+ffolderi nythog yn dal i gael ei ganfod; nid yw'r chwilio byth yn edrych
+y tu mewn i fwndel arall, a'r cydweddiad basaf sy'n ennill.
 
 Dewisir y ddogfen yn ôl y locale yn y newidyn amgylchedd `LANG`, gan
 gwympo'n ôl i'r un iaith mewn rhanbarth arall ac yn olaf i'r ddogfen
@@ -55,9 +57,9 @@ anhysbys, ffrydir y dudalen gyfan.
 
 - `LANG` — y locale a ffefrir (tag BCP-47 fel `cy-GB`).
 - `PATH` — y cyfeiriaduron ychwanegol i chwilio am fwndeli
-  `<command>.app`, ar ôl storfa raglenni'r system.
-- `HOME` — yn enwi eich ffolder `Apps` eich hun ar gyfer y chwilio
-  ailadroddus am fwndeli.
+  `<command>.app`, ar ôl y rhagddodiad sefydlog o storfeydd.
+- `HOME` — yn enwi eich ffolderi `Commands` ac `Applications` eich hun ar
+  gyfer y chwilio ailadroddus am fwndeli.
 
 ## SEE ALSO
 

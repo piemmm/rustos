@@ -53,15 +53,17 @@ presentazione, mai di autorità: l'avvio di un pacchetto è sempre
 governato dai controlli di firma e capacità del loader,
 indipendentemente dal catalogo.
 
-`applib rescan` esamina gli archivi delle applicazioni (`/System/Apps`
-e `/Apps`, o il `<home>/Apps` del chiamante con `--user`), legge il
-manifesto di ogni pacchetto e registra ogni applicazione che richiede
-di essere elencata e non è ancora catalogata. I record esistenti —
-compresi i rinomini e le soppressioni di un curatore — non vengono mai
-disturbati, e un pacchetto con un manifesto illeggibile o malformato
-viene saltato e conteggiato, senza mai causare l'interruzione. È così
-che la libreria di un sistema nuovo si popola dai pacchetti
-effettivamente installati, senza alcuna lista mantenuta manualmente.
+`applib rescan` esamina gli archivi delle applicazioni
+(`/System/Commands`, `/System/Applications` e `/Apps`, o i
+`<home>/Commands` e `<home>/Applications` del chiamante con `--user`),
+legge il manifesto di ogni pacchetto e registra ogni applicazione che
+richiede di essere elencata e non è ancora catalogata. I record
+esistenti — compresi i rinomini e le soppressioni di un curatore — non
+vengono mai disturbati, e un pacchetto con un manifesto illeggibile o
+malformato viene saltato e conteggiato, senza mai causare
+l'interruzione. È così che la libreria di un sistema nuovo si popola dai
+pacchetti effettivamente installati, senza alcuna lista mantenuta
+manualmente.
 
 Per impostazione predefinita, lo strumento modifica l'archivio a
 livello di macchina, che solo un principale ammesso dalla politica di
@@ -86,8 +88,8 @@ può ignorare.
   all'interno della cartella `Resources/` del pacchetto) invece di
   quella del manifesto.
 - `--user` — applica la modifica all'overlay del chiamante (o, con
-  `rescan`, esamina il `<home>/Apps` del chiamante) invece che
-  all'archivio a livello di macchina.
+  `rescan`, esamina i `<home>/Commands` e `<home>/Applications` del
+  chiamante) invece che all'archivio a livello di macchina.
 - `-h, -?` — mostra l'aiuto breve di questo comando.
 
 ## EXAMPLES
@@ -122,7 +124,8 @@ può ignorare.
 - `LANG` — il locale preferito per l'aiuto breve (un tag BCP-47 come
   `fr-FR`).
 - `HOME` — la directory home del chiamante: identifica l'overlay per
-  utente e la radice del rescan `--user` `<home>/Apps`.
+  utente e le radici del rescan `--user` `<home>/Commands` e
+  `<home>/Applications`.
 
 ## SEE ALSO
 

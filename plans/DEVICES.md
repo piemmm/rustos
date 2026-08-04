@@ -74,7 +74,7 @@ Facts the stages below build on, so no stage re-derives them:
   `id::`/`fs::` resolver roots and the volume forest are still open
   (PLAN.md P4) and are a prerequisite DEVICE2 completes, not assumes.
 - **Command-app conventions are fixed** (`plans/APPS.md`, §16.5/§16.7):
-  a command is a full self-contained bundle in the system app store with
+  a command is a full self-contained bundle in the system command store with
   its `Help/` tree, follows the established GNU/`pciutils`/`usbutils`
   option and output surface, emits additive `stdinfo` records, and
   acquires authority only through its manifest capability request.
@@ -280,7 +280,7 @@ Each increment ends green on the whole-project gate (§7).
   gate end to end; the emulated aarch64 `virt` image drives virtio-mmio
   devices and publishes no PCI-function nodes yet, so the full listing is
   host-proven and a live-listing vertical rides the first emulated
-  PCI-function target that carries the app store.
+  PCI-function target that carries the system command store.
 - **V3 — `lsusb`. Done.** `userland/apps/lsusb`, as V2 for the USB view:
   the pure engine (interface selection over `HwMatchKind::Usb` keys, the
   `usbutils` default `Bus NNN Device NNN: ID vvvv:pppp <vendor>
@@ -312,7 +312,7 @@ Each increment ends green on the whole-project gate (§7).
   through the content-hash gate); no emulated fixture publishes
   USB-interface nodes yet, so the live listing is host-proven and a
   live-listing vertical rides the first emulated USB target that
-  carries the app store (Pi 4 metal acceptance otherwise).
+  carries the system command store (Pi 4 metal acceptance otherwise).
 
 ---
 

@@ -1,7 +1,7 @@
 # `tairix-mdadm` — inspect and administer RAID arrays
 
 The administrator's array tool (`plans/FIX-IO.md` IO6), shipped as the
-system app store bundle `mdadm.app` so the shell resolves the bare word
+system command store bundle `mdadm.app` so the shell resolves the bare word
 `mdadm` to it. The option surface tracks the reference `mdadm` — `-C`/
 `--create`, `-D`/`--detail`, `-E`/`--examine`, `-a`/`--add`,
 `-r`/`--remove`, `-S`/`--stop`, with `-l`/`--level`,

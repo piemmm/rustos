@@ -43,7 +43,7 @@ tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
 # The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
 # field names the loaded bundle — the pin's launch witness.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
-# The reserved `WINDOW_ENDPOINT` id and the system app store / bundle suffix
+# The reserved `WINDOW_ENDPOINT` id and the system application store / bundle suffix
 # spellings the witnesses are composed from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The pin store's own directory name — the one definition the session's

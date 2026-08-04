@@ -1,7 +1,7 @@
 # `tairix-ls` — list directory contents
 
 A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
-registered at `/System/Apps/ls.app/Run` so the shell resolves the bare
+registered at `/System/Commands/ls.app/Run` so the shell resolves the bare
 word `ls` to it. `ls` inspects each of its path operands in order. A
 non-directory operand is listed by name; a directory operand has its
 entries listed, sorted by name (or by size under `-S`), unless `-d`
@@ -110,7 +110,7 @@ Advisory only — never affecting the listing, ordering, or exit status.
 plus the required translations (the `tairix_help::REQUIRED_LOCALES`
 set, `plans/APPS.md` §8.1). The tree is authored on disk only:
 `tools/syshelp` discovers it and the image builder (`tools/mkimage`) and
-the QEMU image fixture plant it at `/System/Apps/ls.app/Help/`; the
+the QEMU image fixture plant it at `/System/Commands/ls.app/Help/`; the
 binary embeds no help bytes (`plans/APPS.md` §6.1).
 
 ## Fail closed
@@ -129,7 +129,7 @@ panic (`AGENTS.md` §2.9).
 
 `cargo test -p tairix-ls` drives the parser, the listing engine, and the
 on-disk help tree against in-memory fixtures; the aarch64
-session-ceiling QEMU vertical types `ls /System/Apps` in a real session
+session-ceiling QEMU vertical types `ls /System/Commands` in a real session
 and sees `man.app` in the listing.
 
 See [`docs/src/userland/utilities.md`](../../../docs/src/userland/utilities.md)

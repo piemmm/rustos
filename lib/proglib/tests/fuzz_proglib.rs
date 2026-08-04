@@ -77,8 +77,8 @@ const NAMES: &[&str] = &["Text Editor", "Chess", "F", "Files & Folders"];
 const BUNDLES: &[&str] = &[
     "/Apps/Editor.app",
     "/Apps/games/Chess.app",
-    "/Users/ada/Apps/Editor.app",
-    "/System/Apps/ls.app",
+    "/Users/ada/Applications/Editor.app",
+    "/System/Commands/ls.app",
 ];
 /// Folder identifiers spelled exactly as the closed taxonomy renders them:
 /// the decode is case-sensitive, so only these spellings are accepted.

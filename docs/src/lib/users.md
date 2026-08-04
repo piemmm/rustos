@@ -19,7 +19,7 @@ blank, a `#` comment, or one record of ten `:`-separated fields:
 
 ```text
 tairix-users-v1
-root:1000:1000::System Administrator:/Users/root:/System/Apps/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
+root:1000:1000::System Administrator:/Users/root:/System/Commands/elsh.app/Run:CAP_USER_ADMIN:active:pbkdf2-sha256$600000$<salt>$<hash>
 devmgr:10:101::Device Manager:none:none:CAP_DRV_LOAD:nologin:*
 ```
 

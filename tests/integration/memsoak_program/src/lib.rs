@@ -30,14 +30,14 @@ pub const COMMAND: &str = "memsoak";
 /// Store path of the child the fixture spawns and reaps each cycle: the
 /// `true` command app, which exits `0` immediately, so every cycle executes
 /// the full spawn → run → exit → reap → teardown path and nothing else.
-pub const CHILD_PATH: &[u8] = b"/System/Apps/true.app/Run";
+pub const CHILD_PATH: &[u8] = b"/System/Commands/true.app/Run";
 
 /// Cycles driven before the baseline sample, so every once-per-boot cost is
-/// paid off the measured window: the app store's per-bundle verification
-/// cache admits `true.app`, sysinfod's heap reaches the query working set,
-/// and the kernel's per-first-use paths (wait bookkeeping, IPC endpoint
-/// state) settle. A leak would survive any warmup; only one-time growth is
-/// excluded.
+/// paid off the measured window: the command store's per-bundle
+/// verification cache admits `true.app`, sysinfod's heap reaches the query
+/// working set, and the kernel's per-first-use paths (wait bookkeeping, IPC
+/// endpoint state) settle. A leak would survive any warmup; only one-time
+/// growth is excluded.
 pub const WARMUP_CYCLES: u32 = 4;
 
 /// Cycles driven between the baseline and final samples. Sized so a

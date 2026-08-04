@@ -1,7 +1,7 @@
 # `tairix-df` — report filesystem space usage
 
 A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
-registered as the system app store bundle `df.app` so the shell resolves
+registered as the system command store bundle `df.app` so the shell resolves
 the bare word `df` to it. `df` reports, one row per mounted filesystem,
 the volume's size, the space used, the space available, the percentage
 used, and the mount point; with `file` operands it reports the

@@ -85,8 +85,9 @@ duplicate id.
 form) or `<name>.png`, declared as `library-icon` in that bundle's
 `AppInfo.toml` and planted inside the bundle. Every command app and every GUI
 app under the three app roots the resource walk covers (`userland/apps`,
-`userland/shell`, `userland/gui`) carries one, so browsing `/System/Apps` shows
-fifty distinct pictures rather than fifty copies of the generic bundle icon.
+`userland/shell`, `userland/gui`) carries one, so browsing the system program
+stores shows fifty distinct pictures rather than fifty copies of the generic
+bundle icon.
 Services outside those roots keep the service-bundle class artwork, which is
 the honest picture for them.
 

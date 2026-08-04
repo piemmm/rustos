@@ -27,7 +27,7 @@ POSIX.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — stampare `/System/Apps`.
+- `dirname /System/Commands/top.app` — stampare `/System/Commands`.
 - `dirname src/lib.rs` — stampare `src`.
 - `dirname file` — stampare `.` (nessuna parte directory).
 - `dirname Home:/tools` — stampare `Home:/` (una radice non viene mai

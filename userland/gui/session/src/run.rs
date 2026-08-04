@@ -1,6 +1,6 @@
-//! The `Run` entry-point binary of the `desktop` command app, installed
-//! as a signed bundle in the system app store (`/System/Apps/`) and
-//! started two ways through the one bundle: a graphical login
+//! The `Run` entry-point binary of the `desktop` application, installed as
+//! a signed bundle in the system application store (`/System/Applications/`)
+//! and started two ways through the one bundle: a graphical login
 //! (`os.loginType graphical`) spawns it as the authenticated user's
 //! session, and a shell user starts it on demand by typing `desktop`
 //! (`plans/DISPLAY.md` D7c, `plans/APPS.md`). The reserved `-h`/`-?`

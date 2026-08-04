@@ -13,14 +13,16 @@ orden, en su idioma cuando existe una traducción.
 
 Cada programa de TAIRiX es un paquete de aplicación con un árbol `Help/`:
 un documento estructurado por orden o tema, por idioma. `man` resuelve
-`<command>` exactamente como el intérprete de órdenes — primero la tienda
-de aplicaciones del sistema y después los directorios de `PATH` — de modo
-que la página mostrada siempre documenta el programa que el intérprete
-ejecutaría para la misma palabra. Un sufijo `.app` nombra el paquete
-directamente. Cuando ni la tienda ni `PATH` contienen la palabra, `man`
-recorre las tiendas de aplicaciones de forma recursiva — primero `/Apps`,
-después la carpeta `Apps` de su directorio personal —, de modo que un
-paquete guardado en carpetas anidadas se encuentra igualmente; la
+`<command>` exactamente como el intérprete de órdenes — primero el prefijo
+fijo de tiendas `/System/Commands`, `/System/Applications`,
+`<home>/Commands` y `<home>/Applications`, y después los directorios de
+`PATH` — de modo que la página mostrada siempre documenta el programa que
+el intérprete ejecutaría para la misma palabra; `PATH` no puede reordenar
+ni anular ese prefijo. Un sufijo `.app` nombra el paquete directamente.
+Cuando ninguno de ellos contiene la palabra, `man` recorre las tiendas de
+aplicaciones de forma recursiva — primero `/Apps`, después sus propias
+carpetas `Commands` y `Applications` de su directorio personal —, de modo
+que un paquete guardado en carpetas anidadas se encuentra igualmente; la
 búsqueda nunca mira dentro de otro paquete, y gana la coincidencia menos
 profunda.
 
@@ -57,9 +59,9 @@ la página completa fluye sin pausas.
 - `LANG` — la configuración regional preferida (una etiqueta BCP-47 como
   `es-ES`).
 - `PATH` — los directorios adicionales donde buscar paquetes
-  `<command>.app`, después de la tienda de aplicaciones del sistema.
-- `HOME` — nombra su propia carpeta `Apps` para la búsqueda recursiva de
-  paquetes.
+  `<command>.app`, después del prefijo fijo de tiendas.
+- `HOME` — nombra sus propias carpetas `Commands` y `Applications` para
+  la búsqueda recursiva de paquetes.
 
 ## SEE ALSO
 

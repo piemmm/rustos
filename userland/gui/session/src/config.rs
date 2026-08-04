@@ -17,11 +17,11 @@
 /// Label of the file manager, for launch diagnostics.
 pub const FILES_LABEL: &str = "Files";
 
-/// The file-manager bundle's entry-point path in the system app store
-/// (an OS-provided app, discovered on disk like every other bundle). The
-/// taskbar's permanent Files button launches it — or raises its window
+/// The file-manager bundle's entry-point path in the system application
+/// store (an OS-provided app, discovered on disk like every other bundle).
+/// The taskbar's permanent Files button launches it — or raises its window
 /// when one is already open.
-pub const FILES_RUN_PATH: &str = "/System/Apps/files.app/Run";
+pub const FILES_RUN_PATH: &str = "/System/Applications/files.app/Run";
 
 /// Label of the Switchboard monitor service, for launch diagnostics.
 pub const SWITCHBOARD_LABEL: &str = "Switchboard";

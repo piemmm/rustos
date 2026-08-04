@@ -39,7 +39,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::OpenFlags;
-    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_APP_STORE};
+    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_COMMAND_STORE};
     use tairix_devids::{DbKind, DevIds, MAX_SOURCE_BYTES};
     use tairix_help::BundleHelp;
     use tairix_lspci::{parse, run, Output, USAGE};
@@ -55,7 +55,7 @@ mod program {
     const READ_CHUNK: usize = 64 * 1024;
 
     /// Load the bundle's own compiled `pci.ids` table,
-    /// `/System/Apps/lspci.app/Resources/pci.ids.bin`, through the
+    /// `/System/Commands/lspci.app/Resources/pci.ids.bin`, through the
     /// kernel-authorised `fs_*` syscalls. The path is spelled from the one
     /// shared `lib/abi` store definition, so it cannot drift from where the
     /// image builder plants the resource. The read is bounded: a "table"
@@ -66,7 +66,8 @@ mod program {
     /// A short, human-readable reason (open failure, read failure, or an
     /// over-long file); the caller reports it and degrades to numeric ids.
     fn load_table() -> Result<Vec<u8>, alloc::string::String> {
-        let path = format!("{SYSTEM_APP_STORE}/{OWN_WORD}{BUNDLE_SUFFIX}/Resources/pci.ids.bin");
+        let path =
+            format!("{SYSTEM_COMMAND_STORE}/{OWN_WORD}{BUNDLE_SUFFIX}/Resources/pci.ids.bin");
         let file = File::open(path.as_bytes(), OpenFlags::READ)
             .map_err(|ret| format!("cannot open {path}: {}", Errno::from_syscall(ret)))?;
         let mut bytes = Vec::new();

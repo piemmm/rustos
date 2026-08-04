@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(root.block_count, ROOT_SECTORS);
     }
 
-    /// A planted application-bundle file (`Apps/<name>.app/AppInfo` /
+    /// A planted application-bundle file (`Commands/<name>.app/AppInfo` /
     /// `Run`) reads back byte-for-byte beside the bundle's discovered
     /// `Help/` tree, so every on-disk bundle the verticals browse is
     /// complete and self-contained — and a planted **root-volume** file
@@ -523,10 +523,15 @@ mod tests {
     fn planted_app_bundle_files_read_back_beside_the_help_tree() {
         const APPINFO: &[u8] = b"a signed AppInfo manifest's bytes (synthetic)";
         const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
-        const CATALOG: &[u8] = b"os.tairix.ls.name ls\nos.tairix.ls.bundle /Apps/ls.app\n";
+        const CATALOG: &[u8] =
+            b"os.tairix.ls.name ls\nos.tairix.ls.bundle /System/Commands/ls.app\n";
+        // Larger than every fixture above, so a read that returned more
+        // bytes than were planted would fail the comparison rather than be
+        // silently clipped by the buffer.
+        const READ_LEN: usize = 128;
         let apps: [(&[&[u8]], &[u8]); 4] = [
-            (&[b"Apps", b"ls.app", b"AppInfo"], APPINFO),
-            (&[b"Apps", b"ls.app", b"Run"], RUN),
+            (&[b"Commands", b"ls.app", b"AppInfo"], APPINFO),
+            (&[b"Commands", b"ls.app", b"Run"], RUN),
             (&[b"Services", b"login.app", b"AppInfo"], APPINFO),
             (&[b"Services", b"login.app", b"Run"], RUN),
         ];
@@ -553,13 +558,13 @@ mod tests {
             for component in *components {
                 node = sys.lookup(node, component).expect("store path component");
             }
-            let mut buf = [0u8; 64];
+            let mut buf = [0u8; READ_LEN];
             let read = sys.read_at(node, 0, &mut buf).expect("file reads back");
             assert_eq!(&buf[..read], *expected);
         }
         // The command app's bundle also carries its discovered Help/ tree.
         let mut help = sys.root();
-        for component in [b"Apps".as_slice(), b"ls.app", b"Help", b"en-US"] {
+        for component in [b"Commands".as_slice(), b"ls.app", b"Help", b"en-US"] {
             help = sys.lookup(help, component).expect("Help path component");
         }
         sys.lookup(help, b"ls.md")
@@ -583,7 +588,7 @@ mod tests {
                 .lookup(node, component)
                 .expect("root-volume path component");
         }
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; READ_LEN];
         let read = rootvol
             .read_at(node, 0, &mut buf)
             .expect("the catalog reads back off the root volume");

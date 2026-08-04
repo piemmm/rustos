@@ -1213,8 +1213,9 @@ with it, once per *cluster*.
 The semantic app/runtime cache (`plans/SMARTRAM.md` SMART4, section 6.3)
 retains the result of the one shared application load gate
 (`lib/appload`) for bundles on the immutable read-only system stores
-(`/System/Apps`, `/System/Services`): the parsed signed `AppInfo`
-manifest, the content-hash and syscall-interface-hash verdicts, the
+(`/System/Commands`, `/System/Applications`, `/System/Services`): the
+parsed signed `AppInfo` manifest, the content-hash and
+syscall-interface-hash verdicts, the
 dynamic-loader library policy decisions, and the validated `rxe`
 entry-point image — one `LoadedApp` per bundle. Without it, every launch
 of a system command re-reads and re-hashes the whole bundle tree and

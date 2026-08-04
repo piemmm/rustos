@@ -1913,7 +1913,7 @@ the critical path and land first.
     they live in `lib/abi` so the generated C view carries them. `sysinfo raid`
     renders both.
   - **The command app is `mdadm`** (`userland/apps/mdadm`), a self-contained
-    bundle in the system app store tracking the reference tool's option
+    bundle in the system command store tracking the reference tool's option
     spelling (`-C/--create`, `-l/--level`, `-n/--raid-devices`, `-c/--chunk`,
     `-D/--detail`, `-E/--examine`, `-a/--add`, `-r/--remove`, `-S/--stop`).
     Its parsing, name resolution, and rendering are pure and host-tested; only
@@ -2020,7 +2020,7 @@ decided and staged in §2.6 (IO6a–IO6f), reaches further than the stages above
 — it adds two syscalls (`call_grant`, and the orderly mode of
 `hw_remove_node`), fixes the defects in the kernel's grant machinery, and
 touches `devmgr`, `volmgr`, the hardware-tree bootstrap, the System
-Information broker, and the system app store — so it is staged the same way.
+Information broker, and the system command store — so it is staged the same way.
 All six sub-stages have landed: IO6a–IO6b (the security prerequisites), IO6c
 (the shared `lib/raid` hoist, the composition protocol, the emitted member
 node, and the member agent), IO6d (the assembly decisions, the live array

@@ -53,15 +53,17 @@ une autorité : le lancement d'un paquet est toujours régi par les
 vérifications de signature et de capacité du chargeur, quel que soit le
 catalogue.
 
-`applib rescan` parcourt les magasins d'applications (`/System/Apps` et
-`/Apps`, ou le propre `<home>/Apps` de l'appelant sous `--user`), lit le
-manifeste de chaque paquet et enregistre chaque application qui demande
-à être répertoriée et n'est pas encore cataloguée. Les enregistrements
-existants — y compris les renommages et suppressions d'un conservateur —
-ne sont jamais perturbés, et un paquet avec un manifeste illisible ou
-malformé est sauté et compté, jamais une raison d'avorter. C'est ainsi
-qu'une bibliothèque d'un système frais se peuple à partir des paquets
-réellement installés, sans liste tenue à la main nulle part.
+`applib rescan` parcourt les magasins d'applications
+(`/System/Commands`, `/System/Applications` et `/Apps`, ou les propres
+`<home>/Commands` et `<home>/Applications` de l'appelant sous
+`--user`), lit le manifeste de chaque paquet et enregistre chaque
+application qui demande à être répertoriée et n'est pas encore
+cataloguée. Les enregistrements existants — y compris les renommages et
+suppressions d'un conservateur — ne sont jamais perturbés, et un paquet
+avec un manifeste illisible ou malformé est sauté et compté, jamais une
+raison d'avorter. C'est ainsi qu'une bibliothèque d'un système frais se
+peuple à partir des paquets réellement installés, sans liste tenue à la
+main nulle part.
 
 Par défaut, l'outil édite le magasin à l'échelle de la machine, que
 seul un principal admis par la politique d'écriture de
@@ -85,8 +87,9 @@ reste peut ignorer.
 - `--icon <asset>` — avec `add`, l'icône (un nom de fichier à
   l'intérieur du `Resources/` du paquet) au lieu de celle du manifeste.
 - `--user` — appliquer le changement à la superposition propre à
-  l'appelant (ou, avec `rescan`, parcourir le propre `<home>/Apps` de
-  l'appelant) au lieu du magasin à l'échelle de la machine.
+  l'appelant (ou, avec `rescan`, parcourir les propres `<home>/Commands`
+  et `<home>/Applications` de l'appelant) au lieu du magasin à l'échelle
+  de la machine.
 - `-h, -?` — afficher la propre aide courte de cette commande.
 
 ## EXAMPLES
@@ -121,8 +124,8 @@ reste peut ignorer.
 - `LANG` — la langue préférée pour l'aide courte (une balise BCP-47
   telle que `fr-FR`).
 - `HOME` — le répertoire personnel de l'appelant : nomme la
-  superposition par utilisateur et la racine de rescan `--user`
-  `<home>/Apps`.
+  superposition par utilisateur et les racines de rescan `--user`
+  `<home>/Commands` et `<home>/Applications`.
 
 ## SEE ALSO
 

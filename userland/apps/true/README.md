@@ -1,7 +1,7 @@
 # `tairix-true` — do nothing, successfully
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/true.app/` so the shell resolves the bare word
+store bundle `/System/Commands/true.app/` so the shell resolves the bare word
 `true` to it. `true` is the GNU coreutils tool: it ignores every argument
 and exits `0`, giving scripts a command that always succeeds. A **first**
 argument of `-h`/`-?`/`--help` — the position GNU honours `--help` in —

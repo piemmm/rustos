@@ -1433,7 +1433,7 @@ the whole is too large for one change and each leaves the tree working.
 ##### N8b-2b-β — the live two-process QEMU vertical `[x]`
 - `tairix-test-netstack-ping-qemu-aarch64` boots the production aarch64
   pipeline over the net-only-driver encrypted-root disk carrying the
-  **standard** app store (so the real `ping` bundle is present — no test
+  **system command store** (so the real `ping` bundle is present — no test
   fixture) plus the signed virtio-net driver (`FsDisk::PingRootDisk`), with a
   virtio-net device and the harness-side **passive ICMP echo responder**
   (`NetPeerMode::V6PingResponder` → `netpeer::run_ping_responder`: no

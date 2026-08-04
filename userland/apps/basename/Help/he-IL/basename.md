@@ -32,7 +32,7 @@ TAIRiX — `basename Home:/` הוא `Home:/`. שורש כינוי (`Home:/`,
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — הדפסת `top.app`.
+- `basename /System/Commands/top.app` — הדפסת `top.app`.
 - `basename src/lib.rs .rs` — הדפסת `lib`.
 - `basename -s .rs -a a.rs b.rs` — הדפסת `a` ו-`b`.
 - `basename Home:/` — הדפסת `Home:/` (לעולם אין מפרקים שורש).

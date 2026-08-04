@@ -13,15 +13,17 @@ mitliefert — in Ihrer Sprache, sofern eine Übersetzung existiert.
 
 Jedes TAIRiX-Programm ist ein Anwendungspaket mit einem `Help/`-Baum: ein
 strukturiertes Dokument je Befehl oder Thema, je Sprache. `man` löst
-`<command>` genau wie die Shell auf — zuerst der System-App-Store, dann
-die Verzeichnisse in `PATH` — die angezeigte Seite dokumentiert also immer
-das Programm, das die Shell für dasselbe Wort starten würde. Ein
-angehängtes `.app` benennt das Paket direkt. Enthalten weder der Store
-noch `PATH` das Wort, durchsucht `man` die App-Stores rekursiv — zuerst
-`/Apps`, dann den Ordner `Apps` im eigenen Benutzerverzeichnis —, sodass
-ein in verschachtelten Ordnern abgelegtes Paket dennoch gefunden wird;
-die Suche blickt nie in ein anderes Paket hinein, und der flachste
-Treffer gewinnt.
+`<command>` genau wie die Shell auf — zuerst das feste Store-Präfix
+`/System/Commands`, `/System/Applications`, `<home>/Commands` und
+`<home>/Applications`, dann die Verzeichnisse in `PATH` — die angezeigte
+Seite dokumentiert also immer das Programm, das die Shell für dasselbe
+Wort starten würde; `PATH` kann dieses Präfix weder umordnen noch
+überschreiben. Ein angehängtes `.app` benennt das Paket direkt. Enthält
+keines davon das Wort, durchsucht `man` die App-Stores rekursiv — zuerst
+`/Apps`, dann die eigenen Ordner `Commands` und `Applications` im
+Benutzerverzeichnis —, sodass ein in verschachtelten Ordnern abgelegtes
+Paket dennoch gefunden wird; die Suche blickt nie in ein anderes Paket
+hinein, und der flachste Treffer gewinnt.
 
 Das Dokument wird nach der Locale in der Umgebungsvariablen `LANG`
 gewählt; ersatzweise dieselbe Sprache aus einer anderen Region und
@@ -55,9 +57,9 @@ ganze Seite ausgegeben.
 
 - `LANG` — die bevorzugte Locale (ein BCP-47-Kennzeichen wie `de-DE`).
 - `PATH` — die zusätzlichen Verzeichnisse, in denen nach
-  `<command>.app`-Paketen gesucht wird, nach dem System-App-Store.
-- `HOME` — benennt den eigenen `Apps`-Ordner für die rekursive
-  Paketsuche.
+  `<command>.app`-Paketen gesucht wird, nach dem festen Store-Präfix.
+- `HOME` — benennt die eigenen Ordner `Commands` und `Applications` für
+  die rekursive Paketsuche.
 
 ## SEE ALSO
 

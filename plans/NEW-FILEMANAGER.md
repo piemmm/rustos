@@ -782,7 +782,7 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   signature, so a tampered association breaks the bundle. `viewer.app` declares
   the text/structured-config types it displays.
 - **The running-system `BundleSource` is `files.app`'s `RtBundleSource`**: a
-  bounded recursive walk of `/System/Apps` then `/Apps`, reading each
+  bounded recursive walk of the system program stores then `/Apps`, reading each
   `<Name>.app/AppInfo` through the shared, host-tested
   `lib/browse::association_from_appinfo` decode (fail-closed — a corrupt
   manifest is skipped, never offered). `Activation::OpenFile { path }` resolves

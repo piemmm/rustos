@@ -1,8 +1,9 @@
 # Signed-AppInfo manifest source for the `viewer` windowed file viewer
 # (plans/APPWIN.md AW5). Discovered by the build's app-bundle composer,
 # which cross-compiles Run, signs the manifest, and plants the bundle on
-# the read-only /System/Apps store; the desktop's program-library popup
-# spawns it (and the shell resolves it by name like any command app).
+# the read-only /System/Applications store; the desktop's program-library
+# popup spawns it (and the shell resolves it by name, like any program in
+# either system store).
 # The capability list is the bundle's request — deliberately WITHOUT any
 # filesystem capability: the viewer's only reach into the filesystem is
 # the one file the user chooses in the desktop session's trusted picker,
@@ -15,7 +16,7 @@
 id = "os.tairix.viewer"
 name = "viewer"
 version = "0.1.0"
-kind = "command"
+kind = "application"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # File-type associations: the text content the viewer can display. The file
 # manager offers the viewer as an "Open With…" candidate for a file of one of

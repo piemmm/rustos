@@ -37,7 +37,7 @@ basename — прибрати каталог і суфікс із назв
 
 ## EXAMPLES
 
-- `basename /System/Apps/top.app` — надрукувати `top.app`.
+- `basename /System/Commands/top.app` — надрукувати `top.app`.
 - `basename src/lib.rs .rs` — надрукувати `lib`.
 - `basename -s .rs -a a.rs b.rs` — надрукувати `a` і `b`.
 - `basename Home:/` — надрукувати `Home:/` (корінь ніколи не

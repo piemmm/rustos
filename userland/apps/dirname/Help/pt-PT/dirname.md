@@ -27,7 +27,7 @@ papel que `/` desempenha nos sistemas POSIX.
 
 ## EXAMPLES
 
-- `dirname /System/Apps/top.app` — imprimir `/System/Apps`.
+- `dirname /System/Commands/top.app` — imprimir `/System/Commands`.
 - `dirname src/lib.rs` — imprimir `src`.
 - `dirname file` — imprimir `.` (sem parte de diretório).
 - `dirname Home:/tools` — imprimir `Home:/` (uma raiz nunca é

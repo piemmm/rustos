@@ -226,23 +226,46 @@ impl core::fmt::Display for LibraryCategory {
 /// else.
 pub const SYSTEM_LIBRARIES_DIR: &str = "/System/Libraries";
 
-/// Absolute path of the **system app store**: the OS-provided, read-only,
-/// system-signed command-app bundles (`ps.app`, `top.app`, …), each named by
-/// the command it serves. The shell resolves a bare command word here
-/// *before* the user's `PATH`, so a user-writable directory can never shadow
-/// a system command with an attacker-supplied bundle of the same name
-/// (`plans/APPS.md` §8). One definition, shared by the kernel's program
+/// Absolute path of the **system command store**: the OS-provided,
+/// read-only, system-signed command-app bundles (`ps.app`, `top.app`, …),
+/// each named by the command it serves. It is the **first** directory a bare
+/// command word is resolved against and that position is not overridable —
+/// no `PATH` value, environment variable, or per-user directory can move it
+/// or shadow a system command with an attacker-supplied bundle of the same
+/// name (`plans/APPS.md` §8). One definition, shared by the kernel's program
 /// registry and the shell's command resolution, so the two cannot drift.
-pub const SYSTEM_APP_STORE: &str = "/System/Apps";
+pub const SYSTEM_COMMAND_STORE: &str = "/System/Commands";
 
-/// Absolute path of the **user app store**: the machine-wide directory for
-/// user-installed application bundles. Unlike the system app store it is
-/// user-writable (never system-signed) and its bundles may be organised in
-/// nested plain subdirectories; `man`'s recursive bundle search walks it —
-/// after the store-then-`PATH` candidates — so an installed app's help is
-/// found wherever its bundle was filed (`plans/APPS.md` §7). Launch stays
-/// explicit: the shell searches it only if the user adds it to `PATH`.
-pub const USER_APP_STORE: &str = "/Apps";
+/// Absolute path of the **system application store**: the OS-provided,
+/// read-only, system-signed graphical application bundles (`files.app`,
+/// `terminal.app`, …). It is searched immediately after the command store —
+/// so a desktop application is typeable by name — and, like the command
+/// store, ahead of every user-writable directory.
+pub const SYSTEM_APPLICATION_STORE: &str = "/System/Applications";
+
+/// Home-relative directory name of a user's own **command store**
+/// (`/Users/<name>/Commands`): the third directory a bare command word is
+/// resolved against, after both system stores and before the user's `PATH`.
+/// A store is spelled identically at every scope, so this is pinned to
+/// [`SYSTEM_COMMAND_STORE`]'s final component by a unit test.
+pub const HOME_COMMAND_STORE_DIR: &str = "Commands";
+
+/// Home-relative directory name of a user's own **application store**
+/// (`/Users/<name>/Applications`): the fourth directory a bare command word
+/// is resolved against. Pinned to [`SYSTEM_APPLICATION_STORE`]'s final
+/// component by a unit test, for the same reason as
+/// [`HOME_COMMAND_STORE_DIR`].
+pub const HOME_APPLICATION_STORE_DIR: &str = "Applications";
+
+/// Absolute path of the **installed application store**: the machine-wide
+/// directory for locally-installed application bundles. Unlike the system
+/// stores it is writable under a capability (never system-signed) and its
+/// bundles may be organised in nested plain subdirectories; `man`'s
+/// recursive bundle search walks it — after the ordered candidates — so an
+/// installed app's help is found wherever its bundle was filed
+/// (`plans/APPS.md` §7). Launch stays explicit: the shell searches it only
+/// if the user adds it to `PATH`.
+pub const INSTALLED_APP_STORE: &str = "/Apps";
 
 /// Absolute path of the **system service store**: the OS-provided,
 /// read-only, system-signed service bundles (`login.app`, `devmgr.app`,
@@ -257,6 +280,86 @@ pub const SYSTEM_SERVICE_STORE: &str = "/System/Services";
 /// (`<name>.app`). Command resolution appends it to a bare command word and
 /// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).
 pub const BUNDLE_SUFFIX: &str = ".app";
+
+/// What a program *is*, and therefore which OS-provided store its bundle is
+/// planted in.
+///
+/// A bundle declares its kind once, in its `AppInfo.toml` manifest source,
+/// and the build plants it accordingly — there is no list anywhere of which
+/// programs are commands and which are applications. The set is closed:
+/// an unrecognised spelling is a packaging defect the build refuses, never a
+/// guessed default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ProgramKind {
+    /// A command app: a program whose interface is the standard streams,
+    /// resolved by its bare name from [`SYSTEM_COMMAND_STORE`].
+    Command,
+    /// A graphical application: a program whose interface is a desktop
+    /// window, planted in [`SYSTEM_APPLICATION_STORE`].
+    Application,
+    /// A long-running system service (a service is an app), planted in
+    /// [`SYSTEM_SERVICE_STORE`].
+    Service,
+}
+
+impl ProgramKind {
+    /// Every kind, in canonical order — the closed set.
+    pub const ALL: [ProgramKind; 3] = [
+        ProgramKind::Command,
+        ProgramKind::Application,
+        ProgramKind::Service,
+    ];
+
+    /// The canonical `kind = "…"` spelling a manifest source declares.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ProgramKind::Command => "command",
+            ProgramKind::Application => "application",
+            ProgramKind::Service => "service",
+        }
+    }
+
+    /// Decode a manifest `kind` value, or `None` for an unrecognised
+    /// spelling. The match is exact and case-sensitive.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == key)
+    }
+
+    /// Absolute path of the store bundles of this kind are planted in.
+    #[must_use]
+    pub const fn store(self) -> &'static str {
+        match self {
+            ProgramKind::Command => SYSTEM_COMMAND_STORE,
+            ProgramKind::Application => SYSTEM_APPLICATION_STORE,
+            ProgramKind::Service => SYSTEM_SERVICE_STORE,
+        }
+    }
+
+    /// The `/System`-relative directory name of [`store`](Self::store)
+    /// (`/System/Commands` → `Commands`), derived from that one definition
+    /// so a planted path cannot drift from the path the loader scans.
+    #[must_use]
+    pub fn store_dir(self) -> &'static str {
+        let store = self.store();
+        store.rsplit('/').next().unwrap_or(store)
+    }
+
+    /// `true` when a user launches programs of this kind **by name**: both
+    /// program stores are on the fixed search prefix, so a command and a
+    /// graphical application are each typeable, while a service is started
+    /// by the system, never by a typed word.
+    ///
+    /// This is the one predicate that separates the user-facing programs
+    /// from the system's own, so the help gates — every named program ships
+    /// a help document, a service ships none — cannot disagree with what
+    /// command resolution searches.
+    #[must_use]
+    pub const fn is_searched(self) -> bool {
+        matches!(self, ProgramKind::Command | ProgramKind::Application)
+    }
+}
 
 /// One of the fixed set of names permitted at the top level of an
 /// application bundle.
@@ -952,9 +1055,10 @@ mod tests {
     use super::{
         body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
         AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
-        LibraryError, LibraryScope, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-        BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-        SYSTEM_LIBRARIES_DIR,
+        LibraryError, LibraryScope, ProgramKind, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
+        APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR,
+        HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APPLICATION_STORE,
+        SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
     use crate::{Errno, ABI_VERSION_CURRENT};
@@ -1007,6 +1111,68 @@ mod tests {
         assert!(!BundleEntry::Code.is_required());
         assert!(BundleEntry::AppInfo.is_file());
         assert!(!BundleEntry::Libraries.is_file());
+    }
+
+    #[test]
+    fn program_kind_keys_round_trip() {
+        for kind in ProgramKind::ALL {
+            assert_eq!(ProgramKind::from_key(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ProgramKind::from_key("Command"), None);
+        assert_eq!(ProgramKind::from_key("app"), None);
+        assert_eq!(ProgramKind::from_key(""), None);
+    }
+
+    /// Exactly the two program stores are reached by a typed word; a
+    /// service is never named by a user.
+    #[test]
+    fn only_the_program_stores_are_searched_by_name() {
+        assert!(ProgramKind::Command.is_searched());
+        assert!(ProgramKind::Application.is_searched());
+        assert!(!ProgramKind::Service.is_searched());
+    }
+
+    /// Each kind names a distinct store, and the `/System`-relative
+    /// directory is derived from that one spelling rather than repeated.
+    #[test]
+    fn program_kind_stores_are_distinct_and_derive_their_directory() {
+        assert_eq!(ProgramKind::Command.store(), SYSTEM_COMMAND_STORE);
+        assert_eq!(ProgramKind::Application.store(), SYSTEM_APPLICATION_STORE);
+        assert_eq!(ProgramKind::Service.store(), SYSTEM_SERVICE_STORE);
+        assert_eq!(ProgramKind::Command.store_dir(), "Commands");
+        assert_eq!(ProgramKind::Application.store_dir(), "Applications");
+        assert_eq!(ProgramKind::Service.store_dir(), "Services");
+        for kind in ProgramKind::ALL {
+            let store = kind.store();
+            assert_eq!(
+                store.strip_prefix("/System/"),
+                Some(kind.store_dir()),
+                "{store} is not /System/<store_dir>"
+            );
+            for other in ProgramKind::ALL {
+                assert_eq!(kind == other, store == other.store());
+            }
+        }
+    }
+
+    /// A store carries the same directory name at every scope: a user's own
+    /// store is the system store's final component under their home, so the
+    /// two spellings can never drift apart.
+    #[test]
+    fn a_store_is_spelled_the_same_at_every_scope() {
+        assert_eq!(
+            SYSTEM_COMMAND_STORE.strip_prefix("/System/"),
+            Some(HOME_COMMAND_STORE_DIR)
+        );
+        assert_eq!(
+            SYSTEM_APPLICATION_STORE.strip_prefix("/System/"),
+            Some(HOME_APPLICATION_STORE_DIR)
+        );
+        for name in [HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR] {
+            assert!(!name.is_empty(), "{name:?} is empty");
+            assert!(!name.contains('/'), "{name:?} is not one component");
+        }
+        assert_ne!(HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR);
     }
 
     #[test]

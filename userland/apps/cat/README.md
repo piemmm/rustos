@@ -1,7 +1,7 @@
 # `tairix-cat` — concatenate files to the terminal
 
 Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`), a `plans/APPS.md`
-command app registered at `/System/Apps/cat.app/Run` so the shell
+command app registered at `/System/Commands/cat.app/Run` so the shell
 resolves the bare word `cat` to it. `cat` reads each of its sources in
 order and writes the bytes to the terminal. A source is a path, standard
 input (the `-` operand, and the default when no operand is given), or a
@@ -55,7 +55,7 @@ input. `--` ends option parsing: every later argument is a file path.
 The bundle's thirteen-locale `Help/` tree (the canonical `en-US` plus the
 `tairix_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
 authored on disk in this crate and
-planted at `/System/Apps/cat.app/Help/` by the image builder from that
+planted at `/System/Commands/cat.app/Help/` by the image builder from that
 source (`tools/syshelp`) — never embedded in the binary
 (`plans/APPS.md` §6.1).
 

@@ -13,15 +13,17 @@ inclui, na sua língua quando existe uma tradução.
 
 Cada programa TAIRiX é um pacote de aplicação com uma árvore `Help/`: um
 documento estruturado por comando ou tópico, por língua. O `man` resolve
-`<command>` exatamente como a shell — primeiro a loja de aplicações do
-sistema, depois os diretórios de `PATH` — pelo que a página mostrada
-documenta sempre o programa que a shell executaria para a mesma palavra.
-Um sufixo `.app` nomeia o pacote diretamente. Quando nem a loja nem o
-`PATH` contêm a palavra, o `man` percorre as lojas de aplicações de forma
-recursiva — primeiro `/Apps`, depois a pasta `Apps` do seu diretório
-pessoal — pelo que um pacote arrumado em pastas encaixadas é encontrado à
-mesma; a procura nunca olha para dentro de outro pacote, e vence a
-correspondência menos profunda.
+`<command>` exatamente como a shell — primeiro o prefixo fixo de lojas
+`/System/Commands`, `/System/Applications`, `<home>/Commands` e
+`<home>/Applications`, depois os diretórios de `PATH` — pelo que a página
+mostrada documenta sempre o programa que a shell executaria para a mesma
+palavra; o `PATH` não pode reordenar nem substituir esse prefixo. Um
+sufixo `.app` nomeia o pacote diretamente. Quando nenhum deles contém a
+palavra, o `man` percorre as lojas de aplicações de forma recursiva —
+primeiro `/Apps`, depois as pastas `Commands` e `Applications` do seu
+diretório pessoal — pelo que um pacote arrumado em pastas encaixadas é
+encontrado à mesma; a procura nunca olha para dentro de outro pacote, e
+vence a correspondência menos profunda.
 
 O documento é escolhido segundo a região da variável de ambiente `LANG`,
 recuando para a mesma língua noutra região e por fim para o documento
@@ -55,9 +57,9 @@ inteira é emitida de seguida.
 
 - `LANG` — a região preferida (uma etiqueta BCP-47 como `pt-PT`).
 - `PATH` — os diretórios adicionais onde procurar pacotes
-  `<command>.app`, depois da loja de aplicações do sistema.
-- `HOME` — nomeia a sua própria pasta `Apps` para a procura recursiva de
-  pacotes.
+  `<command>.app`, depois do prefixo fixo de lojas.
+- `HOME` — nomeia as suas próprias pastas `Commands` e `Applications`
+  para a procura recursiva de pacotes.
 
 ## SEE ALSO
 

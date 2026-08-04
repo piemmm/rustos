@@ -29,12 +29,13 @@ disagree about what a store says.
   has one, else as an overlay patch. A hidden record keeps its identifier
   claimed, so a rescan cannot resurrect what a curator suppressed; the
   overlay's verdict wins at resolve time.
-- `applib rescan [--user]` — walk the application stores (`/System/Apps`
-  then `/Apps`; under `--user`, the caller's `<home>/Apps`), read each
-  bundle's manifest, and `lib/proglib::reconcile` every listed bundle the
-  catalog does not know yet. Curation is never disturbed; a bundle with
-  an unreadable or undecodable manifest is skipped and counted, never a
-  reason to abort; an unchanged catalog is not rewritten.
+- `applib rescan [--user]` — walk the application stores
+  (`/System/Commands` and `/System/Applications`, then `/Apps`; under
+  `--user`, the caller's own `<home>/Commands` and `<home>/Applications`),
+  read each bundle's manifest, and `lib/proglib::reconcile` every listed
+  bundle the catalog does not know yet. Curation is never disturbed; a
+  bundle with an unreadable or undecodable manifest is skipped and
+  counted, never a reason to abort; an unchanged catalog is not rewritten.
 
 By default the tool edits the machine-wide store
 (`/System/Settings/ProgramLibrary/library.conf`); `--user` targets the

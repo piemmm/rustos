@@ -1591,10 +1591,10 @@ list. The flag only ever narrows the child, so requesting it needs no
 capability.
 
 `spawn`'s store-bundle verification runs **once per boot** per
-read-only system-store bundle (`/System/Apps`, `/System/Services` —
-immutable for the life of the boot): the accepted `LoadedApp` is cached
-in the kernel's `AppStore` (keyed by bundle root, LRU-evicted under a
-byte budget of a fixed fraction of discovered RAM,
+read-only system-store bundle (`/System/Commands`, `/System/Applications`,
+`/System/Services` — immutable for the life of the boot): the accepted
+`LoadedApp` is cached in the kernel's `AppStore` (keyed by bundle root,
+LRU-evicted under a byte budget of a fixed fraction of discovered RAM,
 `appspawn::APP_CACHE_RAM_DIVISOR`), and a later launch of the same
 bundle serves the cached, already-verified image after re-authorising
 the **caller's** read of the bundle's `Run` through the secured VFS —

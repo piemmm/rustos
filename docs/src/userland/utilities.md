@@ -631,8 +631,8 @@ tree fixture.
 ## `cat` — concatenate files to the terminal (`userland/apps/cat`)
 
 `tairix-cat` concatenates files and standard input (`AGENTS.md` §3; a
-`plans/APPS.md` command app registered at `/System/Apps/cat.app/Run`, so
-the shell resolves the bare word `cat` to it). It reads each of its
+`plans/APPS.md` command app registered at `/System/Commands/cat.app/Run`,
+so the shell resolves the bare word `cat` to it). It reads each of its
 sources in order and writes the bytes to the terminal. A source is
 a path, standard input — the `-` operand, and the default when
 no operand is given — or a typed resource reference (`sys:random`).
@@ -795,7 +795,7 @@ included).
 
 `tairix-clear` writes the byte sequence that moves the cursor home and
 erases the display — the ncurses `clear` model (a `plans/APPS.md`
-command app registered at `/System/Apps/clear.app/Run`, so the shell
+command app registered at `/System/Commands/clear.app/Run`, so the shell
 resolves the bare word `clear` to it). Which bytes are written is
 decided by the inherited `TERM` through the compiled-in `lib/termcap`
 capability database, and the sequence is encoded through the one shared
@@ -819,7 +819,7 @@ dumb refusal), and the locale switch-drift pin.
 
 `tairix-reset` undoes the state a crashed full-screen program can leave
 behind (a `plans/APPS.md` command app registered at
-`/System/Apps/reset.app/Run`). It first restores the **cooked** input
+`/System/Commands/reset.app/Run`). It first restores the **cooked** input
 discipline through `stream_input_mode` (`tairix_rt::set_input_mode`) — a
 crashed viewer may have left the console raw, with neither echo nor
 indicator — then writes the restoration sequence for the `TERM`-named
@@ -1151,7 +1151,7 @@ short-help fallback, and the locale switch-drift pin.
 ## `ls` — list directory contents (`userland/apps/ls`)
 
 `tairix-ls` lists directory contents (`AGENTS.md` §3; a `plans/APPS.md`
-command app registered at `/System/Apps/ls.app/Run`, so the shell
+command app registered at `/System/Commands/ls.app/Run`, so the shell
 resolves the bare word `ls` to it). It inspects each of its path
 operands in order: a non-directory operand is listed by name, and a
 directory operand has its entries listed, sorted by name (by size under
@@ -1464,7 +1464,7 @@ locale's document records exactly the parser's switches; the
 `tairix-syshelp` discovery crate's tests prove every shipped locale
 parses under the engine's bounds and the required locale set is complete.
 The aarch64 session-ceiling QEMU vertical types
-`ls /System/Apps` in a real session and sees `man.app` in the listing —
+`ls /System/Commands` in a real session and sees `man.app` in the listing —
 a store read only the mounted read-only `/System` volume produces.
 
 ## `rm` — remove files and directories (`userland/apps/rm`)
@@ -2178,7 +2178,7 @@ the directory before its contents, and the missing-operand / stat / apply
 ## `useradd` — create a user account (`userland/apps/useradd`)
 
 `tairix-useradd` is a `plans/APPS.md` command app registered at
-`/System/Apps/useradd.app/Run`. It adds a single account to the user
+`/System/Commands/useradd.app/Run`. It adds a single account to the user
 database that persists under `/System/Security/Users` (`AGENTS.md` §5.1,
 §16). It names the new account and its numeric identity — a login name,
 an optional user id (auto-allocated when omitted), a **required** primary
@@ -2304,7 +2304,7 @@ switches (`plans/APPS.md` §3.1).
 ## `groupadd` — create a group (`userland/apps/groupadd`)
 
 `tairix-groupadd` is a `plans/APPS.md` command app registered at
-`/System/Apps/groupadd.app/Run`. It adds a single group to the group
+`/System/Commands/groupadd.app/Run`. It adds a single group to the group
 database that persists under `/System/Security/Groups` (`AGENTS.md` §5.1,
 §16). It names the new group and an optional numeric id (auto-allocated
 when omitted), and hands that record to the database through an injected
@@ -2408,8 +2408,8 @@ the parser's switches (`plans/APPS.md` §3.1).
 
 ## `users` — interactive account administration (`userland/shell/users`)
 
-`tairix-users-cli` (`/System/Apps/users.app/Run`) is the first holder of the
-`CAP_USER_ADMIN`-gated `users_admin` syscall
+`tairix-users-cli` (`/System/Commands/users.app/Run`) is the first holder of
+the `CAP_USER_ADMIN`-gated `users_admin` syscall
 (`plans/CAPABILITY_USE.md` CU4): an interactive session that lists,
 creates, modifies, locks/unlocks, and deletes accounts, edits their
 capability ceilings, replaces passwords, and manages groups. It is
@@ -2446,7 +2446,7 @@ served listing, the listing renderers, and the terse errno reporting.
 
 ## `man` — show a command's help document (`userland/apps/man`)
 
-`tairix-man` (`/System/Apps/man.app/Run`) renders the help document a
+`tairix-man` (`/System/Commands/man.app/Run`) renders the help document a
 command's application bundle ships (`plans/APPS.md` §7). TAIRiX has no
 troff/roff man pages and no `/usr/share/man`: a bundle's single
 internationalised `Help/` tree is the one documentation source, and `man`
@@ -2466,24 +2466,26 @@ codes: `0` page shown, `1` command/document not found or delivery failed,
 ### One resolution, one engine
 
 `man <cmd>` walks `tairix_cmdres::bundle_candidates` — the same
-store-then-`PATH` order the shell launches by — and stops at the first
+fixed-prefix-then-`PATH` order the shell launches by (`/System/Commands`,
+then `/System/Applications`, then the caller's own `<home>/Commands` and
+`<home>/Applications`, then each `PATH` entry) — and stops at the first
 bundle directory that exists (`NotFound` moves on; any other refusal is
 final, mirroring the shell's launch rule), so the page shown always
 documents the program the shell would run for the same word. When no
 ordered candidate matches a bare word, `man` falls back to a **recursive
 bundle search** of the app stores — the machine-wide `/Apps`, then the
-user's own `<HOME>/Apps` (`tairix_cmdres::search_roots`) — walked
-breadth-first over sorted listings so the shallowest match wins
-deterministically. The walk never descends into another bundle's `.app`
-directory (a bundle is a sealed unit), is bounded in depth and by a
-whole-invocation directory budget (an exhausted budget is reported as a
-truncated search, never silently as "not found"), and a missing root
-simply lists nothing. `man moose` therefore finds
-`/Apps/somefolder/anotherfolder/moose.app`'s help wherever the bundle was
-filed; launching stays the shell's store-then-`PATH` rule, unchanged. The
-document is located, locale-selected, parsed, and rendered by `lib/help`,
-the one shared engine; `man` owns only its argument grammar, the bundle
-probe, and the pager.
+user's own `<HOME>/Commands` and `<HOME>/Applications`
+(`tairix_cmdres::search_roots`) — walked breadth-first over sorted
+listings so the shallowest match wins deterministically. The walk never
+descends into another bundle's `.app` directory (a bundle is a sealed
+unit), is bounded in depth and by a whole-invocation directory budget (an
+exhausted budget is reported as a truncated search, never silently as
+"not found"), and a missing root simply lists nothing. `man moose`
+therefore finds `/Apps/somefolder/anotherfolder/moose.app`'s help wherever
+the bundle was filed; launching stays the shell's fixed-prefix-then-`PATH`
+rule, unchanged. The document is located, locale-selected, parsed, and
+rendered by `lib/help`, the one shared engine; `man` owns only its
+argument grammar, the bundle probe, and the pager.
 
 ### Locale
 
@@ -2519,12 +2521,12 @@ every `Help/` read per-inode under the caller's attested identity.
 
 `cargo test -p tairix-man` drives the engine against in-memory
 `BundleStore`/`Console` fixtures: the grammar and its refusals, the
-store-shadows-`PATH` order, the final-refusal rule, `.app`/explicit-path
-words, the recursive app-store search (nested finds, `/Apps`-before-home
-order, shallowest-match determinism, the sealed-`.app` rule, and the
-reported budget truncation), topics, locale exact/fallback plus the fd-3
-advisory, the pager's
-key handling, and the `-h` fallback. `man`'s own `Help/` tree is authored
+fixed-prefix-shadows-`PATH` order, the final-refusal rule,
+`.app`/explicit-path words, the recursive app-store search (nested finds,
+`/Apps`-before-home order, shallowest-match determinism, the sealed-`.app`
+rule, and the reported budget truncation), topics, locale exact/fallback
+plus the fd-3 advisory, the pager's key handling, and the `-h` fallback.
+`man`'s own `Help/` tree is authored
 on disk in the bundle and read at runtime through the `BundleStore` seam,
 never embedded in the binary; `tools/syshelp` discovers it from that
 source and `tools/mkimage` and the QEMU image fixture plant it on the

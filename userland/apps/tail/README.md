@@ -1,7 +1,7 @@
 # `tairix-tail` — output the last part of files
 
 A `plans/APPS.md` §12.1 Stage C command app, shipped as the self-contained
-store bundle `/System/Apps/tail.app/` so the shell resolves the bare word
+store bundle `/System/Commands/tail.app/` so the shell resolves the bare word
 `tail` to it. `tail` is the GNU coreutils tool: it prints the last 10 lines
 of each file operand (or standard input) to standard output, with
 `==> file <==` headers between multiple files. The GNU surface implementable

@@ -148,7 +148,8 @@ tairix-mkimage = { path = "../mkimage", version = "=0.0.0" }
 # layout. Host-only build glue (`AGENTS.md` §1 / §12); the `driver-image`
 # feature pulls in the Ed25519 signer, and `app-image` the signed
 # application-bundle composer + `AppInfo.toml` discovery the `image_apps`
-# pipeline composes the self-contained `/System/Apps` + `/System/Services`
+# pipeline composes the self-contained `/System/Commands` +
+# `/System/Applications` + `/System/Services`
 # bundles with (`plans/APPS.md` deliverable 8).
 tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
     "driver-image",

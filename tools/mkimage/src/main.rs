@@ -71,7 +71,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
 
     // The low-level CLI installs no autoloaded driver bundles and no
     // application bundles: cross-compiling and signing the `/System/Drivers/`
-    // and `/System/Apps`+`/System/Services` stores is the orchestrator's job
+    // and the `/System` program/service stores is the orchestrator's job
     // (it needs to drive `cargo` for the freestanding builds), so the
     // canonical `cargo xtask image` path supplies them. A directly-scripted
     // CLI image therefore ships empty stores (the kernel leaves every node

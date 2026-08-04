@@ -1,6 +1,6 @@
 # `tairix-reset` — restore the terminal to a sane state
 
-A `plans/APPS.md` command app registered at `/System/Apps/reset.app/Run`
+A `plans/APPS.md` command app registered at `/System/Commands/reset.app/Run`
 so the shell resolves the bare word `reset` to it. `reset` undoes the
 state a crashed full-screen program can leave behind: it restores the
 cooked input discipline (echo on) through `stream_input_mode`, and

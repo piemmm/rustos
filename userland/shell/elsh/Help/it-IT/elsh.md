@@ -11,11 +11,14 @@ elsh — la shell dei comandi di TAIRiX
 Esegue una shell dei comandi interattiva — un ciclo
 leggi-valuta-stampa sui flussi standard ereditati. Una parola di
 comando digitata è risolta prima fra i comandi integrati della shell,
-poi nello store di applicazioni di sistema (`/System/Apps`), poi nelle
-directory della variabile `PATH`; lo store è cercato prima di `PATH`,
-quindi `PATH` non può mai oscurare un comando di sistema. Una parola
-non risolta esce con `127`; un bundle risolto ma non eseguibile esce
-con `126`.
+poi nello store di comandi di sistema (`/System/Commands`), nello store
+di applicazioni di sistema (`/System/Applications`), nello store di
+comandi (`<home>/Commands`) e nello store di applicazioni
+(`<home>/Applications`) dell'utente stesso, poi nelle directory della
+variabile `PATH`; questi quattro store formano un prefisso fisso che
+l'utente non può riordinare né sovrascrivere, quindi `PATH` non può mai
+oscurare un comando di sistema. Una parola non risolta esce con `127`;
+un bundle risolto ma non eseguibile esce con `126`.
 
 I comandi integrati:
 
@@ -50,8 +53,7 @@ completa nomi di comandi, percorsi e riferimenti a risorse come
 
 ## ENVIRONMENT
 
-- `PATH` — le directory cercate dopo lo store di applicazioni di
-  sistema.
+- `PATH` — le directory cercate dopo il prefisso fisso di store.
 - `LANG` — la locale preferita per la guida breve (un tag BCP-47 come
   `it-IT`), esportata a ogni comando lanciato.
 

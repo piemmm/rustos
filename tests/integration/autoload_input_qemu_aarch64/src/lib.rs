@@ -125,7 +125,7 @@ pub const TERMINAL_COMMAND: &str = "sleep 3600\n";
 /// the typed command, so the witness is uniquely and unambiguously that
 /// event. Its load is also the readiness point at which the guest emits
 /// [`CTRL_C_ARM_MARKER`].
-pub const TERMINAL_ROUND_TRIP_BUNDLE: &str = "/System/Apps/sleep.app";
+pub const TERMINAL_ROUND_TRIP_BUNDLE: &str = "/System/Commands/sleep.app";
 
 /// The on-disk bundle path the shell loads for the recovered `true` of
 /// [`TERMINAL_CTRL_C_RECOVERY`]. The guest attributes the pty `Ctrl-C`
@@ -133,7 +133,7 @@ pub const TERMINAL_ROUND_TRIP_BUNDLE: &str = "/System/Apps/sleep.app";
 /// `wait` on `sleep` and can load and run `true` only once `Ctrl-C`
 /// interrupted `sleep`, so `true`'s load is the end-to-end job-control
 /// witness (the last of the vertical's six PASS witnesses).
-pub const CTRL_C_RECOVERY_BUNDLE: &str = "/System/Apps/true.app";
+pub const CTRL_C_RECOVERY_BUNDLE: &str = "/System/Commands/true.app";
 
 /// The follow-on the runner types once the `sleep` spawn has latched (the
 /// [`CTRL_C_ARM_MARKER`] gate): a `Ctrl-C` (the `\u{3}` ETX byte the

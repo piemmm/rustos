@@ -1,6 +1,6 @@
 # `tairix-useradd` — create a user account
 
-A `plans/APPS.md` command app registered at `/System/Apps/useradd.app/Run`
+A `plans/APPS.md` command app registered at `/System/Commands/useradd.app/Run`
 so the shell resolves the bare word `useradd` to it. `useradd` adds a
 single account to the user database that persists under
 `/System/Security/Users` (`AGENTS.md` §5.1, §16). It names the new
@@ -45,7 +45,7 @@ every later argument is an operand.
 The bundle's thirteen-locale `Help/` tree (the canonical `en-US` plus the
 `tairix_help::REQUIRED_LOCALES` translations, `plans/APPS.md` §8.1) is
 authored on disk in this crate and
-planted at `/System/Apps/useradd.app/Help/` by the image builder from
+planted at `/System/Commands/useradd.app/Help/` by the image builder from
 that source (`tools/syshelp`) — never embedded in the binary
 (`plans/APPS.md` §6.1).
 

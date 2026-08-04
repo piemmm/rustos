@@ -1,7 +1,7 @@
-# Signed-AppInfo manifest source for the `desktop` command app — the
+# Signed-AppInfo manifest source for the `desktop` application — the
 # graphical desktop session (plans/DISPLAY.md D7c, plans/APPS.md).
 # Discovered by the build's app-bundle composer and planted in the system
-# app store under /System/Apps/, so the shell resolves the bare command
+# application store under /System/Applications/, so the shell resolves the bare command
 # word `desktop` to this bundle and a graphical login spawns the same
 # path — one bundle, one spelling. The capability list is the bundle's
 # request: CAP_DISPLAY to acquire the boot seat's exclusive, revocable
@@ -28,7 +28,7 @@
 id = "os.tairix.desktop"
 name = "desktop"
 version = "0.1.0"
-kind = "command"
+kind = "application"
 capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "desktop.png"

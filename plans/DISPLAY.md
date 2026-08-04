@@ -535,9 +535,9 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 - **D7c — the desktop session binary. `[x]` — done.**
   `userland/gui/session` ships the `Run` program (`src/run.rs`, the
   login-crate lib+bin shape: `freestanding` build.rs cfg, the shared PIE
-  `Run.ld`, host stub elsewhere) as the `desktop` **command app** — its
-  `AppInfo.toml` (kind `command`, the AW3/AW5/CU6-grown request pinned in
-  the kernel registry tests) plants it in the system app store:
+  `Run.ld`, host stub elsewhere) as the `desktop` **application** — its
+  `AppInfo.toml` (kind `application`, the AW3/AW5/CU6-grown request pinned in
+  the kernel registry tests) plants it in the system application store:
   `display_acquire(SEAT_PRIMARY)` → `DisplayClient` bring-up over
   `ipc_call` (query → checked frame arithmetic → `shm_create` double
   buffer → `shm_grant` to the display endpoint's serving task →
@@ -568,7 +568,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   bookkeeping; and fixture build scripts register the inner build's
   dep-info (`tests/integration/harness` `dep_info`).
   **D7d-2 (the desktop launch) guarantees:**
-  - The desktop is the `desktop` **command app** in the system app store
+  - The desktop is the `desktop` **application** in the system application store
     (`userland/gui/session`, bundle `desktop.app`): the shell resolves
     the bare command word `desktop` to it, and a graphical login spawns
     the same bundle — one bundle, one spelling.
@@ -577,7 +577,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     configured (`lib/sysconfig`) *and* the per-round probe holds — a
     read-only `fs_open` of `DESKTOP_SESSION_PATH`
     (`tairix_login::session`, the one spelling of
-    `/System/Apps/desktop.app/Run`) plus one `Query` `ipc_call` to the
+    `/System/Applications/desktop.app/Run`) plus one `Query` `ipc_call` to the
     reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
     privileged-bound service; `NotFound` proves none); a configured
     graphical default that cannot start degrades to text, never an

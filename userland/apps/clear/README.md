@@ -1,6 +1,6 @@
 # `tairix-clear` — clear the terminal screen
 
-A `plans/APPS.md` command app registered at `/System/Apps/clear.app/Run`
+A `plans/APPS.md` command app registered at `/System/Commands/clear.app/Run`
 so the shell resolves the bare word `clear` to it. `clear` writes the
 byte sequence that moves the cursor home and erases the display — the
 ncurses `clear` model. Which bytes those are is decided by the inherited

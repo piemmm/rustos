@@ -3,8 +3,8 @@
 //! no prefix or alias resolution.
 //!
 //! Every program — command app and service alike — is a `<name>.app`
-//! bundle (a service is an app): a command app lives in the system app
-//! store as `/System/Apps/<command>.app/Run`, so the shell's bare-word
+//! bundle (a service is an app): a command app lives in the system command
+//! store as `/System/Commands/<command>.app/Run`, so the shell's bare-word
 //! resolution (`plans/APPS.md` §8, built from the shared `tairix_abi`
 //! store definitions) lands on a registered path, and a service lives in
 //! the service store as `/System/Services/<name>.app/Run`, the path PID 1
@@ -14,11 +14,11 @@
 //! bare-metal production build.
 
 /// Absolute path the `elsh` shell program is registered under: the system
-/// app store's command-named bundle (`plans/APPS.md` §8). It must match
+/// command store's command-named bundle (`plans/APPS.md` §8). It must match
 /// exactly the shell path an authenticated account's
 /// `/System/Security/Users` record names. One OS-wide path contract,
 /// identical on every target, so it lives here once.
-pub const SHELL_PATH: &[u8] = b"/System/Apps/elsh.app/Run";
+pub const SHELL_PATH: &[u8] = b"/System/Commands/elsh.app/Run";
 
 /// Absolute path the login service program is registered under
 /// (`plans/PI.md` P11): the service store's `<name>.app` bundle (a service
@@ -63,72 +63,72 @@ pub const NETSTACK_PATH: &[u8] = b"/System/Services/netstack.app/Run";
 /// path contract, identical on every target.
 pub const FONTD_PATH: &[u8] = b"/System/Services/fontd.app/Run";
 
-/// Absolute path the `ps` tool program is registered under: the system app
-/// store's command-named bundle, so the shell resolves the bare word `ps`
+/// Absolute path the `ps` tool program is registered under: the system
+/// command store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
 /// every target.
-pub const PS_PATH: &[u8] = b"/System/Apps/ps.app/Run";
+pub const PS_PATH: &[u8] = b"/System/Commands/ps.app/Run";
 
 /// Absolute path the `sysinfo` tool program is registered under: the system
-/// app store's command-named bundle, so the shell resolves the bare word
+/// command store's command-named bundle, so the shell resolves the bare word
 /// `sysinfo` to it (`plans/APPS.md` §8). One OS-wide path contract,
 /// identical on every target.
-pub const SYSINFO_PATH: &[u8] = b"/System/Apps/sysinfo.app/Run";
+pub const SYSINFO_PATH: &[u8] = b"/System/Commands/sysinfo.app/Run";
 
 /// Absolute path the `sysmon` tool program is registered under: the system
-/// app store's command-named bundle, so the shell resolves the bare word
+/// command store's command-named bundle, so the shell resolves the bare word
 /// `sysmon` to it (`plans/APPS.md` §8). One OS-wide path contract,
 /// identical on every target.
-pub const SYSMON_PATH: &[u8] = b"/System/Apps/sysmon.app/Run";
+pub const SYSMON_PATH: &[u8] = b"/System/Commands/sysmon.app/Run";
 
 /// Absolute path the `stress` load-generator tool is registered under: the
-/// system app store's command-named bundle, so the shell resolves the bare
-/// word `stress` to it (`plans/APPS.md` §8). One OS-wide path contract,
+/// system command store's command-named bundle, so the shell resolves the
+/// bare word `stress` to it (`plans/APPS.md` §8). One OS-wide path contract,
 /// identical on every target.
-pub const STRESS_PATH: &[u8] = b"/System/Apps/stress.app/Run";
+pub const STRESS_PATH: &[u8] = b"/System/Commands/stress.app/Run";
 
-/// Absolute path the `top` tool program is registered under: the system app
-/// store's command-named bundle, so the shell resolves the bare word `top`
+/// Absolute path the `top` tool program is registered under: the system
+/// command store's command-named bundle, so the shell resolves the bare word `top`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
 /// every target.
-pub const TOP_PATH: &[u8] = b"/System/Apps/top.app/Run";
+pub const TOP_PATH: &[u8] = b"/System/Commands/top.app/Run";
 
-/// Absolute path the `ls` tool program is registered under: the system app
-/// store's command-named bundle, so the shell resolves the bare word `ls`
+/// Absolute path the `ls` tool program is registered under: the system
+/// command store's command-named bundle, so the shell resolves the bare word `ls`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
 /// every target.
-pub const LS_PATH: &[u8] = b"/System/Apps/ls.app/Run";
+pub const LS_PATH: &[u8] = b"/System/Commands/ls.app/Run";
 
-/// Absolute path the `cat` tool program is registered under: the system app
-/// store's command-named bundle, so the shell resolves the bare word `cat`
+/// Absolute path the `cat` tool program is registered under: the system
+/// command store's command-named bundle, so the shell resolves the bare word `cat`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
 /// every target.
-pub const CAT_PATH: &[u8] = b"/System/Apps/cat.app/Run";
+pub const CAT_PATH: &[u8] = b"/System/Commands/cat.app/Run";
 
-/// Absolute path the `man` help tool is registered under: the system app
-/// store's command-named bundle, so the shell resolves the bare word `man`
+/// Absolute path the `man` help tool is registered under: the system
+/// command store's command-named bundle, so the shell resolves the bare word `man`
 /// to it (`plans/APPS.md` §7–§8). One OS-wide path contract, identical on
 /// every target.
-pub const MAN_PATH: &[u8] = b"/System/Apps/man.app/Run";
+pub const MAN_PATH: &[u8] = b"/System/Commands/man.app/Run";
 
 /// Absolute path the `clear` tool program is registered under: the system
-/// app store's command-named bundle, so the shell resolves the bare word
+/// command store's command-named bundle, so the shell resolves the bare word
 /// `clear` to it (`plans/APPS.md` §8). One OS-wide path contract, identical
 /// on every target.
-pub const CLEAR_PATH: &[u8] = b"/System/Apps/clear.app/Run";
+pub const CLEAR_PATH: &[u8] = b"/System/Commands/clear.app/Run";
 
 /// Absolute path the `reset` tool program is registered under: the system
-/// app store's command-named bundle, so the shell resolves the bare word
+/// command store's command-named bundle, so the shell resolves the bare word
 /// `reset` to it (`plans/APPS.md` §8). One OS-wide path contract, identical
 /// on every target.
-pub const RESET_PATH: &[u8] = b"/System/Apps/reset.app/Run";
+pub const RESET_PATH: &[u8] = b"/System/Commands/reset.app/Run";
 
 /// Absolute path the `users` account-administration tool is registered
-/// under: the system app store's command-named bundle, so an
+/// under: the system command store's command-named bundle, so an
 /// administrator's shell resolves the bare word `users` to it
 /// (`plans/APPS.md` §8, `plans/CAPABILITY_USE.md` CU4). One OS-wide path
 /// contract, identical on every target.
-pub const USERS_CLI_PATH: &[u8] = b"/System/Apps/users.app/Run";
+pub const USERS_CLI_PATH: &[u8] = b"/System/Commands/users.app/Run";
 
 #[cfg(test)]
 mod tests {
@@ -137,11 +137,11 @@ mod tests {
         NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH,
         SYSINFO_PATH, SYSMON_PATH, TOP_PATH, USERS_CLI_PATH,
     };
-    use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_APP_STORE, SYSTEM_SERVICE_STORE};
+    use tairix_abi::{BundleEntry, BUNDLE_SUFFIX, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE};
 
     /// The system services PID 1 spawns are registered under the service
-    /// store as `<service>.app` bundles (a service is an app), never in the
-    /// app store: they are session/service programs, not commands a user
+    /// store as `<service>.app` bundles (a service is an app), never in a
+    /// program store: they are session/service programs, not commands a user
     /// types. The spelling is built from the shared `tairix_abi` store
     /// definitions so this registry and the on-disk bundle layout cannot
     /// drift.
@@ -163,14 +163,14 @@ mod tests {
         }
     }
 
-    /// Every command app is registered under the system app store as a
+    /// Every command app is registered under the system command store as a
     /// command-named bundle, `<store>/<command>.app/Run`, so the shell's
     /// bare-word resolution (which builds the same spelling from the shared
     /// `tairix_abi` definitions) always lands on a registered path. A drift
     /// between this registry and the shared store definition would silently
     /// break every bare command word.
     #[test]
-    fn command_apps_live_in_the_system_app_store() {
+    fn command_apps_live_in_the_system_command_store() {
         for (path, command) in [
             (SHELL_PATH, "elsh"),
             (CAT_PATH, "cat"),
@@ -186,7 +186,7 @@ mod tests {
             (USERS_CLI_PATH, "users"),
         ] {
             let expected = alloc::format!(
-                "{SYSTEM_APP_STORE}/{command}{BUNDLE_SUFFIX}/{}",
+                "{SYSTEM_COMMAND_STORE}/{command}{BUNDLE_SUFFIX}/{}",
                 BundleEntry::Run.as_str()
             );
             assert_eq!(core::str::from_utf8(path), Ok(expected.as_str()));

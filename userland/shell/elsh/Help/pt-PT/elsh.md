@@ -11,10 +11,14 @@ elsh — a shell de comandos do TAIRiX
 Executa uma shell de comandos interativa — um ciclo ler-avaliar-imprimir
 sobre os fluxos padrão herdados. Uma palavra de comando escrita é
 resolvida primeiro contra os builtins da shell, depois contra a loja de
-aplicações do sistema (`/System/Apps`) e depois contra os diretórios da
-variável `PATH`; a loja é procurada antes de `PATH`, pelo que `PATH`
-nunca pode sombrear um comando do sistema. Uma palavra não resolvida
-sai com `127`; um pacote resolvido mas não executável sai com `126`.
+comandos do sistema (`/System/Commands`), a loja de aplicações do
+sistema (`/System/Applications`), a loja de comandos (`<home>/Commands`)
+e a loja de aplicações (`<home>/Applications`) do próprio utilizador e
+depois contra os diretórios da variável `PATH`; estas quatro lojas
+formam um prefixo fixo que o utilizador não pode reordenar nem
+substituir, pelo que `PATH` nunca pode sombrear um comando do sistema.
+Uma palavra não resolvida sai com `127`; um pacote resolvido mas não
+executável sai com `126`.
 
 Os builtins:
 
@@ -49,8 +53,7 @@ como `sys:random`.
 
 ## ENVIRONMENT
 
-- `PATH` — os diretórios procurados depois da loja de aplicações do
-  sistema.
+- `PATH` — os diretórios procurados depois do prefixo fixo de lojas.
 - `LANG` — a região preferida para a ajuda curta (uma etiqueta BCP-47
   como `pt-PT`), exportada para cada comando lançado.
 

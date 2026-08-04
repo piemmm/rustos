@@ -15,6 +15,13 @@
 //! the header prefix concatenated with the body — exactly the message the
 //! bundle verifier reconstructs.
 //!
+//! The `kind` a manifest declares ([`tairix_abi::ProgramKind`]) is what
+//! decides the store: a command app lands in `/System/Commands`, a graphical
+//! application in `/System/Applications`, and a service in
+//! `/System/Services`. There is no list anywhere of which programs are which
+//! — every bundle declares itself, and the walk refuses two bundles that
+//! claim the same name, so one store can never shadow a name in another.
+//!
 //! The manifest-source grammar is a deliberately tiny, line-based TOML
 //! subset, parsed fail-closed: `#` comments; the required keys `id`,
 //! `name`, `version`, `kind`, and `capabilities` (a single-line array of
@@ -33,37 +40,14 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
-    ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX,
+    ProgramKind, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
 /// File name of a program crate's manifest source, beside its `Cargo.toml`.
 pub const APP_MANIFEST_SOURCE: &str = "AppInfo.toml";
-
-/// Where a program's bundle lives on the read-only `/System` volume.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AppKind {
-    /// A command app the shell resolves by its bare name: planted under the
-    /// system app store (`/System/Apps/<name>.app/`).
-    Command,
-    /// A long-running system service (a service is an app): planted under
-    /// `/System/Services/<name>.app/`.
-    Service,
-}
-
-impl AppKind {
-    /// The `/System`-volume-relative store directory bundles of this kind
-    /// are planted in.
-    #[must_use]
-    pub fn store_dir(self) -> &'static str {
-        match self {
-            Self::Command => "Apps",
-            Self::Service => "Services",
-        }
-    }
-}
 
 /// A failed manifest parse, discovery walk, or bundle composition. The
 /// message names the offending file and cause; the build fails closed on
@@ -96,7 +80,7 @@ pub struct AppManifestSource {
     /// Bundle version string.
     pub version: String,
     /// Which store the bundle is planted in.
-    pub kind: AppKind,
+    pub kind: ProgramKind,
     /// The bundle's requested capabilities, in manifest order.
     pub capabilities: Vec<CapabilityId>,
     /// The file-type (MIME) associations the bundle declares it can open,
@@ -229,7 +213,7 @@ impl AppManifestSource {
         if let Some(icon) = &self.library_icon {
             check_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?;
         }
-        if self.library.is_some() && self.kind == AppKind::Service {
+        if self.library.is_some() && self.kind == ProgramKind::Service {
             // A service is a daemon, not a user-facing application; listing
             // one in the launcher would offer a user a bundle that opens no
             // surface.
@@ -279,13 +263,14 @@ fn parse_string(at: &str, value: &str) -> Result<String, AppImageError> {
     Ok(inner.to_string())
 }
 
-/// Parse the closed `kind` vocabulary.
-fn parse_kind(at: &str, value: &str) -> Result<AppKind, AppImageError> {
-    match parse_string(at, value)?.as_str() {
-        "command" => Ok(AppKind::Command),
-        "service" => Ok(AppKind::Service),
-        other => Err(AppImageError::new(at, format!("unknown kind `{other}`"))),
-    }
+/// Parse the closed `kind` vocabulary — the shared
+/// [`ProgramKind`] definition that also names the store the
+/// bundle is planted in, so a manifest's declaration and its destination
+/// cannot disagree.
+fn parse_kind(at: &str, value: &str) -> Result<ProgramKind, AppImageError> {
+    let name = parse_string(at, value)?;
+    ProgramKind::from_key(&name)
+        .ok_or_else(|| AppImageError::new(at, format!("unknown kind `{name}`")))
 }
 
 /// Parse the closed program-library folder vocabulary
@@ -609,7 +594,7 @@ mod tests {
         assert_eq!(manifest.id, "os.tairix.example");
         assert_eq!(manifest.name, "example");
         assert_eq!(manifest.version, "1.2.3");
-        assert_eq!(manifest.kind, AppKind::Command);
+        assert_eq!(manifest.kind, ProgramKind::Command);
         assert_eq!(
             manifest.capabilities,
             [CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS]
@@ -643,13 +628,20 @@ mod tests {
         assert_eq!(manifest.library_icon.as_deref(), Some("example.png"));
     }
 
+    /// The declared kind, and nothing else, decides the store a bundle is
+    /// planted in.
     #[test]
-    fn service_kind_selects_the_services_store() {
-        let text = GOOD.replace("\"command\"", "\"service\"");
-        let manifest = AppManifestSource::parse(&text).expect("valid");
-        assert_eq!(manifest.kind, AppKind::Service);
-        assert_eq!(manifest.kind.store_dir(), "Services");
-        assert_eq!(AppKind::Command.store_dir(), "Apps");
+    fn the_declared_kind_selects_the_store() {
+        for (key, kind, store) in [
+            ("command", ProgramKind::Command, "Commands"),
+            ("application", ProgramKind::Application, "Applications"),
+            ("service", ProgramKind::Service, "Services"),
+        ] {
+            let text = GOOD.replace("\"command\"", &format!("\"{key}\""));
+            let manifest = AppManifestSource::parse(&text).expect("valid");
+            assert_eq!(manifest.kind, kind);
+            assert_eq!(manifest.kind.store_dir(), store);
+        }
     }
 
     #[test]
@@ -794,7 +786,7 @@ mod tests {
         }
         let services: Vec<&str> = found
             .iter()
-            .filter(|d| d.manifest.kind == AppKind::Service)
+            .filter(|d| d.manifest.kind == ProgramKind::Service)
             .map(|d| d.manifest.name.as_str())
             .collect();
         assert_eq!(
