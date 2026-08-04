@@ -88,6 +88,7 @@
   - [`tairix-util`](./lib/util.md)
   - [`tairix-virtio-input`](./lib/virtio_input.md)
   - [`tairix-vt`](./lib/vt.md)
+  - [`tairix-wallpaper`](./lib/wallpaper.md)
 
 # Drivers
 
@@ -143,6 +144,7 @@
 - [Seat ownership](./desktop/seat.md)
 - [Traditional desktop taskbar](./desktop/taskbar.md)
 - [Desktop session glue](./desktop/session.md)
+- [The desktop pinboard](./desktop/pinboard.md)
 - [Switchboard monitor service](./desktop/switchboard.md)
 - [Desktop theming](./desktop/theming.md)
 - [Pointer cursors](./desktop/cursors.md)

@@ -558,7 +558,7 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   different ceiling; there is no second copy of that loop.
 - **How the pixels are produced — in a sandbox, never in the app.** Icon
   artwork is a file on a volume, i.e. untrusted input, so it is decoded by the
-  shared `lib/sandbox` `iconraster` service running in a minimum-capability
+  shared `lib/sandbox` `imagerender` service running in a minimum-capability
   worker (`AGENTS.md` §19.5). The `Run` binary re-enters **itself** in the
   reserved worker role over a fresh pipe pair — the same production launcher
   pattern the desktop session uses (`ParserSandbox` over `RtLauncher`), not a

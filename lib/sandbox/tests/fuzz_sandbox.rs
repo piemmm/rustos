@@ -1,5 +1,5 @@
 //! Deterministic fuzz harness for the sandbox seam's decode, helpdoc, and
-//! iconraster surfaces.
+//! imagerender surfaces.
 //!
 //! Two hostile directions, both driven through the public client path so
 //! the request encoder, the service's request decoder, the decoders
@@ -30,9 +30,12 @@ use tairix_sandbox::decode::{
 };
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
-use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService, MAX_ICON_SIDE};
+use tairix_sandbox::imagerender::{
+    rasterise_icon, render_wallpaper, ImageRenderService, MAX_ICON_SIDE, MAX_WALLPAPER_WIDTH,
+};
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::proto::Channel;
+use tairix_wallpaper::WallpaperFit;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -100,7 +103,7 @@ const ISAS: [Isa; 4] = [Isa::X86_64, Isa::Aarch64, Isa::Riscv64, Isa::Wasm];
 const HELP_TEMPLATE: &[u8] =
     b"## NAME\n\ntop \xe2\x80\x94 display tasks\n\n## SYNOPSIS\n\n`top [-d seconds]`\n\n## DESCRIPTION\n\nShows tasks.\n";
 
-/// A minimal valid SVG icon, as the iconraster mutation template.
+/// A minimal valid SVG icon, as the imagerender mutation template.
 const SVG_TEMPLATE: &[u8] =
     br##"<svg viewBox="0 0 10 10"><polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/></svg>"##;
 
@@ -159,7 +162,17 @@ fn zlib_wrap(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A minimal valid 2x2 RGBA8 PNG icon, as the iconraster mutation template.
+/// The five wallpaper fits, cycled by the driver.
+const FITS: [WallpaperFit; 5] = [
+    WallpaperFit::Fill,
+    WallpaperFit::Fit,
+    WallpaperFit::Stretch,
+    WallpaperFit::Centre,
+    WallpaperFit::Tile,
+];
+
+/// A minimal valid 2x2 RGBA8 PNG icon, as both the imagerender and the
+/// wallpaper mutation template.
 fn png_template() -> Vec<u8> {
     let mut ihdr = Vec::new();
     ihdr.extend_from_slice(&2u32.to_be_bytes());
@@ -200,7 +213,7 @@ impl Channel for HostileChannel {
 }
 
 /// The honest icon-rasterisation sandbox the fuzz loop drives.
-type HonestIconSandbox = ParserSandbox<LoopbackLauncher<fn() -> IconRasterService>, SilentSink>;
+type HonestIconSandbox = ParserSandbox<LoopbackLauncher<fn() -> ImageRenderService>, SilentSink>;
 
 /// Fuzz one iteration's icon coverage: an SVG icon and a PNG icon, each
 /// with a handful of bytes flipped, a random truncation, and pure `noise`,
@@ -235,6 +248,36 @@ fn fuzz_icon_iteration(
     let _ = rasterise_icon(honest_icon, side, &png[..cut]);
     let _ = rasterise_icon(honest_icon, side, noise);
     side
+}
+
+/// Fuzz one iteration's wallpaper coverage: a PNG source, mutated, a
+/// random truncation, and pure `noise`, rendered through the honest worker
+/// (the same one [`fuzz_icon_iteration`] drives, since one worker serves
+/// both surfaces) at a random small destination and fit. Returns the
+/// destination and fit used, so the caller can reuse them against the
+/// hostile worker too.
+fn fuzz_wallpaper_iteration(
+    honest: &mut HonestIconSandbox,
+    noise: &[u8],
+    next: &mut impl FnMut() -> u64,
+) -> (u32, u32, WallpaperFit) {
+    let width = u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1;
+    let height = u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1;
+    let fit = FITS[bounded(next(), FITS.len() - 1)];
+    let mut png = png_template();
+    for _ in 0..bounded(next(), 6) {
+        let pos = bounded(next(), png.len() - 1);
+        png[pos] ^= low_byte(next() >> 17);
+    }
+    let _ = render_wallpaper(honest, width, height, fit, &png);
+    let cut = bounded(next(), png.len());
+    let _ = render_wallpaper(honest, width, height, fit, &png[..cut]);
+    let _ = render_wallpaper(honest, width, height, fit, noise);
+    // Also exercise a destination one past the ceiling: always refused
+    // locally, before any request is even sent, so this is cheap to run
+    // every iteration unlike a genuine ceiling-sized render.
+    let _ = render_wallpaper(honest, MAX_WALLPAPER_WIDTH + 1, height, fit, &png);
+    (width, height, fit)
 }
 
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
@@ -292,7 +335,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         SilentSink,
     );
     let mut honest_icon = ParserSandbox::new(
-        LoopbackLauncher::new(IconRasterService::default as fn() -> IconRasterService),
+        LoopbackLauncher::new(ImageRenderService::default as fn() -> ImageRenderService),
         SilentSink,
     );
     let hostile_state = Rc::new(RefCell::new(next()));
@@ -365,9 +408,13 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = render_help(&mut honest_help, mode, styling, locale, &help[..cut]);
         let _ = render_help(&mut honest_help, mode, styling, locale, &noise);
 
-        // 6. The icon-rasterisation surface, fuzzed in its own helper to
-        //    keep this loop's body a readable, bounded size.
+        // 6. The icon-rasterisation and wallpaper surfaces, fuzzed in
+        //    their own helpers to keep this loop's body a readable,
+        //    bounded size. Both run over the same worker instance,
+        //    exercising the two surfaces interleaved.
         let side = fuzz_icon_iteration(&mut honest_icon, &noise, &mut next);
+        let (wallpaper_w, wallpaper_h, fit) =
+            fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut next);
 
         // 7. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
@@ -377,6 +424,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE);
+        let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

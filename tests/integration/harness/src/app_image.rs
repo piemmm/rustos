@@ -774,6 +774,7 @@ mod tests {
                 "users",
                 "viewer",
                 "vim",
+                "wallpaper",
                 "wc",
                 "whoami",
                 "widgets",

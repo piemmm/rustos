@@ -1,5 +1,6 @@
 //! The desktop: the user's own `Desktop` folder shown as a column of icons
-//! down the trailing edge of the screen (`plans/NEW-TASKBAR.md` T7).
+//! down the screen edge their settings name (`plans/NEW-TASKBAR.md` T7,
+//! `plans/PINBOARD.md`).
 //!
 //! The desktop is a *directory view*, not a new kind of surface. It lists the
 //! user's `Desktop` folder through the same [`DirectorySource`] seam the
@@ -7,10 +8,22 @@
 //! listing with the shared [`sort_entries`]; it classifies each child with the
 //! shared content-type registry; and it lays its tiles out with the shared
 //! [`GridView`], differing from the file manager's grid only in its
-//! [`GridFlow`] and [`GridFill`] — the desktop's column hugs the trailing edge,
-//! grows a new column inward as it fills, and keeps a fixed pitch so an icon
-//! does not drift when the work area changes size. There is no second grid, no
-//! second sort, and no second classifier anywhere in this module.
+//! [`GridFlow`] and [`GridFill`] — the desktop's column hugs the edge the
+//! user's arrangement names, grows a new column inward as it fills, and keeps
+//! a fixed pitch so an icon does not drift when the work area changes size.
+//! There is no second grid, no second sort, and no second classifier anywhere
+//! in this module.
+//!
+//! # The pinboard settings live here
+//!
+//! The desktop owns the user's [`PinboardSettings`] — the wallpaper and its
+//! fit, the backdrop colour, the icon arrangement, and the sort order — as the
+//! single copy inside the session: the shell reads them from the desktop
+//! rather than holding a second set that could drift from the one the icons
+//! are actually laid out by. An edit arrives through
+//! [`Desktop::apply_settings`], which reports exactly the work it implies, so
+//! changing the sort order does not decode a wallpaper and changing the
+//! wallpaper does not re-read the folder.
 //!
 //! What the desktop *owns* is the behaviour a folder-on-the-screen needs:
 //! hover feedback, a selection, keyboard navigation while it holds focus, and
@@ -54,8 +67,9 @@ use alloc::vec::Vec;
 
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
-    applications_for, entry_icon_request, media_for_entry, sort_entries, AppAssociation, ClickKind,
-    DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill, GridFlow, GridView, SortMode,
+    applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
+    AppAssociation, ClickKind, DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill,
+    GridFlow, GridView, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
@@ -64,7 +78,10 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
 use tairix_wm::{Key, NamedKey};
+
+use crate::pinboard::PinboardCommand;
 
 /// The inset, in logical pixels at the reference density, between the work
 /// area's edges and the first icon.
@@ -110,10 +127,58 @@ pub enum DesktopActivation {
 pub enum DesktopAction {
     /// Carry out this activation.
     Activate(DesktopActivation),
+    /// Open the pinboard's context menu anchored at this screen position.
+    OpenMenu {
+        /// The pointer position the menu is anchored at.
+        at: Point,
+        /// Whether the press landed on an icon, which is what decides whether
+        /// the menu offers `Open`.
+        on_icon: bool,
+    },
+    /// Create a directory at this absolute path.
+    ///
+    /// The name is already chosen — through the shared new-directory naming
+    /// the file manager uses, over the listing the desktop is showing — so the
+    /// embedder only holds the filesystem capability and makes the directory.
+    CreateFolder {
+        /// Absolute path of the directory to create.
+        path: String,
+    },
+    /// Adopt these settings: persist them to the user's own store and hand
+    /// them back through [`Desktop::apply_settings`], which reports the work
+    /// the edit actually implies.
+    ///
+    /// The model names the new settings; it does not apply them itself, so
+    /// there is exactly one place settings are adopted and the persisted
+    /// document and the live desktop can never drift apart.
+    AdoptSettings(PinboardSettings),
+    /// Open the wallpaper chooser, which is an installed application the
+    /// embedder resolves and launches (the model knows no bundle paths).
+    ChangeBackground,
     /// The gesture was refused. The line is complete and newline-terminated,
     /// ready for `stderr`: a refused action always says why rather than
     /// failing silently.
     Refuse(String),
+}
+
+/// The work a settings edit implies, beyond the repaint that having changed
+/// anything at all already implies.
+///
+/// Each field names one piece of work the *edit* asks for, so a change of sort
+/// order does not cost a wallpaper decode and a change of wallpaper does not
+/// cost a directory read. An edit that only changes the backdrop colour asks
+/// for none of them — the repaint alone shows it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PinboardChange {
+    /// The icon arrangement moved: the grid must be laid out again before the
+    /// next paint or hit-test.
+    pub relayout: bool,
+    /// The sort order changed: the folder must be listed again to pick the new
+    /// order up.
+    pub relist: bool,
+    /// The wallpaper image or its fit changed: the embedder must prepare the
+    /// screen-sized wallpaper surface again and hand it to the shell.
+    pub wallpaper: bool,
 }
 
 /// The outcome of one desktop gesture: whether the desktop's own pixels
@@ -178,6 +243,10 @@ pub struct Desktop<S: DirectorySource> {
     source: S,
     /// Root-first components of the user's `Desktop` folder.
     folder: Vec<String>,
+    /// The user's pinboard settings. The desktop is their single owner inside
+    /// the session: the shell reads them from here rather than keeping a
+    /// second copy that could drift.
+    settings: PinboardSettings,
     entries: Vec<Entry>,
     selected: Option<usize>,
     hovered: Option<usize>,
@@ -192,12 +261,19 @@ pub struct Desktop<S: DirectorySource> {
 
 impl<S: DirectorySource> Desktop<S> {
     /// A desktop over `source` showing the folder named by the root-first
-    /// `folder` components. Nothing is listed until [`relist`](Self::relist).
+    /// `folder` components, on the default pinboard settings. Nothing is
+    /// listed until [`relist`](Self::relist).
+    ///
+    /// The settings an absent store document implies are the defaults, so a
+    /// desktop is fully specified before the embedder has read anything; the
+    /// user's own document arrives through
+    /// [`apply_settings`](Self::apply_settings).
     #[must_use]
     pub fn new(source: S, folder: Vec<String>) -> Self {
         Self {
             source,
             folder,
+            settings: PinboardSettings::default(),
             entries: Vec::new(),
             selected: None,
             hovered: None,
@@ -212,6 +288,40 @@ impl<S: DirectorySource> Desktop<S> {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// The pinboard settings in force.
+    #[must_use]
+    pub const fn settings(&self) -> &PinboardSettings {
+        &self.settings
+    }
+
+    /// The absolute path of the folder the desktop shows.
+    #[must_use]
+    pub fn folder_path(&self) -> String {
+        tairix_browse::vfs::spell_absolute_path(&self.folder)
+    }
+
+    /// Adopt `settings`, reporting the work the edit implies.
+    ///
+    /// `None` means `settings` were already in force: nothing changed and there
+    /// is nothing to do. Anything else means the desktop layer must be
+    /// repainted — that is what a change *is* — and the returned
+    /// [`PinboardChange`] names the further work on top of it, so the caller
+    /// re-lays out, re-lists, or re-prepares the wallpaper only when the edit
+    /// actually asks for it. The desktop applies nothing beyond its own state.
+    pub fn apply_settings(&mut self, settings: PinboardSettings) -> Option<PinboardChange> {
+        if settings == self.settings {
+            return None;
+        }
+        let change = PinboardChange {
+            relayout: settings.icons != self.settings.icons,
+            relist: settings.sort != self.settings.sort,
+            wallpaper: settings.wallpaper != self.settings.wallpaper
+                || settings.fit != self.settings.fit,
+        };
+        self.settings = settings;
+        Some(change)
     }
 
     /// The selected icon's index, if any.
@@ -263,7 +373,7 @@ impl<S: DirectorySource> Desktop<S> {
     pub fn relist(&mut self, now_ns: u64) -> bool {
         self.listed_at_ns = Some(now_ns);
         let mut entries = self.source.list(&self.folder).unwrap_or_default();
-        sort_entries(&mut entries, SortMode::default_order());
+        sort_entries(&mut entries, sort_mode(self.settings.sort));
         if entries == self.entries {
             return false;
         }
@@ -295,8 +405,8 @@ impl<S: DirectorySource> Desktop<S> {
     }
 
     /// The grid the desktop's icons are laid out in: the shared tile geometry
-    /// under the trailing-edge column flow, inset from `work_area` by
-    /// [`DESKTOP_MARGIN`].
+    /// under the column flow the settings' arrangement names, inset from
+    /// `work_area` by [`DESKTOP_MARGIN`].
     ///
     /// `work_area` is the screen with the taskbar's band removed, so an icon
     /// can never be drawn under the bar or hit-tested through it.
@@ -318,7 +428,7 @@ impl<S: DirectorySource> Desktop<S> {
             grid_metrics(font),
             0,
             self.entries.len(),
-            GridFlow::ColumnsFromTrailing,
+            grid_flow(self.settings.icons),
             GridFill::FixedPitch,
         )
     }
@@ -430,6 +540,91 @@ impl<S: DirectorySource> Desktop<S> {
         DesktopOutcome::redraw()
     }
 
+    /// A secondary (right) press at screen position `at`: the pinboard's
+    /// context-menu gesture.
+    ///
+    /// A press on an icon selects it, so the menu acts on the thing the user
+    /// pointed at; a press on empty backdrop leaves the selection exactly as
+    /// it was, because asking for the menu is not a way to lose a selection.
+    /// The gesture claims no keyboard focus: the window manager does not move
+    /// focus for a secondary press on the backdrop, and the desktop does not
+    /// pretend otherwise.
+    pub fn context_press(&mut self, at: Point, layout: &GridView) -> DesktopOutcome {
+        let on_icon = index_at(layout, at);
+        let redraw = match on_icon {
+            Some(index) if self.selected != Some(index) => {
+                self.selected = Some(index);
+                true
+            }
+            _ => false,
+        };
+        DesktopOutcome {
+            redraw,
+            relisted: false,
+            action: Some(DesktopAction::OpenMenu {
+                at,
+                on_icon: on_icon.is_some(),
+            }),
+        }
+    }
+
+    /// Resolve one pinboard menu `command` against the desktop's own state, at
+    /// monotonic time `now_ns`.
+    ///
+    /// This is the single translation from a named command to a
+    /// [`DesktopAction`]: `Open` resolves through the very same activation the
+    /// double-click path uses, a sort or arrangement row names the settings the
+    /// embedder is to adopt (never applying them behind its back), a new folder
+    /// is named through the shared new-directory naming over the listing on
+    /// screen, and `Refresh` re-lists here and now. A command that asks for
+    /// what is already in force changes nothing.
+    pub fn command(
+        &mut self,
+        command: PinboardCommand,
+        apps: &[AppAssociation],
+        now_ns: u64,
+    ) -> DesktopOutcome {
+        match command {
+            PinboardCommand::Open => self.activate_selection(apps),
+            PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
+                path: self.path_of(&suggest_new_dir_name(&self.entries)),
+            }),
+            PinboardCommand::SortBy(sort) => self.adopt(PinboardSettings {
+                sort,
+                ..self.settings.clone()
+            }),
+            PinboardCommand::ArrangeFrom(icons) => self.adopt(PinboardSettings {
+                icons,
+                ..self.settings.clone()
+            }),
+            PinboardCommand::Refresh => {
+                let relisted = self.relist(now_ns);
+                DesktopOutcome {
+                    redraw: relisted,
+                    relisted,
+                    action: None,
+                }
+            }
+            PinboardCommand::OpenDesktopFolder => {
+                DesktopOutcome::acting(DesktopAction::Activate(DesktopActivation::OpenFolder {
+                    path: self.folder_path(),
+                }))
+            }
+            PinboardCommand::ChangeBackground => {
+                DesktopOutcome::acting(DesktopAction::ChangeBackground)
+            }
+        }
+    }
+
+    /// Name the settings edit `next` for the embedder to adopt, or change
+    /// nothing when it asks for the settings already in force.
+    fn adopt(&self, next: PinboardSettings) -> DesktopOutcome {
+        if next == self.settings {
+            return DesktopOutcome::ignored();
+        }
+        DesktopOutcome::acting(DesktopAction::AdoptSettings(next))
+    }
+
     /// A key while the desktop holds the keyboard: the arrows move the
     /// selection, `Enter` activates it, and `Escape` clears it.
     ///
@@ -446,10 +641,7 @@ impl<S: DirectorySource> Desktop<S> {
             return DesktopOutcome::ignored();
         }
         match key {
-            Key::Named(NamedKey::Enter) => match self.selected {
-                Some(index) => self.activate(index, apps),
-                None => DesktopOutcome::ignored(),
-            },
+            Key::Named(NamedKey::Enter) => self.activate_selection(apps),
             Key::Named(NamedKey::Escape) => {
                 if self.selected.take().is_some() {
                     DesktopOutcome::redraw()
@@ -457,7 +649,7 @@ impl<S: DirectorySource> Desktop<S> {
                     DesktopOutcome::ignored()
                 }
             }
-            Key::Named(named) => match Step::for_key(named) {
+            Key::Named(named) => match Step::for_key(named, self.settings.icons) {
                 Some(step) => self.move_selection(step, layout),
                 None => DesktopOutcome::ignored(),
             },
@@ -482,6 +674,18 @@ impl<S: DirectorySource> Desktop<S> {
         }
         self.selected = Some(next);
         DesktopOutcome::redraw()
+    }
+
+    /// Activate whatever is selected, if anything.
+    ///
+    /// The one definition of "open the selection", so the menu's `Open` row,
+    /// the `Enter` key, and a double-click can never disagree about what
+    /// opening an icon means.
+    fn activate_selection(&self, apps: &[AppAssociation]) -> DesktopOutcome {
+        match self.selected {
+            Some(index) => self.activate(index, apps),
+            None => DesktopOutcome::ignored(),
+        }
     }
 
     /// Resolve what activating the icon at `index` means.
@@ -531,31 +735,39 @@ impl<S: DirectorySource> Desktop<S> {
 
 /// One arrow-key move over the icon column.
 ///
-/// The desktop's icons flow *down* a column before wrapping, and the columns
-/// grow inward from the trailing edge, so up/down is one icon while
-/// right/left is one whole column — and "one column" is however many icons
-/// the live grid fits, never a number this module guesses.
+/// The desktop's icons flow *down* a column before wrapping, so up/down is one
+/// icon while right/left is one whole column — and "one column" is however
+/// many icons the live grid fits, never a number this module guesses.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Step {
     /// One icon further down the listing.
     NextIcon,
     /// One icon back up the listing.
     PreviousIcon,
-    /// One whole column inward (leftward), which is later in the listing.
+    /// One whole column later in the listing.
     NextColumn,
-    /// One whole column outward (rightward), which is earlier in the listing.
+    /// One whole column earlier in the listing.
     PreviousColumn,
 }
 
 impl Step {
-    /// The step an arrow key asks for, or `None` when the key means nothing to
-    /// the desktop.
-    const fn for_key(key: NamedKey) -> Option<Self> {
+    /// The step an arrow key asks for under the `flow` the icons are arranged
+    /// in, or `None` when the key means nothing to the desktop.
+    ///
+    /// Which horizontal arrow runs *later* into the listing is a property of
+    /// the arrangement, not a constant: columns grow rightward from the
+    /// leading edge and leftward from the trailing one, so the mapping is read
+    /// off the live arrangement. Otherwise one of the two arrangements would
+    /// move the selection the opposite way to the icons the user can see.
+    const fn for_key(key: NamedKey, flow: IconFlow) -> Option<Self> {
+        let rightward_is_later = matches!(flow, IconFlow::Leading);
         match key {
             NamedKey::Down => Some(Self::NextIcon),
             NamedKey::Up => Some(Self::PreviousIcon),
-            NamedKey::Left => Some(Self::NextColumn),
+            NamedKey::Right if rightward_is_later => Some(Self::NextColumn),
             NamedKey::Right => Some(Self::PreviousColumn),
+            NamedKey::Left if rightward_is_later => Some(Self::PreviousColumn),
+            NamedKey::Left => Some(Self::NextColumn),
             _ => None,
         }
     }
@@ -570,6 +782,36 @@ impl Step {
             Self::NextColumn => current.saturating_add(column),
             Self::PreviousColumn => current.saturating_sub(column),
         }
+    }
+}
+
+/// The shared grid flow the settings' icon arrangement names.
+const fn grid_flow(flow: IconFlow) -> GridFlow {
+    match flow {
+        IconFlow::Leading => GridFlow::ColumnsFromLeading,
+        IconFlow::Trailing => GridFlow::ColumnsFromTrailing,
+    }
+}
+
+/// The shared listing order the settings' icon sort names.
+///
+/// The two vocabularies meet in exactly this one function, and the settings
+/// engine deliberately does not speak [`SortMode`] itself: that type belongs to
+/// the file-browser engine, and a five-line configuration document that every
+/// consumer of the user's pinboard store must parse has no business dragging
+/// that engine's dependency weight in behind it. Bridging here keeps the
+/// desktop ordering its listing through the single shared sort — there is still
+/// no second sort — while the store stays a store.
+const fn sort_mode(sort: IconSort) -> SortMode {
+    let key = match sort {
+        IconSort::Name => SortKey::Name,
+        IconSort::Kind => SortKey::Kind,
+        IconSort::Size => SortKey::Size,
+        IconSort::Date => SortKey::Modified,
+    };
+    SortMode {
+        key,
+        direction: SortDirection::Ascending,
     }
 }
 

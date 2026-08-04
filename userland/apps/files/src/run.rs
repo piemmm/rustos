@@ -116,7 +116,7 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
-    use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
+    use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
@@ -3926,7 +3926,7 @@ mod program {
         // its wired standard streams and nothing else — it never becomes the
         // file manager.
         if worker_role() {
-            let mut service = IconRasterService;
+            let mut service = ImageRenderService::default();
             return match serve_stdio(&mut service) {
                 ServeEnd::Finished => 0,
                 ServeEnd::Failed(_) => 1,

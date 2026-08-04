@@ -29,12 +29,14 @@
 //!
 //! Input that lands on nothing is likewise reported rather than swallowed.
 //! The desktop beneath the window stack is a real surface with a real owner
-//! ([`Compositor::set_desktop`](crate::Compositor::set_desktop)), so a press
-//! and a motion that resolve to no window come back as [`DesktopPressed`] and
+//! ([`Compositor::set_desktop`](crate::Compositor::set_desktop)), so a
+//! primary press, a secondary press, and a motion that resolve to no window
+//! come back as [`DesktopPressed`], [`DesktopSecondaryPressed`], and
 //! [`DesktopPointerMoved`]. The router still takes no action of its own for
 //! them — it only names where they landed.
 //!
 //! [`DesktopPressed`]: InputResponse::DesktopPressed
+//! [`DesktopSecondaryPressed`]: InputResponse::DesktopSecondaryPressed
 //! [`DesktopPointerMoved`]: InputResponse::DesktopPointerMoved
 
 use tairix_controls::{
@@ -72,10 +74,12 @@ pub enum InputResponse {
     /// window was raised to the top of the z-order and given focus, and the
     /// press is delivered to the client as a secondary-button press (which a
     /// client uses to open its context menu). `local` is the press position
-    /// in the window's surface coordinates. A secondary press on the
-    /// desktop or on window furniture opens no menu (it is
-    /// [`Ignored`](Self::Ignored) / consumed), so the window manager never
-    /// synthesises a context menu of its own — only the client decides.
+    /// in the window's surface coordinates. A secondary press on window
+    /// furniture opens no menu (it is consumed), and one on the desktop is
+    /// reported to the desktop layer's owner as
+    /// [`DesktopSecondaryPressed`](Self::DesktopSecondaryPressed): the window
+    /// manager never synthesises a context menu of its own — only the surface
+    /// the press landed on decides what it means.
     SecondaryActivated {
         /// The window whose client received the secondary press.
         window: WindowId,
@@ -85,6 +89,13 @@ pub enum InputResponse {
     /// A primary press landed on the desktop background; focus, if any,
     /// was cleared.
     DesktopPressed,
+    /// A secondary (right) press landed on the desktop background, so the
+    /// desktop layer's owner decides what it means (it opens the desktop's
+    /// own context menu). Unlike the primary press this clears no focus and
+    /// changes no window-manager state: a right-click asks a question of the
+    /// surface under the pointer, it does not activate anything. The press
+    /// position is the router's own [`pointer`](InputRouter::pointer).
+    DesktopSecondaryPressed,
     /// Pointer motion resolved to the desktop background — no window lies
     /// under it and no grab is in flight — so the desktop layer's owner
     /// interprets it (hover feedback, a drag it started itself). The
@@ -594,14 +605,16 @@ impl InputRouter {
     /// Like [`press_primary`](Self::press_primary) it raises and focuses the
     /// window under the pointer, but it starts no move/resize/control grab and
     /// pages no scrollbar: a right-click's only meaning is "open the context
-    /// menu of the client under the pointer". A press on the client area is
+    /// menu of the surface under the pointer". A press on the client area is
     /// delivered as [`InputResponse::SecondaryActivated`] for the client to
-    /// interpret; a press on the desktop or on window furniture opens no menu
-    /// (the window manager consumes it), so the WM never synthesises a menu of
-    /// its own — only the client decides what a right-click means.
+    /// interpret; one on the desktop background is reported as
+    /// [`InputResponse::DesktopSecondaryPressed`] for the desktop layer's
+    /// owner; one on window furniture opens no menu (the window manager
+    /// consumes it). The WM never synthesises a menu of its own — only the
+    /// surface pressed decides what a right-click means.
     fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
-            return InputResponse::Ignored;
+            return InputResponse::DesktopSecondaryPressed;
         };
         compositor.raise(window);
         self.focused = Some(window);

@@ -18,6 +18,24 @@
 
 use crate::Errno;
 
+/// The character-acceptability rule shared by every bounded text field in
+/// the ABI: a character is acceptable unless it is a control character —
+/// with `\n` privileged when the caller's own grammar is legitimately
+/// multi-line.
+///
+/// [`BoundedText`] calls this with `allow_newline = false`, so it forbids
+/// every control character exactly as before. The one exception in the
+/// crate is [`crate::pinboard_ipc::PinboardDocument`], a rendered
+/// multi-line settings document that cannot be a `BoundedText` (its `\n`
+/// separators would otherwise be refused) but must reject every other
+/// control character identically. Sharing this one function keeps the two
+/// validators' character rule from drifting into two independent copies of
+/// "is this character acceptable".
+#[must_use]
+pub(crate) fn is_forbidden_character(c: char, allow_newline: bool) -> bool {
+    c.is_control() && !(allow_newline && c == '\n')
+}
+
 /// A validated text field: at least `MIN` and at most `MAX` bytes of
 /// well-formed UTF-8 with no control characters.
 ///
@@ -57,7 +75,7 @@ impl<const MIN: usize, const MAX: usize> BoundedText<MIN, MAX> {
         if text.len() < MIN || text.len() > MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        if text.chars().any(char::is_control) {
+        if text.chars().any(|c| is_forbidden_character(c, false)) {
             return Err(Errno::OutOfRange);
         }
         let mut bytes = [0u8; MAX];
@@ -91,7 +109,7 @@ impl<const MIN: usize, const MAX: usize> BoundedText<MIN, MAX> {
             return Err(Errno::BadMagic);
         }
         let text = core::str::from_utf8(&bytes[..len_usize]).map_err(|_| Errno::OutOfRange)?;
-        if text.chars().any(char::is_control) {
+        if text.chars().any(|c| is_forbidden_character(c, false)) {
             return Err(Errno::OutOfRange);
         }
         Ok(Self { bytes: *bytes, len })

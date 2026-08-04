@@ -27,9 +27,10 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
 /// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
 /// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]),
-/// notification service ([`crate::notify_ipc::NOTIFY_ENDPOINT`]), and
+/// notification service ([`crate::notify_ipc::NOTIFY_ENDPOINT`]),
 /// Switchboard tray-summary service
-/// ([`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`]), the sandboxed font
+/// ([`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`]), and pinboard-apply
+/// service ([`crate::pinboard_ipc::PINBOARD_ENDPOINT`]), the sandboxed font
 /// service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
 /// manager's control surface
 /// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the RAID array
@@ -61,6 +62,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::window_ipc::WINDOW_ENDPOINT
         || id == crate::notify_ipc::NOTIFY_ENDPOINT
         || id == crate::switchboard_ipc::SWITCHBOARD_ENDPOINT
+        || id == crate::pinboard_ipc::PINBOARD_ENDPOINT
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
         || id == crate::font_ipc::FONT_ENDPOINT
@@ -83,16 +85,17 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
 ///
 /// These are the rendezvous the desktop session serves on behalf of the
 /// seat it owns: the window channel ([`crate::window_ipc::WINDOW_ENDPOINT`]),
-/// the notification channel ([`crate::notify_ipc::NOTIFY_ENDPOINT`]), and the
+/// the notification channel ([`crate::notify_ipc::NOTIFY_ENDPOINT`]), the
 /// Switchboard tray-summary channel
-/// ([`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`]). A session is an
+/// ([`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`]), and the pinboard-apply
+/// channel ([`crate::pinboard_ipc::PINBOARD_ENDPOINT`]). A session is an
 /// ordinary user process whose account ceiling never carries the
 /// service-class privileged-bind capability, so without this alternative it
-/// could not serve the seat's windows, notifications, or tray summary at all;
-/// scoping the exception to the lease keeps the session minimally privileged
-/// and fails closed for everyone else (a squatter without the lease is
-/// refused, and losing the seat ends the session, whose exit reclaims the
-/// endpoints).
+/// could not serve the seat's windows, notifications, tray summary, or
+/// pinboard at all; scoping the exception to the lease keeps the session
+/// minimally privileged and fails closed for everyone else (a squatter
+/// without the lease is refused, and losing the seat ends the session, whose
+/// exit reclaims the endpoints).
 ///
 /// Every seat-scoped endpoint is by definition also
 /// [reserved](is_reserved_endpoint): the seat lease substitutes only for the
@@ -104,6 +107,7 @@ pub const fn is_seat_scoped_endpoint(id: u64) -> bool {
     id == crate::window_ipc::WINDOW_ENDPOINT
         || id == crate::notify_ipc::NOTIFY_ENDPOINT
         || id == crate::switchboard_ipc::SWITCHBOARD_ENDPOINT
+        || id == crate::pinboard_ipc::PINBOARD_ENDPOINT
 }
 
 /// Flags accepted by the server-side `call_recv` syscall.
@@ -473,6 +477,7 @@ mod tests {
         assert!(is_reserved_endpoint(
             crate::switchboard_ipc::SWITCHBOARD_ENDPOINT
         ));
+        assert!(is_reserved_endpoint(crate::pinboard_ipc::PINBOARD_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net_ipc::NETSTACK_ENDPOINT));
         assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
         assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
@@ -492,15 +497,16 @@ mod tests {
     }
 
     #[test]
-    fn seat_scoped_endpoints_are_the_desktop_trio_and_all_reserved() {
-        // Exactly the window, notification, and Switchboard tray-summary
-        // rendezvous are seat-scoped, and all three are reserved (the
-        // lease substitutes only for the reserved-id half of the bind
-        // gate).
+    fn seat_scoped_endpoints_are_the_desktop_quartet_and_all_reserved() {
+        // Exactly the window, notification, Switchboard tray-summary, and
+        // pinboard-apply rendezvous are seat-scoped, and all four are
+        // reserved (the lease substitutes only for the reserved-id half of
+        // the bind gate).
         for id in [
             crate::window_ipc::WINDOW_ENDPOINT,
             crate::notify_ipc::NOTIFY_ENDPOINT,
             crate::switchboard_ipc::SWITCHBOARD_ENDPOINT,
+            crate::pinboard_ipc::PINBOARD_ENDPOINT,
         ] {
             assert!(is_seat_scoped_endpoint(id));
             assert!(is_reserved_endpoint(id));

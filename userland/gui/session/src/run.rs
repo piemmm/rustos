@@ -82,6 +82,7 @@ mod program {
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
     use tairix_abi::input::KeyInput;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
+    use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::switchboard_ipc::{
@@ -100,30 +101,33 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
         build_pin_views, command_section, deliver_pending_open, load_library,
-        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
+        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
         serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
         CliError, Command, ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation,
         DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser,
         InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
-        PinBridge, PinService, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
+        PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
+        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
         SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
         ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
         FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::IpcTransport;
     use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Write};
-    use tairix_sandbox::iconraster::{rasterise_icon, IconRasterService};
+    use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_taskpins::PinTarget;
+    use tairix_wallpaper::{PinboardSettings, WallpaperChoice, WallpaperFit, MAX_WALLPAPER_BYTES};
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
-    use tairix_wm::{chrome_cache, Compositor, InputResponse, Rect};
+    use tairix_wm::{chrome_cache, Compositor, InputResponse, Rect, Surface};
 
     extern crate alloc;
 
@@ -190,6 +194,13 @@ mod program {
     /// monitor cannot publish.
     const EXIT_NO_SWITCHBOARD_ENDPOINT: i32 = 100;
 
+    /// Exit code when the reserved `PINBOARD_ENDPOINT` could not be bound.
+    /// It is authorised by this session's kernel-attested live seat lease —
+    /// the same lease/rendezvous anomaly as the other three — so the session
+    /// exits fail-loud rather than run a desktop whose wallpaper chooser can
+    /// never apply anything.
+    const EXIT_NO_PINBOARD_ENDPOINT: i32 = 101;
+
     /// Exit code when the user chose *Log Out*. The session ended because it
     /// was asked to, so it is a success: nothing failed, and the login
     /// supervisor that started the desktop prompts again.
@@ -224,6 +235,11 @@ mod program {
     /// them until something else is starved.
     const PRESSURE_TOKEN: u64 = 6;
 
+    /// The wait-set token of the served `PINBOARD_ENDPOINT` member: a tool
+    /// the user ran (the wallpaper chooser) asking the session to adopt new
+    /// pinboard settings wakes the loop to apply them.
+    const PINBOARD_TOKEN: u64 = 7;
+
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
     /// covers several concurrent clients.
@@ -238,6 +254,11 @@ mod program {
     /// attested publisher posts, change-driven and synchronous, so the
     /// queue stays tiny (a fail-closed memory bound).
     const SWITCHBOARD_CAPACITY: usize = 4;
+
+    /// Outstanding-call capacity of the pinboard endpoint: an apply is a
+    /// deliberate, user-driven act and synchronous, so a tiny queue covers
+    /// every real caller (a fail-closed memory bound).
+    const PINBOARD_CAPACITY: usize = 4;
 
     /// The audit sink every cache in this session records through. The shared
     /// cache constructors take a `'static` borrow, and the runtime sink is a
@@ -836,16 +857,25 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
+        // One parser-sandbox worker for every untrusted image this session
+        // decodes: the desktop's icon artwork and the user's wallpaper
+        // alike. Both are attacker-influenced files, both are decoded in a
+        // capability-empty re-entry of this binary rather than in this
+        // address space, and sharing the one worker keeps a second decode
+        // path from existing.
+        let sandbox: SharedSandbox = alloc::rc::Rc::new(core::cell::RefCell::new(
+            ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+        ));
+
         // The desktop's icon artwork — the shipped `/System/Graphics`
         // masters and each bundle's own icon — is read through the
-        // session's own VFS identity and decoded in the parser-sandbox
-        // worker, never in this address space. Until this call the shell
-        // draws every icon from its built-in glyphs, and it falls back to
-        // them again whenever either seam refuses.
+        // session's own VFS identity and decoded in that worker. Until this
+        // call the shell draws every icon from its built-in glyphs, and it
+        // falls back to them again whenever either seam refuses.
         shell.set_artwork_source(
             alloc::boxed::Box::new(ArtworkFileReader(VfsFileReader)),
             alloc::boxed::Box::new(ArtworkSandbox(SandboxRasteriser {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                sandbox: alloc::rc::Rc::clone(&sandbox),
             })),
         );
 
@@ -881,12 +911,26 @@ mod program {
             }),
             desktop_folder,
         );
+        // The user's pinboard settings, with the same fail-closed posture as
+        // the pin store: absent → the defaults, silently (a fresh account);
+        // unusable → the defaults plus one loud reason. They are applied
+        // *before* the first listing, so the very first frame already has
+        // the user's own sort order and icon arrangement rather than
+        // re-sorting a frame later.
+        let mut pinboard = load_pinboard(&mut desktop, sandbox);
         desktop.relist(tairix_rt::clock_get());
         // Which installed application opens which file, read once from the
         // bundles the catalog already names and refreshed only when the
         // catalog is. Resolving it per gesture would re-read every manifest
         // on every click.
         let mut associations = desktop_associations(&shell);
+
+        // The wallpaper the desktop layer is painted over: read under the
+        // session's own identity and fitted to this screen in the sandbox
+        // worker, once. A wallpaper that cannot be read or rendered leaves
+        // the backdrop colour showing and states why — the desktop never
+        // fails over a picture.
+        prepare_wallpaper(&mut pinboard, &mut shell, &desktop, &compositor);
 
         // First frame: place the bar, paint the desktop's icons beneath
         // every window, install the pointer cursor at the seat's initial
@@ -961,6 +1005,24 @@ mod program {
             );
         }
 
+        // Bind the pinboard rendezvous the same way: the fourth seat-scoped
+        // reserved id, authorised by the same live seat lease,
+        // unrestricted-sender — the serve arm compares every caller's
+        // kernel-attested origin uid against this session's own and refuses
+        // anything else, so an unentitled sender only ever reaches a typed
+        // refusal.
+        if tairix_rt::call_create(
+            PINBOARD_ENDPOINT,
+            &empty,
+            &empty,
+            PINBOARD_MAX_REQUEST,
+            STATUS_REPLY_LEN,
+            PINBOARD_CAPACITY,
+        ) != 0
+        {
+            return fail(EXIT_NO_PINBOARD_ENDPOINT, "pinboard endpoint bind refused");
+        }
+
         // Park on the wait-set: the seat member wakes on input delivery
         // and on lease loss, the endpoint member on a posted window
         // request, the any-child member when a spawned app exits (so its
@@ -1013,6 +1075,16 @@ mod program {
         ) != 0
         {
             return fail(EXIT_WAIT_FAILED, "switchboard endpoint wait refused");
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Endpoint,
+            PINBOARD_ENDPOINT,
+            PINBOARD_TOKEN,
+        ) != 0
+        {
+            return fail(EXIT_WAIT_FAILED, "pinboard endpoint wait refused");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -1252,6 +1324,32 @@ mod program {
                     };
                     let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply[..len]);
                 }
+            } else if token == PINBOARD_TOKEN {
+                // Serve a pending pinboard apply: attest that the caller
+                // runs as this session's own user from the kernel (never
+                // the wire), parse the carried document with the one
+                // settings engine, and put it through the very same
+                // persist-then-adopt path the backdrop menu uses, so the
+                // two routes cannot diverge. A foreign caller, a malformed
+                // frame, an unusable document, or a refused write is a
+                // typed refusal stated on `stderr`, so no caller is left
+                // parked and the desktop keeps the settings it had.
+                let mut request = [0u8; PINBOARD_MAX_REQUEST];
+                let mut ticket = 0u64;
+                if let Ok(len) = tairix_rt::call_recv(PINBOARD_ENDPOINT, &mut request, &mut ticket)
+                {
+                    let result = serve_pinboard(
+                        &mut pinboard,
+                        &mut desktop,
+                        &mut shell,
+                        &mut compositor,
+                        self_origin.uid(),
+                        ticket,
+                        &request[..len],
+                    );
+                    let reply = encode_status_reply(result);
+                    let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, ticket, &reply);
+                }
             } else if token == PRESSURE_TOKEN {
                 // The machine's memory-pressure band moved. Read it and, if
                 // it really changed, give back whatever the new band says a
@@ -1371,6 +1469,29 @@ mod program {
                 {
                     return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
                 }
+            } else if token == SEAT_TOKEN && pinboard.menu.is_open() {
+                // The backdrop menu is up, so it is modal: the seat's
+                // events are drained straight into it here — not through
+                // the shell — so no press or keystroke behind the open
+                // plate reaches a window, the bar, or the icon column.
+                // This is the routing half of the menu's modality, exactly
+                // as the lock's drain above is the routing half of the
+                // lock.
+                let now_ns = tairix_rt::clock_get();
+                if drain_pinboard_menu(
+                    &mut pinboard,
+                    &mut pointer,
+                    &mut keyboard,
+                    &mut desktop,
+                    &mut shell,
+                    &mut compositor,
+                    &mut launched,
+                    &mut associations,
+                    now_ns,
+                ) == Drained::Faulted
+                {
+                    return drain_fault(&mut shell, &mut compositor, Errno::DeviceFault);
+                }
             } else if token == SEAT_TOKEN {
                 // Drain both input channels through the shell, routing
                 // every outcome onward (to the focused app window, or the
@@ -1389,6 +1510,7 @@ mod program {
                 for outcome in outcomes {
                     route_desktop(
                         &outcome,
+                        &mut pinboard,
                         &mut desktop,
                         &mut shell,
                         &mut compositor,
@@ -1428,6 +1550,7 @@ mod program {
                             let outcome = shell.handle(event, &mut compositor, now_ns);
                             route_desktop(
                                 &outcome,
+                                &mut pinboard,
                                 &mut desktop,
                                 &mut shell,
                                 &mut compositor,
@@ -1557,19 +1680,365 @@ mod program {
         matches: alloc::vec::Vec<Option<TaskId>>,
     }
 
+    /// The one parser-sandbox worker the icon artwork and the wallpaper
+    /// preparation both decode through: this binary re-entered as a single
+    /// capability-empty worker, never a second one spawned for wallpaper
+    /// alone. Shared because the shell owns the icon rasteriser behind a
+    /// boxed trait object while the wallpaper preparation below needs the
+    /// very same live worker from the serve loop's own state.
+    type SharedSandbox =
+        alloc::rc::Rc<core::cell::RefCell<ParserSandbox<RtLauncher, tairix_rt::LogSink>>>;
+
     /// The production [`IconRasteriser`]: untrusted icon bytes go to the
     /// parser-sandbox icon service — this binary re-entered as a
     /// capability-empty worker — and only a verified pixel block comes
     /// back. Any refusal (malformed image, crashed worker, unavailable
     /// spawn) is `None`: the pin falls back to its class glyph.
     struct SandboxRasteriser {
-        sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+        sandbox: SharedSandbox,
     }
 
     impl IconRasteriser for SandboxRasteriser {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-            rasterise_icon(&mut self.sandbox, side, icon).ok()
+            rasterise_icon(&mut self.sandbox.borrow_mut(), side, icon).ok()
         }
+    }
+
+    /// The session's pinboard state, kept beside the loop: the backdrop's
+    /// context menu, the per-user settings store changes are persisted
+    /// through, the sandbox worker the wallpaper is decoded in, and what the
+    /// wallpaper surface now on screen was prepared from.
+    ///
+    /// The settings themselves are *not* here: the desktop model owns them,
+    /// so there is exactly one copy of what is in force.
+    struct PinboardPanel {
+        menu: PinboardMenu,
+        store: PinboardStore,
+        sandbox: SharedSandbox,
+        prepared: Option<WallpaperSource>,
+    }
+
+    /// What the wallpaper surface currently installed in the shell was
+    /// prepared from.
+    ///
+    /// Preparing a wallpaper reads a file and runs a sandboxed decode, so it
+    /// happens only when one of these inputs really changed — never on a
+    /// frame path. It is recorded *before* the attempt is made, so a file
+    /// that cannot be read or rendered costs one refusal rather than one per
+    /// frame.
+    #[derive(Clone, Eq, PartialEq)]
+    struct WallpaperSource {
+        choice: WallpaperChoice,
+        fit: WallpaperFit,
+        width: u32,
+        height: u32,
+    }
+
+    /// Load the user's pinboard settings into `desktop` (reporting an
+    /// unusable store loudly) and answer with the session's pinboard state
+    /// over the production file seams and `sandbox`.
+    ///
+    /// The settings are applied to the model here rather than returned, so
+    /// only the desktop ever holds what is in force.
+    fn load_pinboard<S: DirectorySource>(
+        desktop: &mut Desktop<S>,
+        sandbox: SharedSandbox,
+    ) -> PinboardPanel {
+        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
+        let loaded = PinboardStore::load(&mut VfsFileReader, home);
+        if let Some(warning) = loaded.warning {
+            let _ = write!(Stderr, "{warning}");
+        }
+        desktop.apply_settings(loaded.settings);
+        PinboardPanel {
+            menu: PinboardMenu::new(),
+            store: loaded.store,
+            sandbox,
+            prepared: None,
+        }
+    }
+
+    /// Prepare the wallpaper the desktop layer is painted over and install it
+    /// in the shell, doing nothing at all when the surface already on screen
+    /// was prepared from exactly these settings at exactly this screen size.
+    ///
+    /// The chosen file is read under the session's own identity, bounded by
+    /// the shared wallpaper cap, and fitted to the whole screen in the
+    /// sandbox worker — so untrusted image bytes are never decoded in this
+    /// address space. A wallpaper that cannot be read or rendered installs
+    /// no surface, leaving the backdrop colour as the whole base, and states
+    /// why once.
+    fn prepare_wallpaper<S: DirectorySource>(
+        pinboard: &mut PinboardPanel,
+        shell: &mut DesktopShell,
+        desktop: &Desktop<S>,
+        compositor: &Compositor,
+    ) {
+        let settings = desktop.settings();
+        let screen = compositor.screen_rect();
+        let wanted = WallpaperSource {
+            choice: settings.wallpaper.clone(),
+            fit: settings.fit,
+            width: screen.width,
+            height: screen.height,
+        };
+        if pinboard.prepared.as_ref() == Some(&wanted) {
+            return;
+        }
+        let WallpaperChoice::Image(path) = &wanted.choice else {
+            pinboard.prepared = Some(wanted);
+            shell.set_wallpaper(None);
+            return;
+        };
+        let surface = render_wallpaper_surface(
+            &pinboard.sandbox,
+            path.as_str(),
+            wanted.fit,
+            wanted.width,
+            wanted.height,
+        );
+        pinboard.prepared = Some(wanted);
+        shell.set_wallpaper(surface);
+    }
+
+    /// Read the image at `path`, place it over a `width` × `height` screen
+    /// under `fit` in the sandbox worker, and rebuild the result as the
+    /// surface the compositor blits.
+    ///
+    /// Every refusal — a file that cannot be read, one larger than any
+    /// wallpaper, a malformed image, a crashed worker, or a reply whose
+    /// pixels do not fill the screen — answers `None` with its reason on
+    /// `stderr`, so the desktop falls back to the backdrop colour instead of
+    /// failing over a picture.
+    fn render_wallpaper_surface(
+        sandbox: &SharedSandbox,
+        path: &str,
+        fit: WallpaperFit,
+        width: u32,
+        height: u32,
+    ) -> Option<Surface> {
+        let bytes = match read_file(path, MAX_WALLPAPER_BYTES) {
+            Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: wallpaper {path} is larger than any wallpaper the desktop renders; \
+                     using the backdrop colour"
+                );
+                return None;
+            }
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: wallpaper {path} could not be read ({err}); \
+                     using the backdrop colour"
+                );
+                return None;
+            }
+        };
+        let placed = match render_wallpaper(&mut sandbox.borrow_mut(), width, height, fit, &bytes) {
+            Ok(placed) => placed,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: wallpaper {path} could not be rendered ({err}); \
+                     using the backdrop colour"
+                );
+                return None;
+            }
+        };
+        let surface = Surface::from_rgba8(width, height, &placed);
+        if surface.is_none() {
+            let _ = writeln!(
+                Stderr,
+                "desktop: wallpaper {path} did not fill the screen; using the backdrop colour"
+            );
+        }
+        surface
+    }
+
+    /// Drain the seat's pointer and keyboard straight into the open backdrop
+    /// menu, routing nothing anywhere else.
+    ///
+    /// This is what makes the menu modal: the shell is never given the
+    /// events, so no press or keystroke behind the plate reaches a window,
+    /// the bar, or the icon column while the menu is up. A chosen row is
+    /// resolved by the desktop model — the same resolution a gesture goes
+    /// through — and carried out by the same one action path, so a command
+    /// and a double-click can never disagree. A press away and Escape both
+    /// dismiss, which takes the menu's window down.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn drain_pinboard_menu<S: DirectorySource>(
+        pinboard: &mut PinboardPanel,
+        pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
+        keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launched: &mut LaunchTable,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
+        now_ns: u64,
+    ) -> Drained {
+        loop {
+            match pointer.poll() {
+                Ok(None) => break,
+                Ok(Some(event)) => {
+                    // Motion alone still goes to the shell, so the tracked
+                    // pointer and the on-screen cursor stay in step for the
+                    // moment the plate closes; its outcome is discarded and
+                    // no press ever reaches it, which is what keeps the
+                    // windows beneath the plate untouched.
+                    if matches!(event, tairix_wm::InputEvent::PointerMoved { .. }) {
+                        let _ = shell.handle(event, compositor, now_ns);
+                    }
+                    let acted = match shell.pinboard_menu_bounds(compositor, &pinboard.menu) {
+                        Some(bounds) => pinboard.menu.on_pointer(
+                            &event,
+                            shell.router().pointer(),
+                            bounds,
+                            compositor.scale(),
+                            shell.session().active_theme(),
+                        ),
+                        // An open menu the shell cannot place has no plate to
+                        // route against; dismiss rather than guess at one.
+                        None => {
+                            pinboard.menu.close();
+                            PinboardMenuOutcome::Dismissed
+                        }
+                    };
+                    settle_pinboard_menu(
+                        acted,
+                        pinboard,
+                        desktop,
+                        shell,
+                        compositor,
+                        launched,
+                        associations,
+                        now_ns,
+                    );
+                }
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        loop {
+            match keyboard.poll_record() {
+                Ok(None) => break,
+                // Every key belongs to the open plate: the arrows move the
+                // highlight, Enter chooses, Escape dismisses, and a key it
+                // has no meaning for is dropped rather than reaching a
+                // window behind it.
+                Ok(Some((tairix_wm::InputEvent::KeyPressed { key, .. }, _))) => {
+                    let acted = pinboard.menu.on_key(key);
+                    settle_pinboard_menu(
+                        acted,
+                        pinboard,
+                        desktop,
+                        shell,
+                        compositor,
+                        launched,
+                        associations,
+                        now_ns,
+                    );
+                }
+                Ok(Some(_)) => {}
+                Err(_) => return Drained::Faulted,
+            }
+        }
+        Drained::Empty
+    }
+
+    /// Apply one backdrop-menu outcome: repaint a moved highlight, take the
+    /// menu's window down when it closed, and put a chosen command through
+    /// the desktop model and the one action path.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn settle_pinboard_menu<S: DirectorySource>(
+        acted: PinboardMenuOutcome,
+        pinboard: &mut PinboardPanel,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launched: &mut LaunchTable,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
+        now_ns: u64,
+    ) {
+        match acted {
+            PinboardMenuOutcome::Ignored => {}
+            // The one presentation call both repaints an open plate and takes
+            // a closed one's window down, so a dismissal needs no second
+            // path.
+            PinboardMenuOutcome::Changed | PinboardMenuOutcome::Dismissed => {
+                shell.present_pinboard_menu(compositor, &pinboard.menu);
+            }
+            PinboardMenuOutcome::Chose(command) => {
+                shell.present_pinboard_menu(compositor, &pinboard.menu);
+                // The model resolves the command against its own state, so a
+                // row and the equivalent gesture produce the very same
+                // action; the session merely carries it out.
+                let acted = desktop.command(command, associations, now_ns);
+                let redraw = acted.redraw
+                    | apply_desktop_action(
+                        acted.action,
+                        pinboard,
+                        desktop,
+                        shell,
+                        compositor,
+                        launched,
+                        now_ns,
+                    );
+                if acted.relisted {
+                    refresh_library(shell, compositor);
+                    *associations = desktop_associations(shell);
+                }
+                if redraw {
+                    shell.present_desktop(compositor, desktop);
+                }
+            }
+        }
+    }
+
+    /// Attest the caller of a pending pinboard call from the kernel, decode
+    /// the settings it carries through the shared, host-tested policy, and
+    /// adopt them through the session's one persist-then-adopt path.
+    ///
+    /// Only a caller running as this session's own user may rewrite this
+    /// session's desktop: the uid compared is the kernel-attested
+    /// `call_peer_origin` uid, never a wire claim. Anything else — another
+    /// user's process, a malformed frame, an unusable document, a refused
+    /// store write — is a typed refusal stated on `stderr` that adopts
+    /// nothing (fail closed). The document merely *names* a wallpaper path;
+    /// the session reads it under its own identity, so this channel reaches
+    /// no file the session could not already read.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn serve_pinboard<S: DirectorySource>(
+        pinboard: &mut PinboardPanel,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        session_uid: u32,
+        ticket: u64,
+        request: &[u8],
+    ) -> Result<(), Errno> {
+        let mut buf = [0u8; ORIGIN_WIRE_LEN];
+        let len = tairix_rt::call_peer_origin(PINBOARD_ENDPOINT, ticket, &mut buf)
+            .map_err(Errno::from_syscall)?;
+        let origin = Origin::from_bytes(&buf[..len])?;
+        let settings =
+            serve_pinboard_apply(session_uid, origin.uid(), request).map_err(|refusal| {
+                let msg = refusal.reason();
+                let _ = writeln!(Stderr, "desktop: {msg}");
+                refusal.errno()
+            })?;
+        adopt_pinboard_settings(
+            settings,
+            pinboard,
+            desktop,
+            shell,
+            compositor,
+            tairix_rt::clock_get(),
+        )
+        .map_err(PinboardStoreError::errno)?;
+        shell.present_desktop(compositor, desktop);
+        Ok(())
     }
 
     /// Load the user's pin store (reporting an unusable one loudly) into a
@@ -1855,7 +2324,11 @@ mod program {
                         );
                     }
                 }
-                InputResponse::DesktopPressed => {
+                // A press on the backdrop, primary or secondary, means the
+                // desktop holds the keyboard: the window that had it learns
+                // it lost it. The secondary press additionally opens the
+                // backdrop menu, which `route_desktop` has already applied.
+                InputResponse::DesktopPressed | InputResponse::DesktopSecondaryPressed => {
                     if let Some(old) = focused.take() {
                         deliver(
                             server,
@@ -2325,8 +2798,10 @@ mod program {
     ///
     /// A refusal — a file no installed application opens — is written to
     /// `stderr` and changes nothing else.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn route_desktop<S: DirectorySource>(
         outcome: &tairix_desktop_session::ShellOutcome,
+        pinboard: &mut PinboardPanel,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -2348,6 +2823,7 @@ mod program {
                 InputResponse::DesktopPressed => {
                     desktop.press(pointer, &layout, now_ns, associations)
                 }
+                InputResponse::DesktopSecondaryPressed => desktop.context_press(pointer, &layout),
                 InputResponse::DesktopKey { key, pressed, .. } => {
                     desktop.key(*key, *pressed, &layout, associations)
                 }
@@ -2356,7 +2832,49 @@ mod program {
             _ => departed(desktop, compositor, pointer),
         };
         redraw |= acted.redraw;
-        match acted.action {
+        redraw |= apply_desktop_action(
+            acted.action,
+            pinboard,
+            desktop,
+            shell,
+            compositor,
+            launched,
+            now_ns,
+        );
+        if acted.relisted {
+            // The user's own files demonstrably changed under the desktop, so
+            // this is the honest moment to re-read what is installed as well:
+            // a program installed since bring-up can open a document from
+            // here without waiting for the library popup to be opened. A
+            // re-list that found nothing changed costs none of this.
+            refresh_library(shell, compositor);
+            *associations = desktop_associations(shell);
+        }
+        if redraw {
+            shell.present_desktop(compositor, desktop);
+        }
+    }
+
+    /// Carry out one desktop action, whether a gesture on the icon column
+    /// named it or a chosen backdrop-menu row did, and answer whether the
+    /// desktop layer must be repainted.
+    ///
+    /// The single place every [`DesktopAction`] is honoured, so a
+    /// double-click and the equivalent menu row can never disagree about
+    /// what happens. Every failure — a refused launch, a folder the
+    /// filesystem would not create, settings that could not be saved — is
+    /// stated on `stderr` and leaves the desktop running.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn apply_desktop_action<S: DirectorySource>(
+        action: Option<DesktopAction>,
+        pinboard: &mut PinboardPanel,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launched: &mut LaunchTable,
+        now_ns: u64,
+    ) -> bool {
+        match action {
             Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
                 record_launch(
                     launched,
@@ -2364,6 +2882,7 @@ mod program {
                     FILES_LABEL,
                     FILES_RUN_PATH,
                 );
+                false
             }
             Some(DesktopAction::Activate(DesktopActivation::Launch {
                 run_path,
@@ -2380,24 +2899,100 @@ mod program {
                     &label,
                     &run_path,
                 );
+                false
+            }
+            Some(DesktopAction::OpenMenu { at, on_icon }) => {
+                pinboard.menu.open(at, on_icon, desktop.settings());
+                shell.present_pinboard_menu(compositor, &pinboard.menu);
+                false
+            }
+            Some(DesktopAction::CreateFolder { path }) => {
+                create_desktop_folder(&path, desktop, now_ns)
+            }
+            Some(DesktopAction::AdoptSettings(settings)) => {
+                adopt_pinboard_settings(settings, pinboard, desktop, shell, compositor, now_ns)
+                    .is_ok()
+            }
+            Some(DesktopAction::ChangeBackground) => {
+                record_launch(
+                    launched,
+                    spawn_app(WALLPAPER_RUN_PATH.as_bytes(), &[]),
+                    WALLPAPER_LABEL,
+                    WALLPAPER_RUN_PATH,
+                );
+                false
             }
             Some(DesktopAction::Refuse(reason)) => {
                 let _ = write!(Stderr, "{reason}");
+                false
             }
-            None => {}
+            None => false,
         }
-        if acted.relisted {
-            // The user's own files demonstrably changed under the desktop, so
-            // this is the honest moment to re-read what is installed as well:
-            // a program installed since bring-up can open a document from
-            // here without waiting for the library popup to be opened. A
-            // re-list that found nothing changed costs none of this.
-            refresh_library(shell, compositor);
-            *associations = desktop_associations(shell);
+    }
+
+    /// Create `path` under the session's own identity and show it, answering
+    /// whether the icon column changed.
+    ///
+    /// A refusal — the folder already exists, the desktop folder is not
+    /// writable, the volume is full — is stated on `stderr` with the
+    /// kernel's own reason and leaves the desktop exactly as it was.
+    fn create_desktop_folder<S: DirectorySource>(
+        path: &str,
+        desktop: &mut Desktop<S>,
+        now_ns: u64,
+    ) -> bool {
+        let ret = tairix_rt::fs_mkdir(path.as_bytes());
+        if ret < 0 {
+            let _ = writeln!(
+                Stderr,
+                "desktop: {path} could not be created ({})",
+                Errno::from_syscall(ret)
+            );
+            return false;
         }
-        if redraw {
-            shell.present_desktop(compositor, desktop);
+        desktop.relist(now_ns)
+    }
+
+    /// Persist `settings` to the user's own store and, once that write has
+    /// succeeded, adopt them and do exactly the work the resulting change
+    /// names: re-lay-out, re-list, and re-prepare the wallpaper.
+    ///
+    /// The write comes first, so memory and disk can never diverge: a
+    /// refused write states why on `stderr` and leaves the desktop showing
+    /// the settings the next login would restore. Both routes into the
+    /// settings — a chosen menu row and an apply from the wallpaper chooser
+    /// — come through here, so neither can adopt something the other would
+    /// not have.
+    ///
+    /// # Errors
+    ///
+    /// The [`PinboardStoreError`] the store refused with; nothing was
+    /// adopted.
+    fn adopt_pinboard_settings<S: DirectorySource>(
+        settings: PinboardSettings,
+        pinboard: &mut PinboardPanel,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> Result<(), PinboardStoreError> {
+        if let Err(err) = pinboard.store.persist(&mut VfsFileWriter, &settings) {
+            let _ = writeln!(Stderr, "desktop: {err}");
+            return Err(err);
         }
+        let Some(change) = desktop.apply_settings(settings) else {
+            return Ok(());
+        };
+        if change.relist {
+            desktop.relist(now_ns);
+        }
+        if change.wallpaper {
+            prepare_wallpaper(pinboard, shell, desktop, compositor);
+        }
+        // A re-layout, a re-list, and a new wallpaper all show as the same
+        // repaint of the desktop layer, so one present covers whichever of
+        // them the change asked for.
+        Ok(())
     }
 
     /// The desktop's answer to an outcome that was not its own: a pointer
@@ -2514,16 +3109,7 @@ mod program {
 
     impl SessionFileReader for VfsFileReader {
         fn read(&mut self, path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
-            let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            // `ret >= 0` checked above; it is a descriptor number.
-            let fd = ret as u32;
-            let outcome = read_to_end(fd);
-            let _ = tairix_rt::fs_close(fd);
-            outcome
+            read_file(path, tairix_proglib::MAX_CATALOG_LEN)
         }
     }
 
@@ -2558,13 +3144,35 @@ mod program {
         }
     }
 
+    /// Read the whole file at `path` through the kernel VFS under the
+    /// session's own kernel-attested identity, stopping one chunk past `cap`
+    /// so no file can make the desktop slurp an arbitrary number of bytes.
+    ///
+    /// The one read path every document the session reads goes through — the
+    /// program-library and pin stores at the catalog cap, the user's
+    /// wallpaper at the wallpaper cap — so a second, differently-bounded
+    /// reader cannot exist. An answer longer than `cap` is the caller's
+    /// whole-document refusal to state.
+    fn read_file(path: &str, cap: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        if ret < 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `ret >= 0` checked above; it is a descriptor number.
+        let fd = ret as u32;
+        let outcome = read_to_end(fd, cap);
+        let _ = tairix_rt::fs_close(fd);
+        outcome
+    }
+
     /// Read `fd` from the start until end-of-file, stopping one chunk past
-    /// the catalog cap (the caller treats the oversize as the whole-document
-    /// refusal it is).
-    fn read_to_end(fd: u32) -> Result<alloc::vec::Vec<u8>, Errno> {
+    /// `cap` (the caller treats the oversize as the whole-document refusal it
+    /// is).
+    fn read_to_end(fd: u32, cap: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
         let mut bytes = alloc::vec::Vec::new();
         let mut chunk = [0u8; 1024];
-        while bytes.len() <= tairix_proglib::MAX_CATALOG_LEN {
+        while bytes.len() <= cap {
             let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
                 .map_err(Errno::from_syscall)?;
             if read == 0 {
@@ -2778,7 +3386,7 @@ mod program {
         // this same binary with the reserved role argument, and that
         // capability-empty child must serve parses and nothing else.
         if worker_role() {
-            let mut service = IconRasterService;
+            let mut service = ImageRenderService::default();
             return match serve_stdio(&mut service) {
                 ServeEnd::Finished => 0,
                 ServeEnd::Failed(_) => 1,

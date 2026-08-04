@@ -5,14 +5,15 @@
 //! the driver of the desktop and its observers can never drift
 //! (`plans/APPWIN.md` AW3).
 //!
-//! Only the desktop's two fixed companions are wired by constant: the file
-//! manager (the taskbar's permanent Files button opens it) and the
+//! Only the desktop's three fixed companions are wired by constant: the
+//! file manager (the taskbar's permanent Files button opens it), the
 //! Switchboard monitor service (spawned at bring-up to feed the tray
-//! capsule, `plans/NEW-TASKBAR.md` T10), because the session must know
-//! their bundles without consulting the program-library catalog. Every
-//! other application reaches the desktop through the catalog
-//! (`plans/NEW-TASKBAR.md`), which names each entry's bundle on disk —
-//! there is no compiled-in application list.
+//! capsule, `plans/NEW-TASKBAR.md` T10), and the wallpaper chooser (the
+//! backdrop menu's *Change Background* row opens it, `plans/PINBOARD.md`
+//! §8), because the session must know their bundles without consulting the
+//! program-library catalog. Every other application reaches the desktop
+//! through the catalog (`plans/NEW-TASKBAR.md`), which names each entry's
+//! bundle on disk — there is no compiled-in application list.
 
 /// Label of the file manager, for launch diagnostics.
 pub const FILES_LABEL: &str = "Files";
@@ -33,3 +34,13 @@ pub const SWITCHBOARD_LABEL: &str = "Switchboard";
 /// tray capsule and an absent or dead service simply leaves the capsule
 /// calm.
 pub const SWITCHBOARD_RUN_PATH: &str = "/System/Services/switchboard.app/Run";
+
+/// Label of the wallpaper chooser, for launch diagnostics.
+pub const WALLPAPER_LABEL: &str = "Wallpaper";
+
+/// The wallpaper chooser bundle's entry-point path in the system
+/// application store (`kind = "application"`, like the file manager). The
+/// backdrop menu's *Change Background* row launches it; the chooser then
+/// asks the session to adopt what the user picked over the pinboard
+/// rendezvous, holding no authority to write the store itself.
+pub const WALLPAPER_RUN_PATH: &str = "/System/Applications/wallpaper.app/Run";

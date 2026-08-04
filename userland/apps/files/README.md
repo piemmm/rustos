@@ -31,7 +31,7 @@ reach it.
 - the grid's icon **artwork** — the reclaim-governed decode cache, the
   asset-path spelling, and the read/rasterise seams — is the shared
   `lib/icon::artwork` layer, and the decode itself is the shared
-  `lib/sandbox` `iconraster` service;
+  `lib/sandbox` `imagerender` service;
 - the runtime (`_start`, allocator, syscall wrappers, the shared
   `read_dir_all` listing call) is `lib/rt`.
 
@@ -176,7 +176,7 @@ ceiling — there is no second copy of that loop).
 
 The **decode never runs in this process**. Icon artwork is a file on a
 volume, i.e. untrusted input, so the bytes go to the shared `lib/sandbox`
-`iconraster` service in a minimum-capability worker (`AGENTS.md` §19.5):
+`imagerender` service in a minimum-capability worker (`AGENTS.md` §19.5):
 the `Run` binary re-enters itself in the reserved worker role over a
 fresh pipe pair — the same production launcher the desktop session uses,
 not a second mechanism — and the kernel brands that child

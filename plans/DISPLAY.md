@@ -545,8 +545,10 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `SeatEventReader`s over `tairix_rt::pointer_read`/`keyboard_read`
   drained after each `SeatInput` wake → `DesktopShell` pump → composite →
   present with damage. `DeviceInputSource` receives the screen `Rect`
-  from the queried mode; the compositor's background is the active
-  theme's desktop colour. Loss of the seat (typed
+  from the queried mode; the desktop layer carries the pinboard — the
+  user's wallpaper, or the backdrop colour their settings name, with
+  their `Desktop` folder's icons over it (`plans/PINBOARD.md`). Loss of
+  the seat (typed
   `SeatRevoked`/`SeatNotOwner` on any drain or present) tears the
   session down fail-loud — reason on `stderr`, reserved exit codes
   90–97, owner-checked `display_release` on every exit path — never a
@@ -602,13 +604,18 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     compile-time-pinned to the fixture credentials), and the
     runner keys **both** a QEMU-monitor screendump and the mouse
     injection on the `FIRST_PRESENT` marker, ordered present → fully
-    parsed dump → pointer → `kind=pointer` witness → PASS, then asserts
-    the dump's dominant colour is the shared theme's desktop colour
-    (`tairix_theme`, never a literal) at ≥ 50% share — the host-side
-    proof the composited frame reached scan-out (`tools/qemu` grew the
-    typed-keys script, the verified `Screendump` step, and the
-    fail-closed PPM decoder `screendump::parse_ppm`; an unverified
-    requested dump fails the run even on a guest PASS).
+    parsed dump → pointer → `kind=pointer` witness → PASS, then proves
+    the composited frame reached scan-out by **recomputing the desktop's
+    own wallpaper on the host** — the shipped default master through the
+    same decode, placement and resampling code the guest runs — and
+    requiring exact equality at sampled points clear of the taskbar,
+    the pointer, the icon column and any served window
+    (`plans/PINBOARD.md`). Nothing is asserted from a literal colour:
+    a boot console, a blank frame, or a wrong fit or scale all differ
+    and are refused (`tools/qemu` grew the typed-keys script, the
+    verified `Screendump` step, and the fail-closed PPM decoder
+    `screendump::parse_ppm`; an unverified requested dump fails the run
+    even on a guest PASS).
   `plans/PI.md` P10's final step rides this landing.
 
 **Explicitly not in D7:** a GPU/3D or video-decode pipeline (the

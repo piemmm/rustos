@@ -15,7 +15,8 @@
 
 use core::cmp::Ordering;
 
-use crate::entry::Entry;
+use crate::entry::{Entry, EntryKind};
+use crate::media::extension;
 
 /// Which field a listing is ordered by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
@@ -24,6 +25,14 @@ pub enum SortKey {
     /// directory listing (a person scanning for a name).
     #[default]
     Name,
+    /// The entry's structural kind — directory, then application bundle,
+    /// then plain file — with files further clustered by extension. This is
+    /// the coarse, directory-context-free grouping [`Entry`] alone can name;
+    /// it is deliberately not the full [`crate::media::MediaType`] registry
+    /// (which needs the listed directory's own path to tell a service bundle
+    /// from an application one), so it stays a plain field comparison like
+    /// every other key here rather than a second classifier.
+    Kind,
     /// Apparent byte size. Directories and bundles have size `0`, so within
     /// their group this collapses to the name tiebreak.
     Size,
@@ -64,17 +73,19 @@ impl SortMode {
     }
 
     /// The next order in the fixed cycle the toolbar's Sort command steps
-    /// through: name ↑, name ↓, size ↑, size ↓, modified ↑, modified ↓, then
-    /// back to name ↑. A single command that walks every mode in a
-    /// well-understood order (a menu of the same modes is the later, richer
-    /// surface); the wrap makes it total.
+    /// through: name ↑, name ↓, kind ↑, kind ↓, size ↑, size ↓, modified ↑,
+    /// modified ↓, then back to name ↑. A single command that walks every
+    /// mode in a well-understood order (a menu of the same modes is the
+    /// later, richer surface); the wrap makes it total.
     #[must_use]
     pub const fn next(self) -> Self {
         use SortDirection::{Ascending, Descending};
-        use SortKey::{Modified, Name, Size};
+        use SortKey::{Kind, Modified, Name, Size};
         let (key, direction) = match (self.key, self.direction) {
             (Name, Ascending) => (Name, Descending),
-            (Name, Descending) => (Size, Ascending),
+            (Name, Descending) => (Kind, Ascending),
+            (Kind, Ascending) => (Kind, Descending),
+            (Kind, Descending) => (Size, Ascending),
             (Size, Ascending) => (Size, Descending),
             (Size, Descending) => (Modified, Ascending),
             (Modified, Ascending) => (Modified, Descending),
@@ -106,6 +117,7 @@ fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
     group_rank(a).cmp(&group_rank(b)).then_with(|| {
         let primary = match mode.key {
             SortKey::Name => name_cmp(a.name(), b.name()),
+            SortKey::Kind => kind_cmp(a, b),
             SortKey::Size => a.size().cmp(&b.size()),
             SortKey::Modified => a.modified().cmp(&b.modified()),
         };
@@ -129,4 +141,31 @@ fn name_cmp(a: &str, b: &str) -> Ordering {
         .map(|byte| byte.to_ascii_lowercase())
         .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()));
     folded.then_with(|| a.as_bytes().cmp(b.as_bytes()))
+}
+
+/// The rank [`SortKey::Kind`] clusters an entry's structural kind into:
+/// directories first, then application bundles, then plain files. This is
+/// finer than [`group_rank`] (which only separates directories from
+/// everything else) but coarser than [`crate::media::MediaType`] (which needs
+/// directory context this comparator does not have).
+const fn kind_rank(entry: &Entry) -> u8 {
+    match entry.kind() {
+        EntryKind::Directory => 0,
+        EntryKind::Bundle => 1,
+        EntryKind::File => 2,
+    }
+}
+
+/// Compare two entries by [`SortKey::Kind`]: [`kind_rank`], then — for two
+/// files — a case-insensitive extension fold, so files of one type cluster
+/// together within the file group.
+fn kind_cmp(a: &Entry, b: &Entry) -> Ordering {
+    kind_rank(a).cmp(&kind_rank(b)).then_with(|| {
+        let ext_a = extension(a.name()).unwrap_or_default();
+        let ext_b = extension(b.name()).unwrap_or_default();
+        ext_a
+            .bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(ext_b.bytes().map(|byte| byte.to_ascii_lowercase()))
+    })
 }

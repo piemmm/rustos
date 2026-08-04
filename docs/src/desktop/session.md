@@ -157,18 +157,19 @@ unlaunchable — and pins at the drop index; the offer is consumed either way.
 ## The desktop icon surface
 
 `Desktop<S: DirectorySource>` (`userland/gui/session::desktop`) is the user's
-own `Desktop` folder shown as a column of icons down the screen's trailing
-edge, drawn into the window manager's own [desktop layer](wm.md#the-desktop-layer)
+own `Desktop` folder shown as a column of icons down the screen edge their
+own settings name, drawn into the window manager's own [desktop layer](wm.md#the-desktop-layer)
 — beneath every window and reachable through no window id. It is a
 *directory view*, not a new kind of surface: it lists the folder through the
 same `DirectorySource` seam the trusted file picker uses, orders the listing
 with the shared `sort_entries`, classifies each child with the shared
 content-type registry (see [File-type classification](apps.md#file-type-classification--the-one-content-type-registry)),
 and lays its tiles out with the shared `GridView` under
-`GridFlow::ColumnsFromTrailing` — the file manager's own grid flows rows from
-the leading edge; the desktop's column hugs the trailing edge and grows a new
-column inward as it fills, but both share one cell geometry and one hit-test
-(`lib/browse::layout`). It paints through the same public `grid_tile` /
+`GridFlow::ColumnsFromLeading` or `ColumnsFromTrailing` — the file manager's
+own grid flows rows from the leading edge; the desktop's column hugs one
+vertical edge and grows a new column inward as it fills, but both share one
+cell geometry and one hit-test (`lib/browse::layout`). It paints through the
+same public `grid_tile` /
 `grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
 shows the shipped folder artwork, a file its content-class artwork, and an
 application bundle the icon it carries in its own `Resources/`, falling back
@@ -192,9 +193,14 @@ clears the selection on an empty desktop) and arms the shared
 `DoubleClickTracker`, so a second press within its window activates the icon
 — the desktop can never disagree with the file manager about what a gesture
 means. Motion drives hover feedback and, on arrival from elsewhere, the
-gesture-driven re-list below. While the desktop holds the keyboard, the
+gesture-driven re-list below. A secondary press opens the [pinboard's context
+menu](#the-pinboards-context-menu). While the desktop holds the keyboard, the
 arrows move the selection (down/up one icon, left/right one whole column),
-`Enter` activates it, and `Escape` clears it.
+`Enter` activates it, and `Escape` clears it. *Which* horizontal arrow moves
+later into the listing follows the live arrangement, because columns grow
+rightward from the leading edge and leftward from the trailing one — the
+selection therefore always moves the way the icons the user can see actually
+run.
 
 **Activation** resolves by entry kind: a directory opens the file manager
 *at that path* (passed as the program's own first argument, which the file
@@ -227,6 +233,94 @@ could never succeed would be a promise the system cannot keep, not a
 feature; the pin drag source is the program-library popup instead (see *Pin
 service and window-channel bridge*, above), whose every row is a catalogued
 entry by construction.
+
+### The pinboard settings live on the desktop model
+
+`Desktop<S>` owns the user's `tairix_wallpaper::PinboardSettings` — the
+wallpaper and its fit, the backdrop colour, the icon arrangement, and the sort
+order (`plans/PINBOARD.md` §2) — as the **single** copy inside the session:
+`DesktopShell` reads them back out of the desktop (`Desktop::settings`) rather
+than holding a second set that could drift from the one the icons are actually
+laid out by. A desktop starts on the defaults an absent store document implies,
+so it is fully specified before the embedder has read anything.
+
+An edit arrives through `Desktop::apply_settings`, which reports what the edit
+asks for instead of making the caller guess: `None` means the settings were
+already in force and there is nothing to do at all, and otherwise the layer must
+be repainted — that is what a change *is* — while the returned `PinboardChange`
+names the further work on top of it (`relayout` when the arrangement moved,
+`relist` when the sort order changed, `wallpaper` when the image or its fit
+changed). Changing the sort order therefore never decodes a wallpaper, changing
+the wallpaper never re-reads the folder, and a new backdrop colour costs one
+repaint.
+
+The settings' own vocabulary is deliberately *not* the file browser's:
+`IconSort` is bridged to `lib/browse`'s `SortMode` by one small function in
+`desktop.rs`, and `IconFlow` to `GridFlow` by another, so the listing still runs
+through the single shared `sort_entries` and the single shared `GridView` while
+the settings store stays free of the browser engine's dependency weight.
+
+### The desktop layer: wallpaper or backdrop, then icons
+
+`DesktopShell::present_desktop` repaints the layer **in place**, through
+`Compositor::repaint_desktop`, into the screen-sized buffer the compositor
+already holds: a hover, a moved selection, or a re-list repaints the desktop
+often, and a whole screen of pixels is not something to re-allocate per frame.
+The layer is opaque and covers the screen. Its base is the wallpaper the
+embedder prepares and installs with `DesktopShell::set_wallpaper` (it holds the
+capability to read the user's chosen image and the sandbox that decodes it, and
+it fits the pixels through the one shared placement in `lib/wallpaper`); the
+shell blits what it is handed and parses nothing. The backdrop colour the
+settings name — the active theme's own desktop colour for `Backdrop::Theme`, the
+chosen flat colour for `Backdrop::Colour` — is laid down wherever the wallpaper
+does not reach, which with no wallpaper at all is everywhere. The icons are then
+drawn over that base exactly as before, in the work area, so nothing is ever
+drawn under the taskbar. A layer the heap will not give back leaves the desktop
+exactly as it was rather than blanking it.
+
+### The pinboard's context menu
+
+A secondary press on the backdrop is the desktop's context-menu gesture:
+`Desktop::context_press` selects the icon it landed on (so the menu acts on what
+the user pointed at) or, on empty backdrop, leaves the selection exactly as it
+was, and asks for `DesktopAction::OpenMenu { at, on_icon }`. It claims no
+keyboard focus, because the window manager does not move focus for a secondary
+backdrop press (`InputResponse::DesktopSecondaryPressed`) and the desktop does
+not pretend otherwise.
+
+`PinboardMenu` (`userland/gui/session::pinboard`) is that menu: one shared
+`lib/controls` `Menu` plus the anchor it was opened at. Its command set is
+closed (`plans/PINBOARD.md` §7) — *Open* (only when the press landed on an
+icon), *New Folder*, the four *Sort by* rows, the two *Arrange from* rows,
+*Refresh*, *Open Desktop Folder*, and *Change Background…* — and one `rows_for`
+pass builds each row together with the `PinboardCommand` it names, so a row
+index can never disagree with the command it dispatches. The sort order and
+arrangement already in force are drawn marked and non-actionable with their
+reason stated, because choosing what is already in force is a statement of
+where the desktop is rather than a command. `PinboardMenu::layout` anchors the
+plate at the pointer and clamps it wholly onto the screen, so a right-click in a
+corner opens a menu the user can reach; a closed menu has no plate at all
+rather than a fabricated one at the origin.
+
+The menu holds no authority: `Desktop::command` is the **one** place a command
+becomes a `DesktopAction`, and *Open* resolves through the very same activation
+the double-click and `Enter` paths use, so the three can never disagree about
+what opening an icon means. A sort or arrangement row names
+`DesktopAction::AdoptSettings` for the embedder to persist and hand back through
+`apply_settings` (the model never adopts settings behind its back); *New Folder*
+names `DesktopAction::CreateFolder` with the name already chosen through
+`lib/browse`'s shared new-directory naming over the listing on screen;
+*Refresh* re-lists there and then; *Open Desktop Folder* is an ordinary
+`OpenFolder` activation; and *Change Background…* names
+`DesktopAction::ChangeBackground`, which the embedder resolves to the installed
+wallpaper chooser (the model knows no bundle paths).
+
+`DesktopShell::present_pinboard_menu` shows the open plate as its own
+compositor window and takes that window down when the menu closes, through the
+same shared `place` helper the taskbar's own menu window uses, rounded with the
+same popup radius the plate is painted with. A plate surface the heap will not
+give back leaves what is on screen untouched rather than showing an empty
+window.
 
 ## Resolving taskbar responses
 

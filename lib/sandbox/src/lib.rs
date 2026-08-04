@@ -30,11 +30,18 @@
 //!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
 //!   parsed a byte).
-//! * [`iconraster`] — an application bundle's icon (SVG or PNG bytes) is
+//! * [`imagerender`] — an application bundle's icon (SVG or PNG bytes) is
 //!   sniffed, decoded, and rasterised inside the worker
 //!   (`tairix-svg`/`tairix-image`/`tairix-icon`/`tairix-raster`), and the
-//!   caller-side [`iconraster::rasterise_icon`] validates the reply's echoed
-//!   side and pixel length before trusting the returned RGBA8 buffer.
+//!   caller-side [`imagerender::rasterise_icon`] validates the reply's echoed
+//!   side and pixel length before trusting the returned RGBA8 buffer. The
+//!   same worker also places a desktop wallpaper
+//!   (`tairix-image`/`tairix-wallpaper`/`tairix-raster`) across a
+//!   prepare/band/release sequence, bounded by
+//!   [`crate::proto::MAX_FRAME`]; the caller-side
+//!   [`imagerender::render_wallpaper`] drives the sequence and validates
+//!   every band's echoed geometry and exact pixel length before trusting
+//!   the assembled RGBA8 buffer.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -48,7 +55,7 @@ extern crate alloc;
 pub mod decode;
 pub mod helpdoc;
 pub mod host;
-pub mod iconraster;
+pub mod imagerender;
 pub mod loopback;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]

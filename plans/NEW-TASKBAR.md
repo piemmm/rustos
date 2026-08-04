@@ -647,7 +647,7 @@ What now stands, and the invariants a future change must keep:
   or PNG) is untrusted third-party input, so the session never decodes it
   in-process. New `lib/image` (complete fail-closed PNG decoder) +
   `lib/compress` `inflate`/`zlib` (RFC 1951/1950 decode) + the
-  `lib/sandbox` **icon-rasterisation service** (`iconraster`: SVG via
+  `lib/sandbox` **image-rendering service** (`imagerender`: SVG via
   `lib/svg`/`lib/icon`, PNG via `lib/image` with alpha-weighted box-filter
   scaling and aspect-fit centring; capped input 256 KiB, side ≤ 512) do the
   decode in a capability-empty worker — the session's own binary re-entered

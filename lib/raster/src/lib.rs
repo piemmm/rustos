@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod color;
+pub mod resample;
 pub mod round;
 pub mod surface;
 
@@ -30,5 +31,6 @@ pub mod surface;
 mod tests;
 
 pub use color::{div255, Color, Pixel};
+pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
 pub use round::round_rect_coverage;
 pub use surface::{Surface, SUBPIXEL};

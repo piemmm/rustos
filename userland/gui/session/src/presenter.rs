@@ -356,7 +356,11 @@ impl TaskbarPresenter {
 /// An `existing` id that the compositor no longer knows (the embedder removed
 /// the window) is treated as absent, so the window is re-created rather than
 /// the update being silently dropped.
-fn place(
+///
+/// Shared with the shell's own popup surfaces (the pinboard's context menu), so
+/// every menu and popup window in the session is placed, re-surfaced, and
+/// rounded by one definition.
+pub(crate) fn place(
     compositor: &mut Compositor,
     existing: Option<WindowId>,
     origin: Point,

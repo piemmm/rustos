@@ -19,9 +19,10 @@
 //!
 //! The grid is deliberately not a *file manager* grid: a [`GridFlow`] chooses
 //! whether tiles wrap along a row from the leading edge (the manager's
-//! scrolling view) or down a column from the trailing edge (the desktop's icon
-//! column, which grows a new column inward as it fills). Both are the same cell
-//! maths and the same hit-test, so the desktop needs no second grid.
+//! scrolling view) or down a column from the leading or the trailing edge (the
+//! desktop's icons, which grow a new column across as they fill, from whichever
+//! edge the user arranged them at). All three are the same cell maths and the
+//! same hit-test, so the desktop needs no second grid.
 //!
 //! All arithmetic saturates and every accessor is total: a degenerate viewport
 //! (too short for even one row, too narrow for even one tile, or a zero cell
@@ -226,11 +227,11 @@ fn reveal_line(offset: u64, selected: Option<usize>, visible: usize) -> u64 {
 /// The order a [`GridView`] fills its tiles in, and the edge its first tile
 /// is anchored to.
 ///
-/// The two icon views in this system differ *only* in this: the file
-/// manager's grid reads like text and scrolls vertically, while the desktop's
-/// column hugs the screen's trailing edge and grows a new column inward. Both
-/// therefore share one set of cell maths and one hit-test, parameterised
-/// here, rather than a second grid written beside the first.
+/// The icon views in this system differ *only* in this: the file manager's
+/// grid reads like text and scrolls vertically, while the desktop's icons
+/// run down a column that hugs one screen edge and grows a new column
+/// across. They therefore share one set of cell maths and one hit-test,
+/// parameterised here, rather than a second grid written beside the first.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum GridFlow {
     /// Fill a row left-to-right from the leading edge, then wrap down onto
@@ -238,16 +239,30 @@ pub enum GridFlow {
     /// manager's grid.
     #[default]
     RowsFromLeading,
+    /// Fill a column top-to-bottom from the leading edge, then start a new
+    /// column one pitch further *across*; the scroll axis is horizontal,
+    /// counted in columns. The desktop's icons when they are arranged from
+    /// the leading edge.
+    ColumnsFromLeading,
     /// Fill a column top-to-bottom, then start a new column one pitch
     /// *inward* from the trailing edge; the scroll axis is horizontal,
-    /// counted in columns. The desktop's icon column.
+    /// counted in columns. The desktop's icons when they are arranged from
+    /// the trailing edge.
     ColumnsFromTrailing,
 }
 
 impl GridFlow {
     /// Whether tiles wrap down a column (rather than along a row) — the one
-    /// place the two flows' axis assignment is decided.
+    /// place the flows' axis assignment is decided.
     const fn wraps_down_a_column(self) -> bool {
+        matches!(self, Self::ColumnsFromLeading | Self::ColumnsFromTrailing)
+    }
+
+    /// Whether lines are measured inward from the viewport's trailing edge
+    /// rather than out from its leading one — the one place the flows'
+    /// anchoring differs. Only the trailing column mirrors; both other flows
+    /// grow away from the leading edge.
+    const fn anchors_to_the_trailing_edge(self) -> bool {
         matches!(self, Self::ColumnsFromTrailing)
     }
 }
@@ -501,24 +516,24 @@ impl GridView {
 
     /// The view-local pixel offsets of the tile at line `line` (already
     /// screen-relative) and slot `slot` within it: `(x, y)` from the
-    /// viewport's origin. The single place the two flows' anchoring differs —
-    /// the trailing-edge flow measures `x` inward from the viewport's right
+    /// viewport's origin. The single place the flows' anchoring differs —
+    /// the trailing-edge column measures `x` inward from the viewport's right
     /// edge, so its first column hugs the screen edge whatever the width is.
     fn tile_offsets(&self, line: usize, slot: usize) -> Option<(u32, u32)> {
         let along_slot = self.slot_run().offset(slot)?;
         let along_line = self.line_run().offset(line)?;
-        let (inward, down) = if self.flow.wraps_down_a_column() {
+        let (across, down) = if self.flow.wraps_down_a_column() {
             (along_line, along_slot)
         } else {
             (along_slot, along_line)
         };
         let y = self.list_top().checked_add(down)?;
-        let x = if self.flow.wraps_down_a_column() {
+        let x = if self.flow.anchors_to_the_trailing_edge() {
             self.viewport
                 .width
-                .checked_sub(inward.checked_add(self.cell_width)?)?
+                .checked_sub(across.checked_add(self.cell_width)?)?
         } else {
-            inward
+            across
         };
         Some((x, y))
     }
@@ -562,18 +577,18 @@ impl GridView {
         if y < top || y >= self.viewport.height || x >= self.viewport.width {
             return None;
         }
-        // The trailing-edge flow measures its columns inward from the right
+        // The trailing-edge column measures its columns inward from the right
         // edge, exactly as it paints them.
-        let inward = if self.flow.wraps_down_a_column() {
+        let across = if self.flow.anchors_to_the_trailing_edge() {
             self.viewport.width.checked_sub(x)?.checked_sub(1)?
         } else {
             x
         };
         let down = y - top;
         let (along_line, along_slot) = if self.flow.wraps_down_a_column() {
-            (inward, down)
+            (across, down)
         } else {
-            (down, inward)
+            (down, across)
         };
         // Each run resolves only its own tiles, so a point in a margin, in a
         // gap, or past the last line resolves to nothing: a click can land
@@ -1196,7 +1211,11 @@ mod tests {
 
     #[test]
     fn the_visible_range_is_exactly_the_tiles_with_rects() {
-        for flow in [GridFlow::RowsFromLeading, GridFlow::ColumnsFromTrailing] {
+        for flow in [
+            GridFlow::RowsFromLeading,
+            GridFlow::ColumnsFromLeading,
+            GridFlow::ColumnsFromTrailing,
+        ] {
             for fill in [GridFill::FixedPitch, GridFill::Spread] {
                 let g = grid_flowing(3, 2, 7, flow, fill);
                 for offset in 0..3 {
@@ -1224,7 +1243,11 @@ mod tests {
     #[test]
     fn every_laid_out_tile_is_whole_and_hit_tests_to_itself() {
         const COUNT: usize = 40;
-        for flow in [GridFlow::RowsFromLeading, GridFlow::ColumnsFromTrailing] {
+        for flow in [
+            GridFlow::RowsFromLeading,
+            GridFlow::ColumnsFromLeading,
+            GridFlow::ColumnsFromTrailing,
+        ] {
             for fill in [GridFill::FixedPitch, GridFill::Spread] {
                 for width in (CELL..=CELL * 6).step_by(7) {
                     for height in (CELL..=CELL * 6).step_by(13) {
@@ -1384,7 +1407,72 @@ mod tests {
         assert!(third.bottom() <= g.tile_area().bottom());
     }
 
-    // --- The desktop's trailing-edge icon column ------------------------
+    // --- The desktop's icon columns -------------------------------------
+
+    #[test]
+    fn the_desktop_column_fills_downward_from_the_leading_edge() {
+        // Three columns' worth of width, two tiles per column, five icons.
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromLeading, GridFill::FixedPitch);
+        assert_eq!(g.cells_per_line(), 2, "two icons fit down one column");
+        assert_eq!(g.visible_lines(), 3, "three columns fit across");
+        assert_eq!(g.lines_total(), 3, "five icons need three columns");
+        let header = i32::try_from(CELL).unwrap();
+        let pitch = i32::try_from(CELL + GAP).unwrap();
+        // The first icon hugs the leading edge, below the header.
+        assert_eq!(g.cell_rect(0, 0), Some(Rect::new(0, header, CELL, CELL)));
+        // The second falls directly beneath it, in the same column.
+        assert_eq!(
+            g.cell_rect(0, 1),
+            Some(Rect::new(0, header + pitch, CELL, CELL))
+        );
+        // The third starts a new column one pitch further across.
+        assert_eq!(
+            g.cell_rect(0, 2),
+            Some(Rect::new(pitch, header, CELL, CELL))
+        );
+    }
+
+    /// The two column flows are exact mirrors of one another: an icon that
+    /// sits `n` pixels in from the leading edge under one sits `n` pixels in
+    /// from the trailing edge under the other, at the very same height. That
+    /// is the whole difference between the two desktop arrangements, so it is
+    /// asserted rather than assumed.
+    #[test]
+    fn the_two_desktop_columns_are_mirror_images() {
+        let leading = grid_flowing(3, 2, 5, GridFlow::ColumnsFromLeading, GridFill::FixedPitch);
+        let trailing = grid_flowing(3, 2, 5, GridFlow::ColumnsFromTrailing, GridFill::FixedPitch);
+        let width = i32::try_from(CELL * 3 + GAP * 2).unwrap();
+        for index in 0..5 {
+            let left = leading.cell_rect(0, index).expect("laid out");
+            let right = trailing.cell_rect(0, index).expect("laid out");
+            assert_eq!(left.top(), right.top(), "icon {index} keeps its height");
+            assert_eq!(
+                left.left(),
+                width - right.right(),
+                "icon {index} is the same distance in from its own edge"
+            );
+        }
+    }
+
+    #[test]
+    fn the_leading_desktop_hit_test_mirrors_its_tile_rects_and_rejects_gaps() {
+        let g = grid_flowing(3, 2, 5, GridFlow::ColumnsFromLeading, GridFill::FixedPitch);
+        for index in 0..5 {
+            let rect = g.cell_rect(0, index).expect("every icon is on screen");
+            let x = u32::try_from(rect.origin.x).unwrap() + CELL / 2;
+            let y = u32::try_from(rect.origin.y).unwrap() + CELL / 2;
+            assert_eq!(g.index_at(0, x, y), Some(index));
+        }
+        // The gap between the leading column and the one beside it.
+        assert_eq!(g.index_at(0, CELL + GAP / 2, CELL + CELL / 2), None);
+        // The header band above the first icon.
+        assert_eq!(g.index_at(0, CELL / 2, 0), None);
+        // The empty slot past the last icon (column 2 holds only icon 4).
+        assert_eq!(
+            g.index_at(0, (CELL + GAP) * 2 + CELL / 2, CELL + CELL + GAP + CELL / 2),
+            None
+        );
+    }
 
     #[test]
     fn the_desktop_column_fills_downward_from_the_trailing_edge() {

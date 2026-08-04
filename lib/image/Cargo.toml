@@ -1,6 +1,6 @@
 [package]
 name = "tairix-image"
-description = "First-party TAIRiX raster-image decoding: a complete, fail-closed PNG decoder for untrusted bundle icons (§3 `lib/`)."
+description = "First-party TAIRiX raster-image decoding: complete, fail-closed PNG and JPEG decoders for untrusted artwork, with reduced-scale JPEG decode for wallpapers (§3 `lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -82,6 +82,11 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # gesture already chose onto the wire, rather than re-deciding which panel
 # section a press opens on a second time.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The pinboard settings engine (plans/PINBOARD.md): the desktop model owns the
+# user's `PinboardSettings` — the wallpaper, its fit, the backdrop colour, and
+# the icon arrangement/sort — so the session has one owner of them and the
+# shell reads them from the desktop rather than keeping a second copy.
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared help engine's required-locale registry: the `cli` module's

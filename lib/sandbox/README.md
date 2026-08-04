@@ -41,17 +41,46 @@ imports this seam; a second per-app copy is forbidden.
   canonically — a forbidden escape, colour, OSC string, or truncated
   trailing sequence refuses the whole reply. A document-parse error
   round-trips typed (`HelpError`, code for code). `man` is the consumer.
-- **The icon-rasterisation service** (`iconraster`): an application
+- **The icon-rasterisation service** (`imagerender`): an application
   bundle's icon — SVG or PNG bytes — is sniffed, decoded, and rasterised
   to the caller's requested square side inside the worker
   (`tairix-svg`/`tairix-image`/`tairix-icon`/`tairix-raster`), and the
   caller-side `rasterise_icon` validates the reply's echoed side and exact
   pixel length before trusting the returned straight-alpha RGBA8 buffer. A
   PNG source is fitted inside the square preserving its aspect ratio and
-  scaled through a small alpha-weighted box filter (never
-  nearest-neighbour); an SVG source rasterises directly through the shared
-  vector-icon path. Either a typed refusal or a sandbox failure simply
-  means the desktop session falls back to its own built-in glyph.
+  scaled through the crate's one shared resampler (`tairix-raster`'s
+  alpha-weighted box filter, never nearest-neighbour); an SVG source
+  rasterises directly through the shared vector-icon path. Either a typed
+  refusal or a sandbox failure simply means the desktop session falls
+  back to its own built-in glyph.
+- **The wallpaper-placement service** (also `imagerender`, the same
+  worker): a desktop wallpaper — a shipped master or a file the user
+  picked, whatever `tairix-image` can decode (PNG and JPEG today; the
+  format list grows with `tairix-image` itself) — is sniffed, decoded, and
+  placed onto the session's screen size across a three-op sequence:
+  `OP_WALLPAPER_PREPARE` decodes the source at the smallest scale its
+  format offers that still covers the destination (`tairix-image`'s
+  `decode_fitted`, bounded by `MAX_WALLPAPER_DECODE_PIXELS`, so a
+  25-megapixel master bound for a 1080p screen is decoded at a quarter of
+  its pixels rather than in full) and computes its placement
+  (`tairix-wallpaper`'s `place`), holding both in the worker;
+  `OP_WALLPAPER_BAND` draws and returns a run of destination rows at a
+  time, since a screenful of straight-alpha RGBA8 can exceed `MAX_FRAME`
+  above 1080p and the frame bound is never raised to fit a larger reply;
+  `OP_WALLPAPER_RELEASE` drops the held source. The destination is
+  bounded by `MAX_WALLPAPER_WIDTH`/`MAX_WALLPAPER_HEIGHT` (4K) on both
+  sides of the seam. A tiled fit repeats the decoded source at 1:1; every
+  other fit resamples the placement's source rectangle into its destination
+  rectangle through the same shared resampler the icon path uses, and any
+  pixel the placement does not cover (a letterboxed fit, a source smaller
+  than the screen) is left fully transparent so the desktop's own
+  backdrop colour shows through — this service never draws a backdrop.
+  The caller-side `render_wallpaper` drives the whole sequence, validates
+  every band's echoed geometry and exact length fail-closed, assembles
+  the final buffer, and always releases the held source afterwards — on
+  the success path and on every error path alike. A prepare replaces any
+  source (and placement) an earlier prepare left held on the same
+  (reused) worker.
 - **The production transport** (`rt`, feature `program`, bare-metal only):
   the parent launches **its own binary** in a worker role via
   `SpawnAttach::sandbox` with two pipes wired to the worker's fd 0/1, and
@@ -66,9 +95,9 @@ imports this seam; a second per-app copy is forbidden.
 - The seam adds no authority: the worker holds only the two pipe ends its
   parent wired at spawn; the kernel enforces the rest
   (`docs/src/security/sandbox.md`).
-- Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and iconraster service
-  request decoders and the caller-side reply decoders/validators) is
-  enrolled in `cargo xtask fuzz`.
+- Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
+  request decoders — icon and wallpaper alike — and the caller-side reply
+  decoders/validators) is enrolled in `cargo xtask fuzz`.
 
 ## Design
 

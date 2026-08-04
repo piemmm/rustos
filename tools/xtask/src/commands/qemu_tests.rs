@@ -6679,48 +6679,420 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     finish_run(t, &kernel, spec)
 }
 
-/// Decode a dumped scan-out and assert it is dominated by `theme`'s own
-/// desktop colour (the compositor's background), whatever the taskbar,
-/// cursor, window chrome, or menu overlays. The expected colour is read
-/// from `tairix_theme` — the one definition the desktop session itself
-/// renders with — never a literal, so a theme change cannot silently
-/// diverge the test from the product.
+/// Decode a dumped scan-out and assert the desktop session composited its
+/// own wallpaper into it (see [`assert_desktop_wallpaper`], which this
+/// decodes for).
 fn assert_desktop_screendump(
     t: &QemuTest,
     path: &Path,
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     let image = read_screendump(t, path)?;
-    assert_desktop_dominant(t, path, &image, theme)
+    assert_desktop_wallpaper(t, path, &image, theme, &[])
 }
 
-/// The decoded `image` is dominated by `theme`'s desktop colour (see
-/// [`assert_desktop_screendump`], which decodes and then calls this).
-/// Split out so an assertion that measures several regions of one dump
-/// decodes it once.
-fn assert_desktop_dominant(
+/// Pixels of clearance around a served window's edge: past the
+/// anti-aliased rounded corners, the frame, and any shadow the compositor
+/// casts, so a sampled pixel is unambiguously either inside the window's
+/// body or on the bare desktop beside it.
+const WINDOW_EDGE_CLEARANCE_PX: u32 = 16;
+
+/// The decoded `image` is the composited desktop: every sample point that
+/// lies in wallpaper-only territory carries exactly the pixel the
+/// desktop's own wallpaper draws there. Split out so an assertion that
+/// measures several regions of one dump decodes it once.
+///
+/// # What this proves
+///
+/// The expected pixels are recomputed on the host by
+/// [`expected_wallpaper`] — the shipped default master decoded, placed,
+/// and resampled through the very crates the guest's own render path runs
+/// — so agreement at a spread of points across the frame can only come
+/// from a session that decoded, placed, resampled, and composited that
+/// same wallpaper. A boot console left on screen, a blank or flat-filled
+/// frame, a session that never composited at all, and a wallpaper drawn at
+/// the wrong fit, scale, or offset each differ at these points and are all
+/// rejected. Equality is exact: the compositor's opaque blit and the
+/// framebuffer encode are byte copies, so a tolerance could only hide a
+/// real difference.
+///
+/// # What this does not prove
+///
+/// Only the sampled points are judged, and only where nothing may cover
+/// the wallpaper: the taskbar's band, a box around the pointer the session
+/// parks at the screen centre, a leading margin wide enough for a desktop
+/// icon column, and every `excluded` rectangle a caller knows a served
+/// window occupies are all skipped ([`desktop_chrome_regions`]). Nothing
+/// is asserted about what the desktop draws *there* — icons, chrome, and
+/// window content belong to the assertions that measure them.
+fn assert_desktop_wallpaper(
     t: &QemuTest,
     path: &Path,
     image: &tairix_qemu::screendump::Image,
     theme: &tairix_theme::Theme,
+    excluded: &[tairix_geometry::Rect],
 ) -> Result<(), String> {
-    // The desktop background covers everything but the taskbar, cursor,
-    // and any window, so a genuinely presented frame is far above this
-    // floor; a boot console left on screen (text on its own background)
-    // is far below it.
-    const MIN_SHARE: f64 = 0.5;
-    let desktop = theme.palette().desktop;
-    let expected = (desktop.r, desktop.g, desktop.b);
-    let (dominant, share) = image.dominant_color();
-    if dominant != expected || share < MIN_SHARE {
+    // A frame so covered that fewer points survive is not one this
+    // assertion can judge, and says so rather than passing vacuously.
+    const MIN_SAMPLES: usize = 8;
+    let wallpaper = expected_wallpaper()?;
+    if wallpaper.width != image.width || wallpaper.height != image.height {
         return Err(format!(
-            "test --qemu ({}): screendump {} is not the composited desktop: dominant colour \
-             {dominant:?} at share {share:.3} (expected {expected:?} at >= {MIN_SHARE})",
+            "test --qemu ({}): screendump {} is {}x{}, but the desktop's wallpaper was \
+             recomputed for a {}x{} screen",
             t.package,
             path.display(),
+            image.width,
+            image.height,
+            wallpaper.width,
+            wallpaper.height,
         ));
     }
+    let covered = desktop_chrome_regions(theme, excluded);
+    let samples = wallpaper_sample_points(image.width, image.height, &covered);
+    if samples.len() < MIN_SAMPLES {
+        return Err(format!(
+            "test --qemu ({}): screendump {} leaves only {} sampleable wallpaper points \
+             (expected >= {MIN_SAMPLES})",
+            t.package,
+            path.display(),
+            samples.len(),
+        ));
+    }
+    for (x, y) in samples {
+        let expected = wallpaper.rgb_at(x, y).ok_or_else(|| {
+            format!(
+                "test --qemu ({}): screendump {}: sample point ({x}, {y}) is outside the \
+                 recomputed wallpaper",
+                t.package,
+                path.display(),
+            )
+        })?;
+        let pixel = image.pixel(x, y).map_err(|e| {
+            format!(
+                "test --qemu ({}): screendump {} lacks the sampled desktop point ({x}, {y}): {e}",
+                t.package,
+                path.display(),
+            )
+        })?;
+        if pixel != expected {
+            return Err(format!(
+                "test --qemu ({}): screendump {} is not the composited desktop: ({x}, {y}) is \
+                 {pixel:?}, but the desktop's own wallpaper draws {expected:?} there",
+                t.package,
+                path.display(),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The regions of a desktop frame something other than bare wallpaper may
+/// cover: the taskbar's own band, a box around the pointer the session
+/// parks at the screen centre before any motion event, a leading margin
+/// wide enough for the desktop's icon column, and every `excluded`
+/// rectangle a caller knows a served window occupies (grown by
+/// [`WINDOW_EDGE_CLEARANCE_PX`], so a shadow or an anti-aliased corner
+/// never reaches a sampled point).
+fn desktop_chrome_regions(
+    theme: &tairix_theme::Theme,
+    excluded: &[tairix_geometry::Rect],
+) -> Vec<tairix_geometry::Rect> {
+    /// Half-width of the box kept clear of the pointer: comfortably larger
+    /// than the cursor artwork at unit scale.
+    const CURSOR_CLEARANCE_PX: u32 = 64;
+    /// Width of the margin kept clear of the desktop's icon column,
+    /// whether or not a fixture's `Desktop` folder holds icons to draw.
+    const ICON_COLUMN_PX: u32 = 224;
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    let cursor_left = (width / 2).saturating_sub(CURSOR_CLEARANCE_PX);
+    let cursor_top = (height / 2).saturating_sub(CURSOR_CLEARANCE_PX);
+    let mut regions = vec![
+        taskbar_bar_rect(theme),
+        tairix_geometry::Rect::new(0, 0, ICON_COLUMN_PX, height),
+        tairix_geometry::Rect::new(
+            i32::try_from(cursor_left).unwrap_or(0),
+            i32::try_from(cursor_top).unwrap_or(0),
+            2 * CURSOR_CLEARANCE_PX,
+            2 * CURSOR_CLEARANCE_PX,
+        ),
+    ];
+    regions.extend(
+        excluded
+            .iter()
+            .map(|window| grown_by(*window, WINDOW_EDGE_CLEARANCE_PX)),
+    );
+    regions
+}
+
+/// The screen rectangle the taskbar occupies, from the production bar's own
+/// layout rather than a hand-copied band: the strip a sampled wallpaper
+/// point must stay clear of. Only the bar's own extent is read, which no
+/// pin, task, or tray entry moves.
+fn taskbar_bar_rect(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
+    let taskbar = tairix_taskbar::Taskbar::new(
+        tairix_taskbar::TaskbarConfig::bottom_bar(
+            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+        ),
+        theme,
+    );
+    taskbar.layout(tairix_geometry::Scale::ONE).bar
+}
+
+/// `rect` grown by `margin` pixels on every side, never starting before the
+/// screen origin.
+fn grown_by(rect: tairix_geometry::Rect, margin: u32) -> tairix_geometry::Rect {
+    let inset = i32::try_from(margin).unwrap_or(0);
+    tairix_geometry::Rect::new(
+        rect.left().saturating_sub(inset),
+        rect.top().saturating_sub(inset),
+        rect.width.saturating_add(2 * margin),
+        rect.height.saturating_add(2 * margin),
+    )
+}
+
+/// A lattice of sample points across a `width`×`height` frame, keeping only
+/// those outside every `covered` region.
+///
+/// Spread across the whole frame rather than clustered: the wallpaper is a
+/// photograph, so points taken from many parts of it carry many different
+/// colours, and a frame showing the wrong picture — or no picture — cannot
+/// coincidentally agree with all of them.
+fn wallpaper_sample_points(
+    width: u32,
+    height: u32,
+    covered: &[tairix_geometry::Rect],
+) -> Vec<(u32, u32)> {
+    /// Lattice columns across the frame.
+    const COLUMNS: u32 = 11;
+    /// Lattice rows down the frame.
+    const ROWS: u32 = 9;
+    let column_step = width / (COLUMNS + 1);
+    let row_step = height / (ROWS + 1);
+    let mut points = Vec::new();
+    for row in 1..=ROWS {
+        for column in 1..=COLUMNS {
+            let (x, y) = (column_step * column, row_step * row);
+            let point = tairix_geometry::Point::new(
+                i32::try_from(x).unwrap_or(i32::MAX),
+                i32::try_from(y).unwrap_or(i32::MAX),
+            );
+            if covered.iter().any(|rect| rect.contains(point)) {
+                continue;
+            }
+            points.push((x, y));
+        }
+    }
+    points
+}
+
+/// The wallpaper the desktop session composites behind its icons and
+/// windows, recomputed on the host by [`compute_expected_wallpaper`].
+///
+/// Straight-alpha RGBA8 samples, row-major, `width * height * 4` bytes.
+/// Every sample is opaque (checked when the canvas is built), and both the
+/// compositor's opaque blit and the framebuffer encode are byte copies, so
+/// these are exactly the bytes a dumped scan-out carries wherever nothing
+/// covers the wallpaper.
+struct ExpectedWallpaper {
+    /// Canvas width in pixels.
+    width: u32,
+    /// Canvas height in pixels.
+    height: u32,
+    /// Straight-alpha RGBA8 samples, row-major.
+    pixels: Vec<u8>,
+}
+
+impl ExpectedWallpaper {
+    /// The colour at `(x, y)`, or `None` when the point lies off the canvas.
+    fn rgb_at(&self, x: u32, y: u32) -> Option<(u8, u8, u8)> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = ((y as usize * self.width as usize) + x as usize) * 4;
+        let sample = self.pixels.get(offset..offset + 4)?;
+        Some((sample[0], sample[1], sample[2]))
+    }
+}
+
+/// The desktop's default wallpaper as the guest's own pipeline produces it,
+/// recomputed once per process and shared by every assertion that reads a
+/// desktop frame.
+///
+/// # Errors
+///
+/// The recomputation's own message, unchanged on every later call: the
+/// shipped master is missing from the graphics assets, the default pinboard
+/// no longer draws a wallpaper image, or the decode, placement, or resample
+/// of that master refuses.
+fn expected_wallpaper() -> Result<&'static ExpectedWallpaper, String> {
+    static CANVAS: std::sync::OnceLock<Result<ExpectedWallpaper, String>> =
+        std::sync::OnceLock::new();
+    CANVAS
+        .get_or_init(compute_expected_wallpaper)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// The shipped master and the fit the desktop's default pinboard comes up
+/// with, read from the shared pinboard defaults rather than restated here,
+/// so a new default wallpaper or fit reaches this reconstruction and the
+/// guest identically.
+///
+/// # Errors
+///
+/// A message naming the drift: the default pinboard no longer draws a
+/// wallpaper image at all, or the shipped graphics assets carry no master
+/// under the default's name.
+fn default_wallpaper_master() -> Result<
+    (
+        &'static tairix_syshelp::GraphicsFile,
+        tairix_wallpaper::WallpaperFit,
+    ),
+    String,
+> {
+    let settings = tairix_wallpaper::PinboardSettings::default();
+    if !matches!(
+        settings.wallpaper,
+        tairix_wallpaper::WallpaperChoice::Image(_)
+    ) {
+        return Err(format!(
+            "desktop wallpaper: the default pinboard draws {:?} rather than a wallpaper image, \
+             so a screendump can no longer be judged against one",
+            settings.wallpaper,
+        ));
+    }
+    let master = tairix_syshelp::GRAPHICS_FILES
+        .iter()
+        .find(|asset| {
+            asset.family == tairix_syshelp::GraphicsFamilyKind::Wallpaper
+                && asset.file == tairix_wallpaper::DEFAULT_WALLPAPER
+        })
+        .ok_or_else(|| {
+            format!(
+                "desktop wallpaper: the shipped graphics assets carry no wallpaper master {}",
+                tairix_wallpaper::DEFAULT_WALLPAPER,
+            )
+        })?;
+    Ok((master, settings.fit))
+}
+
+/// Decode `master` at the emulated screen's extent, exactly as the guest's
+/// wallpaper renderer does: one fit box of the destination, so the decoder
+/// picks the same reduced scale on both sides.
+///
+/// # Errors
+///
+/// A message naming the master the desktop's own decoder refuses.
+fn decode_wallpaper_master(
+    master: &tairix_syshelp::GraphicsFile,
+    width: u32,
+    height: u32,
+) -> Result<tairix_image::RasterImage, String> {
+    // The JPEG format's own absolute frame-dimension ceiling (ITU-T T.81
+    // B.2.2) with a generous coefficient budget. A decode limit is a
+    // refusal ceiling, never an input to the decode's arithmetic, so
+    // bounding this reconstruction at the format's own maximum cannot make
+    // it disagree with the desktop about any master the desktop accepts.
+    const JPEG_FRAME_DIMENSION_LIMIT: u32 = 0xFFFF;
+    const COEFFICIENT_BUDGET: u64 = 256 * 1024 * 1024;
+    let limits = tairix_image::DecodeLimits::new(
+        JPEG_FRAME_DIMENSION_LIMIT,
+        JPEG_FRAME_DIMENSION_LIMIT,
+        u64::from(JPEG_FRAME_DIMENSION_LIMIT) * u64::from(JPEG_FRAME_DIMENSION_LIMIT),
+        COEFFICIENT_BUDGET,
+    );
+    tairix_image::decode_fitted(
+        master.bytes,
+        &limits,
+        tairix_image::FitBox::new(width, height),
+    )
+    .map_err(|e| format!("desktop wallpaper: {} does not decode: {e:?}", master.file))
+}
+
+/// Recompute the wallpaper the desktop session paints across the emulated
+/// screen: the shipped default master decoded, placed, and resampled
+/// through the very crates the guest's own render path runs, so both sides
+/// share one definition of the artwork, the placement arithmetic, and the
+/// resampler.
+///
+/// # Errors
+///
+/// Returns an actionable message when the default picture or fit has
+/// drifted ([`default_wallpaper_master`]), the master does not decode, the
+/// default fit no longer covers the whole screen in a single non-tiled
+/// pass, the placement or resample refuses, or the result is not fully
+/// opaque — each of which would make an exact pixel comparison meaningless
+/// rather than merely inconvenient.
+fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    let (master, fit) = default_wallpaper_master()?;
+    let decoded = decode_wallpaper_master(master, width, height)?;
+    let placement =
+        tairix_wallpaper::place((decoded.width(), decoded.height()), (width, height), fit)
+            .ok_or_else(|| {
+                format!(
+                    "desktop wallpaper: {} has no placement on a {width}x{height} screen",
+                    master.file,
+                )
+            })?;
+    let screen = tairix_geometry::Rect::new(0, 0, width, height);
+    if placement.tiled() || placement.destination() != screen {
+        return Err(format!(
+            "desktop wallpaper: the default {fit:?} fit no longer covers the whole screen in one \
+             pass (destination {:?}, tiled {}), so this reconstruction would not be what the \
+             desktop draws",
+            placement.destination(),
+            placement.tiled(),
+        ));
+    }
+    let source = placement.source();
+    let master_pixels =
+        tairix_raster::Rgba8Image::new(decoded.width(), decoded.height(), decoded.pixels())
+            .map_err(|e| {
+                format!(
+                    "desktop wallpaper: {} decoded to pixels the resampler refuses: {e:?}",
+                    master.file,
+                )
+            })?;
+    let off_master = || {
+        format!(
+            "desktop wallpaper: the placement of {} begins outside the master",
+            master.file,
+        )
+    };
+    let region = tairix_raster::Region {
+        x: u32::try_from(source.left()).map_err(|_| off_master())?,
+        y: u32::try_from(source.top()).map_err(|_| off_master())?,
+        width: source.width,
+        height: source.height,
+    };
+    let pixels = tairix_raster::resample(&master_pixels, region, width, height).map_err(|e| {
+        format!(
+            "desktop wallpaper: {} does not resample onto the screen: {e:?}",
+            master.file,
+        )
+    })?;
+    if pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|sample| sample[3] != u8::MAX)
+    {
+        return Err(format!(
+            "desktop wallpaper: {} does not cover the screen opaquely, so what the compositor \
+             blends behind it would decide the dumped pixels",
+            master.file,
+        ));
+    }
+    Ok(ExpectedWallpaper {
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Read and fully decode a dumped scan-out image.
@@ -6744,21 +7116,21 @@ fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), 
 }
 
 /// The served files window is on the desktop rendered with `theme`. The
-/// theme's desktop colour still dominates the frame (the window is far
-/// smaller than the screen), and the region where the session places the
-/// first served window — the cascade origin, sized by the files app's
-/// own window constants, inset to stay clear of the anti-aliased rounded
-/// corners and chrome — is overwhelmingly *not* the desktop colour: a
-/// composited window frame covers it.
+/// desktop's own wallpaper is still composited around the window, and the
+/// region where the session places the first served window — the cascade
+/// origin, sized by the files app's own window constants, inset to stay
+/// clear of the anti-aliased rounded corners and chrome — is
+/// overwhelmingly *not* that wallpaper: a composited window frame covers
+/// it.
 fn assert_files_window_screendump(
     t: &QemuTest,
     path: &Path,
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     let image = read_screendump(t, path)?;
-    assert_desktop_dominant(t, path, &image, theme)?;
     let window = served_window_rect(0, tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT);
-    assert_window_region_covered(t, path, &image, theme, window, "files")
+    assert_desktop_wallpaper(t, path, &image, theme, &[window])?;
+    assert_window_region_covered(t, path, &image, window, "files")
 }
 
 /// Where the session places the `slot`-th window it opens, sized by its
@@ -6771,13 +7143,12 @@ fn served_window_rect(slot: u64, width: u32, height: u32) -> tairix_geometry::Re
 }
 
 /// The `window` region of the decoded `image` is composited: its inset body
-/// is overwhelmingly *not* `theme`'s desktop colour, so a window frame
-/// covers it. `what` names the window in the failure message.
+/// is overwhelmingly *not* the wallpaper the desktop draws behind it, so a
+/// window frame covers it. `what` names the window in the failure message.
 fn assert_window_region_covered(
     t: &QemuTest,
     path: &Path,
     image: &tairix_qemu::screendump::Image,
-    theme: &tairix_theme::Theme,
     window: tairix_geometry::Rect,
     what: &str,
 ) -> Result<(), String> {
@@ -6785,18 +7156,14 @@ fn assert_window_region_covered(
     // pixel belongs to the window's frame; a sliver of tolerance covers
     // the cursor and anti-aliasing if they straddle the inset boundary.
     const MIN_WINDOW_SHARE: f64 = 0.95;
-    /// Pixels shaved off each window edge: clear of the rounded-corner
-    /// radius and any chrome the compositor draws at the boundary.
-    const INSET_PX: u32 = 16;
-    let desktop = theme.palette().desktop;
-    let background = (desktop.r, desktop.g, desktop.b);
+    let wallpaper = expected_wallpaper()?;
     #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
     let (left, top) = (
-        window.left() as u32 + INSET_PX,
-        window.top() as u32 + INSET_PX,
+        window.left() as u32 + WINDOW_EDGE_CLEARANCE_PX,
+        window.top() as u32 + WINDOW_EDGE_CLEARANCE_PX,
     );
-    let right = left + window.width - 2 * INSET_PX;
-    let bottom = top + window.height - 2 * INSET_PX;
+    let right = left + window.width - 2 * WINDOW_EDGE_CLEARANCE_PX;
+    let bottom = top + window.height - 2 * WINDOW_EDGE_CLEARANCE_PX;
     let mut total = 0u64;
     let mut covered = 0u64;
     for y in top..bottom {
@@ -6809,7 +7176,7 @@ fn assert_window_region_covered(
                 )
             })?;
             total += 1;
-            if pixel != background {
+            if Some(pixel) != wallpaper.rgb_at(x, y) {
                 covered += 1;
             }
         }
@@ -6823,7 +7190,7 @@ fn assert_window_region_covered(
     if share < MIN_WINDOW_SHARE {
         return Err(format!(
             "test --qemu ({}): screendump {} shows no served {what} window at its cascade slot: \
-             only {share:.3} of the window body differs from the desktop colour \
+             only {share:.3} of the window body differs from the desktop wallpaper behind it \
              (expected >= {MIN_WINDOW_SHARE})",
             t.package,
             path.display(),
@@ -6922,15 +7289,16 @@ fn pin_slot_glyph_share(
 }
 
 /// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **first**
-/// dump, taken on the desktop's first composited frame: the dark theme's
-/// desktop colour dominates, and the bar's first pin slot is nothing but
-/// the bar's own fill. That is the baseline the second dump is read
-/// against — the strip is provably empty before the script pins anything,
-/// so a glyph found there later can only be the pin this run created.
+/// dump, taken on the desktop's first composited frame: the dark-theme
+/// session has composited its own wallpaper, and the bar's first pin slot
+/// is nothing but the bar's own fill. That is the baseline the second dump
+/// is read against — the strip is provably empty before the script pins
+/// anything, so a glyph found there later can only be the pin this run
+/// created.
 fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
-    assert_desktop_dominant(t, path, &image, &theme)?;
+    assert_desktop_wallpaper(t, path, &image, &theme, &[])?;
     let share = pin_slot_glyph_share(t, path, &image, &theme)?;
     if share > 0.0 {
         return Err(format!(
@@ -6952,11 +7320,11 @@ fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), Stri
 /// is on the bar the user sees, and the Switchboard the capsule opened is
 /// on the screen with it.
 ///
-/// Unlike the first dump this one deliberately does **not** require the
-/// desktop colour to dominate the whole frame: the panel alone covers more
-/// than half of this output, so demanding dominance here would assert
-/// something untrue. The desktop's presence is measured where it is
-/// genuinely expected instead — the bare column beside the panel.
+/// Unlike the first dump this one deliberately does **not** sample the
+/// wallpaper across the whole frame: the panel covers most of this output,
+/// and the pin the script just clicked leaves the pointer on the bar. The
+/// desktop's presence is measured where it is genuinely expected instead —
+/// exactly, over the bare column beside the panel.
 fn assert_pinned_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
@@ -6975,12 +7343,13 @@ fn assert_pinned_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
         tairix_switchboard::WIN_WIDTH,
         tairix_switchboard::WIN_HEIGHT,
     );
-    assert_window_region_covered(t, path, &image, &theme, panel, "Switchboard")?;
-    assert_desktop_beside_window(t, path, &image, &theme, panel)
+    assert_window_region_covered(t, path, &image, panel, "Switchboard")?;
+    assert_desktop_beside_window(t, path, &image, panel)
 }
 
 /// The column between `window`'s right edge and the screen's is bare
-/// composited desktop — every pixel `theme`'s own desktop colour.
+/// composited desktop — every pixel exactly the wallpaper the desktop's
+/// own pipeline draws there ([`expected_wallpaper`]).
 ///
 /// The precise complement of [`assert_window_region_covered`]: together
 /// they say the frame is the desktop with exactly that window on it, with
@@ -6991,17 +7360,12 @@ fn assert_desktop_beside_window(
     t: &QemuTest,
     path: &Path,
     image: &tairix_qemu::screendump::Image,
-    theme: &tairix_theme::Theme,
     window: tairix_geometry::Rect,
 ) -> Result<(), String> {
-    /// Pixels skipped past the window's right edge, clear of its rounded
-    /// corners, frame, and any shadow the compositor casts.
-    const GAP_PX: u32 = 16;
-    let desktop = theme.palette().desktop;
-    let background = (desktop.r, desktop.g, desktop.b);
+    let wallpaper = expected_wallpaper()?;
     #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
     let (left, top, bottom) = (
-        window.right() as u32 + GAP_PX,
+        window.right() as u32 + WINDOW_EDGE_CLEARANCE_PX,
         window.top() as u32,
         window.bottom() as u32,
     );
@@ -7022,10 +7386,19 @@ fn assert_desktop_beside_window(
                     path.display(),
                 )
             })?;
-            if pixel != background {
+            let expected = wallpaper.rgb_at(x, y).ok_or_else(|| {
+                format!(
+                    "test --qemu ({}): screendump {}: ({x}, {y}) is outside the recomputed \
+                     wallpaper",
+                    t.package,
+                    path.display(),
+                )
+            })?;
+            if pixel != expected {
                 return Err(format!(
                     "test --qemu ({}): screendump {} is not the composited desktop beside the \
-                     served window: ({x}, {y}) is {pixel:?}, expected {background:?}",
+                     served window: ({x}, {y}) is {pixel:?}, but the desktop's own wallpaper \
+                     draws {expected:?} there",
                     t.package,
                     path.display(),
                 ));
@@ -8403,6 +8776,117 @@ mod tests {
         assert_eq!(
             tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
             3
+        );
+    }
+
+    /// A `P6` screendump of the emulated screen's own extent whose pixels
+    /// come from `colour`, in exactly the shape QEMU writes, so a fixture
+    /// frame reaches an assertion through the production parser.
+    fn synthetic_frame(
+        colour: impl Fn(u32, u32) -> (u8, u8, u8),
+    ) -> tairix_qemu::screendump::Image {
+        let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+        let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let (r, g, b) = colour(x, y);
+                bytes.extend_from_slice(&[r, g, b]);
+            }
+        }
+        tairix_qemu::screendump::parse_ppm(&bytes).expect("a well-formed fixture frame")
+    }
+
+    /// The enrolment and dump path a fixture assertion names in its
+    /// messages; neither is read, so any enrolment serves.
+    fn fixture_subject() -> (&'static super::QemuTest, &'static std::path::Path) {
+        (
+            super::TESTS
+                .first()
+                .expect("the enrolment table is not empty"),
+            std::path::Path::new("fixture.screendump.ppm"),
+        )
+    }
+
+    /// The desktop assertion accepts exactly the frame the desktop's own
+    /// wallpaper pipeline produces. Without this the three rejection tests
+    /// below would be satisfied by an assertion that refuses everything.
+    #[test]
+    fn the_recomputed_wallpaper_is_the_frame_the_desktop_assertion_accepts() {
+        let (t, path) = fixture_subject();
+        let theme = tairix_theme::Theme::dark();
+        let wallpaper = super::expected_wallpaper().expect("recompute the default wallpaper");
+        let frame = synthetic_frame(|x, y| wallpaper.rgb_at(x, y).expect("a canvas pixel"));
+        super::assert_desktop_wallpaper(t, path, &frame, &theme, &[])
+            .expect("the recomputed wallpaper is the composited desktop");
+    }
+
+    /// A frame flat-filled with the theme's own desktop colour — the
+    /// backdrop a session paints when it composites no wallpaper at all —
+    /// is rejected.
+    #[test]
+    fn a_flat_theme_coloured_frame_is_not_the_composited_desktop() {
+        let (t, path) = fixture_subject();
+        let theme = tairix_theme::Theme::dark();
+        let desktop = theme.palette().desktop;
+        let frame = synthetic_frame(|_, _| (desktop.r, desktop.g, desktop.b));
+        let err = super::assert_desktop_wallpaper(t, path, &frame, &theme, &[])
+            .expect_err("a wallpaper-less desktop is refused");
+        assert!(
+            err.contains("is not the composited desktop"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    /// A dark frame with sparse light text — a boot console left on screen,
+    /// the failure the desktop screendump assertions exist to catch — is
+    /// rejected.
+    #[test]
+    fn a_boot_console_frame_is_not_the_composited_desktop() {
+        let (t, path) = fixture_subject();
+        let theme = tairix_theme::Theme::dark();
+        let frame = synthetic_frame(|x, y| {
+            if y % 16 < 8 && x % 8 < 4 {
+                (0xD0, 0xD0, 0xD0)
+            } else {
+                (0, 0, 0)
+            }
+        });
+        let err = super::assert_desktop_wallpaper(t, path, &frame, &theme, &[])
+            .expect_err("a boot console is refused");
+        assert!(
+            err.contains("is not the composited desktop"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    /// The wallpaper with a single sampled pixel wrong is rejected: the
+    /// assertion judges the pixels it claims to, so a frame that is only
+    /// nearly the desktop's own wallpaper cannot pass.
+    #[test]
+    fn one_wrong_pixel_at_a_sample_point_is_not_the_composited_desktop() {
+        let (t, path) = fixture_subject();
+        let theme = tairix_theme::Theme::dark();
+        let wallpaper = super::expected_wallpaper().expect("recompute the default wallpaper");
+        let samples = super::wallpaper_sample_points(
+            wallpaper.width,
+            wallpaper.height,
+            &super::desktop_chrome_regions(&theme, &[]),
+        );
+        let (wrong_x, wrong_y) = *samples.first().expect("a sampleable wallpaper point");
+        let frame = synthetic_frame(|x, y| {
+            let (r, g, b) = wallpaper.rgb_at(x, y).expect("a canvas pixel");
+            if (x, y) == (wrong_x, wrong_y) {
+                (r ^ 0xFF, g, b)
+            } else {
+                (r, g, b)
+            }
+        });
+        let err = super::assert_desktop_wallpaper(t, path, &frame, &theme, &[])
+            .expect_err("a wrong sampled pixel is refused");
+        assert!(
+            err.contains(&format!("({wrong_x}, {wrong_y})")),
+            "the refusal must name the point that differs: {err}"
         );
     }
 

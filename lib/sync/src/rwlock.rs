@@ -54,12 +54,12 @@
 //!
 //! With the `lock-diagnostics` feature, `read`/`write` (and their
 //! non-spinning `try_*` counterparts) report their acquire/hold/release
-//! lifecycle to the [`lockwatch`](crate::lockwatch) seam, exactly like
-//! [`SpinLock`](crate::spinlock::SpinLock). A reader or writer spinning
-//! here is otherwise invisible to a lockup watchdog that only samples
-//! IRQ-masking spinlocks, so a CPU wedged in `read`/`write` needs to be
-//! nameable too. With the feature off this instrumentation, and the
-//! `#[track_caller]` shim it needs, compile away entirely and a
+//! lifecycle to the `lockwatch` seam that same feature compiles in,
+//! exactly like [`SpinLock`](crate::spinlock::SpinLock). A reader or
+//! writer spinning here is otherwise invisible to a lockup watchdog that
+//! only samples IRQ-masking spinlocks, so a CPU wedged in `read`/`write`
+//! needs to be nameable too. With the feature off this instrumentation,
+//! and the `#[track_caller]` shim it needs, compile away entirely and a
 //! production lock is the bare atomics below.
 //!
 //! [`Acquire`]: core::sync::atomic::Ordering::Acquire

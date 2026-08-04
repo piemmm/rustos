@@ -41,6 +41,12 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # and the load gate refuses it. It is `no_std`; here it links host-only into
 # `build.rs`.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+# The wallpaper graphics family's own definition of a legal shipped file name
+# (`is_wallpaper_file_name`) and the untrusted-input byte bound
+# (`MAX_WALLPAPER_BYTES`) — the same definition the runtime catalog listing
+# filters against, so the build check and the runtime catalog cannot diverge.
+# It is `no_std`; here it links host-only into `build.rs`.
+tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
 
 [dev-dependencies]
 # The same kind -> store mapping `build.rs` plants by, so the test that holds
@@ -60,3 +66,7 @@ tairix-help = { path = "../../lib/help", version = "=0.0.0", features = [
 # same definition `build.rs` validates against, so the emitted table and the
 # desktop resolver cannot drift.
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
+# The wallpaper contract the graphics-discovery tests judge the wallpaper
+# `GRAPHICS_FILES` rows against — the same definition `build.rs` validates
+# against, so the emitted table and the runtime catalog cannot drift.
+tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }

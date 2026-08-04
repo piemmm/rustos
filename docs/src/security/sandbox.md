@@ -131,7 +131,7 @@ sandboxes a parse imports it:
   re-spawns itself as the worker (`CAP_PROC_SPAWN` in its manifest), and
   withholds the page — never falling back to an in-process parse — when
   the renderer fails.
-- **Icon rasterisation** (`iconraster`): an application bundle's icon —
+- **Icon rasterisation** (`imagerender`): an application bundle's icon —
   SVG or PNG bytes shipped inside the bundle, not from the system — is
   sniffed, decoded, and rasterised to the caller's requested square side
   inside the worker (`tairix_svg`/`tairix_image`/`tairix_icon`/
@@ -141,12 +141,46 @@ sandboxes a parse imports it:
   tighter decode-time bounds (independent of the requested output side,
   so a small request cannot smuggle a huge source image past a small
   reply), is fitted inside the square preserving its aspect ratio, and is
-  scaled through a small alpha-weighted box filter — never
-  nearest-neighbour, so a downscale blends instead of aliasing; an SVG
+  scaled through the crate's one shared resampler
+  (`tairix_raster::resample`, an alpha-weighted box filter — never
+  nearest-neighbour, so a downscale blends instead of aliasing); an SVG
   source rasterises directly through the shared vector-icon polygon-fill
   path. Either a typed refusal (unsupported format, a decode failure, or
   an unrenderable result) or a sandbox failure simply means the desktop
   session falls back to its own built-in glyph — never a crash.
+- **Wallpaper placement** (also `imagerender`, the same worker): a
+  desktop wallpaper — a shipped master or a file the user picked, never
+  parsed outside the sandbox — is sniffed, decoded, and placed onto the
+  session's screen size across three ops. `OP_WALLPAPER_PREPARE` decodes
+  the source at the smallest scale its format offers that still covers the
+  destination (`tairix_image::decode_fitted`, bounded by
+  `MAX_WALLPAPER_DECODE_PIXELS`), so a 25-megapixel master bound for a
+  1080p screen costs a quarter of its pixels rather than all of them, and
+  a screen so large that no covering scale fits the bound is served from
+  the largest scale that does rather than refused; it then computes its
+  placement (`tairix_wallpaper::place`), holding the decoded source and its
+  placement in the worker; `OP_WALLPAPER_BAND` draws and returns exactly
+  the destination rows asked for; `OP_WALLPAPER_RELEASE` drops the held
+  source. Bands exist purely to respect `MAX_FRAME`, never to raise it: a
+  screenful of straight-alpha RGBA8 already exceeds it above 1080p, and
+  `OP_WALLPAPER_PREPARE`'s reply names the row count a single
+  `OP_WALLPAPER_BAND` reply can carry. The destination is bounded by
+  `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT` (4K) on both sides of the
+  seam, and the source byte length by `tairix_wallpaper::MAX_WALLPAPER_BYTES`.
+  A tiled fit repeats the source at 1:1; every other fit resamples the
+  placement's source rectangle into its destination rectangle through the
+  same shared resampler the icon path uses. Wherever the placement does
+  not cover the destination (a letterboxed fit, a source smaller than the
+  screen), those pixels are left fully transparent — this service never
+  draws the desktop's backdrop colour, only the wallpaper. The
+  parent-side `render_wallpaper` drives the whole prepare/band/release
+  sequence, validates every band's echoed geometry and exact pixel length
+  fail-closed before trusting it, assembles the final buffer, and always
+  releases the held source afterwards, on the success path and every
+  error path alike, so a worker never holds a decoded wallpaper past one
+  call. A later prepare on the same (reused) worker replaces whatever an
+  earlier one left held; `OP_RASTERISE` keeps working unchanged whether or
+  not it is interleaved with a wallpaper sequence on the same worker.
 
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
@@ -183,15 +217,23 @@ under plain `cargo test`.
   logged events, frozen event ids); fail-closed decode of hostile
   replies; the `helpdoc` render-op whitelist (forbidden escapes, OSC
   strings, colour SGRs, and truncated trailing escapes all refuse the
-  whole reply) and typed `HelpError` round-trips; the `iconraster`
-  service (an SVG icon rasterises to an exact uniform colour, a PNG icon
-  downscales through the box filter to a hand-checked known average,
-  aspect-fit letterboxing centres with transparent padding, every
-  refusal shape, and a hostile reply's wrong tag/echoed side/pixel
-  length/trailing bytes each refuse fail-closed); and the `fuzz_sandbox`
+  whole reply) and typed `HelpError` round-trips; the `imagerender`
+  icon service (an SVG icon rasterises to an exact uniform colour, a PNG
+  icon downscales through the shared resampler to a hand-checked known
+  average, aspect-fit letterboxing centres with transparent padding,
+  every refusal shape, and a hostile reply's wrong tag/echoed side/pixel
+  length/trailing bytes each refuse fail-closed); the `imagerender`
+  wallpaper service (a round trip for each of the five fits with exact
+  corner/centre pixels, a tiled repeat verified across a whole grid, a
+  4K destination that must band across several replies assembling
+  byte-identical to a uniform-colour reference, a band before a prepare,
+  a band out of range, a zero-row band, an oversize destination, an
+  oversize source, a malformed image, an unrecognised format, release
+  fail-closing a subsequent band, and `OP_RASTERISE` still round-tripping
+  after a wallpaper sequence on the same worker); and the `fuzz_sandbox`
   harness (hostile input files through the decode, helpdoc, and
-  iconraster services, hostile worker replies into the client decoders)
-  in `cargo xtask fuzz`.
+  imagerender icon/wallpaper request decoders, hostile worker replies
+  into every client decoder) in `cargo xtask fuzz`.
 - `userland/apps/man`: the loopback-driven suite runs the real
   `HelpService` end to end, and hostile-renderer tests prove a
   disbelieved reply withholds the page (typed `ManError::Render`, no

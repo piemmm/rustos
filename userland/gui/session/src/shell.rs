@@ -55,16 +55,18 @@ use tairix_taskbar::{
     TransientNotification,
 };
 use tairix_theme::TextRole;
+use tairix_wallpaper::Backdrop;
 use tairix_wm::{
-    cursor_cache, Color, Compositor, CursorController, InputEvent, InputResponse, Point, Rect,
-    Scale, Surface, WindowActivationState, WindowFrame, WindowFurnitureState, WindowId,
+    cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse, Point,
+    Rect, Scale, Surface, WindowActivationState, WindowFrame, WindowFurnitureState, WindowId,
     WindowSizeState,
 };
 
 use crate::desktop::Desktop;
 use crate::input::{SessionInputResponse, SessionInputRouter};
+use crate::pinboard::PinboardMenu;
 use crate::pins::resolve_library_icons;
-use crate::presenter::TaskbarPresenter;
+use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
 
@@ -148,6 +150,14 @@ pub struct DesktopShell {
     /// [`sync_active_frame`](Self::sync_active_frame). `None` when focus rests
     /// on the desktop or an undecorated window.
     active_frame: Option<WindowId>,
+    /// The screen-sized, already-fitted wallpaper the desktop layer is painted
+    /// over, or `None` while the backdrop colour is the whole base. The
+    /// embedder prepares it (it holds the read capability and the decode
+    /// sandbox); the shell only blits it.
+    wallpaper: Option<Surface>,
+    /// The compositor window the pinboard's open context menu is shown in, if
+    /// one is placed.
+    pinboard_window: Option<WindowId>,
 }
 
 impl core::fmt::Debug for DesktopShell {
@@ -253,6 +263,8 @@ impl DesktopShell {
             artwork_reader: Box::new(NoArtworkSeam),
             artwork_rasteriser: Box::new(NoArtworkSeam),
             active_frame: None,
+            wallpaper: None,
+            pinboard_window: None,
         }
     }
 
@@ -655,44 +667,145 @@ impl DesktopShell {
         );
     }
 
-    /// Repaint the desktop's icon column and install it as the compositor's
-    /// desktop layer, beneath every window.
+    /// Install the screen-sized, already-fitted `wallpaper` the desktop layer
+    /// is painted over, or `None` to leave the backdrop colour as the whole
+    /// base. The next [`present_desktop`](Self::present_desktop) shows it.
     ///
-    /// The layer is screen-sized and starts fully transparent, so the theme's
-    /// wallpaper colour shows everywhere the icons do not reach; the icons
-    /// themselves are laid out in the work area, which excludes the taskbar's
-    /// band, so nothing is ever drawn under the bar. Each icon's artwork is
-    /// resolved through the same seat-wide cache and seams the taskbar draws
-    /// from, at exactly the slot side the tile will paint it in, and an icon
-    /// the store cannot supply falls back to its built-in glyph.
+    /// The embedder prepares the pixels: it holds the capability to read the
+    /// user's chosen image and the sandbox that decodes it, and it fits them
+    /// to the screen through the one shared placement. The shell blits what it
+    /// is handed and parses nothing.
+    pub fn set_wallpaper(&mut self, wallpaper: Option<Surface>) {
+        self.wallpaper = wallpaper;
+    }
+
+    /// Repaint the desktop layer — the wallpaper (or the backdrop colour the
+    /// settings name) with the icon column over it — beneath every window.
     ///
-    /// Fails closed: a screen-sized surface the heap will not give back
-    /// leaves the desktop layer exactly as it was rather than blanking it.
+    /// The layer is repainted in place, into the screen-sized buffer the
+    /// compositor already holds, because a hover, a moved selection, or a
+    /// re-list repaints it often and a whole screen of pixels is not something
+    /// to re-allocate per frame. It is opaque and covers the screen: the
+    /// wallpaper is blitted at the origin, and the backdrop colour is laid down
+    /// first wherever the wallpaper does not reach (which, with no wallpaper at
+    /// all, is everywhere). The icons are then drawn over it, laid out in the
+    /// work area — which excludes the taskbar's band — so nothing is ever drawn
+    /// under the bar. Each icon's artwork is resolved through the same
+    /// seat-wide cache and seams the taskbar draws from, at exactly the slot
+    /// side the tile will paint it in, and an icon the store cannot supply
+    /// falls back to its built-in glyph.
+    ///
+    /// Fails closed: a screen-sized layer the heap will not give back leaves
+    /// the desktop exactly as it was rather than blanking it.
     pub fn present_desktop<S: DirectorySource>(
         &mut self,
         compositor: &mut Compositor,
         desktop: &Desktop<S>,
     ) {
         let screen = compositor.screen_rect();
-        let Some(mut surface) = Surface::new(screen.width, screen.height) else {
-            return;
-        };
         let scale = compositor.scale();
         let layout = self.desktop_layout(compositor, desktop);
         let font = self.desktop_font(scale);
+        let backdrop = self.backdrop_colour(desktop.settings().backdrop);
         let theme = self.session.active_theme();
-        let mut artwork = IconArtworkSource::new(
-            &mut self.artwork,
-            self.artwork_reader.as_mut(),
-            self.artwork_rasteriser.as_mut(),
-        );
-        desktop.render(&mut surface, &layout, scale, theme, font, &mut artwork);
-        compositor.set_desktop(surface);
+        let wallpaper = self.wallpaper.as_ref();
+        let cache = &mut self.artwork;
+        let reader = self.artwork_reader.as_mut();
+        let rasteriser = self.artwork_rasteriser.as_mut();
+        compositor.repaint_desktop(|surface| {
+            let covered = wallpaper.is_some_and(|paper| {
+                paper.width() >= screen.width && paper.height() >= screen.height
+            });
+            if !covered {
+                surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
+            }
+            if let Some(paper) = wallpaper {
+                surface.blit(0, 0, paper);
+            }
+            let mut artwork = IconArtworkSource::new(cache, reader, rasteriser);
+            desktop.render(surface, &layout, scale, theme, font, &mut artwork);
+        });
     }
 
-    /// The grid the desktop's icons occupy on this output: the shared
-    /// trailing-edge column laid out in the work area at the output's
-    /// density.
+    /// The colour the desktop layer shows wherever the wallpaper does not
+    /// reach: the active theme's own desktop colour, or the flat colour the
+    /// user's settings name.
+    fn backdrop_colour(&self, backdrop: Backdrop) -> Color {
+        match backdrop {
+            Backdrop::Theme => self.desktop_background(),
+            Backdrop::Colour(colour) => Color::rgb(colour.r, colour.g, colour.b),
+        }
+    }
+
+    /// Show the pinboard's open context `menu` as its own compositor window,
+    /// or take that window down when the menu is closed.
+    ///
+    /// The plate is placed through the same shared window placement the
+    /// taskbar's own menu uses, and rounded with the popup radius the menu's
+    /// plate is painted with, so the window and its pixels cannot disagree
+    /// about where the rounding is.
+    ///
+    /// Fails closed: a plate surface the heap will not give back leaves what is
+    /// on screen untouched rather than showing an empty window.
+    pub fn present_pinboard_menu(&mut self, compositor: &mut Compositor, menu: &PinboardMenu) {
+        let scale = compositor.scale();
+        let font = self.desktop_font(scale);
+        let theme = self.session.active_theme();
+        let Some(bounds) = self.pinboard_menu_bounds(compositor, menu) else {
+            if let Some(id) = self.pinboard_window.take() {
+                compositor.remove(id);
+            }
+            return;
+        };
+        let Some(mut surface) = Surface::new(bounds.width, bounds.height) else {
+            return;
+        };
+        let local = Rect::new(0, 0, bounds.width, bounds.height);
+        menu.render(&mut surface, local, scale, theme, font);
+        let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
+        self.pinboard_window = Some(place(
+            compositor,
+            self.pinboard_window,
+            bounds.origin,
+            surface,
+            corners,
+        ));
+    }
+
+    /// The compositor window the pinboard's context menu is shown in, if one is
+    /// placed.
+    #[must_use]
+    pub const fn pinboard_window(&self) -> Option<WindowId> {
+        self.pinboard_window
+    }
+
+    /// The plate the pinboard's open context `menu` occupies on this output,
+    /// or `None` when the menu is closed.
+    ///
+    /// The one place the plate is measured, so what
+    /// [`present_pinboard_menu`](Self::present_pinboard_menu) paints and what
+    /// a press is routed against can never be two different rectangles. The
+    /// shell owns the label font and the active theme the measurement needs,
+    /// which is why it is asked here rather than reconstructed by the
+    /// embedder.
+    #[must_use]
+    pub fn pinboard_menu_bounds(
+        &self,
+        compositor: &Compositor,
+        menu: &PinboardMenu,
+    ) -> Option<Rect> {
+        let scale = compositor.scale();
+        menu.layout(
+            compositor.screen_rect(),
+            scale,
+            self.session.active_theme(),
+            self.desktop_font(scale),
+        )
+    }
+
+    /// The grid the desktop's icons occupy on this output: the shared column
+    /// laid out in the work area at the output's density, arranged from the
+    /// edge the user's settings name.
     ///
     /// The one place the desktop's geometry is decided, so what a press is
     /// hit-tested against and what [`present_desktop`](Self::present_desktop)
@@ -938,12 +1051,16 @@ impl DesktopShell {
             | InputResponse::SecondaryActivated { window, .. }
             | InputResponse::FurniturePressed { window } => Some(window),
             InputResponse::DesktopPressed => None,
+            // A secondary press on the backdrop opens the pinboard's context
+            // menu; it neither raises a window nor drops the focused one, so
+            // the highlighted task stands.
+            InputResponse::DesktopSecondaryPressed
             // A drag, resize, command-control activation, key, or scroll acts
             // on the already-focused window (the press that started it moved
             // focus); a hover or key that reached the desktop rather than a
             // window leaves focus where the last press put it. Neither moves
             // the highlighted task.
-            InputResponse::DesktopPointerMoved
+            | InputResponse::DesktopPointerMoved
             | InputResponse::DesktopKey { .. }
             | InputResponse::Moved { .. }
             | InputResponse::MoveEnded { .. }

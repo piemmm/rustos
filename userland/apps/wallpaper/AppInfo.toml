@@ -1,0 +1,32 @@
+# Signed-AppInfo manifest source for the `wallpaper` desktop backdrop chooser
+# (plans/PINBOARD.md P9). Discovered by the build's app-bundle composer,
+# which cross-compiles Run, signs the manifest, and plants the bundle on the
+# read-only /System/Applications store; the pinboard's "Change Background..."
+# context-menu item launches it (and the shell resolves it by name, like any
+# program in either system store).
+# The capability list is the bundle's request:
+#   - CAP_CONSOLE_WRITE for its fail-loud stderr diagnostics.
+#   - CAP_FS_ACCESS to list the read-only shipped wallpaper store and to read
+#     the launching user's own pinboard settings file — every read is still
+#     permission-checked per inode under the launching user's identity, and
+#     the chooser never writes the settings file itself: it only asks the
+#     desktop session to adopt a change over the pinboard IPC channel.
+#   - CAP_SHM to create and grant the zero-copy window frame region the
+#     desktop session maps.
+#   - CAP_PROC_SPAWN to host its own thumbnail-rendering sandbox worker: a
+#     restricted spawn of this same binary in its worker role, which the
+#     kernel brands capability-empty, so the untrusted wallpaper decode never
+#     runs in the chooser's own address space and needs no capability of its
+#     own.
+# The launched process receives this set intersected with the launching
+# user's grants, never more.
+id = "os.tairix.wallpaper"
+name = "wallpaper"
+version = "0.1.0"
+kind = "application"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN"]
+# A windowed, user-facing application: list it in the desktop's program
+# library beside the other desktop-settings tools.
+library = "SystemTools"
+# This bundle's own icon master in its Resources/, authored as SVG.
+library-icon = "wallpaper.svg"

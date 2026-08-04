@@ -17,7 +17,7 @@ use crate::{sniff, DecodeError, DecodeLimits, ImageFormat};
 /// Generous limits for every fixture in this file (none exercises the
 /// limit-refusal paths, which are tested against a deliberately tight
 /// [`DecodeLimits`] of their own).
-const ROOMY: DecodeLimits = DecodeLimits::new(1024, 1024, 1_000_000);
+const ROOMY: DecodeLimits = DecodeLimits::new(1024, 1024, 1_000_000, 0);
 
 fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -614,7 +614,7 @@ fn ihdr_rejects_zero_dimensions() {
 
 #[test]
 fn width_and_pixel_limits_are_enforced_at_the_exact_boundary() {
-    let tight = DecodeLimits::new(4, 4, 16);
+    let tight = DecodeLimits::new(4, 4, 16, 0);
     let ok = build_png(4, 4, 8, 0, 0, None, None, &[0u8; 4 * 5]);
     assert!(decode(&ok, &tight).is_ok());
 
@@ -633,7 +633,7 @@ fn width_and_pixel_limits_are_enforced_at_the_exact_boundary() {
     // 4x5 = 20 pixels > the limit of 16, even though each dimension alone
     // is within its own per-axis limit.
     let too_many_pixels = build_png(4, 4, 8, 0, 0, None, None, &[0u8; 4 * 5]);
-    let one_pixel_over = DecodeLimits::new(4, 4, 15);
+    let one_pixel_over = DecodeLimits::new(4, 4, 15, 0);
     assert_eq!(
         decode(&too_many_pixels, &one_pixel_over),
         Err(DecodeError::PixelCountExceedsLimit)

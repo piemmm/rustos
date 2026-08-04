@@ -40,6 +40,7 @@ use tairix_abi::net::{
     SocketStreamEvent,
 };
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
+use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
 use tairix_abi::power::PowerAction;
 use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use tairix_abi::reply::decode_status_reply;
@@ -456,6 +457,17 @@ fn exercise_notify_ipc(bytes: &[u8]) {
     }
 }
 
+/// Drive the pinboard-apply decoder on `bytes` (one arm of [`exercise`]):
+/// an accepted apply request must round-trip through its encoder; a
+/// corrupt frame must refuse cleanly, never panic.
+fn exercise_pinboard_ipc(bytes: &[u8]) {
+    if let Ok(request) = PinboardRequest::from_bytes(bytes) {
+        let redecoded = PinboardRequest::from_bytes(&request.to_le_bytes())
+            .expect("round-trip of an accepted pinboard request must succeed");
+        assert_eq!(request, redecoded);
+    }
+}
+
 /// Drive both directions of the Switchboard channel on `bytes` (one arm of
 /// [`exercise`]): an accepted request or command must round-trip through its
 /// encoder; a corrupt frame must refuse cleanly, never panic.
@@ -516,6 +528,7 @@ fn exercise(bytes: &[u8]) {
     exercise_font_ipc(bytes);
     exercise_window_ipc(bytes);
     exercise_notify_ipc(bytes);
+    exercise_pinboard_ipc(bytes);
     exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
@@ -1009,6 +1022,28 @@ fn structured_notify_inputs_with_corrupted_fields_never_panic() {
                 exercise(&base);
                 base[byte] ^= 1 << bit;
             }
+        }
+    }
+}
+
+#[test]
+fn structured_pinboard_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the pinboard apply request
+    // from a well-formed frame: a bit-flip of any byte — magic, version,
+    // op, the reserved pair, the length prefix, or a document byte —
+    // must fail closed, never panic.
+    let mut base = PinboardRequest::Apply {
+        document: PinboardDocument::new(
+            "wallpaper none\nfit fill\nbackdrop theme\nicons leading\nsort name\n",
+        )
+        .expect("a valid document"),
+    }
+    .to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
         }
     }
 }

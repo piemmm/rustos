@@ -161,6 +161,12 @@ pub const TARGETS: &[Target] = &[
             "taskbar pin store (ordered pin grammar, operations model, render round-trip, bounds)",
     },
     Target {
+        package: "tairix-wallpaper",
+        test: "fuzz_wallpaper_settings",
+        description:
+            "pinboard settings store (closed key registry grammar, render round-trip, bounds)",
+    },
+    Target {
         package: "tairix-kernel-ipc",
         test: "fuzz_port",
         description: "IPC port send dispatch (capability + size + capacity)",
@@ -223,7 +229,8 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-image",
         test: "fuzz_image",
-        description: "raster-image decode (untrusted PNG bytes: chunk framing, filters, interlace)",
+        description:
+            "raster-image decode (untrusted PNG + JPEG bytes: chunk framing, filters, interlace, marker segments, Huffman scans)",
     },
     Target {
         package: "tairix-virtio",
@@ -918,6 +925,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-taskpins");
+    }
+
+    #[test]
+    fn pinboard_settings_store_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_wallpaper_settings"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-wallpaper");
     }
 
     #[test]

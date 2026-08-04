@@ -986,19 +986,23 @@ fn secondary_press_activates_and_delivers_to_the_client() {
 }
 
 #[test]
-fn secondary_press_on_desktop_opens_nothing() {
+fn secondary_press_on_desktop_is_reported_to_the_desktop_and_changes_nothing() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
     assert!(router.focus(win, &c));
 
-    // A right-click on the bare desktop opens no menu and changes nothing —
-    // the window manager never synthesises a context menu of its own.
+    // A right-click on the bare desktop is the desktop's own question to
+    // answer: the window manager reports it and synthesises no menu itself.
     router.handle(moved(30, 30), &mut c);
     assert_eq!(
         router.handle(press_secondary(), &mut c),
-        InputResponse::Ignored
+        InputResponse::DesktopSecondaryPressed
     );
+    // Unlike the primary press, it activates nothing: the focused window
+    // keeps the keyboard and the z-order is untouched.
+    assert_eq!(router.focused(), Some(win));
+    assert_eq!(c.window_at(Point::new(5, 5)), Some(win));
 }
 
 #[test]
@@ -4023,6 +4027,48 @@ fn setting_and_clearing_the_desktop_layer_damages_exactly_what_it_covered() {
     assert_eq!(frame_pixel(&c, 2, 2), [0, 0, 255, 255]);
     assert!(!c.clear_desktop(), "clearing twice changes nothing");
     assert!(!c.has_damage());
+}
+
+#[test]
+fn repainting_the_desktop_layer_reuses_its_buffer_and_damages_its_footprint() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.composite();
+    assert!(!c.has_damage());
+
+    // With no layer installed the first repaint allocates one at exactly the
+    // screen's extent, whatever the painter chooses to draw into it.
+    assert!(c.repaint_desktop(|surface| surface.fill(GREEN)));
+    assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
+    assert!(c.has_damage());
+    c.composite();
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255]);
+
+    // A second repaint paints into that very buffer: the painter sees the
+    // pixels the previous one left, which is what lets a wallpapered desktop
+    // touch only the tiles that changed.
+    assert!(c.repaint_desktop(|surface| {
+        assert_eq!(surface.get(10, 10), Some(GREEN.premultiply()));
+        surface.fill_rect(0, 0, 4, 4, RED);
+    }));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 2, 2), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255], "kept its pixels");
+}
+
+#[test]
+fn repainting_the_desktop_layer_re_allocates_when_the_screen_size_changed() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    // A layer installed at some other extent (a mode change, or an owner that
+    // installed a partial layer) is replaced by a screen-sized one rather
+    // than painted into at the wrong size.
+    c.set_desktop(opaque(8, 8, GREEN));
+    assert!(c.repaint_desktop(|surface| {
+        assert_eq!((surface.width(), surface.height()), (20, 20));
+        surface.fill(RED);
+    }));
+    assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 18, 18), [255, 0, 0, 255]);
 }
 
 #[test]

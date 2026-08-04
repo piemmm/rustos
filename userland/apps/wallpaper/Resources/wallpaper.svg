@@ -1,0 +1,7 @@
+<svg viewBox="0 0 64 64">
+  <rect x="0" y="0" width="64" height="64" fill="#14202b"/>
+  <rect x="4" y="4" width="56" height="56" fill="#7ec8f2"/>
+  <polygon points="46,10 50,12 52,16 52,20 50,24 46,26 42,24 40,20 40,16 42,12" fill="#ffd54a"/>
+  <polygon points="4,60 16,34 26,44 36,26 48,42 60,60" fill="#2f5d3a"/>
+  <polygon points="4,60 22,44 34,54 44,40 60,60" fill="#3f7a4c"/>
+</svg>

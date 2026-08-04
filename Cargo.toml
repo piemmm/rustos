@@ -110,6 +110,7 @@ members = [
     "lib/virtio_input",
     "lib/virtio_net",
     "lib/vt",
+    "lib/wallpaper",
     "lib/window",
 
     # Drivers — display
@@ -216,6 +217,7 @@ members = [
     "userland/apps/useradd",
     "userland/apps/viewer",
     "userland/apps/vim",
+    "userland/apps/wallpaper",
     "userland/apps/wc",
     "userland/apps/whoami",
     "userland/apps/widgets",

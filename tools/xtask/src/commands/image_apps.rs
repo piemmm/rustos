@@ -812,10 +812,14 @@ fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 /// Returns an actionable build-error message naming `label` and the geometry
 /// or decode problem.
 fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+    // A raster icon master is always PNG (`plans/ICONS.md`), never
+    // progressive JPEG, so the progressive-coefficient-store bound is
+    // never consulted here.
     let limits = DecodeLimits::new(
         tairix_icon::MAX_ARTWORK_SIDE,
         tairix_icon::MAX_ARTWORK_SIDE,
         u64::from(tairix_icon::MAX_ARTWORK_SIDE) * u64::from(tairix_icon::MAX_ARTWORK_SIDE),
+        0,
     );
     let image = tairix_image::decode(bytes, &limits)
         .map_err(|e| format!("image: {label} is not artwork the desktop can decode: {e:?}"))?;
@@ -1088,12 +1092,23 @@ mod tests {
     /// every bundle's own icon alike — is artwork the desktop will really
     /// draw. Discovered from disk, so a new asset is judged the moment it is
     /// dropped in.
+    ///
+    /// Only the icon-family rows of [`tairix_syshelp::GRAPHICS_FILES`] are
+    /// judged here: the icon and wallpaper families are different pictures
+    /// under different contracts (see
+    /// [`every_shipped_wallpaper_master_is_artwork_the_desktop_will_draw`]),
+    /// and dispatching on [`tairix_syshelp::GraphicsFamilyKind`] rather than
+    /// a directory string is what keeps the two from being conflated.
     #[test]
     fn every_shipped_icon_master_is_artwork_the_desktop_will_draw() {
-        assert!(!tairix_syshelp::GRAPHICS_FILES.is_empty());
-        for asset in tairix_syshelp::GRAPHICS_FILES {
+        let icon_masters: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+            .iter()
+            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Icon)
+            .collect();
+        assert!(!icon_masters.is_empty(), "at least one icon master ships");
+        for asset in icon_masters {
             verify_icon_master(
-                &format!("Graphics/{}/{}", asset.dir, asset.file),
+                &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
                 asset.bytes,
             )
             .expect("a shipped icon master");
@@ -1125,5 +1140,108 @@ mod tests {
             bundle_icons > 0,
             "the shipped bundles declare their own icons"
         );
+    }
+
+    /// Every wallpaper master the image ships is a photograph the desktop's
+    /// own decoder can actually turn into a picture. Discovered from disk
+    /// exactly as the icon masters above are (only the wallpaper-family rows
+    /// of [`tairix_syshelp::GRAPHICS_FILES`]), so a new wallpaper is judged
+    /// the moment it is dropped into `lib/wallpaper/assets/` — never a
+    /// hand-maintained list.
+    ///
+    /// A wallpaper master is not held to the icon contract above: it need
+    /// not be square, has no minimum side, and a fully opaque photograph is
+    /// exactly what is expected rather than something the icon check would
+    /// refuse for having no transparency. [`verify_wallpaper_master`] is its
+    /// own named check for exactly that reason.
+    #[test]
+    fn every_shipped_wallpaper_master_is_artwork_the_desktop_will_draw() {
+        let wallpaper_masters: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+            .iter()
+            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Wallpaper)
+            .collect();
+        assert!(
+            !wallpaper_masters.is_empty(),
+            "at least one wallpaper master ships"
+        );
+        for asset in wallpaper_masters {
+            verify_wallpaper_master(
+                &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
+                asset.bytes,
+            )
+            .expect("a shipped wallpaper master");
+        }
+    }
+
+    /// Verify a wallpaper master is a photograph the desktop will actually
+    /// draw: within [`tairix_wallpaper::MAX_WALLPAPER_BYTES`], a format
+    /// [`tairix_image::sniff`] recognises, and one that format's decoder can
+    /// actually turn into a picture with real dimensions.
+    ///
+    /// This is the wallpaper family's own contract, separate from
+    /// [`verify_icon_master`] rather than a mode flag on it: a wallpaper is
+    /// a full-bleed photograph, so it carries none of an icon master's shape
+    /// rules (square, a minimum side, at least one opaque pixel).
+    ///
+    /// The shipped masters run to several megapixels each (six thousand
+    /// pixels or more on a side), so this decodes through
+    /// [`tairix_image::decode_fitted`] at a tiny destination box rather than
+    /// at natural size. For the shipped JPEG masters that makes the decoder
+    /// pick its coarsest reduced scale — an eighth of natural size — which
+    /// keeps this check fast and light over every shipped master without
+    /// ever exercising the full-resolution decode a real screen would need.
+    /// PNG has no reduced-scale decode process, so a PNG wallpaper would
+    /// still decode at natural size here; every master shipped today is
+    /// JPEG.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable build-error message naming `label` and what is
+    /// wrong with the artwork.
+    fn verify_wallpaper_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+        // The JPEG format's own absolute frame-dimension ceiling (ITU-T
+        // T.81 B.2.2), not a guessed "reasonable wallpaper size" — so this
+        // check can never refuse a master the desktop's own decoder would
+        // happily draw. The progressive-coefficient budget is generous for
+        // the same reason: unlike the output size, a progressive JPEG's
+        // coefficient store scales with its *natural* size regardless of
+        // the small fit box requested below.
+        const JPEG_FRAME_DIMENSION_LIMIT: u32 = 0xFFFF;
+        const COEFFICIENT_BUDGET: u64 = 256 * 1024 * 1024;
+        // A tiny fit box: for a reduced-scale format this forces the
+        // coarsest available scale, which is what keeps this check fast
+        // over a multi-megapixel master.
+        const FIT_SIDE: u32 = 64;
+
+        if bytes.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES {
+            return Err(format!(
+                "image: {label} is {} bytes, exceeding the {}-byte desktop wallpaper \
+                 bound; the desktop would refuse it before decoding",
+                bytes.len(),
+                tairix_wallpaper::MAX_WALLPAPER_BYTES
+            ));
+        }
+        if tairix_image::sniff(bytes).is_none() {
+            return Err(format!(
+                "image: {label} is not a format the desktop's image decoder recognises"
+            ));
+        }
+        let limits = tairix_image::DecodeLimits::new(
+            JPEG_FRAME_DIMENSION_LIMIT,
+            JPEG_FRAME_DIMENSION_LIMIT,
+            u64::from(JPEG_FRAME_DIMENSION_LIMIT) * u64::from(JPEG_FRAME_DIMENSION_LIMIT),
+            COEFFICIENT_BUDGET,
+        );
+        let fit = tairix_image::FitBox::new(FIT_SIDE, FIT_SIDE);
+        let image = tairix_image::decode_fitted(bytes, &limits, fit)
+            .map_err(|e| format!("image: {label} is not artwork the desktop can decode: {e:?}"))?;
+        if image.width() == 0 || image.height() == 0 {
+            return Err(format!(
+                "image: {label} decodes to a degenerate {}x{} image",
+                image.width(),
+                image.height()
+            ));
+        }
+        Ok(())
     }
 }

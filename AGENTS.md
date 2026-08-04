@@ -600,6 +600,8 @@ tairix/
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
+│   ├── wallpaper/       # Desktop pinboard: settings store, wallpaper catalog,
+│   │                    #   fit geometry, and the shipped masters in `assets/`.
 │   └── window/          # Window-channel protocol engine.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
@@ -1348,6 +1350,7 @@ You are not exempt from any rule above. In addition:
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
+    | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, per-user settings store), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, user-pinned app shortcuts (pin/drag), the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
@@ -1484,7 +1487,9 @@ Authoritative subdirectories:
 ├── Fonts/       # System fonts.
 ├── Graphics/    # WM/compositor assets: SVG chrome sources (cursors, status
 │             #   glyphs) and raster icon masters, plus their rasterised
-│             #   caches (§10). Icons live in `Icons/<asset-id>.{png,svg}`.
+│             #   caches (§10). Icons live in `Icons/<asset-id>.{png,svg}`;
+│             #   the shipped desktop wallpapers live in `Wallpapers/`
+│             #   (plans/PINBOARD.md).
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.
 ├── Security/    # Users, Groups, machine-id, capability authority, keys, policy.

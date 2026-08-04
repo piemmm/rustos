@@ -10,14 +10,11 @@
 //! dump QEMU is still writing from a complete one (`Spec::screendump`
 //! holds the pointer injection back until the file parses).
 //!
-//! [`Image::dominant_color`] is the assertion primitive a display
-//! vertical uses: the single most frequent pixel colour and its share of
-//! the surface. A composited desktop is dominated by its background
-//! colour whatever the taskbar, cursor, or window chrome overlays, so
-//! the check is robust against everything except the frame simply not
-//! having been presented.
-
-use std::collections::HashMap;
+//! [`Image::pixel`] is the assertion primitive a display vertical uses.
+//! A vertical proves a frame reached scan-out by recomputing, on the
+//! host, what the guest should have drawn — the desktop's own wallpaper,
+//! a window's chrome — and comparing sampled pixels against it, so this
+//! module decodes and addresses the surface and judges nothing itself.
 
 /// Upper bound on the pixel count of an accepted dump
 /// (`width * height`) — a validation bound on the (host-produced, but
@@ -55,32 +52,6 @@ impl Image {
             self.pixels[index + 1],
             self.pixels[index + 2],
         ))
-    }
-
-    /// The single most frequent colour and the fraction of all pixels it
-    /// covers (`0.0..=1.0`).
-    ///
-    /// Ties resolve to the smallest colour value, so the answer is
-    /// deterministic. The image is never empty ([`parse_ppm`] refuses
-    /// zero dimensions), so a dominant colour always exists.
-    #[must_use]
-    pub fn dominant_color(&self) -> ((u8, u8, u8), f64) {
-        let mut counts: HashMap<(u8, u8, u8), u64> = HashMap::new();
-        for rgb in self.pixels.as_chunks::<3>().0 {
-            *counts.entry((rgb[0], rgb[1], rgb[2])).or_insert(0) += 1;
-        }
-        let total = (self.pixels.len() / 3) as u64;
-        let (color, count) = counts
-            .into_iter()
-            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-            .unwrap_or(((0, 0, 0), 0));
-        #[allow(clippy::cast_precision_loss)] // Pixel counts are far below 2^52.
-        let share = if total == 0 {
-            0.0
-        } else {
-            count as f64 / total as f64
-        };
-        (color, share)
     }
 }
 
@@ -187,14 +158,6 @@ mod tests {
         assert_eq!(image.pixel(0, 0), Ok((255, 0, 0)));
         assert_eq!(image.pixel(1, 1), Ok((0, 0, 255)));
         assert!(image.pixel(2, 0).is_err(), "out of bounds is refused");
-    }
-
-    #[test]
-    fn dominant_color_reports_the_majority_and_share() {
-        let image = parse_ppm(&sample()).expect("well-formed image parses");
-        let (color, share) = image.dominant_color();
-        assert_eq!(color, (255, 0, 0));
-        assert!((share - 0.75).abs() < f64::EPSILON);
     }
 
     #[test]

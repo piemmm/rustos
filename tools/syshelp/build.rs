@@ -20,13 +20,16 @@
 //! loudly rather than emitting a silently-incomplete image.
 //!
 //! Alongside the per-bundle help and resource families, this script also
-//! discovers the desktop's graphics assets — the raster icon masters under
-//! `lib/icon/assets/` — and emits a `[GraphicsFile]` table for the image
-//! builder to plant under `/System/Graphics`. Those are validated against the
-//! desktop's own icon contract (`tairix_icon`) as they are discovered: a name
-//! the desktop could never resolve, an over-large file, or two files claiming
-//! one asset id fails the build closed rather than shipping artwork that would
-//! silently render as a fallback glyph.
+//! discovers the desktop's graphics assets — today the raster icon masters
+//! under `lib/icon/assets/` and the wallpaper masters under
+//! `lib/wallpaper/assets/` — and emits one `[GraphicsFile]` table for the
+//! image builder to plant under `/System/Graphics`. Both are single,
+//! non-per-bundle trees walked by the same `GRAPHICS_FAMILIES` table and
+//! loop, each validated against its own family's contract
+//! (`tairix_icon`/`tairix_wallpaper`) as it is discovered: a name a consumer
+//! could never resolve, an over-large file, or (for icons) two files claiming
+//! one asset id fails the build closed rather than shipping artwork that
+//! would silently render as a fallback glyph or never be offered.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -43,17 +46,59 @@ use std::path::{Path, PathBuf};
 /// change, not a per-bundle edit.
 const APP_ROOTS: &[&str] = &["userland/apps", "userland/gui", "userland/shell"];
 
-/// Source directory of the desktop's raster icon masters, relative to the
-/// workspace root. Unlike the per-bundle help/resource families this is a
-/// single non-per-bundle tree, so it is walked directly rather than under a
-/// per-crate `<root>/<crate>/…` layout.
-const GRAPHICS_ASSETS_ROOT: &str = "lib/icon/assets";
+/// One single-tree desktop graphics asset family: a source directory under
+/// the workspace root, the `/System/Graphics` subdirectory its files are
+/// planted in, the largest byte size a file in it may be, and how to decide
+/// whether one file name is legal for it (returning the identifier the
+/// "no two files claim the same one" check keys on, or `None` when the name
+/// is not legal for this family).
+///
+/// Unlike the per-bundle help/resource families above, a graphics family is
+/// a single non-per-bundle tree, so [`emit_graphics_table`] walks each entry
+/// in this table directly rather than under a per-crate `<root>/<crate>/…`
+/// layout. Adding a family (a future cursor/chrome set, say) is adding a row
+/// here, never a second copy of the walk — that duplication is exactly what
+/// this table exists to prevent.
+struct GraphicsFamily {
+    /// Source directory, relative to the workspace root.
+    source_root: &'static str,
+    /// The name of the `GraphicsFile::family` variant (`tairix_syshelp::
+    /// GraphicsFamilyKind`) this family's rows are tagged with.
+    ///
+    /// This build script cannot depend on the very crate it generates code
+    /// for, so it cannot name that enum as a Rust type; instead this is
+    /// spliced verbatim into each emitted row as
+    /// `GraphicsFamilyKind::<family_variant>`, which then resolves against
+    /// the one enum `src/lib.rs` defines once the generated file is
+    /// `include!`d into it. The family's `/System/Graphics` subdirectory
+    /// is not written down here at all — `GraphicsFamilyKind::target_dir`
+    /// is its one definition.
+    family_variant: &'static str,
+    /// Largest byte size a file in this family may be.
+    max_bytes: usize,
+    /// Whether `name` is a legal shipped file name for this family, and if
+    /// so the identifier the duplicate-id check keys on.
+    identify: fn(&str) -> Option<String>,
+}
 
-/// The `/System/Graphics` subdirectory the icon masters are planted in — the
-/// `GraphicsFile::dir` every emitted icon row carries. Keeping it as data
-/// means a future cursor/chrome family plants through the same table and loop
-/// rather than a second one.
-const GRAPHICS_ICONS_DIR: &str = "Icons";
+/// The desktop's single-tree graphics asset families: today the raster icon
+/// masters and the shipped wallpaper masters.
+const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
+    GraphicsFamily {
+        source_root: "lib/icon/assets",
+        family_variant: "Icon",
+        max_bytes: tairix_icon::MAX_ARTWORK_BYTES,
+        identify: |name| {
+            tairix_icon::artwork_kind_for_file(name).map(|kind| kind.asset_id().to_string())
+        },
+    },
+    GraphicsFamily {
+        source_root: "lib/wallpaper/assets",
+        family_variant: "Wallpaper",
+        max_bytes: tairix_wallpaper::MAX_WALLPAPER_BYTES,
+        identify: |name| tairix_wallpaper::is_wallpaper_file_name(name).then(|| name.to_string()),
+    },
+];
 
 fn main() {
     let manifest = PathBuf::from(env("CARGO_MANIFEST_DIR"));
@@ -152,71 +197,78 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-/// Discover the desktop's raster icon masters under [`GRAPHICS_ASSETS_ROOT`]
-/// and write `graphics_files.rs` — one `GraphicsFile` row per asset, planted
-/// at `Graphics/<dir>/<file>` on the image.
+/// Discover every [`GraphicsFamily`]'s single-tree assets and write
+/// `graphics_files.rs` — one `GraphicsFile` row per asset, planted at
+/// `Graphics/<family's GraphicsFamilyKind::target_dir()>/<file>` on the
+/// image.
 ///
-/// Each discovered file is validated against the desktop's own icon contract
-/// before it is emitted, so the build fails closed on artwork the desktop
-/// could never resolve rather than shipping a file that silently renders as a
-/// fallback glyph:
+/// Each discovered file is validated against its own family's `identify`
+/// contract before it is emitted, so the build fails closed on an asset a
+/// consumer could never resolve rather than shipping one that would silently
+/// render as a fallback glyph (icons) or never be offered (wallpapers):
 ///
-/// * the name must be a legal `<asset-id>.png`
-///   ([`tairix_icon::artwork_kind_for_file`]),
-/// * the file must be at most [`tairix_icon::MAX_ARTWORK_BYTES`] (the same
-///   untrusted-input bound the runtime resolver refuses over-long input
+/// * the name must be legal for the family (`family.identify(name).is_some()`),
+/// * the file must be at most `family.max_bytes` (the same untrusted-input
+///   bound each family's own runtime consumer refuses over-long input
 ///   against), and
-/// * no two files may claim the same asset id.
+/// * no two files in the same family may claim the same identifier.
 ///
-/// Rows are sorted (by file name) exactly as the help and resource walks are,
-/// so the emitted table — and the planted image — is reproducible.
+/// Families are walked in [`GRAPHICS_FAMILIES`] order and each family's
+/// files are sorted by name, exactly as the help and resource walks are, so
+/// the emitted table — and the planted image — is reproducible.
 fn emit_graphics_table(workspace: &Path) {
-    let assets = workspace.join(GRAPHICS_ASSETS_ROOT);
-    println!("cargo:rerun-if-changed={}", assets.display());
-
-    let max_bytes = u64::try_from(tairix_icon::MAX_ARTWORK_BYTES).expect("bound fits u64");
-    let mut seen_ids: Vec<&'static str> = Vec::new();
     let mut rows = String::from("[\n");
-    if assets.is_dir() {
+    for family in GRAPHICS_FAMILIES {
+        let assets = workspace.join(family.source_root);
+        println!("cargo:rerun-if-changed={}", assets.display());
+        if !assets.is_dir() {
+            continue;
+        }
+
+        let max_bytes = u64::try_from(family.max_bytes).expect("bound fits u64");
+        let mut seen_ids: Vec<String> = Vec::new();
         for file in sorted_children(&assets) {
             let path = assets.join(&file);
             if !path.is_file() {
                 continue;
             }
-            // A name the loader would never map to a kind (an unknown id, a
-            // wrong extension, a path separator) can never resolve to artwork,
-            // so shipping it is a build error, not a silent fallback.
-            let kind = tairix_icon::artwork_kind_for_file(&file).unwrap_or_else(|| {
+            // A name the family's own runtime consumer would never resolve
+            // (an unknown id, a wrong extension, a path separator) can never
+            // be offered, so shipping it is a build error, not a silent
+            // fallback.
+            let id = (family.identify)(&file).unwrap_or_else(|| {
                 panic!(
-                    "{}: not a legal desktop icon artwork name (expected `<asset-id>.png`)",
-                    path.display()
+                    "{}: not a legal shipped name for the {} graphics family",
+                    path.display(),
+                    family.family_variant
                 )
             });
             // The byte bound is a fixed validation limit on untrusted input:
-            // an over-large asset is refused before it is decoded, so one that
-            // exceeds it must never reach the image.
+            // an over-large asset is refused before it is decoded, so one
+            // that exceeds it must never reach the image.
             let len = fs::metadata(&path)
                 .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
                 .len();
             assert!(
                 len <= max_bytes,
-                "{}: {len} bytes exceeds the {}-byte icon artwork bound",
+                "{}: {len} bytes exceeds the {}-byte {} bound",
                 path.display(),
-                tairix_icon::MAX_ARTWORK_BYTES
+                family.max_bytes,
+                family.family_variant
             );
-            let id = kind.asset_id();
             assert!(
                 !seen_ids.contains(&id),
-                "{}: two files claim the asset id `{id}`",
+                "{}: two files claim the identifier `{id}`",
                 path.display()
             );
             seen_ids.push(id);
 
             println!("cargo:rerun-if-changed={}", path.display());
             let abs = path.to_str().expect("graphics path is valid UTF-8");
+            let variant = family.family_variant;
             writeln!(
                 rows,
-                "    GraphicsFile {{ dir: {GRAPHICS_ICONS_DIR:?}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                "    GraphicsFile {{ family: GraphicsFamilyKind::{variant}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
             )
             .expect("write to String");
         }

@@ -1239,6 +1239,34 @@ fn sort_by_modified_orders_within_the_file_group() {
 }
 
 #[test]
+fn sort_by_kind_clusters_bundles_ahead_of_files_within_the_non_directory_group() {
+    let mut entries = mixed_listing();
+    sort_entries(
+        &mut entries,
+        SortMode {
+            key: SortKey::Kind,
+            direction: SortDirection::Ascending,
+        },
+    );
+    let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
+    // Directories still lead (grouping is fixed, and both are unaffected by
+    // kind); among the rest, the bundle sorts ahead of the plain files (all
+    // sharing one extension, so the name tiebreak settles them) — a genuinely
+    // different order from name or size, which both put the bundle last.
+    assert_eq!(
+        ordered,
+        [
+            "apricot",
+            "Zebra",
+            "Editor.app",
+            "Apple.txt",
+            "banana.txt",
+            "cherry.txt",
+        ]
+    );
+}
+
+#[test]
 fn sort_of_an_empty_listing_is_a_no_op() {
     let mut entries: Vec<Entry> = Vec::new();
     sort_entries(&mut entries, SortMode::default_order());
@@ -4911,26 +4939,26 @@ fn view_mode_toggled_swaps_list_and_grid() {
 }
 
 #[test]
-fn sort_mode_next_cycles_through_all_six_modes_and_wraps() {
+fn sort_mode_next_cycles_through_all_eight_modes_and_wraps() {
     use crate::sort::SortMode;
     // The Sort command walks every (key, direction) once, in a fixed order,
     // then returns to the start — a total cycle with no unreachable mode.
     let start = SortMode::default_order();
     let mut mode = start;
     let mut seen = Vec::new();
-    for _ in 0..6 {
+    for _ in 0..8 {
         seen.push(mode);
         mode = mode.next();
     }
-    // Back to the start after six steps.
+    // Back to the start after eight steps.
     assert_eq!(mode, start);
-    // All six are distinct.
+    // All eight are distinct.
     for (i, a) in seen.iter().enumerate() {
         for b in &seen[i + 1..] {
             assert_ne!(a, b, "sort cycle repeated a mode early");
         }
     }
-    assert_eq!(seen.len(), 6);
+    assert_eq!(seen.len(), 8);
 }
 
 #[test]

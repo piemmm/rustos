@@ -183,22 +183,7 @@ impl GlyphClient {
     /// size — so a real program's defaults are installed here instead,
     /// keeping the client free of explicit setup.
     fn ensure_defaults(&mut self) {
-        #[cfg(feature = "rt")]
-        {
-            if self.transport.is_none() {
-                self.transport = Some(Box::new(RtTransport));
-            }
-            if self.cache.is_none() {
-                self.cache = Some(default_cache());
-            }
-        }
-        // A consumer's host tests enable `test-util` to get deterministic
-        // glyph coverage without a running service; the runtime transport
-        // takes precedence when both are present (a real program build).
-        #[cfg(all(feature = "test-util", not(feature = "rt")))]
-        if self.transport.is_none() {
-            self.transport = Some(Box::new(SolidTestTransport));
-        }
+        install_defaults(self);
     }
 
     /// Serve `(scalar, family, pixel_height, weight)` to `f`, fetching it
@@ -393,6 +378,41 @@ fn fallback_metrics(pixel_height: u32) -> FontMetrics {
         line_height: pixel_height,
         monospace_advance: scale_atlas_metric(atlas::CELL_WIDTH, pixel_height),
     }
+}
+
+/// Install whatever defaults this build has for `client`, leaving anything
+/// already installed alone.
+///
+/// A real program build talks to the font service over the runtime
+/// transport, and caches glyphs in a cache budgeted from the machine's RAM
+/// (which only a real program can read). A consumer's host tests enable
+/// `test-util` instead, for deterministic glyph coverage with no service
+/// running; the runtime transport takes precedence when both are present.
+///
+/// A build with **neither** — `lib/fbcon` and the boot console, which draw
+/// from the compiled-in atlas, and the host builds of crates that merely
+/// link the render path — has no default to install, so this does nothing
+/// and every glyph request fails closed until a consumer installs a
+/// transport itself. That is why the work lives here rather than in the
+/// method: there is a configuration in which there is genuinely nothing to
+/// do, and this says so plainly instead of dressing it up as a fallible
+/// lookup.
+fn install_defaults(client: &mut GlyphClient) {
+    #[cfg(feature = "rt")]
+    {
+        if client.transport.is_none() {
+            client.transport = Some(Box::new(RtTransport));
+        }
+        if client.cache.is_none() {
+            client.cache = Some(default_cache());
+        }
+    }
+    #[cfg(all(feature = "test-util", not(feature = "rt")))]
+    if client.transport.is_none() {
+        client.transport = Some(Box::new(SolidTestTransport));
+    }
+    #[cfg(not(any(feature = "rt", feature = "test-util")))]
+    let _ = client;
 }
 
 /// Build the client's own glyph cache, budgeted from the machine's total

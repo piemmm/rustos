@@ -10,31 +10,35 @@
 //! where `<store>` is the store the bundle's own manifest kind installs it
 //! to — `Commands` for a command app, `Applications` for a graphical
 //! application, `Services` for a service. It also
-//! ships the desktop's graphics assets — the raster icon masters — under
-//! `/System/Graphics`. The image builder
-//! (`tools/mkimage`) and the QEMU image fixture must plant all of these onto
-//! the volume they author.
+//! ships the desktop's graphics assets — today the raster icon masters and
+//! the shipped default wallpaper masters — under `/System/Graphics`. The
+//! image builder (`tools/mkimage`) and the QEMU image fixture must plant all
+//! of these onto the volume they author.
 //!
 //! The source of truth for each family is its own on-disk directory. This
 //! crate's build script walks the command-app source roots (`userland/apps`,
 //! `userland/gui`, `userland/shell`; each bundle named by its crate's
 //! `AppInfo.toml`, never the crate directory) for `Help/` and `Resources/`,
-//! and walks `lib/icon/assets/` for the desktop icon masters, embedding each
+//! and walks each single-tree graphics asset family — `lib/icon/assets/` for
+//! the desktop icon masters, `lib/wallpaper/assets/` for the shipped
+//! wallpaper masters — through one shared table and loop, embedding each
 //! discovered file as a row in [`HELP_FILES`] / [`RESOURCE_FILES`] /
 //! [`GRAPHICS_FILES`]. The planters iterate that discovered data — **never** a
 //! hand-maintained list that a new file would force an edit to (the
 //! duplication the charter forbids). Adding a bundle's payload is dropping
 //! files under `<root>/<name>/Help/<locale>/` or `<root>/<name>/Resources/`,
-//! and adding an icon is dropping a `<asset-id>.png` under `lib/icon/assets/`;
-//! the next build rediscovers them. Payload is therefore authored in exactly
-//! one place and never hardcoded into a binary or copied into the image
-//! builder.
+//! adding an icon is dropping a `<asset-id>.png` under `lib/icon/assets/`,
+//! and adding a wallpaper is dropping a `.jpg`/`.jpeg`/`.png` under
+//! `lib/wallpaper/assets/`; the next build rediscovers them. Payload is
+//! therefore authored in exactly one place and never hardcoded into a binary
+//! or copied into the image builder.
 //!
-//! The graphics assets are additionally validated against the desktop's own
-//! icon contract (`tairix_icon`) as they are discovered, so a name the
-//! desktop could never resolve or an over-large file fails the build closed
-//! rather than shipping artwork that would silently render as a fallback
-//! glyph.
+//! Each graphics family's files are additionally validated against that
+//! family's own contract (`tairix_icon` for icons, `tairix_wallpaper` for
+//! wallpapers) as they are discovered, so a name a consumer could never
+//! resolve or an over-large file fails the build closed rather than shipping
+//! an icon that would silently render as a fallback glyph or a wallpaper
+//! that would never be offered.
 //!
 //! [`plant_system_payload`] is the single walk both planters drive their own
 //! `plant_nested_file` from, so they can never lay down a different set of
@@ -118,32 +122,68 @@ pub struct ResourceFile {
 pub const RESOURCE_FILES: &[ResourceFile] =
     &include!(concat!(env!("OUT_DIR"), "/resource_files.rs"));
 
+/// Which family of desktop graphics assets a [`GraphicsFile`] belongs to.
+///
+/// Closed by design, and deliberately not carried as a free-form string: a
+/// consumer tells the two shipped families apart by matching on this enum,
+/// never by comparing a directory name. Adding a third family (a future
+/// cursor or chrome set, say) means adding a variant here, which then forces
+/// every `match` over this type — in this crate and in every crate that
+/// reads [`GRAPHICS_FILES`] — to say explicitly what the new family means to
+/// it, rather than silently falling through a default arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsFamilyKind {
+    /// The raster icon masters: one `<asset-id>.png` per icon kind,
+    /// resolved by the window manager and file manager by asset id.
+    Icon,
+    /// The shipped default wallpaper masters: one `.jpg`/`.jpeg`/`.png` per
+    /// shipped master, listed by name through
+    /// `tairix_wallpaper::catalog_entries`.
+    Wallpaper,
+}
+
+impl GraphicsFamilyKind {
+    /// The subdirectory of `/System/Graphics` this family's files are
+    /// planted under. The one place either spelling (`Icons`, `Wallpapers`)
+    /// is written down.
+    #[must_use]
+    pub const fn target_dir(self) -> &'static str {
+        match self {
+            Self::Icon => "Icons",
+            Self::Wallpaper => "Wallpapers",
+        }
+    }
+}
+
 /// One shipped desktop graphics asset, ready to plant at
-/// `/System/Graphics/<dir>/<file>` on the read-only `/System` volume.
+/// `/System/Graphics/<family.target_dir()>/<file>` on the read-only
+/// `/System` volume.
 ///
 /// Unlike a [`HelpFile`] or a [`ResourceFile`] a graphics asset is not
-/// per-bundle: it is desktop-wide artwork the window manager and file manager
-/// resolve by asset id. Today the only family is the raster icon masters
-/// (`dir == "Icons"`, one `<asset-id>.png` per icon kind); carrying the `dir`
-/// as data means a future cursor or chrome family plants through this same
-/// table and loop rather than a second one.
+/// per-bundle: it is desktop-wide artwork, tagged with the
+/// [`GraphicsFamilyKind`] it belongs to so a future family plants through
+/// this same table and loop rather than a second one.
 #[derive(Clone, Copy, Debug)]
 pub struct GraphicsFile {
-    /// The subdirectory of `/System/Graphics` the asset is planted in.
-    pub dir: &'static str,
-    /// The asset's file name, which is its stable asset id plus extension.
+    /// Which family this asset belongs to.
+    pub family: GraphicsFamilyKind,
+    /// The asset's file name: for an icon, its stable asset id plus
+    /// extension; for a wallpaper, the plain file name a consumer lists it
+    /// by.
     pub file: &'static str,
     /// The asset's bytes.
     pub bytes: &'static [u8],
 }
 
-/// Every desktop graphics asset, discovered from `lib/icon/assets/` at build
-/// time and validated against the desktop's icon contract as it is discovered
-/// (a name the desktop could not resolve, an over-large file, or a duplicate
-/// asset id fails the build).
+/// Every desktop graphics asset, discovered from each graphics family's own
+/// source tree at build time (`lib/icon/assets/` for icons,
+/// `lib/wallpaper/assets/` for wallpapers) and validated against that
+/// family's own contract as it is discovered (a name its consumer could not
+/// resolve, an over-large file, or a duplicate identifier fails the build).
 ///
-/// Rows are ordered deterministically (by file name), so the planted store
-/// and any reproducible image are stable across builds and hosts.
+/// Rows are ordered deterministically (by family, then file name), so the
+/// planted store and any reproducible image are stable across builds and
+/// hosts.
 pub const GRAPHICS_FILES: &[GraphicsFile] =
     &include!(concat!(env!("OUT_DIR"), "/graphics_files.rs"));
 
@@ -194,7 +234,11 @@ pub fn plant_system_payload<E>(
     }
     for asset in GRAPHICS_FILES {
         plant(
-            &[b"Graphics", asset.dir.as_bytes(), asset.file.as_bytes()],
+            &[
+                b"Graphics",
+                asset.family.target_dir().as_bytes(),
+                asset.file.as_bytes(),
+            ],
             asset.bytes,
         )?;
     }
@@ -335,46 +379,74 @@ mod tests {
     }
 
     /// The discovered desktop graphics assets are non-empty and every one
-    /// satisfies the desktop's icon contract: a legal `<asset-id>.png` name,
-    /// within the artwork byte bound, planted under `Graphics/Icons`, and
-    /// with a unique asset id. This mirrors the fail-closed checks
-    /// `build.rs` applies — the emitted table and the desktop resolver share
-    /// the one `tairix_icon` definition, so neither can drift.
+    /// satisfies its own family's contract: an icon is a legal
+    /// `<asset-id>.png` name within the artwork byte bound with a unique
+    /// asset id, and a wallpaper is a legal shipped file name within the
+    /// wallpaper byte bound with a unique name. Dispatching on
+    /// [`super::GraphicsFamilyKind`] rather than a directory string means a
+    /// third family added here without a matching arm fails to compile,
+    /// never silently skips its own contract. This mirrors the fail-closed
+    /// checks `build.rs` applies — the emitted table and each family's own
+    /// runtime consumer share one definition, so neither can drift.
     #[test]
-    fn every_discovered_graphics_asset_satisfies_the_icon_contract() {
-        use super::GRAPHICS_FILES;
+    fn every_discovered_graphics_asset_satisfies_its_family_contract() {
+        use super::{GraphicsFamilyKind, GRAPHICS_FILES};
 
         assert!(
             !GRAPHICS_FILES.is_empty(),
             "at least one desktop graphics asset must be discovered"
         );
-        let mut ids: BTreeSet<&str> = BTreeSet::new();
+        let mut icon_ids: BTreeSet<&str> = BTreeSet::new();
+        let mut wallpaper_names: BTreeSet<&str> = BTreeSet::new();
         for asset in GRAPHICS_FILES {
-            assert_eq!(
-                asset.dir, "Icons",
-                "the icon masters plant under Graphics/Icons"
-            );
-            let kind = tairix_icon::artwork_kind_for_file(asset.file)
-                .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
-            assert!(
-                asset.bytes.len() <= tairix_icon::MAX_ARTWORK_BYTES,
-                "`{}` is within the artwork byte bound",
-                asset.file
-            );
-            assert!(
-                ids.insert(kind.asset_id()),
-                "asset id `{}` is claimed by more than one file",
-                kind.asset_id()
-            );
+            match asset.family {
+                GraphicsFamilyKind::Icon => {
+                    let kind = tairix_icon::artwork_kind_for_file(asset.file)
+                        .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
+                    assert!(
+                        asset.bytes.len() <= tairix_icon::MAX_ARTWORK_BYTES,
+                        "`{}` is within the artwork byte bound",
+                        asset.file
+                    );
+                    assert!(
+                        icon_ids.insert(kind.asset_id()),
+                        "asset id `{}` is claimed by more than one file",
+                        kind.asset_id()
+                    );
+                }
+                GraphicsFamilyKind::Wallpaper => {
+                    assert!(
+                        tairix_wallpaper::is_wallpaper_file_name(asset.file),
+                        "`{}` is a legal wallpaper file name",
+                        asset.file
+                    );
+                    assert!(
+                        asset.bytes.len() <= tairix_wallpaper::MAX_WALLPAPER_BYTES,
+                        "`{}` is within the wallpaper byte bound",
+                        asset.file
+                    );
+                    assert!(
+                        wallpaper_names.insert(asset.file),
+                        "wallpaper name `{}` is claimed by more than one file",
+                        asset.file
+                    );
+                }
+            }
         }
+        assert!(!icon_ids.is_empty(), "at least one icon must be discovered");
+        assert!(
+            !wallpaper_names.is_empty(),
+            "at least one wallpaper must be discovered"
+        );
     }
 
     /// The shared payload walk yields every discovered file exactly once,
     /// at its `/System`-volume-relative path: a help document under
     /// `Apps/<bundle>/Help/<locale>/`, a resource under
-    /// `Apps/<bundle>/Resources/`, and an icon under `Graphics/Icons/`. Both
-    /// planters drive their own `plant_nested_file` from this one walk, so
-    /// this pins the count and the path spelling they share.
+    /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/`, and a
+    /// wallpaper under `Graphics/Wallpapers/`. All planters drive their own
+    /// `plant_nested_file` from this one walk, so this pins the count and
+    /// the path spelling they share.
     #[test]
     fn the_shared_walk_visits_every_payload_file_at_its_planted_path() {
         use super::{plant_system_payload, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
@@ -404,6 +476,17 @@ mod tests {
                     b"folder.png".to_vec()
                 ]),
             "the folder icon is planted at Graphics/Icons/folder.png"
+        );
+        // The shipped default wallpaper lands at Graphics/Wallpapers/tairix-dark.jpg.
+        assert!(
+            visited.iter().any(|c| c
+                == &[
+                    b"Graphics".to_vec(),
+                    b"Wallpapers".to_vec(),
+                    tairix_wallpaper::DEFAULT_WALLPAPER.as_bytes().to_vec(),
+                ]),
+            "the default wallpaper is planted at Graphics/Wallpapers/{}",
+            tairix_wallpaper::DEFAULT_WALLPAPER
         );
     }
 }

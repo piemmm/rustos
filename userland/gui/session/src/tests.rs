@@ -6149,3 +6149,182 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
         );
     }
 }
+
+// --- The pinboard: the desktop layer and its context menu -----------------
+
+use crate::desktop::Desktop;
+use crate::pinboard::PinboardMenu;
+use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
+
+/// The row stride, in bytes, of the [`headless_desktop`] frame.
+const FRAME_STRIDE: usize = 640 * 4;
+
+/// A point on the headless screen clear of both the icon column and the bar.
+const CLEAR_OF_EVERYTHING: (usize, usize) = (600, 200);
+
+/// The desktop's own folder over the in-memory tree, already listed.
+fn pinboard_desktop() -> Desktop<TreeSource> {
+    let mut desktop = Desktop::new(TreeSource::fixture(), Vec::new());
+    desktop.relist(0);
+    desktop
+}
+
+/// `desktop` with its backdrop set to the flat colour `rgb`.
+fn with_backdrop(desktop: &mut Desktop<TreeSource>, rgb: Rgb) {
+    let base = desktop.settings().clone();
+    let _ = desktop.apply_settings(PinboardSettings {
+        backdrop: Backdrop::Colour(rgb),
+        ..base
+    });
+}
+
+/// The composited pixel at (`x`, `y`) as its four raw frame bytes.
+fn frame_pixel(comp: &Compositor, x: usize, y: usize) -> [u8; 4] {
+    let start = y * FRAME_STRIDE + x * 4;
+    let bytes = comp
+        .frame()
+        .get(start..start.saturating_add(4))
+        .expect("a pixel inside the frame");
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
+/// Whether any composited pixel inside `area` differs from `colour`.
+fn any_pixel_differs(comp: &Compositor, area: Rect, colour: [u8; 4]) -> bool {
+    let left = usize::try_from(area.left().max(0)).unwrap_or(0);
+    let top = usize::try_from(area.top().max(0)).unwrap_or(0);
+    let right = usize::try_from(area.right().max(0)).unwrap_or(0);
+    let bottom = usize::try_from(area.bottom().max(0)).unwrap_or(0);
+    for y in top..bottom {
+        for x in left..right {
+            if frame_pixel(comp, x, y) != colour {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn the_desktop_layer_paints_the_backdrop_colour_the_settings_name_under_the_icons() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let empty = frame_pixel(&comp, x, y);
+    assert_eq!(empty[3], 255, "the desktop layer is opaque");
+    assert!(
+        empty.contains(&10) && empty.contains(&20) && empty.contains(&30),
+        "the layer shows the colour the settings name, got {empty:?}"
+    );
+
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let cell = layout.cell_rect(0, 0).expect("a shown icon");
+    assert!(
+        any_pixel_differs(&comp, cell, empty),
+        "the icons are drawn over the backdrop"
+    );
+}
+
+#[test]
+fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let without = frame_pixel(&comp, x, y);
+
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    paper.fill_rect(0, 0, 640, 480, Color::rgb(200, 100, 50));
+    shell.set_wallpaper(Some(paper));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+
+    let with = frame_pixel(&comp, x, y);
+    assert_ne!(
+        with, without,
+        "the wallpaper is the layer's base, not the backdrop colour"
+    );
+    assert!(
+        with.contains(&200) && with.contains(&100) && with.contains(&50),
+        "the layer shows the wallpaper's own pixels, got {with:?}"
+    );
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let cell = layout.cell_rect(0, 0).expect("a shown icon");
+    assert!(
+        any_pixel_differs(&comp, cell, with),
+        "the icons are drawn over the wallpaper"
+    );
+
+    shell.set_wallpaper(None);
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    assert_eq!(
+        frame_pixel(&comp, x, y),
+        without,
+        "taking the wallpaper away brings the backdrop colour back"
+    );
+}
+
+#[test]
+fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.present(&mut comp);
+    let before = comp.window_count();
+    let mut menu = PinboardMenu::new();
+
+    shell.present_pinboard_menu(&mut comp, &menu);
+    assert_eq!(
+        shell.pinboard_window(),
+        None,
+        "a closed menu places no window"
+    );
+    assert_eq!(comp.window_count(), before);
+
+    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
+    shell.present_pinboard_menu(&mut comp, &menu);
+    let placed = shell.pinboard_window().expect("an open menu is placed");
+    assert_eq!(comp.window_count(), before + 1);
+    let screen = comp.screen_rect();
+    let plate = window_rect(&comp, placed);
+    assert_eq!(
+        plate.origin,
+        Point::new(100, 100),
+        "a menu with room opens at the pointer"
+    );
+    assert!(plate.right() <= screen.right() && plate.bottom() <= screen.bottom());
+
+    shell.present_pinboard_menu(&mut comp, &menu);
+    assert_eq!(
+        shell.pinboard_window(),
+        Some(placed),
+        "re-presenting reuses the menu's window"
+    );
+    assert_eq!(comp.window_count(), before + 1);
+
+    menu.open(
+        Point::new(screen.right() - 1, screen.bottom() - 1),
+        false,
+        &PinboardSettings::default(),
+    );
+    shell.present_pinboard_menu(&mut comp, &menu);
+    let corner = window_rect(&comp, shell.pinboard_window().expect("still placed"));
+    assert!(
+        corner.right() <= screen.right() && corner.bottom() <= screen.bottom(),
+        "a menu opened in the corner is clamped wholly on screen, got {corner:?}"
+    );
+
+    menu.close();
+    shell.present_pinboard_menu(&mut comp, &menu);
+    assert_eq!(
+        shell.pinboard_window(),
+        None,
+        "closing the menu takes its window down"
+    );
+    assert_eq!(comp.window_count(), before);
+}

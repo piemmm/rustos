@@ -3954,6 +3954,38 @@ per-app recipes (§2.2).
   instrument groove, and drawn through the one shared stroke path in
   `lib/raster`. Both read-only: no input, no action. 31 host tests.
 
+### Stage 7 follow-up — the desktop pinboard (`plans/PINBOARD.md`)
+
+**Status: in progress.** The desktop backdrop becomes a real pinboard: a
+wallpaper drawn behind everything, the user's `Desktop` folder over it, a
+backdrop context menu, and a per-user settings document the chooser app
+edits. `plans/PINBOARD.md` is the binding design and carries the
+deliverable list (P1–P10) and its current state; it is not repeated here.
+
+Load-bearing decisions a future contributor needs:
+
+- **`lib/wallpaper`** (new `lib/*` crate, registered in `AGENTS.md` §3) owns
+  the settings document (`<home>/Settings/Pinboard/pinboard.conf`), the
+  wallpaper catalog, the fit geometry, and the five shipped masters in its
+  `assets/`, which `tools/syshelp` plants at `/System/Graphics/Wallpapers`.
+  The default is `tairix-dark.jpg`.
+- **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
+  with a reduced-scale decode so a 25-megapixel master is never materialised
+  whole; the wallpapers are JPEG and a 1 GiB machine must still draw them.
+- **`lib/raster::resample`** is the one image resampler, shared by the icon
+  and wallpaper paths.
+- **`lib/sandbox`'s `imagerender`** (renamed from `iconraster`) gained the
+  wallpaper prepare/band/release ops, so untrusted wallpaper bytes are
+  decoded only in the capability-empty worker and a screenful of pixels
+  crosses the fixed 8 MiB frame bound in bands rather than raising it.
+- **The desktop session is the settings document's only writer.** The
+  chooser (`wallpaper.app`) and the backdrop menu both *ask*, over the
+  reserved seat-scoped `PINBOARD_ENDPOINT`, whose request carries the
+  rendered document itself rather than a second encoding of the model.
+- **The icon arrangement is a setting**, which is why
+  `tairix_browse::GridFlow` gained `ColumnsFromLeading` beside its existing
+  mirror image.
+
 ---
 
 ## Stage 8 — Installer and Image Builders

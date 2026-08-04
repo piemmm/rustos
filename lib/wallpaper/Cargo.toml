@@ -1,0 +1,32 @@
+[package]
+name = "tairix-wallpaper"
+description = "TAIRiX desktop pinboard wallpaper engine: the per-user pinboard settings document (wallpaper choice, fit, backdrop colour, icon flow, sort order), the shipped default wallpaper catalog and its bounded fail-closed listing model, and the one pure wallpaper-placement geometry the desktop renderer and the chooser's preview both draw through."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Integer screen geometry (`Rect`), so the wallpaper placement geometry and
+# the compositor agree on one rectangle type rather than a second one.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The shared path-spelling parser: the settings document's wallpaper path is
+# validated as an absolute path through the one first-party parser, and the
+# catalog's file names are validated as plain leaf names, exactly as the
+# icon catalog already does — never a second ad-hoc spelling check.
+tairix-path = { path = "../path", version = "=0.0.0" }
+# The one `#`-comment grammar every line-oriented TAIRiX configuration store
+# shares, so a comment is recognised here exactly as it is in the boot-time
+# and network stores and the taskbar's own pin store.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

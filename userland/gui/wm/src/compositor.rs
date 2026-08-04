@@ -549,6 +549,47 @@ impl Compositor {
         }
     }
 
+    /// Repaint the desktop layer in place through `paint`, keeping the
+    /// screen-sized buffer it is already drawn into, and mark its footprint
+    /// dirty.
+    ///
+    /// The desktop is repainted whenever its owner's model changes — an icon
+    /// takes the hover, a selection moves, the folder re-lists — which is
+    /// often, and the layer is a whole screen of pixels. Handing the existing
+    /// buffer back to the painter means those repaints cost a paint, not a
+    /// paint plus a multi-megabyte allocation the heap may refuse. A layer
+    /// that is absent, or sized for a screen this output no longer has, is
+    /// allocated fresh at the current screen size; `paint` then always sees a
+    /// surface of exactly [`screen_rect`](Self::screen_rect)'s extent, and
+    /// receives it exactly as the previous frame left it (it is the painter's
+    /// job to lay down its own background, which is cheaper than a clear this
+    /// method cannot know is redundant).
+    ///
+    /// Returns `false` — having changed and damaged nothing — when no such
+    /// surface could be allocated, so a heap that will not give back a screen
+    /// of pixels leaves the desktop exactly as it was rather than blanking it.
+    pub fn repaint_desktop(&mut self, paint: impl FnOnce(&mut Surface)) -> bool {
+        let screen = self.screen_rect();
+        let fits = self
+            .desktop
+            .as_ref()
+            .is_some_and(|s| s.width() == screen.width && s.height() == screen.height);
+        if !fits {
+            let Some(fresh) = Surface::new(screen.width, screen.height) else {
+                return false;
+            };
+            self.set_desktop(fresh);
+        }
+        let Some(surface) = self.desktop.as_mut() else {
+            return false;
+        };
+        paint(surface);
+        if let Some(covered) = self.desktop_bounds() {
+            self.damage.add(covered);
+        }
+        true
+    }
+
     /// Take the desktop layer down, marking what it covered dirty. Returns
     /// `false` when none was installed (nothing to do, nothing damaged).
     pub fn clear_desktop(&mut self) -> bool {

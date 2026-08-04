@@ -43,10 +43,18 @@ tairix-image = { path = "../image", version = "=0.0.0" }
 # SVG image, so the sandboxed service draws through the one polygon-fill
 # path every vector asset already shares rather than reimplementing it.
 tairix-icon = { path = "../icon", version = "=0.0.0" }
-# The premultiplied-alpha pixel surface a vector icon rasterises into; the
-# sandboxed service un-premultiplies it back to the straight-alpha wire
-# format PNG decoding already produces.
+# The premultiplied-alpha pixel surface a vector icon rasterises into, and
+# the crate's one shared RGBA8 resampler both the icon and wallpaper paths
+# scale through; the sandboxed service un-premultiplies an icon surface
+# back to the straight-alpha wire format PNG decoding already produces.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
+# Integer screen geometry (`Rect`): the wallpaper placement a prepared
+# source is held with is expressed in this one shared rectangle type.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The wallpaper placement geometry (`place`, `Placement`, `WallpaperFit`)
+# and the `MAX_WALLPAPER_BYTES` source-size bound the sandboxed wallpaper
+# service places an untrusted desktop wallpaper through.
+tairix-wallpaper = { path = "../wallpaper", version = "=0.0.0" }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and

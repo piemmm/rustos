@@ -960,7 +960,10 @@ mod tests {
         );
         let folder = tairix_syshelp::GRAPHICS_FILES
             .iter()
-            .find(|asset| asset.dir == "Icons" && asset.file == "folder.png")
+            .find(|asset| {
+                asset.family == tairix_syshelp::GraphicsFamilyKind::Icon
+                    && asset.file == "folder.png"
+            })
             .expect("the folder icon master ships");
 
         let built = build_rpi_image(

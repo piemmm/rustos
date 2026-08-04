@@ -882,6 +882,7 @@ dependencies = [
  "tairix-taskbar",
  "tairix-taskpins",
  "tairix-theme",
+ "tairix-wallpaper",
  "tairix-window",
  "tairix-wm",
 ]
@@ -2176,6 +2177,7 @@ dependencies = [
  "tairix-binfmt",
  "tairix-disasm",
  "tairix-fuzzseed",
+ "tairix-geometry",
  "tairix-help",
  "tairix-icon",
  "tairix-image",
@@ -2184,6 +2186,7 @@ dependencies = [
  "tairix-rt",
  "tairix-svg",
  "tairix-vt",
+ "tairix-wallpaper",
 ]
 
 [[package]]
@@ -2300,6 +2303,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-icon",
+ "tairix-wallpaper",
 ]
 
 [[package]]
@@ -4814,6 +4818,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wallpaper"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-geometry",
+ "tairix-path",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-wallpaper-chooser"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-browse",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-wallpaper",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-wc"
 version = "0.0.0"
 dependencies = [
@@ -4916,6 +4947,7 @@ dependencies = [
  "tairix-net",
  "tairix-proglib",
  "tairix-qemu",
+ "tairix-raster",
  "tairix-reclaim",
  "tairix-switchboard",
  "tairix-syshelp",
@@ -4935,6 +4967,7 @@ dependencies = [
  "tairix-util",
  "tairix-vcmailbox",
  "tairix-virtio-input",
+ "tairix-wallpaper",
 ]
 
 [[package]]

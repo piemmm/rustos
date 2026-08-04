@@ -230,6 +230,20 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # is smaller than the largest slot a desktop draws it in — fails the build
 # where the author can see it instead of degrading silently on screen.
 tairix-image = { path = "../../lib/image", version = "=0.0.0" }
+# The one shared resampler. The desktop screendump assertions recompute the
+# wallpaper the guest composites by running the very decode, placement, and
+# resampling code the session's own render path runs, so the expected pixels
+# have a single definition instead of a captured baseline that would drift
+# the moment the artwork or the fit changed.
+tairix-raster = { path = "../../lib/raster", version = "=0.0.0" }
+# The desktop pinboard's own definitions: the shipped default master's name,
+# the byte bound every shipped master must fit within, the pinboard defaults
+# (which picture and which fit the desktop comes up with), and the placement
+# arithmetic. The discovered-graphics check judges every shipped wallpaper
+# master against that contract — distinct from the icon contract a wallpaper
+# is not held to — and the desktop screendump assertions recompute the
+# wallpaper the guest composites from those same definitions.
+tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
 # The shared pointer input-event vocabulary: the T15 script raises the real
 # context menu by driving the production bar router with the very events the
 # guest will receive, so the menu geometry it clicks is the model's own.

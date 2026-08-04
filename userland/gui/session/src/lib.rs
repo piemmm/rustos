@@ -166,10 +166,12 @@ pub mod launch;
 pub mod library;
 pub mod lock;
 pub mod picker;
+pub mod pinboard;
 pub mod pins;
 pub mod presenter;
 pub mod seat;
 pub mod session;
+pub mod settings;
 pub mod shell;
 pub mod switchboard;
 pub mod tasks;
@@ -183,10 +185,13 @@ mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
 pub use cli::{parse, CliError, Command, USAGE};
-pub use config::{FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH};
+pub use config::{
+    FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, WALLPAPER_LABEL,
+    WALLPAPER_RUN_PATH,
+};
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use desktop::{
-    Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DESKTOP_MARGIN,
+    Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange, DESKTOP_MARGIN,
     RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
@@ -198,6 +203,7 @@ pub use lock::{LockOutcome, LockedDrain, ScreenLock, Unlocker, MAX_PASSWORD, UNN
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
+pub use pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
 pub use pins::{
     build_pin_views, resolve_library_icons, resolve_pin_drop, resolve_pins, ArtworkFileReader,
     ArtworkSandbox, DragOffer, DragOrigin, IconRasteriser, PinBridge, PinEditError, PinIconSource,
@@ -206,6 +212,9 @@ pub use pins::{
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
+pub use settings::{
+    serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal, PinboardStore, PinboardStoreError,
+};
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
     command_section, deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,

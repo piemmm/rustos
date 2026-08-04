@@ -84,23 +84,31 @@ pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 /// against the whole-disk image.
 pub const SYSTEM_SECTORS: u64 = 65_536;
 
-/// First sector of the encrypted `ARXFS` root partition for the
-/// **minimum-content** layout (directly after a floor-sized `/System`
-/// partition). When the `/System` partition grows to fit a larger store the
-/// real root LBA is derived from the produced partition length in
-/// [`build_image_with_contents`]; this constant is the empty/floor-image
-/// value the self-describing image's own partition table always carries.
+/// First sector of the encrypted `ARXFS` root partition for a
+/// **floor-sized** `/System` partition.
+///
+/// This is the *lower bound* on where the root partition can begin, not a
+/// promise about any particular image: `/System` sizes itself to the content
+/// it carries, so a built image's real root LBA is derived from the produced
+/// partition length in [`build_image_with_contents`] and read back from the
+/// image's own partition table. Consumers must take the LBA from the table,
+/// never from this constant.
 pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
 
 /// Sectors in the encrypted `ARXFS` root partition — the shared
 /// [`tairix_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
 
-/// Total sectors in the assembled whole-disk image for the
-/// **minimum-content** layout. A built image describes its own true size
-/// through its partition table and byte length (consumers plant exactly
-/// `bytes.len() / SECTOR_BYTES` sectors); this constant is the floor-image
-/// value.
+/// Total sectors in the assembled whole-disk image for a **floor-sized**
+/// `/System` partition — the smallest image this builder can produce, and a
+/// lower bound rather than the size of any given image.
+///
+/// A built image describes its own true size through its partition table and
+/// byte length, and consumers plant exactly `bytes.len() / SECTOR_BYTES`
+/// sectors. The shipped `/System` content (the skeleton, the signed driver
+/// store, every application bundle beside its `Help/` tree, and the desktop's
+/// graphics assets) already exceeds the floor, so a real image is larger than
+/// this; it is never smaller.
 pub const TOTAL_SECTORS: u64 = ROOT_LBA + ROOT_SECTORS;
 
 /// Upper bound the `/System` partition may grow to (256 MiB). A fixture
@@ -480,15 +488,23 @@ mod tests {
     use super::*;
     use tairix_partition::{parse_partition_table, PartitionBlock};
 
-    /// The assembled image carries exactly the three design-B partitions,
-    /// of the right types, at the documented 1 MiB-aligned offsets.
+    /// The assembled image carries exactly the three design-B partitions, of
+    /// the right types, packed back to back from the documented 1 MiB-aligned
+    /// boot offset, and it is exactly as long as the table it carries says.
+    ///
+    /// The `/System` partition sizes itself to the content it holds, so its
+    /// length — and therefore the root partition's start and the whole
+    /// image's size — are asserted against the image's *own* table and the
+    /// floor/ceiling the builder promises, never against a hand-computed
+    /// total. Pinning an exact byte count here would make every change to the
+    /// shipped `/System` payload fail this test for no reason.
     #[test]
     fn the_image_carries_the_documented_partition_layout() {
         let bytes = build_image().expect("the whole-disk image assembles");
-        assert_eq!(
-            bytes.len(),
-            usize::try_from(TOTAL_SECTORS).unwrap() * SECTOR_BYTES,
-            "the image is exactly the advertised size"
+        let sectors = u64::try_from(bytes.len() / SECTOR_BYTES).expect("a sane image length");
+        assert!(
+            bytes.len().is_multiple_of(SECTOR_BYTES),
+            "the image is a whole number of sectors"
         );
         let mut disk = MemDisk { store: bytes };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
@@ -502,14 +518,40 @@ mod tests {
         let system = table
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a read-only /System partition is present");
-        assert_eq!(system.start_lba, SYSTEM_LBA);
-        assert_eq!(system.block_count, SYSTEM_SECTORS);
+        assert_eq!(system.start_lba, SYSTEM_LBA, "/System follows the boot");
+        assert!(
+            (SYSTEM_SECTORS..=SYSTEM_MAX_SECTORS).contains(&system.block_count),
+            "/System sized itself within its floor and ceiling: {} sectors",
+            system.block_count
+        );
+        // The builder starts at the floor and doubles only on a genuine
+        // out-of-space, so every admissible size is a power-of-two multiple of
+        // the floor — which also keeps the root partition 1 MiB-aligned.
+        assert!(
+            system.block_count.is_multiple_of(SYSTEM_SECTORS)
+                && (system.block_count / SYSTEM_SECTORS).is_power_of_two(),
+            "/System grew by doubling from its floor: {} sectors",
+            system.block_count
+        );
 
         let root = table
             .first_of_type(PartitionType::ARXFSRoot)
             .expect("a ARXFS root partition is present");
-        assert_eq!(root.start_lba, ROOT_LBA);
+        assert_eq!(
+            root.start_lba,
+            SYSTEM_LBA + system.block_count,
+            "the root follows /System with no gap"
+        );
         assert_eq!(root.block_count, ROOT_SECTORS);
+        assert_eq!(
+            sectors,
+            root.start_lba + root.block_count,
+            "the image is exactly as long as its own table describes"
+        );
+        assert!(
+            sectors >= TOTAL_SECTORS,
+            "an image is never smaller than the floor layout"
+        );
     }
 
     /// A planted application-bundle file (`Commands/<name>.app/AppInfo` /

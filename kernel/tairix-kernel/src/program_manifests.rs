@@ -918,6 +918,25 @@ mod tests {
     // embedded spawn-floor program, so the list lives only in this pin.
     const VIEWER_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
+    // The windowed desktop-backdrop chooser `wallpaper` (plans/PINBOARD.md
+    // P9): console write for its fail-loud diagnostics, filesystem reach to
+    // list the read-only shipped wallpaper store and read the launching
+    // user's own pinboard settings document, `CAP_SHM` to create and grant
+    // the zero-copy window frame region the desktop session maps, and
+    // `CAP_PROC_SPAWN` to host its own thumbnail-rendering sandbox worker (a
+    // restricted spawn of this same binary in its worker role, which the
+    // kernel brands capability-empty, so an untrusted wallpaper never
+    // decodes in the chooser's own address space). It requests no authority
+    // to *write* the settings: adopting a change is the desktop session's
+    // decision, asked for over the pinboard rendezvous. Not an embedded
+    // spawn-floor program, so the list lives only in this pin.
+    const WALLPAPER_CHOOSER_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SHM,
+        CapabilityId::PROC_SPAWN,
+    ];
+
     // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
     // pure-tool request plus `CAP_FS_MOUNT`, which *is* its job — the
     // kernel's `volume_detach` path re-checks it and audits every
@@ -1079,6 +1098,11 @@ mod tests {
             ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
             ("viewer", ProgramKind::Application, VIEWER_REQUEST),
             ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
+            (
+                "wallpaper",
+                ProgramKind::Application,
+                WALLPAPER_CHOOSER_REQUEST,
+            ),
             ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("widgets", ProgramKind::Application, WIDGETS_GALLERY_REQUEST),

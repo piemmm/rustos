@@ -43,6 +43,7 @@ pub mod net;
 pub mod net_ipc;
 pub mod notify_ipc;
 pub mod origin;
+pub mod pinboard_ipc;
 pub mod power;
 pub mod process;
 pub mod raid;
