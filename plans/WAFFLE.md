@@ -19,6 +19,11 @@ on.
   a line understandable, the **code** is rewritten (better name, smaller
   function, illegal-states-unrepresentable types), the comment is not kept.
   §2.3 (no bloat) and §13 ("no aimless waffle") express the same value.
+- **A file's existing prose is not a precedent.** §2.11 requires terse
+  comments — the required *why* and no more — and binds regardless of how much
+  prose a file already carries. Waffle found here is the backlog this plan
+  clears, never a style to match: no pass, and no unrelated change, may add to
+  it (§15.17).
 - **Comments only.** This plan touches comment text. It does **not** rename
   items, reshape functions, change control flow, or alter any runtime
   behaviour. A "the comment is the only thing making this line clear" case
@@ -55,6 +60,9 @@ code itself does not?* If no → delete. If yes → keep.
   defect: if it flags real missing work, fix it in scope or raise it (§15.7,
   §2.18); a waffle pass must not bury a known defect.
 - Redundant section-banner / decorative comments that add no information.
+- Essay-length prose: multi-paragraph exposition, tutorials, narration of the
+  change that produced the code, and body comments restating the rustdoc above
+  them. Keep the load-bearing *why* in a line or two; delete the rest.
 - **Charter section citations** — `AGENTS.md §5.4`, `§2.9`, `sec.5.4`,
   "Section 5.4", or a bare trailing `(§5.4)`. `AGENTS.md` §2.11 / §15.17 forbid
   them outright: the rule lives in the charter, so citing its number restates
