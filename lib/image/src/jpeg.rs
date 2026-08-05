@@ -1609,6 +1609,14 @@ impl Decoder<'_> {
     /// Crop, upsample, colour-convert, and assemble the final
     /// straight-alpha RGBA8 image from the (already scale-`m`) sample
     /// planes.
+    ///
+    /// The per-component upsampling parameters (plane, row stride, last
+    /// valid sample coordinate, sampling factors) are resolved once, each
+    /// component's sample row is resolved once per output row, and the
+    /// output is written row slice by row slice — so the inner per-pixel
+    /// loop does only a nearest-neighbour column lookup and the colour
+    /// convert, with no per-pixel division for a component sampled as
+    /// densely as the frame (luma, or every channel of an RGB image).
     fn assemble(&self, frame: &Frame) -> Result<RasterImage, DecodeError> {
         let m = self.scale.m();
         let output_width = frame.output_width(m);
@@ -1623,77 +1631,110 @@ impl Decoder<'_> {
             vec![0u8; usize::try_from(byte_len).map_err(|_| DecodeError::DimensionsOverflow)?];
 
         let use_rgb = frame.components.len() == 3 && self.adobe_transform == Some(0);
-        let h_max = frame.h_max();
-        let v_max = frame.v_max();
+        let h_max = frame.h_max().max(1);
+        let v_max = frame.v_max().max(1);
+        let row_bytes =
+            usize::try_from(u64::from(output_width).saturating_mul(4)).unwrap_or(usize::MAX);
+
+        let comps: Vec<CompMap<'_>> = frame
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, component)| CompMap {
+                plane: self.sample_planes.get(i).map_or(&[][..], Vec::as_slice),
+                stride: usize::try_from(frame.blocks_per_line_padded(component).saturating_mul(m))
+                    .unwrap_or(usize::MAX),
+                h: component.h,
+                v: component.v,
+                x_limit: frame.component_sample_width(component, m).saturating_sub(1),
+                y_limit: frame
+                    .component_sample_height(component, m)
+                    .saturating_sub(1),
+            })
+            .collect();
 
         for y in 0..output_height {
-            for x in 0..output_width {
-                let rgb = if frame.components.len() == 1 {
-                    let sample = self.sample_at(frame, 0, x, y, m, h_max, v_max);
-                    [sample, sample, sample]
+            let y_byte = usize::try_from(y)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(row_bytes);
+            let Some(out_row) = y_byte
+                .checked_add(row_bytes)
+                .and_then(|end| out.get_mut(y_byte..end))
+            else {
+                continue;
+            };
+
+            let mut rows: [&[u8]; 3] = [&[], &[], &[]];
+            for (row, comp) in rows.iter_mut().zip(comps.iter()) {
+                let comp_y = if comp.v == v_max {
+                    y
+                } else {
+                    y.saturating_mul(comp.v).saturating_div(v_max)
+                }
+                .min(comp.y_limit);
+                let start = usize::try_from(comp_y)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(comp.stride);
+                *row = start
+                    .checked_add(comp.stride)
+                    .and_then(|end| comp.plane.get(start..end))
+                    .unwrap_or(&[]);
+            }
+
+            let (pixels, _tail) = out_row.as_chunks_mut::<4>();
+            for (x, px) in (0u32..).zip(pixels.iter_mut()) {
+                let rgb = if comps.len() == 1 {
+                    let s = upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit);
+                    [s, s, s]
                 } else if use_rgb {
                     [
-                        self.sample_at(frame, 0, x, y, m, h_max, v_max),
-                        self.sample_at(frame, 1, x, y, m, h_max, v_max),
-                        self.sample_at(frame, 2, x, y, m, h_max, v_max),
+                        upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit),
+                        upsample_sample(rows[1], x, comps[1].h, h_max, comps[1].x_limit),
+                        upsample_sample(rows[2], x, comps[2].h, h_max, comps[2].x_limit),
                     ]
                 } else {
-                    let luma = self.sample_at(frame, 0, x, y, m, h_max, v_max);
-                    let blue = self.sample_at(frame, 1, x, y, m, h_max, v_max);
-                    let red = self.sample_at(frame, 2, x, y, m, h_max, v_max);
+                    let luma = upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit);
+                    let blue = upsample_sample(rows[1], x, comps[1].h, h_max, comps[1].x_limit);
+                    let red = upsample_sample(rows[2], x, comps[2].h, h_max, comps[2].x_limit);
                     ycbcr_to_rgb(luma, blue, red)
                 };
-                let index = usize::try_from(
-                    (u64::from(y) * u64::from(output_width) + u64::from(x)).saturating_mul(4),
-                )
-                .unwrap_or(usize::MAX);
-                if let Some(slot) = out.get_mut(index..index + 4) {
-                    slot.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
-                }
+                px[0] = rgb[0];
+                px[1] = rgb[1];
+                px[2] = rgb[2];
+                px[3] = 255;
             }
         }
         Ok(RasterImage::from_parts(output_width, output_height, out))
     }
+}
 
-    /// The upsampled sample of component `comp_index` at output pixel
-    /// `(x, y)` (both in `0..output_{width,height}(m)`), via nearest-
-    /// neighbour reconstruction of its (possibly subsampled) plane —
-    /// exactly the JPEG "fast" chroma reconstruction every baseline
-    /// decoder is permitted to use.
-    #[allow(clippy::too_many_arguments)]
-    fn sample_at(
-        &self,
-        frame: &Frame,
-        comp_index: usize,
-        x: u32,
-        y: u32,
-        m: u32,
-        h_max: u32,
-        v_max: u32,
-    ) -> u8 {
-        let Some(&component) = frame.components.get(comp_index) else {
-            return 0;
-        };
-        let comp_x = x.saturating_mul(component.h) / h_max.max(1);
-        let comp_y = y.saturating_mul(component.v) / v_max.max(1);
-        let width_limit = frame
-            .component_sample_width(&component, m)
-            .saturating_sub(1);
-        let height_limit = frame
-            .component_sample_height(&component, m)
-            .saturating_sub(1);
-        let comp_x = comp_x.min(width_limit);
-        let comp_y = comp_y.min(height_limit);
-        let plane_stride = frame.blocks_per_line_padded(&component).saturating_mul(m);
-        let index = u64::from(comp_y)
-            .saturating_mul(u64::from(plane_stride))
-            .saturating_add(u64::from(comp_x));
-        self.sample_planes
-            .get(comp_index)
-            .and_then(|plane| plane.get(usize::try_from(index).unwrap_or(usize::MAX)))
-            .copied()
-            .unwrap_or(0)
-    }
+/// One component's hoisted upsampling parameters for [`Decoder::assemble`]:
+/// its (already scale-`m`) sample plane, that plane's row stride in
+/// samples, the last valid sample coordinate on each axis (the crop that
+/// keeps padding samples out of the output), and its own sampling factors.
+struct CompMap<'a> {
+    plane: &'a [u8],
+    stride: usize,
+    h: u32,
+    v: u32,
+    x_limit: u32,
+    y_limit: u32,
+}
+
+/// The nearest-neighbour upsampled sample of one component at output
+/// column `x`, read from its already-resolved sample `row` — the JPEG
+/// "fast" chroma reconstruction every baseline decoder is permitted to
+/// use. A component sampled as densely as the frame (`h == h_max`, so its
+/// sample width equals the output width) maps `x` straight through with no
+/// arithmetic; a subsampled one projects `x` into its own narrower plane,
+/// clamped to its last real sample so a padding column never leaks in.
+fn upsample_sample(row: &[u8], x: u32, h: u32, h_max: u32, x_limit: u32) -> u8 {
+    let comp_x = if h == h_max {
+        x
+    } else {
+        x.saturating_mul(h).saturating_div(h_max).min(x_limit)
+    };
+    row.get(comp_x as usize).copied().unwrap_or(0)
 }
 
 /// The flat starting index, in a component's coefficient store, of the
@@ -1849,18 +1890,39 @@ impl ScanKind {
     }
 }
 
-/// Dequantise `coeffs` (natural order) and inverse-DCT them at scale `m`
-/// (`1`, `2`, `4`, or `8`), writing the resulting `m`×`m` samples
-/// (level-shifted by 128 and clamped to `0..=255`) into `plane` at
-/// `(row_offset, col_offset)`, `plane_stride` samples per row.
+/// Dequantise `coeffs` (natural order) against `quant`, producing the 64
+/// dequantised DCT coefficients in natural (row-major) order.
 ///
-/// All arithmetic accumulates in `i64` with saturating operations: a
-/// 16-bit quantisation table entry times a Huffman-decoded magnitude can
-/// exceed `i32`, and the two-pass sum over up to 8 such products could in
-/// principle approach `i64`'s own range for a maximally adversarial
-/// (never realistically encoder-produced) coefficient set. Saturating
-/// rather than checked keeps this total without a `Result`: a pathological
-/// input degrades to a clamped-but-safe pixel, never a panic.
+/// The product is formed with `wrapping_mul`: for any real 8-bit JPEG the
+/// dequantised coefficients are the frame's true DCT coefficients, bounded
+/// in magnitude by roughly `2^11`, so no wrap ever occurs and the result is
+/// exact. A hostile file can drive a stored coefficient (a saturated DC
+/// predictor) or a 16-bit quantiser to values whose product exceeds `i32`;
+/// there the wrap is harmless, because both inverse-DCT paths below finish
+/// with a fixed clamp to `0..=255`, so a wrapped coefficient can only yield
+/// a meaningless-but-in-range pixel, never a panic under the workspace's
+/// overflow checks.
+fn dequantize(coeffs: &[i32; 64], quant: &[u16; 64]) -> [i32; 64] {
+    let mut deq = [0i32; 64];
+    for (out, (&coeff, &q)) in deq.iter_mut().zip(coeffs.iter().zip(quant.iter())) {
+        *out = coeff.wrapping_mul(i32::from(q));
+    }
+    deq
+}
+
+/// Dequantise `coeffs` and inverse-DCT them at scale `m` (`1`, `2`, `4`, or
+/// `8`), writing the resulting `m`×`m` samples (level-shifted by 128 and
+/// clamped to `0..=255`) into `plane` at `(row_offset, col_offset)`,
+/// `plane_stride` samples per row.
+///
+/// The full-scale (`m == 8`) case — the overwhelming majority of a
+/// non-reduced decode's work — runs the fast fixed-point AAN /
+/// Loeffler-Ligtenberg-Moerlein row-column inverse DCT ([`idct8_islow`]).
+/// The reduced scales (`m` of `1`, `2`, or `4`) keep the direct
+/// scaled-basis matrix routine ([`idct_general`]): at those sizes it
+/// evaluates only a handful of outputs and is already cheap, and it is the
+/// reference the fast routine's equivalence test checks against. Neither
+/// path re-derives the dequantisation, which happens once here.
 fn idct_and_store(
     coeffs: &[i32; 64],
     quant: &[u16; 64],
@@ -1870,22 +1932,211 @@ fn idct_and_store(
     row_offset: usize,
     col_offset: usize,
 ) {
-    let m = usize::try_from(m).unwrap_or(8).clamp(1, 8);
+    let deq = dequantize(coeffs, quant);
+    if m == 8 {
+        let samples = idct8_islow(&deq);
+        for r in 0..8 {
+            let Some(row_samples) = samples.get(r * 8..r * 8 + 8) else {
+                continue;
+            };
+            let row = row_offset.saturating_add(r);
+            let dst_start = row.saturating_mul(plane_stride).saturating_add(col_offset);
+            if let Some(end) = dst_start.checked_add(8) {
+                if let Some(dst) = plane.get_mut(dst_start..end) {
+                    dst.copy_from_slice(row_samples);
+                }
+            }
+        }
+    } else {
+        idct_general(&deq, m, plane, plane_stride, row_offset, col_offset);
+    }
+}
 
-    let mut dequantised = [[0i64; 8]; 8];
-    for (u, row) in dequantised.iter_mut().enumerate().take(m) {
-        for (v, cell) in row.iter_mut().enumerate().take(m) {
-            let index = u * 8 + v;
-            *cell = i64::from(coeffs[index]).saturating_mul(i64::from(quant[index]));
+/// The two guard bits the column pass keeps before the row pass descales
+/// them away — libjpeg's `PASS1_BITS`.
+const IDCT_PASS1_BITS: u32 = 2;
+
+/// One 8-point 1-D inverse DCT: the standard integer AAN /
+/// Loeffler-Ligtenberg-Moerlein butterfly, the same formulation libjpeg
+/// names `jpeg_idct_islow` (implemented here directly from the published
+/// algorithm, not translated from any source). `s` is 8 (dequantised, or
+/// column-pass) inputs; the return is the 8 spatial samples in natural
+/// order, still scaled by `2^IDCT_SCALE_BITS` for the caller to descale.
+///
+/// Every step is `wrapping_*` (the two left shifts are by the constant
+/// `IDCT_SCALE_BITS < 32`, which never panics on value overflow). The
+/// overflow argument lives on [`idct8_islow`], the two-pass caller.
+fn idct_1d(s: &[i32; 8]) -> [i32; 8] {
+    // Fixed-point cosine products, `round(c * 2^13)`, matching [`IDCT_BASIS`]'s
+    // own 13-bit precision so the two routines agree to within the rounding
+    // the JPEG standard's accuracy requirement allows.
+    const FIX_0_298631336: i32 = 2446;
+    const FIX_0_390180644: i32 = 3196;
+    const FIX_0_541196100: i32 = 4433;
+    const FIX_0_765366865: i32 = 6270;
+    const FIX_0_899976223: i32 = 7373;
+    const FIX_1_175875602: i32 = 9633;
+    const FIX_1_501321110: i32 = 12299;
+    const FIX_1_847759065: i32 = 15137;
+    const FIX_1_961570560: i32 = 16069;
+    const FIX_2_053119869: i32 = 16819;
+    const FIX_2_562915447: i32 = 20995;
+    const FIX_3_072711026: i32 = 25172;
+
+    // Even part -> the four symmetric "sum" terms.
+    let rot = s[2].wrapping_add(s[6]).wrapping_mul(FIX_0_541196100);
+    let rot_hi = rot.wrapping_add(s[6].wrapping_mul(-FIX_1_847759065));
+    let rot_lo = rot.wrapping_add(s[2].wrapping_mul(FIX_0_765366865));
+    let sum04 = s[0].wrapping_add(s[4]) << IDCT_SCALE_BITS;
+    let dif04 = s[0].wrapping_sub(s[4]) << IDCT_SCALE_BITS;
+    let even = [
+        sum04.wrapping_add(rot_lo),
+        dif04.wrapping_add(rot_hi),
+        dif04.wrapping_sub(rot_hi),
+        sum04.wrapping_sub(rot_lo),
+    ];
+
+    // Odd part -> the four "difference" terms.
+    let corner = s[7].wrapping_add(s[1]).wrapping_mul(-FIX_0_899976223);
+    let centre = s[5].wrapping_add(s[3]).wrapping_mul(-FIX_2_562915447);
+    let diag = s[7].wrapping_add(s[3]);
+    let anti = s[5].wrapping_add(s[1]);
+    let shared = diag.wrapping_add(anti).wrapping_mul(FIX_1_175875602);
+    let diag = diag.wrapping_mul(-FIX_1_961570560).wrapping_add(shared);
+    let anti = anti.wrapping_mul(-FIX_0_390180644).wrapping_add(shared);
+    let odd = [
+        s[7].wrapping_mul(FIX_0_298631336)
+            .wrapping_add(corner)
+            .wrapping_add(diag),
+        s[5].wrapping_mul(FIX_2_053119869)
+            .wrapping_add(centre)
+            .wrapping_add(anti),
+        s[3].wrapping_mul(FIX_3_072711026)
+            .wrapping_add(centre)
+            .wrapping_add(diag),
+        s[1].wrapping_mul(FIX_1_501321110)
+            .wrapping_add(corner)
+            .wrapping_add(anti),
+    ];
+
+    // The butterfly: each even term ± its mirror odd term.
+    [
+        even[0].wrapping_add(odd[3]),
+        even[1].wrapping_add(odd[2]),
+        even[2].wrapping_add(odd[1]),
+        even[3].wrapping_add(odd[0]),
+        even[3].wrapping_sub(odd[0]),
+        even[2].wrapping_sub(odd[1]),
+        even[1].wrapping_sub(odd[2]),
+        even[0].wrapping_sub(odd[3]),
+    ]
+}
+
+/// The fast full-scale (`8`×`8`) inverse DCT: [`idct_1d`] run over the
+/// eight columns and then the eight rows. `deq` is the 64 dequantised
+/// coefficients in natural order; the return is the 64 level-shifted,
+/// clamped `0..=255` samples in natural (row-major) order.
+///
+/// This replaces the direct routine's per-block `O(8^3)` matrix multiply
+/// with `O(8^2)` multiply-adds, in `i32` fixed point rather than `i64`,
+/// and takes a per-column shortcut for the flat (all-AC-zero) block a
+/// smoothly shaded image produces in abundance — the constant-DC case
+/// whose every column reconstructs to `dc << IDCT_PASS1_BITS`.
+///
+/// Overflow: [`idct_1d`]'s arithmetic is `wrapping_*`. For a valid 8-bit
+/// frame `|deq| <= ~2^11`, so the largest intermediate the butterfly forms
+/// stays around `2^27` in the column pass and `2^28` in the row pass —
+/// comfortably inside `i32` — and no wrap ever occurs: the transform is
+/// exact. A hostile file whose coefficients exceed that range can only make
+/// an intermediate wrap, and the closing clamp to `0..=255` turns any such
+/// value into a valid, if meaningless, sample. The result is therefore
+/// total: never a panic under the workspace's overflow checks, and never a
+/// pixel outside `0..=255`.
+fn idct8_islow(deq: &[i32; 64]) -> [u8; 64] {
+    // Two passes' 13 basis bits, the 2 guard bits, and a 3-bit `1/8`.
+    const ROW_SHIFT: u32 = IDCT_SCALE_BITS + IDCT_PASS1_BITS + 3;
+
+    let mut ws = [0i32; 64];
+    for c in 0..8 {
+        let column = [
+            deq[c],
+            deq[8 + c],
+            deq[16 + c],
+            deq[24 + c],
+            deq[32 + c],
+            deq[40 + c],
+            deq[48 + c],
+            deq[56 + c],
+        ];
+        // Flat column (a DC-only block's every column): the inverse DCT is
+        // the constant DC term, so skip the butterfly.
+        if (column[1] | column[2] | column[3] | column[4] | column[5] | column[6] | column[7]) == 0
+        {
+            let dcval = column[0] << IDCT_PASS1_BITS;
+            for k in 0..8 {
+                ws[k * 8 + c] = dcval;
+            }
+            continue;
+        }
+        let spatial = idct_1d(&column);
+        for (k, &value) in spatial.iter().enumerate() {
+            ws[k * 8 + c] = descale(value, IDCT_SCALE_BITS - IDCT_PASS1_BITS);
         }
     }
+
+    let mut out = [0u8; 64];
+    for r in 0..8 {
+        let base = r * 8;
+        let row: [i32; 8] = core::array::from_fn(|k| ws[base + k]);
+        let spatial = idct_1d(&row);
+        for (k, &value) in spatial.iter().enumerate() {
+            out[base + k] = clamp_u8(descale(value, ROW_SHIFT).wrapping_add(128));
+        }
+    }
+    out
+}
+
+/// Round `x / 2^n` to the nearest integer via a fixed-point descale
+/// (`(x + 2^(n-1)) >> n`, an arithmetic shift). Both call sites pass a small
+/// compile-time constant, so the round bias folds away; the add wraps
+/// (harmless for the hostile-input case [`idct8_islow`] documents) and the
+/// shift is exact for the in-range case. The bias shift is saturating so the
+/// routine is total for every `n` including `0`, rather than leaving an
+/// underflow trap for a later caller to fall into.
+const fn descale(x: i32, n: u32) -> i32 {
+    x.wrapping_add(1i32.wrapping_shl(n.saturating_sub(1))) >> n
+}
+
+/// The direct scaled-basis inverse DCT for the reduced scales (`m` of `1`,
+/// `2`, or `4`): a separable two-pass matrix multiply over the top-left
+/// `m`×`m` submatrix of [`IDCT_BASIS`], writing the `m`×`m` samples into
+/// `plane` at `(row_offset, col_offset)`.
+///
+/// `deq` is the already-dequantised coefficients in natural order. The
+/// accumulation stays in `i64`: a hostile coefficient set can drive the
+/// two-pass sum well past `i32`, and `i64` with saturating steps keeps the
+/// routine total — a pathological input degrades to a clamped-but-safe
+/// pixel, never a panic — at a cost that is irrelevant for the at-most
+/// 16 outputs a reduced scale evaluates. (This same routine, invoked at
+/// `m == 8`, is the reference [`idct8_islow`]'s equivalence test measures
+/// against.)
+fn idct_general(
+    deq: &[i32; 64],
+    m: u32,
+    plane: &mut [u8],
+    plane_stride: usize,
+    row_offset: usize,
+    col_offset: usize,
+) {
+    let m = usize::try_from(m).unwrap_or(8).clamp(1, 8);
 
     let mut intermediate = [[0i64; 8]; 8];
     for (x, row) in intermediate.iter_mut().enumerate().take(m) {
         for (v, cell) in row.iter_mut().enumerate().take(m) {
             let mut sum = 0i64;
-            for (u, deq_row) in dequantised.iter().enumerate().take(m) {
-                sum = sum.saturating_add(i64::from(IDCT_BASIS[x][u]).saturating_mul(deq_row[v]));
+            for (u, &basis) in IDCT_BASIS[x].iter().enumerate().take(m) {
+                sum =
+                    sum.saturating_add(i64::from(basis).saturating_mul(i64::from(deq[u * 8 + v])));
             }
             *cell = sum;
         }

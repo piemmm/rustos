@@ -13,7 +13,7 @@
 //!
 //! A destination pixel's value is the mean of every source pixel whose area
 //! it covers ([`Region`] → destination extent). On a **downscale** that is a
-//! true area average, so a 6688-pixel-wide photograph reduced to a 1920-pixel
+//! true area average, so a 3840-pixel-wide photograph reduced to a 1920-pixel
 //! screen blends rather than aliases into a shimmering mess; on an
 //! **upscale** each destination pixel covers exactly one source pixel and the
 //! filter degrades to sample-and-hold, which is honest — inventing detail a

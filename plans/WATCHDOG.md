@@ -348,6 +348,40 @@ window. Host-tested (`monopolises_cpu` predicate; `on_watchdog_tick` sets the
 latch for a monopolising user CPU only; `preempt_current` honours a forced
 yield with no competitor).
 
+## The in-kernel boundary: a burst of never-waiting operations (done)
+
+The guard above covers a monopolising *user* task. In-kernel work needs a
+different mechanism, because it cannot be suspended at an arbitrary
+instruction: an in-kernel body that issues one bounded operation after another
+— a service kthread draining its request queue, a filesystem read walking a
+large file span by span — holds its CPU for the whole burst whenever the device
+is fast enough that no operation has to wait. `virtio_blk::submit_and_wait`
+polls the completion ring *before* waiting, so on an emulated queue (or an NVMe
+namespace whose completion is already in the ring) the park that would have
+returned control to the dispatcher never happens, and the dispatch loop's
+housekeeping and heartbeats stop for the burst's duration. That is what the
+soft-lockup detector reports as `context=kernel` with no spin anywhere: the
+report is honest and the defect is the missing boundary, not the sample.
+
+`preempt::yield_if_owed` is that boundary. In-kernel code calls it *between*
+units of work; it consumes the same pending-preemption latch and applies the
+same competitor-gated decision the return-to-user point applies (one shared
+`honour_latched_tick`), so a burst gives the CPU up at most one unit after its
+quantum expires and costs a single atomic read when nothing is owed. Placement
+is the caller's obligation — only where no spin lock is held; a point that can
+already park on a slow device is sound by construction. Call sites: the storage
+funnel every in-kernel device operation passes through
+(`SharedBlockHandle::with_device`, before the shared device's sleeping lock is
+taken) and the in-kernel `/System` store server's between-requests boundary.
+Host-tested (free when no tick is latched; consumed exactly once at the
+boundary; per-CPU; fails closed for an unknown CPU).
+
+The diagnostic that made this defect read as a *user*-space problem is fixed
+with it: the dispatcher stamped one `k_site=user_switch` crumb for both a user
+task's EL0 run and a kernel kthread's whole body run, so a kernel-context stall
+pointed a reader at a misbehaving program. A kernel kthread body now stamps
+`k_site=kernel_body`.
+
 Recovery is best-effort through the Arch HAL `WatchdogArch::request_recovery`
 (`kernel/arch/api/src/watchdog.rs`): a soft lockup → reschedule the offending
 CPU; a hard lockup → a directed attention signal; a port with no channel →

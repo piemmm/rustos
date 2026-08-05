@@ -128,7 +128,7 @@ returned **only** for a zero-extent source or screen.
 
 `decode_target(source, screen, fit)` gives the source pixel box a decoder need
 only produce for that placement — never more than the placement crops in, and
-never more than the destination can show — so a 25-megapixel master is never
+never more than the destination can show — so an 8.3-megapixel master is never
 decoded larger than the screen can use. `Tile` is the one exception: it draws
 every source pixel at 1:1 and so needs the native size.
 

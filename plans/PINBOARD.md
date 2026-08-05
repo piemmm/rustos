@@ -110,6 +110,14 @@ One document, one engine, one writer.
   `lib/wallpaper/assets/` by `tools/syshelp` — never a hand-maintained list.
   The default is `tairix-dark.jpg`, named once by
   `tairix_wallpaper::DEFAULT_WALLPAPER`.
+- **A shipped master is authored no larger than the renderer's own maximum
+  destination** (`lib/sandbox`'s `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT`,
+  3840×2160). JPEG entropy decoding cannot skip blocks: every block of the
+  *source* image is Huffman-decoded regardless of the requested output
+  scale, so a master far larger than any destination costs decode time no
+  screen can ever use. This binds the masters this crate ships, not a
+  user-picked wallpaper, which `decode_fitted`'s reduced-scale decode and
+  `MAX_WALLPAPER_DECODE_PIXELS` (§5) still bound and degrade gracefully.
 - **A wallpaper is untrusted input**, whether it is a shipped master or a
   file the user picked. It is read under the session's own identity, bounded
   by `MAX_WALLPAPER_BYTES`, and decoded **only** inside the parser sandbox

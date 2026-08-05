@@ -198,6 +198,36 @@ pub type BorrowedBlockWindow<'a, B> = SharedBlockHandle<&'a SharedBlock<B>>;
 /// device, so the window may outlive the scope that opened it.
 pub type OwnedBlockWindow<B> = SharedBlockHandle<Arc<SharedBlock<B>>>;
 
+impl<B: Block, R: Deref<Target = SharedBlock<B>>> SharedBlockHandle<R> {
+    /// Run one device operation under the shared device's lock, first
+    /// offering this CPU back to the dispatcher when the scheduler is owed a
+    /// turn on it.
+    ///
+    /// Every device operation reached through a window funnels through here,
+    /// which makes it the one place a *burst* of them can be paced. That
+    /// matters because a caller issuing operation after operation — a
+    /// filesystem read walking a large file span by span, a service kthread
+    /// draining requests — stays inside a single dispatched body for the
+    /// whole burst, and on a device fast enough that no operation ever has to
+    /// wait for a completion (an emulated queue, an `NVMe` namespace whose
+    /// completion is already in the ring at the first poll) that body never
+    /// returns to the dispatch loop at all: its housekeeping and heartbeats
+    /// stop and everything else runnable on the CPU waits for the burst to
+    /// end. Offering the turn between operations caps that at one operation,
+    /// and costs a single atomic read when nothing is owed.
+    ///
+    /// Suspending here is sound by construction: the operation this wraps can
+    /// itself park the same body in the same place while it waits for a slow
+    /// device's completion, so no caller can hold a spin lock across it. The
+    /// turn is offered *before* the device lock is taken, so a suspension
+    /// never leaves the device held by a task that is not running.
+    fn with_device<T>(&self, op: impl FnOnce(&mut B) -> T) -> T {
+        let _ = tairix_kernel_core::yield_if_owed();
+        let mut device = self.shared.device.lock();
+        op(&mut device)
+    }
+}
+
 impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R> {
     /// The shared device's own class, so a consumer reached through this
     /// window serves the real hardware's I/O budget rather than the
@@ -213,15 +243,15 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.shared.device.lock().read_blocks(lba, buf)
+        self.with_device(|device| device.read_blocks(lba, buf))
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        self.shared.device.lock().write_blocks(lba, buf)
+        self.with_device(|device| device.write_blocks(lba, buf))
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        self.shared.device.lock().flush()
+        self.with_device(Block::flush)
     }
 
     fn read_blocks_with_class(
@@ -230,10 +260,7 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
         buf: &mut [u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        self.shared
-            .device
-            .lock()
-            .read_blocks_with_class(lba, buf, class)
+        self.with_device(|device| device.read_blocks_with_class(lba, buf, class))
     }
 
     fn write_blocks_with_class(
@@ -242,22 +269,19 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
         buf: &[u8],
         class: BufferClass,
     ) -> Result<(), DriverError> {
-        self.shared
-            .device
-            .lock()
-            .write_blocks_with_class(lba, buf, class)
+        self.with_device(|device| device.write_blocks_with_class(lba, buf, class))
     }
 
     fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
-        self.shared.device.lock().discard_capability()
+        self.with_device(|device| device.discard_capability())
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
-        self.shared.device.lock().discard(lba, blocks)
+        self.with_device(|device| device.discard(lba, blocks))
     }
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
-        self.shared.device.lock().device_health()
+        self.with_device(|device| device.device_health())
     }
 }
 

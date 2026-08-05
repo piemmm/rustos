@@ -51,7 +51,29 @@ progressive coding defines (sequential, DC first, DC refinement, AC first,
 AC refinement, including end-of-band runs that span blocks). Entropy
 decoding uses a fast lookup table for short Huffman codes and a
 bit-at-a-time canonical search only for the long ones, and reconstruction
-uses one separable fixed-point inverse DCT with no per-pixel allocation.
+inverse-DCTs each block with no per-pixel allocation.
+
+The full-scale (unreduced) decode — the path that dominates a
+wallpaper-sized render — reconstructs each 8×8 block with a fast
+fixed-point integer inverse DCT: the standard AAN /
+Loeffler-Ligtenberg-Moerlein separable row-column butterfly (the
+formulation libjpeg names `jpeg_idct_islow`), in `i32` with the usual
+descale/rounding shifts and a flat-block (all-AC-zero) fast path. That
+replaces the direct routine's per-block `O(8^3)` scaled-basis matrix
+multiply with `O(8^2)` multiply-adds; on the shipped 8.29-megapixel light
+wallpaper it cut a full-scale decode from roughly 276 ms to 64 ms on the
+development host. The reduced scales (one half, quarter, or eighth) keep the
+direct matrix routine, which is already cheap when it evaluates only 1, 2, or
+4 samples per block edge and doubles as the reference a permanent unit test
+checks the fast routine against (no more than a one-level per-sample
+difference, the tolerance the standard's accuracy requirement leaves). The
+transform's arithmetic is `wrapping_*`: a valid 8-bit frame's coefficients
+are bounded so no wrap ever occurs and the result is exact, while a hostile
+file can at worst wrap an intermediate into the closing fixed clamp to
+`0..=255` — never a panic under the workspace's overflow checks, and never a
+pixel outside range. Final assembly resolves each component's upsampling
+parameters once and walks the output row by row, so per output pixel it does
+only a nearest-neighbour sample lookup and the colour convert.
 
 Everything else a stream can declare is a typed, fail-closed refusal
 rather than a best effort: arithmetic coding, lossless and hierarchical
@@ -67,7 +89,7 @@ of natural size, produced by inverse-DCT transforming only the
 coefficients that scale needs — whose output still covers the box. It never
 scales up and never resamples; reduced dimensions round up, so the result
 can be modestly larger than the box but never smaller. Decoding a
-25-megapixel wallpaper master straight to an eighth costs a fraction of the
+8.3-megapixel wallpaper master straight to an eighth costs a fraction of the
 full-size arithmetic and output buffer.
 
 ### Degrading rather than refusing
@@ -77,7 +99,7 @@ Where the smallest covering scale's own output would breach the caller's
 them instead of refusing: a screen larger than the limits allow is served
 slightly soft rather than not at all. That is a deliberate trade of
 sharpness for memory and never a trade of correctness or memory safety, and
-it is what lets the desktop pinboard show a 25-megapixel master on a 4K
+it is what lets the desktop pinboard show an 8.3-megapixel master on a 4K
 screen inside a bound a 1 GiB machine can afford.
 
 The scale is decided entirely from the frame header's declared geometry,
@@ -168,8 +190,11 @@ never the calling service.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by
-marker and check a progressive stream against the pixels of the equivalent
-baseline one. Both formats are fuzzed by `tests/fuzz_image.rs` — random
+marker, check a progressive stream against the pixels of the equivalent
+baseline one, and check the fast full-scale inverse DCT against the direct
+matrix reference over many pseudo-random full coefficient blocks (asserting
+no more than a one-level per-sample difference). Both formats are fuzzed by
+`tests/fuzz_image.rs` — random
 bytes, random bytes behind each valid signature, and structurally mutated
 valid fixtures, baseline and progressive — registered with
 `cargo xtask fuzz`. Stability tier: experimental

@@ -456,9 +456,9 @@ Design D, the `/System` store must stay reachable for on-demand and reactive
 back two concurrent partition windows.
 
 The kernel block-sharing layer (`tairix_kernel::shared_block`) is that
-primitive. A `SharedBlock<B>` owns the brought-up device behind a `lib/sync`
-`SpinLock` and hands out `SharedBlockHandle`s, each of which is itself a
-`Block`. Every byte-moving operation takes the lock for the duration of one
+primitive. A `SharedBlock<B>` owns the brought-up device behind a scheduler-
+blocking `SleepLock` and hands out `SharedBlockHandle`s, each of which is
+itself a `Block`. Every operation takes the lock for the duration of one
 device call, so concurrent windows on different CPUs are serialised
 (`AGENTS.md` §4 — SMP from day one). The device's `BlockGeometry` is immutable
 for the life of a disk, so it is queried once at construction and cached:
@@ -466,15 +466,34 @@ for the life of a disk, so it is queried once at construction and cached:
 construction refuses to wrap the device, so no handle is ever handed out for
 an unusable device (fail closed, §2.9).
 
-A plain `SpinLock` (not the IRQ-safe variant) is correct because block I/O is
-driven from task / kthread context — the device IRQ only *wakes* the waiting
-kthread, it never issues a transfer from inside the handler — so the lock is
-never taken from an interrupt. The layer is generic over any `Block` and names
-no device or architecture, so every port shares the one definition (§2.2 /
-§2.20). The aarch64 root-unlock tail (`finish_unlock`) wraps its brought-up
-virtio-blk or EMMC2 device in a `SharedBlock` and drives both the `/System`
-autoload and the interactive unlock through concurrent handles rather than
-borrowing then moving the one device.
+A **sleeping** lock is required, not a spin lock: a device call parks its
+caller while it waits for the completion interrupt, so the lock is held across
+a park. A spinning contender would then burn its whole quantum waiting on a
+holder that is not running — or deadlock a single CPU outright — whereas the
+`SleepLock` parks the contender and wakes it when the holder releases. The
+layer is generic over any `Block` and names no device or architecture, so every
+port shares the one definition (§2.2 / §2.20). The aarch64 root-unlock tail
+(`finish_unlock`) wraps its brought-up virtio-blk or EMMC2 device in a
+`SharedBlock` and drives both the `/System` autoload and the interactive unlock
+through concurrent handles rather than borrowing then moving the one device.
+
+Because *every* in-kernel device operation funnels through this one
+implementation, it is also where a **burst** of them is paced. A caller
+issuing operation after operation — a filesystem read walking a large file, a
+service kthread draining requests — stays inside a single dispatched body for
+the whole burst, and on a device fast enough that no operation ever waits for
+its completion (an emulated virtio queue, an NVMe namespace whose completion is
+already in the ring at the first poll) that body never returns to the dispatch
+loop at all: the loop's housekeeping and heartbeats stop and everything else
+runnable on that CPU waits for the burst to finish, which the lockup watchdog
+reports as an in-kernel stall. `SharedBlockHandle::with_device` therefore
+offers the CPU back to the dispatcher — `preempt::yield_if_owed`, see
+`docs/src/architecture/scheduler.md` — *before* it takes the device lock, so a
+burst gives up the CPU at most one operation after its quantum expires and
+never leaves the device held by a task that is not running. Nothing is given up
+unless the scheduler is owed a turn, so an uncontended burst pays no context
+switch. Suspending here is sound by construction: the operation it wraps can
+already park the same body in the same place waiting for a slow device.
 
 ## The persistent driver-store service
 

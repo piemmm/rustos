@@ -85,9 +85,9 @@ places it, and returns the finished pixels.
 
 Three properties make this affordable:
 
-- **Reduced-scale decode.** The shipped masters are 25-megapixel JPEGs. The
+- **Reduced-scale decode.** The shipped masters are 8.3-megapixel JPEGs. The
   decoder picks the smallest DCT scale that still covers the screen, so a
-  1920×1080 desktop never materialises 25 million pixels to throw most of
+  1920×1080 desktop never materialises 8.3 million pixels to throw most of
   them away.
 - **Banding.** A screenful of RGBA exceeds the sandbox's fixed 8 MiB frame
   bound above 1080p. The bound is a defence and is not raised; the pixels

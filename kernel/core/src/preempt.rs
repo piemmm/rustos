@@ -65,6 +65,33 @@
 //! stamping progress, draining housekeeping — before re-dispatching the
 //! task. It arms no new periodic timer: it rides the watchdog cadence that
 //! is already running, so the tickless invariant is untouched.
+//!
+//! # The in-kernel boundary (long in-kernel work)
+//!
+//! Both latches above are consumed on the way back to *user* mode, so they
+//! bound how long a **user** task withholds a CPU. Kernel-side work has no
+//! such return: an in-kernel service kthread that drains request after
+//! request, and any kernel loop that issues one bounded operation after
+//! another (a filesystem read walking a large file span by span), stays
+//! inside a single dispatched body for as long as its work lasts. Nothing
+//! it does is individually unbounded, and none of it busy-waits: a slow
+//! device parks the body and the dispatcher runs. But when the device is
+//! *fast* — an emulated virtio queue, an `NVMe` namespace whose completion is
+//! already in the ring by the time the driver first polls — no operation
+//! ever has to wait, so the body runs to completion without a single return
+//! to the dispatch loop. The whole burst then executes with the dispatch
+//! loop's housekeeping and heartbeats suspended and every other runnable
+//! task on that CPU stalled behind it, which the lockup watchdog reports as
+//! an in-kernel stall once the burst outlasts its threshold.
+//!
+//! [`yield_if_owed`] is the boundary that bounds it: in-kernel code calls it
+//! between units of work, and it honours a latched tick through exactly the
+//! same policy [`preempt_current`] applies at the return-to-user point — both
+//! go through the one private `honour_latched_tick` decision, so the two can
+//! never drift apart: reschedule when this CPU owes a switch, otherwise keep a
+//! non-tickless policy's deadline alive. A caller may only place it where
+//! suspending is already sound (no spin lock held); at a point the same code
+//! path can already park on a slow device, it is sound by construction.
 
 use core::sync::atomic::Ordering;
 
@@ -217,6 +244,112 @@ fn take_forced_yield(cpu: CpuId) -> bool {
     cpu_state::get(cpu).is_some_and(|state| state.force_yield.swap(false, Ordering::AcqRel))
 }
 
+/// Count one involuntary preemption against `cpu`. An out-of-range `cpu`
+/// is dropped, so no phantom count lands for a CPU with no slot.
+fn count_preemption(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state.preemptions.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Act on a tick already consumed from `cpu`'s latch: suspend the task
+/// running there back to the scheduler when a switch is owed, else keep a
+/// non-tickless policy's periodic deadline alive.
+///
+/// The single definition of what a latched tick *means*, shared by the
+/// ports' return-to-user preempt point ([`preempt_current`]) and the
+/// in-kernel boundary ([`yield_if_owed`]) so the two can never drift into
+/// different preemption policies.
+///
+/// A fired tick owes a context switch only when it would change what runs:
+/// a runnable competitor to switch to, or interrupt-context work (a
+/// device-IRQ deferred wake, a queued foreground signal) waiting for the
+/// dispatch loop to drain it. A lone runnable task with nothing pending is
+/// left running — the periodic tick still fired, but rescheduling to the
+/// *same* sole task every quantum has no scheduling effect and only churns
+/// the per-dispatch user-address-space switch (and, on an emulated target,
+/// its full TLB flush), which starves the task's own forward progress.
+/// This mirrors Linux's `check_preempt_tick`, which preempts only when a
+/// competitor should run.
+///
+/// Where no switch happens, a non-tickless policy's periodic deadline is
+/// re-armed: without it a CPU whose lone task keeps running would fall
+/// silent and strand work later enqueued there (a task drained back from
+/// overflow, a rebalance) until an IPI arrived. Re-arming only the timer
+/// avoids the reschedule-to-self address-space/TLB churn; a tickless policy
+/// no-ops, so a quiet core keeps taking no ticks.
+///
+/// Returns `true` if a task was suspended (and the preemption counted).
+#[must_use]
+fn honour_latched_tick(cpu: CpuId) -> bool {
+    if !reschedule_owed(cpu) {
+        keep_periodic_tick(cpu);
+        return false;
+    }
+    if !reschedule_current(cpu, RescheduleAction::Yield) {
+        // The fired one-shot was consumed, but no dispatcher ran to arm a
+        // replacement quantum. Restore a non-tickless policy's periodic
+        // deadline before returning; otherwise this CPU can resume a busy
+        // task with no future preemption interrupt.
+        keep_periodic_tick(cpu);
+        return false;
+    }
+    count_preemption(cpu);
+    true
+}
+
+/// Honour the running CPU's pending-preemption latch from **in-kernel**
+/// code, at a boundary between units of work where suspending is sound.
+///
+/// The in-kernel counterpart of [`preempt_current`]: same latch, same
+/// `honour_latched_tick` policy, a different safe point. An in-kernel
+/// body never passes through a return-to-user preempt point, so without
+/// this a kernel loop that issues one bounded operation after another —
+/// a service kthread draining its request queue, a filesystem read walking
+/// a large file — holds its CPU for as long as its work lasts whenever the
+/// device is fast enough that no operation has to wait. Calling this
+/// between units caps that at one unit: the dispatcher regains the CPU,
+/// stamps its heartbeats, drains its housekeeping, and runs whatever else
+/// is runnable before the body resumes where it left off.
+///
+/// It is *not* a busy-yield: nothing is given up unless this CPU's quantum
+/// tick has already fired and the CPU owes a switch, so an uncontended
+/// burst costs one atomic swap per unit and never a context switch.
+///
+/// The CPU is resolved here rather than passed in, because the only CPU an
+/// in-kernel body can yield is the one it is running on; a call before the
+/// scheduler hook exists (early boot, host tests) reports `false` and
+/// suspends nothing.
+///
+/// The **caller** owns placement: suspend only where no spin lock is held.
+/// A point on a path that can already park waiting for a slow device is
+/// sound by construction, because that park suspends the same body in the
+/// same place.
+///
+/// Returns `true` if the body was suspended and has since been resumed,
+/// `false` if nothing was owed or no resumable task is published (the
+/// fail-closed [`reschedule_current`] return — early boot, or a stray call
+/// from a context the dispatcher does not own).
+#[must_use]
+pub fn yield_if_owed() -> bool {
+    let Some(cpu) = crate::waitq::wait_arch().and_then(crate::waitq::WaitQueueArch::current_cpu)
+    else {
+        return false;
+    };
+    yield_if_owed_on(cpu)
+}
+
+/// [`yield_if_owed`] for an explicit `cpu`: consume that CPU's latch and act
+/// on it. Split from the public entry point so the behaviour can be pinned
+/// against a chosen CPU slot without a live scheduler hook.
+#[must_use]
+fn yield_if_owed_on(cpu: CpuId) -> bool {
+    if !take_preempt_pending(cpu) {
+        return false;
+    }
+    honour_latched_tick(cpu)
+}
+
 /// Discard any tick latched on `cpu` before the scheduler's current
 /// dispatch decision.
 ///
@@ -275,48 +408,12 @@ pub fn preempt_current(cpu: CpuId) -> bool {
             keep_periodic_tick(cpu);
             return false;
         }
-        if let Some(state) = cpu_state::get(cpu) {
-            state.preemptions.fetch_add(1, Ordering::Relaxed);
-        }
+        count_preemption(cpu);
         return true;
     }
-    // A fired tick owes a context switch only when it would change what
-    // runs: a runnable competitor to switch to, or interrupt-context work
-    // (a device-IRQ deferred wake, a queued foreground signal) waiting for
-    // the dispatch loop to drain it. A lone runnable task with nothing
-    // pending is left running — the periodic tick still fired (TAIRiX
-    // stays non-tickless under the CFQ policy), but rescheduling to the
-    // *same* sole task every quantum has no scheduling effect and only
-    // churns the per-dispatch user-address-space switch (and, on an
-    // emulated target, its full TLB flush), which starves the task's own
-    // forward progress. This mirrors Linux's `check_preempt_tick`, which
-    // preempts only when a competitor should run. The latch is consumed
-    // either way — the tick was honoured.
-    if !reschedule_owed(cpu) {
-        // The tick fired but nothing owes a switch (a lone runnable task).
-        // Keep a non-tickless policy's periodic tick alive so this CPU
-        // re-checks its run queue at the next tick and promptly picks up
-        // work later enqueued here without an IPI (a task drained back
-        // from overflow, a rebalance); without this the lone task's tick
-        // would fall silent and strand such work — the source of the
-        // heavy-load stall. This re-arms only the timer, so it avoids the
-        // reschedule-to-self address-space/TLB churn. A tickless policy
-        // no-ops, so a quiet core keeps taking no ticks.
-        keep_periodic_tick(cpu);
-        return false;
-    }
-    if !reschedule_current(cpu, RescheduleAction::Yield) {
-        // The fired one-shot was consumed, but no dispatcher ran to arm a
-        // replacement quantum. Restore a non-tickless policy's periodic
-        // deadline before returning; otherwise this CPU can resume a busy
-        // user task with no future preemption interrupt.
-        keep_periodic_tick(cpu);
-        return false;
-    }
-    if let Some(state) = cpu_state::get(cpu) {
-        state.preemptions.fetch_add(1, Ordering::Relaxed);
-    }
-    true
+    // The latch is consumed either way — the tick was honoured — and the
+    // competitor-gated decision it implies is the shared one.
+    honour_latched_tick(cpu)
 }
 
 /// The number of involuntary preemptions performed on `cpu` since boot.
@@ -515,5 +612,61 @@ mod tests {
         // latch; returns false only because no user task is published here.
         assert!(!preempt_current(CPU));
         assert!(!take_forced_yield(CPU));
+    }
+
+    /// The in-kernel boundary is free when nothing is owed: an in-kernel loop
+    /// that calls it between units of work with no tick latched suspends
+    /// nothing and does not disturb the CPU's timer, so an uncontended burst
+    /// pays no context switch.
+    #[test]
+    fn the_in_kernel_boundary_is_free_when_no_tick_is_latched() {
+        const CPU: CpuId = 32;
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
+        assert!(!take_preempt_pending(CPU));
+        assert!(!yield_if_owed_on(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before);
+        assert_eq!(preemption_count(CPU), 0);
+    }
+
+    /// A tick latched while in-kernel code runs is honoured *at* the
+    /// boundary: the latch is consumed there and the reschedule is attempted
+    /// through the same policy the return-to-user point applies. Without this
+    /// boundary an in-kernel body held its CPU for its whole burst, because
+    /// only a return to user mode consumed the latch. In a host test no
+    /// resumable task is published, so the suspension fails closed and CFQ's
+    /// periodic deadline is restored instead (the real suspension is the
+    /// aarch64 QEMU preemption vertical).
+    #[test]
+    fn a_tick_latched_in_kernel_is_honoured_at_the_boundary() {
+        const CPU: CpuId = 33;
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
+        note_preempt_tick(CPU);
+        assert!(!yield_if_owed_on(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        // Consumed at the boundary, so the next unit of work starts clean and
+        // a single tick cannot yield twice.
+        assert!(!take_preempt_pending(CPU));
+        assert!(!yield_if_owed_on(CPU));
+        assert_eq!(preemption_count(CPU), 0);
+    }
+
+    /// The boundary yields only the CPU it is called for: a tick latched on
+    /// one CPU is never consumed by another CPU's in-kernel loop.
+    #[test]
+    fn the_in_kernel_boundary_is_per_cpu() {
+        const CPU_A: CpuId = 34;
+        const CPU_B: CpuId = 35;
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        note_preempt_tick(CPU_A);
+        assert!(!yield_if_owed_on(CPU_B));
+        assert!(take_preempt_pending(CPU_A));
+    }
+
+    /// An out-of-range CPU fails closed: no phantom yield, no rearm.
+    #[test]
+    fn the_in_kernel_boundary_fails_closed_for_an_unknown_cpu() {
+        assert!(!yield_if_owed_on(u32::MAX));
     }
 }

@@ -154,7 +154,7 @@ sandboxes a parse imports it:
   session's screen size across three ops. `OP_WALLPAPER_PREPARE` decodes
   the source at the smallest scale its format offers that still covers the
   destination (`tairix_image::decode_fitted`, bounded by
-  `MAX_WALLPAPER_DECODE_PIXELS`), so a 25-megapixel master bound for a
+  `MAX_WALLPAPER_DECODE_PIXELS`), so an 8.3-megapixel master bound for a
   1080p screen costs a quarter of its pixels rather than all of them, and
   a screen so large that no covering scale fits the bound is served from
   the largest scale that does rather than refused; it then computes its

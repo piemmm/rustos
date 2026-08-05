@@ -479,15 +479,16 @@ pub enum KernelBreadcrumb {
     /// scheduler's own pick/steal machinery (which stays [`Self::Dispatch`],
     /// set before the body closure runs).
     TaskBody = 10,
-    /// The context switch into the task ([`crate::kthread`] `dispatch_step`,
-    /// immediately before `ContextSwitch::switch`), the task's EL0 execution
-    /// up to its first syscall/fault (which re-stamps the breadcrumb), and
-    /// the arch switch *back* to the dispatcher — the crumb held for the
-    /// whole `ContextSwitch::switch` call. Distinguishes a wedge in the arch
-    /// switch or early user-entry from one in the shim prologue
-    /// ([`Self::TaskBody`]) below it, or in the post-switch dispatcher
-    /// teardown ([`Self::SwitchReturn`]) above it (detail: unused, `0` — the
-    /// task id is carried by the preceding [`Self::TaskBody`] crumb).
+    /// The context switch into a **user** task ([`crate::kthread`]
+    /// `dispatch_step`, immediately before `ContextSwitch::switch`), that
+    /// task's EL0 execution up to its first syscall/fault (which re-stamps
+    /// the breadcrumb), and the arch switch *back* to the dispatcher — the
+    /// crumb held for the whole `ContextSwitch::switch` call. Distinguishes a
+    /// wedge in the arch switch or early user-entry from one in the shim
+    /// prologue ([`Self::TaskBody`]) below it, or in the post-switch
+    /// dispatcher teardown ([`Self::SwitchReturn`]) above it (detail: unused,
+    /// `0` — the task id is carried by the preceding [`Self::TaskBody`]
+    /// crumb).
     UserSwitch = 11,
     /// The dispatcher-side teardown that runs immediately after
     /// `ContextSwitch::switch` returns control from the task
@@ -515,6 +516,19 @@ pub enum KernelBreadcrumb {
     /// ([`Self::SwitchReturn`]) that precede it (detail: the dispatched task
     /// id).
     DispatchTail = 13,
+    /// The context switch into a **kernel** kthread and that kthread's body
+    /// running kernel code — the [`Self::UserSwitch`] counterpart for a task
+    /// that has no user address space and never leaves EL1, so no syscall or
+    /// fault ever re-stamps the crumb and this one is held for the entire
+    /// body run (detail: unused, `0` — the task id is carried by the
+    /// preceding [`Self::TaskBody`] crumb).
+    ///
+    /// Separate from [`Self::UserSwitch`] because a stall reported against a
+    /// kernel-context sample means something quite different in each case: a
+    /// long in-kernel service body here, versus a task executing user code
+    /// there. One tag covering both sent a reader looking for a misbehaving
+    /// user program when the CPU was in fact inside a kernel service.
+    KernelBody = 14,
 }
 
 // These decode/render helpers are consumed only by the debug-diagnostics
@@ -542,6 +556,7 @@ impl KernelBreadcrumb {
             11 => Self::UserSwitch,
             12 => Self::SwitchReturn,
             13 => Self::DispatchTail,
+            14 => Self::KernelBody,
             _ => Self::None,
         }
     }
@@ -564,6 +579,7 @@ impl KernelBreadcrumb {
             Self::UserSwitch => "user_switch",
             Self::SwitchReturn => "switch_return",
             Self::DispatchTail => "dispatch_tail",
+            Self::KernelBody => "kernel_body",
         }
     }
 }

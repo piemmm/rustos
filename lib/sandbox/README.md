@@ -60,8 +60,8 @@ imports this seam; a second per-app copy is forbidden.
   placed onto the session's screen size across a three-op sequence:
   `OP_WALLPAPER_PREPARE` decodes the source at the smallest scale its
   format offers that still covers the destination (`tairix-image`'s
-  `decode_fitted`, bounded by `MAX_WALLPAPER_DECODE_PIXELS`, so a
-  25-megapixel master bound for a 1080p screen is decoded at a quarter of
+  `decode_fitted`, bounded by `MAX_WALLPAPER_DECODE_PIXELS`, so an
+  8.3-megapixel master bound for a 1080p screen is decoded at a quarter of
   its pixels rather than in full) and computes its placement
   (`tairix-wallpaper`'s `place`), holding both in the worker;
   `OP_WALLPAPER_BAND` draws and returns a run of destination rows at a

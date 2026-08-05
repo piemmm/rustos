@@ -581,8 +581,11 @@ past `watchdog::DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS` (1 s), it requests a
 interrupt runs honours it in `preempt_current` **unconditionally** (the
 forced-yield latch bypasses the competitor gate), returning the task to the
 dispatcher for one housekeeping iteration before it resumes. Kernel code is
-never force-yielded (the kernel is non-preemptible), and no new timer is armed
-— it rides the always-on watchdog cadence, so the tickless invariant holds.
+never *force*-yielded — the kernel is non-preemptible, so it cannot be
+suspended at an arbitrary instruction; long in-kernel work instead gives the
+CPU up voluntarily, at its own safe boundary (the in-kernel boundary below).
+No new timer is armed — the guard rides the always-on watchdog cadence, so the
+tickless invariant holds.
 
 The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls
@@ -633,6 +636,41 @@ competitor until its next voluntary yield — cooperative scheduling in
 preemptive clothing. If the safe-boundary suspension cannot proceed because
 no resumable user handle is published, the policy's no-dispatch hook restores
 CFQ's periodic deadline; tickless policies leave the hook inert.
+
+### The in-kernel boundary
+
+Both latches above are consumed on the way back to **user** mode, so on their
+own they bound only how long a *user* task withholds a CPU. In-kernel work has
+no such return, and it does not have to spin to hold a core: a kernel loop that
+issues one bounded operation after another — an in-kernel service kthread
+draining its request queue, a filesystem read walking a large file span by
+span — stays inside a single dispatched body for as long as its work lasts.
+Each operation blocks correctly when it must, so a *slow* device parks the body
+and the dispatcher runs; but when the device is **fast** — an emulated virtio
+queue, an NVMe namespace whose completion is already in the ring at the
+driver's first poll — no operation ever waits, and the whole burst runs without
+one return to the dispatch loop. Its housekeeping and heartbeats stop for the
+duration and every other runnable task on that CPU waits behind the burst,
+which the lockup watchdog reports as an in-kernel stall (`context=kernel`,
+`k_site=kernel_body`) once the burst outlasts the soft-lockup threshold.
+
+`kernel/core::preempt::yield_if_owed` is the boundary that bounds it. In-kernel
+code calls it *between* units of work; it consumes the same latch and applies
+the same competitor-gated decision the return-to-user point applies (both share
+one `honour_latched_tick` definition), so a burst gives the CPU up at most one
+unit after the quantum expires and costs a single atomic read when nothing is
+owed. It suspends nothing before the scheduler hook exists (early boot) and
+nothing where no resumable task is published, restoring CFQ's periodic deadline
+in that case exactly as the user-mode path does.
+
+Placement is the caller's obligation: the boundary suspends the body, so it may
+only sit where no spin lock is held. A point on a path that can *already* park
+waiting for a slow device is sound by construction, because that park suspends
+the same body in the same place. The two call sites are the storage funnel every
+in-kernel device operation passes through (`SharedBlockHandle`'s `with_device`,
+which offers the turn before taking the shared device's sleeping lock — see
+`docs/src/drivers/block.md`) and the in-kernel `/System` store server's
+between-requests boundary, where nothing of the server's own is held.
 
 A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
 its in-memory transmit ring draining through

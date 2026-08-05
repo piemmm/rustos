@@ -431,23 +431,31 @@ CPU is actually stuck in, where the stale sampled `pc` cannot. The
 wedge otherwise reports only the coarse `dispatch`: the scheduler's own
 pick/steal machinery keeps `dispatch`; the task-body shim hand-off (a user
 kthread's `pre_resume` address-space reactivation, resume/live publication)
-is `task_body`; the arch context switch into the task and its execution up
-to its first trap is `user_switch`; the dispatcher-side teardown *after* the
-switch returns — retiring the resume handle and, for a user kthread, parking
-this CPU's translation off the task's user root (a translation-register
-write) and checking the guard, all with device interrupts still masked — is
-`switch_return`; and the post-run accounting tail (also masked, inherited
-from the suspending task's exception entry) is `dispatch_tail`. Splitting
-`switch_return` from `user_switch` tells a wedge coming *back* from a task
-(notably the user-root translation park) apart from one going *into* it —
-both otherwise-invisible IRQ-masked sections on a GICv2 board. The full
-`k_site` set is `dispatch` / `task_body` / `user_switch` / `switch_return` /
-`dispatch_tail` / `syscall` (before any handler work) / `fault_entry` /
-`fault_reclaim` / `fault_stack` / `fault_ramzip` / `fault_anon` /
-`fault_file` / `fault_fatal`; `k_detail` is the syscall number, the faulting
-virtual address for a fault phase, or the dispatched task id for `task_body`
-/ `dispatch_tail` (`0` for `user_switch` and `switch_return`, whose task id
-is carried by the preceding `task_body` crumb); and `k_seq` is
+is `task_body`; the arch context switch into a **user** task and its
+execution up to its first trap is `user_switch`, while the switch into a
+**kernel** kthread and that kthread's whole body run — which never leaves EL1,
+so no trap ever re-stamps the crumb — is `kernel_body`; the dispatcher-side
+teardown *after* the switch returns — retiring the resume handle and, for a
+user kthread, parking this CPU's translation off the task's user root (a
+translation-register write) and checking the guard, all with device interrupts
+still masked — is `switch_return`; and the post-run accounting tail (also
+masked, inherited from the suspending task's exception entry) is
+`dispatch_tail`. Splitting `switch_return` from `user_switch` tells a wedge
+coming *back* from a task (notably the user-root translation park) apart from
+one going *into* it — both otherwise-invisible IRQ-masked sections on a GICv2
+board. Splitting `kernel_body` from `user_switch` matters for a different
+reason: a stall reported against a kernel-context sample means a long
+in-kernel service body under `kernel_body` but a task executing *user* code
+under `user_switch`, and one tag covering both sent a reader hunting a
+misbehaving user program while the CPU was in fact inside a kernel service.
+The full `k_site` set is `dispatch` / `task_body` / `user_switch` /
+`kernel_body` / `switch_return` / `dispatch_tail` / `syscall` (before any
+handler work) / `fault_entry` / `fault_reclaim` / `fault_stack` /
+`fault_ramzip` / `fault_anon` / `fault_file` / `fault_fatal`; `k_detail` is
+the syscall number, the faulting virtual address for a fault phase, or the
+dispatched task id for `task_body` / `dispatch_tail` (`0` for `user_switch`,
+`kernel_body` and `switch_return`, whose task id is carried by the preceding
+`task_body` crumb); and `k_seq` is
 a per-CPU sequence, so two successive reports tell a frozen breadcrumb —
 stuck in exactly this region — from an advancing one. The breadcrumb is
 three relaxed stores plus one release bump, the same order of cost as the

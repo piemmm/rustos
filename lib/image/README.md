@@ -15,9 +15,11 @@ PNG — and the desktop wallpaper (a shipped master, or a photograph the
 user picked) inside a minimum-capability parser sandbox before either
 reaches the compositor, because neither ships from the system. This crate
 is the raster half of that pipeline; the vector half is `lib/svg`. The
-shipped wallpaper masters in `lib/wallpaper/assets` are baseline JPEG up
-to 6688×3764 (25.2 megapixels), which is what `decode_fitted` and the
-progressive-store bound below exist for.
+shipped wallpaper masters in `lib/wallpaper/assets` are baseline JPEG
+authored no larger than the wallpaper renderer's own maximum destination
+(3840×2160), but a user-picked photograph can still arrive at many times
+that, which is what `decode_fitted` and the progressive-store bound below
+exist for.
 
 ## Formats
 
@@ -39,6 +41,25 @@ Everything else a JPEG stream can declare is a typed, fail-closed
 refusal rather than a best effort: arithmetic coding, lossless and
 hierarchical (differential) frames, 12-bit precision, 2- or 4-component
 images, a height deferred to a `DNL` marker, and any malformed stream.
+
+Reconstruction inverse-DCTs each block with no per-pixel allocation. The
+full-scale (unreduced) decode — the path that dominates a wallpaper-sized
+render — uses a fast fixed-point integer inverse DCT: the standard AAN /
+Loeffler-Ligtenberg-Moerlein separable row-column butterfly (the
+formulation libjpeg names `jpeg_idct_islow`), in `i32` with the usual
+descale/rounding shifts and a flat-block (all-AC-zero) fast path, replacing
+the direct routine's per-block `O(8^3)` matrix multiply with `O(8^2)`
+multiply-adds. The reduced scales (one half/quarter/eighth) keep the direct
+scaled-basis matrix routine, which is already cheap when it evaluates only
+1, 2, or 4 samples per block edge and is the reference the fast routine's
+equivalence test is checked against. The arithmetic is `wrapping_*`: for a
+valid 8-bit frame the coefficients are bounded and no wrap ever occurs, so
+the transform is exact, while a hostile file can at worst wrap an
+intermediate into the closing fixed clamp to `0..=255` — never a panic, and
+never a pixel outside range. The final assembly resolves each component's
+upsampling parameters once and walks the output row by row, so the
+per-pixel work is one nearest-neighbour sample lookup and the colour
+convert.
 
 ## API shape
 
@@ -69,7 +90,7 @@ half, one quarter, or one eighth of natural size, produced by inverse-DCT
 transforming only the coefficients that scale needs — whose result still
 covers the caller's `FitBox` on both axes. It never scales up and never
 resamples: reduced dimensions round up, so a result can be modestly larger
-than the box but never smaller. Decoding a 25-megapixel wallpaper master
+than the box but never smaller. Decoding an 8.3-megapixel wallpaper master
 straight to an eighth costs a fraction of the full-size arithmetic and
 output buffer.
 
@@ -142,8 +163,11 @@ that sandbox, never the calling service.
 
 Host-unit-tested beside the code (`src/png_tests.rs`, `src/jpeg_tests.rs`,
 `src/crc32.rs`) with no external fixture files: the JPEG tests build their
-streams marker by marker, and check a progressive stream against the
-pixels of the equivalent baseline one. Both formats are fuzzed by
+streams marker by marker, check a progressive stream against the pixels of
+the equivalent baseline one, and check the fast full-scale inverse DCT
+against the direct matrix reference over many pseudo-random full coefficient
+blocks (asserting no more than a one-level per-sample difference). Both
+formats are fuzzed by
 `tests/fuzz_image.rs` — random bytes, random bytes behind each valid
 signature, and structurally mutated valid fixtures (baseline and
 progressive) through the shared `tests/fuzzseed` seed and budget seam —

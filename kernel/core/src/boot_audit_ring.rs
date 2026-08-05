@@ -379,21 +379,33 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{BootAuditRing, TAIL_MESSAGE_MAX};
-    use core::sync::atomic::{AtomicU64, Ordering};
     use tairix_abi::Duration64;
     use tairix_log::{log, Event, EventId, Level, Sink};
 
-    /// A scripted monotonic clock: each read returns a strictly increasing
-    /// second so stored timestamps are distinguishable.
-    static CLOCK_SECS: AtomicU64 = AtomicU64::new(0);
+    // A scripted monotonic clock: each read returns a strictly increasing
+    // second so stored timestamps are distinguishable.
+    //
+    // Per *thread*, not per process: the harness runs these tests in parallel,
+    // and several of them reset the sequence and then assert the exact instants
+    // their own writes recorded. One shared counter let two tests interleave
+    // their reads and hand each other the wrong seconds — the clock a test
+    // scripts must therefore be its own. The stored value is plain (not atomic)
+    // because a thread's counter is only ever read and written by that thread.
+    std::thread_local! {
+        static CLOCK_SECS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
 
     fn scripted_clock() -> Duration64 {
-        let secs = CLOCK_SECS.fetch_add(1, Ordering::Relaxed);
+        let secs = CLOCK_SECS.with(|c| {
+            let now = c.get();
+            c.set(now + 1);
+            now
+        });
         Duration64::from_secs(i64::try_from(secs).expect("test seconds fit i64"))
     }
 
     fn reset_clock() {
-        CLOCK_SECS.store(0, Ordering::Relaxed);
+        CLOCK_SECS.with(|c| c.set(0));
     }
 
     fn event(id: u32, level: Level, message: &str) -> Event<'_> {
@@ -430,6 +442,26 @@ mod tests {
             stamp_from(Some(2_500_000_001)),
             Duration64::from_nanos(2_500_000_001)
         );
+    }
+
+    /// Each thread scripts its own instants, so tests the harness runs in
+    /// parallel cannot consume each other's seconds. With one shared counter
+    /// every exact-instant assertion in this module was order-dependent: a
+    /// sibling test's writes advanced the sequence between this test's reset and
+    /// its own reads, and the recorded timestamps came back wrong.
+    #[test]
+    fn the_scripted_clock_is_independent_per_thread() {
+        reset_clock();
+        assert_eq!(scripted_clock(), Duration64::from_secs(0));
+        let other = std::thread::spawn(|| {
+            reset_clock();
+            (scripted_clock(), scripted_clock())
+        })
+        .join()
+        .expect("the scripted-clock thread runs to completion");
+        assert_eq!(other, (Duration64::from_secs(0), Duration64::from_secs(1)));
+        // Unaffected by the other thread's reads: this sequence resumes at 1.
+        assert_eq!(scripted_clock(), Duration64::from_secs(1));
     }
 
     #[test]

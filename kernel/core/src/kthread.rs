@@ -1196,15 +1196,23 @@ where
         publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
     }
 
-    // Kernel-activity breadcrumb: the shim prologue is done and we are
-    // about to context-switch into the task (and, for a user kthread, run
-    // it at EL0 up to its first syscall/fault, which re-stamps the crumb). A
-    // wedge in the arch switch itself or in early task execution before the
-    // first trap is attributed to `user_switch`, versus the shim prologue
-    // (`task_body`) above it (`crate::watchdog`). The dispatched task id is
-    // carried by the `task_body` crumb this closure stamped, so the datum
-    // here is unused (`0`).
-    crate::watchdog::note_kernel_breadcrumb(cpu, crate::watchdog::KernelBreadcrumb::UserSwitch, 0);
+    // Kernel-activity breadcrumb: the shim prologue is done and we are about
+    // to context-switch into the task. A wedge in the arch switch itself or
+    // in early task execution before the first trap is attributed here,
+    // versus the shim prologue (`task_body`) above it (`crate::watchdog`).
+    // The crumb names which *kind* of task got the CPU, because a stall
+    // reported against a kernel-context sample means a different thing for
+    // each: a user kthread runs at EL0 until its first syscall/fault
+    // re-stamps the crumb (`user_switch`), whereas a kernel kthread never
+    // leaves EL1, so nothing re-stamps it and `kernel_body` is held for the
+    // whole body run. The dispatched task id is carried by the `task_body`
+    // crumb this closure stamped, so the datum here is unused (`0`).
+    let entered = if is_user {
+        crate::watchdog::KernelBreadcrumb::UserSwitch
+    } else {
+        crate::watchdog::KernelBreadcrumb::KernelBody
+    };
+    crate::watchdog::note_kernel_breadcrumb(cpu, entered, 0);
 
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`

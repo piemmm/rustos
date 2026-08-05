@@ -40,8 +40,8 @@
 //! own wallpaper, a smaller one for the chooser's true-scale preview.
 //! `OP_WALLPAPER_PREPARE` sniffs and decodes the source image at the
 //! smallest scale its format offers that still covers the *screen*
-//! (`tairix_image::decode_fitted`, so a 25-megapixel master bound for a
-//! 1080p screen never becomes 25 megapixels of held RGBA), then asks the
+//! (`tairix_image::decode_fitted`, so an 8.3-megapixel master bound for a
+//! 1080p screen never becomes 8.3 megapixels of held RGBA), then asks the
 //! one shared scaling arithmetic (`tairix_wallpaper::nominal_source_size`)
 //! what size that decoded image must be treated as having to draw a
 //! screen-sized composition onto the destination instead. Exactly when the
@@ -526,9 +526,9 @@ pub const MAX_WALLPAPER_PIXELS: u64 = (MAX_WALLPAPER_WIDTH as u64) * (MAX_WALLPA
 /// down would have fallen short of the destination — and a decode that
 /// genuinely covers the destination can therefore need close to four times
 /// the destination's pixel count. Admitting that is the point of the
-/// factor: at the 4K destination this service bounds itself to, the shipped
-/// 6688×3764 masters are covered only by their full scale, and a ceiling at
-/// [`MAX_WALLPAPER_PIXELS`] would serve every one of them visibly soft.
+/// factor: a user-picked master just short of double the 4K destination on
+/// each axis is covered only by its full scale, and a ceiling at
+/// [`MAX_WALLPAPER_PIXELS`] would serve it visibly soft.
 ///
 /// A source whose covering scale exceeds this is served from the largest
 /// scale that fits (`tairix_image::decode_fitted`), trading a little
@@ -854,7 +854,7 @@ fn rows_per_band(dest_w: u32) -> u32 {
 ///
 /// The destination extent is what the decode is asked for, so a source with
 /// far more detail than the destination could ever show is decoded at a
-/// reduced scale rather than in full — for a 6688×3764 master onto a
+/// reduced scale rather than in full — for a 3840×2160 master onto a
 /// 1920×1080 screen that is a quarter of the pixels, memory the 1 GiB
 /// operating-conditions floor keeps rather than spends on detail no one can
 /// see. Where even the covering scale exceeds the bounds, the largest scale

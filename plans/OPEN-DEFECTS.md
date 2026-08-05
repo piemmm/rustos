@@ -361,6 +361,42 @@ The open items, in priority order:
   stack into a recursive, `DAIF`-masked abort storm: silent, no panic, no
   recovery. Both `eret` sequences now mask asynchronous exceptions before
   they program the return state. Detail below.
+- **D24 — in-kernel work had no yield boundary, so a burst of fast device
+  operations monopolised a core — DONE.** A desktop session on the QEMU-`virt`
+  debug image reported a 10 s soft lockup (`id=4080 cpu=0 stalled_ms=10000
+  context=kernel`) while an app decoded wallpaper JPEGs and a second app wanted
+  the CPU. The report was honest, not a false positive: the sample's
+  `context=kernel` comes straight from `SPSR_EL1`, and its backtrace resolved
+  through the storage stack (`SharedBlockHandle::read_blocks` →
+  `BlockCache::cached_read` → `virtio_blk` → `notify_wait`). Root cause was a
+  **missing boundary, not a spin**: both preemption latches are consumed only on
+  the way back to user mode, so an in-kernel body that issues one bounded
+  operation after another holds its CPU for the whole burst whenever the device
+  is fast enough that no operation has to wait — `virtio_blk::submit_and_wait`
+  polls the ring *before* waiting, and under QEMU the completion is already
+  there, so the park that would have returned control to the dispatcher never
+  happens. The dispatch loop's housekeeping and heartbeats stopped for the
+  burst, which is exactly the condition `classify` reports. Fixed by giving
+  in-kernel code the boundary it lacked (`preempt::yield_if_owed`, sharing one
+  `honour_latched_tick` decision with the return-to-user point), called from the
+  storage funnel every in-kernel device operation passes through
+  (`SharedBlockHandle::with_device`, before the device lock is taken) and from
+  the in-kernel `/System` store server's between-requests boundary. The
+  diagnostic that misdirected the reading is fixed too: a kernel kthread body
+  now stamps `k_site=kernel_body` instead of sharing `user_switch` with a real
+  user task's EL0 run.
+- **D25 — `boot_audit_ring`'s scripted test clock was process-wide, making its
+  exact-instant assertions order-dependent — DONE.** Noticed while running the
+  `kernel/core` suite for D24: `records_are_retained_and_read_non_destructively`
+  read back `8 s` where it expected `1 s`. The module's `scripted_clock` counted
+  on one `static AtomicU64` that several tests `reset_clock()` before asserting
+  the exact instants their own writes recorded, and the harness runs those tests
+  in parallel threads — so a sibling test's reads advanced the sequence between
+  a test's reset and its own writes. Fixed structurally by making the counter
+  per-thread (`std::thread_local!`), so a test's scripted sequence is its own;
+  a regression test asserts the per-thread independence directly (it fails
+  against a shared counter). Not a load artifact and not retried away: six
+  consecutive whole-crate runs are green.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -373,9 +409,13 @@ proved non-reproducing once FONT-SERVICE removed the per-app font payload
 (closed: marker-based sequencing + file-manager choreography moved to host
 tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
 reported — D22 is a load-dependent QEMU-harness timeout whose mechanism is
-not yet named, and D23 was an observer-perturbs-the-observed defect the debug
-watchdog's own non-maskable sample exposed (fixed). Do not collapse the open
-items into one change; land each on its own whole-project-green gate (§7).
+not yet named, D23 was an observer-perturbs-the-observed defect the debug
+watchdog's own non-maskable sample exposed (fixed), D24 was a missing
+in-kernel preemption boundary — a fairness defect, not a wedge — that let a
+burst of never-waiting device operations withhold a core (fixed), and D25 was a
+process-wide test clock that made a host suite's exact-instant assertions
+order-dependent (fixed). Do not collapse the open items into one change; land
+each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 

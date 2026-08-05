@@ -2193,6 +2193,39 @@ order (one fully-gated increment each):
                  "any ISR-shared lock is `IrqSafeSpinLock` or the ISR side is
                  lock-free + deferred drain" is in `lib/sync`'s `irq` rustdoc and
                  the §23 checklist. Docs: `docs/src/architecture/syscalls.md`.
+               - **P-5c — in-kernel bodies yield at a safe boundary (the
+                 in-kernel half of the §17.1 no-cooperative-dispatch fix) —
+                 DONE.** P-5 made the dispatch loop preemptible and P-5b the
+                 syscall body, but both latches are consumed only on the way
+                 back to *user* mode, so an in-kernel body that issues one
+                 bounded operation after another still held its CPU for the whole
+                 burst. It does not spin and each operation blocks correctly, so
+                 a *slow* device parks it and the dispatcher runs — but when the
+                 device is fast enough that no operation ever waits
+                 (`virtio_blk::submit_and_wait` polls the completion ring
+                 *before* waiting, and under QEMU the completion is already
+                 there) the park never happens and the whole burst runs with the
+                 dispatch loop's housekeeping and heartbeats suspended. A desktop
+                 session reading wallpaper JPEGs reproduced it as a 10 s
+                 `context=kernel` soft lockup with no spin anywhere
+                 (`plans/OPEN-DEFECTS.md` D24). `preempt::yield_if_owed` is the
+                 boundary: it consumes the same latch and applies the same
+                 competitor-gated decision the return-to-user point applies (one
+                 shared `honour_latched_tick`, not a second policy), so a burst
+                 gives the CPU up at most one operation after its quantum expires
+                 and costs one atomic read when nothing is owed. Placement is the
+                 caller's obligation — only where no spin lock is held, which a
+                 point that can already park on a slow device satisfies by
+                 construction. Call sites: the storage funnel every in-kernel
+                 device operation passes through (`SharedBlockHandle::with_device`,
+                 before the shared device's sleeping lock) and the in-kernel
+                 `/System` store server's between-requests boundary. The
+                 dispatcher also stamps a distinct `k_site=kernel_body` crumb for
+                 a kernel kthread body, which previously shared `user_switch`
+                 with a user task's EL0 run and so pointed a reader at a
+                 misbehaving program. Docs:
+                 `docs/src/architecture/scheduler.md`,
+                 `docs/src/drivers/block.md`, `plans/WATCHDOG.md`.
                - **P-6 — wait-queue §27 completeness rework — DONE
                  (host-proven).** `kernel/core/src/waitq.rs` now meets the §27
                  bar. The P-2 slice's O(n) `Vec` wait set is replaced by a
@@ -3978,7 +4011,7 @@ Load-bearing decisions a future contributor needs:
   `assets/`, which `tools/syshelp` plants at `/System/Graphics/Wallpapers`.
   The default is `tairix-dark.jpg`.
 - **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
-  with a reduced-scale decode so a 25-megapixel master is never materialised
+  with a reduced-scale decode so an 8.3-megapixel master is never materialised
   whole; the wallpapers are JPEG and a 1 GiB machine must still draw them.
 - **`lib/raster::resample`** is the one image resampler, shared by the icon
   and wallpaper paths.

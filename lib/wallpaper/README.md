@@ -52,10 +52,14 @@ a partial intent, and a writer refuses the edit outright.
 The five shipped wallpaper masters ship read-only at `WALLPAPER_STORE`
 (`/System/Graphics/Wallpapers`), discovered at build time from
 `lib/wallpaper/assets/` by `tools/syshelp` — never a hand-maintained list.
-`catalog_entries` is the one bounded, fail-closed definition of which files
-in a directory listing a chooser may offer: it performs no I/O of its own,
-filtering to the decodable extensions, rejecting illegal names, skipping
-oversized files, and capping and sorting the result.
+Each master is authored no larger than `lib/sandbox`'s
+`MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT` (3840×2160): JPEG entropy
+decoding cannot skip blocks, so a source pixel beyond what the renderer
+will ever draw costs decode time no screen can use. `catalog_entries` is
+the one bounded, fail-closed definition of which files in a directory
+listing a chooser may offer: it performs no I/O of its own, filtering to
+the decodable extensions, rejecting illegal names, skipping oversized
+files, and capping and sorting the result.
 
 The fit geometry (`place`, `decode_target`) is pure arithmetic with no
 rendering of its own: given a source image size, a screen size, and a

@@ -718,12 +718,14 @@ fn a_4k_wallpaper_assembles_identically_across_many_bands() {
 
 #[test]
 fn a_wallpaper_far_larger_than_the_destination_prepares_at_a_reduced_scale() {
-    // The geometry of every wallpaper master TAIRiX ships: 6688x3764, over
-    // 25 megapixels, three times the largest destination this service will
-    // ever draw. Asking the decoder for the destination extent rather than
-    // the natural size is what lets the desktop show its own default
-    // wallpapers at all: a full decode of one costs 25 megapixels of held
-    // RGBA and breaches `MAX_WALLPAPER_DECODE_PIXELS`.
+    // A synthetic master well beyond our new 8.3-megapixel shipped masters
+    // (this one is over three times the pixels of a 4K destination)
+    // so the reduced-scale path is exercised even though every
+    // shipped master now fits within `MAX_WALLPAPER_WIDTH`/
+    // `MAX_WALLPAPER_HEIGHT`. Asking the decoder for the destination extent
+    // rather than the natural size is what would let the desktop show a
+    // user-picked wallpaper this large at all: a full decode of one costs
+    // its large pixel count in held RGBA and breaches `MAX_WALLPAPER_DECODE_PIXELS`.
     let source = flat_grey_jpeg(6688, 3764);
     assert!(source.len() < tairix_wallpaper::MAX_WALLPAPER_BYTES);
 

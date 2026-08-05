@@ -457,6 +457,29 @@ opt-level = 1
 overflow-checks = true
 panic = "abort"
 
+# The image/raster decode path is the one place where the dev profile's
+# `opt-level = 1` is the difference between a usable development image and an
+# unusable one: decoding a photographic wallpaper or an icon master is
+# millions of Huffman-table lookups, inverse-transform multiply-adds and
+# per-pixel writes, and at `opt-level = 1` a debug image spends tens of
+# seconds where the shipped `--release` image spends a fraction of a second.
+# These crates are pure, well-tested computation over byte buffers — there is
+# nothing in them a developer steps through — so they are built at product
+# speed in every profile while the rest of the workspace stays quick to
+# rebuild and pleasant to debug. Overflow checks and debug assertions are
+# untouched, so the fail-closed bounds these decoders enforce still hold.
+[profile.dev.package.tairix-image]
+opt-level = 3
+
+[profile.dev.package.tairix-raster]
+opt-level = 3
+
+[profile.dev.package.tairix-svg]
+opt-level = 3
+
+[profile.dev.package.tairix-fontface]
+opt-level = 3
+
 # `panic = "abort"` collides with the test harness on host targets. Cargo
 # always uses `panic = "unwind"` for the `test` and `bench` profiles
 # regardless of the dev/release settings, so no override is required here.

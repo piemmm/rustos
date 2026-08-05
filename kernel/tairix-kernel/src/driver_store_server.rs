@@ -524,6 +524,16 @@ pub fn serve_system_store(
     loop {
         // Drain every pending call first.
         if serve_pending(&service, ctx, &store, &endpoint, audit) {
+            // One request served is one unit of work, and the gap before the
+            // next is this loop's safe boundary: nothing of the server's own
+            // is held across it. Offer the CPU back to the dispatcher here if
+            // the scheduler is owed a turn, so a caller that keeps the queue
+            // full cannot make this body drain request after request without
+            // ever returning — which would suspend the dispatch loop's
+            // housekeeping and heartbeats and stall everything else runnable
+            // on this CPU behind the burst. Nothing is given up unless a turn
+            // is owed, so an uncontended drain still costs no context switch.
+            let _ = tairix_kernel_core::yield_if_owed();
             continue;
         }
         // Nothing pending: park off the run queue until a request is posted

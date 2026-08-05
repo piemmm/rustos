@@ -18,7 +18,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{decode, decode_fitted};
+use super::{decode, decode_fitted, dequantize, idct8_islow, idct_general};
 use crate::{sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
 
 /// Generous limits for every fixture that is not itself exercising a
@@ -617,6 +617,59 @@ fn progressive_scans_decode_to_the_same_pixels_as_the_equivalent_baseline() {
     let progressive =
         decode(&build_progressive_single_block_example(), &ROOMY).expect("progressive decodes");
     assert_eq!(baseline, progressive);
+}
+
+#[test]
+fn fast_idct_matches_the_direct_reference_within_one() {
+    // The regression test for the fast full-scale inverse DCT: over many
+    // pseudo-random full (DC + all-AC) coefficient blocks, the fast
+    // `idct8_islow` and the direct `idct_general` matrix routine — the two
+    // being different fixed-point roundings of the same transform — must
+    // never disagree by more than one 8-bit level, the tolerance the JPEG
+    // standard's own accuracy requirement leaves. Coefficients stay inside
+    // the 12-bit signed magnitude a valid 8-bit frame's dequantised
+    // coefficients occupy, so both routines compute in range.
+    let mut state = 0x0123_4567_89AB_CDEFu64;
+    let quant = [1u16; 64];
+    let mut worst = 0i32;
+    for _ in 0..1_000 {
+        let mut coeffs = [0i32; 64];
+        for c in &mut coeffs {
+            let raw = i32::try_from(lcg_next(&mut state) % 4096).unwrap_or(0);
+            *c = raw - 2048;
+        }
+        let deq = dequantize(&coeffs, &quant);
+        let fast = idct8_islow(&deq);
+        let mut reference = [0u8; 64];
+        idct_general(&deq, 8, &mut reference, 8, 0, 0);
+        for (i, (&f, &r)) in fast.iter().zip(reference.iter()).enumerate() {
+            let diff = (i32::from(f) - i32::from(r)).abs();
+            worst = worst.max(diff);
+            assert!(
+                diff <= 1,
+                "sample {i}: fast {f} vs reference {r} (diff {diff})"
+            );
+        }
+    }
+    // A block whose AC coefficients are all zero (the flat-DC fast path)
+    // must reconstruct exactly the direct routine's constant value.
+    let deq = dequantize(
+        &{
+            let mut c = [0i32; 64];
+            c[0] = 576;
+            c
+        },
+        &quant,
+    );
+    let fast = idct8_islow(&deq);
+    let mut reference = [0u8; 64];
+    idct_general(&deq, 8, &mut reference, 8, 0, 0);
+    assert_eq!(fast, reference);
+    // Sanity that the loop actually exercised non-trivial rounding.
+    assert!(
+        worst >= 1,
+        "random blocks never differed, tolerance not exercised"
+    );
 }
 
 // =======================================================================
