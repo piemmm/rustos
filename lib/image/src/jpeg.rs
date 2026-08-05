@@ -564,11 +564,17 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `n` (`<= 16`) raw bits, MSB first, as an unsigned value.
+    ///
+    /// Taken from the buffer in one go rather than a bit at a time: every
+    /// non-zero coefficient in a scan reads its magnitude bits here, so this
+    /// is the hottest loop in an entropy decode and a per-bit shift-and-test
+    /// would multiply its cost by the magnitude's width for no gain.
     fn read_bits(&mut self, n: u32) -> Result<u32, DecodeError> {
-        let mut value = 0u32;
-        for _ in 0..n {
-            value = (value << 1) | self.next_bit()?;
+        let (value, available) = self.peek(n);
+        if available < n {
+            return Err(DecodeError::JpegEntropyDataTruncated);
         }
+        self.consume(n)?;
         Ok(value)
     }
 
@@ -901,6 +907,57 @@ fn parse_adobe_transform(payload: &[u8]) -> Option<u8> {
 // ---------------------------------------------------------------------
 // Decoding
 // ---------------------------------------------------------------------
+
+/// Read the natural size the frame header declares, decoding nothing.
+///
+/// Walks only the markers that may precede a frame header, skipping each by
+/// its own declared length, and hands the frame header to the same parser a
+/// full decode uses — so a probe refuses 12-bit precision, an unsupported
+/// component count, a lossless or hierarchical frame, arithmetic coding and
+/// a `DNL` height exactly as a decode would, and never reads a byte of
+/// entropy-coded data.
+///
+/// The markers it walks past are exactly those a decode itself walks past
+/// before a frame header: the tables, the restart interval, the application
+/// and comment segments. Anything else there is a stream a decode would
+/// refuse, so a probe refuses it too rather than guessing its length.
+pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+    if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
+        return Err(DecodeError::JpegBadSignature);
+    }
+    let mut pos = 2usize; // past the 2-byte SOI marker
+    loop {
+        let (marker, next) = read_marker(bytes, pos)?;
+        pos = next;
+        match marker {
+            SOF0 | SOF1 | SOF2 => {
+                let (payload, _after) = read_segment(bytes, pos)?;
+                let frame = parse_sof(payload, marker == SOF2)?;
+                return Ok((frame.width, frame.height));
+            }
+            SOF3 | SOF5 | SOF6 | SOF7 | DHP | EXP => {
+                return Err(DecodeError::JpegLosslessOrHierarchicalUnsupported);
+            }
+            SOF9 | SOF10 | SOF11 | SOF13 | SOF14 | SOF15 | DAC => {
+                return Err(DecodeError::JpegArithmeticCodingUnsupported);
+            }
+            DNL => return Err(DecodeError::JpegDnlUnsupported),
+            SOS | EOI => return Err(DecodeError::JpegMissingFrameHeader),
+            DQT | DHT | DRI => {
+                let (_payload, after) = read_segment(bytes, pos)?;
+                pos = after;
+            }
+            marker if (APP0..=APP15).contains(&marker) || marker == COM => {
+                let (_payload, after) = read_segment(bytes, pos)?;
+                pos = after;
+            }
+            marker if restart_index(marker).is_some() => {
+                return Err(DecodeError::JpegRestartMarkerMismatch);
+            }
+            _ => return Err(DecodeError::JpegUnknownMarker),
+        }
+    }
+}
 
 /// Decode `bytes` at natural size.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
@@ -1610,13 +1667,12 @@ impl Decoder<'_> {
     /// straight-alpha RGBA8 image from the (already scale-`m`) sample
     /// planes.
     ///
-    /// The per-component upsampling parameters (plane, row stride, last
-    /// valid sample coordinate, sampling factors) are resolved once, each
-    /// component's sample row is resolved once per output row, and the
-    /// output is written row slice by row slice — so the inner per-pixel
-    /// loop does only a nearest-neighbour column lookup and the colour
-    /// convert, with no per-pixel division for a component sampled as
-    /// densely as the frame (luma, or every channel of an RGB image).
+    /// Upsampling is hoisted out of the per-pixel loop entirely: each
+    /// component resolves one whole output-width row of samples at a time
+    /// (see [`Upsampler`]), so the pixel loop does nothing but read three
+    /// bytes and colour-convert, and a component already sampled as densely
+    /// as the frame — luma, or every channel of an RGB image — is read
+    /// straight from its plane with no copy at all.
     fn assemble(&self, frame: &Frame) -> Result<RasterImage, DecodeError> {
         let m = self.scale.m();
         let output_width = frame.output_width(m);
@@ -1636,20 +1692,29 @@ impl Decoder<'_> {
         let row_bytes =
             usize::try_from(u64::from(output_width).saturating_mul(4)).unwrap_or(usize::MAX);
 
-        let comps: Vec<CompMap<'_>> = frame
+        let mut upsamplers: Vec<Upsampler<'_>> = frame
             .components
             .iter()
             .enumerate()
-            .map(|(i, component)| CompMap {
-                plane: self.sample_planes.get(i).map_or(&[][..], Vec::as_slice),
-                stride: usize::try_from(frame.blocks_per_line_padded(component).saturating_mul(m))
-                    .unwrap_or(usize::MAX),
-                h: component.h,
-                v: component.v,
-                x_limit: frame.component_sample_width(component, m).saturating_sub(1),
-                y_limit: frame
-                    .component_sample_height(component, m)
-                    .saturating_sub(1),
+            .map(|(i, component)| {
+                Upsampler::new(
+                    CompMap {
+                        plane: self.sample_planes.get(i).map_or(&[][..], Vec::as_slice),
+                        stride: usize::try_from(
+                            frame.blocks_per_line_padded(component).saturating_mul(m),
+                        )
+                        .unwrap_or(usize::MAX),
+                        h: component.h,
+                        v: component.v,
+                        x_limit: frame.component_sample_width(component, m).saturating_sub(1),
+                        y_limit: frame
+                            .component_sample_height(component, m)
+                            .saturating_sub(1),
+                    },
+                    output_width,
+                    h_max,
+                    v_max,
+                )
             })
             .collect();
 
@@ -1664,39 +1729,24 @@ impl Decoder<'_> {
                 continue;
             };
 
+            for upsampler in &mut upsamplers {
+                upsampler.prepare(y);
+            }
             let mut rows: [&[u8]; 3] = [&[], &[], &[]];
-            for (row, comp) in rows.iter_mut().zip(comps.iter()) {
-                let comp_y = if comp.v == v_max {
-                    y
-                } else {
-                    y.saturating_mul(comp.v).saturating_div(v_max)
-                }
-                .min(comp.y_limit);
-                let start = usize::try_from(comp_y)
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(comp.stride);
-                *row = start
-                    .checked_add(comp.stride)
-                    .and_then(|end| comp.plane.get(start..end))
-                    .unwrap_or(&[]);
+            for (row, upsampler) in rows.iter_mut().zip(upsamplers.iter()) {
+                *row = upsampler.samples();
             }
 
             let (pixels, _tail) = out_row.as_chunks_mut::<4>();
-            for (x, px) in (0u32..).zip(pixels.iter_mut()) {
-                let rgb = if comps.len() == 1 {
-                    let s = upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit);
+            for (x, px) in (0usize..).zip(pixels.iter_mut()) {
+                let sample = |row: &[u8]| row.get(x).copied().unwrap_or(0);
+                let rgb = if upsamplers.len() == 1 {
+                    let s = sample(rows[0]);
                     [s, s, s]
                 } else if use_rgb {
-                    [
-                        upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit),
-                        upsample_sample(rows[1], x, comps[1].h, h_max, comps[1].x_limit),
-                        upsample_sample(rows[2], x, comps[2].h, h_max, comps[2].x_limit),
-                    ]
+                    [sample(rows[0]), sample(rows[1]), sample(rows[2])]
                 } else {
-                    let luma = upsample_sample(rows[0], x, comps[0].h, h_max, comps[0].x_limit);
-                    let blue = upsample_sample(rows[1], x, comps[1].h, h_max, comps[1].x_limit);
-                    let red = upsample_sample(rows[2], x, comps[2].h, h_max, comps[2].x_limit);
-                    ycbcr_to_rgb(luma, blue, red)
+                    ycbcr_to_rgb(sample(rows[0]), sample(rows[1]), sample(rows[2]))
                 };
                 px[0] = rgb[0];
                 px[1] = rgb[1];
@@ -1721,20 +1771,212 @@ struct CompMap<'a> {
     y_limit: u32,
 }
 
-/// The nearest-neighbour upsampled sample of one component at output
-/// column `x`, read from its already-resolved sample `row` — the JPEG
-/// "fast" chroma reconstruction every baseline decoder is permitted to
-/// use. A component sampled as densely as the frame (`h == h_max`, so its
-/// sample width equals the output width) maps `x` straight through with no
-/// arithmetic; a subsampled one projects `x` into its own narrower plane,
-/// clamped to its last real sample so a padding column never leaks in.
-fn upsample_sample(row: &[u8], x: u32, h: u32, h_max: u32, x_limit: u32) -> u8 {
-    let comp_x = if h == h_max {
-        x
-    } else {
-        x.saturating_mul(h).saturating_div(h_max).min(x_limit)
-    };
-    row.get(comp_x as usize).copied().unwrap_or(0)
+impl CompMap<'_> {
+    /// The half-open byte range of sample row `y` within the plane.
+    fn row_range(&self, y: u32) -> (usize, usize) {
+        let start = usize::try_from(y)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(self.stride);
+        (start, start.saturating_add(self.stride))
+    }
+}
+
+/// Fixed-point one for an upsampling tap weight.
+const UPSAMPLE_ONE: u32 = 256;
+
+/// The two samples an upsampled coordinate lies between, and how far
+/// towards the second of them it falls.
+///
+/// `weight` is zero exactly when the coordinate lands on `low` itself, so a
+/// component that needs no upsampling on this axis is recognised by its
+/// taps rather than by a separate flag.
+#[derive(Copy, Clone)]
+struct Tap {
+    low: u32,
+    high: u32,
+    weight: u32,
+}
+
+/// The samples output coordinate `output` interpolates between, for a
+/// component whose sampling factor on this axis is `factor` out of the
+/// frame's `max_factor`, with `limit` its last real sample.
+///
+/// A subsampled component's samples sit at the *centres* of the output
+/// pixels they cover, not at their leading edges: output pixel `o` maps to
+/// component coordinate `(o + 0.5) * factor / max_factor - 0.5`. Getting
+/// that half-sample offset right is the whole point — projecting `o` by a
+/// bare ratio instead lands between the real samples and shifts the chroma
+/// half a pixel against the luma, which shows as coloured fringing along
+/// every hard edge. Carried as a rational in halves of a component sample
+/// so the floor and the fraction are both exact.
+///
+/// A component sampled as densely as the frame maps straight through with
+/// no interpolation, which is both exact and free.
+fn axis_tap(output: u32, factor: u32, max_factor: u32, limit: u32) -> Tap {
+    if factor == max_factor {
+        let sample = output.min(limit);
+        return Tap {
+            low: sample,
+            high: sample,
+            weight: 0,
+        };
+    }
+    let denominator = 2 * i64::from(max_factor);
+    let numerator = (2 * i64::from(output) + 1) * i64::from(factor) - i64::from(max_factor);
+    let floor = numerator.div_euclid(denominator);
+    let fraction = numerator.rem_euclid(denominator);
+    let weight = fraction * i64::from(UPSAMPLE_ONE) / denominator;
+    Tap {
+        low: clamp_sample(floor, limit),
+        high: clamp_sample(floor + 1, limit),
+        weight: u32::try_from(weight).unwrap_or(0),
+    }
+}
+
+/// A component sample coordinate held inside `0..=limit`, so a tap that
+/// reaches past an edge reads that edge's own sample rather than a padding
+/// sample or nothing at all.
+fn clamp_sample(coordinate: i64, limit: u32) -> u32 {
+    let held = coordinate.clamp(0, i64::from(limit));
+    u32::try_from(held).unwrap_or(0)
+}
+
+/// Interpolate between two samples: `low` when `weight` is zero, `high`
+/// when it is [`UPSAMPLE_ONE`], rounded to nearest in between.
+fn interpolate(low: u8, high: u8, weight: u32) -> u8 {
+    let complement = UPSAMPLE_ONE.saturating_sub(weight);
+    let sum = u32::from(low) * complement + u32::from(high) * weight + UPSAMPLE_ONE / 2;
+    u8::try_from(sum / UPSAMPLE_ONE).unwrap_or(u8::MAX)
+}
+
+/// Which buffer the row an [`Upsampler`] last prepared lives in.
+#[derive(Copy, Clone)]
+enum Prepared {
+    /// A range of the component's own sample plane, needing no upsampling
+    /// on either axis.
+    Plane(usize, usize),
+    /// The vertical interpolation of two plane rows, already output-width.
+    Blended,
+    /// The horizontal interpolation of a plane or blended row.
+    Upsampled,
+}
+
+/// One component's upsampler: it turns that component's (possibly
+/// subsampled) sample plane into one output-width row of samples at a time.
+///
+/// Chroma is reconstructed by **triangle interpolation** on both axes, the
+/// same reconstruction a quality JPEG decoder performs. Replicating each
+/// chroma sample across the output pixels it covers instead — the "fast"
+/// reconstruction the standard permits — reproduces the chroma grid as
+/// 2×2 blocks of flat colour across the whole photograph, and that is
+/// visible as blockiness long before any resampling stage is reached.
+///
+/// The interpolation is planned once, not per pixel: the horizontal taps
+/// are the same for every row, so they are computed for the whole output
+/// width when the upsampler is built, and each row then costs one pass of
+/// multiply-adds rather than a division per sample.
+struct Upsampler<'a> {
+    map: CompMap<'a>,
+    /// The frame's tallest sampling factor, which this component's own
+    /// vertical factor is resolved against.
+    v_max: u32,
+    /// Horizontal taps per output column, empty when the component is
+    /// already as wide as the output.
+    columns: Vec<Tap>,
+    /// The vertical interpolation of two plane rows, empty when the
+    /// component is already as tall as the output.
+    blended: Vec<u8>,
+    /// The finished output-width row, empty when neither axis interpolates.
+    upsampled: Vec<u8>,
+    prepared: Prepared,
+}
+
+impl<'a> Upsampler<'a> {
+    /// An upsampler for `map` feeding an `output_width`-wide image whose
+    /// frame's widest and tallest components carry `h_max` and `v_max`
+    /// samples.
+    fn new(map: CompMap<'a>, output_width: u32, h_max: u32, v_max: u32) -> Self {
+        let width = usize::try_from(output_width).unwrap_or(usize::MAX);
+        let horizontal = map.h != h_max;
+        let vertical = map.v != v_max;
+        let columns = if horizontal {
+            (0..output_width)
+                .map(|x| axis_tap(x, map.h, h_max, map.x_limit))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let blended = if vertical {
+            vec![0u8; map.stride]
+        } else {
+            Vec::new()
+        };
+        let upsampled = if horizontal {
+            vec![0u8; width]
+        } else {
+            Vec::new()
+        };
+        Self {
+            map,
+            v_max,
+            columns,
+            blended,
+            upsampled,
+            prepared: Prepared::Plane(0, 0),
+        }
+    }
+
+    /// Resolve output row `y` of this component.
+    fn prepare(&mut self, y: u32) {
+        let tap = axis_tap(y, self.map.v, self.v_max, self.map.y_limit);
+        let low = self.map.row_range(tap.low);
+        let source = if tap.weight == 0 || self.blended.is_empty() {
+            Prepared::Plane(low.0, low.1)
+        } else {
+            let high = self.map.row_range(tap.high);
+            blend_rows(self.map.plane, low, high, tap.weight, &mut self.blended);
+            Prepared::Blended
+        };
+        if self.columns.is_empty() {
+            self.prepared = source;
+            return;
+        }
+        let row: &[u8] = match source {
+            Prepared::Plane(start, end) => self.map.plane.get(start..end).unwrap_or(&[]),
+            _ => self.blended.as_slice(),
+        };
+        for (tap, slot) in self.columns.iter().zip(self.upsampled.iter_mut()) {
+            let low = row.get(tap.low as usize).copied().unwrap_or(0);
+            let high = row.get(tap.high as usize).copied().unwrap_or(0);
+            *slot = interpolate(low, high, tap.weight);
+        }
+        self.prepared = Prepared::Upsampled;
+    }
+
+    /// The output-width samples the last [`prepare`](Self::prepare)
+    /// resolved.
+    fn samples(&self) -> &[u8] {
+        match self.prepared {
+            Prepared::Plane(start, end) => self.map.plane.get(start..end).unwrap_or(&[]),
+            Prepared::Blended => self.blended.as_slice(),
+            Prepared::Upsampled => self.upsampled.as_slice(),
+        }
+    }
+}
+
+/// Write the interpolation of two plane rows into `out`.
+fn blend_rows(
+    plane: &[u8],
+    low: (usize, usize),
+    high: (usize, usize),
+    weight: u32,
+    out: &mut [u8],
+) {
+    let top = plane.get(low.0..low.1).unwrap_or(&[]);
+    let bottom = plane.get(high.0..high.1).unwrap_or(&[]);
+    for (slot, (&above, &below)) in out.iter_mut().zip(top.iter().zip(bottom.iter())) {
+        *slot = interpolate(above, below, weight);
+    }
 }
 
 /// The flat starting index, in a component's coefficient store, of the

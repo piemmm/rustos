@@ -56,15 +56,29 @@ equivalence test is checked against. The arithmetic is `wrapping_*`: for a
 valid 8-bit frame the coefficients are bounded and no wrap ever occurs, so
 the transform is exact, while a hostile file can at worst wrap an
 intermediate into the closing fixed clamp to `0..=255` — never a panic, and
-never a pixel outside range. The final assembly resolves each component's
-upsampling parameters once and walks the output row by row, so the
-per-pixel work is one nearest-neighbour sample lookup and the colour
-convert.
+never a pixel outside range.
+
+The final assembly reconstructs a subsampled component by **triangle
+interpolation** on both axes: a chroma sample sits at the centre of the
+output pixels it covers, so an output pixel blends the two chroma samples it
+lies between. Replicating each sample instead reproduces the chroma grid as
+2x2 blocks of flat colour, and projecting by a bare ratio (skipping the
+half-sample centre offset) fringes every hard edge with colour. The taps are
+planned once — they are identical for every row — so each component resolves
+one output-width row at a time and the per-pixel work is three byte reads and
+the colour convert; a component already as dense as the frame is read straight
+from its plane.
 
 ## API shape
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — identify a format from its
   leading signature.
+- `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
+  size from the header alone, decoding no pixels. For the caller that cannot
+  state its target size until it knows the source's. The reported geometry is
+  the file's own claim, so nothing is sized from it here and the caller holds
+  it to its own bounds; the header itself is validated by the same parsers a
+  full decode uses.
 - `decode(&[u8], &DecodeLimits) -> Result<RasterImage, DecodeError>` —
   decode at natural (full) size.
 - `decode_fitted(&[u8], &DecodeLimits, FitBox) -> Result<RasterImage,

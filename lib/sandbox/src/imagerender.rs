@@ -69,7 +69,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::Rect;
 use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
-use tairix_image::{DecodeLimits, FitBox, ImageFormat, RasterImage};
+use tairix_image::{DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage};
 use tairix_raster::{resample, resample_rows, Region, Rgba8Image, Surface};
 use tairix_svg::{SvgError, SvgImage};
 use tairix_wallpaper::{Placement, WallpaperFit};
@@ -675,30 +675,43 @@ impl core::fmt::Display for WallpaperRenderFailure {
     }
 }
 
-/// The one decoded (and, when the destination models a screen larger than
-/// itself, nominally resampled) wallpaper source and its placement a
-/// worker holds between `OP_WALLPAPER_PREPARE` and `OP_WALLPAPER_RELEASE`.
+/// The one decoded wallpaper source, and the resolved geometry that draws
+/// it, a worker holds between `OP_WALLPAPER_PREPARE` and
+/// `OP_WALLPAPER_RELEASE`.
 ///
 /// The pixels are held as a plain buffer rather than a [`RasterImage`]:
 /// this crate cannot construct one (its constructor is private to
 /// `tairix_image`), and a render never needs anything a `RasterImage`
 /// offers beyond the width, height, and straight-alpha bytes already kept
 /// here.
+///
+/// [`Self::source`] is already expressed in the held source's own
+/// coordinates rather than in the nominal coordinates the placement was
+/// computed in, so a band draws the file's own pixels onto the destination
+/// through exactly one resample. Resampling twice — once to a nominal size
+/// and again into the destination — costs a whole intermediate image and
+/// softens the result for nothing, since the second resample can sample the
+/// first's input directly.
 #[derive(Debug)]
 struct PreparedWallpaper {
     /// The full destination canvas width, as prepared.
     dest_w: u32,
     /// The full destination canvas height, as prepared.
     dest_h: u32,
-    /// The held source's width, in the same coordinate space as
-    /// [`Self::placement`]'s [`Placement::source`].
+    /// The held source's width.
     image_width: u32,
-    /// The held source's height (see [`Self::image_width`]).
+    /// The held source's height.
     image_height: u32,
     /// The held source's straight-alpha RGBA8 pixels, row-major.
     image_pixels: Vec<u8>,
-    /// Where and how the source is drawn onto the destination.
-    placement: Placement,
+    /// Where on the destination canvas the source is drawn.
+    destination: Rect,
+    /// The rectangle of the held source that is drawn there, in the held
+    /// source's own coordinates.
+    source: Region,
+    /// Whether [`Self::source`] repeats at 1:1 across [`Self::destination`]
+    /// rather than being scaled onto it once.
+    tiled: bool,
 }
 
 impl ImageRenderService {
@@ -714,11 +727,10 @@ impl ImageRenderService {
         }
     }
 
-    /// `OP_WALLPAPER_PREPARE`: decode the source at the modelled screen's
-    /// scale, resample it down to the nominal size that same screen's
-    /// composition needs at the destination's own size, place it, hold
-    /// both, and answer with the band size a reply can carry. Replaces any
-    /// source (and placement) an earlier prepare left held.
+    /// `OP_WALLPAPER_PREPARE`: read the source's header, decode it at the
+    /// smallest scale the composition can actually show, resolve where it is
+    /// drawn, hold both, and answer with the band size a reply can carry.
+    /// Replaces any source (and placement) an earlier prepare left held.
     fn handle_wallpaper_prepare(
         &mut self,
         r: &mut Reader<'_>,
@@ -757,33 +769,29 @@ impl ImageRenderService {
         {
             return Err(WallpaperRefusal::MalformedRequest);
         }
-        let image = decode_wallpaper_source(image_bytes, screen_w, screen_h)?;
-        let native = (image.width(), image.height());
+        let native = probe_wallpaper_source(image_bytes)?;
+        // What the composition can show decides what is decoded: a
+        // thumbnail of a 4K master is served from a one-eighth-scale decode
+        // rather than from a screen-sized one it would only throw away.
+        let request = tairix_wallpaper::decode_request(
+            native,
+            (screen_w, screen_h),
+            (dest_w, dest_h),
+            fit,
+        )
+        // Unreachable: `native` is non-zero (a probe refuses a zero-sided
+        // header) and the screen is already ruled out as zero-sided above.
+        .ok_or(WallpaperRefusal::Unrenderable)?;
+        let image = decode_wallpaper_source(image_bytes, request.0, request.1)?;
         let nominal = tairix_wallpaper::nominal_source_size(native, (screen_w, screen_h), (dest_w, dest_h))
-            // Unreachable: `native` and `(screen_w, screen_h)` are both
-            // already ruled out as zero-sided above.
-            .ok_or(WallpaperRefusal::Unrenderable)?;
-        let (image_width, image_height, image_pixels) = if nominal == native {
-            (native.0, native.1, image.into_pixels())
-        } else {
-            let source = Rgba8Image::new(native.0, native.1, image.pixels())
-                .map_err(|_| WallpaperRefusal::Unrenderable)?;
-            let shrunk = resample(&source, source.whole(), nominal.0, nominal.1)
-                .map_err(|_| WallpaperRefusal::Unrenderable)?;
-            (nominal.0, nominal.1, shrunk)
-        };
-        let placement = tairix_wallpaper::place((image_width, image_height), (dest_w, dest_h), fit)
+                // Unreachable for the same reasons as the request above.
+                .ok_or(WallpaperRefusal::Unrenderable)?;
+        let placement = tairix_wallpaper::place(nominal, (dest_w, dest_h), fit)
             // Unreachable: a nominal size is never zero-sided (clamped up
             // to one) and `(dest_w, dest_h)` is already ruled out above.
             .ok_or(WallpaperRefusal::Unrenderable)?;
-        self.wallpaper = Some(PreparedWallpaper {
-            dest_w,
-            dest_h,
-            image_width,
-            image_height,
-            image_pixels,
-            placement,
-        });
+        let prepared = hold_wallpaper(image, nominal, dest_w, dest_h, &placement)?;
+        self.wallpaper = Some(prepared);
         let mut w = Writer::new();
         w.u8(REPLY_WALLPAPER_PREPARED);
         w.u32(rows_per_band(dest_w));
@@ -848,33 +856,129 @@ fn rows_per_band(dest_w: u32) -> u32 {
     u32::try_from((budget / row_bytes).max(1)).unwrap_or(u32::MAX)
 }
 
-/// Sniff and decode `bytes` as a wallpaper source no larger than it has to
-/// be to cover a `dest_w`×`dest_h` destination, bounded by
-/// [`MAX_WALLPAPER_DECODE_PIXELS`].
+/// Read `bytes`' header and answer the natural size it declares.
 ///
-/// The destination extent is what the decode is asked for, so a source with
-/// far more detail than the destination could ever show is decoded at a
-/// reduced scale rather than in full — for a 3840×2160 master onto a
-/// 1920×1080 screen that is a quarter of the pixels, memory the 1 GiB
-/// operating-conditions floor keeps rather than spends on detail no one can
-/// see. Where even the covering scale exceeds the bounds, the largest scale
-/// that fits is decoded instead of refusing the wallpaper.
+/// The declared geometry is the file's own claim and nothing is sized from
+/// it here; it is used only to work out what to *ask* a decode for, and the
+/// decode then holds that answer to [`MAX_WALLPAPER_DECODE_PIXELS`] as
+/// before. A header that is not a supported format, or is malformed, is
+/// refused before a pixel buffer exists at all.
+fn probe_wallpaper_source(bytes: &[u8]) -> Result<(u32, u32), WallpaperRefusal> {
+    match tairix_image::probe(bytes) {
+        Ok(info) => Ok((info.width(), info.height())),
+        Err(DecodeError::UnknownFormat) => Err(WallpaperRefusal::UnsupportedFormat),
+        Err(_) => Err(WallpaperRefusal::MalformedImage),
+    }
+}
+
+/// Decode `bytes` as a wallpaper source no larger than `request_w`×
+/// `request_h`, bounded by [`MAX_WALLPAPER_DECODE_PIXELS`].
+///
+/// The request is what the composition can actually show (see
+/// [`tairix_wallpaper::decode_request`]), so a source with far more detail
+/// than that is decoded at a reduced scale rather than in full — for a
+/// 3840×2160 master onto a 1920×1080 screen that is a quarter of the
+/// pixels, memory the 1 GiB operating-conditions floor keeps rather than
+/// spends on detail no one can see, and for a gallery thumbnail it is a
+/// sixty-fourth of them. Where even the covering scale exceeds the bounds,
+/// the largest scale that fits is decoded instead of refusing the wallpaper.
 fn decode_wallpaper_source(
     bytes: &[u8],
-    dest_w: u32,
-    dest_h: u32,
+    request_w: u32,
+    request_h: u32,
 ) -> Result<RasterImage, WallpaperRefusal> {
-    if tairix_image::sniff(bytes).is_none() {
-        return Err(WallpaperRefusal::UnsupportedFormat);
-    }
     let limits = DecodeLimits::new(
         MAX_WALLPAPER_DECODE_SIDE,
         MAX_WALLPAPER_DECODE_SIDE,
         MAX_WALLPAPER_DECODE_PIXELS,
         MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES,
     );
-    tairix_image::decode_fitted(bytes, &limits, FitBox::new(dest_w, dest_h))
+    tairix_image::decode_fitted(bytes, &limits, FitBox::new(request_w, request_h))
         .map_err(|_| WallpaperRefusal::MalformedImage)
+}
+
+/// Turn a decoded image and the placement computed for its nominal size
+/// into the source a band draws from.
+///
+/// A decode answers with the whole image at one of the scales its format
+/// offers, which is rarely exactly the nominal size the placement speaks in.
+/// For every fit but one, that is simply a change of coordinates: the
+/// sampled rectangle is scaled into the decoded image's own space and drawn
+/// from there, so the file's pixels reach the destination through a single
+/// resample.
+///
+/// [`WallpaperFit::Tile`] is the exception, because it repeats the source at
+/// 1:1 rather than scaling it onto the destination: the repeat is only the
+/// right size at the nominal scale, so a decode that landed elsewhere is
+/// resampled to it once, here, before any band is drawn.
+fn hold_wallpaper(
+    image: RasterImage,
+    nominal: (u32, u32),
+    dest_w: u32,
+    dest_h: u32,
+    placement: &Placement,
+) -> Result<PreparedWallpaper, WallpaperRefusal> {
+    let decoded = (image.width(), image.height());
+    let (image_width, image_height, image_pixels) = if placement.tiled() && decoded != nominal {
+        let source = Rgba8Image::new(decoded.0, decoded.1, image.pixels())
+            .map_err(|_| WallpaperRefusal::Unrenderable)?;
+        let scaled = resample(&source, source.whole(), nominal.0, nominal.1)
+            .map_err(|_| WallpaperRefusal::Unrenderable)?;
+        (nominal.0, nominal.1, scaled)
+    } else {
+        (decoded.0, decoded.1, image.into_pixels())
+    };
+    let source = map_source(placement.source(), nominal, (image_width, image_height));
+    Ok(PreparedWallpaper {
+        dest_w,
+        dest_h,
+        image_width,
+        image_height,
+        image_pixels,
+        destination: placement.destination(),
+        source,
+        tiled: placement.tiled(),
+    })
+}
+
+/// Express a source rectangle given in `nominal` coordinates in a
+/// `held`-sized image's own coordinates.
+///
+/// The leading edge rounds down and the trailing edge rounds up, so the
+/// mapped rectangle covers everything the nominal one did rather than
+/// shaving a column off the crop; both are then held inside the image, and
+/// the result is never empty. When the two sizes agree — the ordinary case,
+/// since the decode was asked for the size the composition wanted — this is
+/// the identity.
+fn map_source(source: Rect, nominal: (u32, u32), held: (u32, u32)) -> Region {
+    let left = u32::try_from(source.left().max(0)).unwrap_or(0);
+    let top = u32::try_from(source.top().max(0)).unwrap_or(0);
+    let (x, width) = map_span(left, source.width, nominal.0, held.0);
+    let (y, height) = map_span(top, source.height, nominal.1, held.1);
+    Region {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Map one axis of a source span from a `from`-sized image onto a `to`-sized
+/// one, as an origin and an extent that lie inside `0..to`.
+fn map_span(origin: u32, extent: u32, from: u32, to: u32) -> (u32, u32) {
+    let from = u64::from(from).max(1);
+    let to64 = u64::from(to);
+    let start = u64::from(origin).saturating_mul(to64) / from;
+    let end = u64::from(origin)
+        .saturating_add(u64::from(extent))
+        .saturating_mul(to64)
+        .div_ceil(from);
+    let start = start.min(to64.saturating_sub(1));
+    let end = end.clamp(start.saturating_add(1), to64.max(1));
+    (
+        u32::try_from(start).unwrap_or(0),
+        u32::try_from(end.saturating_sub(start)).unwrap_or(1).max(1),
+    )
 }
 
 /// The wire byte for `fit`, and its inverse.
@@ -920,7 +1024,7 @@ fn render_wallpaper_band(
     }
     let mut out = vec![0u8; pixel_buffer_len(prepared.dest_w, rows)];
 
-    let dest_rect = prepared.placement.destination();
+    let dest_rect = prepared.destination;
     let dest_top = u32::try_from(dest_rect.top().max(0)).unwrap_or(0);
     let dest_bottom = dest_top.saturating_add(dest_rect.height);
     let band_start = first_row.max(dest_top);
@@ -931,7 +1035,7 @@ fn render_wallpaper_band(
         return Ok(out);
     }
 
-    if prepared.placement.tiled() {
+    if prepared.tiled {
         write_tiled_band(
             prepared, dest_rect, band_start, band_end, first_row, &mut out,
         );
@@ -1023,13 +1127,7 @@ fn write_resampled_band(
         prepared.image_pixels.as_slice(),
     )
     .map_err(|_| WallpaperRefusal::Unrenderable)?;
-    let source = prepared.placement.source();
-    let region = Region {
-        x: u32::try_from(source.left().max(0)).unwrap_or(0),
-        y: u32::try_from(source.top().max(0)).unwrap_or(0),
-        width: source.width,
-        height: source.height,
-    };
+    let region = prepared.source;
     let dest_top = u32::try_from(dest_rect.top().max(0)).unwrap_or(0);
     let dest_left = u32::try_from(dest_rect.left().max(0)).unwrap_or(0);
     let local_first = band_start - dest_top;

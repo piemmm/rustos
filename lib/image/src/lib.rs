@@ -574,6 +574,67 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
+/// What an image's own header declares, without decoding a single pixel.
+///
+/// [`probe`] answers this from the header alone, so a caller that must know
+/// the image's shape before it can decide what to *ask* a decode for — a
+/// composition that maps part of the source onto part of a destination, and
+/// so cannot state its target size until it knows the source's — can settle
+/// that question for the price of parsing a header.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ImageInfo {
+    format: ImageFormat,
+    width: u32,
+    height: u32,
+}
+
+impl ImageInfo {
+    /// The format the header identifies.
+    #[must_use]
+    pub const fn format(&self) -> ImageFormat {
+        self.format
+    }
+
+    /// The natural width the header declares, in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// The natural height the header declares, in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+/// Read `bytes`' header and answer its format and natural size, decoding no
+/// pixels and allocating no pixel buffer.
+///
+/// The geometry is the file's own declaration, so it is exactly as
+/// trustworthy as the file: a hostile image may declare any size at all.
+/// Nothing here acts on it — no buffer is sized from it and no limit is
+/// applied to it — so a caller must hold the answer to its own bounds
+/// before it does. What a probe *does* guarantee is that the header is
+/// structurally valid: a malformed one is refused here rather than later.
+///
+/// # Errors
+///
+/// [`DecodeError::UnknownFormat`] for an unrecognised signature, and
+/// otherwise whichever header refusal the format's own parser raises.
+pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
+    let format = sniff(bytes).ok_or(DecodeError::UnknownFormat)?;
+    let (width, height) = match format {
+        ImageFormat::Png => png::probe(bytes)?,
+        ImageFormat::Jpeg => jpeg::probe(bytes)?,
+    };
+    Ok(ImageInfo {
+        format,
+        width,
+        height,
+    })
+}
+
 /// A caller's target output size for [`decode_fitted`]: the largest width
 /// and height it actually intends to use.
 ///

@@ -555,6 +555,75 @@ fn three_component_four_two_zero_image_decodes_each_block() {
 }
 
 #[test]
+fn subsampled_chroma_is_interpolated_rather_than_replicated() {
+    // Two 4:2:0 MCUs side by side, each with flat luma and its own flat
+    // chroma: the chroma plane therefore holds one value across its left
+    // half and another across its right half, and the output is twice as
+    // wide as that plane.
+    //
+    // Replicating each chroma sample across the two output pixels it covers
+    // would answer exactly two blue levels with a hard step between them —
+    // the chroma grid showing through as flat blocks of colour, which is
+    // the blockiness a photograph must not show. Interpolating answers a
+    // ramp across the join instead, so the test is that the blue channel
+    // rises through at least one level that is neither block's own.
+    // Chroma either side of neutral by enough to be unmistakable, but not
+    // so far that the conversion clamps and hides the ramp.
+    const LEFT_BLUE: i32 = 108;
+    const RIGHT_BLUE: i32 = 148;
+
+    let dct = dc_table();
+    let act = ac_table();
+    let mut out = bare_marker(SOI);
+    out.extend(segment(DQT, &dqt_payload(0, false, &UNIT_QUANT)));
+    out.extend(segment(DHT, &dct.dht_payload(0, 0)));
+    out.extend(segment(DHT, &act.dht_payload(1, 0)));
+    out.extend(segment(
+        SOF0,
+        &sof_payload(8, 32, 16, &[(1, 2, 2, 0), (2, 1, 1, 0), (3, 1, 1, 0)]),
+    ));
+    out.extend(segment(
+        SOS,
+        &sos_payload(&[(1, 0, 0), (2, 0, 0), (3, 0, 0)], 0, 63, 0, 0),
+    ));
+
+    let mut w = BitWriter::new();
+    let mut luma = 0i32;
+    let mut blue = 0i32;
+    let mut red = 0i32;
+    for &chroma in &[LEFT_BLUE, RIGHT_BLUE] {
+        for _block in 0..4 {
+            let diff = dc_diff_for_pixel(&mut luma, 128);
+            w.put_dc(&dct, diff);
+            w.put_ac(&act, 0, 0);
+        }
+        let diff = dc_diff_for_pixel(&mut blue, chroma);
+        w.put_dc(&dct, diff);
+        w.put_ac(&act, 0, 0);
+        let diff = dc_diff_for_pixel(&mut red, 128);
+        w.put_dc(&dct, diff);
+        w.put_ac(&act, 0, 0);
+    }
+    out.extend(w.finish());
+    out.extend(bare_marker(EOI));
+
+    let image = decode(&out, &ROOMY).expect("decodes");
+    assert_eq!((image.width(), image.height()), (32, 16));
+    let pixels = image.pixels();
+    let blues: Vec<u8> = (0..32).map(|x| rgba(pixels, 32, x, 4)[2]).collect();
+    assert!(
+        blues.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the join rises: {blues:?}"
+    );
+    let (lowest, highest) = (blues[0], blues[31]);
+    assert!(lowest < highest, "the two halves differ: {blues:?}");
+    assert!(
+        blues.iter().any(|&value| value > lowest && value < highest),
+        "the join is a ramp, not a step: {blues:?}"
+    );
+}
+
+#[test]
 fn sixteen_by_sixteen_image_spans_several_mcus() {
     let jpeg = build_flat_mono(16, 16, &[60, 90, 150, 200], None);
     let image = decode(&jpeg, &ROOMY).expect("decodes");

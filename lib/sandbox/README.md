@@ -49,7 +49,8 @@ imports this seam; a second per-app copy is forbidden.
   pixel length before trusting the returned straight-alpha RGBA8 buffer. A
   PNG source is fitted inside the square preserving its aspect ratio and
   scaled through the crate's one shared resampler (`tairix-raster`'s
-  alpha-weighted box filter, never nearest-neighbour); an SVG source
+  separable filtered resample in premultiplied-alpha space: the exact area
+  integral when reducing, a Catmull-Rom cubic when enlarging); an SVG source
   rasterises directly through the shared vector-icon path. Either a typed
   refusal or a sandbox failure simply means the desktop session falls
   back to its own built-in glyph.

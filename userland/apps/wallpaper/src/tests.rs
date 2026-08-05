@@ -257,6 +257,56 @@ fn a_ready_thumbnail_replaces_the_pending_state() {
 }
 
 #[test]
+fn a_thumbnail_rendered_for_another_side_is_asked_for_again() {
+    // A tile painter centres the artwork it is handed rather than stretching
+    // it, so pixels rendered for a different square side would draw the
+    // picture at the wrong size. Holding a thumbnail whose side no longer
+    // matches the tile is therefore stale, not resolved.
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let request = chooser.next_thumbnail(style).expect("a pending thumbnail");
+    let index = request.index;
+    let wrong_side = Surface::new(request.side / 2, request.side / 2).expect("a test surface");
+    chooser.set_thumbnail(index, wrong_side);
+
+    let again = chooser
+        .next_thumbnail(style)
+        .expect("the wrong-sided thumbnail is asked for again");
+    assert_eq!(again.index, index);
+    assert_eq!(again.side, request.side);
+
+    let fresh = Surface::new(request.side, request.side).expect("a test surface");
+    chooser.set_thumbnail(index, fresh);
+    assert!(
+        chooser
+            .next_thumbnail(style)
+            .is_none_or(|next| next.index != index),
+        "a thumbnail at the wanted side is resolved"
+    );
+}
+
+#[test]
+fn a_refused_thumbnail_stays_refused_at_every_side() {
+    // A file the worker could not decode will not decode smaller, so a
+    // refusal costs one attempt however the tile is later sized.
+    let registry = ThemeRegistry::with_builtins();
+    let mut chooser = sample_chooser();
+    let theme = registry.active();
+
+    let mut resolved = 0;
+    while let Some(request) = chooser.next_thumbnail(style_for(theme)) {
+        chooser.mark_thumbnail_refused(request.index);
+        resolved += 1;
+        assert!(resolved <= chooser.candidates().len(), "no re-asking");
+    }
+    assert!(chooser
+        .next_thumbnail(style_with_screen(theme, (800, 600)))
+        .is_none());
+}
+
+#[test]
 fn clicking_a_tile_selects_it_and_moves_the_keyboard_there_too() {
     let registry = ThemeRegistry::with_builtins();
     let style = style_for(registry.active());

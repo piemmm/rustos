@@ -112,29 +112,67 @@ pub fn place(source: (u32, u32), screen: (u32, u32), fit: WallpaperFit) -> Optio
     Some(placement)
 }
 
-/// The source pixel box a decoder need only produce to satisfy `fit`,
-/// drawing a source of native size `source` onto `screen`.
+/// The size a decoder must produce for the **whole** image so that no part
+/// of the composition is enlarged: drawing a source whose native size is
+/// `source` as a `screen`-sized composition onto an `output`-sized surface
+/// under `fit`.
 ///
-/// Deliberately never more than [`Placement::source`]'s own size (a fit
-/// never samples more source detail than it crops in) nor more than
-/// [`Placement::destination`]'s size (drawing never needs more source
-/// pixels than the screen positions they land on), except under
-/// [`WallpaperFit::Tile`], which draws every source pixel at 1:1 and so
-/// needs the source at its full native size regardless of the screen.
-/// Returns `None` exactly when [`place`] would.
+/// A decoder does not hand back a crop; it hands back the whole image at
+/// some scale, and a caller must therefore ask for the scale at which the
+/// rectangle the placement *samples* still carries at least as many pixels
+/// as the rectangle it *fills*. For a source of nominal size `n` whose
+/// placement samples `src` into `dst`, that scale is `n * dst / src`: it is
+/// the destination extent for [`WallpaperFit::Stretch`], more than it for
+/// [`WallpaperFit::Fill`] (whose crop discards part of the width or the
+/// height, so the part that remains must be denser), less than it for
+/// [`WallpaperFit::Fit`]'s letterbox, and the nominal size itself for
+/// [`WallpaperFit::Centre`] and [`WallpaperFit::Tile`], which draw source
+/// pixels one-for-one and so are only correct at that scale.
+///
+/// Asking for exactly this is what keeps a decode honest in both
+/// directions. Asking for less would leave the resampler enlarging pixels
+/// the file could have supplied — visible softness in the desktop's own
+/// wallpaper. Asking for more (the whole screen, say, when only a thumbnail
+/// is being drawn) would decode detail nothing can show: for a 4K master
+/// bound for a gallery tile that is the difference between a one-eighth
+/// scale decode and a half-scale one, sixteen times the inverse-transform
+/// and colour-conversion work for a picture the size of a postage stamp.
+///
+/// Never more than `source` itself, since no decoder can produce detail the
+/// file does not hold. Returns `None` exactly when [`place`] would for
+/// `(source, screen)`; every dimension up to `u32::MAX` is handled, with the
+/// arithmetic carried in `u64` and a mathematically-zero result clamped up
+/// to one.
 #[must_use]
-pub fn decode_target(
+pub fn decode_request(
     source: (u32, u32),
     screen: (u32, u32),
+    output: (u32, u32),
     fit: WallpaperFit,
 ) -> Option<(u32, u32)> {
-    let placement = place(source, screen, fit)?;
+    let nominal = nominal_source_size(source, screen, output)?;
+    let placement = place(nominal, output, fit)?;
     if placement.tiled() {
-        return Some(source);
+        return Some((nominal.0.min(source.0), nominal.1.min(source.1)));
     }
     let src = placement.source();
     let dst = placement.destination();
-    Some((src.width.min(dst.width), src.height.min(dst.height)))
+    Some((
+        request_extent(nominal.0, dst.width, src.width, source.0),
+        request_extent(nominal.1, dst.height, src.height, source.1),
+    ))
+}
+
+/// The whole-image extent at which a `sampled`-wide rectangle of a
+/// `nominal`-wide image carries at least `filled` pixels: `nominal *
+/// filled / sampled`, rounded up so the sampled rectangle is never left one
+/// pixel short, and never beyond the `native` extent the file itself holds.
+fn request_extent(nominal: u32, filled: u32, sampled: u32, native: u32) -> u32 {
+    let sampled = u64::from(sampled).max(1);
+    let wanted = u64::from(nominal)
+        .saturating_mul(u64::from(filled))
+        .div_ceil(sampled);
+    clamp_dimension(wanted.min(u64::from(native)), native)
 }
 
 /// The nominal source size a render must treat `source` as having when it

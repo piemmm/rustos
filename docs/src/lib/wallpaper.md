@@ -126,9 +126,22 @@ clamped back into range, so every size up to `u32::MAX` and every extreme
 aspect ratio is handled without a panic or a division by zero, and `None` is
 returned **only** for a zero-extent source or screen.
 
-`decode_target(source, screen, fit)` gives the source pixel box a decoder need
-only produce for that placement — never more than the placement crops in, and
-never more than the destination can show — so an 8.3-megapixel master is never
+`decode_request(source, screen, output, fit)` gives the size a decoder must
+produce for the **whole** image so that no part of the composition is
+enlarged. A decoder does not hand back a crop; it hands back the whole image
+at some scale, so a caller must ask for the scale at which the rectangle the
+placement *samples* still carries at least as many pixels as the rectangle it
+*fills* — `nominal * destination / sampled`. That is the destination extent
+for `Stretch`, more than it for `Fill` (whose crop discards part of the width
+or height, so what remains must be denser), less than it for `Fit`'s
+letterbox, and the nominal size itself for `Centre` and `Tile`, which draw
+source pixels one-for-one and are only correct at that scale. Asking for
+exactly this keeps a decode honest in both directions: asking for less leaves
+the resampler enlarging pixels the file could have supplied, and asking for
+more decodes detail nothing can show — for a 4K master bound for a gallery
+tile, the difference between a one-eighth-scale decode and a half-scale one,
+sixteen times the work for a picture the size of a postage stamp. Never more
+than the source itself, since an 8.3-megapixel master is never
 decoded larger than the screen can use. `Tile` is the one exception: it draws
 every source pixel at 1:1 and so needs the native size.
 
@@ -149,7 +162,8 @@ every source pixel at 1:1 and so needs the native size.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER, default_wallpaper_path,
   is_wallpaper_file_name, catalog_entries, CatalogEntry}` — the shipped set
   and the listing model.
-- `fit::{place, decode_target, Placement}` — the placement geometry.
+- `fit::{place, decode_request, nominal_source_size, Placement}` — the
+  placement geometry.
 - `PINBOARD_SETTINGS_SUBDIR` / `PINBOARD_FILE` / `user_settings_path` — the
   path spellings, defined once here.
 

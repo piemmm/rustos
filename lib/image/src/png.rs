@@ -38,6 +38,15 @@ const TRNS: [u8; 4] = *b"tRNS";
 /// 4 bytes plus five of 1 byte.
 const IHDR_LEN: usize = 13;
 
+/// The limits a header probe holds a declared geometry to: none of its own.
+///
+/// A probe allocates nothing from the geometry it reports, so it has nothing
+/// to protect by bounding it — its caller does, and applies its own bounds
+/// to the answer. The zero-dimension refusal the shared header parser makes
+/// is still enforced, because a zero-sided image is malformed rather than
+/// merely large. The progressive-coefficient bound is irrelevant to PNG.
+const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u32::MAX, u32::MAX, u64::MAX, 0);
+
 /// The five legal PNG colour types, made a closed type so an unvalidated
 /// byte can never reach the pixel-assembly code — an illegal colour type is
 /// refused once, at parse time, rather than needing a fallback arm
@@ -224,6 +233,24 @@ fn parse_trns(data: &[u8], ihdr: &Ihdr, palette: Option<&[[u8; 3]]>) -> Result<T
         }
         ColourType::GreyAlpha | ColourType::Rgba => Err(DecodeError::TransparencyForbidden),
     }
+}
+
+/// Read the natural size an `IHDR` chunk declares, decoding nothing.
+///
+/// Validated by the same header parser a full decode uses, so a probe
+/// accepts exactly the headers a decode would: a bad signature, a first
+/// chunk that is not `IHDR`, a failed CRC, or an illegal bit depth, colour
+/// type, compression, filter or interlace method is refused here too.
+pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+    if !bytes.starts_with(&SIGNATURE) {
+        return Err(DecodeError::BadSignature);
+    }
+    let (chunk_type, payload, _after) = read_chunk(bytes, SIGNATURE.len())?;
+    if chunk_type != IHDR {
+        return Err(DecodeError::HeaderNotFirst);
+    }
+    let ihdr = parse_ihdr(payload, &PROBE_LIMITS)?;
+    Ok((ihdr.width, ihdr.height))
 }
 
 /// Decode a complete PNG file into a [`RasterImage`].

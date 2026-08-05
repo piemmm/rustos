@@ -518,6 +518,54 @@ fn solid_png(width: u32, height: u32, colour: [u8; 4]) -> Vec<u8> {
 }
 
 #[test]
+fn a_wallpaper_drawn_larger_than_its_source_is_interpolated_not_blocked() {
+    // The desktop's own complaint, end to end: a source smaller than the
+    // screen it is stretched onto must be reconstructed smoothly, not held
+    // one source pixel at a time across the destination pixels it covers.
+    // A four-step horizontal ramp stretched over sixteen columns would show
+    // four flat blocks of four under a sample-and-hold; interpolated, the
+    // ramp rises pixel by pixel.
+    let source = png_with(4, 1, |x, _y| {
+        let level = u8::try_from(x * 60).unwrap_or(u8::MAX);
+        [level, level, level, 255]
+    });
+    let mut sandbox = sandbox();
+    let pixels =
+        render_wallpaper(&mut sandbox, 16, 1, WallpaperFit::Stretch, &source).expect("renders");
+    let reds: Vec<u8> = (0..16).map(|x| rgba_at(&pixels, 16, x, 0)[0]).collect();
+    assert!(
+        reds.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the ramp rises: {reds:?}"
+    );
+    let held = reds.windows(2).filter(|pair| pair[0] == pair[1]).count();
+    assert!(
+        held < 4,
+        "source samples are not held across the destination: {reds:?}"
+    );
+}
+
+#[test]
+fn a_thumbnail_of_a_large_master_is_placed_exactly_as_the_screen_would_be() {
+    // A gallery tile models a screen exactly as large as itself, so what it
+    // shows must be the same composition the desktop shows, only smaller.
+    // This is the case the render now serves from a far smaller decode: the
+    // request is what the tile can show, not what the screen could.
+    let source = png_with(64, 32, |x, y| {
+        let level = u8::try_from((x * 4 + y) % 256).unwrap_or(0);
+        [level, 255 - level, 128, 255]
+    });
+    let mut sandbox = sandbox();
+    let tile = render_wallpaper(&mut sandbox, 8, 8, WallpaperFit::Fill, &source).expect("renders");
+    assert_eq!(tile.len(), 8 * 8 * 4);
+    // Fill covers the whole square: no pixel is left transparent.
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(rgba_at(&tile, 8, x, y)[3], 255, "tile pixel ({x}, {y})");
+        }
+    }
+}
+
+#[test]
 fn wallpaper_round_trips_for_every_fit_with_correct_placement() {
     let source = solid_png(2, 2, WALLPAPER_COLOUR);
     let transparent = [0, 0, 0, 0];

@@ -193,45 +193,143 @@ fn centre_on_equal_1x1_sizes_is_exact() {
 }
 
 #[test]
-fn decode_target_for_fill_is_the_smaller_of_crop_and_destination() {
-    // Downscale case: cropped source region is larger than the destination
-    // (the screen), so the decoder need only produce screen-sized pixels.
-    let target = decode_target((3840, 2160), (960, 540), WallpaperFit::Fill).unwrap();
-    assert_eq!(target, (960, 540));
-
-    // Upscale case: the source is smaller than the screen, so the decoder
-    // can never be asked for more than the source's own native size.
-    let target = decode_target((100, 100), (1920, 1080), WallpaperFit::Fill).unwrap();
-    let placement = place((100, 100), (1920, 1080), WallpaperFit::Fill).unwrap();
-    assert_eq!(
-        target,
-        (placement.source().width, placement.source().height)
-    );
+fn a_stretch_needs_the_destination_and_nothing_more() {
+    // Stretch samples the whole image into the whole destination, so the
+    // whole image is wanted at exactly the destination's own size.
+    let request = decode_request(
+        LANDSCAPE_SOURCE,
+        (960, 540),
+        (960, 540),
+        WallpaperFit::Stretch,
+    )
+    .unwrap();
+    assert_eq!(request, (960, 540));
 }
 
 #[test]
-fn decode_target_for_tile_is_always_the_full_native_source() {
-    let target = decode_target((64, 64), (1920, 1080), WallpaperFit::Tile).unwrap();
-    assert_eq!(target, (64, 64));
+fn a_fill_needs_more_than_the_destination_when_it_crops() {
+    // A 16:9 master onto a 4:3 screen crops three quarters of the width, so
+    // the quarter that survives must be screen-wide: the whole image is
+    // wanted a third wider than the screen. The height is uncropped and so
+    // is wanted at the screen's own height.
+    let request = decode_request(
+        LANDSCAPE_SOURCE,
+        (1024, 768),
+        (1024, 768),
+        WallpaperFit::Fill,
+    )
+    .unwrap();
+    let placement = place(LANDSCAPE_SOURCE, (1024, 768), WallpaperFit::Fill).unwrap();
+    let crop = placement.source();
+    assert_eq!(crop.height, LANDSCAPE_SOURCE.1, "the height is uncropped");
+    assert_eq!(request.1, 768);
+    assert!(request.0 > 1024, "the cropped axis wants more: {request:?}");
+    // Sampling the crop out of a decode this size leaves at least as many
+    // pixels as the destination has columns, which is what "never enlarged"
+    // means.
+    let sampled = u64::from(crop.width) * u64::from(request.0) / u64::from(LANDSCAPE_SOURCE.0);
+    assert!(sampled >= 1024, "sampled {sampled} columns for 1024");
 }
 
 #[test]
-fn decode_target_returns_none_exactly_when_place_does() {
-    assert_eq!(decode_target((0, 100), (10, 10), WallpaperFit::Fit), None);
-    assert!(decode_target((10, 10), (10, 10), WallpaperFit::Fit).is_some());
+fn a_fit_needs_only_its_letterbox() {
+    // Fit shrinks to the tighter axis, so it wants the whole image at the
+    // letterbox's own size — less than the screen on the slack axis.
+    let request = decode_request(
+        LANDSCAPE_SOURCE,
+        (1024, 768),
+        (1024, 768),
+        WallpaperFit::Fit,
+    )
+    .unwrap();
+    let placement = place(LANDSCAPE_SOURCE, (1024, 768), WallpaperFit::Fit).unwrap();
+    let letterbox = placement.destination();
+    assert_eq!(request, (letterbox.width, letterbox.height));
+    assert!(request.1 < 768, "the letterboxed axis wants less");
 }
 
 #[test]
-fn decode_target_never_exceeds_the_destination_size() {
+fn centre_and_tile_need_the_nominal_size_because_they_draw_one_for_one() {
+    // Both draw source pixels at 1:1 against the composition, so neither is
+    // correct at any scale but the nominal one.
+    for fit in [WallpaperFit::Centre, WallpaperFit::Tile] {
+        let request = decode_request(LANDSCAPE_SOURCE, (1024, 768), (1024, 768), fit).unwrap();
+        assert_eq!(request, LANDSCAPE_SOURCE, "{fit:?}");
+        // Modelled at half the linear size, the nominal source halves too.
+        let modelled = decode_request(LANDSCAPE_SOURCE, (1024, 768), (512, 384), fit).unwrap();
+        assert_eq!(modelled, (1920, 1080), "{fit:?}");
+    }
+}
+
+#[test]
+fn a_request_never_exceeds_the_source_the_file_holds() {
+    // A source smaller than the screen cannot be asked for more than it is:
+    // the resampler enlarges it, and asking a decoder for detail the file
+    // does not hold would be meaningless.
     for fit in [
         WallpaperFit::Fill,
         WallpaperFit::Fit,
         WallpaperFit::Stretch,
         WallpaperFit::Centre,
+        WallpaperFit::Tile,
     ] {
-        let target = decode_target(LANDSCAPE_SOURCE, (320, 200), fit).unwrap();
-        assert!(target.0 <= 320, "{fit:?}: {target:?}");
-        assert!(target.1 <= 200, "{fit:?}: {target:?}");
+        let request = decode_request((100, 80), LANDSCAPE_SCREEN, LANDSCAPE_SCREEN, fit).unwrap();
+        assert!(request.0 <= 100 && request.1 <= 80, "{fit:?}: {request:?}");
+    }
+}
+
+#[test]
+fn a_thumbnail_asks_for_far_less_than_the_screen_it_models() {
+    // The whole point of modelling a screen at a smaller output: a tile the
+    // size of a postage stamp must not drag a screen-sized decode behind it.
+    let request = decode_request(
+        LANDSCAPE_SOURCE,
+        LANDSCAPE_SCREEN,
+        (70, 70),
+        WallpaperFit::Fill,
+    )
+    .unwrap();
+    assert!(
+        request.0 < 480 && request.1 < 270,
+        "a tile wants a one-eighth-scale decode at most: {request:?}"
+    );
+}
+
+#[test]
+fn decode_request_returns_none_exactly_when_place_does() {
+    assert_eq!(
+        decode_request((0, 100), (10, 10), (10, 10), WallpaperFit::Fit),
+        None
+    );
+    assert_eq!(
+        decode_request((10, 10), (0, 10), (10, 10), WallpaperFit::Fit),
+        None
+    );
+    assert!(decode_request((10, 10), (10, 10), (10, 10), WallpaperFit::Fit).is_some());
+}
+
+#[test]
+fn a_request_is_total_at_the_extremes() {
+    for fit in [
+        WallpaperFit::Fill,
+        WallpaperFit::Fit,
+        WallpaperFit::Stretch,
+        WallpaperFit::Centre,
+        WallpaperFit::Tile,
+    ] {
+        for source in [(u32::MAX, 1), (1, u32::MAX), (u32::MAX, u32::MAX), (1, 1)] {
+            for screen in [(u32::MAX, u32::MAX), (1, 1), LANDSCAPE_SCREEN] {
+                let request = decode_request(source, screen, screen, fit).unwrap();
+                assert!(
+                    request.0 >= 1 && request.1 >= 1,
+                    "{fit:?} {source:?} {screen:?}"
+                );
+                assert!(
+                    request.0 <= source.0 && request.1 <= source.1,
+                    "{fit:?} {source:?} {screen:?}: {request:?}"
+                );
+            }
+        }
     }
 }
 

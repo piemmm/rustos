@@ -71,9 +71,23 @@ transform's arithmetic is `wrapping_*`: a valid 8-bit frame's coefficients
 are bounded so no wrap ever occurs and the result is exact, while a hostile
 file can at worst wrap an intermediate into the closing fixed clamp to
 `0..=255` — never a panic under the workspace's overflow checks, and never a
-pixel outside range. Final assembly resolves each component's upsampling
-parameters once and walks the output row by row, so per output pixel it does
-only a nearest-neighbour sample lookup and the colour convert.
+pixel outside range.
+
+Final assembly reconstructs a subsampled component by **triangle
+interpolation** on both axes, the reconstruction a quality decoder performs:
+a chroma sample sits at the centre of the output pixels it covers, so an
+output pixel is the weighted blend of the two chroma samples it lies between.
+Replicating each chroma sample across those pixels instead — the "fast"
+reconstruction the standard permits — reproduces the chroma grid as 2x2
+blocks of flat colour across the whole photograph, blockiness that appears
+long before any resampling stage is reached, and a bare-ratio projection that
+skips the half-sample centre offset shifts chroma against luma and fringes
+every hard edge with colour. The interpolation is planned once rather than
+per pixel: the horizontal taps are identical for every row, so each component
+resolves one whole output-width row at a time and the per-pixel loop does
+nothing but read three bytes and colour-convert. A component already sampled
+as densely as the frame — luma, or every channel of an RGB image — is read
+straight from its plane with no copy and no arithmetic at all.
 
 Everything else a stream can declare is a typed, fail-closed refusal
 rather than a best effort: arithmetic coding, lossless and hierarchical
@@ -170,6 +184,17 @@ never the calling service.
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — format identification from a
   byte signature.
+- `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
+  size from the header alone, decoding no pixels and allocating no pixel
+  buffer. It is for the caller that cannot state its target size until it
+  knows the source's: a composition mapping part of an image onto part of a
+  destination settles that question for the price of parsing a header instead
+  of decoding at a guessed scale. The geometry it reports is the file's own
+  claim, so it is exactly as trustworthy as the file — nothing is sized from
+  it here and no limit is applied to it, and a caller holds it to its own
+  bounds before acting on it. What a probe does guarantee is that the header
+  is structurally valid: it reuses the same header parsers a full decode uses,
+  so it refuses precisely the headers a decode would.
 - `decode(&[u8], &DecodeLimits) -> Result<RasterImage, DecodeError>` —
   decode at natural (full) size, dispatching on `sniff`.
 - `decode_fitted(&[u8], &DecodeLimits, FitBox) -> Result<RasterImage,

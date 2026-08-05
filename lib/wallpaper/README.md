@@ -10,7 +10,8 @@ and the chooser's preview both draw through. It defines the validated
 settings model (`PinboardSettings`), the line grammar and its closed key
 registry (`SettingsKey`), the bounded fail-closed parser, and the canonical
 render — plus the shipped wallpaper identity (`WALLPAPER_STORE`,
-`DEFAULT_WALLPAPER`) and the placement geometry (`place`, `decode_target`).
+`DEFAULT_WALLPAPER`) and the placement geometry (`place`,
+`decode_request`).
 
 The settings document is data on the volume, never a compiled-in table: a
 per-user store at `/Users/<u>/Settings/Pinboard/pinboard.conf`
@@ -61,7 +62,7 @@ listing a chooser may offer: it performs no I/O of its own, filtering to
 the decodable extensions, rejecting illegal names, skipping oversized
 files, and capping and sorting the result.
 
-The fit geometry (`place`, `decode_target`) is pure arithmetic with no
+The fit geometry (`place`, `decode_request`) is pure arithmetic with no
 rendering of its own: given a source image size, a screen size, and a
 `WallpaperFit`, it answers the destination rectangle, the sampled source
 rectangle, and whether the source tiles — every dimension checked/widened

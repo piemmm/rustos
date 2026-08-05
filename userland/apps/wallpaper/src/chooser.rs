@@ -346,6 +346,13 @@ impl Chooser {
 
     /// The first gallery thumbnail still to be rendered, or `None` when every
     /// candidate is resolved (or the window is too small to show a tile).
+    ///
+    /// A thumbnail already held at a different square side is stale and is
+    /// asked for again: the tile's side follows the desktop's UI scale, and a
+    /// tile painter centres the artwork it is given rather than stretching
+    /// it, so keeping pixels rendered for the old scale would draw the
+    /// picture at the wrong size. A refusal stays a refusal at every side,
+    /// since a file the worker could not decode will not decode smaller.
     #[must_use]
     pub fn next_thumbnail(&self, style: Style<'_>) -> Option<ThumbnailRequest> {
         let (width, height) = self.layout(style).tile_size();
@@ -364,6 +371,15 @@ impl Chooser {
                         path: path.clone(),
                         side,
                     }),
+                    (Thumbnail::Ready(held), WallpaperChoice::Image(path))
+                        if held.width() != side =>
+                    {
+                        Some(ThumbnailRequest {
+                            index,
+                            path: path.clone(),
+                            side,
+                        })
+                    }
                     _ => None,
                 },
             )

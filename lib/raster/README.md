@@ -55,6 +55,13 @@ This crate owns:
   corner area, not the whole rectangle. The window manager's corner mask and
   `Surface::fill_round_rect`'s Reactive Alloy control plates both round
   through this one function, so the two never drift apart (`AGENTS.md` §2.2).
+- `resample` / `resample_rows` — the single image resampler the whole desktop
+  scales through: the icon pipeline fitting a bundle's artwork into a slot and
+  the wallpaper pipeline placing a photograph onto a screen are the same
+  arithmetic, so there is one implementation rather than one per consumer
+  (`AGENTS.md` §2.2). Separable, integer, and filtered in **premultiplied**
+  space so a transparent neighbour can never bleed its colour into an opaque
+  pixel. See "The resampler" below.
 - `Surface`'s `tairix_reclaim::CachedBytes` impl — the one measurement of a
   surface's retained heap size (its pixel buffer) and the one wipe that
   clears it to fully transparent black before release. The window manager's
@@ -99,6 +106,57 @@ a coverage bitmap through it — so such a consumer also pays one bounds check
 and one index computation per row instead of per pixel. It returns the column
 the span really starts at, so a caller pairing it with its own mask advances
 that mask by whatever leading columns the clip withheld.
+
+## The resampler
+
+`resample(src, region, w, h)` scales a rectangle of a straight-alpha RGBA8
+image to a new size; `resample_rows` produces any contiguous run of
+destination rows of that same result, so a caller that cannot hold (or cannot
+transport) a whole destination at once builds it a band at a time. Bands are
+computed from the source and the filter plan alone, never from a previous
+band, so assembling them yields byte-for-byte what one call would have
+produced.
+
+Resampling is reconstruction followed by prefiltering, and which of the two
+dominates is decided by the ratio between the extents — so the kernel is
+chosen per axis by the direction that axis is going:
+
+- **Reducing** — a destination sample is the exact area integral of the
+  source over the footprint it covers, with *fractional* weights on the two
+  partly-covered end samples. Aliasing-free at every ratio. The fractional
+  ends are what matter: a filter averaging whole samples takes one source
+  sample for some destination pixels and two for the next at a ratio of 1.4,
+  and that alternation is visible as hard-edged, blocky texture across a
+  photograph.
+- **Enlarging (or 1:1)** — the destination samples the Catmull-Rom cubic
+  through the source samples. Holding each source sample across the
+  destination pixels it lands on — a sample-and-hold — reproduces the source
+  grid as visible blocks, exactly the artefact a wallpaper drawn larger than
+  its decoded source must not show. The cubic is interpolating, so at 1:1 its
+  weights collapse to a single unit tap and the resample is an exact copy:
+  no needless blur on the ratio callers hit most.
+
+Weights are fixed-point and **normalised to sum to exactly one** per
+destination sample, which keeps a flat region exactly flat — a rounding
+residual spread across a large image would show as banding — and makes two
+calls that should agree unable to drift the way floating point would.
+
+Colour is filtered premultiplied and divided back out at the end, the only
+correct way to filter an image with an alpha channel: a fully transparent
+source pixel contributes its transparency but not its (meaningless) colour,
+so artwork with transparent padding cannot drag that padding's colour into
+its visible edge. The division rounds to nearest and happens *before* any
+clipping, so the cubic's overshoot at an edge lands on the alpha where it
+belongs rather than shifting the colour.
+
+Cost is proportional to the source plus the destination, not to the ratio:
+each axis is a small run of taps per destination sample, and the horizontal
+pass is shared between the destination rows that read it. Scratch memory is a
+fixed handful of destination-width rows however extreme the ratio, so
+reducing a 4K photograph to a thumbnail costs no more working memory than
+reducing it to a screen. Every entry point is total — degenerate geometry, a
+region outside its image, a mis-sized output buffer, and a band past the
+destination are typed refusals, never a panic or a partial write.
 
 ## The clip window
 

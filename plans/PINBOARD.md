@@ -158,14 +158,34 @@ Wallpaper decoding joins the desktop's existing sandboxed image service
 (`lib/sandbox`'s `imagerender`), rather than standing up a second worker
 role: one capability-empty worker, one op space, one audit surface.
 
-- `OP_WALLPAPER_PREPARE { dest_w, dest_h, fit, bytes }` — sniff, decode at
-  the smallest scale that covers the destination within
-  `MAX_WALLPAPER_DECODE_PIXELS`, compute the placement, hold the decoded
-  source, and answer with the number of destination rows one reply frame can
-  carry.
+- `OP_WALLPAPER_PREPARE { screen_w, screen_h, dest_w, dest_h, fit, bytes }` —
+  read the header (`tairix_image::probe`), work out what the composition can
+  actually show (`tairix_wallpaper::decode_request`), decode at the smallest
+  scale that covers *that* within `MAX_WALLPAPER_DECODE_PIXELS`, resolve the
+  placement, hold the source with its sampled rectangle already expressed in
+  the decoded image's own coordinates, and answer with the number of
+  destination rows one reply frame can carry.
 - `OP_WALLPAPER_BAND { first_row, rows }` — resample and place exactly those
   destination rows, and answer with their straight-alpha RGBA8 bytes.
 - `OP_WALLPAPER_RELEASE` — drop the held source.
+
+**The file's pixels reach the screen through exactly one resample.** The
+placement is computed in nominal screen-model coordinates but the sampled
+rectangle is mapped into the held image's own coordinates at prepare time, so
+a band resamples the decoded source straight onto the destination. Resampling
+twice — once to a nominal size and again into the destination — would cost a
+whole intermediate image and soften the result for nothing, since the second
+resample can sample the first's input directly. `Tile` is the one exception:
+it repeats the source at 1:1 rather than scaling it, so the repeat is only the
+right size at the nominal scale, and a decode that landed elsewhere is scaled
+to it once at prepare time.
+
+**What is decoded is what can be shown.** `decode_request` asks for the scale
+at which the sampled rectangle still carries as many pixels as the rectangle
+it fills — no more and no less. Asking for less would leave the resampler
+enlarging pixels the file could have supplied; asking for the whole screen
+when only a gallery thumbnail is being drawn would decode sixteen times the
+blocks for a picture the size of a postage stamp.
 
 Banding exists because a screenful of RGBA exceeds the sandbox's fixed
 8 MiB frame bound at anything above 1080p. The bound is a defence and is
@@ -343,8 +363,14 @@ nothing in the settings model needs to change.
   landscape, portrait, square, and degenerate sizes. An integration test
   decodes every shipped master, so a master that the OS could not draw fails
   the build rather than the desktop.
-- **`lib/raster`** — resample identity, exact-half downscale, upscale, and
-  single-pixel and degenerate sources.
+- **`lib/raster`** — a 1:1 resample is an exact copy; a reduction weights a
+  partly-covered source sample by its real coverage; an enlargement rises
+  strictly rather than holding a source sample across destination pixels; an
+  enlarged flat region stays exactly flat; a crop enlarges from its own edge
+  samples alone; bands reassemble byte-for-byte into the whole image at every
+  band height; transparent padding never bleeds its colour and an enlarged
+  alpha edge keeps its colour across the ramp; single-pixel, extreme-aspect,
+  and degenerate sources; and every fail-closed refusal.
 - **`lib/sandbox`** — the three ops against a loopback worker: banding
   arithmetic, out-of-range bands, a band before a prepare, an oversize
   destination, and a malformed image.

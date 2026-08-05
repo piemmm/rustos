@@ -142,8 +142,10 @@ sandboxes a parse imports it:
   so a small request cannot smuggle a huge source image past a small
   reply), is fitted inside the square preserving its aspect ratio, and is
   scaled through the crate's one shared resampler
-  (`tairix_raster::resample`, an alpha-weighted box filter — never
-  nearest-neighbour, so a downscale blends instead of aliasing); an SVG
+  (`tairix_raster::resample`: a separable filtered resample in
+  premultiplied-alpha space — the exact area integral when reducing, so a
+  downscale blends instead of aliasing, and a Catmull-Rom cubic when
+  enlarging, so an upscale is never a sample-and-hold); an SVG
   source rasterises directly through the shared vector-icon polygon-fill
   path. Either a typed refusal (unsupported format, a decode failure, or
   an unrenderable result) or a sandbox failure simply means the desktop
