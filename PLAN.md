@@ -3222,10 +3222,9 @@ on death) — and **as a live panel** (T11): the monitor hosts its own screen
 composition (`userland/gui/switchboard::view`, assembled from the shared
 controls) as a real window with genuinely working actions, implementing
 `plans/desktop1.png`'s Open Panel. The
-composition gained the shared `Meter` control (rail-tinted rounded track, an
-honest `Unmeasured` state that never fabricates a zero) and its history
-counterpart `Chart`, the always-visible header resource band it tiles,
-`select_section`
+composition gained the shared `MetricTile` (its `Track` instrument is the
+rail-tinted rounded track, and its honest `Unmeasured` state never fabricates
+a zero) and its history counterpart `Chart`, `select_section`
 (the host chooses the opening section) and `set_model` (an in-place data
 refresh preserving section, per-section scroll, focus and any in-flight
 drag; row-indexed selection/hover/armed presses are dropped so a press can
@@ -3963,7 +3962,7 @@ per-app recipes (§2.2).
   application-specific composition, so it lives in the application
   (`userland/gui/switchboard::view`, `plans/NEW-SWITCHBOARD.md` S1);
   `lib/controls` holds only controls any surface may reuse. The screen
-  assembles Switchboard (spec §17) purely from the shared controls — the
+  assembles Switchboard purely from the shared controls — the
   `WindowFrame`/`TitleBar`/`ResizeGrabber`/`ScrollCorner` furniture, a `Tabs`
   strip, `ListRow`/`Card`/`Panel`/`Button` content, an `ActionRail` beside the
   list, and one vertical `ScrollBar` over the Stage A/B scroll engine —
@@ -3974,26 +3973,26 @@ per-app recipes (§2.2).
   denied action fails closed and renders `DeniedByAuthority`, a force action
   carries the destructive-confirmation posture, and the mouse wheel, thumb,
   end buttons, track paging, and keyboard all scroll the active section (offsets
-  are per-section, re-clamped on section switch/resize). An always-visible
-  header band tiles one `Meter` per resource above the tab strip and takes no
-  input; a host opens the panel on a chosen section (`select_section`) and
+  are per-section, re-clamped on section switch/resize). A host opens the panel
+  on a chosen section (`select_section`) and
   refreshes live data in place (`set_model`, preserving section, per-section
   scroll, focus and any in-flight drag). Its own host tests take the controls'
   shared heavy-contrast fixture through the `tairix-controls` `test-support`
   feature, so an application's render tests exercise the same two contrast
   axes as the controls with no second copy of the fixture. The Reactive Alloy
   control set is now complete (Stages A–F).
-- **Instruments: `Meter` and `Chart` — DONE.** `lib/controls::meter` draws one
-  resource reading (label, reading text, rounded track tinted by the
-  resource's semantic rail) over the shared paint core and the shared
-  rail-colour lookup `Card` uses. `MeterValue::Unmeasured` makes an
+- **Instruments: the metric track and `Chart` — DONE.** There is exactly one
+  reading-with-a-track: `lib/controls::metric`'s `MetricTile` under
+  `MetricInstrument::Track`, which draws the rounded track tinted by the
+  resource's semantic rail over the shared paint core and the shared
+  rail-colour lookup `Card` uses. `state::MeterValue::Unmeasured` makes an
   unmeasurable resource unrepresentable as a real zero, so a denied or absent
   query renders a quiet groove rather than a fabricated `0%`.
   `lib/controls::chart` is its history counterpart (spec §11.35): a bounded
   oldest-to-newest permille series plotted as a line with a quiet filled body,
   mapping its readings across the *whole* box it is given rather than an
   instrument groove, and drawn through the one shared stroke path in
-  `lib/raster`. Both read-only: no input, no action. 31 host tests.
+  `lib/raster`. Both read-only: no input, no action.
 
 ### Stage 7 follow-up — the desktop pinboard (`plans/PINBOARD.md`)
 

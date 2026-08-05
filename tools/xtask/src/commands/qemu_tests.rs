@@ -7787,17 +7787,21 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // its app's own constants — the same values the dump assertion
     // measures.
     let files_origin = cascade_origin_for(0);
-    // The files-window "focus" clicks below target the breadcrumb path bar,
-    // not the item area. At the root the path bar's only crumb is the inert
-    // current-directory crumb, and the click column sits off it, so the click
-    // focuses the window (delivering `Focus` + `Pressed` app-ward) without
-    // selecting a listing row or navigating. The files app's frame therefore
-    // never changes — its single startup present is the "sole present" the
-    // window-reply gate downstream counts on, independent of how many entries
-    // the root lists. (A click on a row would select it and repaint — correct
-    // app behaviour, but it would add presents the fixed count gate must not
-    // see.) A few pixels below the toolbar strip lands squarely in the path
-    // bar row (its height is far larger than this inset for the UI font).
+    // The files-window "focus" clicks below aim at a column and row that hold
+    // nothing actionable, so the click focuses the window (delivering `Focus` +
+    // `Pressed` app-ward) without selecting a listing row or navigating. The
+    // files app's frame therefore never changes — its single startup present is
+    // the "sole present" the window-reply gate downstream counts on,
+    // independent of how many entries the root lists. (A click on a row would
+    // select it and repaint — correct app behaviour, but it would add presents
+    // the fixed count gate must not see.)
+    //
+    // The offset is measured from `cascade_origin_for`, which is the window's
+    // *outer* top-left, and the compositor insets the app's content below the
+    // border and title bar. The point therefore falls higher in the client than
+    // this row offset names. Correcting the whole script to a shared
+    // client-origin definition moves every click point and dump region at once
+    // and is staged in `plans/APPWIN.md` AW3.
     let path_bar_y =
         tairix_browse::render::toolbar_height(shell.session().active_theme()).saturating_add(4);
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.

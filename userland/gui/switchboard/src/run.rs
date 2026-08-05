@@ -509,6 +509,49 @@ mod program {
                 DegradedField::MemoryPressure => {
                     "notice: the memory-pressure gauge is unavailable; memory pressure is degraded"
                 }
+                DegradedField::Identity => {
+                    "notice: the system identity is unavailable; the host name and version are degraded"
+                }
+                DegradedField::Uptime => "notice: uptime is unavailable; it is not shown",
+                DegradedField::LoadAverage => {
+                    "notice: the load average is unavailable; it is not shown"
+                }
+                DegradedField::CpuInfo => {
+                    "notice: the CPU inventory is unavailable; core models and frequencies are degraded"
+                }
+                DegradedField::CpuLoad => {
+                    "notice: per-CPU load is unavailable; only the overall CPU figure is shown"
+                }
+                DegradedField::KernelMemory => {
+                    "notice: kernel memory accounting is unavailable; it is not shown"
+                }
+                DegradedField::MemoryTotal => {
+                    "notice: the installed-memory total is unavailable; memory figures are degraded"
+                }
+                DegradedField::Mounts => {
+                    "notice: the mount table is unavailable; volume capacities are not shown"
+                }
+                DegradedField::VolumeHealth => {
+                    "notice: volume I/O health is unavailable; a failing disk cannot be reported"
+                }
+                DegradedField::NetInterfaceFacts => {
+                    "notice: the network interface inventory is unavailable; interfaces are not named"
+                }
+                DegradedField::NetInterfaceState => {
+                    "notice: network interface state is unavailable; link and address state are not shown"
+                }
+                DegradedField::NetInterfaceRates => {
+                    "notice: network throughput is unavailable; rates are not shown"
+                }
+                DegradedField::Seats => {
+                    "notice: the seat list is unavailable; seats are not shown"
+                }
+                DegradedField::ResourceLimits => {
+                    "notice: resource limits are unavailable; they are not shown"
+                }
+                DegradedField::CrashRecords => {
+                    "notice: crash records are unavailable; recent faults are not shown"
+                }
             };
             let _ = writeln!(Stderr, "switchboard: {reason}");
         }

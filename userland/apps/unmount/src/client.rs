@@ -8,7 +8,7 @@ use alloc::string::String;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::sysinfo::{MountAvailability, MOUNT_VOLUME_ID_LEN};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_mount, Transport};
+use tairix_procinfo::{for_each_mount, Transport, WalkStep};
 
 use crate::command::Command;
 use crate::error::UnmountError;
@@ -87,23 +87,22 @@ pub fn run(
 /// backing source, mount-point path, or `/Storage/<name>` catalog
 /// location matches. Listing order is the service's stable mount order,
 /// and catalog names are unique in the mount table, so the first match
-/// is the only match for a detachable volume.
+/// is the only match for a detachable volume and the walk ends there
+/// rather than paging the rest of the table.
 fn resolve(name: &str, transport: &dyn Transport) -> Result<Option<Resolved>, UnmountError> {
     let catalog_path = format!("/Storage/{name}");
     let mut found: Option<Resolved> = None;
     for_each_mount(transport, |record| {
-        if found.is_some() {
-            return Ok(());
-        }
         let source = String::from_utf8_lossy(record.source_bytes());
         let target = String::from_utf8_lossy(record.target_bytes());
-        if source == name || target == name || target == catalog_path {
-            found = Some(Resolved {
-                volume_id: record.volume_id(),
-                unavailable: record.availability() != MountAvailability::Available,
-            });
+        if source != name && target != name && target != catalog_path {
+            return Ok(WalkStep::Continue);
         }
-        Ok(())
+        found = Some(Resolved {
+            volume_id: record.volume_id(),
+            unavailable: record.availability() != MountAvailability::Available,
+        });
+        Ok(WalkStep::Stop)
     })
     .map_err(UnmountError::from)?;
     Ok(found)

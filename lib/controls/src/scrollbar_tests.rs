@@ -4,8 +4,8 @@
 //! math, the preserved drag anchor and mid-drag re-clamp, end-button line steps,
 //! track paging, press-and-hold repeat, orientation-aware keys, the wheel, the
 //! §13 denied/disabled fail-closed treatment, dark/light and high-contrast
-//! rendering, the focus ring, and the fail-closed degenerate/non-scrollable
-//! cases.
+//! rendering, the focus ring, the render-equivalence repaint gate, and the
+//! fail-closed degenerate/non-scrollable cases.
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -425,5 +425,59 @@ fn the_drag_anchor_alone_never_changes_a_scrollbar_render() {
         render(&near, vbounds(), &theme).pixels(),
         render(&far, vbounds(), &theme).pixels(),
         "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn a_move_within_one_part_leaves_a_scrollbar_equal() {
+    let theme = theme();
+    // A host feeds every pointer sample to every control it holds, so a bar
+    // must not report a change for a sample that lands on a new coordinate
+    // without changing which part is beneath it — off the bar entirely, or
+    // further along the same region. Reporting one would repaint an unchanged
+    // surface on every mouse move.
+    let settle = |x: i32, y: i32| {
+        let mut bar = vbar();
+        bar.on_pointer(&moved(x, y), vbounds(), Scale::ONE, &theme);
+        bar
+    };
+    for (from, to, region) in [
+        ((200, 400), (205, 401), "clear of the bar"),
+        ((2, 2), (3, 4), "the decrement button"),
+        ((2, 150), (3, 170), "the track after the thumb"),
+    ] {
+        let before = settle(from.0, from.1);
+        let after = settle(to.0, to.1);
+        assert_eq!(
+            before, after,
+            "two samples within {region} draw the same pixels"
+        );
+        assert_eq!(
+            render(&before, vbounds(), &theme).pixels(),
+            render(&after, vbounds(), &theme).pixels(),
+            "…and must therefore paint identically within {region}"
+        );
+    }
+}
+
+#[test]
+fn the_part_under_the_pointer_is_a_drawn_property() {
+    let theme = theme();
+    // The end button beneath the pointer brightens, so *which* part the
+    // pointer sits over does compare — excluding it would let the gate pass a
+    // bar that paints a lit chevron off as one that does not.
+    let mut on_end = vbar();
+    on_end.on_pointer(&moved(2, 2), vbounds(), Scale::ONE, &theme);
+    let mut on_track = vbar();
+    on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme);
+
+    assert_ne!(
+        on_end, on_track,
+        "a lit decrement chevron is a different composition"
+    );
+    assert_ne!(
+        render(&on_end, vbounds(), &theme).pixels(),
+        render(&on_track, vbounds(), &theme).pixels(),
+        "…and the two must therefore paint differently"
     );
 }

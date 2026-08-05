@@ -147,18 +147,24 @@ impl BarLayout {
 /// input rather than looking merely inert (spec §13).
 ///
 /// Equal bars draw the same pixels, so a host may use `==` as its repaint
-/// gate. Unusually for this crate most of the interaction state is *visible*
-/// here and so still compares: the pointer coordinate lights the end control
-/// beneath it, and `dragging`/`held` brighten the thumb and the held end.
-/// Only the drag anchor is excluded — it is the grab offset within the thumb,
-/// read solely to keep the thumb under the pointer, and no render path reads
-/// it.
+/// gate. The visible interaction state compares: the hovered part lights its
+/// end chevron, and `dragging`/`held` brighten the thumb and the held end. The
+/// raw pointer coordinate and the drag anchor do not — both are hit-testing
+/// bookkeeping no render path reads, so a sample that lands on a new
+/// coordinate without changing which part is under it draws the same pixels
+/// and must not force the host to repaint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ScrollBar {
     orientation: ScrollOrientation,
     model: ScrollModel,
     state: ControlState,
-    pointer: Point,
+    /// The part the pointer currently sits over, resolved when the pointer
+    /// moves — drawn (an end button brightens under the pointer), unlike the
+    /// raw coordinate below.
+    hover: ScrollPart,
+    /// The last pointer position, classified on the next press or re-mapped on
+    /// the next drag move — hit-testing input, never a drawn property.
+    pointer: RenderInvariant<Point>,
     dragging: bool,
     /// How far along the thumb the drag was grabbed, so the thumb keeps its
     /// offset under the pointer instead of jumping its start to it.
@@ -174,7 +180,8 @@ impl ScrollBar {
             orientation,
             model,
             state: ControlState::idle(),
-            pointer: Point::ORIGIN,
+            hover: ScrollPart::Outside,
+            pointer: RenderInvariant::new(Point::ORIGIN),
             dragging: false,
             anchor: RenderInvariant::new(0),
             held: None,
@@ -286,18 +293,19 @@ impl ScrollBar {
         theme: &Theme,
     ) -> Option<ScrollAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
         let layout = self.layout(bounds, scale, theme)?;
         match event {
             InputEvent::PointerMoved { .. } => {
+                self.hover = layout.part_at(*self.pointer);
                 if self.dragging {
                     let offset = layout
                         .geometry
-                        .offset_for_drag(layout.along(self.pointer), *self.anchor);
+                        .offset_for_drag(layout.along(*self.pointer), *self.anchor);
                     self.apply(|m| m.scroll_to(offset))
                 } else {
-                    self.state.pointer = if layout.bar.contains(self.pointer) {
+                    self.state.pointer = if layout.bar.contains(*self.pointer) {
                         PointerState::Hover
                     } else {
                         PointerState::None
@@ -311,7 +319,7 @@ impl ScrollBar {
                 if !self.state.is_actionable() {
                     return None;
                 }
-                match layout.part_at(self.pointer) {
+                match layout.part_at(*self.pointer) {
                     ScrollPart::Decrement => {
                         self.held = Some(ScrollPart::Decrement);
                         self.state.pointer = PointerState::Pressed;
@@ -336,7 +344,7 @@ impl ScrollBar {
                         if layout.geometry.draggable() {
                             self.dragging = true;
                             let thumb_start = to_i32(layout.geometry.thumb().start);
-                            *self.anchor = layout.along(self.pointer) - thumb_start;
+                            *self.anchor = layout.along(*self.pointer) - thumb_start;
                             self.state.pointer = PointerState::Pressed;
                         }
                         None
@@ -349,7 +357,7 @@ impl ScrollBar {
             } => {
                 self.dragging = false;
                 self.held = None;
-                self.state.pointer = if layout.bar.contains(self.pointer) {
+                self.state.pointer = if layout.bar.contains(*self.pointer) {
                     PointerState::Hover
                 } else {
                     PointerState::None
@@ -516,11 +524,9 @@ impl ScrollBar {
             ScrollOrientation::Horizontal => (ChevronDir::Left, ChevronDir::Right),
         };
         let dec_hot = self.state.is_actionable()
-            && (self.held == Some(ScrollPart::Decrement)
-                || layout.decrement.contains(self.pointer));
+            && (self.held == Some(ScrollPart::Decrement) || self.hover == ScrollPart::Decrement);
         let inc_hot = self.state.is_actionable()
-            && (self.held == Some(ScrollPart::Increment)
-                || layout.increment.contains(self.pointer));
+            && (self.held == Some(ScrollPart::Increment) || self.hover == ScrollPart::Increment);
         paint_button(
             surface,
             layout.decrement,

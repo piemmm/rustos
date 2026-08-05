@@ -661,7 +661,7 @@ impl TaskbarInput {
     fn apply_system_action(action: SystemAction) -> TaskbarResponse {
         match action {
             SystemAction::About => TaskbarResponse::OpenSwitchboard {
-                section: CommandSection::Overview,
+                section: CommandSection::System,
             },
             SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
                 section: CommandSection::Tasks,

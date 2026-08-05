@@ -482,7 +482,7 @@ fn command_section_rejects_the_reserved_zero_and_unknown_bytes() {
         CommandSection::Tasks,
         CommandSection::Jobs,
         CommandSection::Recovery,
-        CommandSection::Overview,
+        CommandSection::System,
         CommandSection::Pressure,
         CommandSection::Activities,
     ] {
@@ -525,7 +525,7 @@ fn round_trips_open_panel_for_every_section() {
         CommandSection::Tasks,
         CommandSection::Jobs,
         CommandSection::Recovery,
-        CommandSection::Overview,
+        CommandSection::System,
         CommandSection::Pressure,
         CommandSection::Activities,
     ] {

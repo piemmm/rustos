@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::{SysinfoQueryId, UserDirectoryRecord, UserDirectoryRequest};
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError};
+use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -28,7 +28,14 @@ pub const USER_DIRECTORY_PAGE: u16 = 64;
 /// The query is ungated (the directory is the `/etc/passwd`-class public
 /// uid + username pairing); a system whose user database is not loaded
 /// yields an empty directory. Records are delivered in the order the
-/// service returns them. The walk **fails closed**: a reply whose length
+/// service returns them.
+///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile directory it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
+/// The walk **fails closed**: a reply whose length
 /// is not a whole number of [`UserDirectoryRecord::WIRE_LEN`] records is
 /// rejected rather than partially decoded.
 ///
@@ -40,7 +47,7 @@ pub const USER_DIRECTORY_PAGE: u16 = 64;
 ///   walk stops at that record.
 pub fn for_each_user(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&UserDirectoryRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&UserDirectoryRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -69,9 +76,11 @@ pub fn for_each_user(
 ///
 /// The one definition of "which account is this uid?", so a tool resolving a
 /// single identity re-derives neither the directory walk, the duplicate-uid
-/// rule, nor the lossy name decode. The walk always completes, and a uid the
-/// directory lists twice keeps its first name, so the answer is
-/// deterministic whatever order the service returns records in.
+/// rule, nor the lossy name decode. The walk ends at the first matching
+/// record rather than paging the rest of a directory whose answer is
+/// already known, so a uid the directory lists twice keeps its first name
+/// and the answer is deterministic whatever order the service returns
+/// records in.
 ///
 /// A failure is reported rather than turned into a missing name: a caller
 /// that cannot reach the directory must not conclude the account does not
@@ -86,10 +95,11 @@ pub fn user_name(
 ) -> Result<Option<alloc::string::String>, ListError> {
     let mut name = None;
     for_each_user(transport, |record| {
-        if record.uid == uid && name.is_none() {
-            name = Some(crate::list::field_lossy(record.name_bytes()));
+        if record.uid != uid {
+            return Ok(WalkStep::Continue);
         }
-        Ok(())
+        name = Some(crate::list::field_lossy(record.name_bytes()));
+        Ok(WalkStep::Stop)
     })?;
     Ok(name)
 }
@@ -106,7 +116,7 @@ pub fn user_names(transport: &dyn Transport) -> Vec<(u32, alloc::string::String)
     let mut names = Vec::new();
     let walked = for_each_user(transport, |record| {
         names.push((record.uid, crate::list::field_lossy(record.name_bytes())));
-        Ok(())
+        Ok(WalkStep::Continue)
     });
     if walked.is_err() {
         return Vec::new();
@@ -116,7 +126,7 @@ pub fn user_names(transport: &dyn Transport) -> Vec<(u32, alloc::string::String)
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
+    use super::{for_each_user, user_name, user_names, WalkStep, USER_DIRECTORY_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -183,7 +193,7 @@ mod tests {
         let seen = RefCell::new(0usize);
         for_each_user(&fixture, |_| {
             *seen.borrow_mut() += 1;
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("ok");
         assert_eq!(*seen.borrow(), usize::from(USER_DIRECTORY_PAGE) + 1);
@@ -195,7 +205,7 @@ mod tests {
     fn malformed_reply_fails_closed() {
         let mut fixture = Fixture::new(alloc::vec![record(0, b"root")]);
         fixture.malformed = true;
-        let outcome = for_each_user(&fixture, |_| Ok(()));
+        let outcome = for_each_user(&fixture, |_| Ok(WalkStep::Continue));
         assert_eq!(
             outcome,
             Err(ListError::Call(CallError::Service(Errno::BadMagic)))

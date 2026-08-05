@@ -12,7 +12,7 @@ use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{field_lossy, walk_pages, ListError};
+use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::{Output, Transport};
 
@@ -36,6 +36,12 @@ pub const PROCESS_HEADER: &str = "  PID  PPID   UID   GID S CPU NAME";
 /// ([`SysinfoQueryId::SELF_PROCESS_LIST`], ungated). Records are delivered in
 /// the order the service returns them.
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there — how a caller that will only
+/// hold a bounded number of processes stops a huge or hostile list from
+/// being paged for as long as the service keeps answering. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply whose length
 /// is not a whole number of [`ProcessRecord::WIRE_LEN`] records, or one that
 /// would overflow the page offset, is rejected rather than partially
@@ -50,7 +56,7 @@ pub const PROCESS_HEADER: &str = "  PID  PPID   UID   GID S CPU NAME";
 pub fn for_each_process(
     transport: &dyn Transport,
     all: bool,
-    mut sink: impl FnMut(&ProcessRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&ProcessRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     let query = if all {
         SysinfoQueryId::GLOBAL_PROCESS_LIST
@@ -186,8 +192,8 @@ pub fn emit_self_scope_omission(out: &dyn Output, producer: &str, widen: &[&str]
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
-        PROCESS_PAGE,
+        emit_self_scope_omission, for_each_process, render_process, state_char, WalkStep,
+        PROCESS_HEADER, PROCESS_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -279,7 +285,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_process(fixture, all, |r| {
             seen.borrow_mut().push(*r);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }
@@ -319,6 +325,34 @@ mod tests {
         assert_eq!(got.len(), usize::from(PROCESS_PAGE) + 1);
         // A full page plus a short page: two requests.
         assert_eq!(fixture.seen.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_sink_that_stops_mid_walk_ends_the_walk_successfully() {
+        // Twice a full page, so a walk that ran to exhaustion would ask for
+        // a second page and deliver every record.
+        let mut records = Vec::new();
+        for pid in 0..u64::from(PROCESS_PAGE) * 2 {
+            records.push(record(pid, b"p", ProcessState::Runnable));
+        }
+        let fixture = Fixture::new(records);
+
+        let delivered = RefCell::new(0usize);
+        let outcome = for_each_process(&fixture, false, |_| {
+            *delivered.borrow_mut() += 1;
+            if *delivered.borrow() == 3 {
+                Ok(WalkStep::Stop)
+            } else {
+                Ok(WalkStep::Continue)
+            }
+        });
+
+        // Ending early is a success the caller chose, never mistakable for
+        // a broken service, and no further page is requested — which is
+        // what bounds a caller against a list that never ends.
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(*delivered.borrow(), 3);
+        assert_eq!(fixture.seen.borrow().len(), 1);
     }
 
     #[test]
@@ -362,7 +396,7 @@ mod tests {
             if *c == 1 {
                 Err(Errno::NotFound)
             } else {
-                Ok(())
+                Ok(WalkStep::Continue)
             }
         });
         assert_eq!(result, Err(ListError::Sink(Errno::NotFound)));

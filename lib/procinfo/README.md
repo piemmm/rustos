@@ -20,8 +20,18 @@ The crate provides:
 - `encode_request` / `call` / `CallError` — framing a `sysinfo-v1` request
   and mapping a capability denial onto a distinguished error.
 - `ListError` — the shared error type for the paged-list walks, returned by
-  both `for_each_process` and `for_each_mount` (the generic paging loop they
-  share is crate-internal).
+  both `for_each_process` and `for_each_mount`.
+- `walk_pages` / `WalkStep` — the generic paging loop every `for_each_*` walk
+  is built on, public so a consumer with its own bound or cadence policy (the
+  Switchboard sampler, which caps how many records one reading may
+  accumulate) drives it directly rather than re-implementing it.
+- `WalkStep` is how *every* walk is bounded on the caller's side: each
+  `for_each_*` sink answers `WalkStep::Continue` for the next record or
+  `WalkStep::Stop` to end the walk there, and stopping returns `Ok`, so a
+  deliberate truncation is never mistaken for a failed service and no
+  caller is left paging a list only an offset overflow would end. A sink
+  that wants everything simply always continues; one with an answer already
+  (a single-uid lookup, a named-volume lookup) stops at the match.
 - `for_each_cpu_time` / `CpuTotals` — the paged CPU-time walk and its busy/idle
   delta arithmetic.
 - `for_each_process` / `PROCESS_HEADER` / `render_process` / `state_char` —

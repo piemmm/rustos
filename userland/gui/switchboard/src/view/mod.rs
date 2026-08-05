@@ -6,22 +6,25 @@
 //! assembled **purely from the shared Reactive Alloy controls** (spec §17) —
 //! the window-manager
 //! [`WindowFrame`]/[`TitleBar`](tairix_controls::TitleBar)/[`ResizeGrabber`]
-//! furniture, a header resource band of [`Meter`]s, a [`Breadcrumb`] location
-//! band, the collection controls ([`ListRow`](tairix_controls::ListRow),
-//! [`Card`], [`Panel`]), action [`Button`](tairix_controls::Button)s, and one
-//! shared [`ScrollBar`] — so the application paints no chrome of its own and
-//! carries no second copy of any control's behaviour.
+//! furniture, a [`Breadcrumb`] location band, the collection controls
+//! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card),
+//! [`Panel`](tairix_controls::Panel)), action
+//! [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`] — so the
+//! application paints no chrome of its own and carries no second copy of any
+//! control's behaviour.
 //!
 //! # Package layout
 //!
 //! This module is the shared skeleton every section draws into: the
 //! [`Switchboard`] retained widget tree, [`SwitchboardModel`], [`Section`],
 //! [`SwitchboardAction`], the window frame and chrome, input dispatch, the
-//! scroll model, and the per-section layout primitives. Each section owns its
-//! own view models and layout in its own sibling module — [`mod@tasks`],
+//! scroll model, and the list geometry every section's primary column reuses.
+//! Each section is a struct in its own sibling module — [`mod@tasks`],
 //! [`mod@background`], [`mod@pressure`], [`mod@activities`],
-//! [`mod@recovery`], and [`mod@system`] — and every type that was public from
-//! this screen before the split is re-exported here unchanged.
+//! [`mod@recovery`], and [`mod@system`] — owning its own view models,
+//! controls and cursor behind one internal section dispatch, and every type
+//! that was public from this screen before the split is re-exported here
+//! unchanged.
 //!
 //! # What it composes
 //!
@@ -30,19 +33,7 @@
 //!   the four window commands; the only application region is the client
 //!   viewport, so the client can never receive furniture input (the frame's
 //!   hit map enforces this).
-//! - Immediately below the title bar sits an always-visible header resource
-//!   band: one column per [`ResourceSummary`] in the model, spaced evenly
-//!   across the band's width. Each column is a [`Meter`]'s label and reading
-//!   over one instrument — a [`Chart`](tairix_controls::Chart) of the
-//!   resource's recent history where
-//!   there is one to plot, the meter's own track where there is not, never
-//!   both of the same number. They are read-only instruments, not controls —
-//!   they take no pointer or keyboard input and never produce a
-//!   [`SwitchboardAction`] — so a press over the band can never be mistaken
-//!   for a press on the location band, the section content, or the scrollbar
-//!   below it. An empty resource list collapses the band to zero height
-//!   rather than drawing an empty strip.
-//! - Below it sits the **location band**: a [`Breadcrumb`] reading
+//! - Immediately below the title bar sits the **location band**: a [`Breadcrumb`] reading
 //!   `Switchboard › <section>` with a section-list [`IconButton`] at its
 //!   trailing end. The trail's leading crumb and that command both open the
 //!   one [`Menu`] of the six [`Section`]s — the one being shown marked
@@ -50,18 +41,21 @@
 //!   section the panel opens on — Recovery when the user reached for a
 //!   flagged capsule, Tasks otherwise — with
 //!   [`Switchboard::select_section`], never by feeding synthetic input.
-//! - Each section's content is a vertical list drawn from the shared
-//!   collection controls; when it exceeds the viewport the standard vertical
-//!   [`ScrollBar`] governs it (mouse wheel, thumb drag, end buttons, track
-//!   paging, and keyboard, all from the one shared scroll engine).
+//! - Each section lays itself out into the one
+//!   [`SectionFrame`] anatomy resolved from what that
+//!   section asked for, and its primary column is a vertical list drawn from
+//!   the shared collection controls; when the list exceeds the viewport the
+//!   standard vertical [`ScrollBar`] governs it (mouse wheel, thumb drag, end
+//!   buttons, track paging, and keyboard, all from the one shared scroll
+//!   engine).
 //! - A [`ResizeGrabber`] sits at the scrollbar junction, kept clear of the
 //!   scroll thumb.
 //!
 //! # Data in, typed actions out
 //!
 //! The caller builds a [`SwitchboardModel`] of typed view models
-//! ([`TaskSummary`], [`JobSummary`], [`RecoveryItem`], [`ResourceSummary`],
-//! [`ServiceSummary`], [`SystemAction`]); Switchboard turns it into controls.
+//! ([`TaskSummary`], [`JobSummary`], [`RecoveryItem`], [`SystemReport`],
+//! [`SystemAction`]); Switchboard turns it into controls.
 //! It performs no privileged work: every interaction emits a typed
 //! [`SwitchboardAction`] the hosting service authorises and applies (a denied
 //! action renders distinctly and fails closed, never activating).
@@ -88,34 +82,42 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, Card, CardAction,
+    ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, CardAction,
     ControlRole, ControlState, Crumb, FrameLayout, FurniturePart, IconButton, Menu, MenuAction,
-    MenuItem, Meter, Panel, RenderInvariant, ResizeEvent, ResizeGrabber, ScrollAction, ScrollBar,
-    ScrollCorner, ScrollModel, ScrollOrientation, ScrollRange, SelectionState, TitleBarEvent,
+    MenuItem, RenderInvariant, ResizeEvent, ResizeGrabber, ScrollAction, ScrollBar, ScrollCorner,
+    ScrollModel, ScrollOrientation, ScrollRange, SelectionState, TitleBarEvent,
     WindowActivationState, WindowControlKind, WindowFrame, WindowFurnitureState, WindowSizeState,
 };
 use tairix_icon::IconKind;
 
 pub mod activities;
 pub mod background;
+pub mod frame;
 pub mod pressure;
 pub mod recovery;
 pub mod system;
+pub mod system_data;
 pub mod tasks;
 
 pub use activities::{ActivityControl, ActivityMember, ActivitySummary};
 pub use background::{JobControl, JobSummary};
 pub use pressure::{PressureAction, PressureCause, PressureControl};
-pub use recovery::{RecoveryControl, RecoveryItem};
-pub use system::{ResourceSummary, ServiceSummary, SystemAction};
-pub use tasks::TaskSummary;
+pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, RecoveryItem};
+pub use system_data::{
+    HeadlineTile, HealthSeverity, LimitRow, NetworkInterface, Reading, SessionSeat, StorageVolume,
+    SystemAction, SystemFact, SystemPage, SystemReport, TileInstrument, Unmeasured,
+};
+pub use tasks::{TaskKind, TaskSummary};
 
-use activities::{ActivityEntry, ActivityRow, RenameEdit};
-use background::job_control;
-use pressure::PressureEntry;
-use recovery::RecoveryEntry;
-use system::{ResourceEntry, ServiceEntry};
-use tasks::{GroupPopup, TaskEntry};
+use activities::ActivitiesSection;
+use background::JobsSection;
+use frame::{
+    action_button_width, resolve_section_frame, row_commands_width, SectionAnatomy, SectionFrame,
+};
+use pressure::PressureSection;
+use recovery::RecoverySection;
+use system::SystemSection;
+use tasks::TasksSection;
 
 #[cfg(test)]
 mod test_support;
@@ -124,7 +126,7 @@ mod test_support;
 #[path = "mod_tests.rs"]
 mod tests;
 
-/// One of Switchboard's six top-level sections (spec §17).
+/// One of Switchboard's six top-level sections (`plans/NEW-SWITCHBOARD.md`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Section {
     /// Live application/task list.
@@ -137,8 +139,8 @@ pub enum Section {
     Activities,
     /// Hung objects and their recovery actions.
     Recovery,
-    /// Resource, service, and system-action overview.
-    Overview,
+    /// The machine itself: its readings, its pages, and its own actions.
+    System,
 }
 
 impl Section {
@@ -149,7 +151,7 @@ impl Section {
         Section::Pressure,
         Section::Activities,
         Section::Recovery,
-        Section::Overview,
+        Section::System,
     ];
 
     /// The section's zero-based tab index.
@@ -161,7 +163,7 @@ impl Section {
             Section::Pressure => 2,
             Section::Activities => 3,
             Section::Recovery => 4,
-            Section::Overview => 5,
+            Section::System => 5,
         }
     }
 
@@ -180,7 +182,7 @@ impl Section {
             Section::Pressure => "Pressure",
             Section::Activities => "Activities",
             Section::Recovery => "Recovery",
-            Section::Overview => "Overview",
+            Section::System => "System",
         }
     }
 }
@@ -215,7 +217,8 @@ impl ActionVerdict {
     }
 }
 
-/// The complete typed model Switchboard renders (spec §17).
+/// The complete typed model Switchboard renders
+/// (`plans/NEW-SWITCHBOARD.md`).
 ///
 /// It is one sample of a moving system, not a lasting handle: the caller hands
 /// it to [`Switchboard::new`] to build the surface and hands each later sample
@@ -235,13 +238,16 @@ pub struct SwitchboardModel {
     pub jobs: Vec<JobSummary>,
     /// The hung/recoverable objects.
     pub recovery: Vec<RecoveryItem>,
-    /// The system resources. Drives both the always-visible header meter
-    /// band and the Overview section's resource cards from the one model.
-    pub resources: Vec<ResourceSummary>,
-    /// The system services.
-    pub services: Vec<ServiceSummary>,
-    /// The system-level actions.
-    pub system_actions: Vec<SystemAction>,
+    /// How many faults have cleared since the service started watching.
+    ///
+    /// Only something that folds one sample into the next can see a fault
+    /// disappear, so this is counted where the samples meet and carried
+    /// here — never re-derived by the screen, which sees one model at a
+    /// time and would count differently depending on what it saw before.
+    pub recovery_resolved: usize,
+    /// Everything the System section shows: its header readings, its eight
+    /// pages' bodies, and the machine's own actions.
+    pub system: SystemReport,
     /// The resource-pressure causes and their recommended relief actions.
     pub pressure: Vec<PressureCause>,
     /// The activities: named groups of tasks that move, pause, and close
@@ -267,9 +273,8 @@ impl SwitchboardModel {
             tasks: Vec::new(),
             jobs: Vec::new(),
             recovery: Vec::new(),
-            resources: Vec::new(),
-            services: Vec::new(),
-            system_actions: Vec::new(),
+            recovery_resolved: 0,
+            system: SystemReport::default(),
             pressure: Vec::new(),
             activities: Vec::new(),
             can_create_activity: true,
@@ -382,13 +387,18 @@ pub enum SwitchboardAction {
     },
 }
 
-/// The title of the Overview section's system-action panel, named once so the
-/// resting composition and every refresh of it cannot drift apart.
-const SYSTEM_PANEL_TITLE: &str = "System";
-
 /// The screen's own name: the title bar's application name and the leading
 /// crumb of the location trail are the same word, so it is spelled once.
 const APP_NAME: &str = "Switchboard";
+
+/// The text every surface shows in place of a figure the service did not
+/// measure.
+///
+/// One word, spelled once, so a resource meter and a table cell can never
+/// say "no reading" two different ways. It is deliberately a word rather
+/// than a dash or a zero: a reader must be able to tell "nothing measured
+/// this" from "measured, and it was nothing".
+pub const UNMEASURED_READING: &str = "unknown";
 
 /// The composed [`ControlState`] for an action whose availability is `allowed`.
 ///
@@ -403,6 +413,64 @@ fn action_state(allowed: bool) -> ControlState {
     } else {
         ActionVerdict::DeniedByAuthority.to_state()
     }
+}
+
+/// The selection a section should hold after a refresh, given the identity
+/// it held before and the identities its fresh list carries.
+///
+/// A section's list is rebuilt from scratch on every sample, so a selection
+/// remembered as a row *number* silently re-points at a different subject
+/// the moment one above it leaves. Remembering the subject's own stable
+/// identity instead — and re-finding it here — is what makes a selection
+/// survive a refresh and drop only when the subject genuinely goes. Every
+/// section that has a selection to keep resolves it through this one rule,
+/// so two lists cannot answer the same question differently.
+///
+/// The fallback is the first subject in the fresh list: a section with
+/// something to show always has something selected, and one with nothing to
+/// show selects nothing rather than a subject that is not there.
+fn resolve_selection<Id: Copy + Eq>(
+    previous: Option<Id>,
+    mut present: impl Iterator<Item = Id> + Clone,
+) -> Option<Id> {
+    if let Some(id) = previous {
+        if present.clone().any(|candidate| candidate == id) {
+            return Some(id);
+        }
+    }
+    present.next()
+}
+
+/// Walk a section's row of on-screen master cards, reporting whichever one
+/// reported an interaction — a completed body press or a completed footer
+/// click — together with its own reported action.
+///
+/// Every Switchboard master/detail section shares this exact walk: locate
+/// each visible slot's rectangle from `info` and hand it to the card living
+/// there through `card_at` (which feeds the pointer event that drove this
+/// call and returns what the card reported), remembering the last one that
+/// answered. A press on a card's own body is exactly as much "this is now
+/// the selected cause" as a footer click is, which is what makes every
+/// section's rustdoc claim — that pressing a card opens its detail —
+/// actually true; a card that additionally carries footer buttons still
+/// reports which one fired, so the caller resolves that button's own meaning
+/// on top of the selection. One walk here, rather than one written per
+/// section, is what keeps that property from drifting out of step between
+/// sections as they evolve.
+fn select_pressed_card(
+    info: &ListInfo,
+    start: usize,
+    mut card_at: impl FnMut(usize, Rect) -> Option<CardAction>,
+) -> Option<(usize, CardAction)> {
+    let mut chosen = None;
+    for slot in 0..info.visible() {
+        let index = start + slot as usize;
+        let rect = info.item_rect(slot);
+        if let Some(action) = card_at(index, rect) {
+            chosen = Some((index, action));
+        }
+    }
+    chosen
 }
 
 /// Which region of the composition currently holds keyboard focus, cycled by
@@ -436,7 +504,206 @@ impl FocusRegion {
     }
 }
 
-/// This application's Switchboard screen (spec §17).
+/// What one section's own input handling produced, before the screen turns it
+/// into the action a host sees.
+///
+/// A section reports most intents directly, but it cannot run the transitions
+/// that belong to the whole composition: the Pressure section's "Show tasks"
+/// relief has to switch section and then place *another* section's content
+/// cursor. Naming that request instead of performing it keeps the one section
+/// transition and the one piece of focus arithmetic where every other route
+/// already finds them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SectionOutcome {
+    /// Report this action to the host.
+    Action(SwitchboardAction),
+    /// Show [`Section::Tasks`] with the task at this index focused; `None`
+    /// focuses the first task.
+    ShowTask {
+        /// The task to focus, clamped into the Tasks list by the screen.
+        task: Option<usize>,
+    },
+}
+
+/// Everything a section needs to lay itself out, paint, and hit-test for one
+/// frame.
+///
+/// The screen resolves this once per repaint or event and hands the same
+/// bundle to every section entry point, so a section never re-derives its own
+/// regions, never re-reads the scroll offset, and no call site restates the
+/// same seven parameters.
+#[derive(Copy, Clone, Debug)]
+struct SectionCtx<'a> {
+    /// This section's regions, resolved from its [`SectionView::anatomy`].
+    frame: SectionFrame,
+    /// The whole window's bounds, so an overlay clamps inside the window
+    /// rather than inside the section that opened it.
+    bounds: Rect,
+    /// The index of the primary column's first visible item.
+    start: usize,
+    /// The last pointer position, for the hit tests a control cannot resolve
+    /// from the event alone.
+    pointer: Point,
+    /// The active UI scale.
+    scale: Scale,
+    /// The active theme.
+    theme: &'a Theme,
+    /// The text font.
+    font: BitmapFont,
+}
+
+/// One Switchboard section: its view models, its retained controls, its
+/// content cursor, and its own painting and input.
+///
+/// This is the whole surface the screen needs from a section, so it reaches
+/// the section on show through a single dispatch
+/// ([`Switchboard::active`]/[`Switchboard::active_mut`]) rather than a `match`
+/// per question. Everything *shared* deliberately stays out: the window
+/// chrome, the scroll model, the section transition, and the keyboard policy
+/// (Tab cycles the regions, the arrows move the content cursor, and the
+/// focused item is scrolled into view) all live in the screen, so a section
+/// reports its counts and holds its own cursor rather than re-deriving any of
+/// that for itself.
+trait SectionView {
+    /// The regions this section asks the frame to seat.
+    fn anatomy(&self) -> SectionAnatomy;
+
+    /// Rebuild this section's controls from a fresh sample.
+    ///
+    /// Each section takes what it needs from the one sample and keeps what is
+    /// the user's — its cursor, clamped into the new content, and any overlay
+    /// that survives a refresh.
+    fn adopt(&mut self, model: &SwitchboardModel);
+
+    /// How many items the primary column's scrollable list holds. This is the
+    /// scroll range's content extent.
+    fn item_count(&self) -> usize;
+
+    /// How many places the content cursor has to be in this section.
+    ///
+    /// For most sections that is exactly its rows, which is the default. A
+    /// section with focusable chrome of its own — a header band of filters,
+    /// a footer of controls — spans those too, so every one of its controls
+    /// is reachable by the same Up/Down the rows are, and stays reachable
+    /// when a filter leaves no rows at all. It never changes what
+    /// [`item_count`](Self::item_count) means, so the scroll model is the
+    /// rows' alone.
+    fn focus_span(&self) -> usize {
+        self.item_count()
+    }
+
+    /// Which scrollable row, if any, the content cursor at `index`
+    /// corresponds to.
+    ///
+    /// This is how the screen keeps the one "scroll the focused thing into
+    /// view" arithmetic while a section's cursor spans things that are not
+    /// rows: a cursor on the header or the footer answers [`None`] and the
+    /// offset is left where the reader put it, because neither scrolls.
+    fn focus_row(&self, index: usize) -> Option<usize> {
+        (index < self.item_count()).then_some(index)
+    }
+
+    /// Where the primary column's list draws, how tall one of its items is,
+    /// and how many it holds.
+    ///
+    /// The rectangle is the section's own: most seat the list in the whole
+    /// `primary` region, but the System section seats it inside its panel,
+    /// below the resource block, so the viewport the scrollbar is ranged over
+    /// has to come from the section rather than from `primary`'s height.
+    fn list_info(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> ListInfo;
+
+    /// How many inline action buttons one of this section's rows carries, for
+    /// the anchored action column beside the list. Zero when its items are
+    /// cards, which draw their own footer actions inside themselves.
+    fn row_buttons(&self) -> u32;
+
+    /// How many actions the *focused* item carries — the bound the screen
+    /// clamps the within-row action cursor to. Not always
+    /// [`row_buttons`](Self::row_buttons): a card's footer length is its own,
+    /// and a display-only row carries none.
+    fn focused_action_count(&self) -> usize;
+
+    /// The content cursor: which item of the primary column the keyboard is
+    /// on.
+    fn content_focus(&self) -> usize;
+
+    /// Move the content cursor. The caller has already clamped it into the
+    /// list.
+    fn set_content_focus(&mut self, index: usize);
+
+    /// The within-row action cursor: which of the focused item's actions the
+    /// keyboard is on.
+    fn row_action(&self) -> usize;
+
+    /// Move the within-row action cursor. The caller has already clamped it
+    /// against [`focused_action_count`](Self::focused_action_count).
+    fn set_row_action(&mut self, index: usize);
+
+    /// Feed an activation key to the focused item's action-focused control. A
+    /// disabled or denied control refuses the key itself, so a refused
+    /// activation produces nothing.
+    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome>;
+
+    /// Paint the section into its own regions.
+    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>);
+
+    /// Route a pointer event to the section's items.
+    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome>;
+
+    /// Mark this section's focus rings and Focus Field membership for a
+    /// content region that is (or is not) `focused`.
+    ///
+    /// Every section is told, not just the one on show, so the rings of a
+    /// section the reader has navigated away from are cleared rather than
+    /// left lit under content nobody is looking at.
+    fn apply_focus_marks(&mut self, focused: bool);
+
+    /// Whether this section holds the keyboard: an open popup or an in-flight
+    /// inline edit of its own takes every key before the Tab-cycled regions
+    /// see it.
+    fn holds_keyboard(&self) -> bool {
+        false
+    }
+
+    /// Whether this section holds the pointer: an open popup is modal over
+    /// the whole composition, so a press outside it dismisses it rather than
+    /// falling through to whatever sits beneath. An inline edit does *not*
+    /// hold the pointer — it is a control inside the list, and the rest of
+    /// the surface stays reachable while it is open.
+    fn holds_pointer(&self) -> bool {
+        false
+    }
+
+    /// Paint this section's overlay, above every other region including the
+    /// scrollbar and grabber.
+    fn render_overlay(&self, _surface: &mut Surface, _ctx: SectionCtx<'_>) {}
+
+    /// Route a pointer event to this section's overlay while it
+    /// [`holds_pointer`](Self::holds_pointer).
+    fn overlay_on_pointer(
+        &mut self,
+        _event: &InputEvent,
+        _ctx: SectionCtx<'_>,
+    ) -> Option<SectionOutcome> {
+        None
+    }
+
+    /// Route a key to this section's overlay while it
+    /// [`holds_keyboard`](Self::holds_keyboard).
+    fn overlay_on_key(&mut self, _key: Key) -> Option<SectionOutcome> {
+        None
+    }
+
+    /// Drop this section's overlay because the section is no longer shown.
+    ///
+    /// Both a popup and an inline edit name a row the reader has navigated
+    /// away from, so neither may outlive the section that opened it: an
+    /// overlay left standing would keep taking keys for content that is not
+    /// on screen.
+    fn dismiss_overlay(&mut self) {}
+}
+
+/// This application's Switchboard screen (`plans/NEW-SWITCHBOARD.md`).
 ///
 /// A stateful composed surface built entirely from the shared Reactive Alloy
 /// controls. Build it from a [`SwitchboardModel`] with [`Switchboard::new`],
@@ -484,30 +751,23 @@ pub struct Switchboard {
     grabber: ResizeGrabber,
     corner: ScrollCorner,
     scroll: ScrollBar,
-    tasks: Vec<TaskEntry>,
-    jobs: Vec<Card>,
-    recovery: Vec<RecoveryEntry>,
-    resources: Vec<ResourceEntry>,
-    services: Vec<ServiceEntry>,
-    pressure: Vec<PressureEntry>,
-    activities: Vec<ActivityEntry>,
-    can_create_activity: bool,
-    panel: Panel,
+    /// The six sections, each owning its own view models, controls, cursor and
+    /// overlays. The screen reaches the one on show through
+    /// [`active`](Self::active)/[`active_mut`](Self::active_mut), never by
+    /// naming a section's own state here.
+    tasks: TasksSection,
+    jobs: JobsSection,
+    pressure: PressureSection,
+    activities: ActivitiesSection,
+    recovery: RecoverySection,
+    system: SystemSection,
     section: Section,
     offsets: [u64; 6],
     focus: FocusRegion,
-    content_focus: usize,
-    /// Which of the focused row's/card's several buttons is keyboard-focused
-    /// (Left/Right cycles it; Enter activates it). Reset whenever
-    /// `content_focus` or `section` changes.
-    row_action: usize,
     /// The last pointer position, kept so a press can be resolved against the
     /// coordinate the pointer actually reached — hit-testing input, never a
     /// drawn property.
     pointer: RenderInvariant<Point>,
-    group_popup: Option<GroupPopup>,
-    rename: Option<RenameEdit>,
-    submitted_activity_name: Option<String>,
 }
 
 impl Switchboard {
@@ -520,7 +780,7 @@ impl Switchboard {
     /// live state feeds each new reading to
     /// [`set_model`](Switchboard::set_model) rather than building again.
     #[must_use]
-    pub fn new(model: SwitchboardModel) -> Self {
+    pub fn new(model: &SwitchboardModel) -> Self {
         let mut switchboard = Self {
             frame: WindowFrame::new(model.furniture),
             trail: Self::build_trail(Section::Tasks),
@@ -532,24 +792,16 @@ impl Switchboard {
                 ScrollOrientation::Vertical,
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
             ),
-            tasks: Vec::new(),
-            jobs: Vec::new(),
-            recovery: Vec::new(),
-            resources: Vec::new(),
-            services: Vec::new(),
-            pressure: Vec::new(),
-            activities: Vec::new(),
-            can_create_activity: true,
-            panel: Panel::new(SYSTEM_PANEL_TITLE),
+            tasks: TasksSection::new(),
+            jobs: JobsSection::new(),
+            pressure: PressureSection::new(),
+            activities: ActivitiesSection::new(),
+            recovery: RecoverySection::new(),
+            system: SystemSection::new(),
             section: Section::Tasks,
             offsets: [0; 6],
             focus: FocusRegion::Content,
-            content_focus: 0,
-            row_action: 0,
             pointer: RenderInvariant::new(Point::ORIGIN),
-            group_popup: None,
-            rename: None,
-            submitted_activity_name: None,
         };
         switchboard.frame.title_bar_mut().set_app_name(APP_NAME);
         switchboard.adopt(model);
@@ -621,26 +873,33 @@ impl Switchboard {
     /// the same clamp a section switch uses, so a list that shrank leaves
     /// neither past its end. An emptied section leaves a valid, renderable
     /// state with nothing to activate.
-    pub fn set_model(&mut self, model: SwitchboardModel) {
+    pub fn set_model(&mut self, model: &SwitchboardModel) {
         self.adopt(model);
         self.set_scroll_range(
-            self.active_count(),
+            self.active().item_count(),
             self.scroll.model().range().viewport_extent(),
         );
     }
 
     /// Derive every model-shaped part of the composition from `model` — the
-    /// window furniture and title, each section's rows, cards, and meters, and
-    /// the Overview panel's system actions — then re-assert the keyboard focus
-    /// onto the controls that replaced the old ones.
+    /// window furniture and title, and every section's own controls — then
+    /// re-assert the keyboard focus onto the controls that replaced the old
+    /// ones.
     ///
     /// This is the one model-to-controls derivation. Both
     /// [`new`](Switchboard::new) and [`set_model`](Switchboard::set_model) run
     /// it, so a refreshed Switchboard holds exactly the controls a freshly
-    /// built one would, marked exactly the same way. The focused list position
-    /// is clamped into the new content first, so it can never address a row
-    /// the new model does not have.
-    fn adopt(&mut self, model: SwitchboardModel) {
+    /// built one would, marked exactly the same way. Every section is handed
+    /// the sample, not just the one on show, so switching to a section never
+    /// shows a reading from a sample ago; each clamps its own cursor into its
+    /// own new content, so no cursor can address a row its model no longer
+    /// has.
+    ///
+    /// An open section list survives: its rows are the closed [`Section`] set,
+    /// so no sample can make it stale, and closing it would snatch a menu out
+    /// from under the reader mid-gesture. What each section does with its own
+    /// overlay is that section's own business.
+    fn adopt(&mut self, model: &SwitchboardModel) {
         let furniture = model.furniture;
         self.frame.set_furniture(furniture);
         self.frame.title_bar_mut().set_title(&model.title);
@@ -651,69 +910,9 @@ impl Switchboard {
         self.grabber.set_active_frame(active);
         self.corner.set_active_frame(active);
 
-        self.tasks = model.tasks.into_iter().map(Self::build_task).collect();
-        self.jobs = model.jobs.into_iter().map(Self::build_job).collect();
-        self.recovery = model
-            .recovery
-            .into_iter()
-            .map(Self::build_recovery)
-            .collect();
-        self.resources = model
-            .resources
-            .into_iter()
-            .map(Self::build_resource)
-            .collect();
-        self.services = model
-            .services
-            .into_iter()
-            .map(Self::build_service)
-            .collect();
-        self.panel = Panel::new(SYSTEM_PANEL_TITLE).with_actions(
-            model
-                .system_actions
-                .into_iter()
-                .map(Self::build_system_button)
-                .collect(),
-        );
-        self.pressure = model
-            .pressure
-            .into_iter()
-            .map(Self::build_pressure)
-            .collect();
-        self.activities = model
-            .activities
-            .into_iter()
-            .map(Self::build_activity)
-            .collect();
-        self.can_create_activity = model.can_create_activity;
-
-        // The Group popup only ever anchors on a Tasks row, and every section
-        // change already drops it; a refresh drops it too, rather than
-        // re-validating a menu built from the now-superseded activity list.
-        // An open section list survives: its rows are the closed `Section` set,
-        // so no sample can make it stale, and closing it would snatch a menu
-        // out from under the reader mid-gesture.
-        self.group_popup = None;
-
-        // An in-flight rename survives a refresh only as long as its activity
-        // still exists, re-located by stable id — never by its old position,
-        // which a refresh may have shifted or removed entirely (fail closed).
-        self.rename = self.rename.take().and_then(|edit| {
-            self.activities
-                .iter()
-                .position(|a| a.id == edit.id)
-                .map(|index| RenameEdit {
-                    id: edit.id,
-                    index,
-                    field: edit.field,
-                })
-        });
-        self.submitted_activity_name = None;
-
-        self.content_focus = self
-            .content_focus
-            .min(self.active_count().saturating_sub(1));
-        self.row_action = 0;
+        for section in Section::ALL {
+            self.section_mut(section).adopt(model);
+        }
         self.apply_focus_marks();
     }
 
@@ -737,7 +936,7 @@ impl Switchboard {
     /// before refreshing its model.
     #[must_use]
     pub fn submitted_activity_name(&self) -> Option<&str> {
-        self.submitted_activity_name.as_deref()
+        self.activities.submitted_name()
     }
 
     /// Show `section`, as if it had been chosen from the section list, and
@@ -791,88 +990,33 @@ impl Switchboard {
             .saturating_add(scale.scale_length(m.control_gap).saturating_mul(2))
     }
 
-    /// The width reserved for one inline row action button.
-    fn action_width(scale: Scale, theme: &Theme) -> u32 {
-        scale
-            .scale_length(theme.metrics().control_height.saturating_mul(4))
-            .max(1)
-    }
-
-    /// The header resource band's measured height: zero when there is nothing
-    /// to show — an empty resource list means no band at all — otherwise the
-    /// one column height every resource in the band shares.
+    /// The overlay rectangle for `menu`: its preferred size, placed below
+    /// `anchor` (or above it when there is no room below), clamped inside
+    /// `bounds` so it never draws outside the window.
     ///
-    /// A column is the [`Meter`]'s label and reading over *one* instrument
-    /// slot: the theme's chart box when any resource has a history to plot,
-    /// otherwise just the meter's own track. Only one instrument reports a
-    /// given resource, so a column never carries both a track and a graph of
-    /// the same number.
-    fn band_height(
+    /// The section list and a section's own popup place themselves the same
+    /// way, so there is one placement rule rather than one per menu.
+    pub(super) fn popup_rect(
+        menu: &Menu,
+        anchor: Rect,
+        bounds: Rect,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        resources: &[ResourceEntry],
-    ) -> u32 {
-        if resources.is_empty() {
-            return 0;
-        }
-        if resources.iter().all(|entry| entry.chart.is_empty()) {
-            return Meter::measured_height(scale, theme, font);
-        }
-        Meter::reading_height(scale, theme, font)
-            .saturating_add(scale.scale_length(theme.metrics().chart_height))
-    }
-
-    /// Split one band column into the rectangle its [`Meter`] draws in and the
-    /// instrument slot beneath the reading.
-    ///
-    /// The meter is handed the whole column when it owns the slot — it draws
-    /// its label, its reading, and its track in the space left over — and only
-    /// the text height when a [`tairix_controls::Chart`] owns the slot instead, so the meter's
-    /// own track cannot draw under a graph of the same number.
-    fn band_column_split(
-        column: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        plotted: bool,
-    ) -> (Rect, Option<Rect>) {
-        if !plotted {
-            return (column, None);
-        }
-        let reading_h = Meter::reading_height(scale, theme, font).min(column.height);
-        let slot_h = column.height.saturating_sub(reading_h);
-        let reading = Rect::new(column.left(), column.top(), column.width, reading_h);
-        if slot_h == 0 {
-            return (reading, None);
-        }
-        let top = column.top() + to_i32(reading_h);
-        (
-            reading,
-            Some(Rect::new(column.left(), top, column.width, slot_h)),
-        )
-    }
-
-    /// The rectangle for the meter at `index` of `count`, evenly spaced
-    /// across `band`'s width with the theme's control gap between neighbours.
-    fn band_meter_rect(
-        band: Rect,
-        index: usize,
-        count: usize,
-        scale: Scale,
-        theme: &Theme,
     ) -> Rect {
-        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let count = u32::try_from(count).unwrap_or(1).max(1);
-        let total_gap = gap.saturating_mul(count.saturating_sub(1));
-        let each_w = band
-            .width
-            .saturating_sub(total_gap)
-            .checked_div(count)
-            .unwrap_or(0);
-        let idx = u32::try_from(index).unwrap_or(0);
-        let left = band.left() + to_i32(idx.saturating_mul(each_w.saturating_add(gap)));
-        Rect::new(left, band.top(), each_w, band.height)
+        let w = menu.preferred_width(scale, theme, font).min(bounds.width);
+        let h = menu.preferred_height(scale, theme).min(bounds.height);
+        let max_x = bounds.left().max(bounds.right() - to_i32(w));
+        let x = anchor.left().clamp(bounds.left(), max_x);
+        let below = anchor.bottom();
+        let y = if below + to_i32(h) <= bounds.bottom() {
+            below
+        } else {
+            (anchor.top() - to_i32(h)).max(bounds.top())
+        };
+        let max_y = bounds.top().max(bounds.bottom() - to_i32(h));
+        let y = y.clamp(bounds.top(), max_y);
+        Rect::new(x, y, w, h)
     }
 }
 /// The laid-out regions of a Switchboard for one outer bounds.
@@ -880,11 +1024,8 @@ impl Switchboard {
 struct SbLayout {
     /// The window frame's laid-out rectangles.
     frame: FrameLayout,
-    /// The always-visible header resource band, above the location band. Zero
-    /// height when the model has no resources.
-    band: Rect,
-    /// The location band along the top of the client, below the resource band:
-    /// the trail and its trailing section-list command, split by
+    /// The location band along the top of the client: the trail and its
+    /// trailing section-list command, split by
     /// [`Switchboard::location_split`].
     location: Rect,
     /// The section content area (excludes the scrollbar gutter).
@@ -908,6 +1049,29 @@ struct ListInfo {
 }
 
 impl ListInfo {
+    /// The list of `count` list-row items filling `rect`: one control plus a
+    /// gap per item.
+    ///
+    /// Every section whose primary column is rows builds its metrics here, so
+    /// the row pitch is one fact rather than one per section.
+    pub(super) fn rows(rect: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
+        Self {
+            list_rect: rect,
+            item_h: Switchboard::row_item_height(scale, theme),
+            count,
+        }
+    }
+
+    /// The list of `count` card items filling `rect`, the taller pitch a
+    /// [`Card`](tairix_controls::Card) with a body and a footer needs.
+    pub(super) fn cards(rect: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
+        Self {
+            list_rect: rect,
+            item_h: Switchboard::card_item_height(scale, theme),
+            count,
+        }
+    }
+
     /// How many whole items fit in the list rectangle.
     fn visible(self) -> u32 {
         self.list_rect.height.checked_div(self.item_h).unwrap_or(0)
@@ -927,34 +1091,22 @@ impl ListInfo {
 impl Switchboard {
     /// Lay the composition out within `bounds` for the active theme.
     ///
-    /// The header resource band claims its measured height (zero with no
-    /// resources) immediately below the title bar, and the location band and
-    /// every region below it shift down by exactly that height, clipped so a
+    /// The location band claims one control height immediately below the title
+    /// bar and the content and scrollbar take what is left, clipped so a
     /// window too short for the full anatomy still lays out in bounds
     /// (fail closed, never negative or overlapping).
-    fn compute_layout(
-        &self,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> SbLayout {
+    fn compute_layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> SbLayout {
         let frame = self.frame.layout(bounds, scale, theme);
         let client = frame.client;
 
-        let band_h = Self::band_height(scale, theme, font, &self.resources).min(client.height);
-        let band = Rect::new(client.left(), client.top(), client.width, band_h);
-
-        let below_band_top = client.top() + to_i32(band_h);
-        let below_band_h = client.height.saturating_sub(band_h);
         let location_h = scale
             .scale_length(theme.metrics().control_height)
             .max(1)
-            .min(below_band_h);
-        let location = Rect::new(client.left(), below_band_top, client.width, location_h);
+            .min(client.height);
+        let location = Rect::new(client.left(), client.top(), client.width, location_h);
 
-        let below_top = below_band_top + to_i32(location_h);
-        let below_h = below_band_h.saturating_sub(location_h);
+        let below_top = client.top() + to_i32(location_h);
+        let below_h = client.height.saturating_sub(location_h);
         let gutter = scale
             .scale_length(theme.metrics().scrollbar_breadth)
             .max(1)
@@ -969,7 +1121,6 @@ impl Switchboard {
 
         SbLayout {
             frame,
-            band,
             location,
             content,
             scroll,
@@ -1002,76 +1153,69 @@ impl Switchboard {
         (trail, command)
     }
 
-    /// The scrollable list metrics for the active section.
-    fn list_info(&self, layout: &SbLayout, scale: Scale, theme: &Theme) -> ListInfo {
-        let content = layout.content;
+    /// The section on show, for everything the screen asks a section that
+    /// needs no mutation: its anatomy, its counts, its cursor, and its
+    /// painting.
+    ///
+    /// This and [`active_mut`](Self::active_mut) are the only places a
+    /// [`Section`] is turned back into the state behind it, so there is one
+    /// route to a section rather than one per question.
+    fn active(&self) -> &dyn SectionView {
         match self.section {
-            Section::Tasks => ListInfo {
-                list_rect: content,
-                item_h: Self::row_item_height(scale, theme),
-                count: self.tasks.len(),
-            },
-            Section::Jobs => ListInfo {
-                list_rect: content,
-                item_h: Self::card_item_height(scale, theme),
-                count: self.jobs.len(),
-            },
-            Section::Pressure => ListInfo {
-                list_rect: content,
-                item_h: Self::card_item_height(scale, theme),
-                count: self.pressure.len(),
-            },
-            Section::Activities => ListInfo {
-                list_rect: content,
-                item_h: Self::row_item_height(scale, theme),
-                count: self.total_activity_rows(),
-            },
-            Section::Recovery => ListInfo {
-                list_rect: content,
-                item_h: Self::row_item_height(scale, theme),
-                count: self.recovery.len(),
-            },
-            Section::Overview => {
-                let pc = self
-                    .panel
-                    .content_rect(content, scale, theme)
-                    .unwrap_or(Rect::EMPTY);
-                let card_h = Self::card_item_height(scale, theme);
-                let block = u32::try_from(self.resources.len())
-                    .unwrap_or(0)
-                    .saturating_mul(card_h)
-                    .min(pc.height);
-                let list_rect = Rect::new(
-                    pc.left(),
-                    pc.top() + to_i32(block),
-                    pc.width,
-                    pc.height.saturating_sub(block),
-                );
-                ListInfo {
-                    list_rect,
-                    item_h: Self::row_item_height(scale, theme),
-                    count: self.services.len(),
-                }
-            }
+            Section::Tasks => &self.tasks,
+            Section::Jobs => &self.jobs,
+            Section::Pressure => &self.pressure,
+            Section::Activities => &self.activities,
+            Section::Recovery => &self.recovery,
+            Section::System => &self.system,
         }
     }
 
-    /// How many inline action buttons a row of `section` carries.
-    ///
-    /// The render pass, the hit-test pass, the Group popup's anchor, and the
-    /// action column's geometry must all agree on this count or a click will
-    /// land on a button the user is not looking at, so it is defined once
-    /// here rather than restated as a literal at each site. A section whose
-    /// items are cards carries none: a card draws its own footer actions
-    /// inside itself, so there is no anchored column beside the list.
-    #[must_use]
-    const fn row_actions(section: Section) -> u32 {
+    /// The section on show, for everything that moves its cursor, feeds it
+    /// input, or re-derives it from a sample.
+    fn active_mut(&mut self) -> &mut dyn SectionView {
+        self.section_mut(self.section)
+    }
+
+    /// One named section, however it was named — the one place a [`Section`]
+    /// becomes the state behind it, so a refresh and a focus sweep can visit
+    /// every section without a second copy of this mapping.
+    fn section_mut(&mut self, section: Section) -> &mut dyn SectionView {
         match section {
-            Section::Tasks | Section::Recovery => 2,
-            Section::Activities => 4,
-            Section::Overview => 1,
-            Section::Jobs | Section::Pressure => 0,
+            Section::Tasks => &mut self.tasks,
+            Section::Jobs => &mut self.jobs,
+            Section::Pressure => &mut self.pressure,
+            Section::Activities => &mut self.activities,
+            Section::Recovery => &mut self.recovery,
+            Section::System => &mut self.system,
         }
+    }
+
+    /// The active section's frame and everything else it needs for one
+    /// repaint or event, resolved once from the section's own anatomy.
+    fn section_ctx<'a>(
+        &self,
+        layout: &SbLayout,
+        bounds: Rect,
+        scale: Scale,
+        theme: &'a Theme,
+        font: BitmapFont,
+    ) -> SectionCtx<'a> {
+        SectionCtx {
+            frame: resolve_section_frame(layout.content, self.active().anatomy(), scale, theme),
+            bounds,
+            start: usize::try_from(self.offsets[self.section.index()]).unwrap_or(0),
+            pointer: *self.pointer,
+            scale,
+            theme,
+            font,
+        }
+    }
+
+    /// The scrollable list metrics for the active section.
+    fn list_info(&self, layout: &SbLayout, scale: Scale, theme: &Theme) -> ListInfo {
+        let frame = resolve_section_frame(layout.content, self.active().anatomy(), scale, theme);
+        self.active().list_info(&frame, scale, theme)
     }
 
     /// The anchored action column of the active section: the strip the rows'
@@ -1082,13 +1226,7 @@ impl Switchboard {
     /// the same [`Switchboard::split_row`] geometry the buttons themselves
     /// are laid out with, so the column cannot drift away from its contents.
     /// [`None`] when the section's items carry no inline actions.
-    fn action_column(
-        info: ListInfo,
-        section: Section,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<Rect> {
-        let buttons = Self::row_actions(section);
+    fn action_column(info: ListInfo, buttons: u32, scale: Scale, theme: &Theme) -> Option<Rect> {
         if buttons == 0 {
             return None;
         }
@@ -1112,13 +1250,8 @@ impl Switchboard {
         let inset = scale.scale_length(m.control_inset).max(1);
         let gap = scale.scale_length(m.control_gap).max(1);
         let ctrl_h = scale.scale_length(m.control_height).max(1).min(item.height);
-        let aw = Self::action_width(scale, theme);
-        let total = if buttons == 0 {
-            0
-        } else {
-            aw.saturating_mul(buttons)
-                .saturating_add(gap.saturating_mul(buttons.saturating_sub(1)))
-        };
+        let aw = action_button_width(scale, theme);
+        let total = row_commands_width(buttons, scale, theme);
         let right = item.right() - to_i32(inset);
         let by = item.top() + (to_i32(item.height) - to_i32(ctrl_h)).max(0) / 2;
         let mut rects = Vec::new();
@@ -1135,18 +1268,6 @@ impl Switchboard {
         let row_w = u32::try_from((row_right - item.left()).max(0)).unwrap_or(0);
         let row_rect = Rect::new(item.left(), item.top(), row_w, ctrl_h);
         (row_rect, rects)
-    }
-
-    /// The number of items in the active section's scrollable list.
-    fn active_count(&self) -> usize {
-        match self.section {
-            Section::Tasks => self.tasks.len(),
-            Section::Jobs => self.jobs.len(),
-            Section::Pressure => self.pressure.len(),
-            Section::Activities => self.total_activity_rows(),
-            Section::Recovery => self.recovery.len(),
-            Section::Overview => self.services.len(),
-        }
     }
 
     /// Re-range the scrollbar over `count` items in a `viewport` of whole
@@ -1171,8 +1292,8 @@ impl Switchboard {
     /// and its viewport extent is the number of whole items that fit, so a
     /// range change (a section switch or a resize) re-clamps the offset rather
     /// than leaving it out of bounds.
-    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) {
-        let layout = self.compute_layout(bounds, scale, theme, font);
+    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) {
+        let layout = self.compute_layout(bounds, scale, theme);
         let info = self.list_info(&layout, scale, theme);
         self.set_scroll_range(info.count, u64::from(info.visible()));
     }
@@ -1188,13 +1309,13 @@ impl Switchboard {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        self.sync_scroll(bounds, scale, theme, font);
-        let layout = self.compute_layout(bounds, scale, theme, font);
+        self.sync_scroll(bounds, scale, theme);
+        let layout = self.compute_layout(bounds, scale, theme);
+        let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
         self.frame.render(surface, bounds, scale, theme, font);
-        self.render_band(surface, layout.band, scale, theme, font);
         self.render_location(surface, layout.location, scale, theme, font);
-        self.render_section(surface, &layout, scale, theme, font);
+        self.render_section(surface, ctx);
 
         // The scrollbar and its junction/resize corner, drawn last so they sit
         // above the content and the corner never overlaps the thumb.
@@ -1206,11 +1327,7 @@ impl Switchboard {
         // region, including the scrollbar and grabber. Only one can be open:
         // each is modal over the whole composition while it is, so no input
         // can reach the control that would open the other.
-        if let Some(popup) = &self.group_popup {
-            let anchor = self.group_anchor_rect(popup.task, &layout, scale, theme);
-            let rect = Self::popup_rect(&popup.menu, anchor, bounds, scale, theme, font);
-            popup.menu.render(surface, rect, scale, theme, font);
-        }
+        self.active().render_overlay(surface, ctx);
         if let Some(menu) = &self.section_menu {
             let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme, font);
             menu.render(surface, rect, scale, theme, font);
@@ -1234,33 +1351,6 @@ impl Switchboard {
             .render(surface, command, scale, theme, font, None);
     }
 
-    /// Paint the always-visible header resource band: every resource's meter
-    /// reading over its one instrument, evenly spaced across the band's width
-    /// through [`Switchboard::band_meter_rect`]. A zero-height `band` (no
-    /// resources) draws nothing.
-    ///
-    /// A resource with no history recorded yet keeps its meter's track, so the
-    /// band never shows a graph box with no graph in it.
-    fn render_band(
-        &self,
-        surface: &mut Surface,
-        band: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        let count = self.resources.len();
-        for (i, entry) in self.resources.iter().enumerate() {
-            let column = Self::band_meter_rect(band, i, count, scale, theme);
-            let (reading, slot) =
-                Self::band_column_split(column, scale, theme, font, !entry.chart.is_empty());
-            entry.meter.render(surface, reading, scale, theme, font);
-            if let Some(slot) = slot {
-                entry.chart.render(surface, slot, scale, theme);
-            }
-        }
-    }
-
     /// Paint the active section's content, then the Edge Wake on the action
     /// column if the list beside it is displaced.
     ///
@@ -1279,28 +1369,16 @@ impl Switchboard {
     /// neither a scrolled window of a longer list nor the Activities list's
     /// button-less member rows between its header rows
     /// (`plans/NEW-SWITCHBOARD.md` S3).
-    fn render_section(
-        &self,
-        surface: &mut Surface,
-        layout: &SbLayout,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        let info = self.list_info(layout, scale, theme);
-        match self.section {
-            Section::Tasks => self.render_task_rows(surface, info, scale, theme, font),
-            Section::Jobs => self.render_job_cards(surface, info, scale, theme, font),
-            Section::Pressure => self.render_pressure_cards(surface, info, scale, theme, font),
-            Section::Activities => self.render_activity_rows(surface, info, scale, theme, font),
-            Section::Recovery => self.render_recovery_rows(surface, info, scale, theme, font),
-            Section::Overview => self.render_overview(surface, layout, info, scale, theme, font),
-        }
-        if let Some(column) = Self::action_column(info, self.section, scale, theme) {
+    fn render_section(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+        let section = self.active();
+        section.render(surface, ctx);
+        let info = section.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        if let Some(column) = Self::action_column(info, section.row_buttons(), ctx.scale, ctx.theme)
+        {
             let scrolled = self.offsets[self.section.index()] != 0;
             ActionRail::new(Vec::new())
                 .with_edge_wake(scrolled)
-                .render(surface, column, scale, theme, font);
+                .render(surface, column, ctx.scale, ctx.theme, ctx.font);
         }
     }
 
@@ -1336,23 +1414,18 @@ impl Switchboard {
         // An open popup is modal over the rest of the composition: every event
         // routes to it first, and a primary press outside its bounds dismisses
         // it rather than falling through to whatever sits beneath.
-        if self.group_popup.is_some() {
-            return self.group_popup_on_pointer(event, bounds, scale, theme, font);
+        if self.active().holds_pointer() {
+            let layout = self.compute_layout(bounds, scale, theme);
+            let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+            let outcome = self.active_mut().overlay_on_pointer(event, ctx);
+            return outcome.and_then(|outcome| self.resolve_outcome(outcome));
         }
         if self.section_menu.is_some() {
             return self.section_menu_on_pointer(event, bounds, scale, theme, font);
         }
 
-        self.sync_scroll(bounds, scale, theme, font);
-        let layout = self.compute_layout(bounds, scale, theme, font);
-
-        // The header resource band is an instrument, not a control: it takes
-        // no pointer input, so a press over it must fall through to nothing
-        // rather than reaching the location band, the content, or the scrollbar
-        // it happens to sit above (no fabricated SwitchboardAction).
-        if layout.band.contains(*self.pointer) {
-            return None;
-        }
+        self.sync_scroll(bounds, scale, theme);
+        let layout = self.compute_layout(bounds, scale, theme);
 
         // The mouse wheel scrolls the active section (spec §17 / no deferral).
         if let InputEvent::PointerScrolled { dx, dy } = event {
@@ -1401,7 +1474,37 @@ impl Switchboard {
         }
 
         // The active section's content.
-        self.section_on_pointer(event, &layout, scale, theme)
+        let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+        let outcome = self.active_mut().on_pointer(event, ctx);
+        outcome.and_then(|outcome| self.resolve_outcome(outcome))
+    }
+
+    /// Turn what a section reported into the action a host sees, running the
+    /// composition-wide transitions a section may ask for but never perform
+    /// itself.
+    fn resolve_outcome(&mut self, outcome: SectionOutcome) -> Option<SwitchboardAction> {
+        match outcome {
+            SectionOutcome::Action(action) => Some(action),
+            SectionOutcome::ShowTask { task } => self.show_task(task),
+        }
+    }
+
+    /// Show [`Section::Tasks`] with `task` focused (clamped into the list;
+    /// `None` focuses the first task) and report the transition.
+    ///
+    /// This runs the one section transition and the one focus arithmetic every
+    /// other route runs, so the Pressure section's "Show tasks" relief cannot
+    /// leave the trail, the content and the offsets disagreeing.
+    fn show_task(&mut self, task: Option<usize>) -> Option<SwitchboardAction> {
+        let action = self.select_section_index(Section::Tasks.index());
+        let last = self.tasks.item_count().saturating_sub(1);
+        let row = task.unwrap_or(0).min(last);
+        let focus = self.tasks.focus_index_for_row(row);
+        self.tasks.set_content_focus(focus);
+        self.tasks.set_row_action(0);
+        self.ensure_focus_visible();
+        self.apply_focus_marks();
+        action
     }
 
     /// Open the section list on the section currently shown, so the reader
@@ -1422,7 +1525,7 @@ impl Switchboard {
         theme: &Theme,
         font: BitmapFont,
     ) -> Option<SwitchboardAction> {
-        let layout = self.compute_layout(bounds, scale, theme, font);
+        let layout = self.compute_layout(bounds, scale, theme);
         let menu = self.section_menu.as_ref()?;
         let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme, font);
 
@@ -1468,45 +1571,23 @@ impl Switchboard {
         self.select_section_index(index)
     }
 
-    /// Route a pointer event to the active section's items.
-    fn section_on_pointer(
-        &mut self,
-        event: &InputEvent,
-        layout: &SbLayout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<SwitchboardAction> {
-        let info = self.list_info(layout, scale, theme);
-        let start = usize::try_from(self.offsets[self.section.index()]).unwrap_or(0);
-        match self.section {
-            Section::Tasks => self.tasks_on_pointer(event, info, start, scale, theme),
-            Section::Jobs => self.jobs_on_pointer(event, info, start, scale, theme),
-            Section::Pressure => self.pressure_on_pointer(event, info, start, scale, theme),
-            Section::Activities => self.activities_on_pointer(event, info, start, scale, theme),
-            Section::Recovery => self.recovery_on_pointer(event, info, start, scale, theme),
-            Section::Overview => self.overview_on_pointer(event, layout, info, start, scale, theme),
-        }
-    }
-
     /// Feed one key event, returning the typed action it produced (if any).
     ///
-    /// An in-flight rename, then an open popup, take every key first: each is
-    /// modal over the composition, so no key reaches the regions beneath it
-    /// until it commits, cancels, or dismisses. Otherwise Tab cycles keyboard
-    /// focus between the location band, the content list, the scrollbar, and
-    /// the title-bar command group; keys are then routed to the focused
-    /// region's control.
+    /// The active section's own overlay — an in-flight inline edit or an open
+    /// popup — takes every key first: it is modal over the composition, so no
+    /// key reaches the regions beneath it until it commits, cancels, or
+    /// dismisses. Otherwise Tab cycles keyboard focus between the location
+    /// band, the content list, the scrollbar, and the title-bar command group;
+    /// keys are then routed to the focused region's control.
     ///
     /// Sections are reachable without a pointer: with focus on the location
     /// band, Space or Enter opens the section list, Up/Down walk it, and Enter
     /// shows the section under the cursor — the [`Menu`]'s own keys, with
     /// Escape closing it and leaving the section as it was.
     pub fn on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
-        if self.rename.is_some() {
-            return self.rename_on_key(key);
-        }
-        if self.group_popup.is_some() {
-            return self.group_popup_on_key(key);
+        if self.active().holds_keyboard() {
+            let outcome = self.active_mut().overlay_on_key(key);
+            return outcome.and_then(|outcome| self.resolve_outcome(outcome));
         }
         if self.section_menu.is_some() {
             return self.section_menu_on_key(key);
@@ -1544,118 +1625,53 @@ impl Switchboard {
     /// move the action focus along the row's buttons, and Enter/Space
     /// activate the action-focused button.
     fn content_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
-        let count = self.active_count();
+        let count = self.active().focus_span();
         if count == 0 {
             return None;
         }
         match key {
             Key::Named(NamedKey::Down) => {
-                self.content_focus = (self.content_focus + 1).min(count - 1);
-                self.row_action = 0;
-                self.ensure_focus_visible();
-                self.apply_focus_marks();
+                let next = (self.active().content_focus() + 1).min(count - 1);
+                self.move_content_focus(next);
                 None
             }
             Key::Named(NamedKey::Up) => {
-                self.content_focus = self.content_focus.saturating_sub(1);
-                self.row_action = 0;
-                self.ensure_focus_visible();
-                self.apply_focus_marks();
+                let next = self.active().content_focus().saturating_sub(1);
+                self.move_content_focus(next);
                 None
             }
             Key::Named(NamedKey::Right) => {
-                let last = self.focused_action_count().saturating_sub(1);
-                self.row_action = (self.row_action + 1).min(last);
+                let last = self.active().focused_action_count().saturating_sub(1);
+                let next = (self.active().row_action() + 1).min(last);
+                self.active_mut().set_row_action(next);
                 self.apply_focus_marks();
                 None
             }
             Key::Named(NamedKey::Left) => {
-                self.row_action = self.row_action.saturating_sub(1);
+                let next = self.active().row_action().saturating_sub(1);
+                self.active_mut().set_row_action(next);
                 self.apply_focus_marks();
                 None
             }
-            _ => self.activate_focused_item(key),
+            _ => {
+                let outcome = self.active_mut().activate_focused(key)?;
+                self.resolve_outcome(outcome)
+            }
         }
     }
 
-    /// How many inline action buttons the focused content item carries — the
-    /// bound for the Left/Right action focus. Activities member rows are
-    /// display-only and carry none.
-    fn focused_action_count(&self) -> usize {
-        match self.section {
-            Section::Tasks | Section::Recovery => 2,
-            Section::Jobs => self
-                .jobs
-                .get(self.content_focus)
-                .map_or(0, |card| card.footer().len()),
-            Section::Pressure => self
-                .pressure
-                .get(self.content_focus)
-                .map_or(0, |entry| entry.card.footer().len()),
-            Section::Activities => match self.activity_row_at(self.content_focus) {
-                Some(ActivityRow::Header(_)) => 4,
-                Some(ActivityRow::Member(..)) | None => 0,
-            },
-            Section::Overview => 1,
-        }
-    }
-
-    /// Feed an activation key to the focused item's action-focused button.
-    /// A disabled or denied button refuses the key itself, so a refused
-    /// activation emits nothing (fail closed).
-    fn activate_focused_item(&mut self, key: Key) -> Option<SwitchboardAction> {
-        let idx = self.content_focus;
-        match self.section {
-            Section::Tasks => {
-                let entry = self.tasks.get_mut(idx)?;
-                if self.row_action == 0 {
-                    return (entry.action.on_key(key) == Some(ButtonAction::Activated))
-                        .then_some(SwitchboardAction::Task { index: idx });
-                }
-                if entry.group_button.on_key(key) == Some(ButtonAction::Activated) {
-                    self.open_group_popup(idx);
-                }
-                None
-            }
-            Section::Jobs => {
-                let card = self.jobs.get_mut(idx)?;
-                card.on_key(key)
-                    .map(
-                        |CardAction::FooterActivated { index }| SwitchboardAction::Job {
-                            index: idx,
-                            control: job_control(index),
-                        },
-                    )
-            }
-            Section::Pressure => {
-                let action = self.pressure.get_mut(idx)?.card.on_key(key);
-                let CardAction::FooterActivated { index } = action?;
-                self.resolve_pressure_footer(idx, index)
-            }
-            Section::Activities => self.activate_focused_activity(key),
-            Section::Recovery => {
-                let entry = self.recovery.get_mut(idx)?;
-                if self.row_action == 0 {
-                    return (entry.restart.on_key(key) == Some(ButtonAction::Activated)).then_some(
-                        SwitchboardAction::Recovery {
-                            index: idx,
-                            control: RecoveryControl::Restart,
-                        },
-                    );
-                }
-                (entry.force.on_key(key) == Some(ButtonAction::Activated)).then_some(
-                    SwitchboardAction::Recovery {
-                        index: idx,
-                        control: RecoveryControl::Force,
-                    },
-                )
-            }
-            Section::Overview => {
-                let entry = self.services.get_mut(idx)?;
-                (entry.action.on_key(key) == Some(ButtonAction::Activated))
-                    .then_some(SwitchboardAction::Service { index: idx })
-            }
-        }
+    /// Put the content cursor on `index` of the active section: the action
+    /// cursor returns to the item's first action, the item is scrolled into
+    /// view, and the focus marks are re-applied.
+    ///
+    /// Both arrow keys move the cursor through here, so "keep the focused item
+    /// visible" is one definition rather than one per direction or per
+    /// section.
+    fn move_content_focus(&mut self, index: usize) {
+        self.active_mut().set_content_focus(index);
+        self.active_mut().set_row_action(0);
+        self.ensure_focus_visible();
+        self.apply_focus_marks();
     }
 
     /// The one section transition: every path that changes the shown section —
@@ -1674,16 +1690,17 @@ impl Switchboard {
         if section == self.section {
             return None;
         }
+        // Every overlay names the section that opened it — a popup anchors on
+        // one of its rows, an inline edit sits in one of them, and the section
+        // list marks the section on show — so a section change drops them
+        // rather than leaving one standing over, lying about, or still taking
+        // keys for content the reader has navigated away from.
+        self.active_mut().dismiss_overlay();
+        self.section_menu = None;
         self.section = section;
         self.trail = Self::build_trail(section);
-        self.content_focus = 0;
-        self.row_action = 0;
-        // Both popups name the section that opened them — the Group popup
-        // anchors on one of its rows, the section list marks it as the one on
-        // show — so a section change drops them rather than leaving either
-        // standing over, or lying about, unrelated content.
-        self.group_popup = None;
-        self.section_menu = None;
+        self.active_mut().set_content_focus(0);
+        self.active_mut().set_row_action(0);
         self.apply_focus_marks();
         Some(SwitchboardAction::SectionChanged { section })
     }
@@ -1695,7 +1712,12 @@ impl Switchboard {
         if viewport == 0 {
             return;
         }
-        let idx = u64::try_from(self.content_focus).unwrap_or(0);
+        // A cursor on a section's own header or footer names no row, so
+        // there is nothing to scroll to and the reader's offset stands.
+        let Some(row) = self.active().focus_row(self.active().content_focus()) else {
+            return;
+        };
+        let idx = u64::try_from(row).unwrap_or(0);
         let mut offset = self.offsets[self.section.index()];
         if idx < offset {
             offset = idx;
@@ -1738,74 +1760,14 @@ impl Switchboard {
             }
         }
 
+        // Every section is told, so the one on show lights its focused item
+        // and the five behind it are cleared rather than left glowing under
+        // content nobody is looking at.
         let content = self.focus == FocusRegion::Content;
-        let idx = self.content_focus;
-        let action = self.row_action;
-        for (i, entry) in self.tasks.iter_mut().enumerate() {
-            let focus_here = content && self.section == Section::Tasks && i == idx;
-            entry.row.set_in_focus_field(focus_here);
-            entry.action.set_focused(focus_here && action == 0);
-            entry.action.set_in_focus_field(focus_here);
-            entry.group_button.set_focused(focus_here && action == 1);
-            entry.group_button.set_in_focus_field(focus_here);
-        }
-        for (i, card) in self.jobs.iter_mut().enumerate() {
-            let focus_here = content && self.section == Section::Jobs && i == idx;
-            card.set_in_focus_field(focus_here);
-            for (b, button) in card.footer_mut().iter_mut().enumerate() {
-                button.set_focused(focus_here && b == action);
-                button.set_in_focus_field(focus_here);
-            }
-        }
-        for (i, entry) in self.pressure.iter_mut().enumerate() {
-            let focus_here = content && self.section == Section::Pressure && i == idx;
-            entry.card.set_in_focus_field(focus_here);
-            for (b, button) in entry.card.footer_mut().iter_mut().enumerate() {
-                button.set_focused(focus_here && b == action);
-                button.set_in_focus_field(focus_here);
-            }
-        }
-        // Only an Activities header row carries buttons, so the flattened row
-        // focus marks a button only when it names a header; a member row is a
-        // field of one.
-        let focused_activity = (content && self.section == Section::Activities)
-            .then(|| self.activity_row_at(idx))
-            .flatten();
-        let focused_header = focused_activity.and_then(|row| match row {
-            ActivityRow::Header(ai) => Some(ai),
-            ActivityRow::Member(..) => None,
-        });
-        let focused_member = focused_activity.and_then(|row| match row {
-            ActivityRow::Member(ai, mi) => Some((ai, mi)),
-            ActivityRow::Header(..) => None,
-        });
-        for (i, entry) in self.activities.iter_mut().enumerate() {
-            let focus_here = focused_header == Some(i);
-            entry.header.set_in_focus_field(focus_here);
-            entry.switch.set_focused(focus_here && action == 0);
-            entry.switch.set_in_focus_field(focus_here);
-            entry.pause_resume.set_focused(focus_here && action == 1);
-            entry.pause_resume.set_in_focus_field(focus_here);
-            entry.rename.set_focused(focus_here && action == 2);
-            entry.rename.set_in_focus_field(focus_here);
-            entry.close.set_focused(focus_here && action == 3);
-            entry.close.set_in_focus_field(focus_here);
-            for (m, member) in entry.members.iter_mut().enumerate() {
-                member.set_in_focus_field(focused_member == Some((i, m)));
-            }
-        }
-        for (i, entry) in self.recovery.iter_mut().enumerate() {
-            let focus_here = content && self.section == Section::Recovery && i == idx;
-            entry.row.set_in_focus_field(focus_here);
-            entry.restart.set_focused(focus_here && action == 0);
-            entry.restart.set_in_focus_field(focus_here);
-            entry.force.set_focused(focus_here && action == 1);
-            entry.force.set_in_focus_field(focus_here);
-        }
-        for (i, entry) in self.services.iter_mut().enumerate() {
-            let focus_here = content && self.section == Section::Overview && i == idx;
-            entry.row.set_in_focus_field(focus_here);
-            entry.action.set_focused(focus_here);
+        let active = self.section;
+        for section in Section::ALL {
+            self.section_mut(section)
+                .apply_focus_marks(content && section == active);
         }
     }
 }

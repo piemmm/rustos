@@ -15,7 +15,7 @@ use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord, RAID_LIST_LIMIT_
 use tairix_abi::sysinfo::{RaidListRequest, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError};
+use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -34,6 +34,11 @@ pub const RAID_PAGE: u16 = RAID_LIST_LIMIT_MAX;
 /// which storage devices exist and how they are composed, so it is read under
 /// the same authority as the hardware tree itself.
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile list it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply whose length is not a whole number of
 /// [`RaidArrayRecord::WIRE_LEN`] records, or a record carrying an unknown
 /// level, health, or reserved bit, is rejected rather than partially
@@ -49,7 +54,7 @@ pub const RAID_PAGE: u16 = RAID_LIST_LIMIT_MAX;
 ///   walk stops at that record.
 pub fn for_each_raid_array(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&RaidArrayRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&RaidArrayRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -87,7 +92,7 @@ pub fn for_each_raid_array(
 ///   walk stops at that record.
 pub fn for_each_raid_member(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&RaidMemberRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&RaidMemberRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -147,7 +152,7 @@ pub fn raid_arrays() -> Result<Vec<RaidArrayRecord>, Errno> {
     let mut records = Vec::new();
     for_each_raid_array(&crate::client::IpcTransport, |record| {
         records.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(flatten)?;
     Ok(records)
@@ -170,7 +175,7 @@ pub fn raid_members() -> Result<Vec<RaidMemberRecord>, Errno> {
     let mut records = Vec::new();
     for_each_raid_member(&crate::client::IpcTransport, |record| {
         records.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(flatten)?;
     Ok(records)
@@ -178,7 +183,7 @@ pub fn raid_members() -> Result<Vec<RaidMemberRecord>, Errno> {
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_raid_array, for_each_raid_member, RAID_PAGE};
+    use super::{for_each_raid_array, for_each_raid_member, WalkStep, RAID_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -299,7 +304,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_raid_array(fixture, |record| {
             seen.borrow_mut().push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }
@@ -308,7 +313,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_raid_member(fixture, |record| {
             seen.borrow_mut().push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }
@@ -402,7 +407,9 @@ mod tests {
             }
         }
         assert_eq!(
-            for_each_raid_array(&Bogus(RaidArrayRecord::WIRE_LEN), |_| Ok(())),
+            for_each_raid_array(&Bogus(RaidArrayRecord::WIRE_LEN), |_| Ok(
+                WalkStep::Continue
+            )),
             Err(ListError::Call(CallError::Service(Errno::OutOfRange)))
         );
     }

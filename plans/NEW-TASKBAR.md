@@ -198,7 +198,8 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   record and the **library-edit** / **pin** / **Switchboard-control** IPC
   vocabularies under the usual ABI discipline (versioned, hashed, fuzzed).
 - `lib/controls` — add the shared controls the mockups need that do not yet
-  exist (resource **Meter**, **PressureRail**, **ActivitySeam**, **SignalBead**
+  exist (the **MetricTile** resource reading, **PressureRail**,
+  **ActivitySeam**, **SignalBead**
   refinements) so both the taskbar icon and the Switchboard window compose
   them (T9, T11–T14). The Switchboard app's own screen composition is
   extended (Pressure + Activities sections) in place (§2.13).
@@ -957,12 +958,12 @@ tests it rides on. Docs: `userland/gui/switchboard/README.md`,
   authenticated by its kernel-attested per-message `Origin` against the
   session identity learned from the seat-anchored publish reply — never a
   wire claim.
-- The header resource meters (CPU / MEM / DISK / NET) from the mockup are
-  drawn with a new shared `lib/controls` **Meter** control (a rounded bar with
-  the value trace + **pressure rail** colour by resource), added to
-  `lib/controls` (never a Switchboard-private draw, §2.2). The four existing
-  sections (Tasks, Jobs, Recovery, Overview) render the NOW / BACKGROUND /
-  PRESSURE / RECOVERY / SYSTEM content from live data.
+- A resource reading (CPU / MEM / DISK / NET) is drawn with the shared
+  `lib/controls` **MetricTile** under its `Track` instrument (a rounded bar
+  with the value trace + **pressure rail** colour by resource), never a
+  Switchboard-private draw (§2.2). The six sections (Tasks, Jobs, Pressure,
+  Activities, Recovery, System) render the NOW / BACKGROUND / PRESSURE /
+  RECOVERY / SYSTEM content from live data.
 - Zero-copy window presentation, parks on its event mailbox (no poll, §2.23),
   fail-closed on a denied action (renders `DeniedByAuthority`, never acts).
 
@@ -1020,8 +1021,9 @@ seat report is sent only when the vigil's unresponsive set changes,
 carrying the truthful total beyond `SEAT_REPORT_OWNERS_MAX`. A refused send
 is reported on `stderr` and dropped, never retried.
 
-**Status — the shared controls (`lib/controls`): done.** `meter.rs` adds the
-`Meter` instrument: one resource reading (label, reading text, rounded track
+**Status — the shared controls (`lib/controls`): done.** `metric.rs`'s
+`MetricTile` under `MetricInstrument::Track` is the one reading-with-a-track:
+one resource reading (label, reading text, rounded track
 tinted by the resource's semantic rail through the same `signal_color` lookup
 `Card`'s Pressure Rail uses), read-only with no input or action. `chart.rs`
 adds its history counterpart, `Chart` (spec §11.35): a bounded
@@ -1031,17 +1033,16 @@ is given — a trend confined to a track's thickness cannot rise more than a
 pixel or two whatever it reads.
 `MeterValue::Unmeasured` makes an unmeasurable resource
 unrepresentable as a real zero, so a denied or absent query draws a quiet
-groove instead of a fabricated `0%`. The `switchboard` composition tiles one
-per resource in an always-visible header band above the Tabs strip (every
-region below shifts by its measured height; an empty resource list collapses
-it to nothing) and the band routes no pointer or key input. A column shows one
-instrument: the `Chart` takes the slot the meter's track would have had
+groove instead of a fabricated `0%`. The `switchboard` composition draws a
+reading in the section it is *about* — there is no permanent resource band
+above the sections (`plans/NEW-SWITCHBOARD.md` S2) — and a column shows one
+instrument: the `Chart` takes the slot the tile's track would have had
 wherever there is a history to plot, so a resource is never reported twice in
-the same column. `ResourceSummary`
-carries the measured value, pressure and inline bounded history once, feeding
-both the band's `Meter` and the Overview `Card`. `select_section` lets a host
-open on a chosen section and `set_model` refreshes live data in place —
-both through the one internal transition, so the tab strip, content and
+the same column. The System report
+carries each measured value, its pressure and its inline bounded history
+once, feeding the System section's own resource tiles. `select_section` lets
+a host open on a chosen section and `set_model` refreshes live data in place —
+both through the one internal transition, so the location band, content and
 per-section scroll can never disagree; a refresh keeps section, offsets,
 focus, pointer and any in-flight drag, and deliberately drops row-indexed
 selection, hover and any armed press so a press begun on one row can never
@@ -1077,7 +1078,7 @@ verdict cannot diverge).
 ## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3) — **done**
 
 The panel carries six sections — Tasks, Jobs, **Pressure**, **Activities**,
-Recovery, Overview — on the same in-place `SwitchboardModel` (no v2), with
+Recovery, System — on the same in-place `SwitchboardModel` (no v2), with
 the wire `CommandSection` — which the bar's own gesture names directly, so the
 section a user asked for is relayed unchanged rather than re-decided — and the
 service mapping extended in step.
@@ -1153,7 +1154,7 @@ authority: each row reports a typed outcome and the session resolves it.
 
 | Row | Resolved by | Backing |
 |---|---|---|
-| About This System | session → Switchboard `Overview` | the T11 overview (identity, uptime, load, memory) |
+| About This System | session → Switchboard `System` | the System screen (identity, uptime, load, memory) |
 | System Monitor | session → Switchboard `Tasks` | the T11 open panel |
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |

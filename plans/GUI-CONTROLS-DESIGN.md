@@ -39,11 +39,11 @@ Switchboard is the flagship example because it exposes live task, job, recovery,
 
 Every control and every piece of window furniture named in this specification —
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
-Radio), value controls (Slider, Progress, Meter), text entry (TextField, SearchField),
+Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField),
 choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
-Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel),
-decision surfaces (Dialog, Tooltip, HelpTip), shell surfaces (Notification,
-TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
+Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel,
+MetricTile, StatusPill), decision surfaces (Dialog, Tooltip, HelpTip), shell surfaces
+(Notification, TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
 TitleBar, the WindowControl set — Close, Minimize, PutToBack, SizeToggle — the
 ResizeGrabber, the ScrollBar in both orientations, and the ScrollCorner) — is a
 **first-class control**. Each MUST be **fully implemented**: not stubbed, not a
@@ -197,7 +197,6 @@ pub enum ControlKind {
     Radio,
     Slider,
     Progress,
-    Meter,
     TextField,
     SearchField,
     ComboBox,
@@ -487,7 +486,12 @@ ControlBounds
 - Content remains aligned while edge signals change.
 - Label text never shifts because a Signal Rim brightened.
 - Progress seams do not change the measured size of the control.
-- Signal Beads reserve space only when persistent. Transient beads overlay inside the existing trailing inset.
+- Signal Beads never displace content by appearing. Where content must stay
+  aligned across rows or columns (the row family, §11.13), the trailing bead
+  band is reserved from the control's own size whether or not a bead is drawn
+  right now, so a bead only ever paints inside space that was already there.
+  Elsewhere a persistent bead reserves its own space and a transient one
+  overlays inside the existing trailing inset.
 - Focus rings are visible in every theme and do not rely on color alone.
 - Destructive controls remain readable before and during confirmation.
 
@@ -723,11 +727,24 @@ Rows are controls. They can be selected, focused, inspected, dragged, or linked 
 - Resource pressure uses a semantic rail on the leading edge.
 - Recovery state uses a sharper bead or latch affordance.
 
-Tables must keep columns aligned while row state changes.
+Tables must keep columns aligned while row state changes. Both the leading
+rail gutter and the trailing Signal Bead band are therefore reserved from the
+row's own size alone, never from its current state, and a header reserves the
+identical span so its titles name exactly the spans the cells beneath occupy.
+A composer that must place its own content inside a column (a sparkline beside
+a number) reads the row's laid-out cell rectangles rather than re-deriving the
+layout, so the two can never disagree.
 
 ### 11.14 TableCell
 
 A table cell may expose its own state only when that state is cell-specific. Row-wide state belongs to the row. Numeric cells should use a tabular numeric font role when available.
+
+A cell may carry an optional leading icon naming what its value *is* — the same
+optional identity icon a metric tile already carries on its own leading edge,
+never a second convention. It draws on a fixed slot ahead of the text whatever
+the cell's alignment, out of the text's own budget so it can never overlap it,
+and a column too narrow to seat it omits it rather than crowding the text. An
+icon is content within a cell: it never moves a column boundary.
 
 ### 11.15 Card
 
@@ -737,6 +754,20 @@ Cards group state and actions.
 - The bottom edge carries progress.
 - The top trailing corner carries count or alert beads.
 - Footer actions share the card's semantic state but keep their own pointer and focus states.
+- A card is itself pressable, so a master list of cards is selectable with the
+  pointer. A completed primary click inside the card's bounds that no footer
+  button consumed reports `CardAction::Pressed`; a completed click on a footer
+  button reports `CardAction::FooterActivated` instead. The footer buttons see
+  every pointer event first, so one click never reports both.
+- A press gives the card **no** pointer look of its own. The feedback for
+  choosing a card is the owner marking it *selected* — the composed state is
+  the owner's to set — so the body pointer position and press latch are
+  hit-test input only and are excluded from render equality: a card mid-press
+  compares equal to its resting self and draws the same pixels.
+- A card that is not actionable (disabled, or denied by authority) reports
+  nothing for a body press, through the same fail-closed press latch every
+  clickable control shares, so there is one rule rather than a card-specific
+  one.
 - A card's plate bounds the group it owns. One item of an icon view is not such
   a group and carries no plate: that is an `IconTile` (§11.34), never a card
   with an icon.
@@ -994,34 +1025,53 @@ Tooltips explain immediate affordance. HelpTips explain why an action is unavail
 - HelpTips may include one reason and one safe next step.
 - Security-sensitive denial text must avoid secrets and capability tokens.
 
-### 11.33 Meter
+### 11.33 MetricTile
 
-A meter is a value/measured control alongside Slider (§11.6) and Progress
-(§11.7): a read-only instrument with no pointer or keyboard handling. It
-renders one resource reading — a small upper-case label, a bold reading
-value, and beneath them a thin rounded track — for the header resource band
-(CPU, memory, disk, network) a taskbar or system-overview panel shows.
+A metric tile is the at-a-glance readout of one resource: an optional
+leading identity icon, a quiet label, a bold reading with a quieter unit
+beside it, an optional line of supporting detail, and an optional
+instrument beneath — a proportional track, or a Chart (§11.35) of the
+resource's recent history. It is a read-only instrument with no pointer or
+keyboard handling, alongside Slider (§11.6) and Progress (§11.7) in the
+value/measured family; the owner supplies every visible fact and
+re-renders when any of them changes.
 
-- The track is always tinted by the resource's own semantic rail colour
-  (CPU, memory, disk, network, power, or thermal), never the plain accent:
-  unlike Slider or Progress, a meter's colour is the resource's fixed
-  identity, not a transient severity, so a CPU meter reads as the compute
-  colour whether it is showing 5% or 95%.
+- **The track is the design language's one reading-with-a-track.** It is
+  always tinted by the resource's own semantic rail colour (CPU, memory,
+  disk, network, power, or thermal), never the plain accent: unlike Slider
+  or Progress, the track's colour is the resource's fixed identity, not a
+  transient severity, so a CPU tile's track reads as the compute colour
+  whether it is showing 5% or 95%.
 - The Pressure Rail's severity state still drives emphasis exactly as it
-  does for Card (§12.3): at rest the meter shows the plain tinted track, and
-  under genuine pressure it gains the same rail emphasis outline a card's
-  leading edge would show. This is not a second severity vocabulary — it is
-  the one Pressure Rail state, read by one more control.
+  does for Card (§12.3): at rest the track is plain and tinted, and under
+  genuine pressure it gains the same rail emphasis outline a card's leading
+  edge would show. This is not a second severity vocabulary — it is the one
+  Pressure Rail state, read by one more control.
 - Unmeasured state: a resource with no wired query or a denied capability
   renders the quiet unmeasured track and whatever reading text its owner
   supplies (e.g. an em dash), never a fabricated `0%`.
-- A meter reports the resource *now*. What it has been doing over time is a
+- A track reports the resource *now*. What it has been doing over time is a
   Chart (§11.35), a different instrument with a different shape, and the two
-  never report the same number at once: a band that plots a resource's history
-  puts the chart in the slot the meter's track would have taken.
-- A meter narrower or shorter than its own label, reading, and track
-  degrades by omitting whichever line does not fit, never by drawing past
-  its own bounds.
+  never report the same number at once: a band that plots a resource's
+  history puts the chart in the slot the track would have taken.
+- A tile draws in one of two layouts: stacked, the default, with the label
+  above the reading for a tile that owns a column of its own; or inline,
+  with the label leading and the reading (kept whole; the label truncates
+  first) trailing on one line, for a stack of readings scanned down a
+  narrow column. Either way the optional detail line and instrument still
+  span the tile's full width.
+- A tile is plated by default; an unplated tile draws no plate, rim, or
+  padding of its own, for several readings sharing one container's surface
+  — a Panel (§11.16) — without nesting a plate inside a plate.
+- A metric tile narrower or shorter than its own icon, label, reading,
+  detail, and instrument degrades by omitting the instrument, then the
+  detail line, never by drawing past its own bounds.
+
+A StatusPill is a compact, read-only capsule that names a condition —
+"Healthy", "Denied", "Recovering" — with no action of its own, toned by the
+theme's own signal roles exactly as a Pressure Rail or Signal Bead of that
+role is elsewhere. It fills the gap neither a metric tile nor any other
+control covers: badging a state without offering a button.
 
 ### 11.34 IconTile
 
@@ -1067,13 +1117,13 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
 ### 11.35 Chart
 
 A chart is the history instrument of the value/measured family: a read-only
-control, like Meter (§11.33) and Progress (§11.7), that plots one bounded
-oldest-to-newest series of readings as a line.
+control, like a MetricTile's track instrument (§11.33) and Progress (§11.7),
+that plots one bounded oldest-to-newest series of readings as a line.
 
 - **A chart owns its box, and its readings map across the whole of it.** Full
   capacity is the ceiling and nothing at all is the floor, both inset only by
   the room the line's own weight needs. This is the whole reason it is not a
-  meter variant: a series confined to an instrument track's thickness cannot
+  track variant: a series confined to an instrument track's thickness cannot
   rise more than a pixel or two whatever its values are, which is a graph that
   cannot report its own data.
 - **It is a line, not a bar field.** Adjacent readings are joined, because the
@@ -1082,8 +1132,8 @@ oldest-to-newest series of readings as a line.
   reads as a shape rather than a wandering hairline; the line stays the thing
   being read.
 - The trace is tinted by the resource's own semantic rail colour, exactly as a
-  meter's track is (§11.33) — the resource's fixed identity, never the accent
-  and never a transient severity.
+  MetricTile's track is (§11.33) — the resource's fixed identity, never the
+  accent and never a transient severity.
 - **An empty series plots nothing at all**, leaving the quiet plate: an honest
   "nothing recorded yet". A fabricated flat line along the floor would read as
   a measured idle. A single reading *is* a measurement, so it holds across the
@@ -1149,7 +1199,7 @@ Resource pressure is directional and semantic.
 
 The rail appears on the object causing or experiencing the pressure and on the recommended action.
 
-A resource Meter (§11.33) is the one exception to "appears only while under pressure": its track is tinted by its rail colour at all times, because the tint is that instrument's fixed resource identity rather than a transient state. The Pressure Rail's severity still reaches it exactly as it reaches a Card — an emphasis outline when the resource is genuinely under load — it is simply drawn over a track that was already coloured.
+A MetricTile's embedded track (§11.33) is the one exception to "appears only while under pressure": it is tinted by its rail colour at all times, because the tint is that instrument's fixed resource identity rather than a transient state. The Pressure Rail's severity still reaches it exactly as it reaches a Card — an emphasis outline when the resource is genuinely under load — it is simply drawn over a track that was already coloured.
 
 ### 12.4 Signal Bead
 

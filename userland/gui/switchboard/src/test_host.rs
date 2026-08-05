@@ -48,6 +48,10 @@ pub(crate) fn process_summary(
     )
 }
 
+/// The per-process storage I/O figures a fixture row carries when the test
+/// is not about them: nothing read, nothing written.
+pub(crate) const NO_IO: (u64, u64) = (0, 0);
+
 /// [`process_summary`], with every pressure/activity-relevant field the
 /// caller needs to vary spelled out explicitly.
 pub(crate) fn process_summary_with(
@@ -70,6 +74,8 @@ pub(crate) fn process_summary_with(
         mem_bytes,
         priority,
         cpu_permille,
+        io_bytes_read: NO_IO.0,
+        io_bytes_written: NO_IO.1,
     }
 }
 

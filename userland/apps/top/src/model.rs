@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, ProcessRecord, SysinfoQueryId, Uptime};
 use tairix_abi::ProcId;
 use tairix_curses::Event;
-use tairix_procinfo::{call, for_each_process, CallError, CpuTotals, Transport};
+use tairix_procinfo::{call, for_each_process, CallError, CpuTotals, Transport, WalkStep};
 
 use crate::error::TopError;
 
@@ -212,7 +212,7 @@ impl Model {
         let mut records = Vec::new();
         for_each_process(transport, self.scope.is_all(), |record| {
             records.push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
 
         self.summary = Self::sample_summary(transport);

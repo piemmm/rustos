@@ -17,11 +17,16 @@
 //!
 //! # Module map
 //!
-//! * [`sample`] — [`sample::Sampler`], which walks the live process list
-//!   and the aggregate CPU/memory-pressure queries and turns them into a
-//!   [`sample::Sample`], degrading every field to its honest empty form on
-//!   a query failure or a refused capability rather than ever fabricating
-//!   one.
+//! * [`sample`] — [`sample::Sampler`], which reads the live system facts
+//!   the System Information API exposes — the process list, CPU time and
+//!   per-CPU load, memory pressure and totals, identity and uptime, load
+//!   average, the mount table and its volume capacities, volume I/O
+//!   health, the network interfaces and their live rates, seats, resource
+//!   limits, and crash records — on a staged cadence, and turns them into
+//!   a [`sample::Sample`]. Every reading degrades on its own to an honest
+//!   absence on a query failure or a refused capability, and the sample
+//!   records which of the two it was ([`sample::Absence`]) rather than
+//!   ever fabricating a value.
 //! * [`mod@derive`] — [`derive::derive_summary`], the pure function that turns
 //!   a [`sample::Sample`] plus the running [`derive::Hysteresis`] state
 //!   into the wire [`tairix_abi::switchboard_ipc::TraySummary`].
@@ -47,7 +52,7 @@
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
 //!   raise, refresh, close) and effect application.
 //! * [`view`] — [`view::Switchboard`], the overview window's own screen:
-//!   the window furniture, resource band, location band, and per-section lists
+//!   the window furniture, location band, and per-section lists
 //!   assembled purely from the shared Reactive Alloy controls, turning a
 //!   [`view::SwitchboardModel`] into pixels and a gesture into a typed
 //!   [`view::SwitchboardAction`].
@@ -78,9 +83,8 @@
 //!   the OS to enumerate, so the tray summary's `jobs` count is an honest
 //!   zero and the panel's Jobs section has no rows.
 //! * **Services.** The System Information API
-//!   ([`tairix_abi::sysinfo`]) has no service-enumeration query — its
-//!   queries cover processes, CPU time, and memory pressure — so the
-//!   Overview section's service list stays empty rather than listing
+//!   ([`tairix_abi::sysinfo`]) has no service-enumeration query at all, so
+//!   the Overview section's service list stays empty rather than listing
 //!   guesses drawn from process names.
 //! * **System actions.** There is no power or session-lock interface this
 //!   service may drive, so it offers no shut-down, restart, or lock
@@ -89,13 +93,13 @@
 //!
 //! A disk resource row is absent for the same reason: the System
 //! Information API exposes no disk-throughput query. A network resource
-//! row is absent for a different reason — the System Information API does
-//! carry a live throughput query
-//! ([`tairix_abi::sysinfo::SysinfoQueryId::NET_INTERFACE_RATES`]), but this
-//! service does not consume it: that query's capability gate and sampling
-//! budget belong to the tray's own pressure latches, and no CPU/memory-style
-//! pressure latch exists yet for network, so there is nothing this crate
-//! could honestly render a rail or a card from.
+//! row is absent for a different reason — the sampler *does* read the live
+//! throughput query
+//! ([`tairix_abi::sysinfo::SysinfoQueryId::NET_INTERFACE_RATES`]) into
+//! [`sample::Sample::net_rates`], but no CPU/memory-style pressure latch
+//! exists yet for network, so the rate is a measurement without the
+//! hysteresis a rail or a card is derived from. The reading is taken and
+//! carried; rendering it waits on that latch rather than on the query.
 //!
 //! # Layering & safety
 //!
@@ -114,12 +118,14 @@ extern crate alloc;
 pub mod activities;
 pub mod command;
 pub mod derive;
+pub mod format;
 pub mod model;
 pub mod panel;
 pub mod publish;
 pub mod sample;
 pub mod schedule;
 pub mod service;
+pub mod system_report;
 pub mod view;
 pub mod wait;
 
@@ -141,17 +147,18 @@ pub use panel::{
 };
 pub use publish::Publisher;
 pub use sample::{
-    probe_scopes, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,
+    probe_scopes, Absence, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,
     ScopeVerdicts, TopTask,
 };
-pub use schedule::{MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
+pub use schedule::{Cadence, INVENTORY_SAMPLE_DIVIDER, MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
 pub use service::{
     CycleOutcome, RenderInputs, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES,
 };
 pub use view::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, JobControl, JobSummary,
-    PressureAction, PressureCause, PressureControl, RecoveryControl, RecoveryItem, ResourceSummary,
-    Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction,
-    TaskSummary,
+    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, HeadlineTile, HealthSeverity,
+    JobControl, JobSummary, LimitRow, NetworkInterface, PressureAction, PressureCause,
+    PressureControl, Reading, RecoveryControl, RecoveryItem, Section, SessionSeat, StorageVolume,
+    Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemPage,
+    SystemReport, TaskSummary, TileInstrument, Unmeasured,
 };
 pub use wait::{required_members, WaitToken};

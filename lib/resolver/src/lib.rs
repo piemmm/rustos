@@ -54,7 +54,7 @@ use tairix_abi::net_ipc::{NetAddrFamily, NetResolverServer, MAX_RESOLVER_SERVERS
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::dns::{self, DnsError, DnsTransport, Name, RecordType, Resolution};
-use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport};
+use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport, WalkStep};
 
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
@@ -118,7 +118,7 @@ pub fn configured_servers(sysinfo: &dyn Transport) -> Result<Vec<IpAddr>, Errno>
     let mut servers = Vec::with_capacity(MAX_RESOLVER_SERVERS);
     for_each_resolver_server(sysinfo, |record| {
         servers.push(server_addr(record));
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(list_error_to_errno)?;
     Ok(servers)

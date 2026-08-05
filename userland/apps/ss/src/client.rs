@@ -10,7 +10,7 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 use tairix_abi::net_ipc::{NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_net_socket, Transport};
+use tairix_procinfo::{for_each_net_socket, Transport, WalkStep};
 
 use crate::command::{Command, Options};
 use crate::error::SsError;
@@ -57,7 +57,7 @@ pub fn run(
     let mut rows: Vec<NetSocketRecord> = Vec::new();
     for_each_net_socket(transport, |record| {
         rows.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })?;
 
     // Count the listening sockets the default view hides, so the omission

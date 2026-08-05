@@ -1,7 +1,7 @@
 //! The mount engine: list the mount table through the System Information
 //! API, or hand a parsed attach request to the kernel.
 
-use tairix_procinfo::{for_each_mount, render_mount, Output, Transport};
+use tairix_procinfo::{for_each_mount, render_mount, Output, Transport, WalkStep};
 
 use crate::command::Command;
 use crate::error::MountError;
@@ -58,8 +58,11 @@ pub fn run(
 
 /// Page through the mount table and render one line per mounted filesystem.
 fn run_list(transport: &dyn Transport, out: &dyn Output) -> Result<(), MountError> {
-    for_each_mount(transport, |record| out.write_line(&render_mount(record)))
-        .map_err(MountError::from)
+    for_each_mount(transport, |record| {
+        out.write_line(&render_mount(record))
+            .map(|()| WalkStep::Continue)
+    })
+    .map_err(MountError::from)
 }
 
 #[cfg(test)]

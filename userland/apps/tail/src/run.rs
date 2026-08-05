@@ -42,7 +42,7 @@ mod program {
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_procinfo::{for_each_process, IpcTransport};
+    use tairix_procinfo::{for_each_process, IpcTransport, WalkStep};
     use tairix_rt::io::{self, write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
     use tairix_rt::{waitset_create, waitset_ctl, waitset_wait, File};
     use tairix_tail::{parse, run, FileSource, Info, Input, Meta, Output, Watcher, USAGE};
@@ -251,10 +251,11 @@ mod program {
             let scan = |all: bool| -> (bool, bool) {
                 let mut found = false;
                 let ok = for_each_process(&transport, all, |record| {
-                    if record.pid == pid {
-                        found = true;
+                    if record.pid != pid {
+                        return Ok(WalkStep::Continue);
                     }
-                    Ok(())
+                    found = true;
+                    Ok(WalkStep::Stop)
                 })
                 .is_ok();
                 (found, ok)

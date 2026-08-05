@@ -197,7 +197,9 @@ impl Notification {
     }
 
     /// Feed a pointer event; a footer action that completes a click reports
-    /// [`NotificationAction::ActionActivated`].
+    /// [`NotificationAction::ActionActivated`]. A notification has no
+    /// master/detail body to select, so a press on its body (as opposed to a
+    /// footer action) is consumed and reported as nothing.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -207,21 +209,23 @@ impl Notification {
         font: BitmapFont,
     ) -> Option<NotificationAction> {
         let card_bounds = self.card_bounds(bounds, scale, theme, font);
-        self.card.on_pointer(event, card_bounds, scale, theme).map(
-            |CardAction::FooterActivated { index }| NotificationAction::ActionActivated { index },
-        )
+        match self.card.on_pointer(event, card_bounds, scale, theme)? {
+            CardAction::FooterActivated { index } => {
+                Some(NotificationAction::ActionActivated { index })
+            }
+            CardAction::Pressed => None,
+        }
     }
 
     /// Feed a key event; a focused footer action activated with Space/Enter
     /// reports [`NotificationAction::ActionActivated`].
     pub fn on_key(&mut self, key: Key) -> Option<NotificationAction> {
-        self.card
-            .on_key(key)
-            .map(
-                |CardAction::FooterActivated { index }| NotificationAction::ActionActivated {
-                    index,
-                },
-            )
+        match self.card.on_key(key)? {
+            CardAction::FooterActivated { index } => {
+                Some(NotificationAction::ActionActivated { index })
+            }
+            CardAction::Pressed => None,
+        }
     }
 }
 

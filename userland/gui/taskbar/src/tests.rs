@@ -5020,7 +5020,7 @@ fn keyboard_navigation_reaches_every_row_and_enter_activates_the_highlighted_one
 fn every_row_maps_to_exactly_its_expected_response() {
     let expected = alloc::vec![
         TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Overview,
+            section: CommandSection::System,
         },
         TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Tasks,

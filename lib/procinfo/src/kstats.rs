@@ -24,7 +24,7 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError};
+use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::{call, CallError};
 use crate::transport::Transport;
 
@@ -139,6 +139,11 @@ pub fn ramzip_stats(transport: &dyn Transport) -> Result<RamzipStats, CallError>
 /// Page through the reclaim ledger ([`SysinfoQueryId::RECLAIM_STATS`]) and
 /// hand each decoded [`ReclaimClassRecord`] to `sink`, in class order.
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile list it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply that is not a whole number of
 /// records, or a record that does not decode, is rejected rather than
 /// partially delivered.
@@ -151,7 +156,7 @@ pub fn ramzip_stats(transport: &dyn Transport) -> Result<RamzipStats, CallError>
 ///   walk stops at that record.
 pub fn for_each_reclaim_class(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&ReclaimClassRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&ReclaimClassRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -190,7 +195,7 @@ pub fn for_each_reclaim_class(
 /// As [`for_each_reclaim_class`].
 pub fn for_each_cache_ledger(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CacheLedgerRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&CacheLedgerRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -228,7 +233,7 @@ pub fn for_each_cache_ledger(
 /// As [`for_each_reclaim_class`].
 pub fn for_each_cpu_load(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CpuLoadRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&CpuLoadRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -277,7 +282,7 @@ pub const IRQ_PAGE: u16 = 64;
 /// As [`for_each_cpu_load`].
 pub fn for_each_irq(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&IrqRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&IrqRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -305,8 +310,8 @@ pub fn for_each_irq(
 mod tests {
     use super::{
         for_each_cache_ledger, for_each_cpu_load, for_each_irq, for_each_reclaim_class,
-        memory_pressure, memory_total_bytes, ramzip_stats, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE,
-        IRQ_PAGE, RECLAIM_PAGE,
+        memory_pressure, memory_total_bytes, ramzip_stats, WalkStep, CACHE_LEDGER_PAGE,
+        CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -578,7 +583,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_reclaim_class(&fixture, |record| {
             seen.borrow_mut().push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         let got = seen.into_inner();
@@ -604,7 +609,7 @@ mod tests {
         let count = RefCell::new(0usize);
         for_each_cpu_load(&fixture, |_| {
             *count.borrow_mut() += 1;
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         assert_eq!(*count.borrow(), usize::from(CPU_LOAD_PAGE) + 1);
@@ -617,13 +622,13 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.deny = Some(SysinfoQueryId::RECLAIM_STATS);
         assert_eq!(
-            for_each_reclaim_class(&fixture, |_| Ok(())),
+            for_each_reclaim_class(&fixture, |_| Ok(WalkStep::Continue)),
             Err(ListError::Call(CallError::PermissionDenied))
         );
         fixture.deny = None;
         fixture.malformed = Some(SysinfoQueryId::CPU_LOAD);
         assert_eq!(
-            for_each_cpu_load(&fixture, |_| Ok(())),
+            for_each_cpu_load(&fixture, |_| Ok(WalkStep::Continue)),
             Err(ListError::Call(CallError::Service(Errno::BadMagic)))
         );
     }
@@ -651,7 +656,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_irq(&fixture, |record| {
             seen.borrow_mut().push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         let got = seen.into_inner();
@@ -682,7 +687,7 @@ mod tests {
         let count = RefCell::new(0usize);
         for_each_irq(&fixture, |_| {
             *count.borrow_mut() += 1;
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         assert_eq!(*count.borrow(), usize::from(IRQ_PAGE) + 1);
@@ -695,7 +700,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.deny = Some(SysinfoQueryId::IRQ_LIST);
         assert_eq!(
-            for_each_irq(&fixture, |_| Ok(())),
+            for_each_irq(&fixture, |_| Ok(WalkStep::Continue)),
             Err(ListError::Call(CallError::PermissionDenied))
         );
     }
@@ -706,7 +711,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_cache_ledger(&fixture, |record| {
             seen.borrow_mut().push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         let got = seen.into_inner();
@@ -739,7 +744,7 @@ mod tests {
         let count = RefCell::new(0usize);
         for_each_cache_ledger(&fixture, |_| {
             *count.borrow_mut() += 1;
-            Ok(())
+            Ok(WalkStep::Continue)
         })
         .expect("walk");
         assert_eq!(*count.borrow(), usize::from(CACHE_LEDGER_PAGE) + 1);
@@ -752,7 +757,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.deny = Some(SysinfoQueryId::CACHE_LEDGERS);
         assert_eq!(
-            for_each_cache_ledger(&fixture, |_| Ok(())),
+            for_each_cache_ledger(&fixture, |_| Ok(WalkStep::Continue)),
             Err(ListError::Call(CallError::PermissionDenied))
         );
     }

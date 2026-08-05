@@ -142,6 +142,26 @@ fn an_empty_chart_plots_nothing_at_all() {
 }
 
 #[test]
+fn no_reading_and_a_measured_nought_do_not_look_alike() {
+    // The distinction the whole honest-reading model rests on: a resource
+    // measured at nought is a fact and draws its floor line, while a resource
+    // nobody could measure draws nothing. Rendering them the same would let a
+    // missing reading pass for an idle one.
+    let theme = Theme::dark();
+    let nothing = chart_surface(&Chart::new(PressureKind::Cpu), &theme);
+    let nought = chart_surface(&Chart::new(PressureKind::Cpu).with_samples([0, 0]), &theme);
+    assert_ne!(nothing.pixels(), nought.pixels());
+    assert!(
+        has_pixel(&nought, cpu(&theme)),
+        "a measured nought is drawn"
+    );
+    assert!(
+        !has_pixel(&nothing, cpu(&theme)),
+        "an absent reading is not"
+    );
+}
+
+#[test]
 fn a_single_reading_holds_across_the_whole_box() {
     // One sample is a real measurement, so it draws as a flat line at its own
     // height rather than as an invisible point.

@@ -6,8 +6,8 @@
 //! events — rather than something the reader can drive. Neither carries
 //! pointer or keyboard handling, an action type, or interior mutability: the
 //! owner supplies every visible fact and re-renders when it changes, exactly
-//! as [`Meter`](crate::Meter) and [`Progress`](crate::Progress) do for a
-//! single reading.
+//! as [`MetricTile`](crate::MetricTile) and [`Progress`](crate::Progress) do
+//! for a single reading.
 //!
 //! [`FactList`] is the key-and-value readout a detail surface uses to state
 //! what a thing *is*: a column of label/value pairs, the label quiet on the

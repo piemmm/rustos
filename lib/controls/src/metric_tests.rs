@@ -1,16 +1,16 @@
 //! Unit tests for the metric-readout family: [`MetricTile`] and
 //! [`StatusPill`].
 //!
-//! These cover the Part 1 hoist leaving [`Meter`](crate::Meter) unchanged,
-//! every [`MetricInstrument`] variant (including the honest unmeasured track
-//! and an empty trend), the proportional fill and pressure emphasis, the
-//! `reading_height`/`measured_height` contract agreeing with what `render`
-//! lays out, progressive omission of the instrument then the detail line
-//! under shrinking heights, truncation of long text, every `StatusPill` tone
-//! (including the heavier-contrast rim), and fail-closed behaviour in
-//! degenerate bounds, across both built-in themes and the high-contrast
-//! fixture — plus the tile's leading icon, its `MetricLayout::Inline` form,
-//! and its `unplated` form, alone and composed together.
+//! These cover every [`MetricInstrument`] variant (including the honest
+//! unmeasured track and an empty trend), the proportional fill and pressure
+//! emphasis, the `reading_height`/`measured_height` contract agreeing with
+//! what `render` lays out, progressive omission of the instrument then the
+//! detail line under shrinking heights, truncation of long text, every
+//! `StatusPill` tone (including the heavier-contrast rim), and fail-closed
+//! behaviour in degenerate bounds, across both built-in themes and the
+//! high-contrast fixture — plus the tile's leading icon, its
+//! `MetricLayout::Inline` form, and its `unplated` form, alone and composed
+//! together.
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -19,9 +19,8 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use crate::chart::Chart;
-use crate::meter::{Meter, MeterValue};
 use crate::metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
-use crate::state::{PressureKind, PressureState, ProgressValue};
+use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
 use crate::testkit::high_contrast;
 
 fn font() -> BitmapFont {
@@ -132,46 +131,6 @@ fn detail_band(theme: &Theme, scale: Scale, font: BitmapFont, layout: MetricLayo
         after_primary = after_primary.saturating_add(line_h).saturating_add(gap);
     }
     (after_primary, after_primary.saturating_add(line_h))
-}
-
-// --- Part 1: the hoist leaves Meter unchanged -----------------------------
-
-#[test]
-fn the_hoisted_track_still_drives_meter_correctly() {
-    let theme = Theme::dark();
-    let low = Meter::new("CPU", "20%", PressureKind::Cpu, measured(200));
-    let high = Meter::new("CPU", "90%", PressureKind::Cpu, measured(900));
-    let unmeasured = Meter::new("CPU", "—", PressureKind::Cpu, MeterValue::Unmeasured);
-    let under = low
-        .clone()
-        .with_pressure(PressureState::Under(PressureKind::Cpu));
-
-    let h = Meter::measured_height(Scale::ONE, &theme, font());
-    let render = |m: &Meter| -> Surface {
-        let mut s = Surface::new(96, h).expect("surface");
-        m.render(&mut s, Rect::new(0, 0, 96, h), Scale::ONE, &theme, font());
-        s
-    };
-
-    let cpu = premul(theme.palette().cpu_pressure);
-    assert!(
-        has_pixel(&render(&low), cpu),
-        "a measured meter still tints its track"
-    );
-    assert!(
-        !has_pixel(&render(&unmeasured), cpu),
-        "an unmeasured meter still shows only the quiet groove"
-    );
-    assert_ne!(
-        render(&low).pixels(),
-        render(&high).pixels(),
-        "a higher reading must still fill further along the track"
-    );
-    assert_ne!(
-        render(&low).pixels(),
-        render(&under).pixels(),
-        "pressure emphasis must still change the rendered track"
-    );
 }
 
 // --- Every MetricInstrument variant ---------------------------------------

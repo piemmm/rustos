@@ -1,20 +1,21 @@
 //! The [`Chart`] control: one bounded history series, plotted as a line over
 //! the box it is given (`plans/GUI-CONTROLS-DESIGN.md` §11.35).
 //!
-//! A chart is a read-only instrument like [`Meter`](crate::Meter) and
-//! [`Progress`](crate::Progress): it carries a series of readings and never
-//! accepts pointer or keyboard input. What distinguishes it from a meter is
-//! *what it says*. A meter answers "how much of this resource is in use right
-//! now" and draws one thin proportional track; a chart answers "what has this
-//! resource been doing", and a trend needs vertical room to be legible — a
-//! series squeezed into a meter's instrument groove cannot rise more than a
-//! pixel or two whatever its values are, which is a graph that cannot report
-//! its own data. The chart therefore claims the whole rectangle its owner lays
-//! out for it, and its readings map across that full height.
+//! A chart is a read-only instrument like [`Progress`](crate::Progress) and a
+//! [`MetricTile`](crate::MetricTile)'s embedded proportional track: it carries
+//! a series of readings and never accepts pointer or keyboard input. What
+//! distinguishes it from a track is *what it says*. A track answers "how much
+//! of this resource is in use right now" and draws one thin proportional
+//! line; a chart answers "what has this resource been doing", and a trend
+//! needs vertical room to be legible — a series squeezed into a track's
+//! instrument groove cannot rise more than a pixel or two whatever its values
+//! are, which is a graph that cannot report its own data. The chart therefore
+//! claims the whole rectangle its owner lays out for it, and its readings map
+//! across that full height.
 //!
-//! Like a meter's track, the trace is tinted by the resource's own semantic
-//! rail colour rather than the accent, so a CPU trace reads as the compute
-//! colour whether it is showing 5% or 95%, and the accent stays reserved for a
+//! Like a track, the trace is tinted by the resource's own semantic rail
+//! colour rather than the accent, so a CPU trace reads as the compute colour
+//! whether it is showing 5% or 95%, and the accent stays reserved for a
 //! chosen action.
 //!
 //! Every colour, radius, and thickness resolves from the active [`Theme`] and

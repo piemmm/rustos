@@ -21,7 +21,7 @@ use tairix_abi::{
     CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY,
     WAIT_PID_ANY,
 };
-use tairix_procinfo::{for_each_mount, IpcTransport};
+use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
     completion_line, dispatch_line, refusal_line, run_scratch_paths, size_targets, summary_record,
@@ -395,7 +395,7 @@ fn scratch_free_bytes(scratch: &str) -> Option<u64> {
                 best = Some((target.len(), free));
             }
         }
-        Ok(())
+        Ok(WalkStep::Continue)
     });
     if walk.is_err() {
         return None;

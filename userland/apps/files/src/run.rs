@@ -113,7 +113,7 @@ mod program {
         MAX_ARTWORK_BYTES,
     };
     use tairix_input::{Key, Modifiers, NamedKey};
-    use tairix_procinfo::IpcTransport;
+    use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
@@ -1401,20 +1401,20 @@ mod program {
         let mut volumes = alloc::vec::Vec::new();
         let _ = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
             if record.availability() != tairix_abi::sysinfo::MountAvailability::Available {
-                return Ok(());
+                return Ok(WalkStep::Continue);
             }
             let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                return Ok(());
+                return Ok(WalkStep::Continue);
             };
             let Some(label) = target.rsplit('/').find(|part| !part.is_empty()) else {
-                return Ok(());
+                return Ok(WalkStep::Continue);
             };
             volumes.push(Volume {
                 label: String::from(label),
                 target: String::from(target),
                 medium: record.medium(),
             });
-            Ok(())
+            Ok(WalkStep::Continue)
         });
         volumes
     }

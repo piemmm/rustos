@@ -142,7 +142,7 @@ impl Panel {
                 host.report_refusal("open the overview window", refusal);
                 return;
             }
-            self.view = Some(Switchboard::new(self.model.model.clone()));
+            self.view = Some(Switchboard::new(&self.model.model));
         } else if let Err(refusal) = host.request(SwitchboardRequest::ActivateOwner {
             owner: self.own_pid,
         }) {
@@ -172,7 +172,7 @@ impl Panel {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        view.set_model(self.model.model.clone());
+        view.set_model(&self.model.model);
     }
 
     /// Apply every effect `action` implies under `authority`, in order, and
@@ -394,7 +394,14 @@ pub const WIN_HEIGHT: u32 = 560;
 
 /// The narrowest client width the panel is laid out for; a resize below it
 /// is clamped up rather than drawn into a box the sections cannot fit.
-pub const MIN_WIN_WIDTH: u32 = 320;
+///
+/// The floor is what every section's primary column must still seat — the
+/// widest unshrinkable row-command strip any section declares. The optional
+/// columns beside it (a detail pane, an impact column, an action rail) are
+/// shed in the section frame's drop order when they do not fit, so they do
+/// not set this floor; a row whose inline commands would be pushed off its
+/// own edge has nothing left to shed and does.
+pub const MIN_WIN_WIDTH: u32 = 640;
 
 /// The shortest client height the panel is laid out for (see
 /// [`MIN_WIN_WIDTH`]).

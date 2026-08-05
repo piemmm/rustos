@@ -4,7 +4,8 @@
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    emit_self_scope_omission, for_each_process, render_process, Output, Transport, PROCESS_HEADER,
+    emit_self_scope_omission, for_each_process, render_process, Output, Transport, WalkStep,
+    PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -82,6 +83,7 @@ fn run_list(all: bool, transport: &dyn Transport, out: &dyn Output) -> Result<()
     out.write_line(PROCESS_HEADER).map_err(PsError::Output)?;
     for_each_process(transport, all, |record| {
         out.write_line(&render_process(record))
+            .map(|()| WalkStep::Continue)
     })
     .map_err(PsError::from)?;
     if !all {

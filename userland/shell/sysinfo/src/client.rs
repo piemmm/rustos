@@ -24,7 +24,7 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
     call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process,
     for_each_raid_array, for_each_raid_member, render_limit_bound, render_process, Output,
-    Transport, PROCESS_HEADER,
+    Transport, WalkStep, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -148,6 +148,7 @@ fn run_processes(
     emit(out, PROCESS_HEADER)?;
     for_each_process(transport, all, |record| {
         out.write_line(&render_process(record))
+            .map(|()| WalkStep::Continue)
     })
     .map_err(SysinfoError::from)?;
     if !all {
@@ -599,6 +600,7 @@ fn run_irqs(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
             "{:<4}  task {:<6}  {:>10}  {}",
             record.line, record.owner, record.count, state,
         ))
+        .map(|()| WalkStep::Continue)
     })
     .map_err(SysinfoError::from)
 }
@@ -759,6 +761,7 @@ fn run_raid(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
             record.block_count(),
             array_progress(record),
         ))
+        .map(|()| WalkStep::Continue)
     })
     .map_err(SysinfoError::from)?;
 
@@ -778,6 +781,7 @@ fn run_raid(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
             record.block_size(),
             record.generation(),
         ))
+        .map(|()| WalkStep::Continue)
     })
     .map_err(SysinfoError::from)
 }

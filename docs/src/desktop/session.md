@@ -356,7 +356,7 @@ the same kind of typed outcome — the bar decides nothing and holds no
 authority for any of them:
 
 - `OpenSwitchboard { section }` — both the capsule's own press *and* the
-  menu's two inspection rows (*About This System* → `Overview`, *System
+  menu's two inspection rows (*About This System* → `System`, *System
   Monitor* → `Tasks`). Relayed to the live monitor; with none live the press
   is itself the demand for one, so an instance is brought up and the section
   held until its first publish proves it is listening.

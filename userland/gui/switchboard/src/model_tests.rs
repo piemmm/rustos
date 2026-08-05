@@ -4,23 +4,26 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
-use tairix_abi::sysinfo::ProcessState;
-use tairix_abi::{ProcId, SchedPriority, Signal};
-use tairix_controls::{
-    ActivityState, MeterValue, PressureKind, PressureState, ProgressValue, MAX_CHART_SAMPLES,
+use tairix_abi::sysinfo::{
+    CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, ProcessState, Uptime,
 };
+use tairix_abi::{Duration64, ProcId, SchedPriority, Signal, Time64, PROC_ID_LEN};
+use tairix_controls::{ActivityState, PressureKind, MAX_CHART_SAMPLES};
 
-use super::{apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, LiveMeters};
+use super::{
+    apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, RollingMeters,
+    TaskMeters, TASK_HISTORY_LEN,
+};
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
-use crate::sample::{MemoryPressureSample, Sample};
+use crate::sample::{MemoryPressureSample, ProcessSummary, Sample};
 use crate::test_host::{
     process_summary as process, process_summary_with, sample_with, DEFAULT_UID,
     NO_AUTHORITY as NONE, PROC_CONTROL_AUTHORITY as PROC_CONTROL,
 };
 use crate::view::{
-    ActionVerdict, ActivityControl, PressureControl, RecoveryControl, ResourceSummary, Section,
-    SwitchboardAction,
+    ActionVerdict, ActivityControl, PressureControl, Reading, RecoveryControl, Section,
+    SwitchboardAction, TileInstrument, Unmeasured,
 };
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test
@@ -30,17 +33,17 @@ const GIB: u64 = 1024 * 1024 * 1024;
 
 /// The meter state the run loop would hold after deriving and recording
 /// exactly `samples`, in order — the same sequence the service performs.
-fn meters_over(samples: &[Sample]) -> LiveMeters {
+fn meters_over(samples: &[Sample]) -> RollingMeters {
     let mut hysteresis = Hysteresis::new();
-    let mut meters = LiveMeters::new();
+    let mut meters = RollingMeters::new();
     for sample in samples {
         let _ = derive_summary(sample, &mut hysteresis);
-        meters.record(sample, hysteresis);
+        meters.record(sample, hysteresis, &SeatReport::HEALTHY);
     }
     meters
 }
 
-fn meters_for(sample: &Sample) -> LiveMeters {
+fn meters_for(sample: &Sample) -> RollingMeters {
     meters_over(core::slice::from_ref(sample))
 }
 
@@ -49,7 +52,7 @@ fn meters_for(sample: &Sample) -> LiveMeters {
 fn model(
     sample: &Sample,
     seat_report: &SeatReport,
-    meters: &LiveMeters,
+    meters: &RollingMeters,
     authority: &dyn tairix_abi::CapabilityQuery,
 ) -> super::PanelModel {
     build_model(
@@ -78,7 +81,7 @@ fn map_section_covers_every_wire_section() {
     assert_eq!(map_section(CommandSection::Pressure), Section::Pressure);
     assert_eq!(map_section(CommandSection::Activities), Section::Activities);
     assert_eq!(map_section(CommandSection::Recovery), Section::Recovery);
-    assert_eq!(map_section(CommandSection::Overview), Section::Overview);
+    assert_eq!(map_section(CommandSection::System), Section::System);
 }
 
 #[test]
@@ -90,7 +93,7 @@ fn tasks_are_built_in_sampled_order_with_a_switch_action() {
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
     assert_eq!(panel.model.tasks.len(), 2);
     assert_eq!(panel.model.tasks[0].name, "alpha");
-    assert_eq!(panel.model.tasks[0].detail, "50%");
+    assert_eq!(panel.model.tasks[0].cpu_permille, Some(500));
     assert_eq!(panel.model.tasks[0].action, "Switch");
     assert!(panel.model.tasks[0].action_allowed);
     assert_eq!(panel.model.tasks[0].group, None);
@@ -225,18 +228,16 @@ fn a_stopped_process_also_named_by_the_seat_report_is_not_duplicated() {
 fn an_unsampled_resource_reads_unknown_and_stays_unmeasured() {
     let sample = Sample::default();
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
-    assert_eq!(
-        panel.model.resources,
-        alloc::vec![
-            ResourceSummary::new("CPU", "unknown", PressureKind::Cpu, ActivityState::Idle),
-            ResourceSummary::new(
-                "Memory",
-                "unknown",
-                PressureKind::Memory,
-                ActivityState::Idle
-            ),
-        ]
-    );
+    let cpu = &panel.model.system.headline[0];
+    let memory = &panel.model.system.headline[1];
+    assert_eq!(cpu.name, "CPU");
+    assert_eq!(memory.name, "Memory");
+    // An unsampled reading names why it is missing rather than showing a
+    // zero, which would read as "idle" when the truth is "unknown".
+    assert_eq!(cpu.value, Reading::Absent(Unmeasured::Unavailable));
+    assert_eq!(memory.value, Reading::Absent(Unmeasured::NotPermitted));
+    assert_eq!(memory.instrument, TileInstrument::Track(None));
+    assert_eq!(cpu.instrument, TileInstrument::Trend(alloc::vec![]));
 }
 
 #[test]
@@ -251,28 +252,12 @@ fn a_sampled_resource_carries_its_measured_reading() {
         ..Sample::default()
     };
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
-    assert_eq!(
-        panel.model.resources,
-        alloc::vec![
-            ResourceSummary::new("CPU", "62%", PressureKind::Cpu, ActivityState::Working)
-                .with_meter(
-                    MeterValue::Measured(ProgressValue::new(624)),
-                    PressureState::None,
-                    [624u16],
-                ),
-            ResourceSummary::new(
-                "Memory",
-                "31%",
-                PressureKind::Memory,
-                ActivityState::Working
-            )
-            .with_meter(
-                MeterValue::Measured(ProgressValue::new(310)),
-                PressureState::None,
-                core::iter::empty(),
-            ),
-        ]
-    );
+    let cpu = &panel.model.system.headline[0];
+    let memory = &panel.model.system.headline[1];
+    assert_eq!(cpu.value, Reading::measured("62%"));
+    assert_eq!(cpu.instrument, TileInstrument::Trend(alloc::vec![624]));
+    assert_eq!(memory.value, Reading::measured("31%"));
+    assert_eq!(memory.instrument, TileInstrument::Track(Some(310)));
 }
 
 #[test]
@@ -282,15 +267,17 @@ fn the_cpu_meter_carries_the_pressure_the_derivation_latched() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    assert!(meters.cpu_pressured());
+    assert!(meters.system.cpu_pressured());
     let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let cpu = &panel.model.system.headline[0];
+    assert_eq!(cpu.value, Reading::measured("90%"));
+    assert!(
+        cpu.pressured,
+        "the header must carry the same latch the tray icon reads"
+    );
     assert_eq!(
-        panel.model.resources[0],
-        ResourceSummary::new("CPU", "90%", PressureKind::Cpu, ActivityState::Working).with_meter(
-            MeterValue::Measured(ProgressValue::new(CPU_PRESSURE_ENTER_PERMILLE)),
-            PressureState::Under(PressureKind::Cpu),
-            [CPU_PRESSURE_ENTER_PERMILLE],
-        )
+        cpu.instrument,
+        TileInstrument::Trend(alloc::vec![CPU_PRESSURE_ENTER_PERMILLE])
     );
 }
 
@@ -305,22 +292,15 @@ fn the_memory_meter_carries_the_band_the_sampler_read() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    assert!(meters.memory_pressured());
+    assert!(meters.system.memory_pressured());
     let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
-    assert_eq!(
-        panel.model.resources[1],
-        ResourceSummary::new(
-            "Memory",
-            "95%",
-            PressureKind::Memory,
-            ActivityState::Working
-        )
-        .with_meter(
-            MeterValue::Measured(ProgressValue::new(950)),
-            PressureState::Under(PressureKind::Memory),
-            core::iter::empty(),
-        )
+    let memory = &panel.model.system.headline[1];
+    assert_eq!(memory.value, Reading::measured("95%"));
+    assert!(
+        memory.pressured,
+        "the header must carry the same latch the tray icon reads"
     );
+    assert_eq!(memory.instrument, TileInstrument::Track(Some(950)));
 }
 
 #[test]
@@ -333,7 +313,7 @@ fn the_cpu_history_records_every_measured_sample_in_order() {
         })
         .collect();
     let meters = meters_over(&samples);
-    assert_eq!(meters.cpu_history(), &[100, 200, 300]);
+    assert_eq!(meters.system.cpu_history(), &[100, 200, 300]);
 }
 
 #[test]
@@ -350,7 +330,7 @@ fn an_unmeasurable_interval_contributes_no_history_point() {
         },
     ];
     let meters = meters_over(&samples);
-    assert_eq!(meters.cpu_history(), &[120, 340]);
+    assert_eq!(meters.system.cpu_history(), &[120, 340]);
 }
 
 #[test]
@@ -362,10 +342,10 @@ fn the_cpu_history_is_bounded_and_drops_the_oldest_reading() {
         })
         .collect();
     let meters = meters_over(&samples);
-    assert_eq!(meters.cpu_history().len(), MAX_CHART_SAMPLES);
-    assert_eq!(meters.cpu_history().first(), Some(&3));
+    assert_eq!(meters.system.cpu_history().len(), MAX_CHART_SAMPLES);
+    assert_eq!(meters.system.cpu_history().first(), Some(&3));
     let last = u16::try_from(MAX_CHART_SAMPLES + 2).expect("small index");
-    assert_eq!(meters.cpu_history().last(), Some(&last));
+    assert_eq!(meters.system.cpu_history().last(), Some(&last));
 }
 
 #[test]
@@ -373,8 +353,14 @@ fn jobs_services_and_system_actions_stay_honestly_empty() {
     let sample = Sample::default();
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
     assert!(panel.model.jobs.is_empty());
-    assert!(panel.model.services.is_empty());
-    assert!(panel.model.system_actions.is_empty());
+    // There is no service registry to enumerate, so the screen states the
+    // absence rather than showing an empty list that reads as "none".
+    assert!(panel
+        .model
+        .system
+        .actions
+        .iter()
+        .all(|action| { !action.allowed && action.refusal == Some(Unmeasured::NoInterface) }));
 }
 
 // --- Pressure section --------------------------------------------------
@@ -726,6 +712,128 @@ fn an_activity_detail_is_plural_for_multiple_members() {
     );
     assert_eq!(panel.model.activities[0].detail, "2 tasks");
     assert_eq!(panel.activity_members(0), &[10, 20]);
+}
+
+#[test]
+fn an_activitys_combined_reading_totals_its_joined_members() {
+    let sample = sample_with(alloc::vec![
+        process_summary_with(
+            10,
+            ProcessState::Running,
+            b"a",
+            Some(120),
+            DEFAULT_UID,
+            2 * GIB,
+            SchedPriority::Normal,
+        ),
+        process_summary_with(
+            20,
+            ProcessState::Running,
+            b"b",
+            Some(80),
+            DEFAULT_UID,
+            GIB,
+            SchedPriority::Normal,
+        ),
+    ]);
+    let mut activities = Activities::new();
+    activities
+        .create(member(sample.processes[0].proc_id, 10, "a"))
+        .expect("room");
+    activities
+        .assign(0, member(sample.processes[1].proc_id, 20, "b"))
+        .expect("room");
+
+    let panel = build_model(
+        "Switchboard",
+        &sample,
+        &SeatReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+        &activities,
+        None,
+    );
+    let summary = &panel.model.activities[0];
+
+    // The group's cost is the sum of what its own members were measured at —
+    // there is no per-group accounting to read instead.
+    assert_eq!(summary.cpu, Reading::measured("20%"), "120‰ + 80‰");
+    assert_eq!(
+        summary.memory,
+        Reading::measured("3.0 GiB"),
+        "2 GiB + 1 GiB"
+    );
+    assert_eq!(
+        summary.network,
+        Reading::Absent(Unmeasured::NoInterface),
+        "no per-task network accounting exists to total"
+    );
+}
+
+#[test]
+fn an_activity_total_is_absent_when_a_member_reading_is() {
+    // The second member's CPU share was never read, so the group's CPU total
+    // is absent rather than understating the group by skipping it.
+    let sample = sample_with(alloc::vec![
+        process(10, ProcessState::Running, b"a", Some(120)),
+        process(20, ProcessState::Running, b"b", None),
+    ]);
+    let mut activities = Activities::new();
+    activities
+        .create(member(sample.processes[0].proc_id, 10, "a"))
+        .expect("room");
+    activities
+        .assign(0, member(sample.processes[1].proc_id, 20, "b"))
+        .expect("room");
+
+    let panel = build_model(
+        "Switchboard",
+        &sample,
+        &SeatReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+        &activities,
+        None,
+    );
+    assert!(
+        matches!(panel.model.activities[0].cpu, Reading::Absent(_)),
+        "one unread part makes the whole total absent, not a smaller measurement"
+    );
+    assert!(
+        matches!(panel.model.activities[0].memory, Reading::Measured(_)),
+        "memory is read for every process, so its total still stands"
+    );
+}
+
+#[test]
+fn an_activity_with_no_running_member_has_no_total_at_all() {
+    // The group's member has exited, so nothing in the sample supports a
+    // total: reporting nought would claim the group costs nothing.
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"other",
+        Some(500)
+    )]);
+    let mut activities = Activities::new();
+    activities
+        .create(member(ProcId::from_raw([7u8; PROC_ID_LEN]), 99, "gone"))
+        .expect("room");
+
+    let panel = build_model(
+        "Switchboard",
+        &sample,
+        &SeatReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+        &activities,
+        None,
+    );
+    let summary = &panel.model.activities[0];
+    assert!(matches!(summary.cpu, Reading::Absent(_)));
+    assert!(matches!(summary.memory, Reading::Absent(_)));
+    assert!(matches!(summary.disk, Reading::Absent(_)));
+    assert!(!summary.members[0].joined, "its member is not running");
 }
 
 #[test]
@@ -1491,4 +1599,570 @@ fn activity_index_out_of_range_is_empty() {
         &NONE,
     );
     assert!(effect.is_empty());
+}
+
+/// One second in nanoseconds — the interval the disk-rate fixtures sample
+/// over, so a byte count and the per-second rate it produces read as the
+/// same figure and the arithmetic is checkable by eye.
+const ONE_SECOND_NS: u64 = 1_000_000_000;
+
+/// One running process carrying storage counters, so a test can move a
+/// task's I/O between samples and read the rate that produces.
+fn process_with_io(pid: u64, cpu_permille: Option<u16>, read: u64, written: u64) -> ProcessSummary {
+    ProcessSummary {
+        io_bytes_read: read,
+        io_bytes_written: written,
+        ..process(pid, ProcessState::Running, b"task", cpu_permille)
+    }
+}
+
+/// A sample of exactly `processes` taken `elapsed_ns` after the last one.
+fn sample_over(elapsed_ns: Option<u64>, processes: Vec<ProcessSummary>) -> Sample {
+    Sample {
+        elapsed_ns,
+        ..sample_with(processes)
+    }
+}
+
+/// The per-task meter state after recording exactly `samples`, in order —
+/// the same sequence the run loop performs each cycle.
+fn task_meters_over(samples: &[Sample]) -> TaskMeters {
+    let mut meters = TaskMeters::new();
+    for sample in samples {
+        meters.record(sample);
+    }
+    meters
+}
+
+/// The never-reused identity the process fixtures derive for task `pid`,
+/// read back from a fixture rather than re-derived, so the tests key on
+/// exactly what the sampler would produce.
+fn ident(pid: u64) -> ProcId {
+    process(pid, ProcessState::Running, b"task", None).proc_id
+}
+
+#[test]
+fn the_first_sample_has_no_interval_to_measure_a_disk_rate_over() {
+    let meters = task_meters_over(&[sample_over(
+        Some(ONE_SECOND_NS),
+        alloc::vec![process_with_io(7, Some(100), 4096, 2048)],
+    )]);
+    assert_eq!(
+        meters.disk_rate(ident(7)),
+        None,
+        "a cumulative counter's first reading is a total, not a rate"
+    );
+}
+
+#[test]
+fn a_moved_counter_measures_its_bytes_over_the_sampled_interval() {
+    let meters = task_meters_over(&[
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(100), 1_000, 500)],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS / 2),
+            alloc::vec![process_with_io(7, Some(100), 2_000, 1_000)],
+        ),
+    ]);
+    assert_eq!(
+        meters.disk_rate(ident(7)),
+        Some(3_000),
+        "1500 bytes read and written over half a second is 3000 a second"
+    );
+}
+
+#[test]
+fn a_counter_that_did_not_move_measures_zero_rather_than_nothing() {
+    let idle = || {
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(100), 4096, 2048)],
+        )
+    };
+    let meters = task_meters_over(&[idle(), idle()]);
+    assert_eq!(
+        meters.disk_rate(ident(7)),
+        Some(0),
+        "a task that did no I/O over a real interval genuinely did none, \
+         which is a measurement and not an absence"
+    );
+}
+
+#[test]
+fn a_task_first_seen_this_sample_has_no_previous_reading_to_delta() {
+    let meters = task_meters_over(&[
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(100), 1_000, 0)],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![
+                process_with_io(7, Some(100), 3_000, 0),
+                process_with_io(9, Some(100), 8_000, 0),
+            ],
+        ),
+    ]);
+    assert_eq!(
+        meters.disk_rate(ident(7)),
+        Some(2_000),
+        "the task that was already here is measured against its own last reading"
+    );
+    assert_eq!(
+        meters.disk_rate(ident(9)),
+        None,
+        "a task seen for the first time has no earlier reading of its own, so \
+         its lifetime total is never mistaken for a rate"
+    );
+}
+
+#[test]
+fn an_unmeasured_interval_reports_no_rate_rather_than_dividing_by_nothing() {
+    for elapsed_ns in [None, Some(0)] {
+        let meters = task_meters_over(&[
+            sample_over(
+                Some(ONE_SECOND_NS),
+                alloc::vec![process_with_io(7, Some(100), 1_000, 0)],
+            ),
+            sample_over(
+                elapsed_ns,
+                alloc::vec![process_with_io(7, Some(100), 5_000, 0)],
+            ),
+        ]);
+        assert_eq!(
+            meters.disk_rate(ident(7)),
+            None,
+            "bytes over an interval nobody measured is not a rate"
+        );
+    }
+}
+
+#[test]
+fn a_task_keeps_its_own_cpu_readings_in_the_order_they_were_measured() {
+    let samples: Vec<Sample> = [100u16, 250, 400]
+        .iter()
+        .map(|permille| {
+            sample_over(
+                Some(ONE_SECOND_NS),
+                alloc::vec![
+                    process_with_io(7, Some(*permille), 0, 0),
+                    process_with_io(9, Some(permille / 2), 0, 0),
+                ],
+            )
+        })
+        .collect();
+    let meters = task_meters_over(&samples);
+    assert_eq!(meters.cpu_history(ident(7)), &[100, 250, 400]);
+    assert_eq!(
+        meters.cpu_history(ident(9)),
+        &[50, 125, 200],
+        "each task's history is its own, keyed by its own identity"
+    );
+}
+
+#[test]
+fn a_sample_that_measured_no_share_adds_no_point_to_the_history() {
+    let meters = task_meters_over(&[
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(100), 0, 0)],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, None, 0, 0)],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(300), 0, 0)],
+        ),
+    ]);
+    assert_eq!(
+        meters.cpu_history(ident(7)),
+        &[100, 300],
+        "an unmeasured share plots nothing, never a zero that reads as idle"
+    );
+}
+
+#[test]
+fn a_tasks_cpu_history_is_bounded_and_drops_its_oldest_reading() {
+    let samples: Vec<Sample> = (0..TASK_HISTORY_LEN + 3)
+        .map(|index| {
+            let permille = u16::try_from(index).expect("small index");
+            sample_over(
+                Some(ONE_SECOND_NS),
+                alloc::vec![process_with_io(7, Some(permille), 0, 0)],
+            )
+        })
+        .collect();
+    let meters = task_meters_over(&samples);
+    let history = meters.cpu_history(ident(7));
+    assert_eq!(
+        history.len(),
+        TASK_HISTORY_LEN,
+        "a long-lived task's ring stays at its bound however long it runs"
+    );
+    assert_eq!(history.first(), Some(&3), "the oldest three fell out");
+    let newest = u16::try_from(TASK_HISTORY_LEN + 2).expect("small index");
+    assert_eq!(history.last(), Some(&newest));
+}
+
+#[test]
+fn a_task_the_sample_no_longer_names_takes_its_history_and_counters_with_it() {
+    let meters = task_meters_over(&[
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![
+                process_with_io(7, Some(100), 1_000, 0),
+                process_with_io(9, Some(200), 1_000, 0),
+            ],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![
+                process_with_io(7, Some(150), 3_000, 0),
+                process_with_io(9, Some(250), 3_000, 0),
+            ],
+        ),
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(175), 4_000, 0)],
+        ),
+    ]);
+    assert_eq!(meters.cpu_history(ident(7)), &[100, 150, 175]);
+    assert_eq!(
+        meters.cpu_history(ident(9)),
+        &[] as &[u16],
+        "the exited task's history is gone the first sample it is absent from"
+    );
+    assert_eq!(
+        meters.disk_rate(ident(9)),
+        None,
+        "and so are its counters, so a churn of short-lived tasks accumulates nothing"
+    );
+}
+
+#[test]
+fn a_returning_identity_starts_its_history_afresh() {
+    let seen = |cpu| {
+        sample_over(
+            Some(ONE_SECOND_NS),
+            alloc::vec![process_with_io(7, Some(cpu), 1_000, 0)],
+        )
+    };
+    let meters = task_meters_over(&[
+        seen(100),
+        seen(200),
+        sample_over(Some(ONE_SECOND_NS), Vec::new()),
+        seen(900),
+    ]);
+    assert_eq!(
+        meters.cpu_history(ident(7)),
+        &[900],
+        "nothing is carried across an absence, so a row never plots a stale span"
+    );
+    assert_eq!(
+        meters.disk_rate(ident(7)),
+        None,
+        "and the counter it comes back with is a total again, not a delta"
+    );
+}
+
+// --- The fault clock ---------------------------------------------------
+
+/// A sample carrying `processes` and an uptime reading of `secs`, so the
+/// fault clock has something to measure a fault's age against.
+fn sample_at(secs: i64, processes: Vec<ProcessSummary>) -> Sample {
+    Sample {
+        processes,
+        uptime: Some(Uptime {
+            since_boot: Duration64::from_secs(secs),
+            boot_time: Time64::from_secs(0),
+        }),
+        ..Sample::default()
+    }
+}
+
+/// One stopped process, which the shared classifier resolves to a fault.
+fn stopped(pid: u64) -> ProcessSummary {
+    process(pid, ProcessState::Stopped, b"stuck", Some(10))
+}
+
+#[test]
+fn a_faults_age_is_measured_from_when_it_was_first_seen() {
+    let mut meters = RollingMeters::new();
+    let hysteresis = Hysteresis::new();
+    let first = sample_at(100, alloc::vec![stopped(7)]);
+    meters.record(&first, hysteresis, &SeatReport::HEALTHY);
+    let later = sample_at(160, alloc::vec![stopped(7)]);
+    meters.record(&later, hysteresis, &SeatReport::HEALTHY);
+
+    let proc_id = later.processes[0].proc_id;
+    let elapsed = meters
+        .faults
+        .elapsed(proc_id, later.uptime.map(|up| up.since_boot))
+        .expect("a fault seen twice has an age");
+    assert_eq!(elapsed.secs(), 60);
+}
+
+#[test]
+fn a_fault_with_no_uptime_reading_has_no_age_rather_than_a_zero() {
+    let mut meters = RollingMeters::new();
+    let sample = sample_with(alloc::vec![stopped(7)]);
+    meters.record(&sample, Hysteresis::new(), &SeatReport::HEALTHY);
+    assert_eq!(
+        meters.faults.elapsed(sample.processes[0].proc_id, None),
+        None
+    );
+}
+
+#[test]
+fn a_fault_that_clears_is_counted_and_forgotten() {
+    let mut meters = RollingMeters::new();
+    let hysteresis = Hysteresis::new();
+    let faulted = sample_at(10, alloc::vec![stopped(7)]);
+    meters.record(&faulted, hysteresis, &SeatReport::HEALTHY);
+    assert_eq!(meters.faults.resolved(), 0);
+
+    let healthy = sample_at(
+        20,
+        alloc::vec![process(7, ProcessState::Running, b"stuck", Some(10))],
+    );
+    meters.record(&healthy, hysteresis, &SeatReport::HEALTHY);
+    assert_eq!(meters.faults.resolved(), 1);
+    assert_eq!(
+        meters.faults.elapsed(
+            healthy.processes[0].proc_id,
+            healthy.uptime.map(|up| up.since_boot)
+        ),
+        None,
+        "a recovered task must not keep the age of the fault it left"
+    );
+}
+
+#[test]
+fn a_fault_that_recovers_and_faults_again_is_timed_from_the_new_fault() {
+    let mut meters = RollingMeters::new();
+    let hysteresis = Hysteresis::new();
+    for (secs, state) in [
+        (10, ProcessState::Stopped),
+        (20, ProcessState::Running),
+        (30, ProcessState::Stopped),
+        (50, ProcessState::Stopped),
+    ] {
+        let sample = sample_at(secs, alloc::vec![process(7, state, b"stuck", Some(10))]);
+        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+    }
+    let last = sample_at(50, alloc::vec![stopped(7)]);
+    let elapsed = meters
+        .faults
+        .elapsed(
+            last.processes[0].proc_id,
+            last.uptime.map(|up| up.since_boot),
+        )
+        .expect("the second fault has its own age");
+    assert_eq!(elapsed.secs(), 20);
+}
+
+// --- The pressure clock ------------------------------------------------
+
+/// One busy CPU hog, so a band has a culprit to blame.
+fn cpu_hog() -> ProcessSummary {
+    process_summary_with(
+        10,
+        ProcessState::Running,
+        b"hog",
+        Some(900),
+        DEFAULT_UID,
+        0,
+        SchedPriority::Normal,
+    )
+}
+
+/// A sample taken `secs` after boot whose machine-wide CPU busy share is
+/// `busy` — the reading the pressure band is actually latched from.
+fn banded_sample_at(secs: i64, busy: u16) -> Sample {
+    Sample {
+        cpu_busy_permille: Some(busy),
+        ..sample_at(secs, alloc::vec![cpu_hog()])
+    }
+}
+
+#[test]
+fn a_pressure_bands_age_is_measured_from_when_the_band_was_entered() {
+    let mut meters = RollingMeters::new();
+    let mut hysteresis = Hysteresis::new();
+    let mut record = |secs: i64, meters: &mut RollingMeters| {
+        let sample = banded_sample_at(secs, CPU_PRESSURE_ENTER_PERMILLE);
+        let _ = derive_summary(&sample, &mut hysteresis);
+        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+        sample
+    };
+    record(100, &mut meters);
+    let later = record(160, &mut meters);
+
+    let elapsed = meters
+        .pressure
+        .cpu_elapsed(later.uptime.map(|up| up.since_boot))
+        .expect("a band held across two samples has an age");
+    assert_eq!(
+        elapsed.secs(),
+        60,
+        "the band is aged from the sample that first saw it, not from this one"
+    );
+
+    // The card carries that same measurement rather than deriving a second
+    // opinion of its own.
+    let panel = model(&later, &SeatReport::HEALTHY, &meters, &NONE);
+    let cause = panel
+        .model
+        .pressure
+        .iter()
+        .find(|cause| cause.kind == PressureKind::Cpu)
+        .expect("the CPU band is flagged");
+    assert_eq!(cause.since, Reading::measured("1m"));
+}
+
+#[test]
+fn a_pressure_band_with_no_uptime_reading_has_no_age_rather_than_a_zero() {
+    let mut meters = RollingMeters::new();
+    let mut hysteresis = Hysteresis::new();
+    // No uptime reading at all, so there is no clock to measure the band
+    // against — which the card must state, not paper over with a nought.
+    let sample = Sample {
+        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
+        ..sample_with(alloc::vec![cpu_hog()])
+    };
+    let _ = derive_summary(&sample, &mut hysteresis);
+    meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+    assert_eq!(meters.pressure.cpu_elapsed(None), None);
+
+    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let cause = panel
+        .model
+        .pressure
+        .iter()
+        .find(|cause| cause.kind == PressureKind::Cpu)
+        .expect("the CPU band is flagged");
+    assert!(
+        matches!(cause.since, Reading::Absent(_)),
+        "an age nobody could measure is stated as absent, never as 0s"
+    );
+}
+
+#[test]
+fn a_band_that_eases_and_returns_is_timed_from_the_new_band() {
+    let mut meters = RollingMeters::new();
+    let mut hysteresis = Hysteresis::new();
+    for (secs, busy) in [
+        (10, CPU_PRESSURE_ENTER_PERMILLE),
+        (20, 0),
+        (30, CPU_PRESSURE_ENTER_PERMILLE),
+        (50, CPU_PRESSURE_ENTER_PERMILLE),
+    ] {
+        let sample = banded_sample_at(secs, busy);
+        let _ = derive_summary(&sample, &mut hysteresis);
+        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+    }
+    let elapsed = meters
+        .pressure
+        .cpu_elapsed(Some(Duration64::from_secs(50)))
+        .expect("the second band has its own age");
+    assert_eq!(elapsed.secs(), 20, "the eased band's start is forgotten");
+}
+
+#[test]
+fn the_models_resolved_count_is_the_clocks_count() {
+    let mut meters = RollingMeters::new();
+    let hysteresis = Hysteresis::new();
+    meters.record(
+        &sample_at(10, alloc::vec![stopped(7)]),
+        hysteresis,
+        &SeatReport::HEALTHY,
+    );
+    let healthy = sample_at(20, Vec::new());
+    meters.record(&healthy, hysteresis, &SeatReport::HEALTHY);
+    let built = model(&healthy, &SeatReport::HEALTHY, &meters, &NONE);
+    assert_eq!(built.model.recovery_resolved, 1);
+}
+
+// --- The crash snapshot ------------------------------------------------
+
+/// A crash record for `proc_id` with one named register and two frames.
+fn crash_for(proc_id: ProcId, pid: u64) -> CrashRecord {
+    let mut record = CrashRecord::new(
+        proc_id,
+        pid,
+        DEFAULT_UID,
+        0,
+        true,
+        CrashFaultClass::Wild,
+        CrashFaultBucket::NullPage,
+        8,
+        b"stuck",
+    )
+    .expect("a short name fits");
+    record.pc = 0x0040_1234;
+    record.sp = 0x7ffe_0000;
+    assert!(record.push_frame(0x0040_1234));
+    assert!(record.push_frame(0x0040_5678));
+    assert!(record
+        .push_reg(CrashNamedReg::new(b"x0", 0xdead_beef).expect("a short register name fits")));
+    record
+}
+
+#[test]
+fn a_faults_crash_record_is_matched_by_process_identity() {
+    let process = stopped(7);
+    let proc_id = process.proc_id;
+    let sample = Sample {
+        processes: alloc::vec![process],
+        crashes: Some(alloc::vec![crash_for(proc_id, 7)]),
+        ..Sample::default()
+    };
+    let meters = meters_for(&sample);
+    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let crash = built.model.recovery[0]
+        .crash
+        .as_ref()
+        .expect("the sampled crash record belongs to this fault");
+    assert_eq!(crash.frames, alloc::vec![0x0040_1234, 0x0040_5678]);
+    assert_eq!(crash.registers.len(), 1);
+    assert_eq!(crash.registers[0].0, "x0");
+    assert_eq!(crash.registers[0].1, 0xdead_beef);
+    assert!(crash.write, "the record's write bit must survive the join");
+    assert!(crash.location.contains("null page"), "{}", crash.location);
+}
+
+#[test]
+fn a_crash_record_for_another_task_is_never_attributed_to_this_fault() {
+    let process = stopped(7);
+    let other = ProcId::from_raw([0xab; 16]);
+    let sample = Sample {
+        processes: alloc::vec![process],
+        crashes: Some(alloc::vec![crash_for(other, 7)]),
+        ..Sample::default()
+    };
+    let meters = meters_for(&sample);
+    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    assert!(
+        built.model.recovery[0].crash.is_none(),
+        "matching on the reused pid would attribute a dead task's crash to a live one"
+    );
+}
+
+#[test]
+fn a_fault_carries_its_own_resource_cost_with_network_unmeasured() {
+    let sample = sample_with(alloc::vec![stopped(7)]);
+    let meters = meters_for(&sample);
+    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let item = &built.model.recovery[0];
+    assert_eq!(item.cpu, Reading::measured("1%"));
+    assert_eq!(item.memory, Reading::measured("0 B"));
+    assert_eq!(
+        item.network,
+        Reading::Absent(Unmeasured::NoInterface),
+        "no query reports a process's network use, so the tile must say so"
+    );
 }

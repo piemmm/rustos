@@ -205,12 +205,6 @@ tairix-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
 # coordinates, so it builds the identical `BitmapFont` — never a hand-copied
 # metric (plans/NEW-FILEMANAGER.md FM9-a, AGENTS.md §2.2).
 tairix-font = { path = "../../lib/font", version = "=0.0.0" }
-# The shared window-frame furniture geometry: the FM9-a click-through offsets
-# its file-manager click points by the compositor's client inset (title bar +
-# border) so a click lands on the client content, not the server-side
-# decoration — the one definition the WM decorates with (plans/NEW-FILEMANAGER.md
-# FM9-a, plans/COMPOSITOR-WORK.md, AGENTS.md §2.2).
-tairix-controls = { path = "../../lib/controls", version = "=0.0.0" }
 tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # The program-library catalog engine: the encrypted-root fixture plants the
 # machine store at the engine's own canonical path, and the AW3 pointer

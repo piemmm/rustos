@@ -40,8 +40,9 @@ pub(crate) const fn pressure_role(kind: PressureKind) -> SignalRole {
 /// The theme's signal colour for a resource `kind` — the Pressure Rail hue
 /// every family shares, whether the rail is conditional (a row or card shows
 /// it only while genuinely under pressure, see [`resolve_rail`]) or a
-/// control's own fixed identity (a resource meter, which always reads as
-/// that resource regardless of how loaded it is).
+/// control's own fixed identity (a [`MetricTile`](crate::metric::MetricTile)'s
+/// embedded track, which always reads as that resource regardless of how
+/// loaded it is).
 #[must_use]
 pub(crate) fn signal_color(theme: &Theme, kind: PressureKind) -> Color {
     Color::from(theme.palette().signal(pressure_role(kind)))
@@ -135,15 +136,14 @@ fn track_thickness(theme: &Theme, scale: Scale, logical: u32) -> u32 {
 /// when `emphasised`.
 ///
 /// This is the one "rounded groove with a proportional tinted fill and an
-/// optional pressure-emphasis outline" recipe every measured instrument track
-/// shares — a [`Meter`](crate::Meter)'s resource track and a
-/// [`MetricTile`](crate::metric::MetricTile)'s embedded track both draw
-/// through this one definition, so the groove/fill/outline geometry has
-/// exactly one home. `band` is `(x, y, w, avail_h)`; the band's own thickness
-/// is the theme's progress thickness capped by `avail_h`, never the whole of
-/// it, so a tall slot still draws an instrument line rather than a block.
-/// `fill` is `None` for an honestly unmeasured reading: the groove alone,
-/// never a fabricated fill.
+/// optional pressure-emphasis outline" recipe a
+/// [`MetricTile`](crate::metric::MetricTile)'s embedded track draws through,
+/// so the groove/fill/outline geometry has exactly one home. `band` is
+/// `(x, y, w, avail_h)`; the band's own thickness is the theme's progress
+/// thickness capped by `avail_h`, never the whole of it, so a tall slot
+/// still draws an instrument line rather than a block. `fill` is `None` for
+/// an honestly unmeasured reading: the groove alone, never a fabricated
+/// fill.
 pub(crate) fn paint_measured_track(
     surface: &mut Surface,
     band: (u32, u32, u32, u32),
@@ -188,10 +188,10 @@ fn proportional(extent: u32, permille: u16) -> u32 {
 /// omitted rather than overlapping whatever follows it.
 ///
 /// This is the one "fits, truncates, draws, advances" recipe every stacked
-/// text anatomy shares — a [`Meter`](crate::Meter)'s label/reading pair and a
-/// [`MetricTile`](crate::metric::MetricTile)'s label/detail lines both
-/// degrade through this one definition, so a tile too short for its content
-/// can never overlap a line onto the one below it.
+/// text anatomy shares — a [`MetricTile`](crate::metric::MetricTile)'s label,
+/// reading, and detail lines all degrade through this one definition, so a
+/// tile too short for its content can never overlap a line onto the one
+/// below it.
 pub(crate) fn paint_text_line(
     surface: &mut Surface,
     text: &str,
@@ -241,6 +241,45 @@ pub(crate) fn paint_icon_slot(
     }
 }
 
+/// Update `armed` from one pointer event and report whether a primary
+/// press-and-release just completed over an actionable control.
+///
+/// This is the pure press-latch state machine underlying [`pointer_activation`]:
+/// a primary press over an actionable, in-bounds control arms the latch;
+/// releasing over it (still actionable, still in bounds) reports the
+/// completed press and disarms; releasing away disarms without reporting.
+/// [`pointer_activation`] layers the standard hover/press visual feedback on
+/// top of this for a control whose composed state carries that wash; a
+/// control that must not gain a pointer look of its own — a
+/// [`Card`](crate::collection::Card)'s body, which the owner marks selected
+/// rather than washing — calls this directly instead, so the one fail-closed
+/// rule (`inside && actionable`) governs both without being restated.
+pub(crate) fn press_latch(
+    armed: &mut bool,
+    event: &InputEvent,
+    inside: bool,
+    actionable: bool,
+) -> bool {
+    match event {
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        } => {
+            if inside && actionable {
+                *armed = true;
+            }
+            false
+        }
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        } => {
+            let activated = *armed && inside && actionable;
+            *armed = false;
+            activated
+        }
+        _ => false,
+    }
+}
+
 /// Update `state`/`armed` from one pointer event and return whether the
 /// control was activated (a primary press-and-release over it).
 ///
@@ -248,13 +287,16 @@ pub(crate) fn paint_icon_slot(
 /// control; releasing over it activates, releasing away cancels — the
 /// standard press model shared by every clickable control (button, toggle,
 /// checkbox, radio). `inside` is whether the pointer is over the control's
-/// bounds (the caller's hit-test).
+/// bounds (the caller's hit-test). The latch and its fail-closed gate are
+/// [`press_latch`]; this layers the resulting hover/press visual onto `state`.
 pub(crate) fn pointer_activation(
     state: &mut ControlState,
     armed: &mut bool,
     event: &InputEvent,
     inside: bool,
 ) -> bool {
+    let actionable = state.is_actionable();
+    let activated = press_latch(armed, event, inside, actionable);
     match event {
         InputEvent::PointerMoved { .. } => {
             if !*armed {
@@ -264,31 +306,26 @@ pub(crate) fn pointer_activation(
                     PointerState::None
                 };
             }
-            false
         }
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
         } => {
-            if inside && state.is_actionable() {
-                *armed = true;
+            if inside && actionable {
                 state.pointer = PointerState::Pressed;
             }
-            false
         }
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
         } => {
-            let activated = *armed && inside && state.is_actionable();
-            *armed = false;
             state.pointer = if inside {
                 PointerState::Hover
             } else {
                 PointerState::None
             };
-            activated
         }
-        _ => false,
+        _ => {}
     }
+    activated
 }
 
 /// Whether a key activates a focused, actionable control (Space or Enter).

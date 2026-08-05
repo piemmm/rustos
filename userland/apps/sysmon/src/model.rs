@@ -20,7 +20,7 @@ use tairix_curses::Event;
 use tairix_procinfo::{
     call, for_each_cache_ledger, for_each_cpu_load, for_each_cpu_time, for_each_irq,
     for_each_mount, for_each_process, for_each_reclaim_class, memory_pressure, ramzip_stats,
-    CallError, CpuTotals, ListError, Transport,
+    CallError, CpuTotals, ListError, Transport, WalkStep,
 };
 
 use crate::command::{DELAY_STEP_TENTHS, MAX_DELAY_TENTHS, MIN_DELAY_TENTHS};
@@ -425,7 +425,7 @@ impl Model {
         let mounts = gauge_walk(
             for_each_mount(transport, |record| {
                 mount_records.push(*record);
-                Ok(())
+                Ok(WalkStep::Continue)
             }),
             mount_records,
         );
@@ -434,7 +434,7 @@ impl Model {
         let reclaim = gauge_walk(
             for_each_reclaim_class(transport, |record| {
                 reclaim_records.push(*record);
-                Ok(())
+                Ok(WalkStep::Continue)
             }),
             reclaim_records,
         );
@@ -443,7 +443,7 @@ impl Model {
         let caches = gauge_walk(
             for_each_cache_ledger(transport, |record| {
                 cache_records.push(*record);
-                Ok(())
+                Ok(WalkStep::Continue)
             }),
             cache_records,
         );
@@ -452,7 +452,7 @@ impl Model {
         let cpu_loads = gauge_walk(
             for_each_cpu_load(transport, |record| {
                 load_records.push(*record);
-                Ok(())
+                Ok(WalkStep::Continue)
             }),
             load_records,
         );
@@ -464,7 +464,7 @@ impl Model {
         let irqs = gauge_walk(
             for_each_irq(transport, |record| {
                 irq_records.push(*record);
-                Ok(())
+                Ok(WalkStep::Continue)
             }),
             irq_records,
         );
@@ -523,7 +523,7 @@ impl Model {
                     idle_ns: record.idle_ns,
                 },
             ));
-            Ok(())
+            Ok(WalkStep::Continue)
         });
         if walked.is_err() {
             self.cpu_busy = Vec::new();
@@ -553,14 +553,14 @@ impl Model {
         let mut records = Vec::new();
         match for_each_process(transport, true, |record| {
             records.push(*record);
-            Ok(())
+            Ok(WalkStep::Continue)
         }) {
             Ok(()) => (records, false),
             Err(ListError::Call(CallError::PermissionDenied)) => {
                 records.clear();
                 let _ = for_each_process(transport, false, |record| {
                     records.push(*record);
-                    Ok(())
+                    Ok(WalkStep::Continue)
                 });
                 (records, true)
             }

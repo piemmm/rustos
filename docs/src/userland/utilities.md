@@ -94,6 +94,14 @@ it issues `ProcessListRequest`s with an increasing `offset` and a fixed
 limit. The paging loop lives in the client; the ABI carries only the
 `offset`/`limit` fields.
 
+Every shared walk also lets its caller end the paging deliberately: a
+per-record sink answers "continue" or "stop", and stopping succeeds
+rather than erroring, so a reader that already has its answer (or that
+will only hold a bounded number of records) is never obliged to page a
+list the service could keep answering indefinitely. `sysinfo` renders
+every row, so it always continues; a lookup for one named thing stops at
+the match.
+
 ### Fail closed
 
 - A capability denial returns from `sysinfod` as

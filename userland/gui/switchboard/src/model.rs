@@ -11,35 +11,33 @@
 //! docs). [`crate::panel`] applies the effects through its host seam; this
 //! module decides *what* to do, never *how*.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
-use tairix_abi::sysinfo::ProcessState;
-use tairix_abi::{CapabilityId, CapabilityQuery, ProcId, SchedPriority, Signal};
+use tairix_abi::sysinfo::{CrashFaultBucket, CrashFaultClass, ProcessState};
+use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{
-    ActivityState, MeterValue, PressureKind, PressureState, ProgressValue, RecoveryState,
-    WindowControlKind, MAX_CHART_SAMPLES,
+    ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, WindowControlKind,
+    MAX_CHART_SAMPLES,
 };
 
 use crate::activities::Activities;
 use crate::derive::{memory_pressured, Hysteresis};
-use crate::sample::{ProcessSummary, Sample};
+use crate::format::{format_bytes, format_duration, format_rate, percent};
+use crate::sample::{DegradedField, ProcessSummary, Sample};
+use crate::system_report::{build_system_report, reading, HeadlinePressure};
 use crate::view::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, PressureAction, PressureCause,
-    PressureControl, RecoveryControl, RecoveryItem, ResourceSummary, Section, SwitchboardAction,
-    SwitchboardModel, TaskSummary,
+    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact,
+    FaultMark, PressureAction, PressureCause, PressureControl, Reading, RecoveryControl,
+    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskKind, TaskSummary, Unmeasured,
 };
 
 /// The task row action's label: every task's row action is the same
 /// switch-to-window request, so the label never varies per row.
 const SWITCH_LABEL: &str = "Switch";
-
-/// The reading text of a resource the service could not measure this
-/// cycle. It reads as "unknown", never as a fabricated `0%`, and the
-/// meter beside it stays [`MeterValue::Unmeasured`].
-const UNREAD_READING: &str = "unknown";
 
 /// Convert a wire [`CommandSection`] into the shared control's own
 /// [`Section`] — the two are defined independently because `lib/abi` may
@@ -53,7 +51,7 @@ pub const fn map_section(command: CommandSection) -> Section {
         CommandSection::Pressure => Section::Pressure,
         CommandSection::Activities => Section::Activities,
         CommandSection::Recovery => Section::Recovery,
-        CommandSection::Overview => Section::Overview,
+        CommandSection::System => Section::System,
     }
 }
 
@@ -77,11 +75,6 @@ pub(crate) fn display_name(bytes: &[u8]) -> String {
         .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// A permille fraction as whole-percent display text.
-fn percent(permille: u16) -> String {
-    format!("{}%", permille / 10)
-}
-
 /// Whether a row owned by `uid` is controllable under `self_uid`/`authority`:
 /// the row is the caller's own (the same-uid rule kill(2) itself uses) or
 /// the caller holds the administrative capability. An unknown `self_uid`
@@ -92,7 +85,7 @@ fn controllable(uid: u32, self_uid: Option<u32>, authority: &dyn CapabilityQuery
     self_uid == Some(uid) || authority.holds(CapabilityId::PROC_CONTROL)
 }
 
-/// The rolling instrument state the panel's header band needs that no single
+/// The rolling instrument state the panel's resource rows need that no single
 /// [`Sample`] carries: the CPU chart's bounded history, and the pressure
 /// verdicts the tray summary's own derivation already reached for the same
 /// readings.
@@ -165,6 +158,367 @@ impl LiveMeters {
     pub const fn memory_pressured(&self) -> bool {
         self.memory_pressured
     }
+}
+
+/// The number of CPU readings kept per task for its row's sparkline.
+///
+/// The same window the resource charts plot, so a per-task spark and the
+/// system CPU chart beside it cover the same span of time rather than two
+/// arbitrary ones.
+pub const TASK_HISTORY_LEN: usize = MAX_CHART_SAMPLES;
+
+/// What one task's tracking holds between samples: the previous reading of
+/// its own storage counters, and its recent CPU readings.
+///
+/// The counters are cumulative-since-start, so a *rate* needs the previous
+/// reading and the interval between the two; the history is the row's own
+/// sparkline, which no single sample carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskTrack {
+    /// The task's total storage bytes (read plus written) as of the last
+    /// recorded sample, which the next sample deltas against.
+    io_bytes: u64,
+    /// The rate that delta produced, in bytes per second, or `None` when
+    /// this sample had nothing honest to divide.
+    disk_bytes_per_sec: Option<u64>,
+    /// Recent CPU readings, oldest first, capped at [`TASK_HISTORY_LEN`].
+    cpu_history: Vec<u16>,
+}
+
+/// The per-task rolling state the task rows need that no single [`Sample`]
+/// carries: each task's previous storage-counter reading (for an honest
+/// bytes-per-second rate) and its own bounded CPU history (for the row's
+/// sparkline).
+///
+/// Keyed by [`ProcId`] — the never-reused process identity — rather than by
+/// pid or row index, so a recycled pid can never inherit a dead task's
+/// history and a re-sorted or filtered table can never mis-attribute one.
+///
+/// Every entry is dropped the first sample its task is absent from
+/// ([`Self::record`] rebuilds the map from the sample rather than mutating
+/// it in place), so a machine that churns short-lived processes for weeks
+/// accumulates nothing: the map is exactly as large as the live process
+/// list, and each entry holds at most [`TASK_HISTORY_LEN`] readings.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TaskMeters {
+    tracks: BTreeMap<ProcId, TaskTrack>,
+}
+
+impl TaskMeters {
+    /// No tasks tracked yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            tracks: BTreeMap::new(),
+        }
+    }
+
+    /// Fold `sample`'s process list in: delta each task's storage counters
+    /// against its previous reading, extend its CPU history, and keep only
+    /// the tasks this sample names.
+    ///
+    /// This runs *before* the rows are built, so a row reads the figures
+    /// this sample produced rather than the last one's — and the delta is
+    /// taken against the stored previous reading before that reading is
+    /// replaced, so the two can never be confused.
+    ///
+    /// A task's CPU reading enters its history only when the sample
+    /// measured one: an unmeasurable interval contributes no point rather
+    /// than a zero one, which would plot as a genuine idle moment.
+    pub fn record(&mut self, sample: &Sample) {
+        let mut next = BTreeMap::new();
+        for process in &sample.processes {
+            let io_bytes = process
+                .io_bytes_read
+                .saturating_add(process.io_bytes_written);
+            let previous = self.tracks.remove(&process.proc_id);
+            let disk_bytes_per_sec = previous
+                .as_ref()
+                .and_then(|track| rate_per_sec(io_bytes, track.io_bytes, sample.elapsed_ns));
+            let mut cpu_history = previous.map_or_else(Vec::new, |track| track.cpu_history);
+            if let Some(permille) = process.cpu_permille {
+                if cpu_history.len() >= TASK_HISTORY_LEN {
+                    cpu_history.remove(0);
+                }
+                cpu_history.push(permille);
+            }
+            next.insert(
+                process.proc_id,
+                TaskTrack {
+                    io_bytes,
+                    disk_bytes_per_sec,
+                    cpu_history,
+                },
+            );
+        }
+        self.tracks = next;
+    }
+
+    /// The task's recorded CPU readings, oldest first; empty for a task
+    /// that has never been measured.
+    #[must_use]
+    pub fn cpu_history(&self, proc_id: ProcId) -> &[u16] {
+        self.tracks
+            .get(&proc_id)
+            .map_or(&[][..], |track| track.cpu_history.as_slice())
+    }
+
+    /// The task's storage throughput as of the last [`Self::record`], in
+    /// bytes per second.
+    ///
+    /// `None` — which the row renders as an explicit unmeasured mark, never
+    /// a zero — when there was nothing honest to divide: the very first
+    /// sample (no interval to measure over), a task appearing for the first
+    /// time (no previous reading *of this task*), or a task this sample did
+    /// not name at all. A counter that did not move over a real interval is
+    /// a genuine measurement of `0` bytes per second and is reported as
+    /// such.
+    #[must_use]
+    pub fn disk_rate(&self, proc_id: ProcId) -> Option<u64> {
+        self.tracks.get(&proc_id)?.disk_bytes_per_sec
+    }
+}
+
+/// When each faulted task was first observed to be faulted, so the surface
+/// can say how long a fault has stood.
+///
+/// Nothing in the System Information API records *when* a task entered its
+/// current state: a process record carries the state but no transition
+/// timestamp. The only honest way to say "stopped 4m ago" is therefore for
+/// this service to note the first sample it saw the fault in and measure
+/// from there — which is what this does, clocked off the monotonic uptime
+/// reading rather than a wall clock that an administrator can move.
+///
+/// Keyed by [`ProcId`] for the same reason [`TaskMeters`] is: a recycled pid
+/// must never inherit a dead task's fault age. Entries are dropped the first
+/// sample their task is no longer faulted, so a machine that churns faults
+/// accumulates nothing and a task that recovers and faults again is timed
+/// from its *new* fault, not its old one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FaultClock {
+    first_seen: BTreeMap<ProcId, Duration64>,
+    resolved: usize,
+}
+
+impl FaultClock {
+    /// No faults observed yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            first_seen: BTreeMap::new(),
+            resolved: 0,
+        }
+    }
+
+    /// Note which tasks are faulted as of `sample`, keeping the instant
+    /// each was *first* seen faulted and forgetting the rest.
+    ///
+    /// With no uptime reading there is no clock to measure against, so no
+    /// instant is recorded and every age reads as unmeasured — never a
+    /// fabricated zero. The map is still pruned in that case, so a stale
+    /// instant cannot outlive the fault it belonged to.
+    pub fn record(&mut self, sample: &Sample, seat_report: &SeatReport) {
+        let now = sample.uptime.map(|uptime| uptime.since_boot);
+        let mut next = BTreeMap::new();
+        for process in &sample.processes {
+            if process_recovery(process, seat_report) == RecoveryState::None {
+                continue;
+            }
+            let Some(now) = now else {
+                continue;
+            };
+            let first = self
+                .first_seen
+                .get(&process.proc_id)
+                .copied()
+                .unwrap_or(now);
+            next.insert(process.proc_id, first);
+        }
+        let cleared = self
+            .first_seen
+            .keys()
+            .filter(|proc_id| !next.contains_key(*proc_id))
+            .count();
+        self.resolved = self.resolved.saturating_add(cleared);
+        self.first_seen = next;
+    }
+
+    /// How many faults this service has watched clear since it started.
+    ///
+    /// A fault that is gone from a sample it was in last time has cleared,
+    /// which only the thing that folds one sample into the next can see. It
+    /// is counted here rather than in the screen so that a screen refreshed
+    /// with a model and a screen built from that same model are the same
+    /// screen, and so a count of *observed* history is never mistaken for a
+    /// figure the kernel reported.
+    #[must_use]
+    pub const fn resolved(&self) -> usize {
+        self.resolved
+    }
+
+    /// How long the task has been faulted as of `now`, or `None` when no
+    /// instant was ever recorded for it (no uptime reading to measure
+    /// against, or a task that is not faulted).
+    #[must_use]
+    pub fn elapsed(&self, proc_id: ProcId, now: Option<Duration64>) -> Option<Duration64> {
+        elapsed_since(self.first_seen.get(&proc_id).copied(), now)
+    }
+}
+
+/// The duration between `first` and `now`, or `None` when either is
+/// unmeasured or the clock appears to have moved backwards — which a
+/// monotonic reading should never do — so a bad pair yields no duration
+/// rather than a negative or wrapped one.
+///
+/// The one interval arithmetic every band-start clock on this screen
+/// shares ([`FaultClock`] and [`PressureClock`]), so a fault's age and a
+/// pressure cause's age can never silently diverge on how "how long" is
+/// computed.
+fn elapsed_since(first: Option<Duration64>, now: Option<Duration64>) -> Option<Duration64> {
+    let first = first?;
+    let now = now?;
+    let (now, first) = (now.saturating_total_nanos(), first.saturating_total_nanos());
+    (now >= first).then(|| Duration64::from_nanos(now.saturating_sub(first)))
+}
+
+/// When each pressured resource last entered its current pressure band, so
+/// the Pressure section can say how long a cause has stood rather than
+/// guessing.
+///
+/// The System Information API reports only whether a resource is pressured
+/// right now, not when it became so, so — exactly as [`FaultClock`] does
+/// for a standing task fault — this service notes the first sample it saw
+/// a resource cross into pressure and measures from there. There are only
+/// ever two resources this section flags (CPU, memory), so a fixed pair of
+/// slots serves the purpose [`FaultClock`]'s map serves for an unbounded
+/// set of tasks; a resource that leaves its band drops its instant
+/// immediately, so a later re-entry is timed from its *new* start, not its
+/// old one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PressureClock {
+    cpu_since: Option<Duration64>,
+    memory_since: Option<Duration64>,
+}
+
+impl PressureClock {
+    /// Neither resource pressured yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cpu_since: None,
+            memory_since: None,
+        }
+    }
+
+    /// Note this sample's latched pressure verdicts, entering or clearing
+    /// each resource's band-start instant.
+    ///
+    /// With no uptime reading there is no clock to measure against, so a
+    /// resource pressured this sample without one recorded before stays
+    /// without a start instant and its age reads as unmeasured — never a
+    /// fabricated zero.
+    pub fn record(&mut self, cpu_pressured: bool, memory_pressured: bool, now: Option<Duration64>) {
+        Self::latch(&mut self.cpu_since, cpu_pressured, now);
+        Self::latch(&mut self.memory_since, memory_pressured, now);
+    }
+
+    /// Enter or clear one resource's band-start instant.
+    fn latch(slot: &mut Option<Duration64>, pressured: bool, now: Option<Duration64>) {
+        if !pressured {
+            *slot = None;
+        } else if slot.is_none() {
+            *slot = now;
+        }
+    }
+
+    /// How long CPU pressure has stood as of `now`, or `None` when CPU is
+    /// not pressured or no start instant was ever recorded for it.
+    #[must_use]
+    pub fn cpu_elapsed(&self, now: Option<Duration64>) -> Option<Duration64> {
+        elapsed_since(self.cpu_since, now)
+    }
+
+    /// How long memory pressure has stood as of `now`, under the same
+    /// conditions as [`Self::cpu_elapsed`].
+    #[must_use]
+    pub fn memory_elapsed(&self, now: Option<Duration64>) -> Option<Duration64> {
+        elapsed_since(self.memory_since, now)
+    }
+}
+
+/// Everything the monitor carries *between* samples — every reading that no
+/// single [`Sample`] can produce on its own.
+///
+/// A rate is a difference over an interval and a history is a sequence, so
+/// neither can be read from one sample: both are folded forward from the
+/// previous cycle. Keeping the whole-system meters and the per-task meters
+/// as one thing means they are always folded forward from the *same*
+/// sample, so a task's rate and the system chart beside it can never end up
+/// describing two different intervals.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RollingMeters {
+    /// The whole-system readings: the CPU chart's history and the latched
+    /// pressure verdicts.
+    pub system: LiveMeters,
+    /// The per-task readings, keyed by the task's never-reused identity.
+    pub tasks: TaskMeters,
+    /// When each standing fault was first observed, so its age is measured
+    /// rather than guessed.
+    pub faults: FaultClock,
+    /// When each pressured resource entered its current band, so the
+    /// Pressure section's "how long" is measured rather than guessed.
+    pub pressure: PressureClock,
+}
+
+impl RollingMeters {
+    /// Nothing measured yet: no history either side, no pressure latched.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            system: LiveMeters::new(),
+            tasks: TaskMeters::new(),
+            faults: FaultClock::new(),
+            pressure: PressureClock::new(),
+        }
+    }
+
+    /// Fold `sample` in on both sides at once, with `hysteresis` the
+    /// pressure verdict latched for that very reading.
+    ///
+    /// Called before the rows are built, so every figure a row shows came
+    /// from this sample rather than the last one. A task the sample does
+    /// not name is dropped here, so an exited task leaks neither its
+    /// counters nor its history.
+    pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis, seat_report: &SeatReport) {
+        self.system.record(sample, hysteresis);
+        self.tasks.record(sample);
+        self.faults.record(sample, seat_report);
+        let now = sample.uptime.map(|uptime| uptime.since_boot);
+        self.pressure.record(
+            self.system.cpu_pressured(),
+            self.system.memory_pressured(),
+            now,
+        );
+    }
+}
+
+/// Nanoseconds in one second, the scale a per-second rate is derived at.
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// A per-second rate from two readings of one cumulative counter and the
+/// interval between them, or `None` when the interval is unmeasured or
+/// zero (there is nothing to divide by).
+///
+/// A counter that went *backwards* — which a cumulative counter should
+/// never do — yields `0` rather than a wrapped, enormous rate: the delta
+/// saturates, so a bad reading understates rather than invents. The
+/// multiplication is done in [`u128`] so a fast device over a short
+/// interval cannot overflow before the division brings it back in range.
+fn rate_per_sec(now: u64, previous: u64, elapsed_ns: Option<u64>) -> Option<u64> {
+    let elapsed_ns = elapsed_ns.filter(|ns| *ns > 0)?;
+    let delta = u128::from(now.saturating_sub(previous));
+    let per_sec = delta.saturating_mul(u128::from(NANOS_PER_SEC)) / u128::from(elapsed_ns);
+    Some(u64::try_from(per_sec).unwrap_or(u64::MAX))
 }
 
 /// The identity backing one rendered task row, for the grouping actions a
@@ -270,13 +624,15 @@ pub fn derive_self_uid(sample: &Sample, self_pid: u64) -> Option<u32> {
         .map(|process| process.uid)
 }
 
-/// Build the live [`PanelModel`] from this sample, the rolling meter state,
-/// the seat's latest unresponsive-owner report, and the service's own
-/// [`Activities`] grouping state.
+/// Build the live [`PanelModel`] from this sample, the monitor's
+/// [`RollingMeters`], the seat's latest unresponsive-owner report, and the
+/// service's own [`Activities`] grouping state.
 ///
 /// `self_uid` is the service's own uid, derived by the caller from its own
 /// pid's row in `sample` (an unknown uid narrows authority rather than
-/// widening it — see `controllable`). `authority` is queried once per
+/// widening it — see `controllable`). `meters` must already have this
+/// sample folded in, so the rows carry this cycle's rates and histories
+/// rather than the previous cycle's. `authority` is queried once per
 /// action kind that needs it, so the rendered [`SwitchboardModel`] and the
 /// effect [`apply_action`] later produces from the same authority can never
 /// disagree about whether an action is available.
@@ -285,7 +641,7 @@ pub fn build_model(
     title: &str,
     sample: &Sample,
     seat_report: &SeatReport,
-    meters: &LiveMeters,
+    meters: &RollingMeters,
     authority: &dyn CapabilityQuery,
     activities: &Activities,
     self_uid: Option<u32>,
@@ -293,15 +649,25 @@ pub fn build_model(
     let mut model = SwitchboardModel::new(title);
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
-    let (tasks, task_owners, task_idents) = build_tasks(&sample.processes, activities);
-    let (recovery, recovery_owners) = build_recovery(&sample.processes, seat_report, can_force);
+    let (tasks, task_owners, task_idents) =
+        build_tasks(&sample.processes, seat_report, &meters.tasks, activities);
+    let (recovery, recovery_owners) = build_recovery(sample, seat_report, meters, can_force);
     let (pressure, pressure_targets) = build_pressure(sample, meters, self_uid, authority);
     let (activity_summaries, activity_ids, activity_members) =
-        build_activities(activities, &sample.processes, self_uid, authority);
+        build_activities(activities, sample, &meters.tasks, self_uid, authority);
 
     model.tasks = tasks;
-    model.resources = build_resources(sample, meters);
+    model.system = build_system_report(
+        sample,
+        meters.system.cpu_history(),
+        HeadlinePressure {
+            cpu: meters.system.cpu_pressured(),
+            memory: meters.system.memory_pressured(),
+        },
+        authority,
+    );
     model.recovery = recovery;
+    model.recovery_resolved = meters.faults.resolved();
     model.pressure = pressure;
     model.activities = activity_summaries;
     model.can_create_activity = activities.can_create();
@@ -323,22 +689,37 @@ pub fn build_model(
 /// A row carries no Pressure Rail: the System Information API reports a
 /// process's CPU time, not which resource that process is straining, so
 /// naming one would be a guess dressed as a measurement.
+///
+/// Every row's kind is [`TaskKind::Process`], because that is what the
+/// process list reports. Nothing here reads a background-job registry or a
+/// service registry — neither exists — so no row claims to be a job or a
+/// service, and the counts for those two are honest zeroes rather than a
+/// classification of processes nobody measured.
+///
+/// The disk rate and the sparkline history come from `meters`, which the
+/// caller has already folded this sample into.
 fn build_tasks(
     processes: &[ProcessSummary],
+    seat_report: &SeatReport,
+    meters: &TaskMeters,
     activities: &Activities,
 ) -> (Vec<TaskSummary>, Vec<u64>, Vec<TaskIdent>) {
     let mut tasks = Vec::with_capacity(processes.len());
     let mut owners = Vec::with_capacity(processes.len());
     let mut idents = Vec::with_capacity(processes.len());
     for process in processes {
-        let detail = process.cpu_permille.map_or_else(String::new, percent);
         let name = display_name(&process.name);
         tasks.push(TaskSummary {
             name: name.clone(),
-            detail,
+            kind: TaskKind::Process,
+            lifecycle: Some(process.state),
+            cpu_permille: process.cpu_permille,
+            memory_bytes: Some(process.mem_bytes),
+            disk_bytes_per_sec: meters.disk_rate(process.proc_id),
+            cpu_history: meters.cpu_history(process.proc_id).to_vec(),
             pressure: PressureState::None,
             activity: process_activity(process.state),
-            recovery: RecoveryState::None,
+            recovery: process_recovery(process, seat_report),
             action: SWITCH_LABEL.to_string(),
             // Every task's switch action is a plain session request that
             // needs no capability of its own to attempt; the session is
@@ -354,6 +735,26 @@ fn build_tasks(
         });
     }
     (tasks, owners, idents)
+}
+
+/// The recovery posture a sampled process is in.
+///
+/// The one definition of "this task is in trouble", shared by the task
+/// row's Signal Bead (and the fault filter that counts it) and the
+/// Recovery section's own list, so the table can never disagree with the
+/// list about which tasks are faulted.
+///
+/// A process the scheduler reports stopped is recoverable; one the seat
+/// named unresponsive is hung. Stopped wins when both hold, matching the
+/// Recovery list, which reports a stopped process once rather than twice.
+fn process_recovery(process: &ProcessSummary, seat_report: &SeatReport) -> RecoveryState {
+    if process.state == ProcessState::Stopped {
+        return RecoveryState::Recoverable;
+    }
+    if seat_report.owners().contains(&process.pid) {
+        return RecoveryState::Hung;
+    }
+    RecoveryState::None
 }
 
 /// The [`ActivityState`] a process's [`ProcessState`] implies.
@@ -374,21 +775,53 @@ const fn process_activity(state: ProcessState) -> ActivityState {
 /// One [`RecoveryItem`] per stopped process this service sampled itself,
 /// plus one per unresponsive owner the seat report names that this
 /// service's own sample can still put a name to; an owner the report names
-/// but this sample never saw contributes no row (never a fabricated one).
+/// but this sample never saw contributes no row (never a fabricated one) —
+/// the join is against the names this service attested itself, never a
+/// name taken from the wire.
+///
+/// Each item carries everything the Recovery screen shows about that one
+/// fault: its stable identity, how long it has stood (from `meters`'
+/// [`FaultClock`], the only honest source), what to do about it, the marks
+/// this service observed, the kernel's crash record where the fault raised
+/// one, and the task's own resource cost.
 fn build_recovery(
-    processes: &[ProcessSummary],
+    sample: &Sample,
     seat_report: &SeatReport,
+    meters: &RollingMeters,
     can_force: bool,
 ) -> (Vec<RecoveryItem>, Vec<u64>) {
     let mut recovery = Vec::new();
     let mut owners = Vec::new();
+    let now = sample.uptime.map(|uptime| uptime.since_boot);
 
-    for process in processes {
-        if process.state == ProcessState::Stopped {
+    // Stopped processes first, then the unresponsive ones, so the list
+    // groups by condition rather than by sampled order. Both conditions
+    // are read through the one shared classifier, so this list and the
+    // task rows' own Signal Beads can never disagree about which tasks
+    // are faulted. A process that is both is reported once, as stopped,
+    // because that is what the classifier resolves it to.
+    for state in [RecoveryState::Recoverable, RecoveryState::Hung] {
+        for process in &sample.processes {
+            if process_recovery(process, seat_report) != state {
+                continue;
+            }
+            let since = elapsed_reading(meters.faults.elapsed(process.proc_id, now), sample);
             recovery.push(RecoveryItem {
+                proc_id: process.proc_id,
+                pid: process.pid,
                 name: display_name(&process.name),
-                detail: String::from("stopped"),
-                recovery: RecoveryState::Recoverable,
+                detail: String::from(fault_detail(state)),
+                since: since.clone(),
+                recovery: state,
+                impact: FaultImpact::of(state),
+                status: String::from(fault_status(state)),
+                recommendation: String::from(fault_recommendation(state, can_force)),
+                marks: fault_marks(state, &since),
+                crash: crash_snapshot(sample, process.proc_id),
+                cpu: cpu_reading(process.cpu_permille, sample),
+                memory: Reading::measured(format_bytes(process.mem_bytes)),
+                disk: disk_reading(meters.tasks.disk_rate(process.proc_id), sample),
+                network: Reading::Absent(Unmeasured::NoInterface),
                 can_restart: true,
                 can_force,
             });
@@ -396,121 +829,195 @@ fn build_recovery(
         }
     }
 
-    for &owner in seat_report.owners() {
-        // Never trust a name from the wire: the report carries ids only,
-        // joined here against the names this service attested itself.
-        let Some(process) = processes.iter().find(|process| process.pid == owner) else {
-            continue;
-        };
-        if owners.contains(&owner) {
-            // Already listed as stopped; a hung-but-running process is a
-            // distinct, separately reported condition below.
-            continue;
-        }
-        recovery.push(RecoveryItem {
-            name: display_name(&process.name),
-            detail: String::from("not responding"),
-            recovery: RecoveryState::Hung,
-            can_restart: true,
-            can_force,
-        });
-        owners.push(owner);
-    }
-
     (recovery, owners)
 }
 
-/// The resource rows the header band and the Overview section show: one per
-/// resource this service actually queries, in a fixed order so the band
-/// never reshuffles between samples.
-///
-/// Disk and network get no row at all: the System Information API's
-/// process/CPU-time/memory-pressure queries carry no throughput reading for
-/// either, and this service's own capability ceiling and sampling budget
-/// stop at the resources the tray's own pressure latches cover, so a row
-/// for either would be an invented reading rather than an honest one.
-fn build_resources(sample: &Sample, meters: &LiveMeters) -> Vec<ResourceSummary> {
-    alloc::vec![
-        resource(
-            "CPU",
-            PressureKind::Cpu,
-            sample.cpu_busy_permille,
-            meters.cpu_pressured(),
-            meters.cpu_history(),
-        ),
-        resource(
-            "Memory",
-            PressureKind::Memory,
-            sample.memory_pressure.map(|memory| memory.used_permille),
-            meters.memory_pressured(),
-            // The memory gauge is refreshed on its own slower cadence and
-            // carried forward between samples, so a per-sample history would
-            // plot one carried reading repeatedly as though every point were a
-            // fresh measurement.
-            &[],
-        ),
-    ]
-}
-
-/// One resource row: measured when `permille` is a real reading, honestly
-/// unmeasured when the query failed or its capability was never granted —
-/// never a fabricated zero, which reads as "idle" when the truth is
-/// "unknown".
-fn resource(
-    name: &str,
-    kind: PressureKind,
-    permille: Option<u16>,
-    pressured: bool,
-    history: &[u16],
-) -> ResourceSummary {
-    let reading = permille.map_or_else(|| String::from(UNREAD_READING), percent);
-    let meter = permille.map_or(MeterValue::Unmeasured, |value| {
-        MeterValue::Measured(ProgressValue::new(value))
-    });
-    let pressure = if pressured {
-        PressureState::Under(kind)
-    } else {
-        PressureState::None
-    };
-    ResourceSummary::new(name, reading, kind, load_activity(permille)).with_meter(
-        meter,
-        pressure,
-        history.iter().copied(),
-    )
-}
-
-/// The Overview card's Heat Seam for a resource reading: any measured load
-/// is work in progress whose extent the seam does not itself quantify (the
-/// meter beside it carries the number). A zero reading, and a reading the
-/// service could not take at all, leave the seam quiet.
-const fn load_activity(permille: Option<u16>) -> ActivityState {
-    match permille {
-        Some(reading) if reading > 0 => ActivityState::Working,
-        _ => ActivityState::Idle,
+/// The trailing detail a fault's card shows: what happened, in the fewest
+/// words that distinguish the two conditions.
+const fn fault_detail(state: RecoveryState) -> &'static str {
+    match state {
+        RecoveryState::Hung => "not responding",
+        _ => "stopped",
     }
 }
 
-/// A byte count as compact binary-unit text with one decimal place
-/// (`"1.9 GiB"`, `"640.0 KiB"`), or plain whole bytes below 1 KiB
-/// (`"512 B"`) — the pressure card's cause text names how much memory the
-/// culprit holds without pretending to more precision than a permille-scale
-/// reading warrants.
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    let (scale, unit) = if bytes >= GIB {
-        (GIB, "GiB")
-    } else if bytes >= MIB {
-        (MIB, "MiB")
-    } else if bytes >= KIB {
-        (KIB, "KiB")
-    } else {
-        return format!("{bytes} B");
-    };
-    let whole = bytes / scale;
-    let tenths = (bytes % scale) * 10 / scale;
-    format!("{whole}.{tenths} {unit}")
+/// The plain statement of what state a fault is in.
+const fn fault_status(state: RecoveryState) -> &'static str {
+    match state {
+        RecoveryState::Hung => "The task is running but has stopped answering its seat.",
+        _ => "The task has been stopped and is holding what it held.",
+    }
+}
+
+/// What a reader should do about a fault.
+///
+/// The recommendation names only a command the caller can actually take: a
+/// caller without process control is told to restart rather than pointed at
+/// a force they would be refused.
+const fn fault_recommendation(state: RecoveryState, can_force: bool) -> &'static str {
+    match (state, can_force) {
+        (RecoveryState::Hung, true) => "Restart it; force it only if the restart does not take.",
+        (RecoveryState::Hung, false) => "Restart it.",
+        (_, _) => "Restart it to release what it is holding.",
+    }
+}
+
+/// How long something has stood, or why that cannot be said.
+///
+/// A duration is only ever a measured one: with no uptime reading there is
+/// no clock to measure against, and the sample's own verdict explains why
+/// that reading is absent rather than this deriving a second opinion.
+/// Shared by Recovery's fault age and Pressure's band age, so the two
+/// screens can never render the same absence two different ways.
+fn elapsed_reading(elapsed: Option<Duration64>, sample: &Sample) -> Reading {
+    reading(sample, DegradedField::Uptime, elapsed, format_duration)
+}
+
+/// A CPU share, or why there is none.
+///
+/// A share is unmeasured on the very first reading — there is no interval
+/// to divide by — which the sample's own verdict explains rather than this
+/// reporting a zero nothing ever idled at. Shared by a faulted task's own
+/// share and the whole processor's busy share, so a per-task figure and a
+/// whole-resource one can never render the same absence two different ways.
+fn cpu_reading(permille: Option<u16>, sample: &Sample) -> Reading {
+    reading(sample, DegradedField::CpuTime, permille, percent)
+}
+
+/// How much of the machine's memory is in use, or why that cannot be said.
+///
+/// The share comes from the one memory-pressure reading the sampler takes,
+/// so an absent reading is explained by that field's own verdict rather
+/// than by this deriving a second opinion — and never by a plausible
+/// percentage of a total nobody read.
+fn memory_share_reading(sample: &Sample) -> Reading {
+    reading(
+        sample,
+        DegradedField::MemoryPressure,
+        sample.memory_pressure.map(|memory| memory.used_permille),
+        percent,
+    )
+}
+
+/// A faulted task's own storage throughput, or why there is none.
+///
+/// Absent for exactly the reason a rate is absent anywhere else: no
+/// previous reading of *this* task to delta against. A counter that did not
+/// move over a real interval is a genuine `0 B/s` and is reported as one.
+fn disk_reading(bytes_per_sec: Option<u64>, sample: &Sample) -> Reading {
+    reading(
+        sample,
+        DegradedField::ProcessList,
+        bytes_per_sec,
+        format_rate,
+    )
+}
+
+/// A resident-memory total, or why there is none.
+///
+/// The process list is what carries a footprint, so an absent total is
+/// explained by that field's own verdict — a group whose members this
+/// sample never saw has no total, rather than a nought none of them holds.
+fn memory_bytes_reading(bytes: Option<u64>, sample: &Sample) -> Reading {
+    reading(sample, DegradedField::ProcessList, bytes, format_bytes)
+}
+
+/// The marks a fault's timeline carries.
+///
+/// Only what this service observed: the fault itself, stamped with the age
+/// it has stood, and — where the age is known — the observation that it is
+/// still standing now. A history this service did not see is not invented.
+fn fault_marks(state: RecoveryState, since: &Reading) -> Vec<FaultMark> {
+    let mut marks = alloc::vec![FaultMark {
+        stamp: match since {
+            Reading::Measured(age) => alloc::format!("{age} ago"),
+            Reading::Absent(_) => String::from("when observed"),
+        },
+        text: String::from(match state {
+            RecoveryState::Hung => "Stopped answering its seat",
+            _ => "Stopped by the kernel",
+        }),
+        is_fault: true,
+    }];
+    if matches!(since, Reading::Measured(_)) {
+        marks.push(FaultMark {
+            stamp: String::from("now"),
+            text: String::from("Still faulted"),
+            is_fault: false,
+        });
+    }
+    marks
+}
+
+/// The kernel's crash record for `proc_id`, matched by the task's own
+/// stable identity.
+///
+/// The match is on [`ProcId`] and nothing else: a numeric pid is reused, so
+/// matching on one could attribute a dead task's crash to a live task that
+/// inherited its number. A fault with no record answers [`None`], which the
+/// screen states plainly rather than drawing an empty table.
+fn crash_snapshot(sample: &Sample, proc_id: ProcId) -> Option<CrashSnapshot> {
+    let crash = sample
+        .crashes
+        .as_ref()?
+        .iter()
+        .find(|record| record.proc_id == proc_id)?;
+    Some(CrashSnapshot {
+        cause: String::from(crash_cause(crash.fault_class)),
+        location: crash_location(crash.fault_bucket, crash.fault_offset),
+        write: crash.is_write(),
+        owner: alloc::format!("uid {}, gid {}", crash.uid, crash.gid),
+        pc: alloc::format!(
+            "{:#018x} ({})",
+            crash.pc,
+            if crash.load_base_known() {
+                "program-relative"
+            } else {
+                "absolute"
+            }
+        ),
+        sp: alloc::format!("{:#018x}", crash.sp),
+        fp: if crash.fp_valid() {
+            alloc::format!("{:#018x}", crash.fp)
+        } else {
+            String::from("not meaningful for this frame")
+        },
+        registers: crash
+            .regs()
+            .iter()
+            .map(|reg| (display_name(reg.name_bytes()), reg.value))
+            .collect(),
+        frames: crash.frames().to_vec(),
+    })
+}
+
+/// Why the resolver refused the faulting access, in the kernel's own terms.
+const fn crash_cause(class: CrashFaultClass) -> &'static str {
+    match class {
+        CrashFaultClass::Stack => "stack growth the kernel could not back",
+        CrashFaultClass::StackLimit => "stack growth refused by the task's stack bound",
+        CrashFaultClass::FileRegion => "refused access inside a file mapping",
+        CrashFaultClass::Anon => "reserved memory the kernel could not back",
+        CrashFaultClass::Wild => "outside every mapping the task owns",
+    }
+}
+
+/// Where the faulting address sat, as a distance from its anchor rather
+/// than an absolute address.
+///
+/// Two of the buckets carry no meaningful distance, and say so rather than
+/// printing the `0` the record holds — which a reader would take for a
+/// measured offset of nothing.
+fn crash_location(bucket: CrashFaultBucket, offset: u64) -> String {
+    match bucket {
+        CrashFaultBucket::NullPage => alloc::format!("{offset} bytes into the null page"),
+        CrashFaultBucket::BelowStackGuard => {
+            alloc::format!("{offset} bytes below the stack guard")
+        }
+        CrashFaultBucket::PastRegion => alloc::format!("{offset} bytes past its region"),
+        CrashFaultBucket::Wild => String::from("far from every mapping (no distance to give)"),
+        CrashFaultBucket::InRegion => String::from("inside a region it owns (no distance to give)"),
+    }
 }
 
 /// The "Show tasks" relief action every pressure cause offers: it always
@@ -529,21 +1036,29 @@ fn show_tasks_action(recommended: bool) -> PressureAction {
 /// icon's rail uses ([`LiveMeters::cpu_pressured`] /
 /// [`LiveMeters::memory_pressured`]) — measured pressure, never guessed —
 /// alongside the culprit pid each card's relief actions target.
+///
+/// How long each cause has stood comes from `meters`' [`PressureClock`],
+/// the only honest source: the System Information API reports that a
+/// resource *is* pressured, never when it became so, so an age this
+/// service did not itself observe reads as unmeasured.
 fn build_pressure(
     sample: &Sample,
-    meters: &LiveMeters,
+    meters: &RollingMeters,
     self_uid: Option<u32>,
     authority: &dyn CapabilityQuery,
 ) -> (Vec<PressureCause>, Vec<Option<u64>>) {
     let mut causes = Vec::new();
     let mut targets = Vec::new();
-    if meters.cpu_pressured() {
-        let (cause, target) = cpu_pressure_cause(sample, self_uid, authority);
+    let now = sample.uptime.map(|uptime| uptime.since_boot);
+    if meters.system.cpu_pressured() {
+        let since = elapsed_reading(meters.pressure.cpu_elapsed(now), sample);
+        let (cause, target) = cpu_pressure_cause(sample, self_uid, authority, since);
         causes.push(cause);
         targets.push(target);
     }
-    if meters.memory_pressured() {
-        let (cause, target) = memory_pressure_cause(sample);
+    if meters.system.memory_pressured() {
+        let since = elapsed_reading(meters.pressure.memory_elapsed(now), sample);
+        let (cause, target) = memory_pressure_cause(sample, since);
         causes.push(cause);
         targets.push(target);
     }
@@ -557,7 +1072,9 @@ fn cpu_pressure_cause(
     sample: &Sample,
     self_uid: Option<u32>,
     authority: &dyn CapabilityQuery,
+    since: Reading,
 ) -> (PressureCause, Option<u64>) {
+    let amount = cpu_reading(sample.cpu_busy_permille, sample);
     let culprit = sample
         .processes
         .iter()
@@ -580,6 +1097,8 @@ fn cpu_pressure_cause(
                 ),
                 activity: ActivityState::Idle,
                 task_index: None,
+                amount,
+                since,
                 actions: alloc::vec![show_tasks_action(false)],
             },
             None,
@@ -609,6 +1128,8 @@ fn cpu_pressure_cause(
         cause: format!("Using {}% of the CPU over the last sample.", permille / 10),
         activity: ActivityState::Progress(ProgressValue::new(permille)),
         task_index: Some(index),
+        amount,
+        since,
         actions: alloc::vec![
             PressureAction {
                 label: String::from("Lower priority"),
@@ -635,7 +1156,8 @@ fn cpu_pressure_cause(
 /// Pausing a process does not free the memory it already holds, so the
 /// only relief this card ever offers is Show tasks; force-quitting a
 /// culprit stays the Recovery section's job.
-fn memory_pressure_cause(sample: &Sample) -> (PressureCause, Option<u64>) {
+fn memory_pressure_cause(sample: &Sample, since: Reading) -> (PressureCause, Option<u64>) {
+    let amount = memory_share_reading(sample);
     let culprit = sample
         .processes
         .iter()
@@ -652,6 +1174,8 @@ fn memory_pressure_cause(sample: &Sample) -> (PressureCause, Option<u64>) {
                 cause: String::from("Memory pressure is high."),
                 activity: ActivityState::Idle,
                 task_index: None,
+                amount,
+                since,
                 actions: alloc::vec![show_tasks_action(false)],
             },
             None,
@@ -684,30 +1208,75 @@ fn memory_pressure_cause(sample: &Sample) -> (PressureCause, Option<u64>) {
         cause: cause_text,
         activity: ActivityState::Progress(ProgressValue::new(used_permille)),
         task_index: Some(index),
+        amount,
+        since,
         actions: alloc::vec![show_tasks_action(true)],
     };
     (cause, Some(process.pid))
+}
+
+/// The total of one measured reading across every joined member of an
+/// activity, or `None` when the group has no joined member at all or any
+/// joined member's own reading is unmeasured.
+///
+/// One missing part makes the whole absent: a total that quietly skipped an
+/// unmeasured member would understate the group while reading as a
+/// measurement. The sum saturates rather than wrapping, so an implausible
+/// set of readings overstates at the ceiling instead of folding back to a
+/// small, believable figure.
+fn member_total(
+    joined: &[&ProcessSummary],
+    read: impl Fn(&ProcessSummary) -> Option<u64>,
+) -> Option<u64> {
+    if joined.is_empty() {
+        return None;
+    }
+    joined.iter().try_fold(0u64, |total, member| {
+        read(member).map(|value| total.saturating_add(value))
+    })
+}
+
+/// One activity's combined CPU share across its joined members, or why
+/// there is none.
+///
+/// A group spanning several cores legitimately totals past 100%, so the
+/// share is not clamped; it saturates at the widest figure the share type
+/// carries, which a group bounded by
+/// [`MAX_ACTIVITY_MEMBERS`](crate::activities::MAX_ACTIVITY_MEMBERS) cannot
+/// reach.
+fn activity_cpu_reading(joined: &[&ProcessSummary], sample: &Sample) -> Reading {
+    let total = member_total(joined, |process| process.cpu_permille.map(u64::from))
+        .map(|total| u16::try_from(total).unwrap_or(u16::MAX));
+    cpu_reading(total, sample)
 }
 
 /// The Activities section's summaries, one per tracked group in group
 /// order, alongside each group's stable id and its joined members' pids
 /// (in group order) for the actions a rendered [`ActivityMember`] cannot
 /// resolve on its own.
+///
+/// Each summary also carries what the group costs the machine, totalled
+/// from its joined members' own measured readings rather than from any
+/// per-group accounting: there is none, and inventing one would be a figure
+/// nobody measured. Network is always unmeasured because no per-process
+/// network accounting exists to total.
 fn build_activities(
     activities: &Activities,
-    processes: &[ProcessSummary],
+    sample: &Sample,
+    meters: &TaskMeters,
     self_uid: Option<u32>,
     authority: &dyn CapabilityQuery,
 ) -> (Vec<ActivitySummary>, Vec<u64>, Vec<Vec<u64>>) {
     let mut summaries = Vec::with_capacity(activities.len());
     let mut ids = Vec::with_capacity(activities.len());
     let mut member_pids = Vec::with_capacity(activities.len());
+    let processes = &sample.processes;
 
     for group in activities.iter() {
         let mut members = Vec::with_capacity(group.members.len());
         let mut joined_pids = Vec::new();
+        let mut joined = Vec::new();
         let mut any_working = false;
-        let mut joined_count = 0usize;
         let mut all_joined_controllable = true;
 
         for member in group.members {
@@ -719,10 +1288,11 @@ fn build_activities(
                     name: member.name.clone(),
                     detail: String::new(),
                     activity: ActivityState::Idle,
+                    joined: false,
                 });
                 continue;
             };
-            joined_count += 1;
+            joined.push(process);
             joined_pids.push(process.pid);
             let activity = process_activity(process.state);
             if activity == ActivityState::Working {
@@ -736,8 +1306,10 @@ fn build_activities(
                 name: display_name(&process.name),
                 detail,
                 activity,
+                joined: true,
             });
         }
+        let joined_count = joined.len();
 
         let can_control = if joined_count == 0 {
             authority.holds(CapabilityId::PROC_CONTROL)
@@ -764,6 +1336,16 @@ fn build_activities(
             paused: group.paused,
             can_control,
             can_accept_member: count < crate::activities::MAX_ACTIVITY_MEMBERS,
+            cpu: activity_cpu_reading(&joined, sample),
+            memory: memory_bytes_reading(
+                member_total(&joined, |process| Some(process.mem_bytes)),
+                sample,
+            ),
+            disk: disk_reading(
+                member_total(&joined, |process| meters.disk_rate(process.proc_id)),
+                sample,
+            ),
+            network: Reading::Absent(Unmeasured::NoInterface),
             members,
         });
         ids.push(group.id);

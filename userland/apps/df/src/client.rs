@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_mount, Transport};
+use tairix_procinfo::{for_each_mount, Transport, WalkStep};
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
@@ -73,7 +73,7 @@ pub fn run(
             fstype: String::from_utf8_lossy(record.fstype_bytes()).into_owned(),
             usage: record.usage(),
         });
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(DfError::from)?;
 

@@ -9,7 +9,7 @@ use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
 
 use super::{CycleOutcome, Service, MAX_CONSECUTIVE_PUBLISH_FAILURES};
-use crate::model::GroupingEdit;
+use crate::model::{GroupingEdit, TASK_HISTORY_LEN};
 use crate::panel::PanelOutcome;
 use crate::publish::KEEPALIVE_NS;
 use crate::sample::{DegradedField, ScopeVerdicts};
@@ -23,10 +23,11 @@ use crate::wait::required_members;
 /// This service's own scheduler task id in these tests.
 const OWN_PID: u64 = 4242;
 
-/// Neither optional scope granted — the ordinary unprivileged ceiling.
+/// No optional scope granted — the ordinary unprivileged ceiling.
 const NO_SCOPES: ScopeVerdicts = ScopeVerdicts {
     global_process_scope: false,
     memory_pressure: false,
+    hardware_scope: false,
 };
 
 /// The global process scope granted, so [`ProcessListTransport`]'s records
@@ -34,6 +35,7 @@ const NO_SCOPES: ScopeVerdicts = ScopeVerdicts {
 const GRANTED_SCOPES: ScopeVerdicts = ScopeVerdicts {
     global_process_scope: true,
     memory_pressure: false,
+    hardware_scope: false,
 };
 
 fn service() -> Service {
@@ -60,14 +62,29 @@ fn the_first_cycle_publishes_and_notes_each_degraded_measurement_once() {
     assert_eq!(cycle(&mut service, &mut host, 0), CycleOutcome::Continue);
 
     assert_eq!(host.published.len(), 1);
+    // Every reading this unprivileged ceiling permits was attempted against
+    // a dead transport, so each states its own degradation once, in the
+    // order the sampler reads them. The capability-gated readings are
+    // absent rather than degraded: they were never issued.
     assert_eq!(
         host.degradations,
-        alloc::vec![DegradedField::ProcessList, DegradedField::CpuTime]
+        alloc::vec![
+            DegradedField::ProcessList,
+            DegradedField::CpuTime,
+            DegradedField::Uptime,
+            DegradedField::LoadAverage,
+            DegradedField::Identity,
+            DegradedField::MemoryTotal,
+            DegradedField::CpuInfo,
+            DegradedField::ResourceLimits,
+            DegradedField::Mounts,
+        ]
     );
+    let announced = host.degradations.len();
 
     // The same failures on the next cycle are not re-announced.
     cycle(&mut service, &mut host, KEEPALIVE_NS);
-    assert_eq!(host.degradations.len(), 2);
+    assert_eq!(host.degradations.len(), announced);
 }
 
 #[test]
@@ -420,14 +437,18 @@ fn a_cycle_at_the_deadline_samples_exactly_once_and_advances_the_deadline() {
     let requests_after_one = transport.request_count();
     assert!(requests_after_one > 0);
 
-    // At the deadline it samples again.
+    // At the deadline it samples again. A later sample costs fewer queries
+    // than the first, because the static and slow-moving readings are not
+    // due, so the evidence that a sample happened is that *some* queries
+    // were issued.
     service.cycle(
         &mut host,
         &transport,
         crate::SAMPLE_PERIOD_NS,
         &NO_AUTHORITY,
     );
-    assert_eq!(transport.request_count(), requests_after_one * 2);
+    let requests_after_two = transport.request_count();
+    assert!(requests_after_two > requests_after_one);
 
     // And the deadline has moved: another cycle immediately is a no-op.
     service.cycle(
@@ -436,7 +457,7 @@ fn a_cycle_at_the_deadline_samples_exactly_once_and_advances_the_deadline() {
         crate::SAMPLE_PERIOD_NS,
         &NO_AUTHORITY,
     );
-    assert_eq!(transport.request_count(), requests_after_one * 2);
+    assert_eq!(transport.request_count(), requests_after_two);
 }
 
 #[test]
@@ -465,14 +486,23 @@ fn many_sub_deadline_cycles_produce_exactly_one_sample_once_the_deadline_passes(
     }
     assert_eq!(transport.request_count(), requests_after_one);
 
-    // Once it passes, one sample happens.
+    // Once it passes, one sample happens: further queries are issued, and
+    // the cycle straight after it issues none.
     service.cycle(
         &mut host,
         &transport,
         crate::SAMPLE_PERIOD_NS + 1,
         &NO_AUTHORITY,
     );
-    assert_eq!(transport.request_count(), requests_after_one * 2);
+    let requests_after_two = transport.request_count();
+    assert!(requests_after_two > requests_after_one);
+    service.cycle(
+        &mut host,
+        &transport,
+        crate::SAMPLE_PERIOD_NS + 1,
+        &NO_AUTHORITY,
+    );
+    assert_eq!(transport.request_count(), requests_after_two);
 }
 
 #[test]
@@ -497,16 +527,17 @@ fn an_unchanged_sample_one_period_later_presents_nothing_new() {
     // against, so it measures as unmeasured; the second sample is the first
     // one that can measure a share at all (0%, the fixture's rows never
     // advance their recorded CPU time) and so still differs from the first.
-    // Only from the third sample on is the reading itself genuinely steady.
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-    service.panel_mut().flush(&mut host);
-    service.cycle(
-        &mut host,
-        &transport,
-        crate::SAMPLE_PERIOD_NS,
-        &NO_AUTHORITY,
-    );
-    service.panel_mut().flush(&mut host);
+    // From the third sample on the reading itself is steady, but the row's
+    // plotted CPU history is still one reading longer each time, so the
+    // sparkline genuinely differs until that ring is full: settle it first,
+    // then measure, so "unchanged" is asked of a composition that has
+    // actually stopped changing.
+    let settle = TASK_HISTORY_LEN + 2;
+    for step in 0..settle {
+        let now = crate::SAMPLE_PERIOD_NS.saturating_mul(step as u64);
+        service.cycle(&mut host, &transport, now, &NO_AUTHORITY);
+        service.panel_mut().flush(&mut host);
+    }
     let presents = host.presents;
 
     // One full sample period later still, the transport reports the exact
@@ -516,7 +547,7 @@ fn an_unchanged_sample_one_period_later_presents_nothing_new() {
     service.cycle(
         &mut host,
         &transport,
-        crate::SAMPLE_PERIOD_NS * 2,
+        crate::SAMPLE_PERIOD_NS.saturating_mul(settle as u64),
         &NO_AUTHORITY,
     );
     service.panel_mut().flush(&mut host);

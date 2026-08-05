@@ -4,21 +4,23 @@
 //! section's tests, so no section carries its own copy of the fixture the
 //! others already use.
 
+use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, PointerButton};
+use tairix_input::{InputEvent, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActivityState, ControlRole, MeterValue, PressureKind, PressureState, ProgressValue,
-    RecoveryState,
+    ActivityState, ControlRole, PressureKind, PressureState, ProgressValue, RecoveryState,
 };
 
 use super::{
-    ActionVerdict, ActivityMember, ActivitySummary, JobSummary, PressureAction, PressureCause,
-    PressureControl, RecoveryItem, ResourceSummary, ServiceSummary, Switchboard, SwitchboardAction,
-    SwitchboardModel, SystemAction, TaskSummary,
+    ActionVerdict, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact, FaultMark,
+    HeadlineTile, HealthSeverity, JobSummary, LimitRow, NetworkInterface, PressureAction,
+    PressureCause, PressureControl, Reading, RecoveryItem, SessionSeat, StorageVolume, Switchboard,
+    SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemReport, TaskSummary,
+    TileInstrument, Unmeasured,
 };
 
 pub(super) fn font() -> BitmapFont {
@@ -41,16 +43,16 @@ pub(super) fn moved(x: i32, y: i32) -> InputEvent {
 
 /// A populated model with enough items to overflow a modest viewport.
 ///
-/// The three resources deliberately span the band's honest range: CPU is
-/// measured with a plotted history, Memory is measured with a plain track (no
-/// history), and Disk is left honestly unmeasured — exactly the "quiet meter"
+/// Its System report deliberately spans the screen's honest range: CPU is
+/// measured with a plotted trend, Memory and Disk are measured tracks, and
+/// Network is left honestly unmeasured — exactly the "quiet instrument"
 /// default a host with no wired query must fall back to.
 pub(super) fn model() -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for i in 0..50 {
         m.tasks.push(TaskSummary {
             name: alloc::format!("task {i}"),
-            detail: alloc::format!("{i}%"),
+            cpu_permille: Some(u16::try_from(i).unwrap_or(0) * 10),
             pressure: if i % 3 == 0 {
                 PressureState::Under(PressureKind::Cpu)
             } else {
@@ -61,6 +63,7 @@ pub(super) fn model() -> SwitchboardModel {
             action: alloc::string::String::from("End"),
             action_allowed: true,
             group: None,
+            ..TaskSummary::default()
         });
     }
     for i in 0..8 {
@@ -72,82 +75,103 @@ pub(super) fn model() -> SwitchboardModel {
             can_cancel: true,
         });
     }
-    m.pressure = (0..8).map(model_pressure_cause).collect();
+    m.pressure = (0..PRESSURE_KINDS.len())
+        .map(model_pressure_cause)
+        .collect();
     m.activities = (0..6).map(model_activity).collect();
     for i in 0..6 {
-        m.recovery.push(RecoveryItem {
-            name: alloc::format!("hung {i}"),
-            detail: alloc::string::String::from("not responding"),
-            recovery: RecoveryState::Hung,
-            can_restart: true,
-            can_force: true,
-        });
+        m.recovery.push(recovery_item(i, RecoveryState::Hung));
     }
-    m.resources.push(
-        ResourceSummary::new(
-            "CPU",
-            "62%",
-            PressureKind::Cpu,
-            ActivityState::Progress(ProgressValue::new(620)),
-        )
-        .with_meter(
-            MeterValue::Measured(ProgressValue::new(620)),
-            PressureState::Under(PressureKind::Cpu),
-            [100, 300, 500, 620],
-        ),
-    );
-    m.resources.push(
-        ResourceSummary::new(
-            "Memory",
-            "8.6 GB / 16 GB",
-            PressureKind::Memory,
-            ActivityState::Progress(ProgressValue::new(538)),
-        )
-        .with_meter(
-            MeterValue::Measured(ProgressValue::new(538)),
-            PressureState::None,
-            [],
-        ),
-    );
-    m.resources.push(ResourceSummary::new(
-        "Disk",
-        "72%",
-        PressureKind::Disk,
-        ActivityState::Progress(ProgressValue::new(720)),
-    ));
-    for i in 0..10 {
-        m.services.push(ServiceSummary {
-            name: alloc::format!("svc {i}"),
-            detail: alloc::string::String::from("running"),
-            recovery: RecoveryState::None,
-            action: alloc::string::String::from("Restart"),
-            action_allowed: true,
-        });
-    }
-    m.system_actions.push(SystemAction {
-        label: alloc::string::String::from("Lock"),
-        role: ControlRole::System,
-        allowed: true,
-    });
-    m.system_actions.push(SystemAction {
-        label: alloc::string::String::from("Shut Down"),
-        role: ControlRole::Destructive,
-        allowed: true,
-    });
+    m.system = system_report();
     m
 }
 
-/// The CPU pressure cause at `index` of the populated model: Working, blamed
+/// The fault at `index` of the populated model: a task with a measured age
+/// and impact readings, no crash record, and both commands permitted.
+///
+/// The identity is derived from `index` so every fixture fault has its own
+/// stable one — which is what lets a test move a fault in the list and
+/// still assert the selection followed it.
+pub(super) fn recovery_item(index: usize, recovery: RecoveryState) -> RecoveryItem {
+    RecoveryItem {
+        proc_id: fault_id(index),
+        pid: 400 + index as u64,
+        name: alloc::format!("hung {index}"),
+        detail: alloc::string::String::from("not responding"),
+        since: Reading::measured("4m"),
+        recovery,
+        impact: FaultImpact::of(recovery),
+        status: alloc::string::String::from("The task has stopped answering."),
+        recommendation: alloc::string::String::from("Restart it."),
+        marks: alloc::vec![FaultMark {
+            stamp: alloc::string::String::from("4m ago"),
+            text: alloc::string::String::from("Stopped answering its seat"),
+            is_fault: true,
+        }],
+        crash: None,
+        cpu: Reading::measured("3%"),
+        memory: Reading::measured("64.0 MiB"),
+        disk: Reading::measured("0 B/s"),
+        network: Reading::Absent(Unmeasured::NoInterface),
+        can_restart: true,
+        can_force: true,
+    }
+}
+
+/// The stable identity the fixture fault at `index` carries.
+pub(super) fn fault_id(index: usize) -> ProcId {
+    let mut bytes = [0u8; PROC_ID_LEN];
+    bytes[0] = 0x9f;
+    bytes[1] = u8::try_from(index).unwrap_or(u8::MAX);
+    ProcId::from_raw(bytes)
+}
+
+/// A crash record a test can hang on a fixture fault, so the Crash
+/// Snapshot page can be asserted against real recorded values.
+pub(super) fn fault_crash() -> CrashSnapshot {
+    CrashSnapshot {
+        cause: alloc::string::String::from("outside every mapping the task owns"),
+        location: alloc::string::String::from("8 bytes into the null page"),
+        write: true,
+        owner: alloc::string::String::from("uid 1000, gid 1000"),
+        pc: alloc::string::String::from("0x0000000000401234 (program-relative)"),
+        sp: alloc::string::String::from("0x00007ffe0000f000"),
+        fp: alloc::string::String::from("not meaningful for this frame"),
+        registers: alloc::vec![(alloc::string::String::from("x0"), 0xdead_beef_u64)],
+        frames: alloc::vec![0x0040_1234, 0x0040_5678],
+    }
+}
+
+/// The resources the populated model flags, one cause each.
+///
+/// A cause is remembered by the resource it is about, so a fixture that
+/// raised the same resource twice would carry two causes a selection
+/// cannot tell apart — which the service never produces, since it raises
+/// at most one cause per resource. One entry per kind keeps the fixture
+/// honest about that.
+pub(super) const PRESSURE_KINDS: [PressureKind; 6] = [
+    PressureKind::Cpu,
+    PressureKind::Memory,
+    PressureKind::Disk,
+    PressureKind::Network,
+    PressureKind::Power,
+    PressureKind::Thermal,
+];
+
+/// The pressure cause at `index` of the populated model: Working, blamed
 /// on task `index`, offering a recommended Pause, Lower priority, and Show
-/// tasks — all Ready.
+/// tasks — all Ready, with both detail readings measured.
 pub(super) fn model_pressure_cause(index: usize) -> PressureCause {
+    let kind = PRESSURE_KINDS[index.min(PRESSURE_KINDS.len() - 1)];
     PressureCause {
-        resource: alloc::string::String::from("CPU"),
-        kind: PressureKind::Cpu,
+        resource: alloc::format!("{kind:?}"),
+        kind,
         culprit: alloc::format!("culprit {index}"),
         cause: alloc::string::String::from("busy loop"),
         activity: ActivityState::Working,
         task_index: Some(index),
+        amount: Reading::measured("92%"),
+        since: Reading::measured("4m"),
         actions: alloc::vec![
             PressureAction {
                 label: alloc::string::String::from("Pause"),
@@ -173,7 +197,7 @@ pub(super) fn model_pressure_cause(index: usize) -> PressureCause {
 
 /// The activity at `index` of the populated model: stable id `100 + index`,
 /// controllable, accepting members, paused on the odd indices, with one
-/// working and one idle member.
+/// working and one idle member, and its three measurable totals measured.
 pub(super) fn model_activity(index: u64) -> ActivitySummary {
     ActivitySummary {
         id: 100 + index,
@@ -183,16 +207,22 @@ pub(super) fn model_activity(index: u64) -> ActivitySummary {
         paused: index % 2 == 1,
         can_control: true,
         can_accept_member: true,
+        cpu: Reading::measured("12%"),
+        memory: Reading::measured("96.0 MiB"),
+        disk: Reading::measured("0 B/s"),
+        network: Reading::Absent(Unmeasured::NoInterface),
         members: alloc::vec![
             ActivityMember {
                 name: alloc::format!("member {index}.0"),
                 detail: alloc::string::String::from("running"),
                 activity: ActivityState::Working,
+                joined: true,
             },
             ActivityMember {
                 name: alloc::format!("member {index}.1"),
                 detail: alloc::string::String::from("idle"),
                 activity: ActivityState::Idle,
+                joined: true,
             },
         ],
     }
@@ -207,6 +237,33 @@ pub(super) fn centre(rect: Rect) -> (i32, i32) {
         rect.left() + i32::try_from(rect.width).unwrap_or(0) / 2,
         rect.top() + i32::try_from(rect.height).unwrap_or(0) / 2,
     )
+}
+
+/// The rectangle the master card in list slot `index` occupies.
+///
+/// This is the very rectangle the section hit-tests its cards against, read
+/// from the section's own list geometry, so a test aims where the screen
+/// really seats the card rather than at a rectangle of its own invention.
+pub(super) fn card_slot(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> Rect {
+    let layout = sb.compute_layout(b, Scale::ONE, theme);
+    let info = sb.list_info(&layout, Scale::ONE, theme);
+    info.item_rect(u32::try_from(index).unwrap_or(0))
+}
+
+/// A point inside master card `item`'s own body, clear of every footer
+/// button in `footer`, so a click there is a body press and nothing else.
+///
+/// The footer sits along the card's bottom edge, so the upper quarter is
+/// body; the assertion is what keeps that true if the footer layout ever
+/// changes, rather than leaving a test quietly clicking a button.
+pub(super) fn card_body_centre(item: Rect, footer: &[Rect]) -> (i32, i32) {
+    let x = item.left() + i32::try_from(item.width).unwrap_or(0) / 2;
+    let y = item.top() + i32::try_from(item.height).unwrap_or(0) / 4;
+    assert!(
+        footer.iter().all(|rect| !rect.contains(Point::new(x, y))),
+        "the body point must miss every footer button"
+    );
+    (x, y)
 }
 
 pub(super) fn has_ink(surface: &Surface, rect: Rect) -> bool {
@@ -235,4 +292,193 @@ pub(super) fn click(
         }
     }
     out
+}
+
+/// The action-button rectangles of the Tasks table's shown row `row`.
+///
+/// The Tasks table draws its per-row commands inside its trailing Actions
+/// *column* rather than in an anchored rail beside the list, so a test
+/// reaches them through the row's own cell geometry — the very rectangles
+/// the render path uses — instead of re-deriving a split of its own.
+pub(super) fn task_action_rects(
+    sb: &mut Switchboard,
+    b: Rect,
+    scale: Scale,
+    theme: &Theme,
+    row: usize,
+) -> alloc::vec::Vec<Rect> {
+    let layout = sb.compute_layout(b, scale, theme);
+    let info = sb.list_info(&layout, scale, theme);
+    let slot = u32::try_from(row).unwrap_or(0);
+    let item = info.item_rect(slot);
+    sb.tasks
+        .entries
+        .get(row)
+        .map(|entry| entry.action_rects(item, scale, theme))
+        .unwrap_or_default()
+}
+
+/// Put the Tasks section's content cursor on shown row `row`.
+///
+/// The section's cursor spans its header controls before its rows, so a
+/// test that wants a row walks down to it exactly as a reader would rather
+/// than assuming row zero is the first stop.
+pub(super) fn focus_task_row(sb: &mut Switchboard, row: usize) {
+    let target = sb.tasks.focus_index_for_row(row);
+    for _ in 0..target {
+        assert_eq!(sb.on_key(tairix_input::Key::Named(NamedKey::Down)), None);
+    }
+    assert_eq!(sb.active().content_focus(), target);
+}
+
+/// A System report spanning every state the screen must draw: measured and
+/// unmeasured header readings, a healthy volume and a failing one, an
+/// interface with addresses and one without, a seat, a limit, and the rail's
+/// refused actions.
+pub(super) fn system_report() -> SystemReport {
+    SystemReport {
+        headline: alloc::vec![
+            tile(
+                "CPU",
+                Reading::measured("62%"),
+                Reading::measured("4 x Test Core"),
+                PressureKind::Cpu,
+                TileInstrument::Trend(alloc::vec![100, 300, 500, 620]),
+            ),
+            tile(
+                "Memory",
+                Reading::measured("54%"),
+                Reading::measured("8.6 GiB of 16.0 GiB"),
+                PressureKind::Memory,
+                TileInstrument::Track(Some(538)),
+            ),
+            tile(
+                "Disk",
+                Reading::measured("72%"),
+                Reading::measured("140.0 GiB free"),
+                PressureKind::Disk,
+                TileInstrument::Track(Some(720)),
+            ),
+            tile(
+                "Network",
+                Reading::Absent(Unmeasured::NotPermitted),
+                Reading::Absent(Unmeasured::NotPermitted),
+                PressureKind::Network,
+                TileInstrument::Trend(alloc::vec![]),
+            ),
+        ],
+        machine: alloc::vec![
+            SystemFact::new("Hostname", Reading::measured("tairix")),
+            SystemFact::new("OS version", Reading::measured("TAIRiX 0.1.0")),
+            SystemFact::new("Uptime", Reading::measured("2h 1m")),
+            SystemFact::new("Machine id", Reading::Absent(Unmeasured::Unavailable)),
+        ],
+        authority: alloc::vec![
+            SystemFact::new("Process control", Reading::measured("held")),
+            SystemFact::new("Kernel readings", Reading::Absent(Unmeasured::NotPermitted)),
+        ],
+        cores: alloc::vec![
+            SystemFact::new("Core 0", Reading::measured("performance, 3200 MHz")),
+            SystemFact::new("Core 1", Reading::measured("performance, 3200 MHz")),
+        ],
+        memory: alloc::vec![
+            SystemFact::new("Installed", Reading::measured("16.0 GiB")),
+            SystemFact::new("Kernel heap", Reading::Absent(Unmeasured::NotPermitted)),
+        ],
+        volumes: alloc::vec![
+            volume(
+                "System:",
+                HealthSeverity::Healthy,
+                Reading::measured("no faults")
+            ),
+            volume(
+                "Backup:",
+                HealthSeverity::Failing,
+                Reading::measured("3 medium errors"),
+            ),
+        ],
+        volumes_absent: None,
+        interfaces: alloc::vec![
+            interface(
+                "eth0",
+                alloc::vec![alloc::string::String::from("10.0.2.15/24")]
+            ),
+            interface("eth1", alloc::vec![]),
+        ],
+        interfaces_absent: None,
+        seats: alloc::vec![SessionSeat {
+            name: alloc::string::String::from("Seat 0"),
+            owner: Reading::measured("task 7"),
+            console: Reading::measured("console 1"),
+        }],
+        seats_absent: None,
+        census: alloc::vec![SystemFact::new("Logged in", Reading::measured("2"))],
+        limits: alloc::vec![LimitRow {
+            name: alloc::string::String::from("Open streams"),
+            soft: alloc::string::String::from("64"),
+            hard: alloc::string::String::from("unlimited"),
+            usage: Reading::measured("9"),
+        }],
+        limits_absent: None,
+        actions: alloc::vec![
+            SystemAction {
+                label: alloc::string::String::from("Lock"),
+                role: ControlRole::System,
+                allowed: true,
+                refusal: None,
+            },
+            SystemAction {
+                label: alloc::string::String::from("Shut Down"),
+                role: ControlRole::Destructive,
+                allowed: false,
+                refusal: Some(Unmeasured::NoInterface),
+            },
+        ],
+    }
+}
+
+/// One header reading for the fixture.
+fn tile(
+    name: &str,
+    value: Reading,
+    detail: Reading,
+    kind: PressureKind,
+    instrument: TileInstrument,
+) -> HeadlineTile {
+    HeadlineTile {
+        name: alloc::string::String::from(name),
+        value,
+        unit: alloc::string::String::new(),
+        detail,
+        kind,
+        pressured: matches!(kind, PressureKind::Cpu),
+        instrument,
+    }
+}
+
+/// One mounted volume for the fixture.
+fn volume(mount_point: &str, health_state: HealthSeverity, health: Reading) -> StorageVolume {
+    StorageVolume {
+        source: alloc::string::String::from("/dev/vda1"),
+        mount_point: alloc::string::String::from(mount_point),
+        filesystem: alloc::string::String::from("arxfs"),
+        medium: alloc::string::String::from("solid state"),
+        availability: alloc::string::String::from("available"),
+        capacity: Reading::measured("60.0 GiB of 200.0 GiB used"),
+        health,
+        health_state,
+    }
+}
+
+/// One network interface for the fixture.
+fn interface(name: &str, addresses: alloc::vec::Vec<alloc::string::String>) -> NetworkInterface {
+    NetworkInterface {
+        name: alloc::string::String::from(name),
+        facts: alloc::vec![SystemFact::new("MTU", Reading::measured("1500 bytes"))],
+        link: Reading::measured("up"),
+        addresses,
+        addresses_absent: None,
+        rx: Reading::measured("1.0 KiB/s"),
+        tx: Reading::Absent(Unmeasured::Unavailable),
+    }
 }

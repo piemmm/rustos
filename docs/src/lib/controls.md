@@ -16,13 +16,13 @@ another.
 | `button` | `Button`, `IconButton`, `SplitButton` |
 | `selector` | `Toggle`, `Checkbox`, `Radio` |
 | `value` | `Slider`, `Progress` |
-| `meter`, `chart` | `Meter`, `Chart` |
+| `chart` | `Chart` |
 | `metric` | `MetricTile`, `StatusPill` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
-| `collection` | `ListRow`, `TableRow`, `TableHeader`, `Card`, `Panel` |
+| `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `TraySignal` |
@@ -43,12 +43,13 @@ it, or frame the content that does:
 - `MetricTile` is one at-a-glance report of a resource: a quiet label, a large
   reading with a quieter unit, an optional detail line, and an optional
   `MetricInstrument` beneath it — nothing, a `Track` proportional to the
-  current level (the same `MeterValue` a `Meter` reads, tinted by the tile's
-  resource kind), or a `Trend` `Chart` of its recent history, never two
-  instruments for one number. `MetricLayout` picks the anatomy: `Stacked` puts
-  the label above the reading for a tile with a column of its own, `Inline`
-  puts the label leading and the reading trailing so a narrow stack of
-  readings can be scanned down. A tile takes no input and reports nothing.
+  current level (a `MeterValue`, tinted by the tile's resource kind, whose
+  unmeasurable case draws the bare groove rather than a fabricated zero), or a
+  `Trend` `Chart` of its recent history, never two instruments for one number.
+  `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
+  for a tile with a column of its own, `Inline` puts the label leading and the
+  reading trailing so a narrow stack of readings can be scanned down. A tile
+  takes no input and reports nothing.
 - `StatusPill` is the compact capsule that names a state in a word, toned by
   its signal role, for a place a full tile would not fit.
 - `FactList` is a column of key/value readouts with the values right-aligned
@@ -67,7 +68,22 @@ it, or frame the content that does:
   below down its own leading edge while the content beside it is scrolled.
 - `TableHeader` gives the row family sortable column titles over the same
   column-width model `TableRow` lays its cells out with, and reports the sort
-  its owner commits rather than reordering anything itself.
+  its owner commits rather than reordering anything itself. A header and a row
+  reserve the *same* fixed leading rail gutter and the *same* fixed trailing
+  Signal Bead band, both sized from the surface alone: a bead paints inside a
+  band that is always there, so a row that becomes denied or gains a recovery
+  mark keeps every column exactly where the header names it.
+- `TableRow::cell_rects` answers where a row's cells are laid out, in the
+  coordinate space of the bounds it is asked about and derived from the very
+  span `render` draws with. A composer placing its own content inside a column
+  — a sparkline beside a number — reads the layout rather than re-deriving it,
+  so the two can never disagree. It returns one rect per cell it could seat,
+  and fewer (or none) when the bounds cannot seat them all.
+- `TableCell` carries an optional leading `IconKind` naming what its value
+  *is*, taken the way `MetricTile` takes one. The icon draws on a fixed slot
+  ahead of the text whatever the cell's alignment, out of the text's own
+  budget; a column too narrow to seat it omits it rather than overlapping the
+  text, and it never moves a column boundary.
 - `TabsOrientation` gives the existing strip a vertical orientation, so a
   sidebar of pages is the one selection control rather than a second one.
 
@@ -166,7 +182,42 @@ tile bleeding onto its neighbour.
 
 A tile renders state and never dispatches. The view owns the grid geometry and
 hit-tests pointer input against that same geometry, so a tile carries no pointer
-position or press latch of its own, unlike a `ListRow` the user clicks directly.
+position or press latch of its own, unlike a `ListRow` or a `Card` — controls
+the user clicks directly.
+
+## The card: a group that can be chosen
+
+`collection::Card` is a grouped state-and-actions surface: a dominant state on
+its leading edge, progress along its bottom, a count or alert bead at its
+top-trailing corner, a title and optional body line, and a row of footer action
+`Button`s.
+
+A card reports two different interactions, and the distinction is what makes a
+master/detail screen work:
+
+- A completed click on a footer button reports `CardAction::FooterActivated`
+  with that button's index. The footer buttons always see a pointer event
+  first, and they keep their own pointer and focus states, so hovering one
+  action does not disturb the card.
+- A completed primary click on the card's **own body** — inside its bounds and
+  clear of every footer button — reports `CardAction::Pressed`. That is how a
+  master list of cards is selected with the pointer, which is what the
+  Switchboard's Pressure, Recovery, and Background screens are built on. A
+  click can never report both: the body press is considered only once no footer
+  button has claimed the event.
+
+A press does **not** give the card a look of its own. Feedback for choosing a
+card is the owner marking it *selected*, not a hover or press wash, because the
+card's composed state is the owner's to set. The pointer position and press
+latch are therefore hit-test input only: they are excluded from the equality
+comparison, so a card mid-press still compares equal to its resting self and a
+host using `==` as its repaint gate is never woken by a click that changed no
+pixel.
+
+A card that is not actionable — disabled, or denied by authority — reports
+nothing at all, for the body press exactly as for a footer button. The body
+press runs through the same fail-closed press latch every clickable control
+shares, so there is one rule rather than a second one written for cards.
 
 ## Grouped focus and anchored edges
 
@@ -179,10 +230,12 @@ instead of being drawn per surface.
 
 `FocusState` carries two independent facts: whether a control holds the
 keyboard, and whether it belongs to a group whose **Focus Field** is
-highlighted. A row of related controls — a list row and the action buttons
-that act on it — is one such group: the member the keyboard is actually on
-takes the focus ring, and every other member states its membership by
-lifting its rim part-way toward the active rim.
+highlighted. A row of related controls — a list or table row and the action
+buttons that act on it — is one such group: the member the keyboard is
+actually on takes the focus ring, and every other member states its
+membership by lifting its rim part-way toward the active rim. Both members of
+the row family carry the mark, so a table whose commands are a column groups
+exactly as a list beside a rail does.
 
 The lift is partial by design, so a member never looks like the focused
 control; a control that is *both* focused and a member simply takes the ring,

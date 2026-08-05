@@ -8,7 +8,7 @@
 use tairix_abi::sysinfo::{CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError};
+use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -42,7 +42,7 @@ impl CpuTotals {
             count = count.saturating_add(1);
             totals.busy_ns = totals.busy_ns.saturating_add(record.busy_ns);
             totals.idle_ns = totals.idle_ns.saturating_add(record.idle_ns);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         if count > 0 {
             Ok(Some(totals))
@@ -80,6 +80,11 @@ impl CpuTotals {
 /// Records are delivered in the order the service returns them (ascending
 /// CPU index).
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile list it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply whose length is not a whole number of
 /// [`CpuTimeRecord::WIRE_LEN`] records, or one that would overflow the page
 /// offset, is rejected rather than partially rendered.
@@ -92,7 +97,7 @@ impl CpuTotals {
 ///   walk stops at that record.
 pub fn for_each_cpu_time(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CpuTimeRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&CpuTimeRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -118,7 +123,7 @@ pub fn for_each_cpu_time(
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
+    use super::{for_each_cpu_time, CpuTotals, WalkStep, CPU_TIME_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -183,7 +188,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_cpu_time(fixture, |r| {
             seen.borrow_mut().push(*r);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }

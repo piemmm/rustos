@@ -648,8 +648,9 @@ pub enum CommandSection {
     Jobs = 2,
     /// The recovery section (what a long-press on a flagged icon opens).
     Recovery = 3,
-    /// The system-overview section.
-    Overview = 4,
+    /// The system section: the machine's own readings, storage, network,
+    /// session, permissions and system actions.
+    System = 4,
     /// The pressure section ("why is my machine slow": per-resource cause
     /// cards, `plans/NEW-TASKBAR.md` T12).
     Pressure = 5,
@@ -675,7 +676,7 @@ impl CommandSection {
             1 => Ok(Self::Tasks),
             2 => Ok(Self::Jobs),
             3 => Ok(Self::Recovery),
-            4 => Ok(Self::Overview),
+            4 => Ok(Self::System),
             5 => Ok(Self::Pressure),
             6 => Ok(Self::Activities),
             _ => Err(Errno::OutOfRange),

@@ -262,6 +262,8 @@ fn refresh_names_updates_joined_members_and_leaves_others_untouched() {
         mem_bytes: 0,
         priority: tairix_abi::SchedPriority::Normal,
         cpu_permille: None,
+        io_bytes_read: 0,
+        io_bytes_written: 0,
     }];
     activities.refresh_names(&processes);
     let view = activities.iter().next().expect("one activity");

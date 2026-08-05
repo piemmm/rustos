@@ -40,7 +40,8 @@
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor.
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
-//!   loop both walks are built on.
+//!   loop both walks are built on, plus the [`WalkStep`] signal a caller with
+//!   its own bound answers to end a walk early without faking a failure.
 //! * [`resolve()`], the userspace `info:`/`stats:` resource-reference resolver:
 //!   it maps a parsed [`ResourceRef`](tairix_resref::ResourceRef) onto a
 //!   [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId), issues it over
@@ -121,7 +122,7 @@ pub use kstats::{
     memory_pressure, memory_pressure_band, memory_total_bytes, ramzip_stats, CACHE_LEDGER_PAGE,
     CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
 };
-pub use list::{field_lossy, ListError};
+pub use list::{field_lossy, walk_pages, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use netsock::{for_each_net_socket, NET_SOCKET_PAGE};
 pub use process::{

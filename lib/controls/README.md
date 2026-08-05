@@ -217,10 +217,10 @@ milliseconds, so this is the difference between a desktop that stays
 responsive under a moving pointer and one that does not.
 
 Controls also carry state that exists only for hit testing — the last raw
-pointer coordinate, the press latch that remembers where a button-down
-landed, a scrollbar's drag anchor. None of it reaches `render`, so counting
-it as a difference would defeat the contract: a pointer sample crossing no
-control would look like a change. Such a field is wrapped in
+pointer coordinate, the press latch that remembers where a button-down landed
+(a card's body press among them), a scrollbar's drag anchor. None of it reaches
+`render`, so counting it as a difference would defeat the contract: a pointer
+sample crossing no control would look like a change. Such a field is wrapped in
 `RenderInvariant<T>` (see `src/state.rs`), a transparent newtype whose own
 `PartialEq` always compares equal. The exception therefore lives in the
 *type of the excluded field*, so each struct keeps its `derive` and a field
@@ -275,7 +275,7 @@ own readout:
 - `metric` — `MetricTile`, one at-a-glance report of a resource: a quiet
   label, a large reading with a quieter unit, an optional detail line, and an
   optional `MetricInstrument` beneath it (`None`, a `Track` proportional to the
-  current level over the same `MeterValue` a `Meter` reads, or a `Trend`
+  current level over the shared `MeterValue` (`state`), or a `Trend`
   `Chart` of its recent history — never two instruments for one number).
   `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
   for a tile with a column of its own, `Inline` puts the label leading and the
@@ -298,9 +298,37 @@ own readout:
   down its own leading edge (`with_edge_wake`) while the content beside it is
   scrolled away from its start, so a still frame shows that the list moved
   under an anchored column rather than the column moving with the list.
+- `collection::Card` — the grouped state-and-actions surface a master list of
+  causes, faults, or jobs is made of, and the one control that reports *two*
+  interactions: `CardAction::FooterActivated` for a completed click on one of
+  its footer `Button`s, and `CardAction::Pressed` for a completed click on the
+  card's own body, clear of every footer button. The footer sees each event
+  first, so a click can never report both, and a master/detail screen selects
+  the pressed card rather than needing a click target of its own. A press gives
+  the card no wash: choosing a card is the owner marking it *selected*, so the
+  body pointer position and press latch are hit-test state excluded from
+  equality (above), and a card that is disabled or denied by authority reports
+  nothing at all — the body press runs through the same fail-closed latch every
+  clickable control shares. `footer_rects` is the one definition of where the
+  footer buttons are, so a composer embedding a card reads the same rectangles
+  the card hit-tests and paints.
 - `collection::TableHeader` — sortable column titles over the same
   column-width model `TableRow` lays its cells out with, reporting the sort
-  its owner commits rather than reordering anything itself.
+  its owner commits rather than reordering anything itself. Header and row
+  reserve the *same* fixed leading rail gutter and the *same* fixed trailing
+  Signal Bead band, both sized from the surface alone, so a row that becomes
+  denied or gains a recovery mark keeps every column exactly where the header
+  names it — a bead paints inside a band that is always reserved.
+- `collection::TableRow::cell_rects` — where a row's cells are laid out, in
+  the coordinate space of the bounds it is asked about, derived from the very
+  span `render` draws with. A composer placing its own content inside a column
+  (a sparkline beside a number) reads the layout instead of re-deriving it, so
+  the answer cannot drift from the paint.
+- `collection::TableCell` — an optional leading `IconKind` naming what the
+  cell's value *is*, taken the way `MetricTile` takes one, drawn on a fixed
+  slot ahead of the text at every alignment and out of the text's own budget.
+  A column too narrow to seat it omits it rather than overlapping the text,
+  and it never moves a column boundary.
 - `tabs::TabsOrientation` — a vertical orientation of the existing strip, so a
   sidebar of pages is the one selection control rather than a second one.
 

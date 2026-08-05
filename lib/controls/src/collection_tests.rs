@@ -20,7 +20,7 @@
 use alloc::vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -360,41 +360,161 @@ fn first_col(surface: &Surface, want: Pixel) -> Option<u32> {
     (0..W).find(|&x| (0..H).any(|y| surface.get(x, y) == Some(want)))
 }
 
+/// A `W`×`H` render of `row` laid out across `columns` at the unscaled
+/// desktop, the counterpart of [`row_surface`]/[`header_surface`] so no table
+/// case restates the render call it is really asserting about.
+fn table_surface(row: &TableRow, theme: &Theme, columns: &[u32]) -> Surface {
+    let mut surface = Surface::new(W, H).expect("surface");
+    row.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        theme,
+        font(),
+        columns,
+    );
+    surface
+}
+
 #[test]
 fn table_row_content_does_not_shift_when_selected() {
     let theme = Theme::dark();
     let on = premul(theme.palette().on_surface);
     let unselected = {
         let row = TableRow::new(vec![TableCell::new("X")]);
-        let mut s = Surface::new(W, H).expect("surface");
-        row.render(
-            &mut s,
-            Rect::new(0, 0, W, H),
-            Scale::ONE,
-            &theme,
-            font(),
-            &[W],
-        );
-        first_col(&s, on).expect("text drawn")
+        first_col(&table_surface(&row, &theme, &[W]), on).expect("text drawn")
     };
     let selected = {
         let row = TableRow::new(vec![TableCell::new("X")])
             .with_state(ControlState::idle().with_selection(SelectionState::Selected));
-        let mut s = Surface::new(W, H).expect("surface");
-        row.render(
-            &mut s,
-            Rect::new(0, 0, W, H),
-            Scale::ONE,
-            &theme,
-            font(),
-            &[W],
-        );
-        first_col(&s, on).expect("text drawn")
+        first_col(&table_surface(&row, &theme, &[W]), on).expect("text drawn")
     };
     assert_eq!(
         unselected, selected,
         "a selected row's content must not shift ({unselected} vs {selected})"
     );
+}
+
+#[test]
+fn a_bead_bearing_rows_inner_column_is_painted_where_an_idle_rows_is() {
+    // Regression test, read from the paint rather than from any query: the
+    // trailing Signal Bead band is reserved unconditionally, so the *inner*
+    // column boundaries a row's declared widths are scaled into must not move
+    // when the row starts drawing a bead. Before the fix the band was
+    // subtracted only when a bead actually drew, which rescaled every column
+    // of a denied row and slid this one eight pixels leftward.
+    let theme = Theme::dark();
+    let on = premul(theme.palette().on_surface);
+    // Only the middle cell carries text, so the leftmost emphasised mark *is*
+    // where the second column's content begins (a denied row's own bead draws
+    // in the denied colour, never this one).
+    let cells = || vec![TableCell::new(""), TableCell::new("B"), TableCell::new("")];
+    let at = |row: &TableRow| {
+        first_col(&table_surface(row, &theme, &COLUMNS), on).expect("the middle cell drew")
+    };
+    let idle = at(&TableRow::new(cells()));
+    let denied = at(&TableRow::new(cells())
+        .with_state(ControlState::idle().with_authority(AuthorityState::Denied)));
+    assert_eq!(
+        idle, denied,
+        "a row that becomes denied must paint its inner columns unmoved ({idle} vs {denied})"
+    );
+}
+
+#[test]
+fn table_row_cell_rects_are_unaffected_by_a_state_that_adds_a_trailing_bead() {
+    // Regression test: the trailing Signal Bead band must be reserved
+    // unconditionally, so a row that merely becomes denied (and so starts
+    // drawing a bead) must not shift any column relative to the same row
+    // idle. Before the fix this failed because the bead band was only
+    // subtracted from the content width when a bead actually drew.
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let cells = || {
+        vec![
+            TableCell::new("A"),
+            TableCell::new("B"),
+            TableCell::new("C"),
+        ]
+    };
+    let idle = TableRow::new(cells());
+    let denied = TableRow::new(cells())
+        .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
+
+    assert_eq!(
+        idle.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS),
+        denied.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS),
+        "a row that becomes denied must not shift any column"
+    );
+}
+
+#[test]
+fn a_denied_rows_columns_still_align_with_the_header_above_it() {
+    // Regression test: the header reserves the identical span through
+    // `row_content_span`, so a row's own bead-bearing state must not pull its
+    // columns out of step with the header naming them.
+    let theme = Theme::dark();
+    let header = three_columns();
+    let bounds = Rect::new(0, 0, W, H);
+    let row = TableRow::new(vec![
+        TableCell::new("A"),
+        TableCell::new("B"),
+        TableCell::new("C"),
+    ])
+    .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
+
+    let rects = row.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(rects.len(), COLUMNS.len());
+    for (i, rect) in rects.iter().enumerate() {
+        let (start, end) =
+            column_x_range(&header, &theme, &COLUMNS, i).unwrap_or_else(|| panic!("column {i}"));
+        assert_eq!(
+            rect.left(),
+            xi(start),
+            "column {i}'s start must match the header"
+        );
+        assert_eq!(
+            rect.width,
+            end - start,
+            "column {i}'s width must match the header"
+        );
+    }
+}
+
+#[test]
+fn table_row_cell_rects_match_where_render_draws_the_cells() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let row = TableRow::new(vec![
+        TableCell::new("Name"),
+        TableCell::new("Type"),
+        TableCell::numeric("128"),
+    ]);
+    let rects = row.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(rects.len(), COLUMNS.len());
+
+    let surface = table_surface(&row, &theme, &COLUMNS);
+    let start = first_col(&surface, premul(theme.palette().on_surface)).expect("first cell drawn");
+    assert!(
+        rects[0].contains(Point::new(xi(start), xi(H / 2))),
+        "the first cell's own text must fall inside the rect `cell_rects` reports for it"
+    );
+}
+
+#[test]
+fn table_row_cell_rects_degrades_when_bounds_cannot_seat_them() {
+    let theme = Theme::dark();
+    let row = TableRow::new(vec![TableCell::new("A"), TableCell::new("B")]);
+    let too_small = Rect::new(0, 0, 1, 1);
+    assert!(
+        row.cell_rects(too_small, Scale::ONE, &theme, &[100, 100])
+            .is_empty(),
+        "bounds with no room for content produce no cell rects"
+    );
+    let off_surface = Rect::new(-5, 0, W, H);
+    assert!(row
+        .cell_rects(off_surface, Scale::ONE, &theme, &[100, 100])
+        .is_empty());
 }
 
 // --- TableCell / TableRow (spec §11.13–§11.14) -------------------------
@@ -417,16 +537,8 @@ fn table_row_draws_all_cells() {
         TableCell::new("Type"),
         TableCell::numeric("128"),
     ]);
-    let mut s = Surface::new(W, H).expect("surface");
-    row.render(
-        &mut s,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-        &[100, 80, 60],
-    );
-    assert!(has_pixel(&s, premul(theme.palette().on_surface)));
+    let surface = table_surface(&row, &theme, &[100, 80, 60]);
+    assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
 
 #[test]
@@ -437,34 +549,252 @@ fn table_cell_specific_state_shows_its_bead() {
         TableCell::new("bad")
             .with_state(ControlState::idle().with_authority(AuthorityState::Denied)),
     ]);
-    let mut s = Surface::new(W, H).expect("surface");
-    row.render(
-        &mut s,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-        &[120, 120],
+    let surface = table_surface(&row, &theme, &[120, 120]);
+    assert!(has_pixel(&surface, premul(theme.palette().denied)));
+}
+
+// --- A cell's leading identity icon (spec §11.14) ----------------------
+//
+// The icon is tinted with the very foreground its text is drawn in, so what
+// adding it changed reads as the *difference* between two renders rather than
+// as a colour of its own. The cases below therefore measure position: where
+// the changed pixels are, and how far the text moved.
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` of every pixel that differs
+/// between two same-sized renders, or `None` when they are identical.
+fn diff_bbox(a: &Surface, b: &Surface) -> Option<(u32, u32, u32, u32)> {
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..a.height().min(b.height()) {
+        for x in 0..a.width().min(b.width()) {
+            if a.get(x, y) == b.get(x, y) {
+                continue;
+            }
+            found = Some(match found {
+                None => (x, y, x, y),
+                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+            });
+        }
+    }
+    found
+}
+
+/// An `i32` surface coordinate as a `u32` (a laid-out column never starts off
+/// the left of the surface).
+fn xu(v: i32) -> u32 {
+    u32::try_from(v).expect("a laid-out column starts on the surface")
+}
+
+/// The `(cell rect, padding, icon side)` a one-cell row laid out across the
+/// whole width gives its cell under `theme` — read from the row's own
+/// `cell_rects` and the same public theme/font metrics the cell sizes its
+/// icon slot from, so a case never re-derives the layout it checks.
+fn icon_slot(row: &TableRow, theme: &Theme, columns: &[u32]) -> (Rect, u32, u32) {
+    let rect = row
+        .cell_rects(Rect::new(0, 0, W, H), Scale::ONE, theme, columns)
+        .first()
+        .copied()
+        .expect("the first column is laid out");
+    let pad = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1);
+    (rect, pad, font().glyph_height().min(rect.height))
+}
+
+#[test]
+fn table_cell_icon_defaults() {
+    assert_eq!(
+        TableCell::new("a").icon(),
+        None,
+        "a cell carries an icon only when asked for one"
     );
-    assert!(has_pixel(&s, premul(theme.palette().denied)));
+    assert_eq!(
+        TableCell::new("a").with_icon(IconKind::Text).icon(),
+        Some(IconKind::Text)
+    );
+    let numeric = TableCell::numeric("42").with_icon(IconKind::Disk);
+    assert_eq!(numeric.icon(), Some(IconKind::Disk));
+    assert_eq!(numeric.text(), "42");
+    assert_eq!(
+        numeric.align(),
+        CellAlign::Trailing,
+        "an icon is not an alignment; it sits ahead of the text either way"
+    );
+}
+
+#[test]
+fn a_cell_icon_draws_ahead_of_its_text_at_every_alignment() {
+    let theme = Theme::dark();
+    let on = premul(theme.palette().on_surface);
+    for align in [CellAlign::Leading, CellAlign::Center, CellAlign::Trailing] {
+        let plain = TableRow::new(vec![TableCell::new("Ag").with_align(align)]);
+        let iconed = TableRow::new(vec![TableCell::new("Ag")
+            .with_align(align)
+            .with_icon(IconKind::Text)]);
+        let bare = table_surface(&plain, &theme, &[W]);
+        let with = table_surface(&iconed, &theme, &[W]);
+        let (rect, pad, side) = icon_slot(&iconed, &theme, &[W]);
+        let left = xu(rect.left()) + pad;
+
+        // The icon takes its slot plus the gap before the text out of the
+        // text's budget, so the text's own trailing ink moves by exactly what
+        // each alignment implies: a leading cell by the whole reservation, a
+        // centred one by half of it, a trailing one not at all.
+        let reserved = side + pad;
+        let shift = match align {
+            CellAlign::Leading => reserved,
+            CellAlign::Center => reserved / 2,
+            CellAlign::Trailing => 0,
+        };
+        let (bare_min, _, bare_max, _) = bbox(&bare, on).expect("the text alone drew");
+        let (_, _, with_max, _) = bbox(&with, on).expect("the iconed cell drew");
+        assert_eq!(
+            with_max,
+            bare_max + shift,
+            "{align:?}: the icon must displace the text by its reservation, no more"
+        );
+
+        let (dx0, _, dx1, _) = diff_bbox(&bare, &with).expect("the icon reached the surface");
+        assert!(
+            dx0 >= left && dx0 < left + side,
+            "{align:?}: the icon draws on the cell's own leading slot ({dx0} outside {left}..{})",
+            left + side
+        );
+        assert!(
+            dx1 < xu(rect.left()) + rect.width,
+            "{align:?}: nothing the icon draws may overflow its column"
+        );
+        if align != CellAlign::Trailing {
+            continue;
+        }
+        // A trailing-aligned cell's text stays pinned to its trailing edge, so
+        // the icon slot is the *only* thing that changed — proof the icon is
+        // ahead of the text rather than drawn over it.
+        assert!(
+            dx1 < left + side,
+            "a trailing cell's icon changes its leading slot alone"
+        );
+        assert!(
+            dx0 < bare_min,
+            "and puts ink ahead of where the text alone began"
+        );
+    }
+}
+
+#[test]
+fn a_cell_icon_too_big_for_its_column_is_omitted_rather_than_overlapping_the_text() {
+    let theme = Theme::dark();
+    let on = premul(theme.palette().on_surface);
+    let plain = TableRow::new(vec![TableCell::new("ab"), TableCell::new("next")]);
+    let iconed = TableRow::new(vec![
+        TableCell::new("ab").with_icon(IconKind::Text),
+        TableCell::new("next"),
+    ]);
+    // The declared widths sum to the content width, so the first column is
+    // laid out at exactly the width named here.
+    let (content, pad, side) = icon_slot(&plain, &theme, &[1]);
+    let content_w = content.width;
+    // A cell seats its icon only when its own padding, the slot, the gap
+    // after it, and the trailing padding all still fit: `3 × pad + side` is
+    // the widest column that cannot, and a slot's width past it comfortably
+    // can.
+    let cramped = pad * 3 + side;
+    let roomy = cramped + side;
+    assert!(roomy < content_w, "both column widths fit the row");
+
+    let narrow = [cramped, content_w - cramped];
+    let bare = table_surface(&plain, &theme, &narrow);
+    let with = table_surface(&iconed, &theme, &narrow);
+    assert!(
+        has_pixel(&bare, on),
+        "the cramped column still draws its text, so the icon's absence is the icon's own doing"
+    );
+    assert_eq!(
+        diff_bbox(&bare, &with),
+        None,
+        "a column too narrow to seat the icon omits it entirely rather than \
+         overlapping the text or overflowing the column"
+    );
+
+    let wide = [roomy, content_w - roomy];
+    let bare = table_surface(&plain, &theme, &wide);
+    let with = table_surface(&iconed, &theme, &wide);
+    let (rect, _, _) = icon_slot(&iconed, &theme, &wide);
+    let (dx0, _, dx1, _) = diff_bbox(&bare, &with).expect("a roomy column draws the icon");
+    assert!(
+        dx0 >= xu(rect.left()) && dx1 < xu(rect.left()) + rect.width,
+        "the icon stays inside its own column, never reaching the next one"
+    );
+}
+
+#[test]
+fn a_cell_icon_reads_in_both_themes_and_under_heavy_contrast() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        // Trailing-aligned, so the text stays put and the only difference
+        // between the two renders is the icon itself.
+        let plain = TableRow::new(vec![TableCell::numeric("42")]);
+        let iconed = TableRow::new(vec![TableCell::numeric("42").with_icon(IconKind::Disk)]);
+        let bare = table_surface(&plain, &theme, &[W]);
+        let with = table_surface(&iconed, &theme, &[W]);
+        // The heavier-contrast path doubles the leading rails, so the content
+        // span — and with it the icon slot — moves; reading the slot back from
+        // the row keeps the case honest about where it should now be.
+        let (rect, pad, side) = icon_slot(&iconed, &theme, &[W]);
+        let left = xu(rect.left()) + pad;
+        let (dx0, _, dx1, _) = diff_bbox(&bare, &with).expect("the icon reads in every theme");
+        assert!(
+            dx0 >= left && dx1 < left + side,
+            "the icon follows its theme's own content span ({dx0}..={dx1} outside {left}..{})",
+            left + side
+        );
+    }
+}
+
+#[test]
+fn a_cell_icon_never_changes_the_column_geometry() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let cells = || {
+        vec![
+            TableCell::new("A"),
+            TableCell::new("B"),
+            TableCell::numeric("3"),
+        ]
+    };
+    let plain = TableRow::new(cells());
+    let iconed = TableRow::new(
+        cells()
+            .into_iter()
+            .map(|cell| cell.with_icon(IconKind::Folder))
+            .collect(),
+    );
+    let rects = iconed.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(
+        plain.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS),
+        rects,
+        "an icon lives inside a cell; it may not move a column boundary"
+    );
+    let header = three_columns();
+    for (i, rect) in rects.iter().enumerate() {
+        let (start, end) =
+            column_x_range(&header, &theme, &COLUMNS, i).unwrap_or_else(|| panic!("column {i}"));
+        assert_eq!(
+            (rect.left(), rect.width),
+            (xi(start), end - start),
+            "column {i} of an iconed row still spans exactly what the header names"
+        );
+    }
 }
 
 #[test]
 fn table_row_selection_and_activation() {
     let theme = Theme::dark();
     let mut row = TableRow::new(vec![TableCell::new("r")]);
-    let mut s = Surface::new(W, H).expect("surface");
     row.set_selected(true);
     assert!(row.is_selected());
-    row.render(
-        &mut s,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-        &[W],
-    );
-    assert!(has_pixel(&s, premul(theme.palette().accent)));
+    assert!(has_pixel(
+        &table_surface(&row, &theme, &[W]),
+        premul(theme.palette().accent)
+    ));
     let bounds = Rect::new(0, 0, W, H);
     assert_eq!(row.on_pointer(&moved(40, 14), bounds), None);
     assert_eq!(row.on_pointer(&PRESS, bounds), None);
@@ -604,15 +934,7 @@ fn a_header_column_spans_exactly_the_row_cell_beneath_it() {
         HeaderColumn::new("B").with_state(denied),
         HeaderColumn::new("C").with_state(denied),
     ]);
-    let mut beneath = Surface::new(W, H).expect("surface");
-    row.render(
-        &mut beneath,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-        &COLUMNS,
-    );
+    let beneath = table_surface(&row, &theme, &COLUMNS);
     let above = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
 
     let mark = premul(theme.palette().denied);
@@ -834,20 +1156,26 @@ fn a_sort_caret_points_up_for_ascending_and_down_for_descending() {
     let theme = Theme::dark();
     let emphasised = premul(theme.palette().on_surface);
     // A denser scale gives the caret enough pixels for its direction to read
-    // unambiguously; an empty title leaves it the only emphasised mark.
+    // unambiguously; an empty title leaves it the only emphasised mark. The
+    // surface is widened by the same factor, because a triple-density desktop
+    // draws a table three times as wide in physical pixels — holding the width
+    // at `W` would ask a header for a table 80 logical pixels across, which is
+    // narrower than the caret's own square and so rightly draws no caret at
+    // all.
     let scale = Scale::from_percent(300).expect("valid scale");
+    let wide = W * 3;
     let tall = TableHeader::measured_height(scale, &theme, font());
     let caret = |order| {
         let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
         header.set_sort(Some((0, order)));
-        let mut surface = Surface::new(W, tall).expect("surface");
+        let mut surface = Surface::new(wide, tall).expect("surface");
         header.render(
             &mut surface,
-            Rect::new(0, 0, W, tall),
+            Rect::new(0, 0, wide, tall),
             scale,
             &theme,
             font(),
-            &[W],
+            &[wide],
         );
         halves(&surface, emphasised).expect("caret drawn")
     };
@@ -1471,6 +1799,116 @@ fn card_footer_action_activates_by_keyboard() {
     );
 }
 
+/// A card with one footer button, and a point in its body that no footer
+/// rectangle covers — read from the card's own footer layout, so the body
+/// point cannot drift out of agreement with where the footer really is.
+fn card_with_footer(theme: &Theme) -> (Card, Rect, Point) {
+    let card = Card::new("Job")
+        .with_body("a cause")
+        .with_footer(vec![Button::labelled("Run")]);
+    let bounds = Rect::new(0, 0, CW, CH);
+    let body = Point::new(to_i32(CW / 2), to_i32(CH / 4));
+    assert!(
+        card.footer_rects(bounds, Scale::ONE, theme)
+            .iter()
+            .all(|rect| !rect.contains(body)),
+        "the chosen body point must not sit on a footer button"
+    );
+    (card, bounds, body)
+}
+
+#[test]
+fn card_body_press_reports_pressed() {
+    let theme = Theme::dark();
+    let (mut card, bounds, body) = card_with_footer(&theme);
+    assert_eq!(
+        card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme),
+        None
+    );
+    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        Some(CardAction::Pressed)
+    );
+}
+
+#[test]
+fn card_body_press_released_outside_reports_nothing() {
+    let theme = Theme::dark();
+    let (mut card, bounds, body) = card_with_footer(&theme);
+    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
+    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    // Leaving the card before releasing cancels the press.
+    let _ = card.on_pointer(
+        &moved(to_i32(CW) + 20, to_i32(CH) + 20),
+        bounds,
+        Scale::ONE,
+        &theme,
+    );
+    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    // The cancelled latch leaves nothing behind: returning and releasing
+    // again without a fresh press reports nothing either.
+    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
+    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+}
+
+#[test]
+fn card_footer_click_reports_footer_and_never_pressed() {
+    let theme = Theme::dark();
+    let (mut card, bounds, body) = card_with_footer(&theme);
+    let footer = card.footer_rects(bounds, Scale::ONE, &theme);
+    let rect = footer.first().copied().expect("one footer rectangle");
+    let on_button = Point::new(
+        rect.origin.x + to_i32(rect.width / 2),
+        rect.origin.y + to_i32(rect.height / 2),
+    );
+    let _ = card.on_pointer(&moved(on_button.x, on_button.y), bounds, Scale::ONE, &theme);
+    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        Some(CardAction::FooterActivated { index: 0 })
+    );
+    // The footer press never armed the body latch, so moving onto the body
+    // and releasing cannot yield a stale press.
+    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
+    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+}
+
+#[test]
+fn card_disabled_or_denied_body_press_reports_nothing() {
+    let theme = Theme::dark();
+    for state in [
+        ControlState::disabled(),
+        ControlState::idle().with_authority(AuthorityState::Denied),
+    ] {
+        let (card, bounds, body) = card_with_footer(&theme);
+        let mut card = card.with_state(state);
+        let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
+        assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+        assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    }
+}
+
+#[test]
+fn card_press_leaves_the_card_equal_and_pixel_identical() {
+    let theme = Theme::dark();
+    let (mut card, bounds, body) = card_with_footer(&theme);
+    let resting = card.clone();
+    let before = card_surface(&card, &theme);
+    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
+    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    // Mid-press: the body latch and pointer are hit-test state, so the card
+    // still compares equal and still draws the same pixels.
+    assert_eq!(card, resting);
+    assert_eq!(card_surface(&card, &theme).pixels(), before.pixels());
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        Some(CardAction::Pressed)
+    );
+    assert_eq!(card, resting);
+    assert_eq!(card_surface(&card, &theme).pixels(), before.pixels());
+}
+
 #[test]
 fn card_renders_in_light_theme() {
     let s = card_surface(&Card::new("Light"), &Theme::light());
@@ -1606,18 +2044,9 @@ fn shown_pressed() -> ControlState {
     state
 }
 
-fn table_surface(row: &TableRow, theme: &Theme) -> Surface {
-    let mut surface = Surface::new(W, H).expect("surface");
-    row.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-        &[120, 120],
-    );
-    surface
-}
+/// The two equal columns the render-equivalence cases lay a table row out
+/// across.
+const PAIR: [u32; 2] = [120, 120];
 
 #[test]
 fn hit_test_bookkeeping_is_invisible_to_a_list_row() {
@@ -1663,8 +2092,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_table_row() {
         "a coordinate clear of the row is not a drawn property"
     );
     assert_eq!(
-        table_surface(&a, &theme).pixels(),
-        table_surface(&b, &theme).pixels(),
+        table_surface(&a, &theme, &PAIR).pixels(),
+        table_surface(&b, &theme, &PAIR).pixels(),
         "…and the two must therefore paint identically"
     );
 
@@ -1675,8 +2104,52 @@ fn hit_test_bookkeeping_is_invisible_to_a_table_row() {
     shown.set_state(shown_pressed());
     assert_eq!(latched, shown, "the press latch is not a drawn property");
     assert_eq!(
-        table_surface(&latched, &theme).pixels(),
-        table_surface(&shown, &theme).pixels(),
+        table_surface(&latched, &theme, &PAIR).pixels(),
+        table_surface(&shown, &theme, &PAIR).pixels(),
         "…and the two must therefore paint identically"
+    );
+}
+
+#[test]
+fn a_table_row_joins_the_focus_field_without_taking_the_ring() {
+    let cells = || vec![TableCell::new("Name"), TableCell::numeric("128")];
+
+    let plain = TableRow::new(cells());
+    let mut member = TableRow::new(cells());
+    member.set_in_focus_field(true);
+    let mut ringed = TableRow::new(cells());
+    ringed.set_focused(true);
+
+    assert!(member.state().focus.in_focus_field);
+    assert!(
+        !member.state().focus.focused,
+        "membership is not the ring: the row's own action button holds that"
+    );
+    assert!(
+        !ringed.state().focus.in_focus_field,
+        "…and the ring is not membership: a composer states each one itself"
+    );
+
+    // Membership is part of the row's compared state, exactly as it is for a
+    // list row, so a composition whose focus moved onto a row's actions is
+    // not mistaken for the one before it and does get shown again.
+    assert_ne!(plain, member);
+    assert_ne!(ringed, member);
+
+    let mut cleared = member.clone();
+    cleared.set_in_focus_field(false);
+    assert_eq!(cleared, plain, "leaving the field restores the resting row");
+}
+
+#[test]
+fn both_row_kinds_can_join_a_focus_field() {
+    let mut list = ListRow::new("Name");
+    let mut table = TableRow::new(vec![TableCell::new("Name")]);
+    list.set_in_focus_field(true);
+    table.set_in_focus_field(true);
+    assert_eq!(
+        list.state().focus,
+        table.state().focus,
+        "one row family, one focus contract: a section may use either kind"
     );
 }

@@ -84,15 +84,315 @@ costs no render and no present. What it carries:
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list; each row's primary action asks the session to raise that owner's window, and its `Group` button files the task into an activity (below) |
+| Tasks | the sampled process list, as a filterable, searchable, sortable table — see below. Each row's primary action asks the session to raise that owner's window, and its `Group` button files the task into an activity (below) |
 | Pressure | "why is my machine slow": one cause card per resource the **tray's own latches** flag (CPU ≥ 90 % with < 80 % release; memory band ≥ mild), naming the measured culprit — the busiest sampled task for CPU, the largest mapped address space for memory — with a plain-language cause line and recommended actions, each rendered `Ready`, `DisabledByState` (a culprit already at `Low` priority or already stopped) or `DeniedByAuthority` per the same rule the kernel enforces. No latch, no card; no per-task rate yet, a culprit-less card with the one action that is still honest (`Show tasks`) |
 | Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from a task row's `Group` menu; renamed inline; paused/resumed/closed as a set |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
-| Overview | the CPU and memory readings, with the CPU column's line graph fed from a bounded rolling history and each meter carrying the pressure the tray derivation itself latched |
-| Jobs | always empty — see below |
+| System | the machine's own readings, over eight sidebar pages beneath four header tiles — see below |
+| Jobs | always empty — the list states the absence rather than reading as "nothing is running"; see below |
 
 A resource the service could not measure this cycle reads `unknown` with an
 unmeasured meter, never a fabricated `0%`.
+
+### One anatomy, one drop order
+
+Every section lays out into the same frame — an optional sidebar, header and
+footer around a primary column with an optional detail pane, impact column and
+action rail beside it — resolved in one place, so no section improvises its own
+geometry (`plans/NEW-SWITCHBOARD.md` S3).
+
+A window too narrow to seat everything **sheds** the optional columns in a
+fixed order — detail, then impact, then rail, then sidebar — rather than
+squeezing the primary column. What the primary column may not fall below is a
+floor each section declares: a section whose rows carry inline commands states
+how many, and the frame turns that into the width that strip actually needs, so
+a row's commands can never be pushed off its own edge. That arithmetic has one
+definition, shared with the row splitter that lays the buttons out, and the
+window's own minimum client width is the widest such floor — not the width at
+which every optional column happens to fit, because shedding one is a correct
+outcome and clipping a command is not.
+
+A section whose primary column is a list of `Card`s — Pressure, Recovery, and
+Background — is a master/detail screen, and **pressing a card selects it**: a
+completed click anywhere on a card's own body, clear of any footer button it
+carries, makes that card's subject the selected one, so its detail pane, impact
+column, and action rail all describe the card the reader just pressed. Where a
+card carries footer commands (only Pressure does), a click on one of those
+buttons selects the card *and* resolves that command, so a command can never
+act on a subject other than the card that offered it. A card that is not
+actionable — disabled, or denied by authority — selects nothing. One walk over
+the visible cards serves all three sections, so no section can drift into a
+different idea of what a press means, and the keyboard cursor selects the card
+it lands on for the same reason.
+
+### The Tasks table
+
+Tasks is a table with a header band, the rows, and a footer band
+(`plans/NEW-SWITCHBOARD.md` S4).
+
+The **header** carries four census `MetricTile`s — Processes, Jobs, Services,
+Alerts — a filter `Tabs` strip (All, Processes, Jobs, Services, Faults) whose
+labels carry each filter's own count, and a `SearchField` that matches on the
+task's name, case-insensitively. Every tile and every tab counts the adopted
+rows through the *same* predicate the filter itself applies, so a tile, its tab
+and the rows it shows can never state different numbers. Filtering, searching,
+grouping and sorting are arrangements of the rows already sampled; none of them
+issues a new query.
+
+The **rows** are a sortable `TableHeader` over ten columns: Task (its icon and
+name), Type, State, Activity, CPU, Memory, Disk, Network, Last active, and
+Actions. The sort is the header's own, applied over the filtered rows and
+stable — rows a column cannot separate keep the order the sample reported them
+in. *Activity* is the task's own CPU sparkline, drawn into that column's rect;
+the column geometry has one definition, which the heading, the cells and the
+sparkline all read.
+
+**Actions is a column, not a rail.** Tasks commands *each row* rather than one
+selected subject, so a reader acts on the line they are reading and the buttons
+scroll with it; the sections that command a selection (Recovery, Background,
+System) are the ones with an `ActionRail`. Each button still renders its own
+verdict: allowed, disabled by the task's state, or the Authority Mark.
+
+The **footer** states how many rows are shown of the total, a grouping
+`ComboBox` (ungrouped, by type, by activity), and an Auto-refresh `Toggle` that
+holds the table on the sample the reader is reading rather than letting it move
+under them.
+
+The content cursor spans the header controls, then the rows, then the footer
+controls, so every control is reachable from the keyboard whatever the filter
+leaves showing — including nothing.
+
+Type names what a row *is*, not what it is for: a row from the process list is
+a `Process`. `Job` and `Service` are the kinds a job registry and a service
+manager will contribute, so their tiles and tabs read a genuine zero today
+rather than a guess. Three filters the concept boards sketch are deliberately
+absent, because no reading backs them: *Background* (the process list carries
+no foreground/background signal), *Recent* (there is no last-active interface),
+and *Hung*, which is folded into *Faults* — one filter over the same classifier
+the Recovery section uses, so the two can never disagree about which tasks are
+faulted.
+
+#### What the table measures, and what it cannot
+
+*CPU*, *Memory*, *State* and *Activity* are measured per sample. *Disk* is a
+real rate: the service deltas each task's read-plus-written byte counters
+against that task's *own* previous reading over the interval between the two
+samples. A cumulative total is not a rate, so the first sample, a task seen for
+the first time, and an interval nobody measured each yield no reading; a
+counter that did not move over a real interval is a genuine `0`. *Activity*
+plots a bounded per-task ring of the CPU shares already measured, keyed by the
+never-reused `proc_id` so a recycled pid cannot inherit a dead task's history
+and an exited task leaks neither its history nor its counters.
+
+*Network* and *Last active* have no interface at all — there is no per-process
+socket accounting, and the process record carries no creation timestamp — so
+both render the explicit unmeasured mark. An absent reading is never a `0`,
+never a dash that reads like one, and never a plausible number.
+
+### The System screen
+
+System is the machine reading about itself. A vertical `Tabs` **sidebar**
+selects one of eight pages — Overview, Resources, Storage, Network, Session,
+Permissions, Services, Power. It selects the page, not the section; the
+window's location band remains the one section switcher.
+
+The **header** carries four `MetricTile`s. CPU and Network plot a trend,
+because a rate has no fixed ceiling to fill a bar against; Memory and Disk
+fill a track, because each is a fraction of a measured whole. The Disk tile
+sums the capacity of every mounted volume and the Network tile sums every
+interface's rates, so each states the machine's figure rather than one
+arbitrary member's.
+
+Each **page** states what it can measure:
+
+| Page | What it reads |
+|---|---|
+| Overview | hostname, OS version, machine id, uptime, boot time, CPU model and core count, load average and installed RAM; then the Active Services statement and the authority summary |
+| Resources | the per-core load, and the memory and kernel-heap detail |
+| Storage | every mount — source, mount point, filesystem, medium, availability, used-of-total from the volume's own block counts, and its measured health |
+| Network | per interface — its facts, its link state and addresses, and its rx/tx rates |
+| Session | the seats and the logged-in census the load reading carries |
+| Permissions | what the service can attest about the caller's authority, with each resource limit's soft and hard bound and its live usage |
+| Services, Power | no interface exists, so each states plainly what is missing and why |
+
+Every page compiles down to one ordered vocabulary of lines — a heading, a
+fact, or an absence — so the screen has a single layout, a single scroll
+range and a single paint loop rather than eight of each.
+
+The **rail** is `SYSTEM ACTIONS`, seated in a `Panel` because the rail control
+carries no caption of its own. It is a rail rather than a per-row column
+because this screen commands one subject: the machine.
+
+**Nothing here is ever fabricated, and an absence says which kind it is.** A
+reading the caller may not have reads *not permitted*; one the service asked
+for and did not get reads *unavailable*. They are different statements to a
+reader and are never conflated. A missing measurement is never a `0`, never an
+empty bar, and never an empty list — an empty list reads as "none", which is a
+claim, so a reading with no interface behind it states its absence in words.
+An unmeasured trend plots no trace at all rather than a line along the floor,
+and an unmeasured track stays unfilled rather than sitting at nought.
+
+A refused action names its own kind of refusal. An action refused for want of
+a capability wears the Authority Mark, because acquiring that authority would
+make it available; an action with no endpoint behind it at all is plainly
+disabled, because no grant would change anything.
+
+The content cursor's stops are the eight pages and then the rail's buttons, so
+Up/Down walks the sidebar exactly as a reader expects of a vertical list and
+Enter or Space commits. The `Tabs` control's own vertical navigation is
+deliberately not given the same keys, which would give them two meanings.
+
+### The Recovery screen
+
+Recovery is the one screen about a *single* fault at a time. The **primary**
+column is one `Card` per fault — what faulted, what happened to it, and how
+long ago — and the three columns beside it all describe whichever card is
+selected.
+
+Selection is remembered by the faulting task's own kernel-attested identity,
+never by its row number. The list is rebuilt from scratch every sample, so a
+number would silently re-point at a different fault the moment one above it
+cleared; the identity survives a reorder and drops only when the fault
+genuinely goes. That rule has one definition, which every section with a
+selection to keep reads.
+
+The **detail** pane names the fault and the task it is, a `StatusPill` naming
+what the fault costs while it stands, a `FactList` of its status, its age and
+the recommendation, and then a `Tabs` strip over three pages:
+
+| Page | What it reads |
+|---|---|
+| Timeline | the marks this service observed: the fault itself, stamped with the age it has stood, and — where that age is known — that it is still standing |
+| Crash Snapshot | the kernel's own crash record for that task: the fault class and the distance from its anchor, the access direction, the owning uid/gid, `pc`/`sp`/`fp`, every named register and every backtrace frame |
+| Logs | no log-query interface exists, so the page states that |
+
+The crash record is matched to its fault by process identity and nothing
+else: a numeric pid is reused, so matching on one could attribute a dead
+task's crash to a live task that inherited its number. A fault with no record
+says so plainly — a task the kernel stopped, or one merely gone
+unresponsive, has faulted without ever raising a user fault, so that is a
+statement of fact and deliberately does not wear the unmeasured mark.
+
+The **impact** column stacks four unplated `MetricTile`s for the faulting
+task's own CPU, memory, disk and network. Network is always unmeasured: no
+query reports a process's network use, so the tile says so rather than
+showing a zero.
+
+A fault's **age** is tracked by the service, not read from the kernel: there
+is no state-change timestamp anywhere in the System Information API, so the
+service keeps when it first saw each task faulted, keyed by that same stable
+identity and clocked off the monotonic uptime reading. With no uptime reading
+there is no clock, and the age reads unmeasured rather than as a fabricated
+zero. An entry is dropped the first sample its task is no longer faulted, so
+a task that recovers and faults again is timed from its *new* fault.
+
+The **rail** is `RECOVERY ACTIONS` for the selected fault, carrying only the
+commands this service actually backs: Restart, and Force with its
+confirmation posture (or the Authority Mark when the caller may not take it).
+The **footer** states how many faults have cleared. That count is observed
+history — only something that folds one sample into the next can see a fault
+disappear — so it is counted where the samples meet and carried in the model,
+which is what keeps a refreshed screen and a freshly built one the same
+screen.
+
+The content cursor walks the fault cards, then the page strip, then the
+rail's commands. Moving onto a card selects it, so the detail, impact and
+rail always describe the card the reader is on. A rail stop hands the key to
+the button, so a refused command refuses the keyboard exactly as it refuses
+the pointer.
+
+### The Pressure screen
+
+Pressure carries the same master/detail anatomy as Recovery: the **primary**
+column is one `Card` per flagged cause — the culprit, a plain-language cause
+line, and that cause's relief commands in the card's own footer — and the
+**detail** pane describes whichever cause is selected. There is no action rail:
+a cause's relief belongs to the card that offers it, where the resource being
+relieved is unambiguous.
+
+Selection is remembered by the *resource* the cause is about, not by its row
+number: the list is rebuilt every sample, so a number would re-point at a
+different resource the moment one above it eased. A cause that is still flagged
+keeps the selection however far it has moved; a resource that eases loses it.
+That is the one shared selection rule every section with a selection reads.
+
+The detail pane names the culprit and the resource, then states four facts:
+
+| Fact | What it reads |
+|---|---|
+| Resource | the pressured resource the cause names |
+| Pressure | how much of it is in use — the machine-wide CPU busy share, or the memory band's own measured share |
+| In band | how long the resource has stood in that band, measured by this service (below) |
+| Relief | the cause's own recommended command, and — where this session cannot take it — why not |
+
+A **band's age** is tracked by the service exactly as a fault's age is: nothing
+in the System Information API timestamps a band change, so the service keeps
+when it first saw each resource pressured and clocks it off the monotonic
+uptime reading. With no uptime reading there is no clock and the age reads
+unmeasured rather than as a fabricated zero; a band that eases forgets its
+start, so a resource that comes back under pressure is timed from its *new*
+band.
+
+The Relief fact names a refused command rather than hiding it: a reader is told
+what would relieve the pressure and that this session may not do it (`not
+permitted` for want of the capability, `not available in this state` when the
+culprit is already stopped or already at `Low`). The command itself still fails
+closed at its own button, to the keyboard exactly as to the pointer. A cause
+whose model recommends nothing says so instead of volunteering another of its
+commands.
+
+### The Activities screen
+
+Activities is a flattened list: one header row per group, its member rows
+indented beneath it, and the group's four commands — Switch, Pause-or-Resume,
+Rename, Close — inline on the header row itself, where the group that owns them
+is unambiguous. The **detail** pane describes the selected group.
+
+Selection is remembered by the group's own stable id, and pressing any part of
+a header — its name or any of its four commands — selects that group, so the
+pane describes the group the reader just acted on. A refresh that reorders the
+groups keeps the reader on the same one; a group that closes loses the
+selection. An in-flight rename is re-located the same way, by id and never by
+row.
+
+The pane states the group's own name and member count, then its four **combined
+readings**, then one line per member:
+
+| Reading | Where it comes from |
+|---|---|
+| CPU | the sum of its joined members' own measured shares |
+| Memory | the sum of its joined members' own resident sizes |
+| Disk | the sum of its joined members' own measured I/O rates |
+| Network | always unmeasured: there is no per-task network accounting to total |
+
+There is no per-group accounting anywhere to read, so a total is a sum of the
+members' *own* measurements or it is absent. One unread part makes the whole
+total absent — a total that quietly skipped an unmeasured member would
+understate the group while reading as a measurement — and a group with no
+member joined to this sample has no total at all rather than a nought that
+would claim the group costs nothing. Each member line reads that member's own
+figure, states plainly that it is not running when it has exited, and wears the
+unmeasured mark when it is running but its figure was not read.
+
+### The Background screen
+
+Background carries the same master/detail anatomy: a `Card` per job, a detail
+pane (the job's name and how far through it is, a throughput `Chart`, two
+columns of `FactList`, and a `Timeline`), a `JOB ACTIONS` rail with Pause and
+Cancel for the selected job, and a footer holding an Auto-throttle `Toggle`.
+
+Nothing in this system keeps a registry of background jobs — no service
+publishes one and the System Information API has no query for one — so the
+list is empty on every real machine and says so in two statements: the shared
+absence line ("no interface"), and a sentence naming what is missing, because
+a reader who sees only an empty list concludes nothing is running, which is a
+different and unverified claim. The anatomy around it is the shape a registry
+would fill, not a promise that one exists, and no job is invented to populate
+it.
+
+The Auto-throttle switch is off and *plainly disabled* rather than wearing the
+Authority Mark: the caller's authority is not what is missing, so the control
+must not imply that a grant would change anything.
 
 ### Activities are live groupings, not saved workspaces
 
@@ -114,19 +414,23 @@ reached", "Activity is full") on the controls they disable.
 ### What is deliberately empty, and why
 
 - **Jobs** — there is no background-job registry anywhere in the OS to
-  enumerate.
+  enumerate, so the Background screen's list states that absence while its
+  anatomy stands ready for one.
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
-  no service-enumeration query; its queries cover processes, CPU time, and
-  memory pressure.
+  no service-enumeration query, so the System screen's Services page and its
+  Overview's Active Services block both state that absence rather than
+  showing an empty list that would read as "no services are running".
 - **In-panel system actions** — the machine's power transitions are not
   rows *in this window*: they live in the taskbar's quick-actions menu,
   where the user confirms them, and reach this service as the `Power`
   command below. Session lock is the desktop session's own surface (it
   keeps the session running behind it), never this service's.
 - **Disk and network pressure cards and resource rows** — the API exposes
-  no disk-throughput query at all, and while a per-interface network-rates
-  query exists (`NET_INTERFACE_RATES`), no tray latch is derived from it,
-  so a card would be a guess rather than a measured cause.
+  no whole-machine disk-throughput query (the per-process byte counters the
+  Tasks table's Disk column derives from measure one task, not the device),
+  and while a per-interface network-rates query exists
+  (`NET_INTERFACE_RATES`), no tray latch is derived from it, so a card would
+  be a guess rather than a measured cause.
 - **App "sleep" and disk "throttle"** (sketched on the concept boards) —
   no such kernel interfaces exist; the pressure cards offer only actions
   that genuinely work today: pause (`Stop`), lower priority, show tasks.

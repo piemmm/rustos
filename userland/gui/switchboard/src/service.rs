@@ -27,7 +27,7 @@ use tairix_procinfo::Transport;
 
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis};
-use crate::model::{build_model, derive_self_uid, GroupingEdit, LiveMeters};
+use crate::model::{build_model, derive_self_uid, GroupingEdit, RollingMeters};
 use crate::panel::{Panel, PanelOutcome, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
@@ -198,7 +198,7 @@ pub struct Service {
     sampler: Sampler,
     hysteresis: Hysteresis,
     publisher: Publisher,
-    meters: LiveMeters,
+    meters: RollingMeters,
     last_sample: Sample,
     activities: Activities,
     panel: Panel,
@@ -212,7 +212,7 @@ impl Service {
     #[must_use]
     pub fn new(self_pid: u64, scopes: ScopeVerdicts, authority: &dyn CapabilityQuery) -> Self {
         let last_sample = Sample::default();
-        let meters = LiveMeters::new();
+        let meters = RollingMeters::new();
         let activities = Activities::new();
         let model = build_model(
             PANEL_TITLE,
@@ -281,7 +281,10 @@ impl Service {
         // cached at start-up: an authority dropped since then stops being
         // advertised on the very next publish.
         summary.power_capable = authority.holds(CapabilityId::SYSTEM_POWER);
-        self.meters.record(&sample, self.hysteresis);
+        // Folded in before the rows are built, so each row reads the disk
+        // rate and CPU history this sample produced.
+        self.meters
+            .record(&sample, self.hysteresis, self.panel.seat_report());
         // A process list that degraded to its honest empty form this cycle
         // is a query failure, not "every process exited" — pruning against
         // it would wipe every activity on a transient `sysinfo` hiccup, so

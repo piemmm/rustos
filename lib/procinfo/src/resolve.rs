@@ -52,7 +52,7 @@ use tairix_resref::{KnownNamespace, Op, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
 use crate::kstats;
-use crate::list::{field_lossy, ListError};
+use crate::list::{field_lossy, ListError, WalkStep};
 use crate::request::{call, CallError};
 use crate::resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
@@ -798,7 +798,7 @@ fn busy_share_input(
                 .saturating_add(record.busy_ns)
                 .saturating_add(record.idle_ns);
         }
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(map_list_error)?;
     if !found {
@@ -858,7 +858,7 @@ fn query_reclaim_records(
     let mut records = Vec::new();
     kstats::for_each_reclaim_class(transport, |record| {
         records.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(map_list_error)?;
     Ok(records)
@@ -870,7 +870,7 @@ fn query_cpu_loads(transport: &dyn Transport) -> Result<Vec<CpuLoadRecord>, Reso
     let mut records = Vec::new();
     kstats::for_each_cpu_load(transport, |record| {
         records.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(map_list_error)?;
     Ok(records)
@@ -986,7 +986,7 @@ fn query_irqs(transport: &dyn Transport) -> Result<Vec<IrqRecord>, ResolveInfoEr
     let mut records = Vec::new();
     kstats::for_each_irq(transport, |record| {
         records.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(map_list_error)?;
     Ok(records)
@@ -1209,7 +1209,7 @@ fn net_resolver_servers_all(
     let mut servers = Vec::new();
     for_each_resolver_server(transport, |record| {
         servers.push(*record);
-        Ok(())
+        Ok(WalkStep::Continue)
     })
     .map_err(map_list_error)?;
     Ok(servers)

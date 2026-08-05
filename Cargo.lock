@@ -4918,7 +4918,6 @@ dependencies = [
  "tairix-abi",
  "tairix-browse",
  "tairix-cc",
- "tairix-controls",
  "tairix-crypto",
  "tairix-desktop-session",
  "tairix-devids",

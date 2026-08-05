@@ -49,7 +49,7 @@ mod program {
         run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, VolumeSpace,
     };
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_procinfo::{for_each_mount, IpcTransport};
+    use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
@@ -440,10 +440,10 @@ mod program {
             let mut best: Option<(usize, VolumeSpace)> = None;
             let walked = for_each_mount(&IpcTransport, |record| {
                 let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                    return Ok(());
+                    return Ok(WalkStep::Continue);
                 };
                 if !path_has_prefix(path, target) {
-                    return Ok(());
+                    return Ok(WalkStep::Continue);
                 }
                 let usage = record.usage();
                 let block = u64::from(usage.block_size);
@@ -454,7 +454,7 @@ mod program {
                 if best.as_ref().is_none_or(|(len, _)| target.len() > *len) {
                     best = Some((target.len(), space));
                 }
-                Ok(())
+                Ok(WalkStep::Continue)
             });
             match walked {
                 Ok(()) => best.map(|(_, space)| space),
@@ -470,7 +470,7 @@ mod program {
             let mut volumes = Vec::new();
             let walked = for_each_mount(&IpcTransport, |record| {
                 let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                    return Ok(());
+                    return Ok(WalkStep::Continue);
                 };
                 let fstype =
                     String::from(core::str::from_utf8(record.fstype_bytes()).unwrap_or("?"));
@@ -487,7 +487,7 @@ mod program {
                     fstype,
                     space,
                 });
-                Ok(())
+                Ok(WalkStep::Continue)
             });
             match walked {
                 Ok(()) => volumes,

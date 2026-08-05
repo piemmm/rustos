@@ -12,8 +12,10 @@
 //! region, optionally pointing an anchor notch back at its invoker.
 //!
 //! [`TableHeader`] and [`TableRow`] share exactly one column-width model — the
-//! private `column_spans` helper both call — so a header can never drift out
-//! of alignment with the rows it names.
+//! private `column_spans` helper both call over the shared `row_content_span`
+//! leading/trailing reservation — so a header can never drift out of
+//! alignment with the rows it names, and a row's own state (a Signal Bead
+//! appearing or disappearing) can never shift that same row's columns either.
 //!
 //! Every visible property resolves from the active [`Theme`] and [`Scale`], and
 //! every shared recipe (plate rounding, Signal Bead, Pressure Rail, focus ring)
@@ -36,8 +38,9 @@ use tairix_theme::Theme;
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
     dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_chevron,
-    paint_count_badge, paint_icon_slot, plate_border, pointer_activation, rail_thickness,
-    resolve_bead, resolve_rail, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
+    paint_count_badge, paint_icon_slot, plate_border, pointer_activation, press_latch,
+    rail_thickness, resolve_bead, resolve_rail, seam_thickness, seam_width, surface_rect, to_i32,
+    ChevronDir,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -69,15 +72,71 @@ fn row_gutter(theme: &Theme, scale: Scale, w: u32) -> u32 {
     rail_thickness(theme, scale).saturating_mul(2).min(w)
 }
 
+/// The fixed trailing Signal Bead band width reserved on a row's trailing
+/// edge, sized from `h`/`theme`/`scale` alone — never from whether *this*
+/// row's particular state actually has a bead to draw right now.
+///
+/// [`paint_row`] reserves this band unconditionally, exactly as it reserves
+/// [`row_gutter`] unconditionally on the leading edge: a bead only ever
+/// paints inside the band, it never changes the band's width. That is what
+/// lets a row's disposition, recovery, or activity change without shifting
+/// its own columns (spec §11.13) — a row that merely becomes denied, or
+/// gains a recovery mark, keeps every cell exactly where it was.
+#[must_use]
+fn bead_band(theme: &Theme, scale: Scale, h: u32) -> u32 {
+    let border = plate_border(theme, scale);
+    scale
+        .scale_length(theme.metrics().bead_size)
+        .max(3)
+        .min(h.saturating_sub(border.saturating_mul(2)))
+}
+
+/// The `(x, width)` content span a row's (or [`TableHeader`]'s) cells are laid
+/// out across, given its `(x, w, h)` surface-pixel bounds.
+///
+/// The reservation is state-independent on both edges: the fixed leading
+/// [`row_gutter`] plus the theme's control padding, and that same padding
+/// plus the fixed trailing [`bead_band`] plus a second padding gap before the
+/// content — every one of those sized from `w`/`h`/`theme`/`scale` alone,
+/// never from a row's actual disposition, recovery, or activity. [`paint_row`],
+/// [`TableHeader::column_at`]/[`TableHeader::render`] (which draw no leading
+/// rails or trailing bead of their own but must reserve the identical space
+/// to stay lined up with the rows they name), and [`TableRow::cell_rects`]
+/// all derive their column rectangles from this one span, so a header, a
+/// plain row, and a bead-bearing row can never drift out of alignment (spec
+/// §11.13/§11.14). `None` when `w`/`h` are too small to hold any content past
+/// the reserved edges.
+#[must_use]
+fn row_content_span(scale: Scale, theme: &Theme, x: u32, w: u32, h: u32) -> Option<(u32, u32)> {
+    let gutter = row_gutter(theme, scale, w);
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let band = bead_band(theme, scale, h);
+    let content_x = x.saturating_add(gutter).saturating_add(pad);
+    let content_right = x
+        .saturating_add(w)
+        .saturating_sub(pad)
+        .saturating_sub(band)
+        .saturating_sub(pad);
+    if content_right <= content_x {
+        return None;
+    }
+    Some((content_x, content_right - content_x))
+}
+
 /// Paint the shared row chrome — background tint, leading pressure and
 /// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
 /// and the keyboard focus ring — into `rect`, returning the inner content
 /// rectangle `(x, y, w, h)` the caller draws its label or cells within.
 ///
 /// Returning the content rect (already inset past the leading rails and the
-/// trailing bead) keeps the column-alignment contract in one place: the
+/// trailing bead band) keeps the column-alignment contract in one place: the
 /// caller lays content out relative to this rect, so a row's state changing
-/// never shifts where its content begins (spec §11.13 "keep columns aligned").
+/// never shifts where its content begins or ends (spec §11.13 "keep columns
+/// aligned"). The rect itself comes from `row_content_span`, whose
+/// reservation on both edges is fixed by the row's own size — a bead only
+/// ever paints *inside* the already-reserved trailing band, it never resizes
+/// it, so a row that merely becomes denied or gains a recovery mark never
+/// shifts its own cells, let alone its neighbours'.
 fn paint_row(
     surface: &mut Surface,
     rect: (u32, u32, u32, u32),
@@ -140,21 +199,19 @@ fn paint_row(
         );
     }
 
-    // The trailing Signal Bead (denied lock / recovery diamond / complete
-    // check), so a recovery or authority state reads without colour (§13, §15).
+    // The trailing Signal Bead band (denied lock / recovery diamond /
+    // complete check) is reserved unconditionally, exactly like the leading
+    // gutter above: only whether a bead actually paints inside it depends on
+    // the row's state, never the band's own width (§13, §15).
     let border = plate_border(theme, scale);
     let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let mut right = x.saturating_add(w).saturating_sub(pad);
+    let band = bead_band(theme, scale, h);
     if let Some((color, shape)) = resolve_bead(theme, state) {
-        let size = scale
-            .scale_length(theme.metrics().bead_size)
-            .max(3)
-            .min(h.saturating_sub(border.saturating_mul(2)));
-        if size > 0 && right > lead.saturating_add(size) {
-            let bx = right.saturating_sub(size);
-            let by = y + (h.saturating_sub(size)) / 2;
-            paint_bead(surface, bx, by, size, color, shape);
-            right = bx.saturating_sub(pad);
+        let bead_right = x.saturating_add(w).saturating_sub(pad);
+        if band > 0 && bead_right > lead.saturating_add(band) {
+            let bx = bead_right.saturating_sub(band);
+            let by = y + (h.saturating_sub(band)) / 2;
+            paint_bead(surface, bx, by, band, color, shape);
         }
     }
 
@@ -171,12 +228,7 @@ fn paint_row(
         );
     }
 
-    let content_left = lead.saturating_add(pad);
-    let content_right = right;
-    if content_right <= content_left {
-        return None;
-    }
-    Some((content_left, y, content_right - content_left, h))
+    row_content_span(scale, theme, x, w, h).map(|(cx, cw)| (cx, y, cw, h))
 }
 
 /// The baseline `y` that vertically centres one line of `font` in a
@@ -434,24 +486,31 @@ pub enum CellAlign {
 
 /// One cell of a [`TableRow`] (spec §11.14).
 ///
-/// A cell draws its text aligned within its column. Row-wide state belongs to
-/// the row; a cell exposes its *own* composed state only when that state is
+/// A cell draws its text aligned within its column, with an optional leading
+/// icon naming what the cell's value *is* (a file-type glyph beside a name, a
+/// resource glyph beside a reading) — the same optional identity-icon
+/// [`MetricTile`](crate::metric::MetricTile) already carries on its own
+/// leading edge, never a second convention. Row-wide state belongs to the
+/// row; a cell exposes its *own* composed state only when that state is
 /// cell-specific (e.g. one invalid field in an otherwise-valid row), in which
 /// case the cell draws its own Signal Bead and takes its own foreground.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCell {
     text: String,
     align: CellAlign,
+    icon: Option<IconKind>,
     state: Option<ControlState>,
 }
 
 impl TableCell {
-    /// A leading-aligned cell with the given text and no cell-specific state.
+    /// A leading-aligned cell with the given text, no icon, and no
+    /// cell-specific state.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             align: CellAlign::Leading,
+            icon: None,
             state: None,
         }
     }
@@ -463,6 +522,7 @@ impl TableCell {
         Self {
             text: text.into(),
             align: CellAlign::Trailing,
+            icon: None,
             state: None,
         }
     }
@@ -472,6 +532,23 @@ impl TableCell {
     pub fn with_align(mut self, align: CellAlign) -> Self {
         self.align = align;
         self
+    }
+
+    /// This cell with a leading icon identifying what its value is, drawn on
+    /// a fixed slot ahead of the text regardless of the cell's own alignment
+    /// — so a leading, centred, or trailing cell's icon always sits at the
+    /// same edge. A column too narrow to hold it simply omits it rather than
+    /// overlapping or overflowing the text (fail closed).
+    #[must_use]
+    pub fn with_icon(mut self, icon: IconKind) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// This cell's leading icon, if any.
+    #[must_use]
+    pub fn icon(&self) -> Option<IconKind> {
+        self.icon
     }
 
     /// This cell with its own cell-specific state (drawn instead of inheriting
@@ -494,9 +571,21 @@ impl TableCell {
         self.align
     }
 
+    /// The pixel side of the square slot this cell's leading icon (if any)
+    /// draws in: the text line, never taller than the cell height it is
+    /// given. One definition so the reserved slot and the drawn glyph can
+    /// never disagree.
+    #[must_use]
+    fn icon_side(font: BitmapFont, h: u32) -> u32 {
+        font.glyph_height().min(h)
+    }
+
     /// Paint this cell into the column rectangle `(x, y, w, h)`, taking its
-    /// foreground from its own state when it has one, otherwise from the row's
-    /// `row_disposition`.
+    /// foreground from its own state when it has one, otherwise from the
+    /// row's `row_disposition`. A leading icon (if any) draws first, on a
+    /// fixed slot carved out of the text budget ahead of it — never inside
+    /// it, so it can never overlap the truncated text, and never past the
+    /// column's own edge, so it can never overflow into a neighbour.
     fn paint(
         &self,
         surface: &mut Surface,
@@ -532,7 +621,21 @@ impl TableCell {
             }
         }
 
-        let left = x.saturating_add(pad);
+        let mut left = x.saturating_add(pad);
+        // The leading identity icon, on a fixed slot ahead of the text
+        // regardless of the cell's own alignment (spec §11.14). A column too
+        // narrow to hold the icon and still leave the padding gap before
+        // whatever follows it simply omits the icon; the text then keeps the
+        // full budget rather than a truncated icon overlapping it.
+        if let Some(kind) = self.icon {
+            let side = Self::icon_side(font, h);
+            if side > 0 && right > left.saturating_add(side).saturating_add(pad) {
+                let iy = y + (h.saturating_sub(side)) / 2;
+                paint_icon_slot(surface, left, iy, side, kind, fg, None);
+                left = left.saturating_add(side).saturating_add(pad);
+            }
+        }
+
         if right <= left {
             return;
         }
@@ -631,6 +734,19 @@ impl TableRow {
         self.state.focus.focused = focused;
     }
 
+    /// Set whether the row belongs to the highlighted Focus Field — the group
+    /// of related controls around whichever one holds keyboard focus.
+    ///
+    /// Orthogonal to [`set_focused`](Self::set_focused): a table row whose own
+    /// trailing action button holds the keyboard is a field member without
+    /// holding the ring itself, exactly as [`ListRow::set_in_focus_field`]
+    /// expresses for a list row. Both row kinds carry the same guarantee so a
+    /// composer can move a section between them without a row silently losing
+    /// its ability to read as part of the focused group.
+    pub fn set_in_focus_field(&mut self, member: bool) {
+        self.state.focus.in_focus_field = member;
+    }
+
     /// Set the row's selection.
     pub fn set_selected(&mut self, selected: bool) {
         self.state.selection = if selected {
@@ -684,6 +800,45 @@ impl TableRow {
         }
     }
 
+    /// Where each of this row's cells is laid out at `bounds`, in `bounds`'
+    /// own coordinate space — the physical-pixel rectangle
+    /// [`Self::render`] draws that cell's text within, laid out across
+    /// `columns` (physical pixel widths) exactly as `render` is called with.
+    ///
+    /// A composer that needs to draw its own content inside a column — a
+    /// sparkline chart beside a cell's number, say — calls this instead of
+    /// re-deriving the row's layout, so the two can never disagree: both
+    /// [`Self::render`] and this query resolve the row's content rect through
+    /// the same `row_content_span`/`column_spans` pair, and that
+    /// reservation is fixed by the row's own size, never by whether this
+    /// particular row currently draws a Signal Bead. The vector holds one
+    /// rect per cell that could be laid out, in cell order; it is shorter
+    /// than [`Self::cells`] (`Vec::new()` in the extreme) when `bounds`
+    /// cannot seat every declared column, exactly as `render` then simply
+    /// draws fewer cells.
+    #[must_use]
+    pub fn cell_rects(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+    ) -> Vec<Rect> {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return Vec::new();
+        };
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let Some((content_x, content_w)) = row_content_span(scale, theme, x, w, h) else {
+            return Vec::new();
+        };
+        column_spans(content_x, content_w, columns, self.cells.len())
+            .into_iter()
+            .map(|(cx, cw)| Rect::new(to_i32(cx), to_i32(y), cw, h))
+            .collect()
+    }
+
     /// Feed a pointer event, given the row's `bounds`; a completed primary
     /// click over an actionable row reports [`RowAction::Activated`].
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<RowAction> {
@@ -705,11 +860,13 @@ impl TableRow {
 /// laid out across `columns` (physical pixel widths), within a content region
 /// `content_w` pixels wide starting at `content_x`.
 ///
-/// [`TableRow::render`] and [`TableHeader::render`]/[`TableHeader::column_at`]
-/// all derive a column's rectangle through this one function — never
-/// independently — so a header can never drift out of alignment with the rows
-/// it names (spec §11.14 "keep columns aligned"). The declared widths are
-/// scaled proportionally into the actual content width (so columns stay
+/// [`TableRow::render`]/[`TableRow::cell_rects`] and
+/// [`TableHeader::render`]/[`TableHeader::column_at`] all derive a column's
+/// rectangle through this one function, fed the identical `content_x`/
+/// `content_w` `row_content_span` computes — never independently — so a
+/// header can never drift out of alignment with the rows it names (spec
+/// §11.14 "keep columns aligned"). The declared widths are scaled
+/// proportionally into the actual content width (so columns stay
 /// proportional even when the content rect is narrower than the sum of the
 /// declared widths), and the last item absorbs the rounding remainder so the
 /// columns fill the content width exactly. Fewer than `item_count` spans come
@@ -746,27 +903,6 @@ fn column_spans(
         col_x = col_x.saturating_add(col_w);
     }
     spans
-}
-
-/// The `(x, width)` content span [`TableHeader`] lays its columns out across,
-/// given its surface-pixel bounds `(x, w)`.
-///
-/// A [`TableRow`] always reserves its fixed leading [`row_gutter`] plus the
-/// theme's control padding before its own column content begins, and the
-/// padding alone at the trailing edge (spec §11.13); this is the identical
-/// inset, so a header's [`column_spans`] start and end exactly where an
-/// ordinary row's do, even though the header itself draws no rails. `None`
-/// when the bounds are too narrow to hold any content past that inset.
-#[must_use]
-fn header_content_span(scale: Scale, theme: &Theme, x: u32, w: u32) -> Option<(u32, u32)> {
-    let gutter = row_gutter(theme, scale, w);
-    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let content_x = x.saturating_add(gutter).saturating_add(pad);
-    let content_right = x.saturating_add(w).saturating_sub(pad);
-    if content_right <= content_x {
-        return None;
-    }
-    Some((content_x, content_right - content_x))
 }
 
 // --- TableHeader ---------------------------------------------------------
@@ -987,9 +1123,9 @@ impl TableHeader {
     }
 
     /// The column index under `point`, given the header's `bounds`, the
-    /// active `scale`/`theme` (needed to reserve the same leading gutter an
-    /// ordinary row does), and the same declared `columns` widths the owner
-    /// renders with.
+    /// active `scale`/`theme` (needed to reserve the same leading/trailing
+    /// span an ordinary row does), and the same declared `columns` widths the
+    /// owner renders with.
     #[must_use]
     pub fn column_at(
         &self,
@@ -1003,7 +1139,7 @@ impl TableHeader {
         if w == 0 || h == 0 {
             return None;
         }
-        let (content_x, content_w) = header_content_span(scale, theme, x, w)?;
+        let (content_x, content_w) = row_content_span(scale, theme, x, w, h)?;
         column_spans(content_x, content_w, columns, self.columns.len())
             .into_iter()
             .position(|(cx, cw)| {
@@ -1017,9 +1153,10 @@ impl TableHeader {
     /// Paint the header into `surface` at `bounds`, laying its columns out
     /// across `columns` (physical pixel widths) — the same declared widths
     /// [`TableRow::render`] is called with — through the shared
-    /// `column_spans` helper over the shared `header_content_span`
-    /// leading/trailing inset, so a header column begins and ends exactly
-    /// where the cell beneath it does and can never drift out of alignment.
+    /// `column_spans` helper over the shared `row_content_span`
+    /// leading/trailing reservation, so a header column begins and ends
+    /// exactly where the cell beneath it does, whether or not that cell's row
+    /// currently draws a Signal Bead, and can never drift out of alignment.
     /// A `bounds` too small to hold anything omits content rather than
     /// clipping or painting outside it.
     pub fn render(
@@ -1037,7 +1174,7 @@ impl TableHeader {
         if w == 0 || h == 0 {
             return;
         }
-        let Some((content_x, content_w)) = header_content_span(scale, theme, x, w) else {
+        let Some((content_x, content_w)) = row_content_span(scale, theme, x, w, h) else {
             return;
         };
         for (i, &(cx, cw)) in column_spans(content_x, content_w, columns, self.columns.len())
@@ -1296,6 +1433,11 @@ pub enum CardAction {
         /// The zero-based index of the activated footer button.
         index: usize,
     },
+    /// A completed primary click landed inside the card's own bounds,
+    /// outside every footer button; the owner marks this card the selected
+    /// cause (e.g. of a master/detail screen) rather than the card washing
+    /// itself.
+    Pressed,
 }
 
 /// A grouped state-and-actions surface (spec §11.15).
@@ -1305,10 +1447,19 @@ pub enum CardAction {
 /// title, optional body text, and a row of footer action [`Button`]s. The
 /// footer actions share the card's semantic state (the owner sets it) but keep
 /// their own pointer and focus states, so hovering one action does not disturb
-/// the card. The card routes input to its footer and reports [`CardAction`].
+/// the card. The card routes input to its footer, and a completed click on
+/// its own body (outside every footer button) reports [`CardAction::Pressed`]
+/// so a master/detail screen can select it — the card carries no hover or
+/// pressed wash of its own for that press, only the owner's later choice to
+/// mark it selected.
 ///
 /// A card's plate bounds the group it owns. One item of an icon view is not
 /// such a group and wears no plate of its own: that is an [`IconTile`].
+///
+/// Equal cards draw the same pixels, so a host may use `==` as its repaint
+/// gate: the title, body, role, count, footer, and every visible part of the
+/// composed state compare, while the pointer coordinate and press latch
+/// beneath them — which no render path reads — do not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Card {
     title: String,
@@ -1317,6 +1468,11 @@ pub struct Card {
     state: ControlState,
     count: Option<u32>,
     footer: Vec<Button>,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The body press latch; a completed press over the body is reported as
+    /// [`CardAction::Pressed`] and never grows a visual of its own.
+    armed: RenderInvariant<bool>,
 }
 
 impl Card {
@@ -1330,6 +1486,8 @@ impl Card {
             state: ControlState::idle(),
             count: None,
             footer: Vec::new(),
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
         }
     }
 
@@ -1630,8 +1788,16 @@ impl Card {
         }
     }
 
-    /// Feed a pointer event to the card's footer buttons; the first footer
-    /// button that completes a click reports [`CardAction::FooterActivated`].
+    /// Feed a pointer event to the card, given its `bounds`: the first footer
+    /// button that completes a click reports [`CardAction::FooterActivated`],
+    /// and otherwise a completed primary click landing inside the card's own
+    /// bounds — outside every footer button — reports [`CardAction::Pressed`].
+    ///
+    /// Every footer button always receives the event first, exactly as
+    /// before, so their own hover/press latches stay correct regardless of
+    /// which one (if any) the pointer is over; the body press is considered
+    /// only once none of them claimed it, and only over the area the footer
+    /// buttons do not occupy, so a click cannot report both.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1650,7 +1816,17 @@ impl Card {
                 }
             }
         }
-        action
+        if action.is_some() {
+            return action;
+        }
+
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
+        let over_footer = rects.iter().any(|rect| rect.contains(*self.pointer));
+        let inside = bounds.contains(*self.pointer) && !over_footer;
+        let actionable = self.state.is_actionable();
+        press_latch(&mut self.armed, event, inside, actionable).then_some(CardAction::Pressed)
     }
 
     /// Feed a key event to the card's footer buttons; a focused footer button

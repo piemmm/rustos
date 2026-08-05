@@ -13,7 +13,7 @@ use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::sysinfo::{MountAvailability, MountListRequest, MountRecord, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{field_lossy, walk_pages, ListError};
+use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -30,6 +30,11 @@ pub const MOUNT_PAGE: u16 = 64;
 /// The query is [`SysinfoQueryId::MOUNT_LIST`], which the service serves
 /// ungated: the mount table is system-wide and secret-free. Records are delivered in the order the service returns them.
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile list it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply whose length
 /// is not a whole number of [`MountRecord::WIRE_LEN`] records, or one that
 /// would overflow the page offset, is rejected rather than partially
@@ -43,7 +48,7 @@ pub const MOUNT_PAGE: u16 = 64;
 ///   walk stops at that record.
 pub fn for_each_mount(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&MountRecord) -> Result<(), Errno>,
+    mut sink: impl FnMut(&MountRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -124,7 +129,7 @@ pub fn render_options(flags: MountFlags) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
+    use super::{for_each_mount, render_mount, render_options, WalkStep, MOUNT_PAGE};
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -222,7 +227,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_mount(fixture, |r| {
             seen.borrow_mut().push(*r);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }

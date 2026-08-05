@@ -13,7 +13,7 @@ use tairix_theme::Theme;
 use super::{refusal_notice, Panel, PANEL_TITLE};
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
-use crate::model::{build_model, LiveMeters, PanelModel};
+use crate::model::{build_model, PanelModel, RollingMeters};
 use crate::sample::Sample;
 use crate::test_host::{
     process_summary, process_summary_with, sample_with, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
@@ -42,7 +42,7 @@ fn stopped_model(pid: u64, can_force: bool) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SeatReport::HEALTHY,
-        &LiveMeters::new(),
+        &RollingMeters::new(),
         authority,
         &Activities::new(),
         None,
@@ -61,7 +61,7 @@ fn task_model(pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SeatReport::HEALTHY,
-        &LiveMeters::new(),
+        &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
         None,
@@ -79,7 +79,7 @@ fn busy_model(first_pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample_with(processes),
         &SeatReport::HEALTHY,
-        &LiveMeters::new(),
+        &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
         None,
@@ -92,7 +92,7 @@ fn empty_model() -> PanelModel {
         PANEL_TITLE,
         &Sample::default(),
         &SeatReport::HEALTHY,
-        &LiveMeters::new(),
+        &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
         None,
@@ -117,8 +117,8 @@ fn pressured_model(pid: u64) -> PanelModel {
     };
     let mut hysteresis = Hysteresis::new();
     let _ = derive_summary(&sample, &mut hysteresis);
-    let mut meters = LiveMeters::new();
-    meters.record(&sample, hysteresis);
+    let mut meters = RollingMeters::new();
+    meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
     build_model(
         PANEL_TITLE,
         &sample,
@@ -174,7 +174,7 @@ fn activity_model(first_pid: u64, second_pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SeatReport::HEALTHY,
-        &LiveMeters::new(),
+        &RollingMeters::new(),
         &NO_AUTHORITY,
         &activities,
         Some(DEFAULT_UID),
@@ -234,7 +234,7 @@ fn opening_shows_the_requested_section_and_arms_the_window_source() {
         (CommandSection::Pressure, Section::Pressure),
         (CommandSection::Activities, Section::Activities),
         (CommandSection::Recovery, Section::Recovery),
-        (CommandSection::Overview, Section::Overview),
+        (CommandSection::System, Section::System),
     ] {
         let mut host = RecordingHost::new();
         let mut panel = Panel::new(OWN_PID, empty_model());

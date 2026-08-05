@@ -291,6 +291,26 @@ impl ProgressValue {
     }
 }
 
+/// A measured instrument's reading: a validated fraction, or an honest
+/// "cannot currently be measured" state.
+///
+/// A resource with no wired query or a denied capability must never render as
+/// a fabricated `0%` — that tells the reader "idle" when the truth is
+/// "unknown". Modelling the two as separate variants, rather than reusing `0`
+/// for both, makes that misrepresentation unrepresentable: a caller can never
+/// accidentally construct a [`MetricInstrument::Track`
+/// ](crate::MetricInstrument::Track) that looks like a real empty reading
+/// when it has none.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MeterValue {
+    /// A validated fraction of the resource's capacity, reusing
+    /// [`ProgressValue`] so the permille validation is never restated.
+    Measured(ProgressValue),
+    /// The resource cannot currently be measured. The track renders only the
+    /// quiet unmeasured groove, never a filled one.
+    Unmeasured,
+}
+
 /// What work a control (or its linked object) is doing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum ActivityState {

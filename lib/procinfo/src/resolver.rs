@@ -15,7 +15,7 @@ use tairix_abi::net_ipc::{NetResolverServer, MAX_RESOLVER_SERVERS};
 use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError};
+use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -37,6 +37,11 @@ const _: () = assert!(RESOLVER_SERVER_PAGE as usize == MAX_RESOLVER_SERVERS);
 /// configuration (the resolv.conf analogue), exposing no per-principal
 /// secret.
 ///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
+/// how much of a long or hostile list it will accept. Stopping is an
+/// ordinary success, so it stays distinguishable from a failure.
+///
 /// The walk **fails closed**: a reply whose length is not a whole number of
 /// [`NetResolverServer::WIRE_LEN`] records, or one that would overflow the
 /// page offset, is rejected rather than partially delivered.
@@ -49,7 +54,7 @@ const _: () = assert!(RESOLVER_SERVER_PAGE as usize == MAX_RESOLVER_SERVERS);
 ///   walk stops at that record.
 pub fn for_each_resolver_server(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&NetResolverServer) -> Result<(), Errno>,
+    mut sink: impl FnMut(&NetResolverServer) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     walk_pages(
         transport,
@@ -136,7 +141,7 @@ mod tests {
         let seen = RefCell::new(Vec::new());
         for_each_resolver_server(fixture, |r| {
             seen.borrow_mut().push(*r);
-            Ok(())
+            Ok(WalkStep::Continue)
         })?;
         Ok(seen.into_inner())
     }
@@ -171,7 +176,7 @@ mod tests {
     fn a_denial_is_surfaced_not_swallowed() {
         let mut fixture = Fixture::new(alloc::vec![v4(9, 9, 9, 9)]);
         fixture.deny = true;
-        let result = for_each_resolver_server(&fixture, |_| Ok(()));
+        let result = for_each_resolver_server(&fixture, |_| Ok(WalkStep::Continue));
         assert_eq!(result, Err(ListError::Call(CallError::PermissionDenied)));
     }
 }

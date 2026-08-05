@@ -3,13 +3,12 @@
 //! state (`plans/GUI-CONTROLS-DESIGN.md`'s System overview resource cards).
 //!
 //! A metric tile is what a resource becomes when it needs its own bounded
-//! card rather than a row in the header's [`Meter`](crate::Meter) band: an
-//! optional leading icon naming the resource, a quiet label, a large reading
-//! with a quieter unit, an optional line of supporting detail, and an
-//! optional instrument beneath — either the same proportional track a meter
-//! draws, or a [`Chart`] of the resource's recent history. Like
-//! those two instruments, a tile is read-only: it carries the facts its
-//! owner supplies and never accepts pointer or keyboard input.
+//! card rather than a row in a shared header band: an optional leading icon
+//! naming the resource, a quiet label, a large reading with a quieter unit,
+//! an optional line of supporting detail, and an optional instrument beneath
+//! — either a proportional track, or a [`Chart`] of the resource's recent
+//! history. Like those two instruments, a tile is read-only: it carries the
+//! facts its owner supplies and never accepts pointer or keyboard input.
 //!
 //! A tile draws in one of two [`MetricLayout`]s. [`MetricLayout::Stacked`],
 //! the default, is the form a tile uses when it owns a column of its own:
@@ -38,11 +37,11 @@
 //!
 //! Every colour, radius, thickness, gap, and font metric resolves from the
 //! active [`Theme`] and [`Scale`] through the shared accessors
-//! (`crate::paint`), and a tile's embedded track is the same groove/fill/
-//! outline recipe [`Meter`](crate::Meter) draws from, and its leading icon is
-//! the same slot [`Button`](crate::Button)'s [`ButtonContent::Icon`
-//! ](crate::button::ButtonContent::Icon) draws through, so neither control
-//! here carries its own copy of that geometry.
+//! (`crate::paint`), and a tile's embedded track is the one shared
+//! groove/fill/outline recipe every measured track in the crate draws from,
+//! and its leading icon is the same slot [`Button`](crate::Button)'s
+//! [`ButtonContent::Icon`](crate::button::ButtonContent::Icon) draws through,
+//! so neither control here carries its own copy of that geometry.
 
 use alloc::string::String;
 
@@ -53,12 +52,11 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use crate::chart::Chart;
-use crate::meter::MeterValue;
 use crate::paint::{
     heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
     plate_border, progress_thickness, signal_color, surface_rect, to_i32, PlateStyle,
 };
-use crate::state::{PressureKind, PressureState};
+use crate::state::{MeterValue, PressureKind, PressureState};
 
 /// How much of a toned [`StatusPill`]'s own role colour its wash carries,
 /// against the quiet surface: low enough that the capsule still reads as a
@@ -225,9 +223,8 @@ impl MetricTile {
     /// detail lines occupy at `scale` before the instrument beneath them.
     ///
     /// This depends on the tile's layout and whether it carries a detail
-    /// line, so it is computed from `self` rather than statically — unlike
-    /// [`Meter::reading_height`](crate::Meter::reading_height), whose anatomy
-    /// never varies. [`measured_height`](Self::measured_height) and
+    /// line, so it is computed from `self` rather than statically.
+    /// [`measured_height`](Self::measured_height) and
     /// [`render`](Self::render) both build on this one definition, so the two
     /// can never disagree about where the instrument slot begins.
     #[must_use]
