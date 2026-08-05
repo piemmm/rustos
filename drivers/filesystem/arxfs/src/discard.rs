@@ -171,12 +171,15 @@ impl<B: Block> ARXFS<B> {
             );
             return Err(DriverError::PermissionDenied);
         }
+        // Discard rewrites the device, so a read-only handle refuses before it
+        // asks the device anything.
+        self.deny_if_read_only()?;
         let cap = self.block.discard_capability()?;
         let mut report = TrimReport::default();
         if !cap.supported {
             // Recorded, not failed: drain the queue (the device cannot
             // reclaim) and report unsupported.
-            self.pending_discard.clear();
+            self.allocator_mut()?.pending_discard.clear();
             report.supported = false;
             report.log_outcome(sink);
             return Ok(report);
@@ -186,13 +189,13 @@ impl<B: Block> ARXFS<B> {
 
         // Keep only blocks that are still free; a reallocated block is now
         // reachable from the committed root and must not be discarded.
-        let queued = core::mem::take(&mut self.pending_discard);
+        let queued = core::mem::take(&mut self.allocator_mut()?.pending_discard);
         let mut free_blocks: Vec<u64> = Vec::with_capacity(queued.len());
         for block in queued {
             if block < RING_BLOCKS || block >= self.total_blocks {
                 continue;
             }
-            if self.bit_used(block) {
+            if self.bit_used(block)? {
                 report.blocks_skipped_in_use += 1;
             } else {
                 free_blocks.push(block);
@@ -288,6 +291,7 @@ impl<B: Block> ARXFS<B> {
     /// Number of blocks currently queued for discard. Test/inspection aid.
     #[cfg(test)]
     pub(crate) fn pending_discard_count(&self) -> usize {
-        self.pending_discard.len()
+        self.allocator()
+            .map_or(0, |alloc| alloc.pending_discard.len())
     }
 }

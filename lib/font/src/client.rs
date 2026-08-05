@@ -399,12 +399,10 @@ fn fallback_metrics(pixel_height: u32) -> FontMetrics {
 ///
 /// A build with **neither** — `lib/fbcon` and the boot console, which draw
 /// from the compiled-in atlas, and the host builds of crates that merely
-/// link the render path — has no default to install, so this does nothing
-/// and every glyph request fails closed until a consumer installs a
-/// transport itself. That is why the work lives here rather than in the
-/// method: there is a configuration in which there is genuinely nothing to
-/// do, and this says so plainly instead of dressing it up as a fallible
-/// lookup.
+/// link the render path — has no default to install, so neither this nor its
+/// caller exists there and every glyph request fails closed until a consumer
+/// installs a transport itself.
+#[cfg(any(feature = "rt", feature = "test-util"))]
 fn install_defaults(client: &mut GlyphClient) {
     #[cfg(feature = "rt")]
     {
@@ -419,8 +417,6 @@ fn install_defaults(client: &mut GlyphClient) {
     if client.transport.is_none() {
         client.transport = Some(Box::new(SolidTestTransport));
     }
-    #[cfg(not(any(feature = "rt", feature = "test-util")))]
-    let _ = client;
 }
 
 /// Build the client's own glyph cache, budgeted from the machine's total

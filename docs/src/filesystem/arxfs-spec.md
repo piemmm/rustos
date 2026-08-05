@@ -3,7 +3,7 @@
 Status: implementation spec  
 Target: TAIRiX  
 Driver path: `drivers/filesystem/arxfs/`  
-Last updated: 2026-06-02
+Last updated: 2026-08-05
 
 ARXFS is the native TAIRiX filesystem: copy-on-write, encrypted, checksummed,
 compressed, deduplicating, SSD-aware, and recoverable. It is optimised for high
@@ -92,9 +92,9 @@ drivers/filesystem/arxfs/
 Expected internal modules:
 
 ```text
-format, mount, transaction, superblock, trees, inode, extent, chunk,
-integrity, crypto, compression, dedupe, trim, health, scrub, check,
-rescue, error
+format, mount, transaction, superblock, trees, allocmap, allocator, inode,
+extent, chunk, integrity, crypto, compression, dedupe, trim, health, scrub,
+check, rescue, error
 ```
 
 Shared ABI types belong in `lib/abi`. Cryptographic primitives and key handling
@@ -134,7 +134,7 @@ superblock ring
       -> extent tree
       -> chunk/refcount tree
       -> reverse-reference tree
-      -> free-space tree
+      -> allocation map (in place, not a COW child)
       -> device-health tree
       -> rebuildable secondary indexes
 ```
@@ -150,52 +150,83 @@ Authoritative metadata:
 
 Rebuildable metadata:
 
-- free-space tree;
+- allocation map;
 - dedupe index;
 - directory acceleration indexes;
 - health summaries;
 - scrub progress;
 - allocation heat maps.
 
-A corrupt rebuildable tree must not make a valid volume unmountable.
+A corrupt rebuildable structure must not make a valid volume unmountable.
 `arxfs check` must rebuild it from authoritative metadata.
 
-### In-memory allocation state (mount-time footprint)
+### On-disk allocation map (mount-time footprint)
 
-The free-space map is held in RAM as a **sparse set of the used block
-numbers**, rebuilt at mount from authoritative metadata. Because occupancy is
-tracked rather than free space, and a real volume is overwhelmingly free, the
-resident size scales with the blocks actually in use — the working set — not
-with the device block count, so mounting a multi-GiB or multi-hundred-GiB
-volume costs RAM proportional to its contents rather than its size. A dense
-per-block bitmap sized to the whole device is forbidden: it allocated O(volume)
-words at mount and exhausted the bounded kernel heap on a real volume. The
-per-transaction bookkeeping — the blocks a not-yet-committed transaction has
-allocated and may overwrite in place — is likewise a sparse set keyed by block
-number, bounded by the transaction's working set and never by the device block
-count.
+Free space is tracked by a contiguous **on-disk paged allocation map**, not
+rebuilt in RAM at every mount. On a fresh volume the region sits immediately
+above the superblock ring, at block `RING_BLOCKS`:
 
-Free space itself is a single 64-bit count, so a near-empty device of any size
-costs no per-block memory: a freshly formatted 100 TiB volume (about 26.8
-billion 4 KiB blocks) mounts and serves with only its few used blocks resident,
-well within a 1 GiB machine. Every other transient allocator structure is
-bounded the same way and never sized to the device: the pending-discard queue
-(freed blocks awaiting a TRIM pass) is capped at a fixed, volume-independent
-ceiling (`MAX_PENDING_DISCARD`), so a long-running mount cannot grow it without
-bound and a huge device cannot size it into a heap-exhausting allocation. A
-dropped entry merely stays un-discarded (still free) until a future free, trim
-pass, or mount rebuild requeues it.
+```text
+[ header block | summary blocks | bitmap pages ]
+```
 
-Known limit, heavily-allocated very large volumes: because occupancy is tracked
-as a resident set, the in-RAM footprint scales with the number of blocks *in
-use*, not with the device size. This meets the 1 GiB-RAM / 100 TB+ floor for
-the realistic case (volumes that are mostly free) but a volume whose *used*
-fraction is itself enormous (many billions of allocated blocks) would still
-want more resident memory than a tiny machine has. The structural answer, an
-on-disk paged free-space representation (extent / bitmap-hierarchy) with only a
-bounded working-set cache resident so even a near-full 100 TB+ volume mounts
-within a fixed RAM budget, is the next planned free-space work (`PLAN.md`); the
-sparse used-set is the step on the way, not the end state.
+- the bitmap pages hold **one bit per device block**;
+- the summary holds **one `u16` free-block count per bitmap page**, so
+  allocation skips a wholly-full page without reading it, and a page the
+  summary reports wholly free is *synthesised as zeroes* rather than read —
+  which is also why laying the map out on a huge volume writes only the
+  summary, never a bitmap page per terabyte;
+- every region block is sealed with the ordinary keyed block header under
+  `BlockType::AllocMap`, **one copy, deliberately not mirrored**: free space
+  is rebuildable, so a page that fails to authenticate makes the mount
+  rebuild rather than repair it.
+
+Because the region holds rebuildable, non-authoritative state, it is **not
+copy-on-written**; it is updated **in place**. That sidesteps the
+self-allocation problem an authoritative copy-on-written free-space tree
+would have — allocating space to record where space is free.
+
+**Crash safety.** The region header carries a clean/dirty stamp naming the
+transaction generation the map reflects. The stamp is turned dirty before the
+first page write of an update reaches the device; an explicit sync
+(`fs_sync`) writes the dirty pages, forces the device write cache once (the
+single barrier), then stamps the region clean at the committed generation.
+Ordinary commits therefore leave the on-disk map dirty while it stays exact
+in RAM. A mount adopts the map only when it authenticates at the address the
+committed transaction root names (`TxnRoot::alloc_map_start`), its coverage
+matches the committed volume size (`TxnRoot::alloc_map_covered`), and its
+stamp is clean at the root's generation; anything else — after an ordinary
+crash, most mounts — rebuilds the map from the authoritative trees and
+rewrites it. A crash between syncs therefore costs one rebuild, never a
+correctness problem. `mkfs` leaves the map stamped clean, so a freshly built
+image mounts fast.
+
+**Resident cost.** The region is read through a bounded LRU cache of at most
+**64 region blocks per mounted volume** (`MAX_CACHED_MAP_BLOCKS`),
+volume-independent: a cache miss costs one block read, never a failure, so
+several 100 TB+ volumes mount together on a 1 GiB machine. Every other
+write-path-only structure — the map's allocation/metadata cursors, the
+per-transaction bookkeeping (blocks a not-yet-committed transaction has
+allocated or released), the pending-discard queue (capped at
+`MAX_PENDING_DISCARD`, a dropped entry merely stays un-discarded until a
+future free, trim pass, or rebuild requeues it), and the dedupe index (§9) —
+is grouped into one `Allocator` held as `Option<Allocator>` on the mounted
+handle, bounded the same way and never sized to the device.
+
+**Read-only mounts build nothing.** A read-only handle holds `None`: it
+cannot allocate, free, dedupe, or trim by construction, and it reads no
+allocation-map block, builds no cache, and walks no tree — mounting a
+read-only volume such as `/System` costs a handful of block reads (the
+superblock ring and the committed root), not a walk of its contents.
+`statfs` on a read-only mount reports the free-block count committed in the
+transaction root (`TxnRoot::free_count`) directly, with no map read or
+rebuild involved.
+
+`grow` widens the map in place when the region length is unchanged;
+otherwise it relays the region (preferring the freshly added tail, else the
+first contiguous free run) and rebuilds it from the authoritative trees.
+`check` always rebuilds the map from the authoritative trees; a clean check
+therefore leaves the device byte-identical.
 
 ---
 
@@ -459,10 +490,15 @@ Missing a duplicate is acceptable. Merging unequal data is corruption.
 > back into the general tier) instead of growing, so the index never exceeds
 > its budget regardless of how much unique data the volume holds. Eviction only
 > forgoes a future dedupe opportunity — it never affects correctness, since the
-> chunk/refcount and reverse-reference trees remain authoritative and the index
-> is rebuilt from them at mount. The per-entry footprint is deliberately
-> over-estimated when deriving the per-tier entry caps, so the byte budgets are
-> a hard ceiling, not an approximation.
+> chunk/refcount and reverse-reference trees remain authoritative. The index is
+> deliberately **not pre-seeded at mount**: walking the chunk tree would cost a
+> read per chunk on a volume of any size — unbounded on a 100 TB one — to fill
+> a cache that evicts all but its last few thousand entries anyway. It instead
+> **warms from the writes that can use it**, so a duplicate written in an
+> earlier mount session may go unfound until the cache warms again; that is a
+> missed dedupe opportunity, never a correctness risk. The per-entry footprint
+> is deliberately over-estimated when deriving the per-tier entry caps, so the
+> byte budgets are a hard ceiling, not an approximation.
 
 ---
 
@@ -805,9 +841,9 @@ inode map and its format-time `inode_count` cap) and a per-file **extent
 tree** (logical block → `(physical run, length)`, superseding the
 12-direct + single-indirect map so a file may span the whole volume). The
 transaction root now names the inode-tree root and the next inode number;
-the mount-time free-space rebuild walks those trees, and a two-cursor
-allocator keeps sequential data contiguous so large writes collapse to one
-extent.
+a free-space rebuild walks those trees (used by mkfs, and by mount whenever
+the on-disk allocation map cannot be adopted, §4), and a two-cursor allocator
+keeps sequential data contiguous so large writes collapse to one extent.
 
 Stage 3 replaced the fast physical checksum in the block header with a
 **keyed authenticator** (HMAC-SHA256 through `lib/crypto`, §5/§8) covering
@@ -923,9 +959,9 @@ record and drops the old refcount, leaving the other sharer intact. A
 **reflink** (`ARXFS::reflink`) is a copy-on-write clone that shares every
 block with its source until a side is written. Discovery is driven by an
 in-memory **dedupe index** (`(domain, length, logical hash) → candidate`)
-that is **rebuilt from the chunk + reverse-reference trees at mount and is
-never authoritative** (§9): every candidate is liveness-checked (its recorded
-referrer's extent map still points at it) and byte-verified before sharing,
+that **warms from writes and is never authoritative** (§9): every candidate
+is liveness-checked (its recorded referrer's extent map still points at it)
+and byte-verified before sharing,
 so a stale entry can never merge wrong data. The index is a **bounded cache**
 (100 MiB, split 20 MiB frequently-used / 80 MiB general; see §9), evicting its
 least-recently-used candidates rather than growing with the volume. Dedupe is
@@ -935,8 +971,8 @@ only unique records are compressed (§10). The §16 acceptance tests for this
 stage — identical content sharing one chunk (refcount 2) while distinct
 content does not, byte-verify-before-share refusing an injected colliding
 entry, COW-on-overwrite leaving the other sharer intact, a reflink sharing
-until written, refcount-to-zero freeing the chunk with the free-space rebuild
-agreeing, the dedupe index rebuilding at mount and yielding the same sharing,
+until written, refcount-to-zero freeing the chunk with the allocation map
+agreeing, the dedupe index warming from writes and yielding the same sharing,
 dedupe staying within the domain, and integrity + compression holding on a
 shared chunk across a remount and a COW rewrite — all pass, alongside the
 crash-replay sweep, the 1 GiB `fssoak` (its fill now uses distinct per-file
@@ -984,12 +1020,13 @@ Stage 9 added **offline check and rescue** (§12), the recovery operations
 scrub deliberately does not attempt. Both reuse the seams the earlier stages
 built rather than re-implementing them (`AGENTS.md` §2.2) — the §8 block
 identity + companion mirror, the `DataFault` classes, the chunk/reverse-ref
-trees, and the free-space / dedupe-index rebuilds. `ARXFS::check` is the
+trees, and the allocation-map / dedupe-index rebuilds. `ARXFS::check` is the
 **offline superset** of the online scrub, run on a mounted handle and
 **capability-gated** on `CAP_FS_MOUNT`: it rebuilds the rebuildable derived
-state first — the free-space bitmap (§4) and the dedupe index (§9) — from the
-authoritative trees (sharing the one `rebuild_free_space` walk `open` uses), so
-a corrupt derivation can never keep a sound volume unmountable; reuses the
+state first — the on-disk allocation map (§4) and the dedupe index (§9) — from
+the authoritative trees (sharing the one `rebuild_free_space` walk mount uses
+when it cannot adopt the map), so a corrupt derivation can never keep a sound
+volume unmountable; reuses the
 scrub verification core (`verify_everything`) to verify/repair metadata copies,
 classify data faults, and reconcile refcounts; validates the directory tree
 (an entry to a missing inode is a *dangling* finding, reported not auto-
@@ -1027,8 +1064,8 @@ support is *recorded, not failed*. Freed blocks enter a transient, in-memory
 **pending-discard queue** as a committed transaction reclaims them
 (`finish_txn`). `ARXFS::trim`, **capability-gated** on `CAP_FS_MOUNT`
 (fail-closed and logged otherwise, §5.4), discards a queued block **only if it
-is still free** at trim time — the mount-time free-space rebuild marks every
-block reachable from the committed root (every reflink target and every deduped
+is still free** at trim time — the allocation map (§4) marks every block
+reachable from the committed root (every reflink target and every deduped
 chunk at refcount ≥ 1 included) as used, so a freed-then-reallocated or
 still-shared block is skipped and never discarded; this is the §11 hard
 constraint that discard may never destroy data reachable from any retained root,
@@ -1098,7 +1135,7 @@ mount, metadata decode, directory decode, compression decode, check, and
 rescue" are all present: the `fuzz_mount` harness (`tests/fuzz_mount.rs`) drives
 the mount / metadata / scrub-progress / health-baseline / check / rescue decode
 paths and now also the **directory-block decode** path (`read_dir`/`lookup`
-decrypt and parse the encrypted dirent payload that the mount-time free-space
+decrypt and parse the encrypted dirent payload that the free-space rebuild
 walk never reads), while the `tairix-compress` `fuzz_compress` harness covers
 compression decode; every harness keeps the single invariant "returns a
 `Result`, never panics, fails closed" and is wired into `cargo xtask fuzz` /

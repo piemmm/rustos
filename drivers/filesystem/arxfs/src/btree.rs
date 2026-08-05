@@ -678,6 +678,45 @@ impl<B: Block> ARXFS<B> {
         }
         Ok(())
     }
+
+    /// Collect every node address *and* every leaf entry of the tree in one
+    /// walk, for callers that need both.
+    ///
+    /// [`Self::btree_collect_nodes`] and [`Self::btree_collect_entries`] each
+    /// read every node, so asking for both separately reads the whole tree
+    /// twice. The allocation-map rebuild wants exactly both, over every inode
+    /// on the volume, which is where that doubling is worth avoiding.
+    pub(crate) fn btree_collect_tree(
+        &mut self,
+        root: u64,
+        spec: TreeSpec,
+    ) -> Result<(Vec<u64>, NodeEntries), DriverError> {
+        let mut nodes = Vec::new();
+        let mut entries = Vec::new();
+        if root != 0 {
+            self.btree_collect_tree_rec(root, spec, &mut nodes, &mut entries)?;
+        }
+        Ok((nodes, entries))
+    }
+
+    fn btree_collect_tree_rec(
+        &mut self,
+        phys: u64,
+        spec: TreeSpec,
+        nodes: &mut Vec<u64>,
+        out: &mut NodeEntries,
+    ) -> Result<(), DriverError> {
+        nodes.push(phys);
+        let (level, entries) = self.btree_load_entries(phys, spec)?;
+        if level == 0 {
+            out.extend(entries);
+        } else {
+            for (_, v) in &entries {
+                self.btree_collect_tree_rec(child_ptr(v), spec, nodes, out)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Decode an internal entry's 8-byte value as a child pointer.

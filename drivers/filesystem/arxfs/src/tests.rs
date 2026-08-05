@@ -5,7 +5,10 @@
 //! commit — plus the full read/write surface the VFS consumes, all over an
 //! in-memory [`MemBlock`] double.
 
+use alloc::collections::BTreeSet;
+
 use super::*;
+use crate::allocmap::MAX_CACHED_MAP_BLOCKS;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
@@ -920,12 +923,14 @@ fn free_space_rebuild_matches_authoritative_extents() {
         let name = alloc::format!("d{i}");
         fs.remove(root, name.as_bytes()).expect("remove");
     }
-    let live = fs.used.clone();
+    let live = fs.used_blocks();
 
     let bytes = fs.into_block().bytes();
-    let rebuilt = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
+    let mut rebuilt =
+        ARXFS::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
     assert_eq!(
-        rebuilt.used, live,
+        rebuilt.used_blocks(),
+        live,
         "mount-time free-space rebuild must equal the authoritative live set"
     );
 }
@@ -1798,7 +1803,7 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     fs.remove(root, b"w").expect("remove");
     for b in 0..last.stored {
         assert!(
-            !fs.bit_used(last.phys + b),
+            !fs.is_used(last.phys + b),
             "stored cluster block {b} returns to the free pool"
         );
     }
@@ -1809,10 +1814,14 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     );
     // The mount-time rebuild reproduces the same used set, so nothing was
     // double-freed either.
-    let live = fs.used.clone();
+    let live = fs.used_blocks();
     let bytes = fs.into_block().bytes();
-    let fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
-    assert_eq!(fs.used, live, "the rebuilt used set agrees after removal");
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(
+        fs.used_blocks(),
+        live,
+        "the rebuilt used set agrees after removal"
+    );
 }
 
 #[test]
@@ -1878,12 +1887,13 @@ fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
     );
     fs.truncate(root, b"mix", cap * (COMPRESS_CLUSTER_BLOCKS + 8))
         .expect("extend with a hole");
-    let live = fs.used.clone();
+    let live = fs.used_blocks();
 
     let bytes = fs.into_block().bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), &TEST_KEY).expect("reopen");
     assert_eq!(
-        fs.used, live,
+        fs.used_blocks(),
+        live,
         "the rebuilt free set accounts compressed extents by stored size"
     );
     let report = scrub_full(&mut fs);
@@ -1908,13 +1918,13 @@ fn alloc_data_run_claims_contiguous_blocks_and_fails_closed_when_fragmented() {
     fs.begin();
     let run = fs.alloc_data_run(4).expect("run allocates");
     for b in 0..4 {
-        assert!(fs.bit_used(run + b), "run block {b} is claimed");
+        assert!(fs.is_used(run + b), "run block {b} is claimed");
     }
     // Fragment the remaining pool: claim every other free block, leaving no
     // 3-block gap anywhere.
     let mut block = RING_BLOCKS;
     while block < fs.total_blocks {
-        if fs.bit_used(block) {
+        if fs.is_used(block) {
             block += 1;
         } else {
             fs.claim_block(block);
@@ -1973,7 +1983,7 @@ fn byte_verify_before_share_refuses_to_merge_unequal_data() {
     block_a.copy_from_slice(&content_a);
     let hash_a = logical_hash(&block_a);
     let key = dedupe_key(fs.dedupe_domain, u32::try_from(cap).unwrap(), &hash_a);
-    fs.dedupe_index.insert(
+    fs.dedupe_index_mut().insert(
         key,
         DedupeCandidate {
             phys: pb,
@@ -2119,7 +2129,10 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
     let bytes = fs.into_block().bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 256), &TEST_KEY).expect("remount");
     assert_eq!(chunk_count(&mut fs), 0);
-    assert!(fs.dedupe_index.is_empty(), "index rebuilt empty");
+    assert!(
+        fs.dedupe_index_mut().is_empty(),
+        "a fresh mount starts with an empty dedupe cache"
+    );
     // The reclaimed space is reusable.
     fs.create(fs.root(), b"c", NodeKind::RegularFile)
         .expect("create c");
@@ -2127,10 +2140,11 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
 }
 
 #[test]
-fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
-    // The dedupe index is rebuildable, never authoritative: after a remount it
-    // is rebuilt from the chunk + reverse-reference trees and yields the same
-    // sharing — a third identical write joins the existing chunk.
+fn the_dedupe_cache_warms_from_writes_rather_than_a_mount_time_walk() {
+    // The dedupe index is a bounded cache, never authoritative, and is not
+    // pre-seeded at mount: walking the chunk tree would cost a read per chunk
+    // on a volume of any size. A fresh mount therefore starts cold and misses
+    // the first duplicate — an allowed miss — then shares every later one.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -2151,15 +2165,30 @@ fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
     fs.create(root, b"c", NodeKind::RegularFile)
         .expect("create c");
     assert_eq!(fs.write_at(root, b"c", 0, &body), Ok(cap));
-    assert_eq!(
-        data_block_phys(&mut fs, b"c", 0),
-        shared,
-        "the rebuilt index re-finds the shared chunk"
+    let warmed = data_block_phys(&mut fs, b"c", 0);
+    assert_ne!(
+        warmed, shared,
+        "a cold cache misses the pre-existing chunk, which is allowed"
     );
     assert_eq!(
         fs.data_refcount(shared).expect("refcount"),
-        3,
-        "the third writer joined the shared chunk"
+        2,
+        "the missed duplicate left the original chunk's refcount alone"
+    );
+
+    // That write warmed the cache, so the next identical write shares it.
+    fs.create(root, b"d", NodeKind::RegularFile)
+        .expect("create d");
+    assert_eq!(fs.write_at(root, b"d", 0, &body), Ok(cap));
+    assert_eq!(
+        data_block_phys(&mut fs, b"d", 0),
+        warmed,
+        "the warmed cache shares the chunk this session wrote"
+    );
+    assert_eq!(
+        fs.data_refcount(warmed).expect("refcount"),
+        2,
+        "the fourth writer joined the warmed chunk"
     );
 }
 
@@ -2189,14 +2218,15 @@ fn dedupe_is_scoped_to_the_encryption_domain() {
     block.copy_from_slice(&body);
     let hash = logical_hash(&block);
     let len = u32::try_from(cap).unwrap();
+    let domain = fs.dedupe_domain;
     assert!(
-        fs.dedupe_index
-            .contains_key(&dedupe_key(fs.dedupe_domain, len, &hash)),
+        fs.dedupe_index_mut()
+            .contains_key(&dedupe_key(domain, len, &hash)),
         "the chunk is indexed under its own domain"
     );
     assert!(
-        !fs.dedupe_index
-            .contains_key(&dedupe_key(fs.dedupe_domain ^ 0x1, len, &hash)),
+        !fs.dedupe_index_mut()
+            .contains_key(&dedupe_key(domain ^ 0x1, len, &hash)),
         "a different domain keys to a different slot"
     );
 }
@@ -3078,38 +3108,33 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
 }
 
 #[test]
-fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
-    // The free-space bitmap and the dedupe index are rebuildable derived state, never authoritative. A corrupt derivation must never keep a
-    // sound volume unmountable: check rebuilds both from the authoritative
-    // trees, and the result matches a freshly mounted reference.
+fn check_rebuilds_a_corrupt_free_space_derivation() {
+    // The allocation map is rebuildable derived state, never authoritative. A
+    // corrupt derivation must never keep a sound volume unmountable: check
+    // rebuilds it from the authoritative trees, and the result matches a
+    // freshly mounted reference.
     let bytes = populated().into_block().bytes();
-    let reference =
+    let mut reference =
         ARXFS::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
-    let good_used = reference.used.clone();
+    let good_used = reference.used_blocks();
     let good_count = reference.free_count;
-    assert!(
-        !reference.dedupe_index.is_empty(),
-        "the populated volume has shared chunks indexed"
-    );
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
-    // Wreck the in-memory derived state: drop the used-block set (so every
-    // block looks free), plant a spurious used marker the trees do not
-    // support, and clear the dedupe index.
-    fs.used.clear();
-    fs.used.insert(8);
+    // Wreck the derived state: release a block the trees say is live, and
+    // report a free count no allocation could satisfy.
+    let live = *good_used.iter().next_back().expect("a used block");
+    fs.mark_free(live);
     fs.free_count = 0;
-    fs.dedupe_index.clear();
 
     let report = check_full(&mut fs);
     assert!(report.complete);
     assert!(report.rebuilt_derived_state);
-    assert_eq!(fs.used, good_used, "the free bitmap was rebuilt");
-    assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
-    assert!(
-        !fs.dedupe_index.is_empty(),
-        "the dedupe index was rebuilt from the chunk trees"
+    assert_eq!(
+        fs.used_blocks(),
+        good_used,
+        "the allocation map was rebuilt"
     );
+    assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
     // The volume is mountable and the structure is sound.
     assert!(report.structure_sound, "{report:?}");
     let bytes = fs.into_block().bytes();
@@ -3383,7 +3408,7 @@ fn fmt_discard(
 /// ever queued).
 fn enqueue_free_range(fs: &mut ARXFS<MemBlock>, start: u64, end: u64) {
     for block in start..end {
-        assert!(!fs.bit_used(block), "test block {block} must start free");
+        assert!(!fs.is_used(block), "test block {block} must start free");
         fs.enqueue_discard(block);
     }
 }
@@ -3437,7 +3462,7 @@ fn trim_coalesces_contiguous_free_blocks_into_one_range() {
     // Out-of-order, contiguous free blocks become a single discard range.
     let mut fs = fmt_discard(512, 1, 0);
     for block in [105u64, 100, 103, 101, 104, 102] {
-        assert!(!fs.bit_used(block));
+        assert!(!fs.is_used(block));
         fs.enqueue_discard(block);
     }
     let sink = RecordingSink::new();
@@ -3503,7 +3528,7 @@ fn trim_skips_a_block_that_was_reallocated() {
     // A queued block that is no longer free (reallocated since it was freed) is
     // skipped, never discarded — discard can never touch live data.
     let mut fs = fmt_discard(512, 1, 0);
-    assert!(!fs.bit_used(100));
+    assert!(!fs.is_used(100));
     fs.enqueue_discard(100);
     fs.mark_used(100); // the block is handed back out before trim runs.
     let sink = RecordingSink::new();
@@ -3525,7 +3550,7 @@ fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
     let mut blocks = alloc::vec::Vec::new();
     for run in 0..runs as u64 {
         let block = 100 + run * 2; // gaps keep every block its own run.
-        assert!(!fs.bit_used(block));
+        assert!(!fs.is_used(block));
         fs.enqueue_discard(block);
         blocks.push(block);
     }
@@ -3600,7 +3625,7 @@ fn trim_never_discards_a_block_still_shared_by_dedupe() {
     fs.block.discarded.clear();
     fs.remove(root, b"a").expect("remove a");
     assert!(
-        fs.bit_used(shared),
+        fs.is_used(shared),
         "the block b still shares must stay allocated after a is removed"
     );
 
@@ -5036,7 +5061,7 @@ fn the_transaction_private_tracker_is_sparse_not_one_entry_per_block() {
     // A freshly formatted (and committed) volume holds no private blocks: the
     // tracker is empty, not `total_blocks` entries long as the dense form was.
     assert!(
-        fs.txn_private.is_empty(),
+        fs.allocator().expect("writable").txn_private.is_empty(),
         "the tracker must start empty, not pre-sized to the device block count"
     );
 
@@ -5049,46 +5074,50 @@ fn the_transaction_private_tracker_is_sparse_not_one_entry_per_block() {
     let body = alloc::vec![0xA5u8; 4000];
     assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
     assert!(
-        fs.txn_private.is_empty(),
+        fs.allocator().expect("writable").txn_private.is_empty(),
         "a committed transaction clears its private-block set"
     );
 }
 
 #[test]
-fn the_used_block_set_is_sparse_not_one_entry_per_block() {
-    // Regression: the in-memory free-space tracker must scale with the blocks
-    // actually in use, never with the device block count. The previous dense
-    // `Vec<u64>` bitmap allocated `total_blocks / 64` words at mount, so a real
-    // multi-GB eMMC volume's mount alone exhausted the bounded kernel heap (the
-    // Raspberry Pi 4 boot OOM). A sparse set of used blocks scales with the
-    // working set: a freshly formatted, near-empty volume names only the
-    // reserved ring plus a handful of metadata blocks, far fewer than the
-    // device's block count, however large the device is.
+fn the_allocation_map_costs_a_bounded_cache_not_one_entry_per_block() {
+    // Regression: mounting must never cost memory proportional to the device.
+    // The first form allocated a dense `Vec<u64>` bitmap at mount, so a real
+    // multi-GB eMMC volume's mount alone exhausted the bounded kernel heap
+    // (the Raspberry Pi 4 boot OOM); the sparse used-set that replaced it
+    // still grew with the blocks in use. The paged on-disk map costs a fixed
+    // cache of region blocks, whatever the volume size or the working set.
     let mut fs = fmt(512, 65536, 32);
     assert_eq!(fs.total_blocks, 65536);
     assert!(
-        fs.used.len() < 256,
-        "a near-empty {}-block volume must track only the few used blocks, \
-         not one entry per device block (tracked {})",
-        fs.total_blocks,
-        fs.used.len()
+        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        "the resident map is a bounded cache, not one entry per device block \
+         (cached {} of at most {MAX_CACHED_MAP_BLOCKS})",
+        fs.map_cached_blocks()
     );
-    // The used set never exceeds the device block count, and every member is a
-    // real in-range block.
-    assert!(fs.used.iter().all(|&b| b < fs.total_blocks));
+    // The region the map occupies on the device is a rounding error of it.
+    assert!(
+        fs.map_region_blocks() * 64 < fs.total_blocks,
+        "the map region is {} of {} blocks",
+        fs.map_region_blocks(),
+        fs.total_blocks
+    );
+    // Every used block is a real in-range block.
+    let before = fs.used_blocks();
+    assert!(before.iter().all(|&b| b < fs.total_blocks));
 
-    // A committed write grows the set by only the blocks the file occupies, not
-    // by anything proportional to the device size.
-    let before = fs.used.len();
+    // A committed write grows the used set by only the blocks the file
+    // occupies, and the resident cache stays bounded.
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
         .expect("create");
     let body = alloc::vec![0xA5u8; 4000];
     assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
     assert!(
-        fs.used.len() < before + 64,
+        fs.used_blocks().len() < before.len() + 64,
         "a small write must add only a handful of used blocks"
     );
+    assert!(fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS);
 }
 
 #[test]
@@ -5125,21 +5154,26 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     let mut fs = fmt_huge();
     assert_eq!(fs.total_blocks, HUGE_BLOCK_COUNT);
 
-    // A freshly formatted volume tracks only the reserved ring plus a handful
-    // of metadata blocks — a few hundred at most, never billions.
+    // A freshly formatted volume holds only a bounded cache of map blocks —
+    // a few dozen at most, never one entry per device block.
     assert!(
-        fs.used.len() < 2000,
-        "a near-empty 100 TiB volume must track only its few used blocks, not \
-         one entry per device block (tracked {})",
-        fs.used.len()
+        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        "a near-empty 100 TiB volume must hold only a bounded map cache \
+         (cached {})",
+        fs.map_cached_blocks()
     );
-    // Free space is a single 64-bit count, so essentially the whole 100 TiB is
-    // free and that fact costs no per-block memory.
-    assert_eq!(fs.free_count, fs.total_blocks - fs.used.len() as u64);
+    // The map region costs well under a thousandth of the device, and
+    // essentially the whole 100 TiB is free.
+    let reserved = fs.map_region_blocks();
     assert!(
-        fs.free_count > HUGE_BLOCK_COUNT - 2000,
+        reserved * 1000 < HUGE_BLOCK_COUNT,
+        "the map region is {reserved} of {HUGE_BLOCK_COUNT} blocks"
+    );
+    assert!(
+        fs.free_count > HUGE_BLOCK_COUNT - reserved - 2000,
         "almost the entire device is free"
     );
+    assert!(fs.free_count < HUGE_BLOCK_COUNT);
 
     // Serve real I/O: create a file, write several blocks, read them back.
     let root = fs.root();
@@ -5152,12 +5186,12 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     assert_eq!(fs.read_at(node, 0, &mut back), Ok(200_000));
     assert_eq!(back, body);
 
-    // The used set grew by only the blocks that file occupies, not by anything
+    // Serving that file left the resident map a bounded cache, not something
     // proportional to the 100 TiB device.
     assert!(
-        fs.used.len() < 2200,
-        "serving a 200 KiB file must add only a handful of used blocks (tracked {})",
-        fs.used.len()
+        fs.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        "serving a 200 KiB file must leave the map cache bounded (cached {})",
+        fs.map_cached_blocks()
     );
 
     // The device itself stored only the working set — proof the test models a
@@ -5175,9 +5209,9 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
     let mut reopened = ARXFS::open(device, &TEST_KEY).expect("reopen 100 TiB volume");
     assert_eq!(reopened.total_blocks, HUGE_BLOCK_COUNT);
     assert!(
-        reopened.used.len() < 2200,
-        "mounting a 100 TiB volume rebuilds only the used-block working set (tracked {})",
-        reopened.used.len()
+        reopened.map_cached_blocks() <= MAX_CACHED_MAP_BLOCKS,
+        "mounting a 100 TiB volume holds only a bounded map cache (cached {})",
+        reopened.map_cached_blocks()
     );
     let node = reopened.lookup(reopened.root(), b"big").expect("lookup");
     let mut back = alloc::vec![0u8; 200_000];
@@ -6004,4 +6038,222 @@ fn a_read_only_mount_flush_issues_no_device_flush() {
         0,
         "a read-only mount forces nothing to the device"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The on-disk allocation map: mount cost, read-only mounts, and recovery.
+// ---------------------------------------------------------------------------
+
+/// A populated, synced volume's bytes, plus the used-block set and free count
+/// the live mount held when it was synced.
+fn synced_volume(files: u8) -> (alloc::vec::Vec<u8>, BTreeSet<u64>, u64) {
+    let mut fs = fmt(4096, 2048, 128);
+    let root = fs.root();
+    for i in 0..files {
+        let name = alloc::format!("f{i}").into_bytes();
+        fs.create(root, &name, NodeKind::RegularFile)
+            .expect("create");
+        fs.write_at(root, &name, 0, &alloc::vec![i; 9000])
+            .expect("write");
+    }
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let used = fs.used_blocks();
+    let free = fs.free_count;
+    (fs.into_block().bytes(), used, free)
+}
+
+fn counting(bytes: alloc::vec::Vec<u8>, block_size: u32, blocks: u64) -> CountingBlock {
+    CountingBlock {
+        inner: MemBlock::from_bytes(bytes, block_size, blocks),
+        reads: 0,
+        flushes: 0,
+    }
+}
+
+#[test]
+fn a_synced_volume_adopts_its_map_instead_of_walking_the_whole_volume() {
+    // The point of the on-disk map: mounting reads the superblock ring, the
+    // committed root, and the map's own header — not every tree node, inode,
+    // and extent on the volume. Before the map existed, mounting the 128 MiB
+    // `/System` image cost over ten thousand block reads and stalled the boot
+    // for seconds.
+    let (bytes, used, free) = synced_volume(24);
+    let mut fs = ARXFS::open(counting(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
+    assert!(
+        fs.map_is_stamped_clean(),
+        "a synced map is adopted, not rebuilt"
+    );
+    let mount_reads = fs.block_mut().reads;
+    assert!(
+        mount_reads < 32,
+        "adopting the map costs a handful of reads, not a walk of the volume \
+         (read {mount_reads} blocks)"
+    );
+    assert_eq!(
+        fs.free_count, free,
+        "the committed free count survives the mount"
+    );
+    assert_eq!(
+        fs.used_blocks(),
+        used,
+        "the adopted map matches the live one"
+    );
+}
+
+#[test]
+fn a_volume_that_was_not_synced_rebuilds_its_map_at_the_next_mount() {
+    // Ordinary commits leave the rebuildable map dirty on the device; only an
+    // explicit sync stamps it clean. A mount that finds it dirty rebuilds from
+    // the authoritative trees rather than trusting a half-written map, and
+    // lands on exactly the same allocation state.
+    let (bytes, _, _) = synced_volume(24);
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
+    let root = fs.root();
+    fs.create(root, b"extra", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"extra", 0, &alloc::vec![7u8; 9000])
+        .expect("write");
+    let live = fs.used_blocks();
+    let free = fs.free_count;
+    let bytes = fs.into_block().bytes();
+
+    let mut reopened = ARXFS::open(counting(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
+    assert!(
+        !reopened.map_is_stamped_clean(),
+        "a map left dirty by an unclean shutdown is rebuilt, never adopted"
+    );
+    assert!(
+        reopened.block_mut().reads > 32,
+        "the rebuild really does walk the authoritative trees"
+    );
+    assert_eq!(
+        reopened.used_blocks(),
+        live,
+        "the rebuild reproduces the live map exactly"
+    );
+    assert_eq!(reopened.free_count, free, "and the same free count");
+}
+
+#[test]
+fn a_read_only_mount_builds_no_allocation_state_at_all() {
+    // A read-only handle can never allocate, free, dedupe, or trim, so it
+    // holds no allocator to do it with — that is a property of the type, not a
+    // convention — and pays none of the cost of building one.
+    let (bytes, _, free) = synced_volume(24);
+    let mut fs =
+        ARXFS::open_read_only(counting(bytes, 4096, 2048), &TEST_KEY).expect("read-only mount");
+    assert!(
+        fs.allocator().is_err(),
+        "a read-only handle has no allocation state"
+    );
+    let mount_reads = fs.block_mut().reads;
+    assert!(
+        mount_reads < 32,
+        "a read-only mount reads a handful of blocks (read {mount_reads})"
+    );
+    // It still reports the committed free space honestly, without the map.
+    let stats = FilesystemStats::stats(&mut fs).expect("stats");
+    assert_eq!(stats.free_blocks, free);
+    assert_eq!(stats.total_blocks, 2048);
+    // Every mutating path fails closed.
+    let root = fs.root();
+    assert_eq!(
+        fs.create(root, b"nope", NodeKind::RegularFile),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(
+        fs.write_at(root, b"f0", 0, b"nope"),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(fs.remove(root, b"f0"), Err(DriverError::PermissionDenied));
+    assert!(matches!(
+        fs.trim(&GrantAll, &NullSink),
+        Err(DriverError::PermissionDenied)
+    ));
+    // And it still serves reads.
+    let node = fs.lookup(root, b"f0").expect("lookup");
+    let mut back = alloc::vec![0u8; 9000];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(9000));
+    assert_eq!(back, alloc::vec![0u8; 9000]);
+}
+
+#[test]
+fn the_allocation_map_region_stays_reserved_under_churn() {
+    // The region holds the map itself, so no allocation may ever land in it —
+    // otherwise a file would overwrite the map that says the file is there.
+    let mut fs = fmt(512, 1024, 64);
+    let start = fs.map_region_start();
+    let region = fs.map_region_blocks();
+    assert!(region > 0 && start >= RING_BLOCKS);
+    let root = fs.root();
+    for i in 0..40u8 {
+        let name = alloc::format!("f{i}").into_bytes();
+        fs.create(root, &name, NodeKind::RegularFile)
+            .expect("create");
+        let _ = fs.write_at(root, &name, 0, &alloc::vec![i; 900]);
+    }
+    for i in (0..40u8).step_by(2) {
+        let name = alloc::format!("f{i}").into_bytes();
+        fs.remove(root, &name).expect("remove");
+    }
+    for block in start..start + region {
+        assert!(
+            fs.is_used(block),
+            "map region block {block} must stay reserved"
+        );
+    }
+    // The map on the device is still readable, which it would not be had a
+    // write landed on it.
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let bytes = fs.into_block().bytes();
+    let reopened = ARXFS::open(MemBlock::from_bytes(bytes, 512, 1024), &TEST_KEY).expect("open");
+    assert!(
+        reopened.map_is_stamped_clean(),
+        "the map survived the churn"
+    );
+    assert_eq!(reopened.map_region_start(), start);
+}
+
+#[test]
+fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
+    // 512-byte blocks hold 3072 bitmap bits per page, so a 3000-block volume
+    // needs one page and a 12000-block one needs four: the region must get
+    // longer, which relays it. Content and allocation must survive that.
+    let mut fs = fmt(512, 3000, 64);
+    let root = fs.root();
+    fs.create(root, b"keep", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0x5Au8; 4000];
+    fs.write_at(root, b"keep", 0, &body).expect("write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let small_region = fs.map_region_blocks();
+
+    let mut bytes = fs.into_block().bytes();
+    bytes.resize(512 * 12000, 0);
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 12000), &TEST_KEY).expect("reopen");
+    assert_eq!(fs.grow().expect("grow"), 12000 - 3000);
+    assert!(
+        fs.map_region_blocks() > small_region,
+        "the wider volume needs a longer region"
+    );
+    assert!(fs.free_count > 8000, "the added tail is free");
+
+    // The relaid map still describes a sound volume: the old file reads back
+    // and new space is allocatable out of the added tail.
+    let root = fs.root();
+    let node = fs.lookup(root, b"keep").expect("lookup");
+    let mut back = alloc::vec![0u8; 4000];
+    assert_eq!(fs.read_at(node, 0, &mut back), Ok(4000));
+    assert_eq!(back, body);
+    fs.create(root, b"after", NodeKind::RegularFile)
+        .expect("create after grow");
+    assert_eq!(fs.write_at(root, b"after", 0, &body), Ok(4000));
+    let live = fs.used_blocks();
+
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let bytes = fs.into_block().bytes();
+    let mut reopened =
+        ARXFS::open(MemBlock::from_bytes(bytes, 512, 12000), &TEST_KEY).expect("reopen grown");
+    assert!(reopened.map_is_stamped_clean(), "the relaid map is adopted");
+    assert_eq!(reopened.used_blocks(), live);
 }

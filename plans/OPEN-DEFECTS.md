@@ -1591,6 +1591,46 @@ decode and no new vocabulary. Belongs with the display/input work
 
 ---
 
+## D27 — ARXFS has no persistent deduplication index
+
+**State:** open, correctness-safe.
+
+**Mechanism.** The dedupe index (`drivers/filesystem/arxfs/src/dedupe.rs`) is
+an in-RAM bounded LRU cache keyed by `(domain, length, logical hash)`, warmed
+only by the writes of the current mount. The chunk tree it is checked against
+is keyed by physical block, not by hash, so a hash lookup cannot fall back to
+it. A duplicate written in an earlier mount session is therefore not found
+until the cache warms again in the new session — reduced cross-mount
+deduplication effectiveness, never a wrong merge (a missed duplicate is
+correctness-safe; the data is simply stored twice, `arxfs-spec.md` §9).
+
+**Fix direction.** A persistent, hash-keyed dedupe tree committed in the
+transaction root, so a lookup survives a remount without walking the chunk
+tree. Structural and larger than a single change: a new authoritative
+on-disk structure, not an extension of the existing rebuildable cache.
+
+---
+
+## D28 — ARXFS per-transaction deferred-free and pending-mark sets are unbounded
+
+**State:** open, pre-existing.
+
+**Mechanism.** `txn_freed` (`drivers/filesystem/arxfs/src/allocator.rs`, a
+`BTreeSet<u64>`) holds every block a transaction releases until it commits,
+and the allocation map's `pending` map holds every bit change whose page or
+summary block was not resident when the change was made. Both scale with the
+size of a single transaction, so deleting a very large file allocates memory
+proportional to the file's block count. This is pre-existing shape (the
+previous free-space tracker's `Vec<u64>` had the same property) and conflicts
+with the small-RAM/large-volume floor (`AGENTS.md` §26.7).
+
+**Fix direction.** Extent-based deferred freeing (a run of contiguous blocks
+recorded as one `(start, length)` entry) rather than per-block, bounding the
+bookkeeping by the number of runs a transaction touches rather than the
+number of blocks.
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

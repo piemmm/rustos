@@ -87,6 +87,12 @@ pub enum BlockType {
     /// leaks on a raw-device read
     /// (`docs/src/filesystem/arxfs-spec.md` §21).
     Attr = 7,
+    /// A block of the allocation-map region: its header, one of its summary
+    /// blocks, or one of its bitmap pages (`allocmap`). Free space is
+    /// rebuildable metadata, so unlike every type above it is updated in
+    /// place and stored as a single copy — a page that fails to authenticate
+    /// makes the mount rebuild the map rather than repair it.
+    AllocMap = 8,
 }
 
 impl BlockType {
@@ -106,6 +112,7 @@ impl BlockType {
             5 => Some(Self::ScrubProgress),
             6 => Some(Self::HealthBaseline),
             7 => Some(Self::Attr),
+            8 => Some(Self::AllocMap),
             _ => None,
         }
     }

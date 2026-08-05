@@ -304,13 +304,26 @@ at it. `ARXFS::open` scans the ring and selects the highest-generation
 slot whose root and commit record validate — so a crash leaves the mount
 on a whole transaction boundary, never a torn one.
 
-The free-block bitmap is rebuilt in memory at mount by walking the trees
-from the selected root — every inode-tree node, then each inode's extent-tree
-nodes and the runs they map — so the authoritative free set is always derived
-from live metadata (the crate uses `alloc` for these). Block allocation draws
-data upward and metadata downward from the pool with a small metadata reserve,
-so a delete can copy-on-write itself even on a full volume. No
-`unwrap`/`expect`/`panic!` and no `unsafe`.
+Free space lives in an **on-disk paged allocation map** (`allocmap`,
+`allocator`): a contiguous region of a header block, a summary recording each
+bitmap page's free count, and one bit per device block, each block sealed with
+the ordinary keyed header under `BlockType::AllocMap`. Because free space is
+rebuildable rather than authoritative, the region is *not* copy-on-written but
+updated in place under a clean/dirty generation stamp — turned dirty before the
+first page write, and stamped clean at an explicit sync (and at mkfs) once the
+pages are durable. A mount adopts the map only when it authenticates at the
+address the committed root names and is stamped clean at that generation;
+otherwise it rebuilds by walking the trees from the selected root. Mounting a
+synced volume therefore costs a handful of block reads rather than a walk of
+every inode and extent on it, and the resident cost is a bounded cache of
+`MAX_CACHED_MAP_BLOCKS` region blocks however large the volume.
+
+A **read-only handle holds no allocator at all** — the field is `None` — so it
+cannot allocate, free, dedupe, or trim by construction, builds no allocation
+state, and reports the committed free count straight from the transaction root.
+Block allocation draws data upward and metadata downward from the pool with a
+small metadata reserve, so a delete can copy-on-write itself even on a full
+volume. No `unwrap`/`expect`/`panic!` and no `unsafe`.
 
 > **Staged build.** A volume is a complete, mountable copy-on-write
 > filesystem with B-tree metadata, a `lib/crypto` keyed-MAC authenticator in
@@ -319,8 +332,8 @@ so a delete can copy-on-write itself even on a full volume. No
 > + physical checksum) verified on every read (Stage 5), and **first-party
 > compression** of every data record before encryption with a raw-store
 > fallback (Stage 6), and **deduplication** with a chunk/refcount tree, a
-> reverse-reference tree, reflinks, and a rebuildable byte-verified dedupe
-> index (Stage 7), and a resumable, capability-gated **online scrub** that
+> reverse-reference tree, reflinks, and a bounded byte-verified dedupe
+> cache (Stage 7), and a resumable, capability-gated **online scrub** that
 > verifies and repairs metadata, classifies data faults, and reconciles
 > refcounts (Stage 8), and **offline `check` and `rescue`** — `check` the
 > mounted-handle structural validator that rebuilds the derived state,
@@ -389,8 +402,9 @@ content sharing one physical chunk at refcount 2 while distinct content does
 not, byte-verify-before-share refusing an injected colliding index entry,
 overwriting one sharer copying-on-write while the other stays intact, a
 reflink sharing until written, refcount-to-zero freeing the chunk with the
-free-space rebuild agreeing, the dedupe index rebuilding at mount, dedupe
-staying within the encryption domain, and integrity + compression holding on a
+free-space rebuild agreeing, the dedupe cache warming from writes rather than a
+mount-time walk, dedupe staying within the encryption domain, and integrity +
+compression holding on a
 shared chunk), the Stage-8 online-scrub tests (a clean/idempotent scrub
 changing nothing, single-copy metadata repair from the companion, data
 `Physical`/`Logical` fault classification, refcount and reverse-reference

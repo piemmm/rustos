@@ -91,7 +91,7 @@ superblock ring
       -> extent tree
       -> chunk/refcount tree
       -> reverse-reference tree
-      -> free-space tree
+      -> allocation map (in place, not a COW child)
       -> snapshot tree        (new — authoritative)
       -> device-health tree
       -> rebuildable secondary indexes

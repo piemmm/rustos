@@ -48,32 +48,23 @@ impl<B: Block> ARXFS<B> {
     /// exists above the reserve — the caller falls back to per-block storage,
     /// so fragmentation degrades compression, never correctness.
     pub(crate) fn alloc_data_run(&mut self, run: u64) -> Result<u64, DriverError> {
+        self.map_fold_pending()?;
         if run == 0 || self.free_count < METADATA_RESERVE.saturating_add(run) {
             return Err(DriverError::NoSpace);
         }
         let start = RING_BLOCKS;
         let total = self.total_blocks;
-        let span = total.saturating_sub(start);
-        let mut scanned = 0u64;
-        let mut block = self.alloc_cursor.max(start);
-        while scanned < span {
-            if block + run > total {
-                scanned += total - block;
-                block = start;
-                continue;
-            }
-            if let Some(used) = (0..run).find(|&b| self.bit_used(block + b)) {
-                scanned += used + 1;
-                block += used + 1;
-            } else {
-                for b in 0..run {
-                    self.claim_block(block + b);
-                }
-                self.alloc_cursor = block + run;
-                return Ok(block);
-            }
+        let cursor = self.allocator()?.alloc_cursor.max(start);
+        let found = match self.map_find_free_run(run, cursor, total)? {
+            Some(block) => Some(block),
+            None => self.map_find_free_run(run, start, cursor)?,
+        };
+        let block = found.ok_or(DriverError::NoSpace)?;
+        for offset in 0..run {
+            self.claim_block(block + offset);
         }
-        Err(DriverError::NoSpace)
+        self.allocator_mut()?.alloc_cursor = block + run;
+        Ok(block)
     }
 
     /// Compress and store the whole-cluster `plaintext` (a multiple of

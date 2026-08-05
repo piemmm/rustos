@@ -18,15 +18,19 @@
 //!   physical block, its value is a capped list of the `(inode, logical block)`
 //!   referrers, used by scrub/check/health and safe discard;
 //! * the **dedupe index** ([`DedupeIndex`], rebuildable, never authoritative):
-//!   an in-memory `(domain, length, logical hash) -> chunk` map rebuilt from
-//!   the chunk tree at mount and consulted for bounded foreground discovery on
-//!   write. Because *missing a duplicate is acceptable*, the index is a
+//!   an in-memory `(domain, length, logical hash) -> chunk` map consulted for
+//!   bounded foreground discovery on write and warmed by the writes
+//!   themselves. Because *missing a duplicate is acceptable*, the index is a
 //!   **bounded cache**, not an unbounded map: its resident RAM is capped at
 //!   [`DEDUPE_INDEX_BUDGET_BYTES`], split into a [`DEDUPE_HOT_BUDGET_BYTES`]
 //!   "frequently used" tier (candidates promoted on a dedupe hit) and a
 //!   [`DEDUPE_GENERAL_BUDGET_BYTES`] tier of freshly written candidates. Once a
 //!   tier is full it evicts its least-recently-used candidate rather than
 //!   growing, so the index never exceeds its budget regardless of volume size.
+//!   It is deliberately **not** pre-seeded at mount: walking the chunk tree
+//!   would cost a read per chunk on a volume of any size — unbounded on a
+//!   100 TB one — to fill a cache that evicts all but its last few thousand
+//!   entries anyway. The index warms from the writes that can use it.
 //!
 //! Dedupe is allowed **only within the same encryption domain**; the
 //! domain is carried in every chunk record and index key so the rule holds
@@ -268,12 +272,6 @@ impl LruTier {
         self.by_key.len()
     }
 
-    fn clear(&mut self) {
-        self.by_key.clear();
-        self.by_recency.clear();
-        self.next_stamp = 0;
-    }
-
     fn contains(&self, key: &DedupeKey) -> bool {
         self.by_key.contains_key(key)
     }
@@ -349,12 +347,6 @@ impl DedupeIndex {
             hot: LruTier::new(hot_cap),
             general: LruTier::new(general_cap),
         }
-    }
-
-    /// Empty the index (used by the mount-time rebuild).
-    pub(crate) fn clear(&mut self) {
-        self.hot.clear();
-        self.general.clear();
     }
 
     /// Total candidates currently cached across both tiers.
@@ -495,18 +487,6 @@ mod tests {
         assert!(index.get(&key(1)).is_none());
         assert!(index.get(&key(2)).is_none());
         assert_eq!(index.len(), 0);
-    }
-
-    #[test]
-    fn clear_empties_both_tiers() {
-        let mut index = DedupeIndex::with_caps(2, 3);
-        index.insert(key(1), cand(1));
-        assert!(index.get(&key(1)).is_some());
-        index.insert(key(2), cand(2));
-        assert!(!index.is_empty());
-        index.clear();
-        assert_eq!(index.len(), 0);
-        assert!(index.get(&key(1)).is_none());
     }
 
     #[test]

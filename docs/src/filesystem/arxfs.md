@@ -87,8 +87,9 @@ shrink is not offered). See [`arxfs-spec.md` §13](./arxfs-spec.md).
 > a per-data-record **integrity field** — a logical content hash plus a fast
 > physical checksum, verified on every read (see [Data integrity](#data-integrity)).
 > ARXFS has no plaintext layout. Compression and dedupe are later stages.
-> The free-block bitmap is rebuilt in memory at mount by walking the trees
-> from the selected root; it is not stored on disk.
+> Free space is now tracked by an on-disk paged allocation map, updated in
+> place and adopted at mount rather than rebuilt (see *Copy-on-write metadata
+> trees* below).
 
 ## Metadata authentication and redundancy (`arxfs-spec.md` §5, §8)
 
@@ -304,12 +305,16 @@ state (its records are removed) and keeps its block. Shared chunks are
 writer and drops the old refcount, leaving every other sharer's data intact.
 
 Discovery uses an in-memory **dedupe index** — `(domain, length, logical hash)
-→ candidate` — that is **rebuilt from the chunk and reverse-reference trees at
-mount and is never authoritative** (§9). Before sharing, a candidate is
-**liveness-checked** (its recorded referrer's extent map must still point at
-it) and then **byte-verified**; a candidate that fails either check is a stale
-index entry and is dropped, never shared. This is what lets the fast in-memory
-index be approximate without ever risking a wrong merge.
+→ candidate` — that **warms from the writes that use it and is never
+authoritative** (§9): it is deliberately not pre-seeded at mount, since
+walking the chunk tree would cost a read per chunk with no bound on volume
+size. Before sharing, a candidate is **liveness-checked** (its recorded
+referrer's extent map must still point at it) and then **byte-verified**; a
+candidate that fails either check is a stale index entry and is dropped,
+never shared. This is what lets the fast in-memory index be approximate
+without ever risking a wrong merge — a duplicate written in an earlier mount
+session simply goes unfound until the cache warms again, which is a missed
+opportunity, not a correctness risk.
 
 A **reflink** (`ARXFS::reflink`) is a copy-on-write clone of a file that
 shares every data block with its source until a side is written, when only the
@@ -419,7 +424,7 @@ Scrub is the *online* verifier; `check` and `rescue` are the *offline*
 recovery operations it deliberately does not attempt. Both reuse the seams the
 earlier stages built rather than re-implementing them (`AGENTS.md` §2.2): the
 §8 block identity + companion mirror, the `DataFault` classes, the
-chunk/reverse-reference trees, and the free-space / dedupe-index rebuilds.
+chunk/reverse-reference trees, and the allocation-map / dedupe-index rebuilds.
 
 **`ARXFS::check` — offline structural validation, repair, and index
 rebuild.** `check` runs on a **mounted handle** (a volume that opens is the
@@ -427,10 +432,11 @@ input) and is the **superset** of the online scrub's checks plus structural
 rebuild. It is **capability-gated** on `CAP_FS_MOUNT` (fail-closed and logged
 otherwise) and:
 
-- **rebuilds the rebuildable derived state first** — the free-space bitmap (§4)
-  and the in-memory dedupe index (§9) — from the authoritative trees, so a
+- **rebuilds the rebuildable derived state first** — the on-disk allocation map
+  (§4) and the in-memory dedupe index (§9) — from the authoritative trees, so a
   corrupt derivation can **never** keep a sound volume unmountable. This shares
-  the one `rebuild_free_space` walk `open` uses;
+  the one `rebuild_free_space` walk mount uses whenever it cannot adopt the
+  map;
 - **verifies and repairs** metadata copies, classifies data-integrity faults,
   and reconciles refcounts / reverse references against the live extents, by
   reusing the online scrub's verification core (`verify_everything`);
@@ -497,11 +503,11 @@ second free-tracking mechanism (`AGENTS.md` §2.2). `ARXFS::trim` later issues
 the discards:
 
 - **Safety by re-check.** A queued block is discarded only if it is **still
-  free** at trim time. The mount-time free-space rebuild marks every block
-  reachable from the committed root — including every reflink target and every
-  deduped chunk at refcount ≥ 1 — as *used*, so a free block is, by
-  construction, unreachable from every retained root. A block freed and then
-  reallocated is *used* again by trim time and is skipped, never discarded.
+  free** at trim time. The allocation map marks every block reachable from the
+  committed root — including every reflink target and every deduped chunk at
+  refcount ≥ 1 — as *used*, so a free block is, by construction, unreachable
+  from every retained root. A block freed and then reallocated is *used* again
+  by trim time and is skipped, never discarded.
 - **Batched, aligned, rate-limited.** Still-free blocks are coalesced into
   contiguous runs, each run is aligned **inward** to the device's discard
   granularity (the unaligned head/tail edges are requeued), and at most
@@ -663,11 +669,18 @@ pool and **metadata** downward from the high end, with a small metadata
 reserve so a delete can always copy-on-write itself and commit even on an
 otherwise-full volume.
 
-The mount-time **free-space rebuild** walks these trees from the selected
-root — every inode-tree node, then each inode's extent-tree nodes and the
-physical runs they map — to reconstruct the in-memory free-block bitmap, so
-the authoritative free set is always derived from live metadata rather than a
-stored bitmap.
+Free space itself is **not** tracked by walking these trees at every mount.
+An on-disk **paged allocation map** — a bitmap with a per-page free-count
+summary, sealed under `BlockType::AllocMap` and updated **in place** rather
+than copy-on-written — sits in a fixed region above the superblock ring. A
+mount **adopts** the map with a handful of reads when it authenticates at the
+address the committed transaction root names and its clean/dirty stamp shows
+no update was left in flight; otherwise it falls back to the same tree walk
+(every inode-tree node, then each inode's extent-tree nodes and the physical
+runs they map) that built the map in the first place. Because the map is
+rebuildable, non-authoritative state, in-place update never risks the
+authoritative trees, and a read-only mount skips it entirely — it builds no
+allocation state at all (`arxfs-spec.md` §4).
 
 ## Copy-on-write and the superblock ring
 
@@ -748,8 +761,8 @@ create/lookup/listing across nested directories; read/write with
 block-boundary straddling; extent-backed large files across a remount;
 inode-tree growth and shrink (split, borrow, and merge) across many inodes;
 a file with many non-contiguous extents that splits its extent tree; a large
-contiguous write collapsing to a single extent; the mount-time free-space
-rebuild matching the authoritative live set; `truncate` keeping the surviving
+contiguous write collapsing to a single extent; the allocation-map rebuild
+matching the authoritative live set; `truncate` keeping the surviving
 prefix; `remove` reclaiming space so a full volume can allocate again; the
 fail-closed extremes
 (`Busy`/`LengthOutOfRange`/`NotFound`); the Stage-4 encryption acceptance
@@ -774,9 +787,9 @@ two files with identical content **sharing one physical chunk** (refcount 2)
 while distinct content does not, **byte-verify-before-share** refusing an
 injected colliding index entry, overwriting one sharer **copying-on-write** a
 fresh chunk and leaving the other intact, a **reflink** sharing chunks until a
-side is written, **refcount-to-zero freeing** the chunk with the mount-time
-free-space rebuild agreeing, the **dedupe index rebuilding** from the chunk
-tree at mount and yielding the same sharing, dedupe staying **within the
+side is written, **refcount-to-zero freeing** the chunk with the allocation
+map agreeing, the **dedupe index warming** from writes and yielding the same
+sharing, dedupe staying **within the
 encryption domain**, and integrity + compression still holding on a **shared**
 chunk across a remount and a COW rewrite; the Stage-8 online-scrub acceptance
 tests — a **clean scrub** of a populated volume reporting zero faults and
@@ -793,7 +806,7 @@ on `CAP_FS_MOUNT` (refused and logged otherwise), and integrity + compression +
 dedupe invariants still holding across a scrub, a remount, and a COW rewrite;
 the Stage-9 offline check/rescue acceptance tests — a **clean check** reporting
 a sound structure and rebuilding nothing (idempotent, changing nothing on
-disk), check **rebuilding** a deliberately corrupted free-space bitmap and
+disk), check **rebuilding** a deliberately corrupted allocation map and
 dedupe-index derivation from the authoritative trees with the volume staying
 mountable, check **reclaiming an orphaned inode** and **correcting a refcount
 divergence** while **reporting** an unrepairable data fault it cannot safely
@@ -868,8 +881,8 @@ soak (`cargo xtask fuzz`, `TAIRIX_FUZZ_BUDGET_SECS`) switches to exhaustive
 coverage — every byte flipped in turn and the PRNG loop run to the wall-clock
 budget. Since Stage 7 the fuzz image is
 populated with duplicate-content files and a reflink, so the sweep also drives
-the **chunk/refcount** and **reverse-reference** record decode paths that
-mount rebuilds the dedupe index from. Since Stage 8 the base image is left with
+the **chunk/refcount** and **reverse-reference** record decode paths the
+dedupe index warms from. Since Stage 8 the base image is left with
 a **paused scrub**, and each successful mount additionally runs a bounded
 `scrub`, so the sweep also drives the **scrub-progress** record decode path
 (`load_scrub_progress`), asserting it too never panics and fails closed. Since
@@ -882,7 +895,7 @@ additionally runs `health`, so the sweep drives the **health-baseline** record
 decode path too, asserting it never panics and fails closed. Since Stage 12
 each successful mount additionally **walks every reachable directory**
 (`read_dir`/`lookup`, bounded), driving the spec's required "directory decode"
-target — the encrypted dirent payload the mount-time free-space walk never
+target — the encrypted dirent payload the free-space rebuild walk never
 reads — and asserting it never panics and fails closed. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):

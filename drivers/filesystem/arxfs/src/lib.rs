@@ -49,7 +49,6 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
@@ -66,6 +65,8 @@ use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_crypto::{AeadKey, MacKey};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 
+mod allocator;
+mod allocmap;
 mod btree;
 mod check;
 mod cluster;
@@ -102,9 +103,10 @@ pub use unlock::{
 };
 pub use xform::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 
+use allocator::{Allocator, MAX_PENDING_DISCARD};
+use allocmap::MapGeometry;
 use dedupe::{
-    chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, DedupeIndex,
-    REVERSE_REF_CAP,
+    chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, REVERSE_REF_CAP,
 };
 use header::{BlockHeader, BlockType, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
@@ -572,50 +574,29 @@ pub struct ARXFS<B: Block> {
     /// The volume's deduplication domain (`crypto` module). Dedupe never
     /// crosses it.
     dedupe_domain: u64,
-    /// In-memory, rebuildable dedupe index (never authoritative): a
-    /// `(domain, length, logical hash)` key mapping to a candidate chunk and
-    /// the referrer that introduced it. Rebuilt from the chunk + reverse-ref
-    /// trees at [`ARXFS::open`]; every candidate is liveness-checked and
-    /// byte-verified before sharing, so a stale entry can never merge unequal
-    /// data.
-    dedupe_index: DedupeIndex,
     root_phys: u64,
-    /// Sparse set of the *used* physical block numbers. The bitmap tracks
-    /// occupancy, and on a mostly-empty volume almost every block is free, so
-    /// recording only the (comparatively few) used blocks scales the in-RAM
-    /// cost with the working set rather than with the device size. A dense
-    /// per-block bitmap sized to the whole device allocates O(volume) words at
-    /// mount and exhausts the bounded kernel heap on a real multi-GB volume.
-    used: BTreeSet<u64>,
+    /// Free blocks in the committed volume, read straight from the transaction
+    /// root at mount. A read-only handle holds no allocator, so this is the
+    /// only free-space figure it has — and the only one it needs, since it can
+    /// never allocate.
     free_count: u64,
-    txn_allocated: Vec<u64>,
-    txn_freed: Vec<u64>,
-    /// The blocks allocated by the current, not-yet-committed transaction,
-    /// held as a sparse set keyed by physical block number. Only the handful
-    /// of blocks a single transaction touches are ever present, so this is
-    /// bounded by the transaction working set — never by the device block
-    /// count. A dense per-block marker would scale with the whole volume and
-    /// exhaust the kernel heap on a large device.
-    txn_private: BTreeSet<u64>,
-    /// Transient, rebuildable queue of physical blocks that a
-    /// committed transaction returned to the free pool and that have
-    /// not yet been discarded to the device. A block enters here only
-    /// once [`Self::finish_txn`] has marked it free — i.e. it is
-    /// unreachable from the committed root, every reflink, and every
-    /// deduped extent (a shared chunk at refcount >= 1 is never freed,
-    /// `release_block_ref`). [`Self::trim`] re-checks each block is
-    /// still free before discarding, so a crash that drops this queue
-    /// never loses live data (`docs/src/filesystem/arxfs-spec.md`
-    /// §11, §4).
-    pending_discard: Vec<u64>,
+    /// Everything only a writable mount can use: the on-disk allocation map
+    /// and its cursors, the per-transaction bookkeeping, the pending-discard
+    /// queue, and the dedupe index (`allocator` module). `None` on a read-only
+    /// handle, which is what makes "a read-only mount never allocates" a
+    /// property of the type rather than a convention — and what lets it mount
+    /// without reading or rebuilding any allocation state at all.
+    alloc: Option<Allocator>,
+    /// First block of the allocation-map region, as the committed transaction
+    /// root records it. Held here rather than read back from the allocator so
+    /// a grow can commit the region's new home before the map moves into it.
+    alloc_map_start: u64,
     saved_inode_tree_root: u64,
     saved_next_ino: u64,
     saved_chunk_tree_root: u64,
     saved_reverse_ref_tree_root: u64,
     saved_scrub_progress_root: u64,
     saved_health_baseline_root: u64,
-    alloc_cursor: u64,
-    meta_cursor: u64,
     clock: fn() -> Time64,
     /// When `true`, the repair-on-read paths (`read_meta`, `read_sb_slot`,
     /// `read_txn_root`) skip writing a good companion back over a bad primary,
@@ -648,16 +629,6 @@ const COMPRESS_CLUSTER_BLOCKS: u64 = 16;
 /// commit a new root even on an otherwise-full volume. Metadata allocation may
 /// draw on this reserve; data allocation stops above it (`alloc_block`).
 const METADATA_RESERVE: u64 = 16;
-
-/// Upper bound on the transient pending-discard queue, in blocks. The queue
-/// batches freed-but-not-yet-trimmed blocks; it is rebuildable, non-authoritative
-/// state, so a deliberately bounded, **volume-independent** ceiling keeps its
-/// worst-case footprint fixed (8 bytes per entry, so under 1 MiB here) no matter
-/// how large the device is. A device-sized cap would scale the queue with the
-/// block count and exhaust the bounded kernel heap on a large volume; dropping a
-/// freed block from a full queue merely leaves it un-discarded (still free) until
-/// a future free, trim pass, or mount rebuild requeues it, so nothing is lost.
-const MAX_PENDING_DISCARD: usize = 1 << 16;
 
 /// The inode tree's record shape: a 256-byte inode keyed by its number.
 fn inode_spec() -> btree::TreeSpec {
@@ -700,29 +671,6 @@ impl<B: Block> ARXFS<B> {
     fn data_capacity(&self) -> u64 {
         (self.block_size - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER)
             as u64
-    }
-
-    // --- in-memory used-block bitmap ---
-
-    fn bit_used(&self, block: u64) -> bool {
-        self.used.contains(&block)
-    }
-
-    fn mark_used(&mut self, block: u64) {
-        // A block outside the committed volume is never marked, exactly as the
-        // dense bitmap ignored an out-of-range word.
-        if block >= self.total_blocks {
-            return;
-        }
-        if self.used.insert(block) {
-            self.free_count = self.free_count.saturating_sub(1);
-        }
-    }
-
-    fn mark_free(&mut self, block: u64) {
-        if self.used.remove(&block) {
-            self.free_count = self.free_count.saturating_add(1);
-        }
     }
 
     /// Replace the wall clock used to stamp the timestamps. Used by tests
@@ -899,104 +847,11 @@ impl<B: Block> ARXFS<B> {
             .map_err(|_| DriverError::DeviceFault)
     }
 
-    /// Mark a metadata block and its companion mirror used in the free-space
-    /// bitmap (the rebuild and live paths both account for both copies).
-    fn mark_meta_used(&mut self, phys: u64) {
-        self.mark_used(phys);
-        self.mark_used(Self::companion(phys));
-    }
-
     /// Whether `phys` was allocated by the current, not-yet-committed
     /// transaction and may therefore be overwritten in place.
     fn is_txn_private(&self, phys: u64) -> bool {
-        self.txn_private.contains(&phys)
-    }
-
-    /// Allocate one free block from the pool, marking it used and private to
-    /// the current transaction. For `metadata` the returned block is the
-    /// **primary** of a mirrored pair: its companion at `companion(primary)`
-    /// is reserved at the same time, so the two physical copies a metadata
-    /// block needs (`docs/src/filesystem/arxfs-spec.md` §5) are always
-    /// adjacent.
-    ///
-    /// Data and metadata draw from opposite ends of the pool: file data scans
-    /// **upward** from the low end and metadata (tree nodes, the transaction
-    /// root, directory blocks) scans **downward** from the high end. Keeping
-    /// the two streams apart lets a large sequential write land in physically
-    /// contiguous blocks even though it interleaves extent-tree growth, so it
-    /// collapses to one extent run rather than fragmenting (`docs/src/filesystem/arxfs-spec.md`
-    /// §6). Metadata also draws on the last [`METADATA_RESERVE`] free blocks so
-    /// a delete or other shrinking transaction can still copy-on-write itself
-    /// on an otherwise-full volume; data allocation stops at the reserve and
-    /// fails closed with [`DriverError::NoSpace`].
-    fn alloc_block(&mut self, metadata: bool) -> Result<u64, DriverError> {
-        if metadata {
-            self.alloc_meta_pair()
-        } else {
-            self.alloc_data_block()
-        }
-    }
-
-    /// Mark `block` used, private to this transaction, and recorded for
-    /// rollback.
-    fn claim_block(&mut self, block: u64) {
-        self.mark_used(block);
-        self.txn_private.insert(block);
-        self.txn_allocated.push(block);
-    }
-
-    /// Allocate one data block, scanning **upward** from the low end.
-    fn alloc_data_block(&mut self) -> Result<u64, DriverError> {
-        if self.free_count <= METADATA_RESERVE {
-            return Err(DriverError::NoSpace);
-        }
-        let start = RING_BLOCKS;
-        let total = self.total_blocks;
-        let span = total.saturating_sub(start);
-        let mut scanned = 0u64;
-        let mut block = self.alloc_cursor.max(start);
-        while scanned < span {
-            if block >= total {
-                block = start;
-            }
-            if !self.bit_used(block) {
-                self.claim_block(block);
-                self.alloc_cursor = block + 1;
-                return Ok(block);
-            }
-            block += 1;
-            scanned += 1;
-        }
-        Err(DriverError::NoSpace)
-    }
-
-    /// Allocate a mirrored metadata pair, scanning **downward** from the high
-    /// end for two adjacent free blocks `(primary, primary + 1)`. Returns the
-    /// primary; both blocks are claimed. Fails closed with
-    /// [`DriverError::NoSpace`] when no adjacent free pair remains — never a panic.
-    fn alloc_meta_pair(&mut self) -> Result<u64, DriverError> {
-        let start = RING_BLOCKS;
-        let total = self.total_blocks;
-        // `hi` is the companion (upper) block; the primary is `hi - 1`, which
-        // must stay at or above the reserved ring region.
-        let mut hi = self.meta_cursor.clamp(start + 1, total - 1);
-        let span = total.saturating_sub(start + 1);
-        let mut scanned = 0u64;
-        while scanned <= span {
-            if hi < start + 1 {
-                hi = total - 1;
-            }
-            let primary = hi - 1;
-            if !self.bit_used(hi) && !self.bit_used(primary) {
-                self.claim_block(primary);
-                self.claim_block(hi);
-                self.meta_cursor = primary.saturating_sub(1).max(start + 1);
-                return Ok(primary);
-            }
-            hi = hi.saturating_sub(1);
-            scanned += 1;
-        }
-        Err(DriverError::NoSpace)
+        self.allocator()
+            .is_ok_and(|alloc| alloc.txn_private.contains(&phys))
     }
 
     /// Free a block. A block allocated **by this transaction** (still private,
@@ -1021,9 +876,11 @@ impl<B: Block> ARXFS<B> {
         }
         if self.is_txn_private(phys) {
             self.mark_free(phys);
-            self.txn_private.remove(&phys);
-        } else {
-            self.txn_freed.push(phys);
+            if let Ok(alloc) = self.allocator_mut() {
+                alloc.txn_private.remove(&phys);
+            }
+        } else if let Ok(alloc) = self.allocator_mut() {
+            alloc.txn_freed.insert(phys);
         }
     }
 
@@ -1123,8 +980,10 @@ impl<B: Block> ARXFS<B> {
     /// Reset the per-transaction bookkeeping at the start of an operation and
     /// snapshot the published tree state so a failed operation can roll back.
     fn begin(&mut self) {
-        self.txn_allocated.clear();
-        self.txn_freed.clear();
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.txn_allocated.clear();
+            alloc.txn_freed.clear();
+        }
         self.saved_inode_tree_root = self.inode_tree_root;
         self.saved_next_ino = self.next_ino;
         self.saved_chunk_tree_root = self.chunk_tree_root;
@@ -1143,12 +1002,24 @@ impl<B: Block> ARXFS<B> {
         self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
         self.scrub_progress_root = self.saved_scrub_progress_root;
         self.health_baseline_root = self.saved_health_baseline_root;
-        let allocated = core::mem::take(&mut self.txn_allocated);
+        let allocated = match self.allocator_mut() {
+            Ok(alloc) => {
+                alloc.txn_freed.clear();
+                core::mem::take(&mut alloc.txn_allocated)
+            }
+            Err(_) => Vec::new(),
+        };
         for block in allocated {
-            self.mark_free(block);
-            self.txn_private.remove(&block);
+            // A block this transaction allocated and then released again is
+            // already back in the pool; only one that is still private has an
+            // allocation left to undo.
+            if self
+                .allocator_mut()
+                .is_ok_and(|alloc| alloc.txn_private.remove(&block))
+            {
+                self.mark_free(block);
+            }
         }
-        self.txn_freed.clear();
         // The freed allocations bypassed `free_block`, so no per-block
         // invalidation ran: drop everything rather than risk a stale
         // cluster over a recycled run (fail closed).
@@ -1160,14 +1031,17 @@ impl<B: Block> ARXFS<B> {
     /// Apply a committed transaction's deferred frees and clear the private
     /// markers, making superseded blocks reusable by the next transaction.
     fn finish_txn(&mut self) {
-        let allocated = core::mem::take(&mut self.txn_allocated);
-        for block in allocated {
-            self.txn_private.remove(&block);
-        }
-        let freed = core::mem::take(&mut self.txn_freed);
+        let Ok(alloc) = self.allocator_mut() else {
+            return;
+        };
+        // Every transaction-private block came from this transaction's
+        // allocations, so clearing both sets releases exactly the same
+        // markers the pair recorded.
+        alloc.txn_allocated.clear();
+        alloc.txn_private.clear();
+        let freed = core::mem::take(&mut alloc.txn_freed);
         for block in freed {
             self.mark_free(block);
-            self.txn_private.remove(&block);
             self.enqueue_discard(block);
         }
     }
@@ -1186,8 +1060,10 @@ impl<B: Block> ARXFS<B> {
         if block < RING_BLOCKS || block >= self.total_blocks {
             return;
         }
-        if self.pending_discard.len() < MAX_PENDING_DISCARD {
-            self.pending_discard.push(block);
+        if let Ok(alloc) = self.allocator_mut() {
+            if alloc.pending_discard.len() < MAX_PENDING_DISCARD {
+                alloc.pending_discard.push(block);
+            }
         }
     }
 
@@ -1220,6 +1096,15 @@ impl<B: Block> ARXFS<B> {
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         let old_root = self.root_phys;
         let root_phys = self.alloc_block(true)?;
+        // Release the superseded root into the deferred-free set *before* the
+        // new root is sealed, so the free count the root records is the one
+        // the committed volume will actually have. The blocks stay reserved
+        // until `finish_txn`, and nothing allocates between here and the
+        // commit point.
+        self.free_meta(old_root);
+        self.map_fold_pending()?;
+        let deferred = self.allocator()?.txn_freed.len() as u64;
+        let alloc_map_start = self.alloc_map_start;
         let root = TxnRoot {
             generation: next_gen,
             inode_tree_root: self.inode_tree_root,
@@ -1228,6 +1113,9 @@ impl<B: Block> ARXFS<B> {
             reverse_ref_tree_root: self.reverse_ref_tree_root,
             scrub_progress_root: self.scrub_progress_root,
             health_baseline_root: self.health_baseline_root,
+            alloc_map_start,
+            alloc_map_covered: self.total_blocks,
+            free_count: self.free_count.saturating_add(deferred),
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, &buf)?;
@@ -1252,7 +1140,6 @@ impl<B: Block> ARXFS<B> {
         self.generation = next_gen;
         self.ring_pos = self.ring_pos.wrapping_add(1);
         self.root_phys = root_phys;
-        self.free_meta(old_root);
         self.finish_txn();
         Ok(())
     }
@@ -1269,7 +1156,7 @@ impl<B: Block> ARXFS<B> {
         if total_blocks <= RING_BLOCKS + 8 {
             return Err(DriverError::NoSpace);
         }
-        let mut fs = Self {
+        let fs = Self {
             block,
             fs_uuid: 0,
             mac_key: [0u8; tairix_crypto::MAC_KEY_LEN],
@@ -1288,29 +1175,20 @@ impl<B: Block> ARXFS<B> {
             scrub_progress_root: 0,
             health_baseline_root: 0,
             dedupe_domain: 0,
-            dedupe_index: DedupeIndex::new(),
             root_phys: 0,
-            used: BTreeSet::new(),
             free_count: total_blocks,
-            txn_allocated: Vec::new(),
-            txn_freed: Vec::new(),
-            txn_private: BTreeSet::new(),
-            pending_discard: Vec::new(),
+            alloc: None,
+            alloc_map_start: 0,
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
             saved_chunk_tree_root: 0,
             saved_reverse_ref_tree_root: 0,
             saved_scrub_progress_root: 0,
             saved_health_baseline_root: 0,
-            alloc_cursor: RING_BLOCKS,
-            meta_cursor: total_blocks - 1,
             clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
         };
-        for block in 0..RING_BLOCKS {
-            fs.mark_used(block);
-        }
         Ok(fs)
     }
 
@@ -1368,6 +1246,10 @@ impl<B: Block> ARXFS<B> {
         // (recorded, not failed), so the outcome is intentionally not
         // propagated as a format error.
         let _ = fs.mkfs_discard();
+        // Lay the allocation map down before anything is allocated from it.
+        // The region sits immediately above the superblock ring, so a fresh
+        // volume's layout is fully determined by its block size and size.
+        fs.rebuild_free_space_at(RING_BLOCKS, fs.total_blocks)?;
 
         fs.begin();
         let now = (fs.clock)();
@@ -1386,6 +1268,10 @@ impl<B: Block> ARXFS<B> {
         // enabled regardless.
         fs.store_initial_health_baseline()?;
         fs.commit()?;
+        // Leave the map stamped clean at the committed generation, so the very
+        // first mount of a freshly built image adopts it instead of walking
+        // the volume.
+        fs.map_persist()?;
         Ok(fs)
     }
 
@@ -1514,30 +1400,44 @@ impl<B: Block> ARXFS<B> {
         fs.scrub_progress_root = root.scrub_progress_root;
         fs.health_baseline_root = root.health_baseline_root;
 
-        // Rebuild the free-block bitmap by walking the live trees (free
-        // space is rebuildable).
-        fs.rebuild_free_space()?;
-        // Rebuild the in-memory dedupe index from the authoritative chunk and
-        // reverse-reference trees (the index is rebuildable, never
-        // authoritative).
-        fs.rebuild_dedupe_index()?;
+        fs.free_count = root.free_count;
+        // A read-only handle builds no allocation state at all: it cannot
+        // allocate, so the map would only be dead weight, and skipping it is
+        // what makes mounting a read-only volume a handful of block reads.
+        if !read_only {
+            fs.adopt_or_rebuild_alloc_map(root.alloc_map_start, root.alloc_map_covered)?;
+        }
         Ok(fs)
     }
 
-    /// Set the volume's working block count to span exactly `total` blocks.
-    /// The used-block set is sparse and derived state, so growing the volume
-    /// needs no resize (the new tail blocks are simply absent from the set,
-    /// i.e. free) and shrinking drops any used entries that fall beyond the
-    /// new tail. The transaction-private set is likewise sparse and keyed by
-    /// block number, so it too needs no resize. The allocation cursors are
-    /// reset into the new range so the next walk stays in bounds.
+    /// Take up the allocation map the committed root names, rebuilding it from
+    /// the authoritative trees when it cannot be trusted — after a crash, or
+    /// when a page no longer authenticates.
+    fn adopt_or_rebuild_alloc_map(&mut self, start: u64, covered: u64) -> Result<(), DriverError> {
+        // The root is authenticated, so a region it names outside the volume,
+        // or a coverage that disagrees with the committed size, is real
+        // corruption rather than a stale value: refuse the mount instead of
+        // laying a fresh region over live data.
+        if start < RING_BLOCKS || start >= self.total_blocks || covered != self.total_blocks {
+            return Err(DriverError::DeviceFault);
+        }
+        self.alloc_map_start = start;
+        if self.map_adopt(start, covered) {
+            return Ok(());
+        }
+        self.rebuild_free_space_at(start, covered)
+    }
+
+    /// Set the volume's working block count to span exactly `total` blocks and
+    /// reset the allocation cursors into the new range so the next scan stays
+    /// in bounds. The allocation map's own coverage is changed separately, by
+    /// the grow path, because moving it may mean relaying the region.
     fn adopt_total_blocks(&mut self, total: u64) {
         self.total_blocks = total;
-        // Drop any used markers in the truncated tail so the set never names a
-        // block outside the committed volume.
-        let _ = self.used.split_off(&total);
-        self.alloc_cursor = RING_BLOCKS;
-        self.meta_cursor = total.saturating_sub(1);
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.alloc_cursor = RING_BLOCKS;
+            alloc.meta_cursor = total.saturating_sub(1);
+        }
     }
 
     /// Grow the mounted volume to fill an enlarged backing device, online and
@@ -1589,26 +1489,90 @@ impl<B: Block> ARXFS<B> {
             return Ok(0);
         }
         let old_total = self.total_blocks;
-        let old_free_count = self.free_count;
-        let old_meta_cursor = self.meta_cursor;
+        let old_start = self.alloc_map_start;
         let added = new_total - old_total;
+        let new_start = self.plan_grown_map(new_total)?;
         self.adopt_total_blocks(new_total);
-        // The newly adopted tail blocks are all free.
-        self.free_count = old_free_count.saturating_add(added);
+        self.alloc_map_start = new_start;
+        // Widen (or relay) the map before the commit, so the free count the
+        // new root records already accounts for the added tail.
+        self.extend_alloc_map(new_start, new_total)?;
         self.begin();
         match self.commit() {
             Ok(()) => Ok(added),
             Err(err) => {
                 // The commit did not publish: undo this transaction's
                 // allocations and restore the previous in-memory geometry so
-                // the handle still matches the committed on-disk size.
+                // the handle still matches the committed on-disk size. The map
+                // now describes a volume the device never committed to, so it
+                // goes back too; failing that leaves the handle unusable and
+                // the caller must see it.
                 self.rollback();
                 self.adopt_total_blocks(old_total);
-                self.free_count = old_free_count;
-                self.meta_cursor = old_meta_cursor;
+                self.alloc_map_start = old_start;
+                self.rebuild_free_space_at(old_start, old_total)?;
                 Err(err)
             }
         }
+    }
+
+    /// Where the allocation map will live once the volume spans `new_total`
+    /// blocks: in place when the region does not need to be longer, otherwise
+    /// a contiguous free run — preferring the freshly added tail, which is
+    /// free by construction.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when no contiguous run long enough for the
+    /// larger region exists.
+    fn plan_grown_map(&mut self, new_total: u64) -> Result<u64, DriverError> {
+        let geom = self.allocator()?.geom;
+        let grown = MapGeometry::new(geom.start(), self.block_size, new_total)?;
+        if grown.region_blocks() <= geom.region_blocks() {
+            return Ok(geom.start());
+        }
+        let needed = grown.region_blocks();
+        let old_total = self.total_blocks;
+        if new_total - old_total >= needed {
+            return Ok(old_total);
+        }
+        self.map_find_free_run(needed, RING_BLOCKS, old_total)?
+            .ok_or(DriverError::NoSpace)
+    }
+
+    /// Take the allocation map from its current coverage up to `covered`
+    /// blocks at `start`: widened in place when the region is unchanged and
+    /// only the last page gained capacity, relaid from the authoritative trees
+    /// when the region itself must be longer or must move.
+    fn extend_alloc_map(&mut self, start: u64, covered: u64) -> Result<(), DriverError> {
+        let geom = self.allocator()?.geom;
+        let grown = MapGeometry::new(start, self.block_size, covered)?;
+        if start != geom.start() || grown.region_blocks() != geom.region_blocks() {
+            return self.rebuild_free_space_at(start, covered);
+        }
+        // Same region, same pages: only the last page's capacity moved, and
+        // the bits it gained were already clear because nothing ever set a bit
+        // beyond the old coverage.
+        let last = grown.pages().saturating_sub(1);
+        let gained = grown
+            .page_capacity(last)
+            .saturating_sub(geom.page_capacity(last));
+        self.allocator_mut()?.geom = grown;
+        self.free_count = self.free_count.saturating_add(covered - geom.covered());
+        if gained == 0 {
+            return Ok(());
+        }
+        let (index, offset) = grown.summary_slot_of(last);
+        let summary_block = grown.summary_block(index);
+        self.map_read(summary_block)?;
+        let alloc = self.allocator_mut()?;
+        let summary = alloc
+            .cache
+            .write(summary_block)
+            .ok_or(DriverError::DeviceFault)?;
+        let free = allocmap::summary_get(summary, offset);
+        allocmap::summary_set(summary, offset, free.saturating_add(gained));
+        Ok(())
     }
 
     /// Establish the working key set by unwrapping the master key with
@@ -1722,60 +1686,38 @@ impl<B: Block> ARXFS<B> {
         Ok(root)
     }
 
-    /// Rebuild the in-memory free-block bitmap from scratch by walking the
-    /// live trees: the superblock ring (always reserved), the published
-    /// transaction root, the scrub-progress record if a scrub is mid-pass,
-    /// every chunk/reverse-reference and inode-tree node, and, for each inode,
-    /// its extent-tree nodes plus the physical runs they map. Every metadata
-    /// block accounts for both its physical copies
-    /// (`docs/src/filesystem/arxfs-spec.md` §4 — free space is rebuildable;
-    /// — two copies).
-    ///
-    /// The free bitmap is rebuildable derived state, never authoritative, so
-    /// this is the single rebuild walk shared by [`Self::open`] (mount) and the
-    /// offline [`Self::check`]. It is idempotent: a second
-    /// rebuild of an unchanged volume produces the same bitmap.
-    fn rebuild_free_space(&mut self) -> Result<(), DriverError> {
-        self.used.clear();
-        self.free_count = self.total_blocks;
-        for block in 0..RING_BLOCKS {
-            self.mark_used(block);
-        }
-        self.mark_meta_used(self.root_phys);
-        if self.scrub_progress_root != 0 {
-            self.mark_meta_used(self.scrub_progress_root);
-        }
-        if self.health_baseline_root != 0 {
-            self.mark_meta_used(self.health_baseline_root);
-        }
+    /// Mark every block reachable from the committed trees used while the
+    /// allocation map is being rebuilt: every chunk / reverse-reference and
+    /// inode-tree node, and, for each inode, its extent-tree nodes plus the
+    /// physical runs they map. Every metadata block accounts for both its
+    /// physical copies (`docs/src/filesystem/arxfs-spec.md` §4, §5).
+    pub(crate) fn mark_reachable_metadata(&mut self) -> Result<(), DriverError> {
         for node in self.btree_collect_nodes(self.chunk_tree_root, chunk_spec())? {
-            self.mark_meta_used(node);
+            self.mark_meta_used_checked(node)?;
         }
         for node in self.btree_collect_nodes(self.reverse_ref_tree_root, reverse_ref_spec())? {
-            self.mark_meta_used(node);
+            self.mark_meta_used_checked(node)?;
         }
         let inode_spec = inode_spec();
-        for node in self.btree_collect_nodes(self.inode_tree_root, inode_spec)? {
-            self.mark_meta_used(node);
+        let (nodes, inodes) = self.btree_collect_tree(self.inode_tree_root, inode_spec)?;
+        for node in nodes {
+            self.mark_meta_used_checked(node)?;
         }
-        let inodes = self.btree_collect_entries(self.inode_tree_root, inode_spec)?;
         for (ino, value) in inodes {
             let inode = Inode::decode(&value)?.ok_or(DriverError::DeviceFault)?;
             let ino = u32::try_from(ino).map_err(|_| DriverError::DeviceFault)?;
             self.mark_inode_blocks(ino, &inode)?;
         }
-        self.alloc_cursor = RING_BLOCKS;
-        self.meta_cursor = self.total_blocks - 1;
         Ok(())
     }
 
     /// Mark every extent-tree node and every physical run reachable from
-    /// `inode` (number `ino`) as used while rebuilding the free bitmap at
-    /// mount.
+    /// `inode` (number `ino`) as used while the allocation map is rebuilt.
     fn mark_inode_blocks(&mut self, ino: u32, inode: &Inode) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
-        for node in self.btree_collect_nodes(inode.extent_root, spec)? {
-            self.mark_meta_used(node);
+        let (nodes, extents) = self.btree_collect_tree(inode.extent_root, spec)?;
+        for node in nodes {
+            self.mark_meta_used_checked(node)?;
         }
         // A directory's content blocks are themselves metadata
         // ([`BlockType::Directory`], mirrored pairs); a regular file's are
@@ -1783,20 +1725,20 @@ impl<B: Block> ARXFS<B> {
         // free set matches the live one (`docs/src/filesystem/arxfs-spec.md`
         // §5).
         let is_dir = inode.is_dir();
-        for (_, value) in self.btree_collect_entries(inode.extent_root, spec)? {
+        for (_, value) in extents {
             let ext = Extent::decode(&value)?;
             for b in 0..ext.stored {
                 if is_dir {
-                    self.mark_meta_used(ext.phys + b);
+                    self.mark_meta_used_checked(ext.phys + b)?;
                 } else {
-                    self.mark_used(ext.phys + b);
+                    self.mark_used_checked(ext.phys + b)?;
                 }
             }
         }
         // The attribute block is a mirrored metadata pair like a directory
         // block, so account for its companion too.
         if inode.attr_root != 0 {
-            self.mark_meta_used(inode.attr_root);
+            self.mark_meta_used_checked(inode.attr_root)?;
         }
         Ok(())
     }
@@ -2130,11 +2072,11 @@ impl<B: Block> ARXFS<B> {
         content: &[u8],
     ) -> Result<Option<DedupeCandidate>, DriverError> {
         let key = dedupe_key(domain, as_u32(content.len()), logical_hash);
-        let Some(cand) = self.dedupe_index.get(&key) else {
+        let Some(cand) = self.allocator_mut()?.dedupe_index.get(&key) else {
             return Ok(None);
         };
         if !self.candidate_is_live(cand)? {
-            self.dedupe_index.remove(&key);
+            self.allocator_mut()?.dedupe_index.remove(&key);
             return Ok(None);
         }
         if usize::try_from(self.data_refcount(cand.phys)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP
@@ -2142,7 +2084,7 @@ impl<B: Block> ARXFS<B> {
             return Ok(None);
         }
         if !self.byte_identical(cand.phys, content) {
-            self.dedupe_index.remove(&key);
+            self.allocator_mut()?.dedupe_index.remove(&key);
             return Ok(None);
         }
         Ok(Some(cand))
@@ -2193,38 +2135,8 @@ impl<B: Block> ARXFS<B> {
         bi: u64,
     ) {
         let key = dedupe_key(domain, as_u32(as_usize(self.data_capacity())), logical_hash);
-        self.dedupe_index.insert(
-            key,
-            DedupeCandidate {
-                phys,
-                inode: ino,
-                logical: bi,
-            },
-        );
-    }
-
-    /// Rebuild the in-memory dedupe index from the authoritative chunk and
-    /// reverse-reference trees at mount (the index is rebuildable). Each
-    /// shared chunk contributes one candidate keyed by its stored domain,
-    /// length, and logical hash, attributed to its first recorded referrer.
-    fn rebuild_dedupe_index(&mut self) -> Result<(), DriverError> {
-        self.dedupe_index.clear();
-        let chunks = self.btree_collect_entries(self.chunk_tree_root, chunk_spec())?;
-        for (phys, value) in chunks {
-            let record = ChunkRecord::decode(&value).ok_or(DriverError::DeviceFault)?;
-            // A cluster chunk (a reflink-shared compressed extent) records the
-            // whole cluster's plaintext length, never the single-block
-            // capacity the per-block dedupe path keys on, so it can never
-            // satisfy a per-block lookup. Skip it.
-            if u64::from(record.length) != self.data_capacity() {
-                continue;
-            }
-            let referrers = self.reverse_refs(phys)?;
-            let Some(&(ino, bi)) = referrers.first() else {
-                return Err(DriverError::DeviceFault);
-            };
-            let key = dedupe_key(record.domain, record.length, &record.logical_hash);
-            self.dedupe_index.insert(
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.dedupe_index.insert(
                 key,
                 DedupeCandidate {
                     phys,
@@ -2233,7 +2145,6 @@ impl<B: Block> ARXFS<B> {
                 },
             );
         }
-        Ok(())
     }
 
     /// Byte offset of a data block's compression descriptor: immediately after
@@ -3560,7 +3471,13 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         if self.read_only {
             return Ok(());
         }
-        self.block.flush()
+        // The allocation map is rebuildable, so ordinary commits leave it
+        // dirty on the device and exact only in RAM. An explicit sync is the
+        // point at which it is worth writing out and stamping clean, so the
+        // next mount can adopt it instead of walking the volume; a crash
+        // between syncs simply costs that walk. The map's own persist forces
+        // the device cache, which is this sync's durability barrier too.
+        self.map_persist()
     }
 }
 

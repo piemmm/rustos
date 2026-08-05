@@ -2652,7 +2652,7 @@ copy/archive tools (§2.2).
 **Status: foundation + syscall surface done.** Delivered: `lib/fsmeta`
 (grammar + AttrSet + preset registry + fuzz harness), the `FilesystemAttrs`
 ABI, and the ARXFS attribute store (encrypt/decrypt, COW read/write,
-free-on-remove, free-space rebuild accounting, reflink copy) with driver
+free-on-remove with correct allocation-map accounting, reflink copy) with driver
 tests (round-trip/remount, case-sensitivity, unknown-namespace + oversize +
 block-overflow fail-closed, encryption at rest, read-only refusal,
 crash-atomicity replay, no-leak, reflink independence, acorn preset
@@ -4658,30 +4658,30 @@ and fail-closed (§24.4) — this work must not loosen them.
   configurable ceiling (`IdentityTableBuilder::with_supplementary_group_limit`);
   the supplementary-group store was already a growable `Vec`, and a candidate
   record can never raise the ceiling, so the §24.4 anti-DoS bound is preserved.
-- ARXFS mount footprint (`drivers/filesystem/arxfs/src/lib.rs`) — **done**
-  (the §24.1 fix for the Raspberry Pi 4 eMMC2 boot OOM): both in-RAM
-  allocation structures that scaled with the device block count are now
-  sparse. The per-transaction private-block tracker was a dense
-  `vec![false; total_blocks]` and the free-space map was a dense
-  `free: Vec<u64>` bitmap (`total_blocks / 64` words allocated at mount from
-  the device geometry); mounting a real multi-GiB volume allocated O(volume)
-  and exhausted the 64 MiB kernel heap before any file was read. Both are now
-  sparse `BTreeSet<u64>`s — the free map tracks the *used* block numbers (a
-  real volume is overwhelmingly free, so the set holds the few used blocks),
-  and the transaction-private set the handful of blocks a transaction touches.
-  Resident size now scales with the volume's contents (working set), not its
-  size. Free space is a single 64-bit count, and the transient pending-discard
-  queue is capped at a fixed, volume-independent `MAX_PENDING_DISCARD` (was
-  `as_usize(total_blocks)`, which saturated to `usize::MAX` on a huge device
-  and could grow the queue until heap exhaustion). A `SparseBlock` test double
-  proves a 100 TiB volume (~26.8 billion blocks) formats, mounts, and serves
-  with only its working set resident and the discard queue bounded. **Residual
-  (§26.6, not a boot blocker), next free-space work:** a near-full very large
-  volume still costs RAM proportional to its *used* blocks; the structural
-  answer is a paged / on-disk free-space representation (extent /
-  bitmap-hierarchy) with only a bounded working-set cache resident, so even a
-  near-full 100 TB+ volume mounts within a fixed RAM budget (see
-  `docs/src/filesystem/arxfs-spec.md` §4).
+- ARXFS mount footprint (`drivers/filesystem/arxfs/src/{allocmap,allocator}.rs`)
+  — **done** (the §24.1/§26.6 fix for the Raspberry Pi 4 eMMC2 boot OOM and for
+  mount cost scaling with volume contents rather than volume size — mounting
+  the shipped 128 MiB read-only `/System` volume used to cost 10,541 block
+  reads and ~6 s of every boot). Free space is tracked by an on-disk **paged
+  allocation map** (bitmap pages plus a per-page free-count summary, sealed
+  under `BlockType::AllocMap`, updated in place rather than copy-on-written)
+  instead of a walk of every tree, inode, and extent at mount. A mount
+  **adopts** the map with a handful of reads when it authenticates at the
+  committed transaction root's address and its clean/dirty stamp shows no
+  update was left in flight; otherwise it rebuilds from the authoritative
+  trees, so a crash between syncs costs one rebuild, never a correctness
+  problem. Resident cost is a bounded LRU cache of at most
+  `MAX_CACHED_MAP_BLOCKS` (64) region blocks per mounted volume,
+  volume-independent, so several 100 TB+ volumes mount together on a 1 GiB
+  machine — including a near-full one, which the previous working-set-sized
+  approach did not cover. A **read-only mount holds no allocator state at
+  all**: it cannot allocate, free, dedupe, or trim by construction, and reads
+  only the superblock ring and the committed root, so mounting a read-only
+  volume such as `/System` costs a handful of block reads rather than a
+  volume-contents walk. The dedupe index is no longer pre-seeded at mount
+  either; it warms from the writes that use it. The transient pending-discard
+  queue stays capped at a fixed, volume-independent `MAX_PENDING_DISCARD`.
+  Spec: `docs/src/filesystem/arxfs-spec.md` §4.
 - Kernel heap arena — `lib/kalloc` `FreeListAllocator` / `HEAP_BYTES` — **done**
   (the §24.1 fix for the `stress --vm` kernel OOM panic): the heap was a fixed
   64 MiB `.bss` slab that, once exhausted, returned null from `GlobalAlloc` →

@@ -287,11 +287,9 @@ impl<B: Block> ARXFS<B> {
         let mut report = CheckReport::default();
 
         // Rebuild the rebuildable derived state first, from the authoritative
-        // trees, before any allocation: a corrupt free-space or dedupe-index
-        // derivation must never keep a sound volume unmountable. These are
-        // in-memory only — they mutate no on-disk block.
+        // trees, before any allocation: a corrupt free-space derivation must
+        // never keep a sound volume unmountable.
         self.rebuild_free_space()?;
-        self.rebuild_dedupe_index()?;
         report.rebuilt_derived_state = true;
 
         // Reuse the online scrub's verification core: metadata both-copies
