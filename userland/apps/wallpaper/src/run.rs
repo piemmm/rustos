@@ -50,26 +50,32 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::fs::{OpenFlags, FS_IO_MAX};
-    use tairix_abi::input::{KeyInput, KeyValue};
+    use tairix_abi::input::KeyInput;
     use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_font::BitmapFont;
+    use tairix_geometry::{Point, Scale};
+    use tairix_input::InputEvent;
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_sandbox::imagerender::{render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::ThemeRegistry;
+    use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_wallpaper::{
         catalog_entries, user_settings_path, PinboardSettings, WallpaperFit, WallpaperPath,
         MAX_SETTINGS_LEN, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
     };
     use tairix_wallpaper_chooser::{
-        candidates_from_catalog, ApplyOutcome, Chooser, ChooserAction, MIN_WIN_HEIGHT,
-        MIN_WIN_WIDTH, THUMB_HEIGHT, THUMB_WIDTH, WIN_HEIGHT, WIN_WIDTH,
+        candidates_from_catalog, ApplyOutcome, Chooser, ChooserAction, Style, MIN_WIN_HEIGHT,
+        MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
-    use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+    use tairix_window::{
+        key_input_event, pointer_input_events, EventSource, WindowClient, WindowEvents,
+        WindowTransport,
+    };
 
     /// Exit code when the shared frame region could not be created or
     /// granted to the window endpoint. A reserved, fail-closed value.
@@ -317,32 +323,34 @@ mod program {
         candidates_from_catalog(&catalog)
     }
 
-    /// Render one candidate's preview through the sandboxed worker: read
-    /// the file (bounded by the shared wallpaper byte bound) and ask the
-    /// worker to place it at thumbnail size under `fit`.
+    /// Render one wallpaper through the sandboxed worker: read the file
+    /// (bounded by the shared wallpaper byte bound) and ask the worker to
+    /// place it into a `width` x `height` destination under `fit`.
     ///
     /// Fails closed to `None` — a file this app cannot read, a worker that
-    /// refuses it, or pixels that do not fill the thumbnail exactly all
+    /// refuses it, or pixels that do not fill the destination exactly all
     /// leave the caller to show a placeholder. The reason is stated on
     /// `stderr` once, since the refusal is remembered and never retried.
-    fn render_preview(
+    fn render_placed(
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         path: &WallpaperPath,
         fit: WallpaperFit,
+        width: u32,
+        height: u32,
     ) -> Option<Surface> {
         let spelled = path.as_str();
         let fd = match open_read(spelled) {
             Ok(fd) => fd,
             Err(err) => {
-                report(&alloc::format!("{spelled}: {err:?}; not previewed"));
+                report(&alloc::format!("{spelled}: {err:?}; not shown"));
                 return None;
             }
         };
         let bytes = read_bounded(fd, MAX_WALLPAPER_BYTES)?;
-        match render_wallpaper(sandbox, THUMB_WIDTH, THUMB_HEIGHT, fit, &bytes) {
-            Ok(rgba) => Surface::from_rgba8(THUMB_WIDTH, THUMB_HEIGHT, &rgba),
+        match render_wallpaper(sandbox, width, height, fit, &bytes) {
+            Ok(rgba) => Surface::from_rgba8(width, height, &rgba),
             Err(failure) => {
-                report(&alloc::format!("{spelled}: {failure}; not previewed"));
+                report(&alloc::format!("{spelled}: {failure}; not shown"));
                 None
             }
         }
@@ -449,23 +457,35 @@ mod program {
         }
     }
 
+    /// The one style the chooser paints and hit-tests through: the active
+    /// theme's interface face at the desktop's unscaled density, exactly as
+    /// the file manager and the control gallery resolve theirs.
+    fn style_for(theme: &Theme) -> Style<'_> {
+        Style::new(
+            theme,
+            Scale::ONE,
+            BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE),
+        )
+    }
+
     /// Repaint the chooser for the current window size.
     fn repaint<T: WindowTransport>(
-        chooser: &Chooser,
-        theme: &tairix_theme::Theme,
+        chooser: &mut Chooser,
+        theme: &Theme,
         client: &mut WindowClient<T>,
         window: u64,
         frames: &mut Frames,
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         chooser
-            .render(theme, mode.width_px, mode.height_px)
+            .render(style_for(theme))
             .ok_or(Errno::NoSpace)
             .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
     }
 
-    /// Re-map the window's frame region onto `new_mode`, re-lay the
-    /// chooser out at the new client size, and repaint.
+    /// Re-map the window's frame region onto `new_mode` and re-lay the
+    /// chooser out at the new client size. The caller repaints, through the
+    /// one path every other change repaints through.
     ///
     /// The ordering is fail-closed: a fresh region is created and granted
     /// first, then adopted only if the session accepts the resize. On
@@ -477,22 +497,21 @@ mod program {
     fn resize_window(
         new_mode: DisplayMode,
         chooser: &mut Chooser,
-        theme: &tairix_theme::Theme,
         client: &mut WindowClient<RtWindowTransport>,
         window: u64,
         frames: &mut Frames,
         mode: &mut DisplayMode,
-    ) -> Result<(), Errno> {
+    ) {
         let total = region_bytes(&new_mode);
         let Some((new_base, new_grant)) = allocate_frames(total) else {
-            return Ok(());
+            return;
         };
         if client
             .resize(window, new_grant, FRAME_COUNT, &new_mode)
             .is_err()
         {
             let _ = tairix_rt::shm_unmap(new_base as u64, total);
-            return Ok(());
+            return;
         }
         let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
         *frames = Frames {
@@ -501,7 +520,20 @@ mod program {
         };
         *mode = new_mode;
         chooser.relayout(mode.width_px, mode.height_px);
-        repaint(chooser, theme, client, window, frames, mode)
+    }
+
+    /// The later of two things the chooser was asked for while handling one
+    /// delivered event.
+    ///
+    /// A wire pointer event is a position and then, sometimes, a button
+    /// transition, so two answers arrive for one event: whichever of them
+    /// asked for something is what the event meant, and a transition's
+    /// answer supersedes the move's.
+    const fn latest(first: ChooserAction, second: ChooserAction) -> ChooserAction {
+        match second {
+            ChooserAction::None => first,
+            asked => asked,
+        }
     }
 
     /// Bind the app's own event mailbox and add it to a fresh wait-set,
@@ -540,28 +572,50 @@ mod program {
         Ok((endpoint, set))
     }
 
-    /// Render the first candidate still awaiting a preview, recording
-    /// either its pixels or its refusal, and report whether anything was
-    /// done.
+    /// Render one outstanding picture — the preview panel first, then the
+    /// next gallery thumbnail — recording either its pixels or its refusal,
+    /// and report whether anything was done.
     ///
-    /// One candidate per call, so the event loop stays responsive while a
-    /// large store fills in, and a candidate that names no file at all is
-    /// recorded as refused rather than being offered again for ever.
-    fn resolve_one_preview(
+    /// One picture per call, so the event loop stays responsive while a
+    /// large store fills in, and the panel the user is actually looking at
+    /// is always the next thing rendered. A refusal is remembered, so a
+    /// wallpaper that will not decode costs exactly one attempt.
+    ///
+    /// A thumbnail is the wallpaper itself at tile size, not a preview of
+    /// the fit, so it is always placed to fill its square: the gallery says
+    /// *which* wallpaper each tile is, and the preview panel is where the
+    /// chosen fit is shown.
+    fn resolve_one_render(
         chooser: &mut Chooser,
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+        theme: &Theme,
     ) -> bool {
-        let Some(index) = chooser.next_pending() else {
+        let style = style_for(theme);
+        if let Some(request) = chooser.next_preview(style) {
+            match render_placed(
+                sandbox,
+                &request.path,
+                request.fit,
+                request.width,
+                request.height,
+            ) {
+                Some(surface) => chooser.set_preview(request, surface),
+                None => chooser.mark_preview_refused(request),
+            }
+            return true;
+        }
+        let Some(request) = chooser.next_thumbnail(style) else {
             return false;
         };
-        let fit = chooser.fit();
-        let rendered = chooser
-            .candidate_path(index)
-            .cloned()
-            .and_then(|path| render_preview(sandbox, &path, fit));
-        match rendered {
-            Some(surface) => chooser.set_thumbnail(index, surface),
-            None => chooser.mark_thumbnail_refused(index),
+        match render_placed(
+            sandbox,
+            &request.path,
+            WallpaperFit::Fill,
+            request.side,
+            request.side,
+        ) {
+            Some(surface) => chooser.set_thumbnail(request.index, surface),
+            None => chooser.mark_thumbnail_refused(request.index),
         }
         true
     }
@@ -616,7 +670,7 @@ mod program {
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
         chooser.relayout(mode.width_px, mode.height_px);
-        if repaint(&chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
+        if repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
@@ -636,8 +690,8 @@ mod program {
             // Outstanding preview work is done before parking, so the grid
             // fills in as fast as the worker can render and the loop never
             // waits on work it already holds.
-            if resolve_one_preview(&mut chooser, &mut sandbox) {
-                if repaint(&chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
+            if resolve_one_render(&mut chooser, &mut sandbox, theme) {
+                if repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
                     return fail(EXIT_CHANNEL_LOST, "present refused");
                 }
                 continue;
@@ -649,70 +703,91 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let outcome = match event {
+            // What the event means to the chooser. Every arm answers in
+            // the one vocabulary the engine speaks, so the decision about
+            // what to *do* about it is made once, below.
+            let asked = match event {
+                // The pointer is the chooser's primary input: one delivered
+                // wire event is the position it happened at and, for a
+                // press or a release, the button transition after it — the
+                // shared translation every windowed app uses.
+                WindowEvent::Pointer { x, y, action, .. } => {
+                    let at = Point::new(
+                        i32::try_from(x).unwrap_or(i32::MAX),
+                        i32::try_from(y).unwrap_or(i32::MAX),
+                    );
+                    let mut asked = ChooserAction::None;
+                    for input in pointer_input_events(action, at) {
+                        asked = latest(asked, chooser.on_pointer(&input, style_for(theme)));
+                    }
+                    asked
+                }
+                WindowEvent::Scrolled { dx, dy, .. } => {
+                    chooser.on_pointer(&InputEvent::PointerScrolled { dx, dy }, style_for(theme))
+                }
+                // The keyboard is the secondary path, and reaches
+                // everything the pointer does.
                 WindowEvent::Key {
-                    key:
-                        KeyInput::Pressed {
-                            key: KeyValue::Named(named),
-                            modifiers,
-                        },
+                    key: pressed @ KeyInput::Pressed { .. },
                     ..
-                } => match chooser.handle_key(named, modifiers.shift) {
-                    ChooserAction::None => Ok(()),
-                    ChooserAction::Changed => {
-                        repaint(&chooser, theme, &mut client, window, &mut frames, &mode)
+                } => match key_input_event(pressed) {
+                    InputEvent::KeyPressed { key, modifiers } => {
+                        chooser.on_key(key, modifiers, style_for(theme))
                     }
-                    ChooserAction::Apply => {
-                        chooser.set_apply_outcome(apply(&chooser.settings_document()));
-                        repaint(&chooser, theme, &mut client, window, &mut frames, &mode)
-                    }
-                    ChooserAction::Close => {
-                        let _ = client.close(window);
-                        let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
-                        return 0;
-                    }
+                    _ => ChooserAction::None,
                 },
                 // The window manager resized (or maximized/restored) the
-                // window: re-map the frame region at the new client size,
-                // re-lay the grid out, and repaint.
+                // window: re-map the frame region at the new client size
+                // and re-lay everything out. The repaint is the shared one
+                // below, exactly as for any other change.
                 WindowEvent::Resized {
                     width_px,
                     height_px,
                     ..
-                } => resize_window(
-                    mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
-                    &mut chooser,
-                    theme,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mut mode,
-                ),
-                WindowEvent::CloseRequested { .. } => {
-                    // The desktop asked; close the window and end cleanly,
-                    // freeing the region this app owns rather than leaving
-                    // it pinned for the runtime to reclaim.
+                } => {
+                    resize_window(
+                        mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
+                        &mut chooser,
+                        &mut client,
+                        window,
+                        &mut frames,
+                        &mut mode,
+                    );
+                    ChooserAction::Changed
+                }
+                WindowEvent::CloseRequested { .. } => ChooserAction::Close,
+                // A key release repaints nothing: every control acts on the
+                // press. Focus changes and minimize leave the window's own
+                // content exactly as it was. A redraw request is already
+                // answered by the client library re-presenting the last
+                // frame, which is still what the chooser would draw. A pick
+                // conclusion can only arrive for a pick this app never asks
+                // for. Listed rather than caught by a wildcard so a new
+                // event forces a decision here.
+                WindowEvent::Key { .. }
+                | WindowEvent::Focus { .. }
+                | WindowEvent::Minimized { .. }
+                | WindowEvent::RedrawRequested { .. }
+                | WindowEvent::FilePicked { .. }
+                | WindowEvent::PickCancelled { .. } => ChooserAction::None,
+            };
+            let outcome = match asked {
+                ChooserAction::None => Ok(()),
+                ChooserAction::Changed => {
+                    repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode)
+                }
+                ChooserAction::Apply => {
+                    chooser.set_apply_outcome(apply(&chooser.settings_document()));
+                    repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode)
+                }
+                // Close the window and end cleanly, freeing the region this
+                // app owns rather than leaving it pinned for the runtime to
+                // reclaim.
+                ChooserAction::Close => {
                     let _ = client.close(window);
                     let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                     return 0;
                 }
-                // Key releases and character keys, focus changes, minimize,
-                // pointer and wheel gestures repaint nothing: the chooser is
-                // keyboard-driven and its grid holds every candidate the
-                // window can show. A redraw request is already answered by
-                // the client library re-presenting the last frame, which is
-                // still what the chooser would draw. A pick conclusion can
-                // only arrive for a pick this app never asks for. Listed
-                // rather than caught by a wildcard so a new event forces a
-                // decision here.
-                WindowEvent::Key { .. }
-                | WindowEvent::Focus { .. }
-                | WindowEvent::Minimized { .. }
-                | WindowEvent::Pointer { .. }
-                | WindowEvent::Scrolled { .. }
-                | WindowEvent::RedrawRequested { .. }
-                | WindowEvent::FilePicked { .. }
-                | WindowEvent::PickCancelled { .. } => Ok(()),
             };
             if outcome.is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");

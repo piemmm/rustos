@@ -1069,6 +1069,97 @@ fn pin_and_drag_default_to_fail_closed_refusal() {
 }
 
 #[test]
+fn a_wire_pointer_event_translates_to_the_position_then_the_button() {
+    use crate::pointer_input_events;
+    use tairix_geometry::Point;
+    use tairix_input::{InputEvent, PointerButton};
+
+    let at = Point::new(37, 91);
+
+    // A bare move is one event: the position.
+    let moved: Vec<InputEvent> = pointer_input_events(PointerAction::Moved, at).collect();
+    assert_eq!(moved, [InputEvent::PointerMoved { to: at }]);
+
+    // Every button transition is preceded by the position it happened at,
+    // because the controls' press and release carry no coordinate.
+    for (code, button) in [
+        (PointerButtonCode::Primary, PointerButton::Primary),
+        (PointerButtonCode::Secondary, PointerButton::Secondary),
+        (PointerButtonCode::Middle, PointerButton::Middle),
+    ] {
+        let pressed: Vec<InputEvent> =
+            pointer_input_events(PointerAction::Pressed(code), at).collect();
+        assert_eq!(
+            pressed,
+            [
+                InputEvent::PointerMoved { to: at },
+                InputEvent::PointerPressed { button }
+            ]
+        );
+        let released: Vec<InputEvent> =
+            pointer_input_events(PointerAction::Released(code), at).collect();
+        assert_eq!(
+            released,
+            [
+                InputEvent::PointerMoved { to: at },
+                InputEvent::PointerReleased { button }
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
+    use crate::key_input_event;
+    use tairix_abi::input::NamedKeyCode;
+    use tairix_input::{InputEvent, Key, NamedKey};
+
+    let held = Modifiers {
+        shift: true,
+        ctrl: false,
+        alt: true,
+        meta: false,
+    };
+    assert_eq!(
+        key_input_event(KeyInput::Pressed {
+            key: KeyValue::Named(NamedKeyCode::Tab),
+            modifiers: held,
+        }),
+        InputEvent::KeyPressed {
+            key: Key::Named(NamedKey::Tab),
+            modifiers: tairix_input::Modifiers {
+                shift: true,
+                ctrl: false,
+                alt: true,
+                meta: false,
+            },
+        }
+    );
+    // A release stays a release, and a character key carries its scalar.
+    assert_eq!(
+        key_input_event(KeyInput::Released {
+            key: KeyValue::Char('q'),
+            modifiers: Modifiers::default(),
+        }),
+        InputEvent::KeyReleased {
+            key: Key::Char('q'),
+            modifiers: tairix_input::Modifiers::default(),
+        }
+    );
+    // The function keys keep their number rather than collapsing together.
+    assert_eq!(
+        key_input_event(KeyInput::Pressed {
+            key: KeyValue::Named(NamedKeyCode::F7),
+            modifiers: Modifiers::default(),
+        }),
+        InputEvent::KeyPressed {
+            key: Key::Named(NamedKey::Function { number: 7 }),
+            modifiers: tairix_input::Modifiers::default(),
+        }
+    );
+}
+
+#[test]
 fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
     use crate::event_endpoint_for;
 

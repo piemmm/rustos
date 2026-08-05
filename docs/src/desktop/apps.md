@@ -1535,7 +1535,25 @@ feeds, and sanitises **every** non-printable byte to a placeholder before
 anything reaches the renderer, so a hostile picked file can neither pin
 unbounded memory nor smuggle control sequences; `render_status` /
 `render_lines` paint through the active theme and the shared monospace
-face. `Enter` asks for another pick; a cancelled pick leaves the viewer
-open with a notice; a `CloseRequested` ends it cleanly. The program
+face.
+
+The window is mouse-driven, exactly as every desktop app is expected to
+be. A `Viewer` composes the current file view (or a status message) with
+a shared header `Button` ("Open…") and a shared vertical `ScrollBar`,
+kept in step through one `ScrollModel` — the same scroll geometry the
+window manager's own root-viewport bars use. `ViewerLayout` is the one
+definition of where the header, the button, the text area, and the
+scrollbar's gutter sit within the window, shared by rendering and pointer
+routing so the two can never disagree about where a control actually is.
+`Viewer::on_pointer` is the single pure entry point a translated
+`tairix_input::InputEvent` is fed into: clicking the button asks for
+another pick, dragging the thumb or clicking the track scrolls to the
+dragged or paged offset, and the wheel steps the view — the `Run` binary
+translates each delivered wire pointer event into that vocabulary through
+the one shared `tairix_window::pointer_input_events` mapping, the same
+translation the file manager's window channel uses. The keyboard remains
+a fully working secondary path: `Enter` asks for another pick, and the
+arrow/page/home/end keys still step the view. A cancelled pick leaves the
+viewer open with a notice; a `CloseRequested` ends it cleanly. The program
 library's catalog carries the viewer's entry, so the desktop's popup
 spawns the bundle.

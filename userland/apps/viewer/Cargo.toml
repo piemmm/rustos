@@ -20,12 +20,20 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # Shared text rasterisation: the built-in monospace face and glyph
 # blitter the content lines are drawn with (§16.4, §17.4).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
-# The shared Reactive Alloy scroll geometry engine (§2.2 —
-# plans/GUI-CONTROLS-DESIGN.md §11.28): the viewer's vertical scroll offset
+# The shared Reactive Alloy scroll geometry engine and drawn controls
+# (plans/GUI-CONTROLS-DESIGN.md): the viewer's vertical scroll offset
 # through a long file is a `ScrollModel`, the same behaviour the window
-# manager's root-viewport bars use. The viewer is the second, independent
-# consumer that keeps that engine in `lib/controls` rather than the WM.
+# manager's root-viewport bars use, and the window's "Open…" button and
+# scrollbar are the shared `Button`/`ScrollBar` controls — the viewer
+# paints no control of its own.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared integer screen geometry (`Rect`, `Scale`) the controls and the
+# viewer's own window layout are expressed in.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The shared desktop input vocabulary (`InputEvent`, `PointerButton`): the
+# single pure pointer entry point the `Run` binary feeds a translated wire
+# pointer event into, so the routing is host-testable without a window.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 
 # The package is both the viewer's host-tested view engine (above — the
 # bounded, sanitising byte→line model and the themed renderers) and the

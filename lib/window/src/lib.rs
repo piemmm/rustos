@@ -12,7 +12,11 @@
 //! * [`client::WindowClient`] / [`client::WindowEvents`] — the app-side
 //!   half over a [`client::WindowTransport`] and a parked
 //!   [`client::EventSource`], so an app creates, presents, closes, and
-//!   waits for events without ever polling.
+//!   waits for events without ever polling, plus
+//!   [`pointer_input_events`] and [`key_input_event`] — the one
+//!   translation from a delivered wire pointer or key event into the input
+//!   vocabulary the shared controls consume, so no app carries a private
+//!   copy of it.
 //!
 //! The wire format itself lives in `tairix_abi::window_ipc`; this crate
 //! adds the behaviour. Window frames travel through one `shm_grant`ed
@@ -31,8 +35,8 @@ pub mod client;
 pub mod server;
 
 pub use client::{
-    event_endpoint_for, EventSource, WindowClient, WindowEvents, WindowTransport,
-    EVENT_MAILBOX_CAPACITY,
+    event_endpoint_for, key_input_event, pointer_input_events, EventSource, WindowClient,
+    WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use server::{
     CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,

@@ -13,21 +13,23 @@ système, la couleur d'arrière-plan derrière eux, et la manière dont le
 bureau organise les icônes sur son tableau d'affichage. Rien ne change
 à l'écran tant que les paramètres ne sont pas appliqués.
 
-La grille liste chaque fond d'écran fourni sous forme de vignette, plus
-une entrée **No wallpaper** (Aucun fond d'écran) qui affiche la couleur
-d'arrière-plan choisie seule. Chaque vignette est rendue selon
-l'ajustement actuellement choisi, afin qu'un aperçu montre ce que le
-bureau fera réellement de cette image. Un fichier qui ne peut pas être
-décodé affiche une tuile d'espace réservé marquée avec son nom et n'est
-pas tenté à nouveau.
+La fenêtre est pilotée par la souris. Un grand aperçu en haut montre le
+fond d'écran sélectionné tel que le bureau le dessinera, avec la couleur
+d'arrière-plan choisie partout où l'image n'atteint pas. En dessous, la
+galerie liste chaque fond d'écran fourni sous forme de tuile : cliquez
+sur l'une d'elles pour la sélectionner et l'aperçu suit immédiatement.
+La tuile **No wallpaper** (Aucun fond d'écran), toujours en premier,
+montre la couleur d'arrière-plan choisie seule.
 
-Les images de fond d'écran ne sont jamais décodées par ce programme.
-Chacune est rendue par un processus sandboxé séparé qui ne détient
-aucune autorité sur le système de fichiers, le réseau ou le lancement,
-de sorte qu'une image malformée ne peut pas compromettre le sélecteur
-ou le bureau.
+La galerie défile lorsqu'elle contient plus de tuiles que la fenêtre n'en
+affiche. Tournez la molette n'importe où sur la fenêtre, faites glisser
+le curseur de la barre de défilement sur le bord arrière, ou cliquez sur
+la piste au-dessus ou en dessous du curseur pour vous déplacer d'une
+page à la fois.
 
-Les lignes d'options sous la grille sont :
+À côté de l'aperçu se trouvent quatre paramètres, chacun étant une liste
+déroulante. Cliquez sur l'un d'eux pour l'ouvrir et cliquez sur un choix
+pour le valider :
 
 - **Fit** (Ajustement) — comment l'image est placée : `fill` (couvrir
   l'écran, en recadrant le surplus), `fit` (la contenir entièrement,
@@ -39,29 +41,41 @@ Les lignes d'options sous la grille sont :
   et les couleurs nommées sont fixes. Une couleur déjà en vigueur qui
   n'est pas l'une des couleurs nommées est proposée sous son propre
   orthographe `rrggbb`.
-- **Icons** (Icônes) — le côté du tableau d'affichage à partir duquel la
+- **Icons** (Icônes) — le coin du tableau d'affichage à partir duquel la
   grille d'icônes du bureau se développe.
 - **Sort** (Tri) — l'ordre dans lequel les icônes du dossier du bureau
   sont listées.
 
-La fenêtre est pilotée par le clavier. `Tab` et `Shift-Tab` déplacent le
-focus vers l'avant et vers l'arrière à travers la grille, les lignes
-d'options et les boutons. Les touches fléchées permettent de se
-déplacer dans la grille de vignettes ou de changer l'option focalisée.
-`Enter` active le bouton focalisé, et `Escape` ferme la fenêtre sans
-appliquer.
+L'aperçu montre l'image, l'arrière-plan et l'ajustement sélectionnés
+selon la propre forme de l'aperçu. Un écran d'une forme différente
+recadre ou ajoute des bandes différemment, de sorte que l'aperçu est une
+vue fidèle de l'image et de la règle d'ajustement, et non un modèle à
+l'échelle de l'affichage.
+
+Les images de fond d'écran ne sont jamais décodées par ce programme.
+Chacune est rendue par un processus sandboxé séparé qui ne détient
+aucune autorité sur le système de fichiers, le réseau ou le lancement,
+de sorte qu'une image malformée ne peut pas compromettre le sélecteur ou
+le bureau. Un fichier qui ne peut pas être décodé est marqué
+`unreadable` dans sa tuile et n'est pas tenté à nouveau.
+
+Le clavier permet d'accéder à tout ce que fait la souris. `Tab` et
+`Shift-Tab` déplacent le focus vers l'avant et vers l'arrière à travers
+la galerie, les quatre paramètres et les deux boutons. Les touches
+fléchées permettent de se déplacer dans la galerie, ou d'ouvrir la liste
+du paramètre focalisé et de s'y déplacer. `Enter` applique, ou active le
+bouton focalisé, et `Escape` ferme la fenêtre sans appliquer.
 
 L'application envoie les paramètres choisis à la session de bureau, qui
 décide de les adopter ou non, redessine le tableau d'affichage et les
 enregistre pour la prochaine connexion. Ce programme n'écrit jamais les
-paramètres lui-même. Le résultat est rapporté sur la ligne d'état sous
-les lignes d'options : appliqué, refusé avec la raison de la session,
-ou aucune session de bureau à l'écoute. Un refus laisse la fenêtre
-ouverte avec les choix intacts.
+paramètres lui-même. Le résultat est rapporté à côté des boutons :
+appliqué, refusé avec la raison de la session, ou aucune session de
+bureau à l'écoute. Un refus laisse la fenêtre ouverte avec les choix
+intacts.
 
 Seul le magasin de fonds d'écran fournis est proposé ; une image
 ailleurs sur le système ne peut pas être choisie depuis cette fenêtre.
-Les clics de pointeur ne sélectionnent rien.
 
 ## EXIT STATUS
 

@@ -154,12 +154,44 @@ desktop unchanged rather than failing silently or dying over a refusal.
 ## The chooser
 
 `wallpaper.app` is an ordinary graphical application bundle: it is launched
-from the menu, typeable by name, and holds no special authority. It lists
-the shipped wallpapers, previews each one through the same sandboxed
-rendering path the desktop uses (so it, too, decodes nothing itself),
-offers the fit, backdrop, arrangement, and sort, and applies by sending the
+from the menu, typeable by name, and holds no special authority. It offers
+the fit, backdrop, arrangement, and sort, and applies by sending the
 rendered document to the session. A refusal is reported in its own window;
 it never fabricates success and never exits over one.
+
+The window is a large preview beside the four settings, a scrolling gallery
+of the shipped wallpapers beneath them, and the two actions in the footer:
+
+```text
++--------------------------------------------------------------+
+|  +---------------------------+  Fit      [ Fill screen   v ] |
+|  |       live preview        |  Backdrop [ Theme         v ] |
+|  |                           |  Icons    [ Top left      v ] |
+|  +---------------------------+  Sort     [ Name          v ] |
+|  Wallpapers                     tairix-dark.jpg              |
+|  +---------------------------------------------------+ +--+  |
+|  |  [tile]  [tile]  [tile]  [tile]  [tile]           | |##|  |
+|  +---------------------------------------------------+ +--+  |
+|  Applied.                                  [Close] [Apply]   |
++--------------------------------------------------------------+
+```
+
+It is **driven by the pointer**, with the keyboard as a complete secondary
+path: click a tile to select it and the preview follows, click a setting to
+open its list, wheel or drag the gallery, click Apply. Every interactive
+part is a shared control from [the control set](./widgets.md) — the
+drop-downs, the buttons, the scrollbar — held for the life of the window so
+each owns its own hover, press and drag state, and the gallery is the
+shared icon-grid engine the file manager and the desktop's own icon field
+use. The chooser therefore defines no control and no grid of its own.
+
+The preview and every tile are rendered through the same sandboxed path the
+desktop uses, so the chooser decodes nothing itself. A tile is the
+wallpaper at tile size, always placed to fill its square — it says *which*
+wallpaper it is — and the preview panel is where the chosen fit is shown.
+The preview draws at its own shape rather than the display's: no
+unprivileged program can ask how large the screen is, so a screen of a
+different shape crops or letterboxes differently (`plans/PINBOARD.md` §8).
 
 ## Headless
 

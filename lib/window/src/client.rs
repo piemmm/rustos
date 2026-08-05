@@ -16,16 +16,134 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::input::{
+    KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode, PointerButtonCode,
+};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, BundleRef, WindowEvent, WindowRequest, WindowTitle,
+    decode_create_reply, BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
     WINDOW_CREATE_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
+use tairix_geometry::Point;
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
 const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
+
+/// The shared input events one delivered [`PointerAction`] at window-local
+/// `point` means, in the order a control must receive them.
+///
+/// Every app that hands pointer input to the shared control family needs the
+/// same translation, so it has one definition here rather than a private copy
+/// per app. A wire pointer event always carries a position, while the
+/// controls' button transitions do not: the position is therefore always
+/// delivered first as an [`InputEvent::PointerMoved`], and a press or release
+/// follows it, so a control is never asked to decide about a button at a
+/// position it has not been told about yet.
+///
+/// The mapping is total — every action and every button code has exactly one
+/// meaning — so an app filters what it does not want by matching the events,
+/// never by guessing at an unhandled code.
+pub fn pointer_input_events(
+    action: PointerAction,
+    point: Point,
+) -> impl Iterator<Item = InputEvent> {
+    let transition = match action {
+        PointerAction::Moved => None,
+        PointerAction::Pressed(button) => Some(InputEvent::PointerPressed {
+            button: pointer_button(button),
+        }),
+        PointerAction::Released(button) => Some(InputEvent::PointerReleased {
+            button: pointer_button(button),
+        }),
+    };
+    [Some(InputEvent::PointerMoved { to: point }), transition]
+        .into_iter()
+        .flatten()
+}
+
+/// The control-facing button one wire button code names.
+const fn pointer_button(code: PointerButtonCode) -> PointerButton {
+    match code {
+        PointerButtonCode::Primary => PointerButton::Primary,
+        PointerButtonCode::Secondary => PointerButton::Secondary,
+        PointerButtonCode::Middle => PointerButton::Middle,
+    }
+}
+
+/// The shared input event one delivered [`KeyInput`] means.
+///
+/// The companion to [`pointer_input_events`] for the keyboard: every app
+/// that hands key input to the shared control family needs the same
+/// translation from the wire vocabulary, so it has one definition here
+/// rather than a private copy per app. The mapping is total — every key and
+/// every modifier has exactly one meaning — so no app has to decide what an
+/// unhandled code means.
+#[must_use]
+pub const fn key_input_event(input: KeyInput) -> InputEvent {
+    match input {
+        KeyInput::Pressed { key, modifiers } => InputEvent::KeyPressed {
+            key: key_value(key),
+            modifiers: key_modifiers(modifiers),
+        },
+        KeyInput::Released { key, modifiers } => InputEvent::KeyReleased {
+            key: key_value(key),
+            modifiers: key_modifiers(modifiers),
+        },
+    }
+}
+
+/// The control-facing key one wire key value names.
+const fn key_value(value: KeyValue) -> Key {
+    match value {
+        KeyValue::Char(ch) => Key::Char(ch),
+        KeyValue::Named(named) => Key::Named(named_key(named)),
+    }
+}
+
+/// The control-facing named key one wire key code names.
+const fn named_key(code: NamedKeyCode) -> NamedKey {
+    match code {
+        NamedKeyCode::Enter => NamedKey::Enter,
+        NamedKeyCode::Escape => NamedKey::Escape,
+        NamedKeyCode::Backspace => NamedKey::Backspace,
+        NamedKeyCode::Tab => NamedKey::Tab,
+        NamedKeyCode::Delete => NamedKey::Delete,
+        NamedKeyCode::Insert => NamedKey::Insert,
+        NamedKeyCode::Home => NamedKey::Home,
+        NamedKeyCode::End => NamedKey::End,
+        NamedKeyCode::PageUp => NamedKey::PageUp,
+        NamedKeyCode::PageDown => NamedKey::PageDown,
+        NamedKeyCode::Left => NamedKey::Left,
+        NamedKeyCode::Right => NamedKey::Right,
+        NamedKeyCode::Up => NamedKey::Up,
+        NamedKeyCode::Down => NamedKey::Down,
+        NamedKeyCode::F1 => NamedKey::Function { number: 1 },
+        NamedKeyCode::F2 => NamedKey::Function { number: 2 },
+        NamedKeyCode::F3 => NamedKey::Function { number: 3 },
+        NamedKeyCode::F4 => NamedKey::Function { number: 4 },
+        NamedKeyCode::F5 => NamedKey::Function { number: 5 },
+        NamedKeyCode::F6 => NamedKey::Function { number: 6 },
+        NamedKeyCode::F7 => NamedKey::Function { number: 7 },
+        NamedKeyCode::F8 => NamedKey::Function { number: 8 },
+        NamedKeyCode::F9 => NamedKey::Function { number: 9 },
+        NamedKeyCode::F10 => NamedKey::Function { number: 10 },
+        NamedKeyCode::F11 => NamedKey::Function { number: 11 },
+        NamedKeyCode::F12 => NamedKey::Function { number: 12 },
+    }
+}
+
+/// The control-facing modifiers the wire modifiers name.
+const fn key_modifiers(modifiers: WireModifiers) -> Modifiers {
+    Modifiers {
+        shift: modifiers.shift,
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        meta: modifiers.meta,
+    }
+}
 
 /// Bounded slot count every window-channel app binds its event mailbox
 /// with: input-rate events, drained after every wake, so a small queue is

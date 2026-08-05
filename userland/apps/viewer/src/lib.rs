@@ -11,18 +11,35 @@
 //! authority. That is the whole CU6 model, exercised end to end by a
 //! shipping app.
 //!
+//! The window is pointer-first: an "Open…" [`Button`] requests the pick,
+//! and a vertical [`ScrollBar`] down the text area's trailing edge is
+//! pressed, dragged, and clicked exactly as the design language
+//! prescribes. The keyboard remains a fully working secondary path (Enter
+//! retries the pick, the arrow/page/home/end keys still step the view).
+//!
 //! # What this crate is
 //!
 //! The host-testable view engine the `Run` binary composes:
 //!
+//! * [`Viewer`] — the whole window's composed, pointer- and
+//!   keyboard-driven state: the current file view or status message, the
+//!   "Open…" button, and the scrollbar, kept in sync through one shared
+//!   [`tairix_controls::ScrollModel`]. [`Viewer::on_pointer`] is the single
+//!   pure entry point a host feeds a translated [`tairix_input::InputEvent`]
+//!   into; [`Viewer::render`] draws the whole window.
+//! * [`ViewerLayout`] — the one definition of where the header, the
+//!   "Open…" button, the text area, and the scrollbar sit within a
+//!   `width_px` × `height_px` window, shared by rendering, hit-testing,
+//!   and the tests so the three can never disagree about where a control
+//!   actually is.
 //! * [`content_lines`] — the pure, bounded byte→line model: the picked
 //!   file's bytes split into at most `max_rows` lines of at most
 //!   `max_cols` characters, every non-printable byte sanitised to a
 //!   placeholder so untrusted file content can never smuggle control
 //!   sequences into the renderer (fail closed, never raw).
 //! * [`render_status`] / [`render_lines`] — the themed painters: a
-//!   one-line status ("waiting", "cancelled") or the content lines,
-//!   drawn with the shared `lib/font` face onto a `lib/raster`
+//!   one-line status ("no file chosen", "pick refused") or the content
+//!   lines, drawn with the shared `lib/font` face onto a `lib/raster`
 //!   [`Surface`] through the active `lib/theme` palette.
 //! * [`ScrollView`] — the vertical scroll offset through a long file, held
 //!   in the shared `lib/controls` scroll model (the same behaviour the
@@ -35,7 +52,9 @@
 //! `no_std` (with `alloc`); depends only on the audited `lib/abi` crate
 //! and the shared `lib/*` desktop libraries — never a kernel, driver, or
 //! window-manager crate. No `unsafe` in this engine, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `unwrap`/`expect`/`panic!` in production paths. Every drawn control is
+//! the shared [`tairix_controls`] implementation — this crate paints no
+//! control of its own.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -46,7 +65,13 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_controls::{
+    Button, ButtonAction, ButtonContent, ControlRole, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange,
+};
 use tairix_font::BitmapFont;
+use tairix_geometry::{Rect, Scale};
+use tairix_input::InputEvent;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
@@ -130,38 +155,58 @@ pub fn content_lines(bytes: &[u8], max_rows: usize, max_cols: usize) -> Vec<Stri
     lines
 }
 
-/// Rows of text a `height_px`-tall viewer window shows.
+/// The header bar's height: the standard interactive [`control_height`]
+/// metric, scaled. It is also the row the "Open…" button sits in.
+///
+/// [`control_height`]: tairix_theme::Metrics::control_height
+fn header_height(theme: &Theme, scale: Scale) -> u32 {
+    scale.scale_length(theme.metrics().control_height)
+}
+
+/// The trailing-edge gutter the vertical scrollbar occupies, scaled from
+/// the theme's own [`scrollbar_breadth`] metric.
+///
+/// [`scrollbar_breadth`]: tairix_theme::Metrics::scrollbar_breadth
+fn scrollbar_gutter(theme: &Theme, scale: Scale) -> u32 {
+    scale.scale_length(theme.metrics().scrollbar_breadth)
+}
+
+/// Rows of text a `height_px`-tall viewer window's text area shows, below
+/// the header bar.
 #[must_use]
-pub fn visible_rows_for(height_px: u32) -> usize {
+pub fn visible_rows_for(height_px: u32, theme: &Theme, scale: Scale) -> usize {
+    let text_h = height_px.saturating_sub(header_height(theme, scale));
     let line = line_height();
     if line == 0 {
         return 0;
     }
-    usize::try_from(height_px / line).unwrap_or(0)
+    usize::try_from(text_h / line).unwrap_or(0)
 }
 
 /// Rows of text the initial [`WIN_HEIGHT`]-tall viewer window shows.
 #[must_use]
-pub fn visible_rows() -> usize {
-    visible_rows_for(WIN_HEIGHT)
+pub fn visible_rows(theme: &Theme, scale: Scale) -> usize {
+    visible_rows_for(WIN_HEIGHT, theme, scale)
 }
 
-/// Columns of text a `width_px`-wide viewer window shows, derived from the
-/// shared monospace face.
+/// Columns of text a `width_px`-wide viewer window's text area shows,
+/// derived from the shared monospace face and shrunk by the scrollbar
+/// gutter so text never runs under the bar.
 #[must_use]
-pub fn visible_cols_for(width_px: u32) -> usize {
+pub fn visible_cols_for(width_px: u32, theme: &Theme, scale: Scale) -> usize {
     let font = BitmapFont::console();
     let advance = font.cell_width();
     if advance == 0 {
         return 0;
     }
-    usize::try_from(width_px.saturating_sub(TEXT_PADDING * 2) / advance).unwrap_or(0)
+    let text_w = width_px.saturating_sub(scrollbar_gutter(theme, scale));
+    usize::try_from(text_w.saturating_sub(TEXT_PADDING * 2) / advance).unwrap_or(0)
 }
 
 /// Columns of text the initial [`WIN_WIDTH`]-wide viewer window shows.
 #[must_use]
-pub fn visible_cols() -> usize {
-    visible_cols_for(WIN_WIDTH)
+pub fn visible_cols(theme: &Theme, scale: Scale) -> usize {
+    visible_cols_for(WIN_WIDTH, theme, scale)
 }
 
 /// Height in pixels of one drawn text line.
@@ -250,7 +295,7 @@ pub const MAX_LINES: usize = CONTENT_MAX;
 /// same range validation and offset behaviour as a window-level bar rather
 /// than a private recipe. The scroll unit here is a **display row**: the
 /// content extent is the number of lines, the viewport extent is the rows the
-/// window shows, and the [`ScrollModel`](tairix_controls::ScrollModel) owns
+/// window shows, and the [`ScrollModel`] owns
 /// the first-visible-row offset. Arrow keys step one line, Page Up/Down step a
 /// page, and Home/End jump to the bounds, exactly as the design language's
 /// scrollbar keyboard model prescribes.
@@ -380,6 +425,13 @@ impl ScrollView {
         })
     }
 
+    /// Jump directly to `offset` — the scrollbar's own drag/track/end-button
+    /// requests, which already carry a clamped absolute offset rather than a
+    /// relative step. Returns whether the view moved.
+    pub fn scroll_to(&mut self, offset: u64) -> bool {
+        self.apply(|model| model.scroll_to(offset))
+    }
+
     /// Apply `change` to the model, returning whether the offset changed.
     fn apply(
         &mut self,
@@ -391,180 +443,355 @@ impl ScrollView {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-    use tairix_theme::ThemeRegistry;
+/// Logical width of the "Open…" button in the header bar.
+const OPEN_BUTTON_WIDTH: u32 = 96;
 
-    #[test]
-    fn content_lines_split_on_line_feeds_and_bound_rows_and_cols() {
-        let lines = content_lines(b"one\ntwo\nthree", 8, 80);
-        assert_eq!(lines, vec!["one", "two", "three"]);
-        // The row bound truncates the tail, never panicking.
-        assert_eq!(content_lines(b"a\nb\nc", 2, 80), vec!["a", "b"]);
-        // The column bound drops each line's overflow.
-        assert_eq!(content_lines(b"abcdef", 8, 3), vec!["abc"]);
-        // Empty input shows nothing (not one empty line).
-        assert!(content_lines(b"", 8, 80).is_empty());
-    }
+/// The on-screen regions of a `width_px` × `height_px` viewer window: the
+/// header bar holding the "Open…" button, the scrollable text area (already
+/// shrunk by the trailing-edge scrollbar gutter), and the scrollbar's own
+/// track.
+///
+/// This is the one definition of where each region sits, shared by
+/// rendering, pointer routing, and the tests, so the three can never
+/// disagree about where a control actually is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewerLayout {
+    /// The header bar across the top of the window.
+    pub header: Rect,
+    /// The "Open…" button's own rectangle within the header.
+    pub button: Rect,
+    /// The scrollable text area, already shrunk by the scrollbar gutter.
+    pub text: Rect,
+    /// The vertical scrollbar's track, down the text area's trailing edge.
+    pub scrollbar: Rect,
+}
 
-    #[test]
-    fn content_lines_sanitise_every_non_printable_byte() {
-        // Control bytes, CR, tab, DEL, and non-ASCII all become the
-        // placeholder: untrusted content never reaches the renderer raw.
-        let lines = content_lines(b"a\x1b[31mb\r\tc\x7f\xffd", 8, 80);
-        assert_eq!(lines, vec!["a.[31mb..c..d"]);
-    }
+impl ViewerLayout {
+    /// Resolve the layout for a `width_px` × `height_px` window under the
+    /// active theme and scale. Every dimension is derived through saturating
+    /// arithmetic, so an extreme or degenerate window size never panics —
+    /// it simply yields a region too small to see or hit.
+    #[must_use]
+    pub fn for_window(width_px: u32, height_px: u32, theme: &Theme, scale: Scale) -> Self {
+        let header_h = header_height(theme, scale).min(height_px);
+        let header = Rect::new(0, 0, width_px, header_h);
 
-    #[test]
-    fn renderers_produce_window_sized_surfaces() {
-        let themes = ThemeRegistry::with_builtins();
-        let theme = themes.active();
-        let status =
-            render_status("Choose a file", theme, WIN_WIDTH, WIN_HEIGHT).expect("status renders");
-        assert_eq!((status.width(), status.height()), (WIN_WIDTH, WIN_HEIGHT));
-        let lines = content_lines(b"hello\nworld", visible_rows(), visible_cols());
-        let content = render_lines(&lines, theme, WIN_WIDTH, WIN_HEIGHT).expect("content renders");
-        assert_eq!((content.width(), content.height()), (WIN_WIDTH, WIN_HEIGHT));
-        // The two states draw observably different pixels somewhere.
-        assert_ne!(status.pixels(), content.pixels());
-    }
+        let inset = scale.scale_length(theme.metrics().control_inset);
+        let button_h = header_h.saturating_sub(inset.saturating_mul(2)).max(1);
+        let button_w = scale
+            .scale_length(OPEN_BUTTON_WIDTH)
+            .min(width_px.saturating_sub(inset.saturating_mul(2)));
+        let button_y = header_h.saturating_sub(button_h) / 2;
+        let button = Rect::new(to_i32(inset), to_i32(button_y), button_w, button_h);
 
-    #[test]
-    fn renderers_track_an_arbitrary_resized_window() {
-        let themes = ThemeRegistry::with_builtins();
-        let theme = themes.active();
-        // A resized window: the surface is exactly the reported client size,
-        // not the initial one — the viewer draws into whatever the window
-        // manager gave it.
-        let (w, h) = (WIN_WIDTH * 2, WIN_HEIGHT + 40);
-        let status = render_status("resized", theme, w, h).expect("status renders");
-        assert_eq!((status.width(), status.height()), (w, h));
-        let lines = content_lines(b"a\nb\nc", visible_rows_for(h), visible_cols_for(w));
-        let content = render_lines(&lines, theme, w, h).expect("content renders");
-        assert_eq!((content.width(), content.height()), (w, h));
-        // The minimum floor never yields a zero-extent surface.
-        assert!(render_status("x", theme, MIN_WIN_WIDTH, MIN_WIN_HEIGHT).is_some());
-    }
+        let below = height_px.saturating_sub(header_h);
+        let breadth = scrollbar_gutter(theme, scale).min(width_px);
+        let text_w = width_px.saturating_sub(breadth);
+        let text = Rect::new(0, to_i32(header_h), text_w, below);
+        let scrollbar = Rect::new(to_i32(text_w), to_i32(header_h), breadth, below);
 
-    #[test]
-    fn view_geometry_is_non_degenerate_and_scales_with_size() {
-        assert!(visible_rows() > 4, "the window shows several lines");
-        assert!(visible_cols() > 16, "the window shows several columns");
-        // A wider/taller window shows strictly more columns/rows; a narrower
-        // one strictly fewer — the geometry follows the client size.
-        assert!(visible_cols_for(WIN_WIDTH * 2) > visible_cols());
-        assert!(visible_rows_for(WIN_HEIGHT * 2) > visible_rows());
-        assert!(visible_cols_for(WIN_WIDTH / 2) < visible_cols());
-    }
-
-    #[test]
-    fn relayout_rewraps_and_keeps_the_reader_near_their_place() {
-        // Scrolled a third of the way down a long file.
-        let mut v = view(300, 20);
-        for _ in 0..100 {
-            v.line_down();
+        Self {
+            header,
+            button,
+            text,
+            scrollbar,
         }
-        assert_eq!(v.offset(), 100);
-        // Resize to a taller window (more rows): the offset is preserved and
-        // the larger viewport is honoured.
-        let lines: Vec<String> = (0..300).map(|n| alloc::format!("line {n}")).collect();
-        v.relayout(lines, 40);
-        assert_eq!(v.window_rows(), 40);
-        assert_eq!(
-            v.offset(),
-            100,
-            "the reader keeps their place across a resize"
-        );
-        assert_eq!(v.visible()[0], "line 100");
-        // Resize so the window is taller than the whole file: the offset
-        // clamps back into range rather than dangling past the content.
-        let short: Vec<String> = (0..10).map(|n| alloc::format!("line {n}")).collect();
-        v.relayout(short, 40);
-        assert_eq!(
-            v.offset(),
-            0,
-            "content shorter than the window pins to the top"
-        );
-        assert_eq!(v.total_lines(), 10);
-    }
-
-    /// Build a view over `total` numbered lines showing `rows` at once.
-    fn view(total: usize, rows: usize) -> ScrollView {
-        let lines: Vec<String> = (0..total).map(|n| alloc::format!("line {n}")).collect();
-        ScrollView::new(lines, rows)
-    }
-
-    #[test]
-    fn scroll_view_shows_a_window_of_lines_from_the_offset() {
-        let mut v = view(100, 10);
-        assert_eq!(v.offset(), 0);
-        assert_eq!(v.visible().len(), 10);
-        assert_eq!(v.visible()[0], "line 0");
-
-        assert!(v.line_down());
-        assert_eq!(v.offset(), 1);
-        assert_eq!(v.visible()[0], "line 1");
-
-        // A page steps one row shy of a full window so a line stays visible.
-        assert!(v.page_down());
-        assert_eq!(v.offset(), 1 + 9);
-    }
-
-    #[test]
-    fn scroll_view_clamps_at_both_ends() {
-        let mut v = view(100, 10);
-        assert!(!v.line_up(), "already at the top");
-        assert!(v.to_bottom());
-        // The last row of content is the last row on screen: offset = 100 - 10.
-        assert_eq!(v.offset(), 90);
-        assert_eq!(v.visible().last().map(String::as_str), Some("line 99"));
-        assert!(!v.line_down(), "already at the bottom");
-        assert!(v.to_top());
-        assert_eq!(v.offset(), 0);
-    }
-
-    #[test]
-    fn scroll_view_scrolls_by_wheel_ticks_one_line_per_tick_and_clamps() {
-        let mut v = view(100, 10);
-        // Positive ticks scroll toward the end, one line per tick.
-        assert!(v.scroll_ticks(3));
-        assert_eq!(v.offset(), 3);
-        // Negative ticks scroll back toward the start.
-        assert!(v.scroll_ticks(-1));
-        assert_eq!(v.offset(), 2);
-        // A zero tick moves nothing (fail closed, no guessed distance).
-        assert!(!v.scroll_ticks(0));
-        assert_eq!(v.offset(), 2);
-        // A large or hostile tick count saturates at the last row rather
-        // than overshooting, and reports no further movement once pinned.
-        assert!(v.scroll_ticks(i32::MAX));
-        assert_eq!(v.offset(), 90);
-        assert!(!v.scroll_ticks(i32::MAX));
-        assert_eq!(v.offset(), 90);
-    }
-
-    #[test]
-    fn scroll_view_with_fewer_lines_than_rows_is_not_scrollable() {
-        let mut v = view(3, 10);
-        assert_eq!(v.total_lines(), 3);
-        assert!(!v.line_down(), "content fits, so nothing scrolls");
-        assert!(!v.page_down());
-        assert!(!v.to_bottom());
-        assert_eq!(v.offset(), 0);
-        assert_eq!(v.visible().len(), 3);
-    }
-
-    #[test]
-    fn scroll_view_and_window_bars_share_the_same_offset_math() {
-        // The viewer's model and a window-manager-style geometry over the same
-        // range agree on the offset a thumb position implies — the point of one
-        // shared engine.
-        let v = view(1000, 20);
-        let range = v.model().range();
-        assert_eq!(range.content_extent(), 1000);
-        assert_eq!(range.viewport_extent(), 20);
-        assert_eq!(range.max_offset(), 980);
     }
 }
+
+/// The outcome of routing one pointer event into a [`Viewer`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewerPointerOutcome {
+    /// Whether anything the window draws actually changed — a hover, a
+    /// press, a drag, or a scroll — so the host knows whether to repaint.
+    pub changed: bool,
+    /// Whether the "Open…" button was activated: the host should issue the
+    /// same pick request the Enter key sends.
+    pub open_requested: bool,
+}
+
+/// The whole viewer window's pointer- and keyboard-driven state.
+///
+/// A `Viewer` owns the current file view (or a status message shown in its
+/// place), the shared "Open…" [`Button`], and the shared vertical
+/// [`ScrollBar`], and keeps the bar's held [`ScrollModel`] in lock-step with
+/// the authoritative one inside its [`ScrollView`] on every navigation,
+/// resize, or drag. [`Viewer::on_pointer`] is the single pure entry point a
+/// host feeds a translated pointer event into, so the routing here is
+/// host-testable without a window; [`Viewer::render`] draws the whole
+/// window from the shared controls, adding no painting of its own.
+pub struct Viewer {
+    /// The raw picked-file bytes currently shown, kept so a resize can
+    /// re-wrap them to the new column count.
+    content: Option<Vec<u8>>,
+    /// The scrolled view over the current file's display lines, or `None`
+    /// while a status message is shown in its place.
+    scroll: Option<ScrollView>,
+    /// The status message shown when no file is open.
+    status: String,
+    /// The shared "Open…" button that requests a new file pick.
+    open_button: Button,
+    /// The shared vertical scrollbar down the text area's trailing edge.
+    scrollbar: ScrollBar,
+}
+
+impl Default for Viewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Viewer {
+    /// A freshly opened window: no file chosen yet, the scrollbar showing an
+    /// empty, non-scrollable range.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            content: None,
+            scroll: None,
+            status: String::from("No file chosen."),
+            open_button: Button::new(
+                ButtonContent::Label(String::from("Open…")),
+                ControlRole::Primary,
+            ),
+            scrollbar: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::new(ScrollRange::EMPTY, 1, 1),
+            ),
+        }
+    }
+
+    /// Show `text` in place of any file view (a cancelled pick, a refusal, or
+    /// the initial prompt), clearing any open content and pinning the
+    /// scrollbar to an empty, non-scrollable range.
+    pub fn show_status(&mut self, text: impl Into<String>) {
+        self.content = None;
+        self.scroll = None;
+        self.status = text.into();
+        self.sync_scrollbar();
+    }
+
+    /// The status message currently shown, or `None` while a file is open.
+    #[must_use]
+    pub fn status(&self) -> Option<&str> {
+        self.scroll.is_none().then_some(self.status.as_str())
+    }
+
+    /// Whether a file is currently open (a status message is showing otherwise).
+    #[must_use]
+    pub fn has_content(&self) -> bool {
+        self.scroll.is_some()
+    }
+
+    /// The picked-file lines currently in view, or `None` while a status
+    /// message is shown instead.
+    #[must_use]
+    pub fn visible_lines(&self) -> Option<&[String]> {
+        self.scroll.as_ref().map(ScrollView::visible)
+    }
+
+    /// The scrolled view over the open file, or `None` while a status
+    /// message is shown instead.
+    #[must_use]
+    pub fn scroll_view(&self) -> Option<&ScrollView> {
+        self.scroll.as_ref()
+    }
+
+    /// Open `bytes` as the file view, wrapped to fit a `width_px` ×
+    /// `height_px` window under the active theme and scale.
+    pub fn open(
+        &mut self,
+        bytes: Vec<u8>,
+        width_px: u32,
+        height_px: u32,
+        theme: &Theme,
+        scale: Scale,
+    ) {
+        let rows = visible_rows_for(height_px, theme, scale);
+        let cols = visible_cols_for(width_px, theme, scale);
+        let lines = content_lines(&bytes, MAX_LINES, cols);
+        self.scroll = Some(ScrollView::new(lines, rows));
+        self.content = Some(bytes);
+        self.sync_scrollbar();
+    }
+
+    /// Re-lay the current file out (if any) for a resized `width_px` ×
+    /// `height_px` window, preserving the reader's place. A no-op while a
+    /// status message is shown — its text does not depend on the window size.
+    pub fn relayout(&mut self, width_px: u32, height_px: u32, theme: &Theme, scale: Scale) {
+        let Some(bytes) = self.content.as_ref() else {
+            return;
+        };
+        let rows = visible_rows_for(height_px, theme, scale);
+        let cols = visible_cols_for(width_px, theme, scale);
+        let lines = content_lines(bytes, MAX_LINES, cols);
+        if let Some(scroll) = self.scroll.as_mut() {
+            scroll.relayout(lines, rows);
+        }
+        self.sync_scrollbar();
+    }
+
+    /// Scroll one line toward the start, returning whether the view moved.
+    pub fn line_up(&mut self) -> bool {
+        self.navigate(ScrollView::line_up)
+    }
+
+    /// Scroll one line toward the end, returning whether the view moved.
+    pub fn line_down(&mut self) -> bool {
+        self.navigate(ScrollView::line_down)
+    }
+
+    /// Scroll one page toward the start, returning whether the view moved.
+    pub fn page_up(&mut self) -> bool {
+        self.navigate(ScrollView::page_up)
+    }
+
+    /// Scroll one page toward the end, returning whether the view moved.
+    pub fn page_down(&mut self) -> bool {
+        self.navigate(ScrollView::page_down)
+    }
+
+    /// Jump to the first line, returning whether the view moved.
+    pub fn to_top(&mut self) -> bool {
+        self.navigate(ScrollView::to_top)
+    }
+
+    /// Jump so the last lines are in view, returning whether the view moved.
+    pub fn to_bottom(&mut self) -> bool {
+        self.navigate(ScrollView::to_bottom)
+    }
+
+    /// Scroll by `ticks` wheel detents (see [`ScrollView::scroll_ticks`]),
+    /// returning whether the view moved.
+    pub fn scroll_ticks(&mut self, ticks: i32) -> bool {
+        self.navigate(|scroll| scroll.scroll_ticks(ticks))
+    }
+
+    /// Apply a navigation step to the open file view (a no-op returning
+    /// `false` while a status message is shown), resyncing the scrollbar
+    /// when it moves.
+    fn navigate(&mut self, step: impl FnOnce(&mut ScrollView) -> bool) -> bool {
+        let Some(scroll) = self.scroll.as_mut() else {
+            return false;
+        };
+        let moved = step(scroll);
+        if moved {
+            self.sync_scrollbar();
+        }
+        moved
+    }
+
+    /// Push the authoritative scroll model (or the empty range while no file
+    /// is open) into the held scrollbar, so the bar never keeps an offset of
+    /// its own.
+    fn sync_scrollbar(&mut self) {
+        let model = self.scroll.as_ref().map_or_else(
+            || ScrollModel::new(ScrollRange::EMPTY, 1, 1),
+            ScrollView::model,
+        );
+        self.scrollbar.set_model(model);
+    }
+
+    /// Draw the whole window — the header bar and its "Open…" button, the
+    /// text area (the status message or the file's visible lines), and the
+    /// scrollbar — into a fresh `width_px` × `height_px` surface. Returns
+    /// `None` only when a surface cannot be allocated (the caller fails
+    /// closed).
+    #[must_use]
+    pub fn render(
+        &self,
+        theme: &Theme,
+        scale: Scale,
+        width_px: u32,
+        height_px: u32,
+    ) -> Option<Surface> {
+        let layout = ViewerLayout::for_window(width_px, height_px, theme, scale);
+        let mut surface = Surface::new(width_px, height_px)?;
+        let palette = theme.palette();
+        surface.fill(palette.surface.into());
+        surface.fill_rect(
+            0,
+            0,
+            layout.header.width,
+            layout.header.height,
+            palette.surface_raised.into(),
+        );
+
+        let font = BitmapFont::console();
+        self.open_button
+            .render(&mut surface, layout.button, scale, theme, font);
+
+        let text_surface = match self.scroll.as_ref() {
+            Some(scroll) => render_lines(
+                scroll.visible(),
+                theme,
+                layout.text.width,
+                layout.text.height,
+            ),
+            None => render_status(&self.status, theme, layout.text.width, layout.text.height),
+        };
+        if let Some(text_surface) = text_surface {
+            surface.blit(layout.text.left(), layout.text.top(), &text_surface);
+        }
+
+        self.scrollbar
+            .render(&mut surface, layout.scrollbar, scale, theme);
+        Some(surface)
+    }
+
+    /// Route one pointer event into the header button and the scrollbar, the
+    /// single pure entry point a host feeds a translated
+    /// [`tairix_input::InputEvent`] into.
+    ///
+    /// A control's visible change decides whether it actually needs a
+    /// repaint — a mere hover move reports no action yet still changes the
+    /// picture, so a naive "did an action fire" check would miss it. The
+    /// button's [`ControlState`](tairix_controls::ControlState) is its whole
+    /// visible interaction surface (its content and role never move under a
+    /// pointer event), so comparing `state()` before and after states the
+    /// repaint intent directly. The scrollbar's own render-equivalence
+    /// [`PartialEq`] is compared instead, because the hovered end button,
+    /// the drag in progress, and which end/track region is held are all
+    /// visible on it yet, unlike the button, live outside its
+    /// `ControlState` (documented on [`ScrollBar`]); it is `Copy`, so
+    /// capturing it before the event costs nothing.
+    #[must_use]
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        width_px: u32,
+        height_px: u32,
+        theme: &Theme,
+        scale: Scale,
+    ) -> ViewerPointerOutcome {
+        let layout = ViewerLayout::for_window(width_px, height_px, theme, scale);
+
+        let button_state_before = self.open_button.state();
+        let action = self.open_button.on_pointer(event, layout.button);
+        let button_changed = self.open_button.state() != button_state_before;
+
+        let bar_before = self.scrollbar;
+        let scroll_action = self
+            .scrollbar
+            .on_pointer(event, layout.scrollbar, scale, theme);
+        let bar_changed = self.scrollbar != bar_before;
+
+        let mut changed = button_changed || bar_changed;
+        if let Some(ScrollAction::ScrollTo { offset }) = scroll_action {
+            if let Some(scroll) = self.scroll.as_mut() {
+                if scroll.scroll_to(offset) {
+                    changed = true;
+                }
+                self.scrollbar.set_model(scroll.model());
+            }
+        }
+
+        ViewerPointerOutcome {
+            changed,
+            open_requested: action == Some(ButtonAction::Activated),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

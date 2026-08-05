@@ -19,16 +19,23 @@
 //!
 //! # What the program wires (and what stays in the library)
 //!
-//! The bounded, sanitising byte→line model and the themed renderers live
-//! in the host-tested `tairix_viewer` engine; this binary composes them
-//! over the live syscalls exactly as the files app does: one
-//! `shm_create`d frame region granted to the window endpoint, one
-//! `port_bind`-bound event mailbox parked on through a wait-set (every
-//! accepted event authenticated against the session identity the create
-//! reply named), and the `WindowClient` calls over `ipc_call`. `Enter`
-//! asks for another pick; a `CloseRequested` from the desktop ends the
-//! program cleanly. Every bring-up refusal exits fail-loud with a
-//! reserved code and a stated reason on `stderr`.
+//! The bounded, sanitising byte→line model, the pointer- and
+//! keyboard-driven [`tairix_viewer::Viewer`] composition, and the themed
+//! renderers all live in the host-tested `tairix_viewer` engine; this
+//! binary composes them over the live syscalls exactly as the files app
+//! does: one `shm_create`d frame region granted to the window endpoint,
+//! one `port_bind`-bound event mailbox parked on through a wait-set
+//! (every accepted event authenticated against the session identity the
+//! create reply named), and the `WindowClient` calls over `ipc_call`.
+//! Wire pointer events are translated into `tairix_input::InputEvent`s
+//! through the one shared `tairix_window::pointer_input_events` mapping and
+//! routed into the viewer's single pointer entry point, so clicking the
+//! window's "Open…" button, dragging its scrollbar, or turning the wheel
+//! all work exactly as they draw; pressing `Enter` asks for a pick the same
+//! way the button does. A `CloseRequested` from the desktop ends the
+//! program cleanly.
+//! Every bring-up refusal exits fail-loud with a reserved code and a
+//! stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -46,17 +53,26 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
     };
+    use tairix_geometry::{Point, Scale};
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::ThemeRegistry;
     use tairix_viewer::{
-        content_lines, render_lines, render_status, visible_cols_for, visible_rows_for, ScrollView,
-        CONTENT_MAX, MAX_LINES, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
+        Viewer, ViewerPointerOutcome, CONTENT_MAX, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT,
+        WIN_WIDTH,
     };
-    use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+    use tairix_window::{
+        pointer_input_events, EventSource, WindowClient, WindowEvents, WindowTransport,
+    };
+
+    /// The desktop scale the viewer draws at. The window's extents are
+    /// authored in unscaled pixels ([`WIN_WIDTH`], [`WIN_HEIGHT`]), so every
+    /// layout, render, and hit-test call in this program agrees on one
+    /// density.
+    const SCALE: Scale = Scale::ONE;
 
     /// Exit code when the shared frame region could not be created or
     /// granted to the window endpoint. A reserved, fail-closed value.
@@ -283,39 +299,21 @@ mod program {
         }
     }
 
-    /// Paint the one-line status message `text` for the current window.
-    fn show_status<T: WindowTransport>(
-        text: &str,
+    /// Draw the whole viewer window — the header, the "Open…" button, the
+    /// text area, and the scrollbar — and present it.
+    fn present_viewer<T: WindowTransport>(
+        viewer: &Viewer,
         theme: &tairix_theme::Theme,
         client: &mut WindowClient<T>,
         window: u64,
         frames: &mut Frames,
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
-        render_status(text, theme, mode.width_px, mode.height_px)
+        viewer
+            .render(theme, SCALE, mode.width_px, mode.height_px)
             .ok_or(Errno::NoSpace)
             .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
     }
-
-    /// Repaint the current window of the scrolled file for the current
-    /// window size.
-    fn repaint_view<T: WindowTransport>(
-        scroll: &ScrollView,
-        theme: &tairix_theme::Theme,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frames: &mut Frames,
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
-        render_lines(scroll.visible(), theme, mode.width_px, mode.height_px)
-            .ok_or(Errno::NoSpace)
-            .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
-    }
-
-    /// The waiting/prompt status shown before a file is chosen and after a
-    /// resize while no file is open. One definition so the prompt reads the
-    /// same everywhere.
-    const WAITING: &str = "Choose a file...";
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
@@ -392,61 +390,26 @@ mod program {
         let themes = ThemeRegistry::with_builtins();
         let theme = themes.active();
 
-        // The currently viewed file, scrolled through the shared engine. None
-        // until content arrives; a re-pick or refusal replaces it. The raw
-        // bytes are kept alongside the view so a resize can re-wrap the file
-        // to the new column count rather than losing content past the old
-        // width.
-        let mut view: Option<ScrollView> = None;
-        let mut content: Option<Vec<u8>> = None;
+        // The whole window's pointer- and keyboard-driven state: the current
+        // file view (or the status message shown in its place), the "Open…"
+        // button, and the scrollbar, all composed in the host-tested engine.
+        let mut viewer = Viewer::new();
 
         if document_mode {
             // The launcher handed us the file on STDIN; display it now instead
             // of prompting. A refused read is stated honestly, never faked.
             match read_document() {
-                Some(bytes) => {
-                    let lines = content_lines(&bytes, MAX_LINES, visible_cols_for(mode.width_px));
-                    let scroll = ScrollView::new(lines, visible_rows_for(mode.height_px));
-                    let present =
-                        repaint_view(&scroll, theme, &mut client, window, &mut frames, &mode);
-                    view = Some(scroll);
-                    content = Some(bytes);
-                    if present.is_err() {
-                        return fail(EXIT_CHANNEL_LOST, "first present refused");
-                    }
-                }
-                None => {
-                    if show_status(
-                        "Document read refused",
-                        theme,
-                        &mut client,
-                        window,
-                        &mut frames,
-                        &mode,
-                    )
-                    .is_err()
-                    {
-                        return fail(EXIT_CHANNEL_LOST, "first present refused");
-                    }
-                }
+                Some(bytes) => viewer.open(bytes, mode.width_px, mode.height_px, theme, SCALE),
+                None => viewer.show_status("Document read refused."),
             }
-        } else {
-            if show_status(WAITING, theme, &mut client, window, &mut frames, &mode).is_err() {
-                return fail(EXIT_CHANNEL_LOST, "first present refused");
-            }
-            if client.pick_file(window).is_err() {
-                // A refused pick (another pick showing, or a session without
-                // filesystem reach) is not fatal: the viewer stays open and
-                // Enter asks again.
-                let _ = show_status(
-                    "Pick refused - Enter retries",
-                    theme,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mode,
-                );
-            }
+        } else if client.pick_file(window).is_err() {
+            // A refused pick (another pick showing, or a session without
+            // filesystem reach) is not fatal: the viewer stays open and the
+            // "Open…" button or Enter asks again.
+            viewer.show_status("Pick refused.");
+        }
+        if present_viewer(&viewer, theme, &mut client, window, &mut frames, &mode).is_err() {
+            return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends
@@ -464,82 +427,53 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
-            let outcome = match event {
-                WindowEvent::FilePicked { handle, .. } => match read_picked(handle) {
-                    Some(bytes) => {
-                        // Keep every line (bounded) so the file can be
-                        // scrolled, not just its first screenful, and keep the
-                        // raw bytes so a resize can re-wrap them.
-                        let lines =
-                            content_lines(&bytes, MAX_LINES, visible_cols_for(mode.width_px));
-                        view = Some(ScrollView::new(lines, visible_rows_for(mode.height_px)));
-                        content = Some(bytes);
-                        match view.as_ref() {
-                            Some(scroll) => {
-                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
-                            }
-                            None => Ok(()),
+            let mut request_pick = false;
+            let repaint = match event {
+                WindowEvent::FilePicked { handle, .. } => {
+                    match read_picked(handle) {
+                        Some(bytes) => {
+                            viewer.open(bytes, mode.width_px, mode.height_px, theme, SCALE);
                         }
+                        // A refused redemption or read delegated nothing the
+                        // viewer can show; state it honestly.
+                        None => viewer.show_status("Delegated read refused."),
                     }
-                    // A refused redemption or read delegated nothing the
-                    // viewer can show; state it honestly.
-                    None => {
-                        view = None;
-                        content = None;
-                        show_status(
-                            "Delegated read refused",
-                            theme,
-                            &mut client,
-                            window,
-                            &mut frames,
-                            &mode,
-                        )
-                    }
-                },
-                WindowEvent::PickCancelled { .. } => show_status(
-                    "No file chosen - Enter retries",
-                    theme,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mode,
-                ),
+                    true
+                }
+                WindowEvent::PickCancelled { .. } => {
+                    viewer.show_status("No file chosen.");
+                    true
+                }
                 WindowEvent::Key {
                     key: KeyInput::Pressed { key, .. },
                     ..
                 } => match key {
-                    // Enter asks for another pick; a refusal (one already
-                    // showing) leaves the current content on screen.
+                    // Enter asks for another pick — the same request the
+                    // "Open…" button sends; a refusal (one already showing)
+                    // leaves the current content on screen.
                     KeyValue::Named(NamedKeyCode::Enter) => {
-                        let _ = client.pick_file(window);
-                        Ok(())
+                        request_pick = true;
+                        false
                     }
                     // Navigation keys drive the shared scroll model and
                     // repaint only when the view actually moved.
-                    KeyValue::Named(nav) => scroll_view(nav, view.as_mut())
-                        .filter(|moved| *moved)
-                        .map_or(Ok(()), |_| match view.as_ref() {
-                            Some(scroll) => {
-                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
-                            }
-                            None => Ok(()),
-                        }),
-                    KeyValue::Char(_) => Ok(()),
+                    KeyValue::Named(nav) => navigate(nav, &mut viewer),
+                    KeyValue::Char(_) => false,
                 },
                 // A wheel gesture the desktop forwarded because this window
                 // owns its own content scrolling: drive the shared model by
                 // its vertical ticks and repaint only when the view moved.
-                WindowEvent::Scrolled { dy, .. } => {
-                    if view.as_mut().is_some_and(|scroll| scroll.scroll_ticks(dy)) {
-                        match view.as_ref() {
-                            Some(scroll) => {
-                                repaint_view(scroll, theme, &mut client, window, &mut frames, &mode)
-                            }
-                            None => Ok(()),
-                        }
-                    } else {
-                        Ok(())
-                    }
+                WindowEvent::Scrolled { dy, .. } => viewer.scroll_ticks(dy),
+                // A pointer event over the client area: sync the hover
+                // position, then apply the press/release the action names,
+                // exactly as the widget gallery's own window channel does.
+                // The button and the scrollbar are the only interactive
+                // regions, so this is the pointer's whole route into the
+                // viewer.
+                WindowEvent::Pointer { x, y, action, .. } => {
+                    let outcome = apply_pointer(&mut viewer, x, y, action, theme, &mode);
+                    request_pick = outcome.open_requested;
+                    outcome.changed
                 }
                 // The window manager resized (or maximized/restored) the
                 // window. Re-map the frame region at the new client size, then
@@ -549,16 +483,18 @@ mod program {
                     width_px,
                     height_px,
                     ..
-                } => resize_window(
-                    mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
-                    theme,
-                    &mut client,
-                    window,
-                    &mut frames,
-                    &mut mode,
-                    content.as_deref(),
-                    &mut view,
-                ),
+                } => {
+                    resize_window(
+                        mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
+                        theme,
+                        &mut client,
+                        window,
+                        &mut frames,
+                        &mut mode,
+                        &mut viewer,
+                    );
+                    true
+                }
                 WindowEvent::CloseRequested { .. } => {
                     // The desktop asked; close the window and end cleanly.
                     let _ = client.close(window);
@@ -568,8 +504,7 @@ mod program {
                     let _ = tairix_rt::shm_unmap(frames.base as u64, frames.len);
                     return 0;
                 }
-                // Focus changes, key releases, minimize, and pointer events
-                // repaint nothing; the viewer is picker- and keyboard-driven.
+                // Focus changes, key releases, and minimize repaint nothing.
                 // A redraw request is already answered by the client library
                 // re-presenting the last frame, which is still what the
                 // viewer would draw. Listed rather than caught by a wildcard
@@ -577,13 +512,51 @@ mod program {
                 WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
-                | WindowEvent::Pointer { .. }
-                | WindowEvent::RedrawRequested { .. } => Ok(()),
+                | WindowEvent::RedrawRequested { .. } => false,
+            };
+            if request_pick {
+                // A refused pick (another pick showing) leaves the current
+                // content on screen; the outcome arrives as a later event.
+                let _ = client.pick_file(window);
+            }
+            let outcome = if repaint {
+                present_viewer(&viewer, theme, &mut client, window, &mut frames, &mode)
+            } else {
+                Ok(())
             };
             if outcome.is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }
+    }
+
+    /// Route one wire pointer event into the viewer through the one shared
+    /// wire-to-control translation ([`pointer_input_events`]): a move to
+    /// `(x, y)` first, then the press/release `action` names, so the button
+    /// and the scrollbar are never asked about a transition at a position
+    /// they have not been told about.
+    fn apply_pointer(
+        viewer: &mut Viewer,
+        x: u32,
+        y: u32,
+        action: PointerAction,
+        theme: &tairix_theme::Theme,
+        mode: &DisplayMode,
+    ) -> ViewerPointerOutcome {
+        let point = Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        );
+        let mut outcome = ViewerPointerOutcome {
+            changed: false,
+            open_requested: false,
+        };
+        for input in pointer_input_events(action, point) {
+            let step = viewer.on_pointer(&input, mode.width_px, mode.height_px, theme, SCALE);
+            outcome.changed |= step.changed;
+            outcome.open_requested |= step.open_requested;
+        }
+        outcome
     }
 
     /// Re-map the window's frame region onto `new_mode` and repaint at the
@@ -595,8 +568,9 @@ mod program {
     /// (never before, so a refused resize leaves the current surface intact);
     /// on refusal the freshly-allocated region is unmapped so nothing leaks.
     /// A region that cannot be allocated at all keeps the current size rather
-    /// than crashing or presenting nothing.
-    #[allow(clippy::too_many_arguments)] // The resize touches every piece of the window's live state exactly once.
+    /// than crashing or presenting nothing. The caller repaints unconditionally
+    /// afterward, since even a refused resize leaves the reported client size
+    /// unchanged and the current picture already matches it.
     fn resize_window(
         new_mode: DisplayMode,
         theme: &tairix_theme::Theme,
@@ -604,14 +578,13 @@ mod program {
         window: u64,
         frames: &mut Frames,
         mode: &mut DisplayMode,
-        content: Option<&[u8]>,
-        view: &mut Option<ScrollView>,
-    ) -> Result<(), Errno> {
+        viewer: &mut Viewer,
+    ) {
         let total = region_bytes(&new_mode);
         let Some((_region_id, new_base, new_grant)) = allocate_frames(total) else {
             // Out of memory for a new region: honestly keep the current
             // window rather than fail the whole app.
-            return Ok(());
+            return;
         };
         if client
             .resize(window, new_grant, FRAME_COUNT, &new_mode)
@@ -620,7 +593,7 @@ mod program {
             // The session refused the re-map: drop the new region and stand on
             // the old geometry (fail closed, no crash).
             let _ = tairix_rt::shm_unmap(new_base as u64, total);
-            return Ok(());
+            return;
         }
         // The session adopted the new region; release the old mapping and
         // switch the app onto the new one.
@@ -630,39 +603,22 @@ mod program {
             len: total,
         };
         *mode = new_mode;
-        // Re-wrap the stored file to the new width and repaint, keeping the
-        // reader near their place; with no file open, redraw the prompt.
-        match content {
-            Some(bytes) => {
-                let lines = content_lines(bytes, MAX_LINES, visible_cols_for(mode.width_px));
-                let rows = visible_rows_for(mode.height_px);
-                match view.as_mut() {
-                    Some(scroll) => scroll.relayout(lines, rows),
-                    None => *view = Some(ScrollView::new(lines, rows)),
-                }
-                match view.as_ref() {
-                    Some(scroll) => repaint_view(scroll, theme, client, window, frames, mode),
-                    None => Ok(()),
-                }
-            }
-            None => show_status(WAITING, theme, client, window, frames, mode),
-        }
+        // Re-wrap the open file (if any) to the new width, keeping the
+        // reader near their place; a status message needs no re-wrapping.
+        viewer.relayout(mode.width_px, mode.height_px, theme, SCALE);
     }
 
-    /// Apply a navigation key to the scroll `view`, returning whether the view
-    /// moved (or `None` when the key is not a scroll key or there is no view).
-    fn scroll_view(key: NamedKeyCode, view: Option<&mut ScrollView>) -> Option<bool> {
-        let view = view?;
-        let moved = match key {
-            NamedKeyCode::Up => view.line_up(),
-            NamedKeyCode::Down => view.line_down(),
-            NamedKeyCode::PageUp => view.page_up(),
-            NamedKeyCode::PageDown => view.page_down(),
-            NamedKeyCode::Home => view.to_top(),
-            NamedKeyCode::End => view.to_bottom(),
-            _ => return None,
-        };
-        Some(moved)
+    /// Apply a navigation key to the viewer, returning whether the view moved.
+    fn navigate(key: NamedKeyCode, viewer: &mut Viewer) -> bool {
+        match key {
+            NamedKeyCode::Up => viewer.line_up(),
+            NamedKeyCode::Down => viewer.line_down(),
+            NamedKeyCode::PageUp => viewer.page_up(),
+            NamedKeyCode::PageDown => viewer.page_down(),
+            NamedKeyCode::Home => viewer.to_top(),
+            NamedKeyCode::End => viewer.to_bottom(),
+            _ => false,
+        }
     }
 
     tairix_rt::entry!(main);

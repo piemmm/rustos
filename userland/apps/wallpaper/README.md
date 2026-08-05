@@ -17,27 +17,45 @@ session listening — is reported on the status line; a refusal leaves the
 window open and never fabricates success.
 
 Wallpaper images are **never decoded in this program's address space**.
-Every thumbnail is rendered by `lib/sandbox`'s image-render service running
-in a capability-empty child this same binary is re-entered as, at the
-currently selected fit, so a preview shows what the desktop will actually
-do with that image. A file the worker refuses becomes a marked placeholder
-tile and is not asked for again — one attempt per bad file, and a malformed
-image cannot take down the chooser.
+The preview panel and every gallery thumbnail are rendered by
+`lib/sandbox`'s image-render service running in a capability-empty child
+this same binary is re-entered as. A file the worker refuses is marked
+`unreadable` and is not asked for again — one attempt per bad file, and a
+malformed image cannot take down the chooser.
+
+## Pointer first
+
+The window is driven by the mouse, with the keyboard as a complete
+secondary path. Every interactive thing on screen is a shared
+`lib/controls` control held for the life of the window — the four settings
+drop-downs, the Apply and Close buttons, the gallery's scrollbar — so each
+owns its own hover, press and drag state and the app inherits the whole
+desktop's interaction vocabulary rather than inventing one. The gallery's
+tiles are the exception the design language names: a tile paints state and
+never dispatches, so the gallery hit-tests the pointer against the very
+grid it painted (`lib/browse`'s shared icon-grid engine, the same one the
+file manager and the desktop's own icon field use).
 
 ## What this crate is
 
 The host-tested engine plus the `Run` binary that composes it:
 
-- `Chooser` — the model: the candidate list (the "no wallpaper" entry, the
-  discovered store, and a current wallpaper from outside the store), the
-  thumbnail lifecycle, the fit / backdrop / icon-flow / sort choices, and
-  the keyboard focus state machine. No I/O, no authority: every thumbnail
-  arrives already rendered or already refused from the caller;
-- `Layout` — the one window geometry every render and hit-test agrees on,
-  computed bottom-up so a resize can never place a row outside the window;
-- `Chooser::render` — the themed painters over `lib/raster`, `lib/font`,
-  and the `lib/controls` radio/button family (no new control family), with
-  the grid and each option row clipped to their own region;
+- `Chooser` — the model: the candidate gallery (the "no wallpaper" entry,
+  the discovered store, and a current wallpaper from outside the store),
+  the four settings drop-downs, the live preview, the pointer's hover and
+  press state, and the keyboard focus order. No I/O, no authority: the
+  preview and every thumbnail arrive already rendered or already refused
+  from the caller. The preview is held together with the request that
+  produced it, so a stale preview is unrepresentable rather than merely
+  avoided;
+- `Layout` — the one window geometry every paint and hit-test agrees on,
+  derived from the theme's metrics and the text face (never a pixel
+  constant), with the footer claimed from the bottom edge so the buttons
+  survive any window size;
+- `Chooser::render` — the painter over `lib/raster`, `lib/font` and the
+  `lib/controls` family, drawing each control in the state that control is
+  already in, with the gallery clipped to its own region and the expanded
+  drop-down's list painted last;
 - `Chooser::settings_document` — the exact `lib/wallpaper` document the
   current UI state means, rendered by that crate's own writer;
 - `src/run.rs` — the freestanding program: the sandbox-worker role, the
@@ -67,8 +85,10 @@ administration.
   descriptor handle) and the pinboard apply to accept a delegated read
   handle the session can use later; neither exists, so the capability is
   absent rather than half-built. See `plans/PINBOARD.md` §8.
-- The window is keyboard-driven; pointer events arrive and select nothing,
-  matching the file viewer's scope.
+- The preview shows the chosen image, backdrop and fit at the preview's own
+  shape, not at the display's: no unprivileged program can ask how large
+  the screen is, so a screen of a different shape crops or letterboxes
+  differently from the preview. See `plans/PINBOARD.md` §8.
 - The backdrop colour is a fixed named palette plus whatever colour is
   already in effect, not a free-form colour entry.
 
@@ -76,7 +96,17 @@ administration.
 
 `cargo test -p tairix-wallpaper-chooser`: the candidate model (the "no
 wallpaper" entry, an out-of-store current wallpaper, refused and pending
-thumbnails), every keyboard movement and the full tab order, each option
-group including the backdrop palette, the rendered document matching the
-UI state exactly, the apply-outcome surfaces, and the layout's
-non-overlap/containment at degenerate and small window sizes.
+thumbnails); the pointer — click-to-select, a press released away from
+what it started on doing nothing, hover and press changing what is drawn,
+a drop-down opening and a row in it taking effect, an open list swallowing
+the click beneath it, the wheel and a thumb drag scrolling the gallery,
+and a secondary click changing nothing; the preview being re-asked for
+exactly when the selection, the fit or the panel size changes and never
+showing the previous one; the keyboard's full tab order and every
+movement; the rendered document matching the state the controls are in;
+the apply-outcome surfaces; and the layout's non-overlap and containment
+at degenerate, small and large window sizes.
+
+No pointer test hard-codes a coordinate: each asks the layout where the
+thing it is about to click is, so the geometry and the tests cannot drift
+apart.

@@ -33,18 +33,19 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::input::{
-        KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
-    };
+    use tairix_abi::input::KeyInput;
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
-    use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+    use tairix_input::InputEvent;
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
-    use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+    use tairix_window::{
+        key_input_event, pointer_input_events, EventSource, WindowClient, WindowEvents,
+        WindowTransport,
+    };
 
     /// The gallery window's logical width in physical pixels.
     const WIN_WIDTH: u32 = 820;
@@ -171,12 +172,14 @@ mod program {
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, modifiers },
+                key: pressed @ KeyInput::Pressed { .. },
                 ..
-            } => {
-                let (key, mods) = to_editor_key(*key, *modifiers);
-                (gallery.on_key(key, mods), false)
-            }
+            } => match key_input_event(*pressed) {
+                InputEvent::KeyPressed { key, modifiers } => {
+                    (gallery.on_key(key, modifiers), false)
+                }
+                _ => (false, false),
+            },
             WindowEvent::Pointer { x, y, action, .. } => (
                 apply_pointer(gallery, *x, *y, *action, viewport, theme, font),
                 false,
@@ -229,92 +232,11 @@ mod program {
             i32::try_from(x).unwrap_or(i32::MAX),
             i32::try_from(y).unwrap_or(i32::MAX),
         );
-        let moved = gallery.on_pointer(
-            &InputEvent::PointerMoved { to: point },
-            viewport,
-            Scale::ONE,
-            theme,
-            font,
-        );
-        let acted = match action {
-            PointerAction::Moved => false,
-            PointerAction::Pressed(code) => gallery.on_pointer(
-                &InputEvent::PointerPressed {
-                    button: to_button(code),
-                },
-                viewport,
-                Scale::ONE,
-                theme,
-                font,
-            ),
-            PointerAction::Released(code) => gallery.on_pointer(
-                &InputEvent::PointerReleased {
-                    button: to_button(code),
-                },
-                viewport,
-                Scale::ONE,
-                theme,
-                font,
-            ),
-        };
-        moved || acted
-    }
-
-    /// Map a wire [`PointerButtonCode`] onto the desktop [`PointerButton`].
-    fn to_button(code: PointerButtonCode) -> PointerButton {
-        match code {
-            PointerButtonCode::Primary => PointerButton::Primary,
-            PointerButtonCode::Secondary => PointerButton::Secondary,
-            PointerButtonCode::Middle => PointerButton::Middle,
+        let mut acted = false;
+        for input in pointer_input_events(action, point) {
+            acted |= gallery.on_pointer(&input, viewport, Scale::ONE, theme, font);
         }
-    }
-
-    /// Map the window channel's wire key event onto the desktop control
-    /// vocabulary the gallery consumes.
-    fn to_editor_key(key: KeyValue, mods: AbiModifiers) -> (Key, Modifiers) {
-        let modifiers = Modifiers {
-            shift: mods.shift,
-            ctrl: mods.ctrl,
-            alt: mods.alt,
-            meta: mods.meta,
-        };
-        let key = match key {
-            KeyValue::Char(ch) => Key::Char(ch),
-            KeyValue::Named(named) => Key::Named(named_to_editor(named)),
-        };
-        (key, modifiers)
-    }
-
-    /// Map a wire [`NamedKeyCode`] onto the desktop [`NamedKey`] (a total map).
-    fn named_to_editor(named: NamedKeyCode) -> NamedKey {
-        match named {
-            NamedKeyCode::Enter => NamedKey::Enter,
-            NamedKeyCode::Escape => NamedKey::Escape,
-            NamedKeyCode::Backspace => NamedKey::Backspace,
-            NamedKeyCode::Tab => NamedKey::Tab,
-            NamedKeyCode::Delete => NamedKey::Delete,
-            NamedKeyCode::Insert => NamedKey::Insert,
-            NamedKeyCode::Home => NamedKey::Home,
-            NamedKeyCode::End => NamedKey::End,
-            NamedKeyCode::PageUp => NamedKey::PageUp,
-            NamedKeyCode::PageDown => NamedKey::PageDown,
-            NamedKeyCode::Left => NamedKey::Left,
-            NamedKeyCode::Right => NamedKey::Right,
-            NamedKeyCode::Up => NamedKey::Up,
-            NamedKeyCode::Down => NamedKey::Down,
-            NamedKeyCode::F1 => NamedKey::Function { number: 1 },
-            NamedKeyCode::F2 => NamedKey::Function { number: 2 },
-            NamedKeyCode::F3 => NamedKey::Function { number: 3 },
-            NamedKeyCode::F4 => NamedKey::Function { number: 4 },
-            NamedKeyCode::F5 => NamedKey::Function { number: 5 },
-            NamedKeyCode::F6 => NamedKey::Function { number: 6 },
-            NamedKeyCode::F7 => NamedKey::Function { number: 7 },
-            NamedKeyCode::F8 => NamedKey::Function { number: 8 },
-            NamedKeyCode::F9 => NamedKey::Function { number: 9 },
-            NamedKeyCode::F10 => NamedKey::Function { number: 10 },
-            NamedKeyCode::F11 => NamedKey::Function { number: 11 },
-            NamedKeyCode::F12 => NamedKey::Function { number: 12 },
-        }
+        acted
     }
 
     /// Bind the app's own event mailbox and add it to a fresh wait-set the

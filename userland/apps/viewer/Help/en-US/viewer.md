@@ -20,9 +20,16 @@ window. Printable characters are shown as they are; every other byte
 is shown as a dot, so binary content reads as obviously sanitised. The
 shown content is bounded to the first part of the file.
 
-Press `Enter` to ask for another file. Cancelling the picker leaves
-the viewer open with a notice. Closing the window from the desktop
-ends the viewer.
+The window is driven by the mouse. Click the "Open…" button in the
+header to ask for another file. Drag the scrollbar's thumb up or down
+to move through a long file, click its track above or below the thumb
+to page, click its end buttons to step a line, or turn the wheel over
+the window to scroll. Cancelling the picker leaves the viewer open
+with a notice; closing the window from the desktop ends the viewer.
+
+The keyboard is a secondary path for the same actions: `Enter` asks
+for another file, the arrow keys step a line, Page Up/Page Down step a
+page, and Home/End jump to the top or bottom.
 
 ## EXIT STATUS
 

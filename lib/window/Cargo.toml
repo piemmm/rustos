@@ -11,6 +11,13 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 tairix-display = { path = "../display", version = "=0.0.0" }
+# Integer screen geometry: the window-local point a delivered pointer event
+# carries.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The shared pointer input-event vocabulary every control consumes, so the
+# one wire-to-control translation every windowed app needs lives here rather
+# than as a private copy per app.
+tairix-input = { path = "../input", version = "=0.0.0" }
 
 [lints]
 workspace = true

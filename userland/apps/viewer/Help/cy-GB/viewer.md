@@ -17,11 +17,22 @@ dirprwyo i'r gwyliwr — unwaith yn unig ac yn ddarllen-yn-unig.
 
 Dangosir cynnwys y ffeil a ddewiswyd fel testun plaen o frig y
 ffenestr. Dangosir nodau argraffadwy fel y maent; dangosir pob beit
-arall fel dot. Cyfyngir y cynnwys a ddangosir i ddechrau'r ffeil.
+arall fel dot, felly mae cynnwys deuaidd yn darllen fel pe bai wedi'i
+saniteiddio'n amlwg. Cyfyngir y cynnwys a ddangosir i ddechrau'r
+ffeil.
 
-Pwyswch `Enter` i ofyn am ffeil arall. Mae canslo'r dewisydd yn gadael
-y gwyliwr ar agor gyda hysbysiad. Mae cau'r ffenestr o'r bwrdd gwaith
-yn gorffen y gwyliwr.
+Gyrrir y ffenestr gan y llygoden. Cliciwch y botwm **Open…** (Agor…) yn
+y pennawd i ofyn am ffeil arall. Llusgwch fawd y bar sgrolio i fyny neu
+i lawr i symud trwy ffeil hir, cliciwch y trac uwchben neu o dan y
+bawd i dudalen, cliciwch y botymau pen i gamu llinell, neu trowch yr
+olwyn dros y ffenestr i sgrolio. Mae canslo'r ddewisydd yn gadael y
+gwyliwr ar agor gyda hysbysiad; mae cau'r ffenestr o'r bwrdd gwaith yn
+gorffen y gwyliwr.
+
+Mae'r bysellfwrdd yn llwybr eilaidd ar gyfer yr un gweithredoedd: mae
+`Enter` yn gofyn am ffeil arall, mae'r bysellau saeth yn camu llinell,
+mae Page Up/Page Down yn camu tudalen, ac mae Home/End yn neidio i'r
+brig neu'r gwaelod.
 
 ## EXIT STATUS
 

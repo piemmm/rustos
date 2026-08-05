@@ -120,7 +120,9 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{EventSource, WindowClient, WindowEvents, WindowTransport};
+    use tairix_window::{
+        pointer_input_events, EventSource, WindowClient, WindowEvents, WindowTransport,
+    };
 
     use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
     use crate::sidebar::{self, press_point};
@@ -1414,10 +1416,14 @@ mod program {
             i32::try_from(*x).unwrap_or(i32::MAX),
             i32::try_from(*y).unwrap_or(i32::MAX),
         );
-        if let Some(event) = scroll_input_event(*action, point) {
-            if let Some(repaint) = scroll_pointer(browser, font, theme, viewport, point, &event) {
-                return (repaint, false);
+        let mut scrolled = None;
+        for input in pointer_input_events(*action, point) {
+            if let Some(repaint) = scroll_pointer(browser, font, theme, viewport, point, &input) {
+                scrolled = Some(scrolled.unwrap_or(false) || repaint);
             }
+        }
+        if let Some(repaint) = scrolled {
+            return (repaint, false);
         }
         if *action == PointerAction::Moved {
             offer_armed_drag(browser, overlays, link, point);
@@ -2664,28 +2670,6 @@ mod program {
     fn report_paste_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
         let _ = writeln!(Stderr, "files: could not paste {name}: {reason}");
-    }
-
-    /// Translate a wire [`PointerAction`] into the shared [`InputEvent`] the
-    /// interactive scrollbar consumes, or `None` for an action the scrollbar
-    /// never handles (a secondary/middle button — those belong to the content).
-    /// A press/release carries no position, so `point` is threaded through the
-    /// move variant and the router re-positions the bar before applying it.
-    fn scroll_input_event(action: PointerAction, point: Point) -> Option<InputEvent> {
-        match action {
-            PointerAction::Moved => Some(InputEvent::PointerMoved { to: point }),
-            PointerAction::Pressed(PointerButtonCode::Primary) => {
-                Some(InputEvent::PointerPressed {
-                    button: PointerButton::Primary,
-                })
-            }
-            PointerAction::Released(PointerButtonCode::Primary) => {
-                Some(InputEvent::PointerReleased {
-                    button: PointerButton::Primary,
-                })
-            }
-            _ => None,
-        }
     }
 
     /// Route one primary-button press at window-local `point` in navigation

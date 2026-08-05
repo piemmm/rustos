@@ -18,12 +18,24 @@ seul le fichier choisi par l'utilisateur est délégué à la visionneuse
 
 Le contenu du fichier choisi est affiché en texte brut depuis le haut
 de la fenêtre. Les caractères imprimables sont affichés tels quels ;
-tout autre octet est représenté par un point. Le contenu affiché est
+tout autre octet est représenté par un point, de sorte que le contenu
+binaire apparaisse manifestement aseptisé. Le contenu affiché est
 limité au début du fichier.
 
-Appuyez sur `Entrée` pour demander un autre fichier. Annuler le
-sélecteur laisse la visionneuse ouverte avec un avis. Fermer la
-fenêtre depuis le bureau termine la visionneuse.
+La fenêtre est pilotée à la souris. Cliquez sur le bouton **Open…**
+(Ouvrir…) dans l'en-tête pour demander un autre fichier. Faites
+glisser le curseur de la barre de défilement vers le haut ou vers le
+bas pour parcourir un long fichier, cliquez sur sa piste au-dessus ou
+en dessous du curseur pour changer de page, cliquez sur ses boutons
+d'extrémité pour avancer d'une ligne, ou tournez la molette au-dessus
+de la fenêtre pour faire défiler. Annuler le sélecteur laisse la
+visionneuse ouverte avec un avis ; fermer la fenêtre depuis le bureau
+termine la visionneuse.
+
+Le clavier est une voie secondaire pour les mêmes actions : `Enter`
+demande un autre fichier, les touches fléchées avancent d'une ligne,
+Page Up/Page Down avancent d'une page, et Home/End sautent au début
+ou à la fin.
 
 ## EXIT STATUS
 

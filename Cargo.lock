@@ -4764,6 +4764,8 @@ dependencies = [
  "tairix-abi",
  "tairix-controls",
  "tairix-font",
+ "tairix-geometry",
+ "tairix-input",
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
@@ -4836,6 +4838,8 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-icon",
+ "tairix-input",
  "tairix-raster",
  "tairix-rt",
  "tairix-sandbox",
@@ -4886,6 +4890,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-display",
+ "tairix-geometry",
+ "tairix-input",
 ]
 
 [[package]]

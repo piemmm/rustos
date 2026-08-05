@@ -22,7 +22,10 @@ the user chose and nothing else: the user-mediated file capability of
 
 ## What this crate is
 
-The host-tested view engine plus the `Run` binary that composes it:
+The host-tested view engine plus the `Run` binary that composes it. The
+window is mouse-driven: a header "Open…" button and a vertical scrollbar,
+both the shared `lib/controls` implementations, with the keyboard as a
+fully working secondary path.
 
 - `content_lines` — the pure, bounded byte→line model: at most the
   visible rows/columns, every non-printable byte sanitised to a
@@ -30,12 +33,25 @@ The host-tested view engine plus the `Run` binary that composes it:
   raw (fail closed);
 - `render_status` / `render_lines` — the themed painters over the
   shared `lib/font` face and `lib/raster` surface;
+- `ViewerLayout` — the one definition of where the header, the "Open…"
+  button, the text area, and the scrollbar sit within the window, shared
+  by rendering, pointer routing, and the tests;
+- `Viewer` — the window's composed pointer- and keyboard-driven state:
+  the current file view or status message, the shared `Button`, and the
+  shared `ScrollBar`, kept in sync through one `ScrollModel`.
+  `Viewer::on_pointer` is the single pure entry point a translated
+  `tairix_input::InputEvent` is fed into, so clicking the button, dragging
+  or paging the scrollbar, and turning the wheel are all host-testable
+  without a window;
 - `src/run.rs` — the freestanding program: window create over
   `lib/window`, an immediate `pick_file`, the parked event wait, the
   delegated bounded read (`fd_redeem` + `fs_read`, capped at
-  `CONTENT_MAX`), and the repaint. `Enter` asks for another pick; a
-  cancelled pick leaves the viewer open with a notice; every bring-up
-  refusal exits fail-loud with a stated reason on `stderr`.
+  `CONTENT_MAX`), and the repaint. Wire pointer events are translated
+  through the one shared `tairix_window::pointer_input_events` mapping
+  and routed into `Viewer::on_pointer`, so clicking "Open…" asks for a
+  pick exactly as pressing `Enter` does. A cancelled pick leaves the
+  viewer open with a notice; every bring-up refusal exits fail-loud with
+  a stated reason on `stderr`.
 
 ## Capabilities
 
@@ -47,4 +63,8 @@ window frame region) — and deliberately nothing else. See
 
 `cargo test -p tairix-viewer`: the line model's row/column bounds and
 line-feed splitting, the non-printable sanitiser, the window-sized
-status/content renders, and the non-degenerate view geometry.
+status/content renders, the non-degenerate view geometry, the layout's
+reserved scrollbar gutter and header button rectangle, clicking and
+hovering the "Open…" button (including a press released outside it),
+dragging the scrollbar's thumb, paging its track, and scrolling by the
+wheel.

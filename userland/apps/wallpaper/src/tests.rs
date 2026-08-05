@@ -1,16 +1,44 @@
 //! Host unit tests for the wallpaper chooser engine.
+//!
+//! The pointer tests are written the way a user drives the app: a move to a
+//! place the layout actually puts something, then a press, then a release.
+//! No test hard-codes a coordinate — every one asks the layout where the
+//! thing it is about to click is — so a change to the geometry moves the
+//! tests with it instead of quietly making them click empty space.
 
 use alloc::string::String;
 use alloc::vec;
 
-use tairix_abi::input::NamedKeyCode;
-use tairix_theme::ThemeRegistry;
-use tairix_wallpaper::{CatalogEntry, WallpaperPath};
+use tairix_controls::collection::IconTile;
+use tairix_controls::scrollbar::ScrollPart;
+use tairix_geometry::{Point, Rect};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_theme::{TextRole, ThemeRegistry};
+use tairix_wallpaper::{CatalogEntry, PinboardSettings, WallpaperPath};
 
 use super::*;
 
-/// A settings document naming a wallpaper that is one of `catalog`'s
-/// candidates, otherwise at the shared crate default.
+/// Settings with no wallpaper at all, everything else at the shared
+/// default.
+fn settings_without_a_wallpaper() -> PinboardSettings {
+    PinboardSettings {
+        wallpaper: WallpaperChoice::None,
+        ..PinboardSettings::default()
+    }
+}
+
+/// The style every test paints and hit-tests through: the built-in dark
+/// theme at the unscaled desktop density, in the interface face.
+fn style_for(theme: &Theme) -> Style<'_> {
+    Style::new(
+        theme,
+        Scale::ONE,
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE),
+    )
+}
+
+/// A settings document naming a wallpaper, otherwise at the shared crate
+/// default.
 fn settings_selecting(path: &str) -> PinboardSettings {
     PinboardSettings {
         wallpaper: WallpaperChoice::Image(WallpaperPath::new(path).expect("a valid test path")),
@@ -18,549 +46,757 @@ fn settings_selecting(path: &str) -> PinboardSettings {
     }
 }
 
-/// Three catalog entries under the shipped store, in listing order.
-fn sample_catalog() -> Vec<Candidate> {
-    let entries = vec![
-        CatalogEntry {
-            name: String::from("alpha.png"),
+/// `count` catalog entries under the shipped store, in listing order.
+fn catalog(count: usize) -> Vec<Candidate> {
+    let entries: Vec<CatalogEntry> = (0..count)
+        .map(|index| CatalogEntry {
+            name: alloc::format!("image-{index:02}.png"),
             bytes: 10,
-        },
-        CatalogEntry {
-            name: String::from("beta.jpg"),
-            bytes: 20,
-        },
-        CatalogEntry {
-            name: String::from("gamma.jpeg"),
-            bytes: 30,
-        },
-    ];
+        })
+        .collect();
     candidates_from_catalog(&entries)
 }
 
-/// A chooser over [`sample_catalog`], opened on its first image candidate.
+/// A chooser over three images, opened on the first of them.
 fn sample_chooser() -> Chooser {
-    let settings = settings_selecting("/System/Graphics/Wallpapers/alpha.png");
-    Chooser::new(sample_catalog(), &settings)
+    Chooser::new(
+        catalog(3),
+        &settings_selecting("/System/Graphics/Wallpapers/image-00.png"),
+    )
 }
 
-/// Press `key` and discard the action reported, for a test whose assertion
-/// is about the state the press left behind rather than what it returned.
-fn press(chooser: &mut Chooser, key: NamedKeyCode) {
-    let _ = chooser.handle_key(key, false);
+/// The middle of `rect`.
+fn centre(rect: Rect) -> Point {
+    Point::new(
+        rect.left() + to_i32(rect.width / 2),
+        rect.top() + to_i32(rect.height / 2),
+    )
 }
 
-/// Move focus to `region` with Tab presses, bounded by one full cycle so a
-/// tab order that never reaches it fails rather than looping.
-fn focus_on(chooser: &mut Chooser, region: Focus) {
-    for _ in 0..Focus::ORDER.len() {
-        if chooser.focus() == region {
-            return;
-        }
-        press(chooser, NamedKeyCode::Tab);
-    }
-    assert_eq!(chooser.focus(), region, "Tab never reached {region:?}");
+/// Move the pointer to `at`.
+fn move_to(chooser: &mut Chooser, at: Point, style: Style<'_>) -> ChooserAction {
+    chooser.on_pointer(&InputEvent::PointerMoved { to: at }, style)
 }
 
-// --- Candidate list model ------------------------------------------------
+/// Press the primary button where the pointer already is.
+fn press(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
+    chooser.on_pointer(
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        style,
+    )
+}
+
+/// Release the primary button where the pointer already is.
+fn release(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
+    chooser.on_pointer(
+        &InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        style,
+    )
+}
+
+/// A whole primary click at `at`: the move that positions the pointer, the
+/// press, and the release, reporting what the release asked for.
+fn click(chooser: &mut Chooser, at: Point, style: Style<'_>) -> ChooserAction {
+    let _ = move_to(chooser, at, style);
+    let _ = press(chooser, style);
+    release(chooser, style)
+}
+
+/// Press a named key with no modifiers.
+fn key(chooser: &mut Chooser, named: NamedKey, style: Style<'_>) -> ChooserAction {
+    chooser.on_key(Key::Named(named), Modifiers::default(), style)
+}
+
+/// The rectangle of the gallery tile at `index`, which must be visible.
+fn tile_rect(chooser: &Chooser, index: usize, style: Style<'_>) -> Rect {
+    chooser
+        .layout(style)
+        .grid(chooser.candidates().len())
+        .cell_rect(chooser.scroll_offset(), index)
+        .expect("the tile is visible")
+}
+
+/// A point inside row `row` of the open drop-down list of `group`.
+///
+/// The list's rows divide its height evenly, so the middle of a row is half
+/// a row-height past its top edge.
+fn popup_row(chooser: &Chooser, group: OptionGroup, row: usize, style: Style<'_>) -> Point {
+    let choices = chooser.field(group).choices().len().max(1);
+    let popup = chooser.popup_rect(group, &chooser.layout(style), style);
+    let height = popup.height / u32::try_from(choices).unwrap_or(1).max(1);
+    let down = height
+        .saturating_mul(u32::try_from(row).unwrap_or(0))
+        .saturating_add(height / 2);
+    Point::new(
+        popup.left() + to_i32(popup.width / 2),
+        popup.top() + to_i32(down),
+    )
+}
+
+/// A point on the gallery scrollbar's thumb, wherever the bar has drawn it.
+fn thumb_point(chooser: &Chooser, style: Style<'_>) -> Point {
+    let gutter = chooser.layout(style).scrollbar();
+    let x = gutter.left() + to_i32(gutter.width / 2);
+    let bar = chooser.scrollbar();
+    (gutter.top()..gutter.bottom())
+        .map(|y| Point::new(x, y))
+        .find(|at| bar.part_at(gutter, *at, style.scale(), style.theme()) == ScrollPart::Thumb)
+        .expect("a scrollable gallery draws a thumb")
+}
 
 #[test]
 fn the_no_wallpaper_entry_is_always_first() {
     let chooser = sample_chooser();
-    assert_eq!(chooser.candidates()[0].choice, WallpaperChoice::None);
-    assert_eq!(chooser.candidates()[0].label, NONE_LABEL);
-    assert_eq!(chooser.candidates()[0].thumbnail, Thumbnail::Backdrop);
+    let first = &chooser.candidates()[0];
+    assert_eq!(first.choice, WallpaperChoice::None);
+    assert_eq!(first.label, NONE_LABEL);
+    assert_eq!(first.thumbnail, Thumbnail::Backdrop);
 }
 
 #[test]
 fn the_chooser_opens_on_the_settings_current_wallpaper() {
-    let chooser = sample_chooser();
-    // "alpha.png" is the first catalog entry, so index 1 (after "no
-    // wallpaper").
-    assert_eq!(chooser.selected(), 1);
-    assert_eq!(chooser.candidates()[1].label, "alpha.png");
+    let chooser = Chooser::new(
+        catalog(3),
+        &settings_selecting("/System/Graphics/Wallpapers/image-01.png"),
+    );
+    assert_eq!(chooser.selected(), 2);
 }
 
 #[test]
 fn no_wallpaper_settings_open_the_chooser_on_the_none_entry() {
-    let settings = PinboardSettings {
-        wallpaper: WallpaperChoice::None,
-        ..PinboardSettings::default()
-    };
-    let chooser = Chooser::new(sample_catalog(), &settings);
+    let chooser = Chooser::new(catalog(3), &settings_without_a_wallpaper());
     assert_eq!(chooser.selected(), 0);
+    assert_eq!(chooser.to_settings().wallpaper, WallpaperChoice::None);
 }
 
 #[test]
 fn a_current_wallpaper_outside_the_catalog_is_appended_and_selected() {
-    let settings = settings_selecting("/Users/ada/Pictures/mine.png");
-    let chooser = Chooser::new(sample_catalog(), &settings);
-    // "no wallpaper" + 3 catalog entries + the synthetic current entry.
-    assert_eq!(chooser.candidates().len(), 5);
-    assert_eq!(chooser.selected(), 4);
-    assert_eq!(chooser.candidates()[4].label, "mine.png");
-    assert_eq!(chooser.candidates()[4].thumbnail, Thumbnail::Pending);
+    let chooser = Chooser::new(
+        catalog(2),
+        &settings_selecting("/Users/ada/Pictures/holiday.png"),
+    );
+    let last = chooser.candidates().len() - 1;
+    assert_eq!(chooser.selected(), last);
+    assert_eq!(chooser.candidates()[last].label, "holiday.png");
 }
 
 #[test]
 fn a_refused_thumbnail_is_remembered_and_never_retried() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    assert_eq!(chooser.next_pending(), Some(1));
-    chooser.mark_thumbnail_refused(1);
-    assert_eq!(chooser.candidates()[1].thumbnail, Thumbnail::Refused);
-    // The refused candidate is no longer offered as pending work.
-    assert_eq!(chooser.next_pending(), Some(2));
+
+    let first = chooser.next_thumbnail(style).expect("a pending thumbnail");
+    chooser.mark_thumbnail_refused(first.index);
+    let next = chooser.next_thumbnail(style).expect("another pending one");
+    assert_ne!(next.index, first.index);
+    assert_eq!(
+        chooser.candidates()[first.index].thumbnail,
+        Thumbnail::Refused
+    );
+}
+
+#[test]
+fn every_thumbnail_is_asked_for_at_the_side_the_tile_will_draw_it() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let chooser = sample_chooser();
+
+    let (width, height) = chooser.layout(style).tile_size();
+    let expected =
+        IconTile::icon_side(Rect::new(0, 0, width, height), style.scale(), style.theme());
+    let request = chooser.next_thumbnail(style).expect("a pending thumbnail");
+    assert!(expected > 0);
+    assert_eq!(request.side, expected);
+}
+
+#[test]
+fn next_thumbnail_is_none_once_every_candidate_is_resolved() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    while let Some(request) = chooser.next_thumbnail(style) {
+        chooser.mark_thumbnail_refused(request.index);
+    }
+    assert!(chooser.next_thumbnail(style).is_none());
 }
 
 #[test]
 fn a_ready_thumbnail_replaces_the_pending_state() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    let surface = Surface::new(THUMB_WIDTH, THUMB_HEIGHT).expect("a small surface allocates");
-    chooser.set_thumbnail(1, surface);
+
+    let request = chooser.next_thumbnail(style).expect("a pending thumbnail");
+    let pixels = Surface::new(request.side, request.side).expect("a test surface");
+    chooser.set_thumbnail(request.index, pixels);
     assert!(matches!(
-        chooser.candidates()[1].thumbnail,
+        chooser.candidates()[request.index].thumbnail,
         Thumbnail::Ready(_)
     ));
-    assert_eq!(chooser.next_pending(), Some(2));
 }
 
 #[test]
-fn next_pending_is_none_once_every_candidate_is_resolved() {
+fn clicking_a_tile_selects_it_and_moves_the_keyboard_there_too() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    for index in 0..chooser.candidates().len() {
-        chooser.mark_thumbnail_refused(index);
-    }
-    assert_eq!(chooser.next_pending(), None);
+    assert_eq!(chooser.selected(), 1);
+
+    let target = tile_rect(&chooser, 2, style);
+    assert_eq!(
+        click(&mut chooser, centre(target), style),
+        ChooserAction::Changed
+    );
+    assert_eq!(chooser.selected(), 2);
+    assert_eq!(chooser.focus(), Focus::Gallery);
 }
 
 #[test]
-fn candidate_path_is_none_for_the_no_wallpaper_entry() {
-    let chooser = sample_chooser();
-    assert_eq!(chooser.candidate_path(0), None);
-    assert!(chooser.candidate_path(1).is_some());
+fn a_press_released_away_from_the_tile_it_started_on_selects_nothing() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let before = chooser.selected();
+
+    let target = tile_rect(&chooser, 2, style);
+    let elsewhere = tile_rect(&chooser, 0, style);
+    let _ = move_to(&mut chooser, centre(target), style);
+    let _ = press(&mut chooser, style);
+    let _ = move_to(&mut chooser, centre(elsewhere), style);
+    let _ = release(&mut chooser, style);
+
+    assert_eq!(chooser.selected(), before);
 }
 
-// --- Selection and focus movement ----------------------------------------
+#[test]
+fn hovering_a_tile_changes_what_the_gallery_draws() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let resting = chooser.render(style).expect("a rendered window");
+    let target = tile_rect(&chooser, 2, style);
+    assert_eq!(
+        move_to(&mut chooser, centre(target), style),
+        ChooserAction::Changed
+    );
+    let hovered = chooser.render(style).expect("a rendered window");
+    assert_ne!(resting.pixels(), hovered.pixels());
+
+    // ...and moving away puts it back exactly as it was.
+    let _ = move_to(&mut chooser, Point::new(0, 0), style);
+    let left = chooser.render(style).expect("a rendered window");
+    assert_eq!(resting.pixels(), left.pixels());
+}
+
+#[test]
+fn pressing_a_tile_draws_it_pressed_before_the_release_decides() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let target = tile_rect(&chooser, 2, style);
+    let _ = move_to(&mut chooser, centre(target), style);
+    let hovered = chooser.render(style).expect("a rendered window");
+    let _ = press(&mut chooser, style);
+    assert_eq!(chooser.armed(), Some(2));
+    let pressed = chooser.render(style).expect("a rendered window");
+    assert_ne!(hovered.pixels(), pressed.pixels());
+}
+
+#[test]
+fn clicking_apply_asks_to_apply_and_clicking_close_asks_to_close() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let layout = chooser.layout(style);
+
+    assert_eq!(
+        click(&mut chooser, centre(layout.apply()), style),
+        ChooserAction::Apply
+    );
+    assert_eq!(
+        click(&mut chooser, centre(layout.close()), style),
+        ChooserAction::Close
+    );
+}
+
+#[test]
+fn a_press_on_apply_released_off_it_applies_nothing() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let layout = chooser.layout(style);
+
+    let _ = move_to(&mut chooser, centre(layout.apply()), style);
+    let _ = press(&mut chooser, style);
+    let _ = move_to(&mut chooser, centre(layout.status()), style);
+    assert_ne!(release(&mut chooser, style), ChooserAction::Apply);
+}
+
+#[test]
+fn hovering_apply_changes_what_the_footer_draws() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let layout = chooser.layout(style);
+
+    let resting = chooser.render(style).expect("a rendered window");
+    assert_eq!(
+        move_to(&mut chooser, centre(layout.apply()), style),
+        ChooserAction::Changed
+    );
+    let hovered = chooser.render(style).expect("a rendered window");
+    assert_ne!(resting.pixels(), hovered.pixels());
+}
+
+#[test]
+fn clicking_a_field_opens_its_list_and_choosing_a_row_changes_the_setting() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    assert_eq!(chooser.fit(), WallpaperFit::Fill);
+
+    let field = chooser.layout(style).option_field(OptionGroup::Fit);
+    let _ = click(&mut chooser, centre(field), style);
+    assert_eq!(chooser.expanded(), Some(OptionGroup::Fit));
+
+    let second = popup_row(&chooser, OptionGroup::Fit, 1, style);
+    let _ = click(&mut chooser, second, style);
+
+    assert_eq!(chooser.expanded(), None);
+    assert_eq!(chooser.fit(), WallpaperFit::Fit);
+    assert_eq!(chooser.to_settings().fit, WallpaperFit::Fit);
+}
+
+#[test]
+fn an_open_list_takes_the_click_that_dismisses_it_and_the_gallery_does_not() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let selected = chooser.selected();
+
+    let field = chooser.layout(style).option_field(OptionGroup::Sort);
+    let _ = click(&mut chooser, centre(field), style);
+    assert_eq!(chooser.expanded(), Some(OptionGroup::Sort));
+
+    // A click on a tile while the list is open dismisses the list and
+    // reaches nothing beneath it.
+    let tile = tile_rect(&chooser, 2, style);
+    let _ = click(&mut chooser, centre(tile), style);
+    assert_eq!(chooser.expanded(), None);
+    assert_eq!(chooser.selected(), selected);
+}
+
+#[test]
+fn the_wheel_scrolls_the_gallery_and_stops_at_both_ends() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    assert_eq!(chooser.scroll_offset(), 0);
+
+    let scrolled = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 3 }, style);
+    assert_eq!(scrolled, ChooserAction::Changed);
+    assert!(chooser.scroll_offset() > 0);
+
+    for _ in 0..64 {
+        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style);
+    }
+    let at_end = chooser.scroll_offset();
+    assert_eq!(
+        chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style),
+        ChooserAction::None
+    );
+    assert_eq!(chooser.scroll_offset(), at_end);
+
+    for _ in 0..80 {
+        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: -8 }, style);
+    }
+    assert_eq!(chooser.scroll_offset(), 0);
+}
+
+#[test]
+fn dragging_the_scrollbar_thumb_scrolls_the_gallery() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    // One paint brings the bar's model in line with the resized gallery,
+    // which is what gives it a thumb to grab.
+    let _ = chooser.render(style);
+    let gutter = chooser.layout(style).scrollbar();
+
+    // Grab the thumb where it rests, then drag to the bottom of the track.
+    let grab = thumb_point(&chooser, style);
+    let _ = move_to(&mut chooser, grab, style);
+    let _ = press(&mut chooser, style);
+    let _ = move_to(
+        &mut chooser,
+        Point::new(grab.x, gutter.top() + to_i32(gutter.height)),
+        style,
+    );
+    let dragged = chooser.scroll_offset();
+    let _ = release(&mut chooser, style);
+
+    assert!(dragged > 0);
+    assert_eq!(chooser.scroll_offset(), dragged);
+}
+
+#[test]
+fn the_preview_is_re_asked_for_when_the_selection_changes_and_never_shows_the_old_one() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let first = chooser.next_preview(style).expect("a preview to render");
+    let pixels = Surface::new(first.width, first.height).expect("a test surface");
+    chooser.set_preview(first.clone(), pixels);
+    assert!(chooser.next_preview(style).is_none());
+
+    let target = tile_rect(&chooser, 2, style);
+    let _ = click(&mut chooser, centre(target), style);
+    let second = chooser.next_preview(style).expect("a new preview");
+    assert_ne!(second.path, first.path);
+    // The pixels held are the previous selection's, so the panel has none.
+    assert!(chooser.preview_surface(&second).is_none());
+}
+
+#[test]
+fn changing_the_fit_re_asks_for_the_preview_but_leaves_the_thumbnails_alone() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    while let Some(request) = chooser.next_thumbnail(style) {
+        let pixels = Surface::new(request.side, request.side).expect("a test surface");
+        chooser.set_thumbnail(request.index, pixels);
+    }
+    let held = chooser.next_preview(style).expect("a preview to render");
+    let pixels = Surface::new(held.width, held.height).expect("a test surface");
+    chooser.set_preview(held.clone(), pixels);
+
+    let field = chooser.layout(style).option_field(OptionGroup::Fit);
+    let _ = click(&mut chooser, centre(field), style);
+    let second = popup_row(&chooser, OptionGroup::Fit, 1, style);
+    let _ = click(&mut chooser, second, style);
+
+    let again = chooser.next_preview(style).expect("the fit changed");
+    assert_eq!(again.path, held.path);
+    assert_ne!(again.fit, held.fit);
+    // A thumbnail is the wallpaper itself, not a fit preview, so none of
+    // them is asked for again.
+    assert!(chooser.next_thumbnail(style).is_none());
+}
+
+#[test]
+fn a_refused_preview_is_remembered_rather_than_asked_for_on_every_paint() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let request = chooser.next_preview(style).expect("a preview to render");
+    chooser.mark_preview_refused(request.clone());
+    assert!(chooser.next_preview(style).is_none());
+    assert!(chooser.preview_refused(&request));
+    assert!(chooser.preview_surface(&request).is_none());
+}
+
+#[test]
+fn selecting_the_no_wallpaper_entry_asks_for_no_preview_at_all() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let none_tile = tile_rect(&chooser, 0, style);
+    let _ = click(&mut chooser, centre(none_tile), style);
+    assert_eq!(chooser.selected(), 0);
+    assert!(chooser.next_preview(style).is_none());
+    assert!(chooser.wanted_preview(style).is_none());
+}
 
 #[test]
 fn tab_cycles_focus_through_every_region_and_wraps() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    let order = [
-        Focus::Fit,
-        Focus::Backdrop,
-        Focus::Icons,
-        Focus::Sort,
-        Focus::Apply,
-        Focus::Close,
-        Focus::Grid,
-    ];
-    for expected in order {
-        assert_eq!(
-            chooser.handle_key(NamedKeyCode::Tab, false),
-            ChooserAction::Changed
-        );
-        assert_eq!(chooser.focus(), expected);
+
+    let mut seen = vec![chooser.focus()];
+    for _ in 1..Focus::ORDER.len() {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
+        seen.push(chooser.focus());
     }
+    assert_eq!(seen, Focus::ORDER.to_vec());
+    let _ = key(&mut chooser, NamedKey::Tab, style);
+    assert_eq!(chooser.focus(), Focus::Gallery);
 }
 
 #[test]
 fn shift_tab_cycles_focus_backward_and_wraps() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    assert_eq!(chooser.focus(), Focus::Grid);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Tab, true),
-        ChooserAction::Changed
-    );
-    assert_eq!(chooser.focus(), Focus::Close);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Tab, true),
-        ChooserAction::Changed
-    );
+    let back = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+
+    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
     assert_eq!(chooser.focus(), Focus::Apply);
+    let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
+    assert_eq!(chooser.focus(), Focus::Close);
 }
 
 #[test]
-fn enter_activates_the_focused_action_and_escape_always_closes() {
+fn the_keyboard_reaches_apply_and_close_and_escape_always_closes() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    // From the grid, an option row, or the Apply button, Enter applies.
-    for region in [Focus::Grid, Focus::Fit, Focus::Backdrop, Focus::Sort] {
-        focus_on(&mut chooser, region);
-        assert_eq!(
-            chooser.handle_key(NamedKeyCode::Enter, false),
-            ChooserAction::Apply
-        );
+
+    while chooser.focus() != Focus::Apply {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
     }
-    focus_on(&mut chooser, Focus::Apply);
     assert_eq!(
-        chooser.handle_key(NamedKeyCode::Enter, false),
+        key(&mut chooser, NamedKey::Enter, style),
         ChooserAction::Apply
     );
-    // A focused Close button closes: a button carrying the focus ring must
-    // do what it says rather than the primary action.
-    focus_on(&mut chooser, Focus::Close);
+    let _ = key(&mut chooser, NamedKey::Tab, style);
+    assert_eq!(chooser.focus(), Focus::Gallery);
     assert_eq!(
-        chooser.handle_key(NamedKeyCode::Enter, false),
+        key(&mut chooser, NamedKey::Escape, style),
         ChooserAction::Close
     );
-    // Escape closes from every region.
-    for region in [Focus::Grid, Focus::Icons, Focus::Apply, Focus::Close] {
-        focus_on(&mut chooser, region);
-        assert_eq!(
-            chooser.handle_key(NamedKeyCode::Escape, false),
-            ChooserAction::Close
-        );
+
+    while chooser.focus() != Focus::Close {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
     }
+    assert_eq!(
+        key(&mut chooser, NamedKey::Enter, style),
+        ChooserAction::Close
+    );
 }
 
 #[test]
-fn arrow_keys_move_the_grid_selection_and_stop_at_the_edges() {
+fn the_arrow_keys_move_the_gallery_selection_and_stop_at_the_edges() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    chooser.relayout(2000, 2000); // one row, every candidate visible
-    assert_eq!(chooser.selected(), 1);
+    let last = chooser.candidates().len() - 1;
+
+    let _ = key(&mut chooser, NamedKey::Home, style);
+    assert_eq!(chooser.selected(), 0);
     assert_eq!(
-        chooser.handle_key(NamedKeyCode::Right, false),
-        ChooserAction::Changed
-    );
-    assert_eq!(chooser.selected(), 2);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Left, false),
-        ChooserAction::Changed
-    );
-    assert_eq!(chooser.selected(), 1);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Left, false),
-        ChooserAction::Changed
+        key(&mut chooser, NamedKey::Left, style),
+        ChooserAction::None
     );
     assert_eq!(chooser.selected(), 0);
-    // Already at the first candidate: Left is a no-op.
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Left, false),
-        ChooserAction::None
-    );
+
+    let _ = key(&mut chooser, NamedKey::Right, style);
+    assert_eq!(chooser.selected(), 1);
+    let _ = key(&mut chooser, NamedKey::End, style);
+    assert_eq!(chooser.selected(), last);
+    let _ = key(&mut chooser, NamedKey::Right, style);
+    assert_eq!(chooser.selected(), last);
 }
 
 #[test]
-fn down_from_an_incomplete_last_row_lands_on_the_last_candidate() {
+fn the_keyboard_opens_a_field_and_chooses_from_it() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    // Lay the grid out exactly 3 columns wide: 4 candidates ("no
-    // wallpaper" plus 3 catalog entries) over 3 columns is row 0 =
-    // [0,1,2], row 1 = [3] alone.
-    let columns = 3u32;
-    let grid_width = CELL_WIDTH * columns;
-    chooser.relayout(grid_width + MARGIN * 2, 2000);
-    assert_eq!(chooser.columns, usize::try_from(columns).unwrap());
-    // From index 1, Down has no full cell below it but a shorter next row
-    // exists, so it lands on the last candidate rather than doing nothing.
-    chooser.selected = 1;
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Down, false),
-        ChooserAction::Changed
-    );
-    assert_eq!(chooser.selected(), 3);
-    // Already on the last row: Down is now a no-op.
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Down, false),
-        ChooserAction::None
-    );
-}
-
-#[test]
-fn up_from_the_top_row_is_a_no_op() {
-    let mut chooser = sample_chooser();
-    chooser.relayout(2000, 2000);
-    chooser.selected = 0;
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Up, false),
-        ChooserAction::None
-    );
-}
-
-#[test]
-fn a_non_arrow_non_tab_key_is_a_no_op() {
-    let mut chooser = sample_chooser();
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::F1, false),
-        ChooserAction::None
-    );
-}
-
-// --- Option groups ---------------------------------------------------------
-
-#[test]
-fn fit_cycles_through_every_value_and_wraps_both_ways() {
-    let mut chooser = sample_chooser();
-    focus_on(&mut chooser, Focus::Fit);
-    assert_eq!(chooser.fit(), WallpaperFit::Fill);
-    for expected in [
-        WallpaperFit::Fit,
-        WallpaperFit::Stretch,
-        WallpaperFit::Centre,
-        WallpaperFit::Tile,
-        WallpaperFit::Fill,
-    ] {
-        press(&mut chooser, NamedKeyCode::Right);
-        assert_eq!(chooser.fit(), expected);
-    }
-    press(&mut chooser, NamedKeyCode::Left);
-    assert_eq!(chooser.fit(), WallpaperFit::Tile);
-}
-
-#[test]
-fn icon_flow_cycles_between_its_two_values() {
-    let mut chooser = sample_chooser();
-    focus_on(&mut chooser, Focus::Icons);
-    assert_eq!(chooser.icons(), IconFlow::Leading);
-    press(&mut chooser, NamedKeyCode::Down);
-    assert_eq!(chooser.icons(), IconFlow::Trailing);
-    press(&mut chooser, NamedKeyCode::Up);
-    assert_eq!(chooser.icons(), IconFlow::Leading);
-}
-
-#[test]
-fn sort_cycles_through_every_value() {
-    let mut chooser = sample_chooser();
-    focus_on(&mut chooser, Focus::Sort);
     assert_eq!(chooser.sort(), IconSort::Name);
-    press(&mut chooser, NamedKeyCode::Right);
+
+    while chooser.focus() != Focus::Setting(OptionGroup::Sort) {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
+    }
+    let _ = key(&mut chooser, NamedKey::Enter, style);
+    assert_eq!(chooser.expanded(), Some(OptionGroup::Sort));
+    let _ = key(&mut chooser, NamedKey::Down, style);
+    let _ = key(&mut chooser, NamedKey::Enter, style);
+    assert_eq!(chooser.expanded(), None);
     assert_eq!(chooser.sort(), IconSort::Kind);
-    press(&mut chooser, NamedKeyCode::Right);
-    assert_eq!(chooser.sort(), IconSort::Size);
-    press(&mut chooser, NamedKeyCode::Right);
-    assert_eq!(chooser.sort(), IconSort::Date);
-    press(&mut chooser, NamedKeyCode::Right);
-    assert_eq!(chooser.sort(), IconSort::Name);
-}
-
-#[test]
-fn arrows_over_apply_or_close_change_nothing() {
-    let mut chooser = sample_chooser();
-    focus_on(&mut chooser, Focus::Apply);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Right, false),
-        ChooserAction::None
-    );
-    focus_on(&mut chooser, Focus::Close);
-    assert_eq!(
-        chooser.handle_key(NamedKeyCode::Left, false),
-        ChooserAction::None
-    );
-}
-
-#[test]
-fn the_backdrop_row_offers_the_whole_palette_and_cycles_both_ways() {
-    let mut chooser = sample_chooser();
-    assert_eq!(chooser.backdrops().len(), BACKDROP_PALETTE.len());
-    for (offered, (label, backdrop)) in chooser.backdrops().iter().zip(BACKDROP_PALETTE) {
-        assert_eq!(offered.label, label);
-        assert_eq!(offered.backdrop, backdrop);
-    }
-
-    focus_on(&mut chooser, Focus::Backdrop);
-    assert_eq!(chooser.backdrop(), Backdrop::Theme);
-    for (_, expected) in BACKDROP_PALETTE.iter().skip(1) {
-        press(&mut chooser, NamedKeyCode::Right);
-        assert_eq!(chooser.backdrop(), *expected);
-    }
-    // One more step wraps back to the theme's own colour, and a backward
-    // step returns to the last palette entry.
-    press(&mut chooser, NamedKeyCode::Right);
-    assert_eq!(chooser.backdrop(), Backdrop::Theme);
-    press(&mut chooser, NamedKeyCode::Left);
-    assert_eq!(
-        Some(chooser.backdrop()),
-        BACKDROP_PALETTE.last().map(|(_, backdrop)| *backdrop)
-    );
-}
-
-#[test]
-fn a_current_colour_outside_the_palette_is_offered_and_selected() {
-    let custom = Backdrop::Colour(tairix_wallpaper::Rgb::new(0x0a, 0x14, 0x1e));
-    let settings = PinboardSettings {
-        backdrop: custom,
-        ..PinboardSettings::default()
-    };
-    let chooser = Chooser::new(sample_catalog(), &settings);
-    assert_eq!(chooser.backdrops().len(), BACKDROP_PALETTE.len() + 1);
-    assert_eq!(chooser.backdrop(), custom);
-    // It is labelled by the same bare spelling the settings document uses,
-    // so the user sees which colour is in effect.
-    assert_eq!(
-        chooser
-            .backdrops()
-            .last()
-            .map(|option| option.label.as_str()),
-        Some("0a141e")
-    );
 }
 
 #[test]
 fn backdrop_options_always_offer_the_current_backdrop() {
-    for current in [
-        Backdrop::Theme,
-        Backdrop::Colour(tairix_wallpaper::Rgb::new(1, 2, 3)),
-        BACKDROP_PALETTE[1].1,
-    ] {
-        let options = backdrop_options(current);
-        assert!(options.iter().any(|option| option.backdrop == current));
-    }
+    let unlisted = Backdrop::Colour(Rgb::new(0x12, 0x34, 0x56));
+    let options = backdrop_options(unlisted);
+    assert_eq!(options.len(), BACKDROP_PALETTE.len() + 1);
+    assert_eq!(options[options.len() - 1].label, "123456");
+    assert!(options.iter().any(|option| option.backdrop == unlisted));
+
+    let listed = backdrop_options(Backdrop::Theme);
+    assert_eq!(listed.len(), BACKDROP_PALETTE.len());
 }
 
 #[test]
-fn changing_the_fit_re_renders_previews_but_remembers_refusals() {
-    let mut chooser = sample_chooser();
-    let surface = Surface::new(THUMB_WIDTH, THUMB_HEIGHT).expect("a small surface allocates");
-    chooser.set_thumbnail(1, surface);
-    chooser.mark_thumbnail_refused(2);
-
-    focus_on(&mut chooser, Focus::Fit);
-    press(&mut chooser, NamedKeyCode::Right);
-
-    // The rendered preview is stale under the new fit and is asked for
-    // again; the refused candidate is not.
-    assert_eq!(chooser.candidates()[1].thumbnail, Thumbnail::Pending);
-    assert_eq!(chooser.candidates()[2].thumbnail, Thumbnail::Refused);
-    assert_eq!(chooser.candidates()[0].thumbnail, Thumbnail::Backdrop);
-    assert_eq!(chooser.next_pending(), Some(1));
-}
-
-// --- Settings document -----------------------------------------------------
-
-#[test]
-fn the_rendered_document_matches_the_current_ui_state_exactly() {
-    let mut chooser = sample_chooser();
-    focus_on(&mut chooser, Focus::Fit);
-    press(&mut chooser, NamedKeyCode::Right); // Fill -> Fit
-    focus_on(&mut chooser, Focus::Backdrop);
-    press(&mut chooser, NamedKeyCode::Right); // Theme -> the first colour
-    focus_on(&mut chooser, Focus::Icons);
-    press(&mut chooser, NamedKeyCode::Down); // Leading -> Trailing
-    focus_on(&mut chooser, Focus::Sort);
-    press(&mut chooser, NamedKeyCode::Right); // Name -> Kind
-    let expected = PinboardSettings {
-        wallpaper: WallpaperChoice::Image(
-            WallpaperPath::new("/System/Graphics/Wallpapers/alpha.png").expect("a valid path"),
-        ),
-        fit: WallpaperFit::Fit,
-        backdrop: BACKDROP_PALETTE[1].1,
-        icons: IconFlow::Trailing,
-        sort: IconSort::Kind,
-    };
-    assert_eq!(chooser.to_settings(), expected);
-    assert_eq!(
-        chooser.settings_document(),
-        tairix_wallpaper::settings::render(&expected)
-    );
-}
-
-#[test]
-fn selecting_no_wallpaper_renders_a_none_document() {
-    let mut chooser = sample_chooser();
-    chooser.selected = 0;
-    let settings = chooser.to_settings();
-    assert_eq!(settings.wallpaper, WallpaperChoice::None);
-    assert!(chooser.settings_document().contains("wallpaper none\n"));
-}
-
-#[test]
-fn the_backdrop_colour_the_chooser_opened_with_is_carried_through_unchanged() {
+fn a_current_colour_outside_the_palette_is_offered_and_carried_through() {
+    let unlisted = Backdrop::Colour(Rgb::new(0x12, 0x34, 0x56));
     let settings = PinboardSettings {
-        backdrop: Backdrop::Colour(tairix_wallpaper::Rgb::new(10, 20, 30)),
+        backdrop: unlisted,
         ..PinboardSettings::default()
     };
-    let chooser = Chooser::new(sample_catalog(), &settings);
-    assert_eq!(chooser.to_settings().backdrop, settings.backdrop);
+    let chooser = Chooser::new(catalog(1), &settings);
+    assert_eq!(chooser.backdrop(), unlisted);
+    assert_eq!(chooser.to_settings().backdrop, unlisted);
 }
 
-// --- Apply outcome -----------------------------------------------------
+#[test]
+fn the_rendered_document_matches_the_state_the_controls_are_in() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+
+    let tile = tile_rect(&chooser, 2, style);
+    let _ = click(&mut chooser, centre(tile), style);
+    let document = chooser.settings_document();
+    let parsed = tairix_wallpaper::settings::parse(&document).expect("a valid document");
+    assert_eq!(parsed, chooser.to_settings());
+    assert_eq!(
+        parsed.wallpaper,
+        chooser.candidates()[chooser.selected()].choice
+    );
+}
 
 #[test]
-fn apply_outcome_starts_absent_and_reports_exactly_what_was_set() {
+fn an_apply_outcome_starts_absent_and_reports_exactly_what_was_set() {
     let mut chooser = sample_chooser();
-    assert_eq!(chooser.apply_outcome(), None);
-    chooser.set_apply_outcome(ApplyOutcome::Applied);
-    assert_eq!(chooser.apply_outcome(), Some(&ApplyOutcome::Applied));
-    chooser.set_apply_outcome(ApplyOutcome::Refused(String::from("no permission")));
+    assert!(chooser.apply_outcome().is_none());
+    chooser.set_apply_outcome(ApplyOutcome::Refused(String::from("denied")));
     assert_eq!(
         chooser.apply_outcome(),
-        Some(&ApplyOutcome::Refused(String::from("no permission")))
+        Some(&ApplyOutcome::Refused(String::from("denied")))
     );
-    chooser.set_apply_outcome(ApplyOutcome::NoDesktop);
-    assert_eq!(chooser.apply_outcome(), Some(&ApplyOutcome::NoDesktop));
 }
 
 #[test]
-fn every_apply_outcome_renders_a_distinct_surface_from_no_outcome() {
-    let themes = ThemeRegistry::with_builtins();
-    let theme = themes.active();
+fn every_apply_outcome_draws_a_distinct_footer() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    let before = chooser
-        .render(theme, WIN_WIDTH, WIN_HEIGHT)
-        .expect("renders");
+
+    let silent = chooser.render(style).expect("a rendered window");
+    let mut rendered = vec![silent.pixels().to_vec()];
     for outcome in [
         ApplyOutcome::Applied,
-        ApplyOutcome::Refused(String::from("denied")),
+        ApplyOutcome::Refused(String::from("the session said no")),
         ApplyOutcome::NoDesktop,
     ] {
         chooser.set_apply_outcome(outcome);
-        let after = chooser
-            .render(theme, WIN_WIDTH, WIN_HEIGHT)
-            .expect("renders");
-        assert_ne!(before.pixels(), after.pixels());
+        let painted = chooser.render(style).expect("a rendered window");
+        let pixels = painted.pixels().to_vec();
+        assert!(!rendered.contains(&pixels));
+        rendered.push(pixels);
     }
 }
 
-// --- Layout -----------------------------------------------------------------
-
 #[test]
-fn layout_regions_never_overlap_or_leave_the_window_at_a_small_size() {
-    for (w, h) in [
+fn the_layout_keeps_every_region_inside_the_window_at_every_size() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    for (width, height) in [
         (MIN_WIN_WIDTH, MIN_WIN_HEIGHT),
-        (0, 0),
-        (1, 1),
         (WIN_WIDTH, WIN_HEIGHT),
-        (2000, 30),
-        (30, 2000),
+        (640, 400),
+        (1600, 1200),
     ] {
-        let layout = Layout::compute(w, h);
-        let regions = layout.regions();
-        let window = Rect::new(0, 0, w, h);
+        let layout = Layout::compute(width, height, style.scale(), style.theme(), style.font());
+        let regions = [
+            layout.preview(),
+            layout.caption(),
+            layout.heading(),
+            layout.tiles(),
+            layout.scrollbar(),
+            layout.status(),
+            layout.apply(),
+            layout.close(),
+            layout.option_field(OptionGroup::Fit),
+            layout.option_field(OptionGroup::Sort),
+        ];
         for region in regions {
+            assert!(region.left() >= 0, "{region:?} at {width}x{height}");
+            assert!(region.top() >= 0, "{region:?} at {width}x{height}");
             assert!(
-                region.is_empty() || window.intersection(&region) == region,
-                "region {region:?} escapes the {w}x{h} window"
+                to_u32(region.right()) <= width,
+                "{region:?} spills past {width}"
+            );
+            assert!(
+                to_u32(region.bottom()) <= height,
+                "{region:?} spills past {height}"
             );
         }
-        for i in 0..regions.len() {
-            for j in (i + 1)..regions.len() {
-                let overlap = regions[i].intersection(&regions[j]);
-                assert!(
-                    overlap.is_empty(),
-                    "regions {:?} and {:?} overlap at {w}x{h}",
-                    regions[i],
-                    regions[j]
-                );
-            }
-        }
+        // The regions that share a column never overlap each other.
+        assert!(layout.preview().right() <= layout.option_field(OptionGroup::Fit).left());
+        assert!(layout.tiles().right() <= layout.scrollbar().left());
+        assert!(layout.status().right() <= layout.close().left());
+        assert!(layout.close().right() <= layout.apply().left());
+        assert!(layout.heading().top() >= layout.preview().bottom());
+        assert!(layout.tiles().top() >= layout.heading().bottom());
+        assert!(layout.apply().top() >= layout.tiles().bottom());
     }
 }
 
 #[test]
-fn a_chooser_renders_a_window_sized_surface_at_every_size() {
-    let themes = ThemeRegistry::with_builtins();
-    let theme = themes.active();
-    let chooser = sample_chooser();
-    for (w, h) in [(MIN_WIN_WIDTH, MIN_WIN_HEIGHT), (WIN_WIDTH, WIN_HEIGHT)] {
-        let surface = chooser.render(theme, w, h).expect("renders");
-        assert_eq!((surface.width(), surface.height()), (w, h));
-    }
-}
-
-#[test]
-fn relayout_updates_the_column_count_from_the_new_grid_width() {
+fn the_chooser_renders_a_window_sized_surface_at_every_size() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
     let mut chooser = sample_chooser();
-    chooser.relayout(WIN_WIDTH, WIN_HEIGHT);
-    let wide_columns = chooser.columns;
+    for (width, height) in [(MIN_WIN_WIDTH, MIN_WIN_HEIGHT), (WIN_WIDTH, WIN_HEIGHT)] {
+        chooser.relayout(width, height);
+        let painted = chooser.render(style).expect("a rendered window");
+        assert_eq!(painted.width(), width);
+        assert_eq!(painted.height(), height);
+    }
+}
+
+#[test]
+fn a_window_resize_re_flows_the_gallery_and_clamps_the_scroll() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
     chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
-    let narrow_columns = chooser.columns;
-    assert!(narrow_columns <= wide_columns);
-    assert!(narrow_columns >= 1);
+
+    for _ in 0..64 {
+        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style);
+    }
+    let deep = chooser.scroll_offset();
+    assert!(deep > 0);
+
+    // A window big enough for every tile has nothing left to scroll to.
+    chooser.relayout(1600, 1200);
+    let _ = chooser.render(style);
+    let grid = chooser.layout(style).grid(chooser.candidates().len());
+    assert!(grid.lines_total() <= grid.visible_lines());
+    assert_eq!(chooser.scroll_offset(), 0);
+}
+
+#[test]
+fn a_secondary_button_click_changes_nothing() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = sample_chooser();
+    let selected = chooser.selected();
+
+    let tile = tile_rect(&chooser, 2, style);
+    let _ = move_to(&mut chooser, centre(tile), style);
+    let _ = chooser.on_pointer(
+        &InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        style,
+    );
+    let action = chooser.on_pointer(
+        &InputEvent::PointerReleased {
+            button: PointerButton::Secondary,
+        },
+        style,
+    );
+    assert_eq!(action, ChooserAction::None);
+    assert_eq!(chooser.selected(), selected);
 }

@@ -24,11 +24,22 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # Integer screen geometry (`Rect`, `Scale`): the one shared coordinate type
 # every layout and hit-test in the desktop agrees on.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-# The Reactive Alloy control family the chooser is built from: `Radio` for
-# the fit/arrangement/sort option rows, `Button` for Apply/Close, and the
-# shared `ScrollModel` for the thumbnail grid's row scrolling — no new
-# control family is defined here.
+# The Reactive Alloy control family the chooser is built from: `ComboBox`
+# for the four settings fields, `Button` for Apply/Close, `ScrollBar` for
+# the gallery, and `IconTile` for its tiles — no new control family is
+# defined here.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared pointer input-event vocabulary every control consumes; the
+# `Run` binary translates the window channel's wire events into it through
+# the one shared translation `lib/window` owns.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The desktop's icon vocabulary: the kind a gallery tile falls back to when
+# a candidate has no artwork to draw.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The one icon-grid geometry every icon view in the desktop shares — the
+# gallery's wrapping, spread, hit-test and scroll range — and the one
+# directory-listing decode the `Run` binary reads the wallpaper store with.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # The single definition of the pinboard settings document, the shipped
 # wallpaper catalog's bounded listing model, and the wallpaper-placement
 # fit geometry — the chooser never carries a second copy of any of it.
@@ -62,9 +73,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = [
     "program",
 ] }
-# The one directory-listing decode both the file manager and the chooser
-# share: turning an `fs_readdir` stream into named, sized entries.
-tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # On the real target the `Run` binary composites glyphs through the
 # sandboxed font service over the runtime `ipc_call` transport (the base
 # dependency stays host-neutral so host tests inject the mock transport

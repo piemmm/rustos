@@ -244,27 +244,51 @@ the system application store and is typeable by name). It:
 
 - lists `/System/Graphics/Wallpapers` through the shared catalog builder,
   and offers a "no wallpaper" candidate that shows the backdrop alone;
-- draws each candidate as a thumbnail, rendered through the same sandboxed
-  wallpaper path at thumbnail size — the chooser decodes nothing in its own
-  address space. A candidate the worker refuses becomes a marked
-  placeholder tile and is not asked for again, so a bad file costs one
-  attempt;
+- draws a **live preview** of the selection at the top of the window, and
+  every candidate as a tile in a scrolling gallery beneath it — all of them
+  rendered through the same sandboxed wallpaper path, so the chooser decodes
+  nothing in its own address space. A candidate the worker refuses is marked
+  `unreadable` and is not asked for again, so a bad file costs one attempt;
 - offers the fit, the backdrop colour, the icon arrangement, and the sort
-  order through the shared `lib/controls` radio family — the fit previewed
-  through the shared geometry (every thumbnail re-renders when the fit
-  changes), the backdrop as the theme default plus a fixed named palette,
-  which also carries whatever colour is already in effect under its own
-  `rrggbb` spelling so opening the chooser never changes it;
+  order as four `lib/controls` drop-downs beside the preview — the fit shown
+  through the shared placement geometry in the preview, the backdrop as the
+  theme default plus a fixed named palette, which also carries whatever
+  colour is already in effect under its own `rrggbb` spelling so opening the
+  chooser never changes it;
 - applies by rendering the settings document and sending it to the session
-  (§6), reporting applied / refused-with-reason / no-session on its own
-  status line rather than exiting;
+  (§6), reporting applied / refused-with-reason / no-session beside the
+  buttons rather than exiting;
 - ships its own `AppInfo`, `Run`, `Help/en-US/wallpaper.md`, and its own
   icon (authored as SVG), all on disk inside the bundle.
 
-The window is keyboard-driven (arrows within the grid and over the focused
-option group, Tab/Shift-Tab through the regions, Enter applies, Escape
-closes), matching the file viewer's scope; pointer events arrive and select
-nothing.
+**Pointer first.** The window is driven by the mouse; the keyboard is a
+complete secondary path (Tab/Shift-Tab through the regions, arrows within
+the gallery or the focused list, Enter applies, Escape closes). Clicking a
+tile selects it and the preview follows; clicking a field opens its list;
+the wheel, the scrollbar thumb and its track scroll the gallery. Every
+interactive part is a shared control held for the life of the window, so
+each owns its own hover, press and drag state, and a press released away
+from the control it started on activates nothing. The gallery is
+`lib/browse`'s icon-grid engine and its tiles are `IconTile`s: the view
+hit-tests the pointer against the very geometry it painted, exactly as
+`plans/GUI-CONTROLS-DESIGN.md` §11.34 requires of an icon view. No control,
+grid or hit-test is defined in this app.
+
+A **tile** is the wallpaper itself at tile size, always placed to fill its
+square, so it answers *which* wallpaper it is; the preview panel is where
+the chosen fit is shown. A fit change therefore re-renders the preview
+alone, never the gallery.
+
+**The preview's shape.** The preview is a viewport onto the chosen
+wallpaper at the preview's own aspect, not a scale model of the display:
+nothing an unprivileged program may call reports the screen extent (the
+window channel carries only the app's own client size, and the System
+Information API's display topology is capability-gated as cross-principal
+surface state). A screen of a different shape therefore crops or
+letterboxes differently from the preview. Making it exact needs a decision
+from the ABI owners — an unprivileged "how big is the seat's screen"
+question, served by the session or the display service — and is deliberately
+not invented here.
 
 **Outstanding — listing a user-picked directory.** Offering an image from
 outside the shipped store needs a seam that does not exist yet, so the

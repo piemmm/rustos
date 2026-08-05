@@ -18,12 +18,23 @@ lettura.
 
 Il contenuto del file scelto è mostrato come testo semplice dall'alto
 della finestra. I caratteri stampabili sono mostrati così come sono;
-ogni altro byte è rappresentato da un punto. Il contenuto mostrato è
+ogni altro byte è rappresentato da un punto, cosicché il contenuto
+binario appaia ovviamente bonificato. Il contenuto mostrato è
 limitato all'inizio del file.
 
-Premere `Invio` per chiedere un altro file. Annullare il selettore
-lascia il visualizzatore aperto con un avviso. Chiudere la finestra
-dal desktop termina il visualizzatore.
+La finestra è guidata dal mouse. Fai clic sul pulsante **Open…** (Apri…)
+nell'intestazione per richiedere un altro file. Trascina il cursore
+della barra di scorrimento verso l'alto o verso il basso per scorrere
+un file lungo, fai clic sulla traccia sopra o sotto il cursore per
+cambiare pagina, fai clic sui pulsanti di estremità per avanzare di una
+riga o ruota la rotellina sopra la finestra per scorrere. Annullare il
+selettore lascia il visualizzatore aperto con un avviso; chiudere la
+finestra dal desktop termina il visualizzatore.
+
+La tastiera è una via secondaria per le stesse azioni: `Enter`
+richiede un altro file, i tasti freccia avanzano di una riga, Page
+Up/Page Down avanzano di una pagina e Home/End saltano all'inizio o
+alla fine.
 
 ## EXIT STATUS
 
