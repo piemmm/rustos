@@ -96,14 +96,33 @@ These are absolute. They override any local convenience.
     - A `// SAFETY:` block immediately above, explaining every invariant.
     - A unit test (or model check) covering the invariants.
     - Encapsulation behind a safe API. No `unsafe` leaks across crate boundaries.
-11. **Code must be self-documenting.** Write code clearly enough that it
-    explains itself with the comments stripped out: intention-revealing names,
-    small single-purpose functions, obvious control flow, and types that make
-    illegal states unrepresentable. If a comment is the only thing that makes a
-    line understandable, the code is wrong — rewrite the code, do not add the
-    comment. Comments are reserved for *why* (rationale, invariants, references,
-    `// SAFETY:`), never for restating *what* the code already says. This does
-    not relax §2.8: rustdoc and `docs/` pages remain mandatory.
+11. **Code must be self-documenting, and comments are terse.** Write code
+    clearly enough that it explains itself with the comments stripped out:
+    intention-revealing names, small single-purpose functions, obvious control
+    flow, and types that make illegal states unrepresentable. If a comment is
+    the only thing that makes a line understandable, the code is wrong —
+    rewrite the code, do not add the comment. Comments are reserved for *why*
+    (rationale, invariants, references, `// SAFETY:`), never for restating
+    *what* the code already says. This does not relax §2.8: rustdoc and
+    `docs/` pages remain mandatory.
+    - **Terse: the required information, then stop.** A comment is a line or
+      two of *why* — never a paragraph, an essay, a tutorial, a narration of
+      the change that produced the code, or a restatement of the rustdoc above
+      it. Decorative banners and section headers carry no information and are
+      not written. Prefer *no* comment wherever the code already reads clearly;
+      that is the normal outcome, not an exception. rustdoc stays mandatory
+      (§2.8, §13) and is held to the same terseness — mandatory is not a
+      licence to waffle.
+    - **The charter sets the bar, never the file in front of you.** Verbose
+      prose already sitting in a source file is unswept waffle
+      (`plans/WAFFLE.md`), not a precedent, a house style, or permission to
+      write more of it. "The rest of the file does it", "I matched the
+      surrounding style", and "the original author explained it at length" are
+      not justifications: this rule outranks every local convention, in every
+      file, however much prose you found there. Trim the waffle in the lines
+      your change touches (§2.18) and never add to it; a whole-file or
+      crate-wide sweep is the staged `plans/WAFFLE.md` work and is not smuggled
+      into an unrelated diff.
     - Here "references" means a pointer to something *outside* this charter that
       a reader cannot derive from the code — an external spec or hardware manual
       (Intel SDM, PCI, virtio, a NIST publication), an algorithm paper, an RFC,
@@ -1321,11 +1340,20 @@ You are not exempt from any rule above. In addition:
     commit, or delegate the commit to another tool — that is the §2.1 hack this
     rule forbids. Your deliverable is the modified tree plus the §23.5
     completion report, never a commit or a push.
-17. **Never cite a charter section number in a code comment (§2.11).** The rule
-    already lives in `AGENTS.md`; repeating "(§5.4)" / "`AGENTS.md` §2.9" /
-    "sec.5.4" in a comment is the noise §2.11 forbids. Explain the *why* in
-    plain prose and stop ("fail closed", "zeroed on drop"); where the charter
-    itself is the subject, write "the charter forbids …", never the number.
+17. **Comment tersely, never mimic a file's waffle, and never cite a charter
+    section number (§2.11).** Write the minimum *why* and stop — a line or two,
+    no essays, no narration, no restating the code or the rustdoc above it —
+    and prefer code clear enough to need no comment at all. Finding pages of
+    prose in a file you are editing is **not** permission to write more of it:
+    that prose is unswept waffle (`plans/WAFFLE.md`), never a style to match,
+    and "I followed the surrounding style" is not a defence. The charter's bar
+    binds in every file regardless of what is already there; trim the waffle in
+    the lines you touch and add none.
+    The section-number ban is separate and absolute: the rule already lives in
+    `AGENTS.md`, so repeating "(§5.4)" / "`AGENTS.md` §2.9" / "sec.5.4" in a
+    comment is the noise §2.11 forbids. Explain the *why* in plain prose and
+    stop ("fail closed", "zeroed on drop"); where the charter itself is the
+    subject, write "the charter forbids …", never the number.
     Cross-references to *other* files/specs/plans/papers (an external spec, a
     hardware manual, `plans/PI.md`, a sibling module) are fine; citing this
     charter is not. The only place a charter section number belongs is a
@@ -2772,7 +2800,9 @@ Trace, do not assume. For every entry point the change adds or touches
   nothing (memory, capabilities, locks, file handles).
 - **Illegal states unrepresentable.** Types encode the invariants so the
   compiler rejects misuse; the code reads correctly with comments stripped
-  (§2.11).
+  (§2.11). Every comment the change adds is terse *why* — no essay, no
+  narration, no restated code or rustdoc, and none of it excused by prose that
+  was already in the file.
 - **Edge cases covered.** Empty, max, off-by-one, overflow/underflow, and the
   pre-1970 / post-2038 / past-format-boundary dates (§21) are handled and
   tested (§7).

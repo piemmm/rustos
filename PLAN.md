@@ -6571,6 +6571,16 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-08-05 — Comments are terse, and a file's existing prose is not a
+  precedent.** Amended §2.11 (and its §15.17 agent mirror and the §23.2 review
+  bullet) after repeated drift where an agent found pages of exposition in a
+  source file and matched that style, treating local convention as a licence to
+  ignore the charter: comments now carry the required *why* and stop, prefer no
+  comment where the code reads clearly, and the bar binds in every file however
+  much prose is already there — "I matched the surrounding style" is explicitly
+  not a defence. Waffle already in the tree is the `plans/WAFFLE.md` backlog to
+  clear, never a style to copy.
+
 - **2026-08-04 — Two system program stores and a fixed lookup order.**
   Amended §16.2/§16.3/§16.5 and added §16.8 (owner decision, `plans/APPS.md`
   §8): `/System` holds the OS-provided command apps in `Commands/` and the
