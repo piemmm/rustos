@@ -32,12 +32,14 @@
 extern crate alloc;
 
 pub mod client;
+pub mod desktop;
 pub mod server;
 
 pub use client::{
     event_endpoint_for, key_input_event, pointer_input_events, EventSource, WindowClient,
     WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
+pub use desktop::Desktop;
 pub use server::{
     CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
     WINDOW_REPLY_MAX,

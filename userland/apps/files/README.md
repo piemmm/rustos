@@ -82,8 +82,19 @@ One `shm_create`d frame region granted to the reserved window endpoint
 (the zero-copy window surface), one `port_bind`-bound event mailbox the
 app **parks** on through its wait-set (every accepted event
 authenticated against the kernel-attested session identity the create
-reply named), and the `WindowClient` calls over `ipc_call`. Keyboard
-navigation drives the browser (`Down`/`Up` select, `Enter` activates the
+reply named), and the `WindowClient` calls over `ipc_call`.
+
+The desktop is asked for first, before anything is sized or painted
+(`WindowClient::desktop`), so the window opens at a size the screen can
+hold, the listing is set at the desktop's own UI density, and a session in
+light mode gets a light window rather than a dark one corrected after the
+user has seen it. A `DesktopChanged` afterwards is adopted and repainted —
+during a long copy too, where the modal progress panel is re-presented each
+pass — so a light/dark switch reaches this window at once. A desktop query
+the session refuses, or a density this client cannot draw at, exits
+fail-loud with the stated reason rather than falling back to a guess.
+
+Keyboard navigation drives the browser (`Down`/`Up` select, `Enter` activates the
 selection — descends into a directory or launches a selected `<Name>.app`
 bundle by spawning the bundle's own `Run` through the ordinary signed
 app-load gate (asynchronously, with the launched child reaped on the

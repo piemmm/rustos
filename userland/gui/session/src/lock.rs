@@ -177,6 +177,7 @@ impl ScreenLock {
             return true;
         }
         let screen = compositor.screen_rect();
+        let scale = compositor.scale();
         let account = if account.is_empty() {
             UNNAMED_ACCOUNT
         } else {
@@ -184,7 +185,7 @@ impl ScreenLock {
         };
         let panel = Panel::new(account);
         let field = password_field();
-        let Some(surface) = render_surface(&panel, &field, screen, shell) else {
+        let Some(surface) = render_surface(&panel, &field, screen, scale, shell) else {
             return false;
         };
         let wm = compositor.add_window(screen.origin, surface);
@@ -224,9 +225,10 @@ impl ScreenLock {
         if let InputEvent::PointerMoved { to } = event {
             compositor.move_cursor(*to);
         }
+        let scale = compositor.scale();
         let screen = compositor.screen_rect();
         let theme = shell.session().active_theme();
-        let font = prompt_font(theme);
+        let font = prompt_font(theme, scale);
         let Some(engaged) = self.engaged.as_mut() else {
             return LockOutcome::Pending;
         };
@@ -245,11 +247,9 @@ impl ScreenLock {
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. } => {
-                let bounds = field_rect(&engaged.panel, panel_rect(screen), theme);
+                let bounds = field_rect(&engaged.panel, panel_rect(screen, scale), scale, theme);
                 let local = to_window_space(event, screen);
-                let action = engaged
-                    .field
-                    .on_pointer(&local, bounds, Scale::ONE, theme, font);
+                let action = engaged.field.on_pointer(&local, bounds, scale, theme, font);
                 let after = engaged.field.state();
                 // Pointer motion is the one event that streams. Repainting
                 // the whole screen for each one would rebuild a
@@ -295,10 +295,12 @@ impl ScreenLock {
     /// than uncovering the session.
     pub fn repaint(&self, shell: &DesktopShell, compositor: &mut Compositor) {
         let screen = compositor.screen_rect();
+        let scale = compositor.scale();
         let Some(engaged) = self.engaged.as_ref() else {
             return;
         };
-        if let Some(surface) = render_surface(&engaged.panel, &engaged.field, screen, shell) {
+        if let Some(surface) = render_surface(&engaged.panel, &engaged.field, screen, scale, shell)
+        {
             let _ = compositor.set_surface(engaged.wm, surface);
         }
         let _ = compositor.raise(engaged.wm);
@@ -425,9 +427,9 @@ fn password_field() -> TextField {
 /// A screen smaller than the panel gets the whole screen: the prompt is still
 /// usable, and a lock that refused to draw on a small display would be a lock
 /// that did not lock.
-fn panel_rect(screen: Rect) -> Rect {
-    let w = PANEL_WIDTH.min(screen.width);
-    let h = PANEL_HEIGHT.min(screen.height);
+fn panel_rect(screen: Rect, scale: Scale) -> Rect {
+    let w = scale.scale_length(PANEL_WIDTH).min(screen.width);
+    let h = scale.scale_length(PANEL_HEIGHT).min(screen.height);
     let x = i32::try_from((screen.width - w) / 2).unwrap_or(0);
     let y = i32::try_from((screen.height - h) / 3).unwrap_or(0);
     Rect::new(x, y, w, h)
@@ -441,10 +443,8 @@ fn panel_rect(screen: Rect) -> Rect {
 /// panel too small to have a content area yields the whole panel: the field
 /// is then cramped but still there, which beats a prompt with nothing to
 /// type into.
-fn field_rect(panel: &Panel, bounds: Rect, theme: &Theme) -> Rect {
-    panel
-        .content_rect(bounds, Scale::ONE, theme)
-        .unwrap_or(bounds)
+fn field_rect(panel: &Panel, bounds: Rect, scale: Scale, theme: &Theme) -> Rect {
+    panel.content_rect(bounds, scale, theme).unwrap_or(bounds)
 }
 
 /// Rebase a pointer event from screen space into the lock window's space.
@@ -467,19 +467,20 @@ fn render_surface(
     panel: &Panel,
     field: &TextField,
     screen: Rect,
+    scale: Scale,
     shell: &DesktopShell,
 ) -> Option<Surface> {
     let theme = shell.session().active_theme();
-    let font = prompt_font(theme);
+    let font = prompt_font(theme, scale);
     let mut surface = Surface::new(screen.width, screen.height)?;
     surface.fill(Color::from(theme.palette().desktop));
 
-    let bounds = panel_rect(screen);
-    panel.render(&mut surface, bounds, Scale::ONE, theme, font);
+    let bounds = panel_rect(screen, scale);
+    panel.render(&mut surface, bounds, scale, theme, font);
     field.render(
         &mut surface,
-        field_rect(panel, bounds, theme),
-        Scale::ONE,
+        field_rect(panel, bounds, scale, theme),
+        scale,
         theme,
         font,
     );
@@ -487,8 +488,8 @@ fn render_surface(
 }
 
 /// The prompt's text font: the theme's ordinary interface-text role at the
-/// density the panel's unscaled extents are authored in, so the paint and the
+/// density of the output it is drawn to, so the paint and the
 /// hit test agree on one font.
-fn prompt_font(theme: &Theme) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+fn prompt_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }

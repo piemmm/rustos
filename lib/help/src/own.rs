@@ -179,7 +179,10 @@ mod rt_source {
                         break;
                     }
                     Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::NotFound => continue,
+                        // The last statement of the loop body: falling
+                        // through to the next candidate is what `continue`
+                        // would have done anyway.
+                        Errno::NotFound => {}
                         _ => return Err(SourceError),
                     },
                 }

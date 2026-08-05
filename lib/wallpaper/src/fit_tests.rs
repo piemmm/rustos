@@ -234,3 +234,100 @@ fn decode_target_never_exceeds_the_destination_size() {
         assert!(target.1 <= 200, "{fit:?}: {target:?}");
     }
 }
+
+#[test]
+fn nominal_source_size_is_the_identity_when_output_matches_screen() {
+    for screen in [LANDSCAPE_SCREEN, PORTRAIT_SOURCE, SQUARE, (1, 1)] {
+        assert_eq!(
+            nominal_source_size(LANDSCAPE_SOURCE, screen, screen),
+            Some(LANDSCAPE_SOURCE)
+        );
+    }
+}
+
+#[test]
+fn nominal_source_size_scales_down_for_a_smaller_output() {
+    // A screen of 1920x1080 modelled at a 960x540 output is exactly half:
+    // a 3840x2160 source is nominally 1920x1080.
+    assert_eq!(
+        nominal_source_size(LANDSCAPE_SOURCE, LANDSCAPE_SCREEN, (960, 540)),
+        Some((1920, 1080))
+    );
+}
+
+#[test]
+fn nominal_source_size_scales_up_for_a_larger_output() {
+    // The inverse: an output twice the modelled screen doubles the source.
+    assert_eq!(
+        nominal_source_size((512, 512), (960, 540), (1920, 1080)),
+        Some((1024, 1024))
+    );
+}
+
+#[test]
+fn nominal_source_size_feeding_place_reproduces_a_scaled_centre() {
+    // The worked example the helper exists for: a screen twice the size of
+    // the output models exactly a half-scale `Centre` composition.
+    let source = (3840, 2160);
+    let screen = (1920, 1080);
+    let output = (960, 540);
+    let full = place(source, screen, WallpaperFit::Centre).unwrap();
+
+    let nominal = nominal_source_size(source, screen, output).unwrap();
+    let scaled = place(nominal, output, WallpaperFit::Centre).unwrap();
+
+    assert_eq!(scaled.destination().width, full.destination().width / 2);
+    assert_eq!(scaled.destination().height, full.destination().height / 2);
+}
+
+#[test]
+fn nominal_source_size_feeding_place_reproduces_a_scaled_tile() {
+    let source = (64, 64);
+    let screen = (1920, 1080);
+    let output = (192, 108);
+    let nominal = nominal_source_size(source, screen, output).unwrap();
+    // A tenth-scale output tiles a tenth-scale source.
+    assert_eq!(nominal, (6, 6));
+    let scaled = place(nominal, output, WallpaperFit::Tile).unwrap();
+    assert_eq!(scaled.source(), Rect::new(0, 0, 6, 6));
+    assert!(scaled.tiled());
+}
+
+#[test]
+fn nominal_source_size_refuses_exactly_where_place_does() {
+    assert_eq!(nominal_source_size((0, 100), (10, 10), (10, 10)), None);
+    assert_eq!(nominal_source_size((100, 100), (0, 10), (10, 10)), None);
+    assert_eq!(nominal_source_size((100, 100), (10, 0), (10, 10)), None);
+    assert!(nominal_source_size((100, 100), (10, 10), (10, 10)).is_some());
+}
+
+#[test]
+fn nominal_source_size_never_panics_at_extreme_aspect_ratios() {
+    let nominal = nominal_source_size((1, 1_000_000), (1_000_000, 1), (1, 1)).unwrap();
+    assert_eq!(nominal, (1, 1_000_000));
+
+    let nominal = nominal_source_size((1, 1), (1, 1), (1_000_000, 1)).unwrap();
+    assert_eq!(nominal, (1_000_000, 1));
+
+    let nominal = nominal_source_size((u32::MAX, u32::MAX), (1, 1), (u32::MAX, u32::MAX)).unwrap();
+    assert_eq!(nominal, (u32::MAX, u32::MAX));
+}
+
+#[test]
+fn nominal_source_size_clamps_a_zero_result_up_to_one() {
+    // A source of 1 modelled at a tiny fraction of the screen rounds down
+    // to zero mathematically; the clamp keeps it a real pixel.
+    let nominal = nominal_source_size((1, 1), (1_000_000, 1_000_000), (1, 1)).unwrap();
+    assert_eq!(nominal, (1, 1));
+}
+
+#[test]
+fn nominal_source_size_is_unaffected_by_a_zero_sided_output() {
+    // `output` alone having a zero dimension is not this function's refusal
+    // to make: the mathematically-zero width clamps up to one exactly as
+    // any other zero result would, and the later `place` call over
+    // `output` refuses the request instead.
+    let nominal = nominal_source_size((100, 100), (200, 200), (0, 50)).unwrap();
+    assert_eq!(nominal, (1, 25));
+    assert_eq!(place(nominal, (0, 50), WallpaperFit::Fill), None);
+}

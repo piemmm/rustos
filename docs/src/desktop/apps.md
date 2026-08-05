@@ -6,6 +6,44 @@ ordinary `.app` bundles (`AGENTS.md` §16.5) that consume the shared desktop
 `tairix-font` — exactly as the taskbar does, and never depend on the window
 manager (`AGENTS.md` §17.4).
 
+## Every app asks the desktop first
+
+An application cannot draw honestly without knowing three things the session
+owns: how large the screen is, what UI density the desktop runs at, and
+whether the theme is light or dark. Guessing any of them is a defect — a
+window that opens larger than the display, a layout at the wrong density, or
+a window still dark after the user switched the desktop to light.
+
+So every graphical app starts the same way, before it sizes or paints
+anything: `WindowClient::desktop` returns the seat's
+`tairix_abi::desktop::DesktopInfo`, and `tairix_window::Desktop` holds it.
+From that, uniformly:
+
+- `Desktop::window_size(logical_w, logical_h)` gives the size to open at —
+  the app's preferred size, authored in logical pixels as every desktop
+  length is, resolved at the live density and capped to the screen. There is
+  one such call per app; none computes it itself (`AGENTS.md` §2.2).
+- `Desktop::scale()` replaces what used to be a hard-coded 100%, and feeds
+  every `BitmapFont::for_role` and every control's layout.
+- `Desktop::appearance()` is applied to the app's `ThemeRegistry` *before*
+  the first frame, so a window opened into a light desktop opens light.
+- `Desktop::apply(&event)` is fed **every** delivered event. A
+  `WindowEvent::DesktopChanged` — pushed to every live window when the
+  session changes any of it — is adopted, and only a real change costs a
+  re-theme, a re-layout and a repaint; an announcement that changed nothing
+  costs none.
+
+Both failure paths state their reason and neither invents a value: a refused
+query, or a density this client cannot draw at, exits fail-loud with the
+app's no-window code (`AGENTS.md` §2.24); a refused *change* is reported on
+`stderr` and the app carries on at the last desktop it accepted, rather than
+drawing at something it could not validate (`AGENTS.md` §5.4).
+
+The query is read-only and carries no capability: it describes the caller's
+own seat, names no other principal's data, and grants no authority. See
+[Variable DPI and UI scale](./dpi.md) and
+[Desktop session glue](./session.md).
+
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the

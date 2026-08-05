@@ -177,6 +177,32 @@ carries a check bead in the menu and is not actionable, so the menu can never
 ask for the appearance already in use. See
 [Desktop session glue](./session.md) and [Taskbar](./taskbar.md).
 
+### Open application windows follow the switch
+
+An application's window is the application's own pixels: the session composes
+them but cannot re-colour them, so re-theming the desktop alone would leave
+every open window sitting in the appearance the user just left. The session
+therefore *tells* each one. `Appearance` is part of the seat's desktop record
+(`tairix_abi::desktop::DesktopInfo`), which an app reads before it paints its
+first frame and is sent again, as a `WindowEvent::DesktopChanged`, to every
+live window whenever the switch happens. Each app re-applies the appearance to
+its own `ThemeRegistry`, re-resolves whatever it derived from the theme, and
+presents — so the switch reaches the whole screen at once. The enum crossing
+that wire *is* `tairix_theme::Appearance`: the theme crate re-exports the ABI's
+definition rather than restating it, so the byte on the wire and the value a
+theme carries cannot drift apart. See
+[Variable DPI and UI scale](./dpi.md) for the rest of that record.
+
+What crosses that wire is the appearance *axis*, not a palette. That is exact
+today, because the desktop's own switch chooses between the two built-ins and
+nothing registers a third theme at runtime, so naming the axis names the
+theme. A desktop that did activate a custom registered palette would leave an
+app drawing its own built-in of the same appearance: closing that would mean
+either sending the palette itself over the window channel or giving apps a
+themes service to read, and neither is worth its cost while the built-in pair
+is the whole of what a user can select. Registering a custom theme therefore
+means answering that question first, not adding a call.
+
 ## Tests
 
 `cargo test -p tairix-theme` covers the built-in palettes (every

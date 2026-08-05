@@ -124,7 +124,7 @@ impl ConfirmPrompt {
             return false;
         }
         let dialog = build_dialog(action);
-        let Some(surface) = render_surface(&dialog, shell) else {
+        let Some(surface) = render_surface(&dialog, compositor.scale(), shell) else {
             return false;
         };
         let Some(wm) = shell.open_window(compositor, CONFIRM_ORIGIN, surface, title(action)) else {
@@ -180,8 +180,11 @@ impl ConfirmPrompt {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
-        let bounds = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
-        let font = prompt_font(shell.session().active_theme());
+        let scale = compositor.scale();
+        let w = scale.scale_length(WIN_WIDTH);
+        let h = scale.scale_length(WIN_HEIGHT);
+        let bounds = Rect::new(0, 0, w, h);
+        let font = prompt_font(shell.session().active_theme(), scale);
         let theme = shell.session().active_theme().clone();
         let action = {
             let active = self.active.as_mut()?;
@@ -190,7 +193,7 @@ impl ConfirmPrompt {
             let _ = active.dialog.on_pointer(
                 &InputEvent::PointerMoved { to: local },
                 bounds,
-                Scale::ONE,
+                scale,
                 &theme,
                 font,
             );
@@ -199,7 +202,7 @@ impl ConfirmPrompt {
                     button: PointerButton::Primary,
                 },
                 bounds,
-                Scale::ONE,
+                scale,
                 &theme,
                 font,
             );
@@ -208,7 +211,7 @@ impl ConfirmPrompt {
                     button: PointerButton::Primary,
                 },
                 bounds,
-                Scale::ONE,
+                scale,
                 &theme,
                 font,
             )
@@ -231,7 +234,7 @@ impl ConfirmPrompt {
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        if let Some(surface) = render_surface(&active.dialog, shell) {
+        if let Some(surface) = render_surface(&active.dialog, compositor.scale(), shell) {
             let _ = compositor.set_surface(active.wm, surface);
         }
     }
@@ -357,23 +360,25 @@ fn set_focus(dialog: &mut Dialog, index: usize) {
     }
 }
 
-/// Paint the prompt at the window's fixed extents through the active theme.
-fn render_surface(dialog: &Dialog, shell: &DesktopShell) -> Option<Surface> {
+/// Paint the prompt at the window's physical extents through the active theme.
+fn render_surface(dialog: &Dialog, scale: Scale, shell: &DesktopShell) -> Option<Surface> {
     let theme = shell.session().active_theme();
-    let mut surface = Surface::new(WIN_WIDTH, WIN_HEIGHT)?;
+    let w = scale.scale_length(WIN_WIDTH);
+    let h = scale.scale_length(WIN_HEIGHT);
+    let mut surface = Surface::new(w, h)?;
     dialog.render(
         &mut surface,
-        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
-        Scale::ONE,
+        Rect::new(0, 0, w, h),
+        scale,
         theme,
-        prompt_font(theme),
+        prompt_font(theme, scale),
     );
     Some(surface)
 }
 
 /// The prompt's text font: the theme's ordinary interface-text role at the
-/// density the window's unscaled extents are authored in, so the render and
+/// density of the output it is drawn to, so the render and
 /// hit-test paths agree on one font.
-pub(crate) fn prompt_font(theme: &Theme) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+pub(crate) fn prompt_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }

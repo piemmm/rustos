@@ -54,18 +54,49 @@ owns that output's `Scale`. It is the single source of truth:
   returns the scale of whichever output the window currently sits on.
 
 Nothing else stores a copy of the scale. The taskbar and the cursor controller
-read it from the compositor, and apps read *their* window's density through
-`window_scale` — so changing a monitor's DPI is transparent to them and is
-never duplicated as a second source of truth (`AGENTS.md` §2.2).
+read it from the compositor, and an application is *told* its window's density
+over the window channel (below) — so changing a monitor's DPI is transparent to
+them and is never duplicated as a second source of truth (`AGENTS.md` §2.2).
 
-## Apps stay out of it
+## How an application learns the density
 
-Picking the density is the desktop's job, not the application's. An app never
-sets a scale; at most it *reads* `Compositor::window_scale` for its own window
-when it must size something in physical pixels (an accessibility or
-pixel-exact concern). The desktop drives a runtime switch through
-`DesktopShell::set_scale`, which sets the output scale on the compositor and
-re-presents the taskbar at the new density.
+Picking the density is the desktop's job, not the application's: an app never
+sets a scale. But it must *know* the one in force, or every length it draws is
+a guess, and the compositor that owns the value lives in another process an app
+cannot — and must not — reach into (`AGENTS.md` §17.3).
+
+The window channel carries it. `tairix_abi::desktop::DesktopInfo` is the seat's
+desktop as one record — the screen extent in physical pixels, the UI scale as a
+percentage of the reference density, and the active appearance — and it reaches
+an application two ways:
+
+- `WindowRequest::QueryDesktop`, wrapped as `WindowClient::desktop`, is a
+  read-only request an app issues **before** it creates its first window, so
+  its opening frame is already the right size at the right density. It carries
+  no capability: the reply describes the caller's own screen and theme, names
+  no other principal's data, and grants no authority, so gating it would only
+  force every application to guess (`AGENTS.md` §5.2 — the capability set stays
+  small, and a descriptive fact is not a security boundary).
+- `WindowEvent::DesktopChanged` is pushed to every live window whenever the
+  session changes any of it, so a running app follows a density or appearance
+  switch instead of sitting there at the state it opened with.
+
+`tairix_window::Desktop` is the app-side holder: it resolves the reported
+percentage into a `Scale` (refusing, never clamping, a percentage outside the
+range `Scale` admits and keeping the last good value), reports the screen as a
+`Rect`, and `Desktop::fit_window` caps a wanted window size to the screen so a
+window can never open larger than the display it must appear on. Feeding it
+every delivered event keeps it current, so no app repeats the bookkeeping.
+
+The desktop drives a runtime switch through `DesktopShell::set_scale`, which
+sets the output scale on the compositor and re-presents the taskbar at the new
+density; the session then announces the change so every open window re-lays
+itself out too.
+
+The scale is *deliverable* but not yet *settable* by a user: nothing in the
+tree sets an output scale other than 100%, so the plumbing is honest and
+exercised at every layer while the settings surface that would change it is
+still to come (`plans/DISPLAY.md`).
 
 ## The taskbar consumes the scale transparently
 
@@ -103,4 +134,14 @@ new density. `cargo test -p tairix-wm` covers the compositor owning the output
 scale (settable, idempotent, marking the screen dirty, and `window_scale` per
 window) and the cursor controller re-rendering on a scale change. `cargo test
 -p tairix-desktop-session` covers `DesktopShell::set_scale` driving the
-compositor and re-laying the bar transparently.
+compositor and re-laying the bar transparently, the session's own surfaces
+(the lock, the confirmation prompt, the trusted picker) laying out differently
+at a different density, and `desktop_info` reporting the compositor's real
+screen, scale and appearance. `cargo test -p tairix-abi` covers the desktop
+record's wire form, including its fail-closed refusal of a zero extent, a zero
+scale, an unknown appearance, or a dirty reserved byte; `cargo test -p
+tairix-window` covers the whole path — an app learning its desktop before it
+owns a window, `fit_window` capping a window to the screen, a change reaching
+every live window, adopting one exactly once, and refusing (rather than
+clamping) a density outside the range `Scale` admits while the last good one
+stands.

@@ -43,26 +43,33 @@ pub(crate) fn render(chooser: &Chooser, layout: &Layout, style: Style<'_>) -> Op
     Some(surface)
 }
 
-/// Paint the preview panel: the chosen backdrop, the chosen wallpaper placed
-/// over it exactly as the desktop would place it, and a rim so the panel
-/// reads as a viewport rather than as a hole in the window.
+/// Paint the preview panel: the true-scale model of the screen, the chosen
+/// backdrop, the chosen wallpaper placed over it exactly as the desktop
+/// would place it on the real screen, and a rim so the model reads as a
+/// screen sitting inside the panel rather than as a hole in the window.
+///
+/// The panel itself is left as the ordinary window background [`render`]
+/// already painted: only the model box — [`Layout::preview_model`], the
+/// largest screen-shaped rectangle that fits centred in the panel — ever
+/// shows the backdrop or the wallpaper, so a panel wider or taller than the
+/// screen's own aspect never stretches the wallpaper to fill it.
 ///
 /// The wallpaper's own render leaves every pixel its placement does not cover
 /// transparent, so painting the backdrop first is what makes a contained fit
 /// show its letterbox bars and a centred one its margins — the same
 /// composition the desktop performs.
 fn paint_preview(surface: &mut Surface, chooser: &Chooser, layout: &Layout, style: Style<'_>) {
-    let panel = layout.preview();
-    if panel.is_empty() {
+    let model = layout.preview_model();
+    if model.is_empty() {
         return;
     }
     let theme = style.theme();
-    let (x, y) = (to_u32(panel.left()), to_u32(panel.top()));
+    let (x, y) = (to_u32(model.left()), to_u32(model.top()));
     surface.fill_rect(
         x,
         y,
-        panel.width,
-        panel.height,
+        model.width,
+        model.height,
         backdrop_color(theme, chooser.backdrop()),
     );
 
@@ -70,7 +77,7 @@ fn paint_preview(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
     // painted above, which is the whole picture.
     if let Some(want) = chooser.wanted_preview(style) {
         if let Some(pixels) = chooser.preview_surface(&want) {
-            surface.blit(panel.left(), panel.top(), pixels);
+            surface.blit(model.left(), model.top(), pixels);
         } else {
             // Pixels that do not exist yet, or a wallpaper the sandbox
             // refused: say which, rather than showing an empty frame.
@@ -79,10 +86,10 @@ fn paint_preview(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
             } else {
                 (PREVIEW_PENDING, theme.palette().on_surface_muted)
             };
-            centre_text(surface, panel, text, style.font(), ink.into());
+            centre_text(surface, model, text, style.font(), ink.into());
         }
     }
-    paint_rim(surface, panel, theme);
+    paint_rim(surface, model, theme);
 }
 
 /// Paint the four settings drop-downs and the caption naming what the

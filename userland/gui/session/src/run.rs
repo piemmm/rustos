@@ -100,18 +100,18 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        build_pin_views, deliver_pending_open, load_library, maybe_send_seat_report, open_tray,
-        parse, reap_launched, relay_power, serve_pinboard_apply, serve_switchboard_request,
-        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
-        ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-        DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser, InputSource,
-        KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion, PinBridge,
-        PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError,
-        ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel, SessionFileReader,
-        SessionFileWriter, SessionPicker, SessionPins, SessionWindows, ShellWindowHost,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker, FILES_LABEL,
-        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
-        WALLPAPER_RUN_PATH,
+        build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
+        open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
+        serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
+        CliError, Command, ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser,
+        InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
+        PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
+        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
+        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -2633,6 +2633,20 @@ mod program {
                 shell.sync_background(compositor);
                 shell.present(compositor);
                 confirm.repaint(shell, compositor);
+                // Served application windows are the apps' own pixels, so
+                // the session cannot re-colour them: it tells every app
+                // instead, and each repaints itself. Without this the
+                // desktop would switch and every open window would sit
+                // there in the appearance the user just left.
+                announce_desktop(
+                    server,
+                    sink,
+                    shell,
+                    compositor,
+                    windows,
+                    picker,
+                    &mut pins.service,
+                );
             }
             ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
                 // Secure the screen. The prompt goes down first: an
@@ -3319,6 +3333,53 @@ mod program {
                 picker,
                 pins,
                 &WindowEvent::RedrawRequested { window_id },
+            );
+        }
+    }
+
+    /// Tell every live window that the desktop they share has changed.
+    ///
+    /// The screen extent, the UI scale, and the active appearance are
+    /// properties of the seat, and an application only learns them by
+    /// asking or by being told: it holds its own pixels, so nothing the
+    /// session does to its own surfaces can bring an app's window into
+    /// step. Each window is told through the ordinary delivery path, so a
+    /// client that has died is torn down here exactly as it would be for
+    /// any other event.
+    ///
+    /// A desktop the record cannot describe is reported and nothing is
+    /// sent: an application keeps the last state it was given rather than
+    /// being handed a guess.
+    #[allow(clippy::too_many_arguments)] // The delivery path's whole mutable state, threaded explicitly.
+    fn announce_desktop<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        pins: &mut dyn PinBridge,
+    ) {
+        let desktop = match desktop_info(compositor) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: cannot describe the desktop to apps: {err}"
+                );
+                return;
+            }
+        };
+        for window_id in server.window_ids() {
+            deliver(
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                pins,
+                &WindowEvent::DesktopChanged { window_id, desktop },
             );
         }
     }

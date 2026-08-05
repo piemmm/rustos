@@ -225,24 +225,32 @@ impl OptionGroup {
 }
 
 /// What every painter and hit-test in this engine resolves its geometry
-/// from: the active theme, the desktop UI scale, and the one shared text
-/// face.
+/// from: the active theme, the desktop UI scale, the one shared text face,
+/// and the desktop's own screen extent (what the preview panel's true-scale
+/// model represents).
 ///
 /// Carried as one value so the layout a click is tested against and the
 /// layout that was painted are resolved from identical inputs, rather than
-/// from three arguments that could be threaded inconsistently.
+/// from four arguments that could be threaded inconsistently.
 #[derive(Copy, Clone)]
 pub struct Style<'a> {
     theme: &'a Theme,
     scale: Scale,
     font: BitmapFont,
+    screen: (u32, u32),
 }
 
 impl<'a> Style<'a> {
-    /// The style drawing with `font` from `theme` at `scale`.
+    /// The style drawing with `font` from `theme` at `scale`, for a desktop
+    /// whose screen is `screen` pixels (see [`Self::screen`]).
     #[must_use]
-    pub const fn new(theme: &'a Theme, scale: Scale, font: BitmapFont) -> Self {
-        Self { theme, scale, font }
+    pub const fn new(theme: &'a Theme, scale: Scale, font: BitmapFont, screen: (u32, u32)) -> Self {
+        Self {
+            theme,
+            scale,
+            font,
+            screen,
+        }
     }
 
     /// The active theme.
@@ -255,6 +263,13 @@ impl<'a> Style<'a> {
     #[must_use]
     pub const fn scale(&self) -> Scale {
         self.scale
+    }
+
+    /// The desktop's screen extent, in physical pixels: what the preview
+    /// panel's true-scale model represents.
+    #[must_use]
+    pub const fn screen(&self) -> (u32, u32) {
+        self.screen
     }
 
     /// The interface text face: every label, choice, and status line.

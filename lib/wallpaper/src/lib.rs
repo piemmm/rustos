@@ -45,7 +45,7 @@ pub use catalog::{
     catalog_entries, default_wallpaper_path, is_wallpaper_file_name, CatalogEntry,
     DEFAULT_WALLPAPER, MAX_WALLPAPER_BYTES, MAX_WALLPAPER_CATALOG_ENTRIES, WALLPAPER_STORE,
 };
-pub use fit::{decode_target, place, Placement};
+pub use fit::{decode_target, nominal_source_size, place, Placement};
 pub use settings::{
     parse, render, Backdrop, IconFlow, IconSort, ParseError, PinboardSettings, Rgb, SettingsError,
     SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,

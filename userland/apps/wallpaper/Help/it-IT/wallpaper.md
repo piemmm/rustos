@@ -44,11 +44,10 @@ discesa. Clicca su una per aprirla e clicca su una scelta per prenderla:
 - **Sort** (Ordinamento) — l'ordine in cui sono elencate le icone della
   cartella del desktop.
 
-L'anteprima mostra l'immagine, lo sfondo e l'adattamento selezionati
-nella propria forma dell'anteprima. Uno schermo di forma diversa
-ritaglia o aggiunge barre in modo diverso, quindi l'anteprima è una
-visione fedele dell'immagine e della regola di adattamento, non un
-modello in scala del display.
+L'anteprima è un modello in scala dello schermo: ha la stessa forma
+del display e mostra l'immagine, lo sfondo e l'adattamento selezionati
+esattamente come verranno mostrati dal desktop. Ciò che vedi
+nell'anteprima è ciò che otterrai.
 
 Le immagini degli sfondi non vengono mai decodificate da questo
 programma. Ognuna è renderizzata da un processo sandbox separato che non

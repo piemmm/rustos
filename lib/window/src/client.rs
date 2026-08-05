@@ -15,14 +15,15 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::input::{
     KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode, PointerButtonCode,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
-    WINDOW_CREATE_REPLY_LEN,
+    decode_create_reply, decode_desktop_reply, BundleRef, PointerAction, WindowEvent,
+    WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::Point;
@@ -238,6 +239,9 @@ impl<T: WindowTransport> WindowClient<T> {
     /// re-lays-out to each reported size and re-maps its region with
     /// [`Self::resize`].
     ///
+    /// The size is the app's own choice; [`Self::desktop`] is how it
+    /// learns the screen it must fit on before making that choice.
+    ///
     /// Returns the session-minted window id and the serving session's
     /// [`ProcId`]: the identity the app then requires of every event's
     /// kernel-attested sender, so no other process can feed it forged
@@ -280,6 +284,32 @@ impl<T: WindowTransport> WindowClient<T> {
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.note_extent(window_id, surface.width_px, surface.height_px);
         Ok((window_id, server))
+    }
+
+    /// Ask the session to describe the desktop this app's windows are
+    /// displayed on: the screen extent, the UI scale, and the active
+    /// appearance.
+    ///
+    /// An app calls this **before** [`Self::create`], so its first window
+    /// is sized to a screen it knows and its first frame is painted at the
+    /// right density in the right colours, rather than at a guess it has
+    /// to correct once the user has already seen it. The session pushes a
+    /// [`WindowEvent::DesktopChanged`] afterwards whenever any of it
+    /// changes; [`Desktop`](crate::Desktop) holds the answer and keeps it
+    /// current from those events.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal (a session that is tearing down and no
+    /// longer has a screen to describe), a transport failure, or a corrupt
+    /// reply — never a guessed extent.
+    ///
+    /// [`WindowEvent::DesktopChanged`]: tairix_abi::window_ipc::WindowEvent::DesktopChanged
+    pub fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
+        let request = WindowRequest::QueryDesktop.to_le_bytes();
+        let mut reply = [0u8; WINDOW_DESKTOP_REPLY_LEN];
+        let len = self.transport.call(&request, &mut reply)?;
+        decode_desktop_reply(&reply[..len])
     }
 
     /// Present frame `frame_index` of window `window_id`, of which

@@ -33,12 +33,15 @@
 //!   taskbar entry.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
+use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
-    encode_create_reply, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
+    encode_create_reply, encode_desktop_reply, WindowEvent, WindowRequest, WindowTitle,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -61,10 +64,14 @@ pub enum PinDecision {
     Refused,
 }
 
-/// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes:
-/// the create reply is the longest frame, and the status frame always
-/// fits inside it.
-pub const WINDOW_REPLY_MAX: usize = WINDOW_CREATE_REPLY_LEN;
+/// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
+/// so one fixed buffer holds every outcome: the create frame, the desktop
+/// frame, or the status frame that fits inside either.
+pub const WINDOW_REPLY_MAX: usize = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_REPLY_LEN {
+    WINDOW_CREATE_REPLY_LEN
+} else {
+    WINDOW_DESKTOP_REPLY_LEN
+};
 
 /// Most windows one attested client may hold open at once. A validation
 /// bound, not a capacity: a desktop app opens a handful of windows, and
@@ -194,6 +201,22 @@ pub trait WindowHost {
     fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
         let _ = (owner, window);
     }
+
+    /// Describe the desktop this host composites: the screen extent, the
+    /// UI scale, and the active appearance.
+    ///
+    /// The host is the authority for all three — it owns the compositor
+    /// and the theme registry — so the answer is read straight from it
+    /// rather than cached in the engine, and an application can never see
+    /// a desktop the session has already left behind.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host has no desktop to describe (it is tearing
+    /// down, or its screen extent is not one the record admits); the
+    /// refusal is relayed to the client, which then knows it does not
+    /// know rather than drawing to a guess.
+    fn desktop(&mut self) -> Result<DesktopInfo, Errno>;
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -393,7 +416,23 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::DragWithdraw { window } => {
                 status(reply, self.drag_withdraw(host, caller, window))
             }
+            // Read-only and ungated: the reply describes the caller's own
+            // seat, holding nothing another principal owns and granting
+            // no authority, so every client on the desktop may ask.
+            WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop()),
         }
+    }
+
+    /// Every live window id, across every client, in ascending order.
+    ///
+    /// The session uses this to reach each window when it must tell every
+    /// application something about the desktop they share — a light/dark
+    /// switch, a scale or mode change — routing each one through its own
+    /// delivery path so a client that has died is torn down exactly as it
+    /// would be for any other event.
+    #[must_use]
+    pub fn window_ids(&self) -> Vec<u64> {
+        self.windows.keys().copied().collect()
     }
 
     /// Open a window for `caller`: bound the client, map the granted
@@ -708,4 +747,10 @@ fn create_reply(
 ) -> usize {
     reply[..WINDOW_CREATE_REPLY_LEN].copy_from_slice(&encode_create_reply(result, server));
     WINDOW_CREATE_REPLY_LEN
+}
+
+/// Write a desktop reply into `reply`, returning its length.
+fn desktop_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<DesktopInfo, Errno>) -> usize {
+    reply[..WINDOW_DESKTOP_REPLY_LEN].copy_from_slice(&encode_desktop_reply(result));
+    WINDOW_DESKTOP_REPLY_LEN
 }

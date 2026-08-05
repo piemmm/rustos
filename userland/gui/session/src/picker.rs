@@ -222,9 +222,15 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         // click resolves to exactly the item the user saw (list row or grid
         // tile), and a click on the path bar or the scrollbar gutter resolves
         // to nothing.
+        let scale = compositor.scale();
         let theme = shell.session().active_theme();
-        let font = picker_font(theme);
-        let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
+        let font = picker_font(theme, scale);
+        let viewport = Rect::new(
+            0,
+            0,
+            scale.scale_length(WIN_WIDTH),
+            scale.scale_length(WIN_HEIGHT),
+        );
         // A toolbar command takes priority over the item area it sits above;
         // an enabled command runs, a disabled one resolves to nothing.
         if let Some(command) = self
@@ -257,6 +263,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         step: impl FnOnce(&mut Browser<S>) -> NavOutcome,
     ) -> Option<ConcludedPick> {
         let active = self.active.as_mut()?;
+        let scale = compositor.scale();
         match step(&mut active.browser) {
             NavOutcome::None => None,
             NavOutcome::Redraw => {
@@ -266,9 +273,14 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     let theme = shell.session().active_theme();
                     reveal_selection(
                         &mut active.browser,
-                        picker_font(theme),
+                        picker_font(theme, scale),
                         theme,
-                        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
+                        Rect::new(
+                            0,
+                            0,
+                            scale.scale_length(WIN_WIDTH),
+                            scale.scale_length(WIN_HEIGHT),
+                        ),
                     );
                 }
                 redraw(&active.browser, active.wm, shell, compositor);
@@ -320,7 +332,8 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
                 return Err(err.source_errno().unwrap_or(Errno::PermissionDenied));
             }
         };
-        let surface = render_surface(&browser, shell).ok_or(Errno::LengthOutOfRange)?;
+        let surface =
+            render_surface(&browser, compositor.scale(), shell).ok_or(Errno::LengthOutOfRange)?;
         let wm = shell
             .open_window(compositor, PICKER_ORIGIN, surface, PICKER_TITLE)
             .ok_or(Errno::NoSpace)?;
@@ -378,9 +391,10 @@ fn open_or_choose<S: DirectorySource>(browser: &mut Browser<S>, index: usize) ->
 }
 
 /// Paint the picker's current listing at the shared browser-view
-/// geometry through the active theme.
+/// physical geometry through the active theme.
 fn render_surface<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     shell: &DesktopShell,
 ) -> Option<tairix_wm::Surface> {
     let theme = shell.session().active_theme();
@@ -392,11 +406,13 @@ fn render_surface<S: DirectorySource>(
     // The picker has no per-entry artwork cache yet, so it resolves every grid
     // tile to its built-in glyph through the always-empty artwork lookup; a
     // later change gives it a real cache.
+    let w = scale.scale_length(WIN_WIDTH);
+    let h = scale.scale_length(WIN_HEIGHT);
     render(
         browser,
         theme,
-        picker_font(theme),
-        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
+        picker_font(theme, scale),
+        Rect::new(0, 0, w, h),
         &ManagerChrome::none(),
         &mut NoArtwork,
     )
@@ -406,12 +422,10 @@ fn render_surface<S: DirectorySource>(
 /// through the one shared role-to-font conversion, so the picker's rows are
 /// sized and weighted exactly like every other list of interface text.
 ///
-/// The window's own extents are authored in unscaled pixels ([`WIN_WIDTH`],
-/// [`WIN_HEIGHT`]), so the role resolves at [`Scale::ONE`] to keep the text and
-/// the box it must fit in on one density. It is the one place the render and
-/// hit-test paths agree on a font.
-pub(crate) fn picker_font(theme: &Theme) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+/// It is the one place the render and hit-test paths agree on a font,
+/// resolved at the density of the output it is drawn to.
+pub(crate) fn picker_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }
 
 /// Repaint the picker window after a navigation change. A surface that
@@ -423,7 +437,7 @@ fn redraw<S: DirectorySource>(
     shell: &mut DesktopShell,
     compositor: &mut Compositor,
 ) {
-    if let Some(surface) = render_surface(browser, shell) {
+    if let Some(surface) = render_surface(browser, compositor.scale(), shell) {
         let _ = compositor.set_surface(wm, surface);
     }
 }

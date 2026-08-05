@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_abi::desktop::{Appearance, DesktopInfo};
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
@@ -18,8 +19,10 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest};
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
+use tairix_geometry::{Rect, Scale};
 
 use crate::client::{EventSource, WindowClient, WindowEvents, WindowTransport};
+use crate::desktop::Desktop;
 use crate::server::{
     CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
     WINDOW_REPLY_MAX,
@@ -132,6 +135,9 @@ struct RecordingHost {
     pin_decision: PinDecision,
     /// Whether the next `DragOffer` is accepted.
     drag_offer_accepts: bool,
+    /// The desktop this host composites, or the refusal a host with no
+    /// screen to describe answers with.
+    desktop: Result<DesktopInfo, Errno>,
 }
 
 impl Default for RecordingHost {
@@ -150,7 +156,17 @@ impl Default for RecordingHost {
             refuse_pick: None,
             pin_decision: PinDecision::Pinned,
             drag_offer_accepts: true,
+            desktop: Ok(sample_desktop()),
         }
+    }
+}
+
+/// The desktop the host tests report: a 1024x768 screen at the reference
+/// density, in the default dark appearance.
+fn sample_desktop() -> DesktopInfo {
+    match DesktopInfo::new(1024, 768, 100, Appearance::Dark) {
+        Ok(info) => info,
+        Err(_) => unreachable!("a 1024x768 screen at 100% is in range"),
     }
 }
 
@@ -214,6 +230,10 @@ impl WindowHost for RecordingHost {
     fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
         self.drag_withdraws.push((owner, window));
     }
+
+    fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
+        self.desktop
+    }
 }
 
 /// A host implementing only the mandatory bridge methods, so the
@@ -249,6 +269,10 @@ impl WindowHost for MinimalHost {
 
     fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
         Ok(())
+    }
+
+    fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
+        Ok(sample_desktop())
     }
 }
 
@@ -336,6 +360,125 @@ fn create_id(
     client
         .create(shm, events, frames, &SURFACE, title, false)
         .map(|(id, _)| id)
+}
+
+#[test]
+fn an_app_learns_its_desktop_before_it_owns_a_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    // Nothing has been created: the query names no window precisely so an
+    // app can size its first one to a screen it knows.
+    assert_eq!(loopback.borrow().server.window_count(), 0);
+    let info = client.desktop().expect("the session describes its desktop");
+    assert_eq!(info, sample_desktop());
+
+    let desktop = Desktop::new(info).expect("the reported scale is one Scale admits");
+    assert_eq!(desktop.screen(), Rect::new(0, 0, 1024, 768));
+    assert_eq!(desktop.scale(), Scale::ONE);
+    assert_eq!(desktop.appearance(), Appearance::Dark);
+    // At the reference density a logical size is its own physical size,
+    // so the app's own choice stands — unless it exceeds the screen, which
+    // caps it.
+    assert_eq!(desktop.window_size(640, 480), (640, 480));
+    assert_eq!(desktop.window_size(2000, 900), (1024, 768));
+}
+
+#[test]
+fn a_window_is_sized_at_the_desktops_density_and_capped_to_the_screen() {
+    let dense = DesktopInfo::new(1024, 768, 200, Appearance::Dark)
+        .expect("a 1024x768 screen at 200% is in range");
+    let desktop = Desktop::new(dense).expect("200% is one Scale admits");
+
+    // The app authors its preference in logical pixels, so at twice the
+    // density it asks for twice the pixels...
+    assert_eq!(desktop.window_size(320, 240), (640, 480));
+    // ...but never more than the screen it must appear on, which is what
+    // a fixed-size window authored for a roomier desktop would otherwise
+    // ask for once doubled.
+    assert_eq!(desktop.window_size(800, 600), (1024, 768));
+}
+
+#[test]
+fn a_session_with_no_desktop_refuses_rather_than_inventing_one() {
+    let loopback = Loopback::with_regions(&[]);
+    loopback.borrow_mut().host.desktop = Err(Errno::NotFound);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    assert_eq!(client.desktop(), Err(Errno::NotFound));
+}
+
+#[test]
+fn a_desktop_change_reaches_every_live_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("first window opens");
+    let second = create_id(&mut client, 8, EVENTS_A, 1, "Viewer").expect("second window opens");
+
+    let switched = DesktopInfo::new(1024, 768, 100, Appearance::Light)
+        .expect("a 1024x768 screen at 100% is in range");
+    let mut sink = QueueSink::default();
+    {
+        let inner = &mut *loopback.borrow_mut();
+        // The desktop belongs to the seat, so the session reaches every
+        // window rather than guessing which apps care.
+        assert_eq!(inner.server.window_ids(), alloc::vec![first, second]);
+        for window_id in inner.server.window_ids() {
+            inner
+                .server
+                .deliver_event(
+                    &mut sink,
+                    &WindowEvent::DesktopChanged {
+                        window_id,
+                        desktop: switched,
+                    },
+                )
+                .expect("a live window takes the event");
+        }
+    }
+    assert_eq!(sink.delivered.len(), 2);
+
+    // The app side adopts the change once and reports it as news only the
+    // first time, so a repeated announcement costs no repaint.
+    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
+    let mut delivered = sink
+        .delivered
+        .iter()
+        .map(|(_, frame)| WindowEvent::from_bytes(frame).expect("a delivered event decodes"));
+    let first_event = delivered.next().expect("the first window was told");
+    assert_eq!(desktop.apply(&first_event), Ok(true));
+    assert_eq!(desktop.appearance(), Appearance::Light);
+    let second_event = delivered.next().expect("the second window was told");
+    assert_eq!(desktop.apply(&second_event), Ok(false));
+
+    // An unrelated event is not a desktop change and leaves it alone.
+    assert_eq!(
+        desktop.apply(&WindowEvent::CloseRequested { window_id: first }),
+        Ok(false)
+    );
+    assert_eq!(desktop.appearance(), Appearance::Light);
+}
+
+#[test]
+fn a_desktop_the_client_cannot_draw_at_is_refused_and_the_last_good_one_stands() {
+    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
+
+    // The wire admits any non-zero percentage; what a *usable* scale is
+    // belongs to the geometry type, so a percentage outside its range is
+    // refused rather than clamped to something the session did not ask
+    // for.
+    let absurd = DesktopInfo::new(1024, 768, 5, Appearance::Light)
+        .expect("the wire accepts any non-zero percentage");
+    assert_eq!(Desktop::new(absurd), Err(Errno::OutOfRange));
+    assert_eq!(
+        desktop.apply(&WindowEvent::DesktopChanged {
+            window_id: 1,
+            desktop: absurd,
+        }),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(desktop.scale(), Scale::ONE);
+    assert_eq!(desktop.appearance(), Appearance::Dark);
 }
 
 #[test]

@@ -56,11 +56,11 @@ mod program {
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Point, Scale};
+    use tairix_geometry::Point;
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
-    use tairix_sandbox::imagerender::{render_wallpaper, ImageRenderService};
+    use tairix_sandbox::imagerender::{render_wallpaper_for_screen, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
@@ -73,7 +73,7 @@ mod program {
         MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{
-        key_input_event, pointer_input_events, EventSource, WindowClient, WindowEvents,
+        key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
         WindowTransport,
     };
 
@@ -325,7 +325,10 @@ mod program {
 
     /// Render one wallpaper through the sandboxed worker: read the file
     /// (bounded by the shared wallpaper byte bound) and ask the worker to
-    /// place it into a `width` x `height` destination under `fit`.
+    /// place it into a `width` x `height` destination under `fit`, modelling
+    /// a `screen`-sized composition (the gallery's thumbnails pass
+    /// `screen == (width, height)`; the preview panel passes the desktop's
+    /// own screen extent, so `Centre` and `Tile` preview at true scale).
     ///
     /// Fails closed to `None` — a file this app cannot read, a worker that
     /// refuses it, or pixels that do not fill the destination exactly all
@@ -334,6 +337,7 @@ mod program {
     fn render_placed(
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         path: &WallpaperPath,
+        screen: (u32, u32),
         fit: WallpaperFit,
         width: u32,
         height: u32,
@@ -347,7 +351,7 @@ mod program {
             }
         };
         let bytes = read_bounded(fd, MAX_WALLPAPER_BYTES)?;
-        match render_wallpaper(sandbox, width, height, fit, &bytes) {
+        match render_wallpaper_for_screen(sandbox, screen, width, height, fit, &bytes) {
             Ok(rgba) => Surface::from_rgba8(width, height, &rgba),
             Err(failure) => {
                 report(&alloc::format!("{spelled}: {failure}; not shown"));
@@ -458,13 +462,16 @@ mod program {
     }
 
     /// The one style the chooser paints and hit-tests through: the active
-    /// theme's interface face at the desktop's unscaled density, exactly as
-    /// the file manager and the control gallery resolve theirs.
-    fn style_for(theme: &Theme) -> Style<'_> {
+    /// theme's interface face at the real desktop's own density and screen
+    /// extent, exactly as the file manager and the control gallery resolve
+    /// theirs — the screen extent is what lets the preview panel model the
+    /// real screen rather than a guessed shape.
+    fn style_for<'a>(theme: &'a Theme, desktop: &Desktop) -> Style<'a> {
         Style::new(
             theme,
-            Scale::ONE,
-            BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE),
+            desktop.scale(),
+            BitmapFont::for_role(theme.fonts(), TextRole::Body, desktop.scale()),
+            (desktop.screen_width_px(), desktop.screen_height_px()),
         )
     }
 
@@ -472,13 +479,14 @@ mod program {
     fn repaint<T: WindowTransport>(
         chooser: &mut Chooser,
         theme: &Theme,
+        desktop: &Desktop,
         client: &mut WindowClient<T>,
         window: u64,
         frames: &mut Frames,
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         chooser
-            .render(style_for(theme))
+            .render(style_for(theme, desktop))
             .ok_or(Errno::NoSpace)
             .and_then(|surface| present_surface(&surface, client, window, frames.as_mut(), mode))
     }
@@ -589,12 +597,14 @@ mod program {
         chooser: &mut Chooser,
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         theme: &Theme,
+        desktop: &Desktop,
     ) -> bool {
-        let style = style_for(theme);
+        let style = style_for(theme, desktop);
         if let Some(request) = chooser.next_preview(style) {
             match render_placed(
                 sandbox,
                 &request.path,
+                request.screen,
                 request.fit,
                 request.width,
                 request.height,
@@ -607,9 +617,12 @@ mod program {
         let Some(request) = chooser.next_thumbnail(style) else {
             return false;
         };
+        // A thumbnail answers *which* wallpaper it is and always fills its
+        // own square, so it models a screen exactly as large as itself.
         match render_placed(
             sandbox,
             &request.path,
+            (request.side, request.side),
             WallpaperFit::Fill,
             request.side,
             request.side,
@@ -642,9 +655,37 @@ mod program {
         let settings = settings_in_effect();
         let mut chooser = Chooser::new(store_candidates(), &settings);
 
+        // --- The desktop the app must fit on: screen extent, UI scale, and
+        // light/dark appearance. Queried once, before any window is
+        // created, so the first frame is correctly sized, themed, and
+        // modelled at the real screen's own scale — never a guessed screen
+        // or a default scale. A refused query, or a desktop this client
+        // cannot draw at, is the same fail-closed outcome as a refused
+        // window create.
+        let mut client = WindowClient::new(RtWindowTransport);
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "wallpaper: desktop query refused: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "wallpaper: cannot draw this desktop: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut themes = ThemeRegistry::with_builtins();
+        themes.set_appearance(desktop.appearance());
+        let mut theme = themes.active();
+
         // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // initial window mode, created here and granted to the session.
-        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
+        // initial window mode (the desktop's own preferred size, capped to
+        // its screen), created here and granted to the session.
+        let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mut mode = mode_for(initial_w, initial_h);
         let Some((base, grant)) = allocate_frames(region_bytes(&mode)) else {
             return fail(EXIT_NO_FRAMES, "shared frame region refused");
         };
@@ -661,16 +702,23 @@ mod program {
 
         // --- Open the window (resizable: the grid re-lays out to each new
         // client size) and paint the first frame.
-        let mut client = WindowClient::new(RtWindowTransport);
         let Ok((window, server)) =
             client.create(grant, event_endpoint, FRAME_COUNT, &mode, TITLE, true)
         else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
-        let themes = ThemeRegistry::with_builtins();
-        let theme = themes.active();
         chooser.relayout(mode.width_px, mode.height_px);
-        if repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
+        if repaint(
+            &mut chooser,
+            theme,
+            &desktop,
+            &mut client,
+            window,
+            &mut frames,
+            &mode,
+        )
+        .is_err()
+        {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
@@ -690,8 +738,18 @@ mod program {
             // Outstanding preview work is done before parking, so the grid
             // fills in as fast as the worker can render and the loop never
             // waits on work it already holds.
-            if resolve_one_render(&mut chooser, &mut sandbox, theme) {
-                if repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode).is_err() {
+            if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop) {
+                if repaint(
+                    &mut chooser,
+                    theme,
+                    &desktop,
+                    &mut client,
+                    window,
+                    &mut frames,
+                    &mode,
+                )
+                .is_err()
+                {
                     return fail(EXIT_CHANNEL_LOST, "present refused");
                 }
                 continue;
@@ -703,6 +761,29 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
+
+            // Apply the desktop change before the chooser-specific event
+            // logic, so every derived value (scale, theme, screen extent)
+            // is current for the repaint below. A screen-extent change
+            // makes the true-scale model box a different size, which
+            // alone makes the held preview stale — `next_preview` notices
+            // through the request it now wants, so nothing further needs
+            // invalidating by hand. A refused change states the reason and
+            // stands on the last good desktop.
+            let desktop_changed = match desktop.apply(&event) {
+                Ok(true) => {
+                    themes.set_appearance(desktop.appearance());
+                    theme = themes.active();
+                    chooser.relayout(mode.width_px, mode.height_px);
+                    true
+                }
+                Ok(false) => false,
+                Err(err) => {
+                    report(&alloc::format!("desktop change refused: {err}"));
+                    false
+                }
+            };
+
             // What the event means to the chooser. Every arm answers in
             // the one vocabulary the engine speaks, so the decision about
             // what to *do* about it is made once, below.
@@ -718,13 +799,17 @@ mod program {
                     );
                     let mut asked = ChooserAction::None;
                     for input in pointer_input_events(action, at) {
-                        asked = latest(asked, chooser.on_pointer(&input, style_for(theme)));
+                        asked = latest(
+                            asked,
+                            chooser.on_pointer(&input, style_for(theme, &desktop)),
+                        );
                     }
                     asked
                 }
-                WindowEvent::Scrolled { dx, dy, .. } => {
-                    chooser.on_pointer(&InputEvent::PointerScrolled { dx, dy }, style_for(theme))
-                }
+                WindowEvent::Scrolled { dx, dy, .. } => chooser.on_pointer(
+                    &InputEvent::PointerScrolled { dx, dy },
+                    style_for(theme, &desktop),
+                ),
                 // The keyboard is the secondary path, and reaches
                 // everything the pointer does.
                 WindowEvent::Key {
@@ -732,7 +817,7 @@ mod program {
                     ..
                 } => match key_input_event(pressed) {
                     InputEvent::KeyPressed { key, modifiers } => {
-                        chooser.on_key(key, modifiers, style_for(theme))
+                        chooser.on_key(key, modifiers, style_for(theme, &desktop))
                     }
                     _ => ChooserAction::None,
                 },
@@ -762,23 +847,54 @@ mod program {
                 // answered by the client library re-presenting the last
                 // frame, which is still what the chooser would draw. A pick
                 // conclusion can only arrive for a pick this app never asks
-                // for. Listed rather than caught by a wildcard so a new
+                // for. A desktop-change announcement is adopted above,
+                // which is also where the repaint a real change needs is
+                // decided. Listed rather than caught by a wildcard so a new
                 // event forces a decision here.
                 WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::RedrawRequested { .. }
                 | WindowEvent::FilePicked { .. }
-                | WindowEvent::PickCancelled { .. } => ChooserAction::None,
+                | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DesktopChanged { .. } => ChooserAction::None,
             };
             let outcome = match asked {
-                ChooserAction::None => Ok(()),
-                ChooserAction::Changed => {
-                    repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode)
+                ChooserAction::None => {
+                    if desktop_changed {
+                        repaint(
+                            &mut chooser,
+                            theme,
+                            &desktop,
+                            &mut client,
+                            window,
+                            &mut frames,
+                            &mode,
+                        )
+                    } else {
+                        Ok(())
+                    }
                 }
+                ChooserAction::Changed => repaint(
+                    &mut chooser,
+                    theme,
+                    &desktop,
+                    &mut client,
+                    window,
+                    &mut frames,
+                    &mode,
+                ),
                 ChooserAction::Apply => {
                     chooser.set_apply_outcome(apply(&chooser.settings_document()));
-                    repaint(&mut chooser, theme, &mut client, window, &mut frames, &mode)
+                    repaint(
+                        &mut chooser,
+                        theme,
+                        &desktop,
+                        &mut client,
+                        window,
+                        &mut frames,
+                        &mode,
+                    )
                 }
                 // Close the window and end cleanly, freeing the region this
                 // app owns rather than leaving it pinned for the runtime to

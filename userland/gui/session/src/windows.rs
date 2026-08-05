@@ -18,6 +18,7 @@
 
 use alloc::collections::BTreeMap;
 
+use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::{Errno, ProcId};
@@ -355,6 +356,38 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn drag_withdrawn(&mut self, _owner: ProcId, window: u64) {
         self.pins.drag_withdrawn(window);
     }
+
+    fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
+        desktop_info(self.compositor)
+    }
+}
+
+/// The desktop `compositor` composites, as the window channel reports it
+/// to an application.
+///
+/// One definition for both directions: the answer an application's query
+/// receives, and the announcement the session pushes when any of it
+/// changes. All three facts come from the compositor — it owns the output
+/// it scans out to, that output's density, and the active theme — so an
+/// application reads the very values the desktop draws itself with rather
+/// than a copy that could drift.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for an output the record cannot describe: a
+/// zero-sized screen, or a density outside the percentage the wire
+/// carries. The query is refused rather than answered with a plausible
+/// guess, so an application never lays itself out to a screen that is not
+/// there.
+pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
+    let screen = compositor.screen_rect();
+    let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
+    DesktopInfo::new(
+        screen.width,
+        screen.height,
+        scale,
+        compositor.theme().appearance(),
+    )
 }
 
 /// Convert the pixels of `damage` from the presented `frame` (laid out

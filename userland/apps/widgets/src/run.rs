@@ -43,7 +43,7 @@ mod program {
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{
-        key_input_event, pointer_input_events, EventSource, WindowClient, WindowEvents,
+        key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
         WindowTransport,
     };
 
@@ -138,16 +138,17 @@ mod program {
     fn present_frame<T: WindowTransport>(
         gallery: &Gallery,
         theme: &Theme,
+        scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = gallery_font(theme);
+        let font = gallery_font(theme, scale);
         let mut surface = tairix_raster::Surface::new(mode.width_px, mode.height_px)
             .ok_or(Errno::LengthOutOfRange)?;
-        gallery.render(&mut surface, viewport, Scale::ONE, theme, font);
+        gallery.render(&mut surface, viewport, scale, theme, font);
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -159,16 +160,51 @@ mod program {
         client.present(window, 0, DamageRect::full(mode))
     }
 
+    /// The live window channel this app owns: the transport to the desktop
+    /// session and its session-assigned window id. Grouped so the event
+    /// loop and the first present take one receiver instead of scattering
+    /// the same two parameters through every call.
+    struct GalleryWindow {
+        /// The synchronous channel to the desktop session.
+        client: WindowClient<RtWindowTransport>,
+        /// This app's window id, assigned by the session at create.
+        window: u64,
+    }
+
+    impl GalleryWindow {
+        /// Draw the gallery into `frames` (the shared window surface,
+        /// shaped as `mode`) and present the whole window.
+        fn present(
+            &mut self,
+            gallery: &Gallery,
+            theme: &Theme,
+            scale: Scale,
+            frames: &mut [u8],
+            mode: &DisplayMode,
+        ) -> Result<(), Errno> {
+            present_frame(
+                gallery,
+                theme,
+                scale,
+                &mut self.client,
+                self.window,
+                frames,
+                mode,
+            )
+        }
+    }
+
     /// Apply one delivered event to the gallery, reporting whether the view
     /// changed (and must re-present) and whether the app should end.
     fn apply_event(
         gallery: &mut Gallery,
         theme: &Theme,
+        scale: Scale,
         mode: &DisplayMode,
         event: &WindowEvent,
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = gallery_font(theme);
+        let font = gallery_font(theme, scale);
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
@@ -180,14 +216,13 @@ mod program {
                 }
                 _ => (false, false),
             },
-            WindowEvent::Pointer { x, y, action, .. } => (
-                apply_pointer(gallery, *x, *y, *action, viewport, theme, font),
-                false,
-            ),
+            WindowEvent::Pointer { x, y, action, .. } => {
+                (apply_pointer(gallery, *x, *y, *action, mode, theme, scale), false)
+            }
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
                 (
-                    gallery.on_pointer(&scroll, viewport, Scale::ONE, theme, font),
+                    gallery.on_pointer(&scroll, viewport, scale, theme, font),
                     false,
                 )
             }
@@ -200,41 +235,51 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. } => (false, false),
+            | WindowEvent::PickCancelled { .. }
+            // The desktop change is adopted by the caller before this match,
+            // which is also where the repaint it needs is decided.
+            | WindowEvent::DesktopChanged { .. } => (false, false),
         }
     }
 
-    /// Route one wire pointer event: a move to `(x, y)` to sync the pointer,
-    /// then the press/release the action names. Returns whether the view
-    /// changed.
     /// The gallery's text font: the theme's ordinary interface-text role
     /// resolved through the one shared role-to-font conversion, so the gallery
     /// reads like every other list of interface text.
     ///
     /// The window's extents are authored in unscaled pixels ([`WIN_WIDTH`],
-    /// [`WIN_HEIGHT`]), so the role resolves at [`Scale::ONE`] to keep the text
-    /// and the box it must fit in on one density. It is the one place the
-    /// render and hit-test paths agree on a font.
-    fn gallery_font(theme: &Theme) -> BitmapFont {
-        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+    /// [`WIN_HEIGHT`]), so the role resolves at the desktop's `scale` to keep
+    /// the text and the box it must fit in on one density. It is the one place
+    /// the render and hit-test paths agree on a font.
+    fn gallery_font(theme: &Theme, scale: Scale) -> BitmapFont {
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
     }
 
+    /// Route one wire pointer event: a move to `(x, y)` to sync the pointer,
+    /// then the press/release the action names. Returns whether the view
+    /// changed.
+    ///
+    /// The viewport and font are derived from `mode`/`theme`/`scale` here
+    /// (the same derivation [`apply_event`] uses for its own dispatch), so
+    /// the caller passes only the values that can actually differ between
+    /// call sites rather than every value they are derived from.
     fn apply_pointer(
         gallery: &mut Gallery,
         x: u32,
         y: u32,
         action: PointerAction,
-        viewport: Rect,
+        mode: &DisplayMode,
         theme: &Theme,
-        font: BitmapFont,
+        scale: Scale,
     ) -> bool {
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let font = gallery_font(theme, scale);
         let point = Point::new(
             i32::try_from(x).unwrap_or(i32::MAX),
             i32::try_from(y).unwrap_or(i32::MAX),
         );
         let mut acted = false;
         for input in pointer_input_events(action, point) {
-            acted |= gallery.on_pointer(&input, viewport, Scale::ONE, theme, font);
+            acted |= gallery.on_pointer(&input, viewport, scale, theme, font);
         }
         acted
     }
@@ -276,31 +321,167 @@ mod program {
         Ok((event_endpoint, set))
     }
 
-    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
-    /// set up and routes its return value through the `exit` syscall.
-    fn main() -> i32 {
-        let mode = DisplayMode {
-            width_px: WIN_WIDTH,
-            height_px: WIN_HEIGHT,
-            stride_bytes: WIN_WIDTH * 4,
-            format: DisplayFormat::Rgba8888,
+    /// Ask the session for its desktop and build this app's local
+    /// [`Desktop`] model and [`ThemeRegistry`], with the session's current
+    /// appearance already applied: the screen, the density, and the look
+    /// are current before anything is sized or painted, so the first frame
+    /// is right rather than a guess corrected once the user has seen it.
+    ///
+    /// On any refusal states the reason on `stderr` and returns the
+    /// reserved [`EXIT_NO_WINDOW`] code for `main`.
+    fn bring_up_desktop(
+        client: &mut WindowClient<RtWindowTransport>,
+    ) -> Result<(Desktop, ThemeRegistry), i32> {
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "widgets: desktop query refused: {err}");
+                return Err(EXIT_NO_WINDOW);
+            }
         };
+        let desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "widgets: cannot draw this desktop: {err}");
+                return Err(EXIT_NO_WINDOW);
+            }
+        };
+        let mut themes = ThemeRegistry::with_builtins();
+        themes.set_appearance(desktop.appearance());
+        Ok((desktop, themes))
+    }
+
+    /// Create and grant a `mode`-shaped frame region, returning `(base,
+    /// total, grant)`: the mapped base address, the region's byte length,
+    /// and the endpoint-directed grant handle. Fails closed with the
+    /// reserved [`EXIT_NO_FRAMES`] code for `main` on any refusal.
+    fn create_frame_region(mode: &DisplayMode) -> Result<(usize, usize, u64), i32> {
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
         let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
+            return Err(fail(EXIT_NO_FRAMES, "shared frame region refused"));
         }
         let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
         if grant < 1 {
-            return fail(EXIT_NO_FRAMES, "frame region grant refused");
+            return Err(fail(EXIT_NO_FRAMES, "frame region grant refused"));
         }
         let Ok(base) = usize::try_from(base) else {
-            return fail(
+            return Err(fail(
                 EXIT_NO_FRAMES,
                 "frame region base outside the address width",
-            );
+            ));
+        };
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        Ok((base, total, grant as u64))
+    }
+
+    /// Open the gallery's window and present its first frame.
+    ///
+    /// Returns the window channel, the desktop session's [`ProcId`], and
+    /// the initialised [`Gallery`], or the reserved exit code for `main`
+    /// when the session refuses the create or the first present.
+    fn open_gallery_window(
+        mut client: WindowClient<RtWindowTransport>,
+        grant: u64,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        theme: &Theme,
+        scale: Scale,
+        frames: &mut [u8],
+    ) -> Result<(GalleryWindow, ProcId, Gallery), i32> {
+        let Ok((window, server)) =
+            client.create(grant, event_endpoint, FRAME_COUNT, mode, "widgets", false)
+        else {
+            return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
+        };
+        let gallery = Gallery::new();
+        let mut surface = GalleryWindow { client, window };
+        if surface
+            .present(&gallery, theme, scale, frames, mode)
+            .is_err()
+        {
+            return Err(fail(EXIT_CHANNEL_LOST, "first present refused"));
+        }
+        Ok((surface, server, gallery))
+    }
+
+    /// The event loop: park, apply, repaint. A dead channel ends the app
+    /// fail-loud; a clean close ends it at zero.
+    fn run_event_loop(
+        surface: &mut GalleryWindow,
+        desktop: &mut Desktop,
+        themes: &mut ThemeRegistry,
+        gallery: &mut Gallery,
+        frames: &mut [u8],
+        mode: &DisplayMode,
+        mut events: WindowEvents<RtEventSource>,
+    ) -> i32 {
+        loop {
+            let event = match events.wait(&mut surface.client) {
+                Ok(event) => event,
+                Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
+                Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
+            };
+
+            // Adopt a desktop change before the app-specific event logic, so
+            // the scale and theme everything below derives from are already
+            // current. Only a real change costs a re-theme and a repaint; a
+            // refused one states its reason and stands on the last good
+            // desktop.
+            let mut redraw = match desktop.apply(&event) {
+                Ok(true) => {
+                    themes.set_appearance(desktop.appearance());
+                    true
+                }
+                Ok(false) => false,
+                Err(err) => {
+                    let _ = writeln!(Stderr, "widgets: desktop change refused: {err}");
+                    false
+                }
+            };
+
+            let (changed, close) =
+                apply_event(gallery, themes.active(), desktop.scale(), mode, &event);
+            if close {
+                let _ = surface.client.close(surface.window);
+                return 0;
+            }
+            redraw |= changed;
+            if redraw
+                && surface
+                    .present(gallery, themes.active(), desktop.scale(), frames, mode)
+                    .is_err()
+            {
+                return fail(EXIT_CHANNEL_LOST, "present refused");
+            }
+        }
+    }
+
+    /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
+    /// set up and routes its return value through the `exit` syscall.
+    fn main() -> i32 {
+        let mut client = WindowClient::new(RtWindowTransport);
+
+        // --- The desktop this window will be shown on, established before
+        // anything is sized or painted so the first frame is right rather
+        // than a guess corrected once the user has seen it.
+        let (mut desktop, mut themes) = match bring_up_desktop(&mut client) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
+
+        let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mode = DisplayMode {
+            width_px: initial_w,
+            height_px: initial_h,
+            stride_bytes: initial_w * 4,
+            format: DisplayFormat::Rgba8888,
+        };
+        let (base, total, grant) = match create_frame_region(&mode) {
+            Ok(triple) => triple,
+            Err(code) => return code,
         };
         // SAFETY: the kernel mapped exactly `total` zeroed bytes read/write
         // into this process at `base` (`shm_create` maps the length it was
@@ -315,48 +496,33 @@ mod program {
             Err(code) => return code,
         };
 
-        let mut client = WindowClient::new(RtWindowTransport);
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let Ok((window, server)) = client.create(
-            grant as u64,
+        let (mut surface, server, mut gallery) = match open_gallery_window(
+            client,
+            grant,
             event_endpoint,
-            FRAME_COUNT,
             &mode,
-            "widgets",
-            false,
-        ) else {
-            return fail(EXIT_NO_WINDOW, "desktop session refused the window");
+            themes.active(),
+            desktop.scale(),
+            frames,
+        ) {
+            Ok(triple) => triple,
+            Err(code) => return code,
         };
 
-        let themes = ThemeRegistry::with_builtins();
-        let theme = themes.active();
-        let mut gallery = Gallery::new();
-        if present_frame(&gallery, theme, &mut client, window, frames, &mode).is_err() {
-            return fail(EXIT_CHANNEL_LOST, "first present refused");
-        }
-
-        let mut events = WindowEvents::new(RtEventSource {
+        let events = WindowEvents::new(RtEventSource {
             endpoint: event_endpoint,
             set,
             server,
         });
-        loop {
-            let event = match events.wait(&mut client) {
-                Ok(event) => event,
-                Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
-                Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
-            };
-            let (changed, close) = apply_event(&mut gallery, theme, &mode, &event);
-            if close {
-                let _ = client.close(window);
-                return 0;
-            }
-            if changed
-                && present_frame(&gallery, theme, &mut client, window, frames, &mode).is_err()
-            {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
-            }
-        }
+        run_event_loop(
+            &mut surface,
+            &mut desktop,
+            &mut themes,
+            &mut gallery,
+            frames,
+            &mode,
+            events,
+        )
     }
 
     tairix_rt::entry!(main);

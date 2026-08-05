@@ -62,7 +62,7 @@ mod program {
     };
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
-        event_endpoint_for, WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        event_endpoint_for, Desktop, WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the shell could not be hosted (the pty or the spawn
@@ -121,11 +121,17 @@ mod program {
     /// so the grid never exceeds the surface (no clipped cell), at least
     /// `1`×`1`, and capped at [`MAX_DIMENSION`] so a huge window never asks
     /// for an unbounded grid (fail closed).
-    fn grid_dims(width_px: u32, height_px: u32) -> (u16, u16) {
-        let advance = BitmapFont::console().cell_width().max(1);
-        let line_height = BitmapFont::console().line_height().max(1);
-        let cols = (width_px / advance).clamp(1, u32::from(MAX_DIMENSION)) as u16;
-        let rows = (height_px / line_height).clamp(1, u32::from(MAX_DIMENSION)) as u16;
+    fn grid_dims(width_px: u32, height_px: u32, font: BitmapFont) -> (u16, u16) {
+        let advance = font.cell_width().max(1);
+        let line_height = font.line_height().max(1);
+        // The `clamp` upper bound is `MAX_DIMENSION` itself (a `u16`), so
+        // the clamped value always fits; `unwrap_or(MAX_DIMENSION)` names a
+        // fallback that is unreachable but still the correct value, rather
+        // than lying with an `as` truncation.
+        let cols = u16::try_from((width_px / advance).clamp(1, u32::from(MAX_DIMENSION)))
+            .unwrap_or(MAX_DIMENSION);
+        let rows = u16::try_from((height_px / line_height).clamp(1, u32::from(MAX_DIMENSION)))
+            .unwrap_or(MAX_DIMENSION);
         (cols, rows)
     }
 
@@ -240,13 +246,14 @@ mod program {
         window: u64,
         frame: &mut [u8],
         mode: &DisplayMode,
+        font: BitmapFont,
     ) -> Result<(), Errno>
     where
         S: ShellSource,
         T: WindowTransport,
     {
         let viewport = tairix_geometry::Rect::new(0, 0, mode.width_px, mode.height_px);
-        let surface = render(terminal, theme, viewport).ok_or(Errno::LengthOutOfRange)?;
+        let surface = render(terminal, theme, viewport, font).ok_or(Errno::LengthOutOfRange)?;
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -308,11 +315,28 @@ mod program {
             return fail(EXIT_NO_SHELL, "screen grid refused");
         };
 
-        // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // window mode, created here and granted to the session. The terminal
-        // is resizable, so the mode, the mapped region, and the frame slice
-        // are rebound on every window resize (below).
-        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
+        // --- Open the window and paint the first frame.
+        let mut client = WindowClient::new(RtWindowTransport);
+        // The desktop this window will be shown on: the screen, the density,
+        // and the appearance, before anything is sized or painted, so the
+        // first frame is right rather than a guess corrected once the user
+        // has seen it.
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "terminal: desktop query refused: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "terminal: cannot draw this desktop: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mut mode = mode_for(w, h);
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
@@ -383,8 +407,6 @@ mod program {
             }
         }
 
-        // --- Open the window and paint the first (blank) screen.
-        let mut client = WindowClient::new(RtWindowTransport);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) = client.create(
             grant as u64,
@@ -396,9 +418,15 @@ mod program {
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
-        let themes = tairix_theme::ThemeRegistry::with_builtins();
-        let theme = themes.active();
-        if present_frame(&terminal, theme, &mut client, window, frames, &mode).is_err() {
+        let mut themes = tairix_theme::ThemeRegistry::with_builtins();
+        themes.set_appearance(desktop.appearance());
+        let mut theme = themes.active();
+        let mut font = BitmapFont::monospace(
+            desktop
+                .scale()
+                .scale_length(tairix_font::atlas::CELL_HEIGHT),
+        );
+        if present_frame(&terminal, theme, &mut client, window, frames, &mode, font).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
@@ -414,7 +442,7 @@ mod program {
             }
             match token {
                 EVENT_TOKEN => {
-                    match drain_events(&mut terminal, event_endpoint, server) {
+                    match drain_events(&mut terminal, &mut desktop, event_endpoint, server) {
                         EventOutcome::Continue => {}
                         EventOutcome::Resized {
                             width_px,
@@ -452,7 +480,7 @@ mod program {
                                         region_len,
                                     )
                                 };
-                                let (cols, rows) = grid_dims(width_px, height_px);
+                                let (cols, rows) = grid_dims(width_px, height_px, font);
                                 let _ = terminal.resize(cols, rows);
                                 let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
                                 if present_frame(
@@ -462,6 +490,7 @@ mod program {
                                     window,
                                     frames,
                                     &mode,
+                                    font,
                                 )
                                 .is_err()
                                 {
@@ -469,11 +498,49 @@ mod program {
                                 }
                             }
                         }
+                        EventOutcome::DesktopChanged => {
+                            // The scale and/or appearance changed: re-apply
+                            // the theme, re-derive the monospace font from
+                            // the new scale, reshape the grid to match (the
+                            // pty follows), and repaint. `desktop` itself was
+                            // already updated inside `drain_events`.
+                            themes.set_appearance(desktop.appearance());
+                            theme = themes.active();
+                            font = BitmapFont::monospace(
+                                desktop
+                                    .scale()
+                                    .scale_length(tairix_font::atlas::CELL_HEIGHT),
+                            );
+                            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, font);
+                            let _ = terminal.resize(cols, rows);
+                            let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
+                            if present_frame(
+                                &terminal,
+                                theme,
+                                &mut client,
+                                window,
+                                frames,
+                                &mode,
+                                font,
+                            )
+                            .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
                         EventOutcome::Redraw => {
                             // The session reclaimed the retained pixels; the
                             // grid is still live, so re-render it in full.
-                            if present_frame(&terminal, theme, &mut client, window, frames, &mode)
-                                .is_err()
+                            if present_frame(
+                                &terminal,
+                                theme,
+                                &mut client,
+                                window,
+                                frames,
+                                &mode,
+                                font,
+                            )
+                            .is_err()
                             {
                                 return fail(EXIT_CHANNEL_LOST, "present refused");
                             }
@@ -493,7 +560,7 @@ mod program {
                 }
                 SHELL_TOKEN => match terminal.pump() {
                     Ok(_) => {
-                        if present_frame(&terminal, theme, &mut client, window, frames, &mode)
+                        if present_frame(&terminal, theme, &mut client, window, frames, &mode, font)
                             .is_err()
                         {
                             return fail(EXIT_CHANNEL_LOST, "present refused");
@@ -530,7 +597,8 @@ mod program {
                     // purpose — rather than closing silently.
                     let reason = reap_shell(shell_pid);
                     while terminal.pump().is_ok() {}
-                    let _ = present_frame(&terminal, theme, &mut client, window, frames, &mode);
+                    let _ =
+                        present_frame(&terminal, theme, &mut client, window, frames, &mode, font);
                     let _ = client.close(window);
                     if let Some(reason) = reason {
                         return fail(
@@ -563,6 +631,9 @@ mod program {
             /// New client height in pixels.
             height_px: u32,
         },
+        /// The desktop changed (screen size, scale, or appearance); already
+        /// adopted by [`Desktop::apply`] before this is returned.
+        DesktopChanged,
         /// The session released this window's retained pixels to reclaim
         /// memory and needs them presented again. The terminal decodes its
         /// mailbox itself, so no library re-present happens on its behalf:
@@ -586,6 +657,7 @@ mod program {
     /// guessed at).
     fn drain_events<S: ShellSource>(
         terminal: &mut Terminal<S>,
+        desktop: &mut Desktop,
         endpoint: u64,
         server: ProcId,
     ) -> EventOutcome {
@@ -606,6 +678,20 @@ mod program {
                     let Ok(event) = WindowEvent::from_bytes(&frame) else {
                         continue;
                     };
+                    // Every delivered event is offered to the desktop first,
+                    // so a scale or appearance change is adopted whether or
+                    // not this app otherwise reacts to the event that
+                    // carried it. A real change ends this drain (the caller
+                    // relays out and repaints); a refusal is stated and the
+                    // last good desktop stands.
+                    match desktop.apply(&event) {
+                        Ok(true) => return EventOutcome::DesktopChanged,
+                        Ok(false) => {}
+                        Err(err) => {
+                            let _ =
+                                writeln!(Stderr, "terminal: could not apply desktop change: {err}");
+                        }
+                    }
                     match event {
                         WindowEvent::Key { key, .. } => {
                             // The one shared layout-to-tty rule; a release
@@ -654,14 +740,18 @@ mod program {
                         //
                         // Minimized needs no action (the window is hidden and
                         // kept on the taskbar; the screen is redrawn from the
-                        // shell on demand). These are honest no-ops, not
-                        // deferred work.
+                        // shell on demand). A desktop change was already
+                        // adopted above (or, on refusal, stated and left the
+                        // last good state standing); either way there is
+                        // nothing further to do with the event itself. These
+                        // are honest no-ops, not deferred work.
                         WindowEvent::Focus { .. }
                         | WindowEvent::Pointer { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
                         | WindowEvent::FilePicked { .. }
-                        | WindowEvent::PickCancelled { .. } => {}
+                        | WindowEvent::PickCancelled { .. }
+                        | WindowEvent::DesktopChanged { .. } => {}
                     }
                 }
                 Err(err) if errno_from(err) == Errno::WouldBlock => return EventOutcome::Continue,

@@ -46,11 +46,10 @@ pour le valider :
 - **Sort** (Tri) — l'ordre dans lequel les icônes du dossier du bureau
   sont listées.
 
-L'aperçu montre l'image, l'arrière-plan et l'ajustement sélectionnés
-selon la propre forme de l'aperçu. Un écran d'une forme différente
-recadre ou ajoute des bandes différemment, de sorte que l'aperçu est une
-vue fidèle de l'image et de la règle d'ajustement, et non un modèle à
-l'échelle de l'affichage.
+L'aperçu est un modèle à l'échelle de votre écran : il a la même forme
+que l'affichage, et montre l'image, l'arrière-plan et l'ajustement
+sélectionnés exactement comme le bureau les affichera. Ce que vous
+voyez dans l'aperçu est ce que vous obtenez.
 
 Les images de fond d'écran ne sont jamais décodées par ce programme.
 Chacune est rendue par un processus sandboxé séparé qui ne détient

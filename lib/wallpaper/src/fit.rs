@@ -137,6 +137,58 @@ pub fn decode_target(
     Some((src.width.min(dst.width), src.height.min(dst.height)))
 }
 
+/// The nominal source size a render must treat `source` as having when it
+/// draws a `screen`-sized composition onto an `output`-sized surface: the
+/// native source size scaled by `output`/`screen`, per axis.
+///
+/// A preview of size `output` that models a screen of size `screen` is
+/// identical, pixel policy for pixel policy, to placing this nominal size
+/// onto `output` directly: [`WallpaperFit::Centre`]'s `min(source, screen)`
+/// scales to `min(nominal, output)`, and [`WallpaperFit::Tile`]'s 1:1
+/// repeat of `source` becomes a 1:1 repeat of `nominal` — both exactly the
+/// scaled-down composition a smaller rendering of the same screen should
+/// show, rather than the unscaled source [`place`] alone would draw at
+/// `output`'s own size. [`WallpaperFit::Stretch`], [`WallpaperFit::Fill`]
+/// and [`WallpaperFit::Fit`] are unaffected either way, since they already
+/// scale to fill whatever screen they are given.
+///
+/// Returns `None` exactly where [`place`] would for `(source, screen)` — a
+/// zero-sized `source` or `screen` — regardless of `output`: there is no
+/// nominal size of nothing, and no scaling by a screen of no extent. A
+/// zero-sized `output` is not on its own a reason to refuse here; the
+/// [`place`] call this feeds refuses that once `output` stands in for its
+/// own `screen` argument. Every dimension up to `u32::MAX` in every input is
+/// handled: all arithmetic is carried in `u64`, and a mathematically-zero
+/// result is clamped up to one rather than degenerating to an empty source
+/// no render could sample.
+///
+/// `output == screen` is the exact identity: `source` is returned
+/// unchanged, so a render that models its own destination as the screen it
+/// draws onto — the desktop's own wallpaper, never a preview — is
+/// completely unaffected by this function's existence.
+#[must_use]
+pub fn nominal_source_size(
+    source: (u32, u32),
+    screen: (u32, u32),
+    output: (u32, u32),
+) -> Option<(u32, u32)> {
+    let (src_w, src_h) = source;
+    let (screen_w, screen_h) = screen;
+    if src_w == 0 || src_h == 0 || screen_w == 0 || screen_h == 0 {
+        return None;
+    }
+    let (out_w, out_h) = output;
+    let nominal_w = clamp_dimension(
+        u64::from(src_w).saturating_mul(u64::from(out_w)) / u64::from(screen_w),
+        u32::MAX,
+    );
+    let nominal_h = clamp_dimension(
+        u64::from(src_h).saturating_mul(u64::from(out_h)) / u64::from(screen_h),
+        u32::MAX,
+    );
+    Some((nominal_w, nominal_h))
+}
+
 /// Clamp `value` into `1..=max`, converting down from `u64` to `u32`.
 ///
 /// `value` is always non-negative and, by the caller's own construction,

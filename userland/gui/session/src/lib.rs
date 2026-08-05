@@ -223,4 +223,4 @@ pub use switchboard::{
 };
 pub use tasks::TaskBridge;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
-pub use windows::{window_control_event, SessionWindows, ShellWindowHost};
+pub use windows::{desktop_info, window_control_event, SessionWindows, ShellWindowHost};

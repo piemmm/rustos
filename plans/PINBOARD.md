@@ -279,16 +279,20 @@ square, so it answers *which* wallpaper it is; the preview panel is where
 the chosen fit is shown. A fit change therefore re-renders the preview
 alone, never the gallery.
 
-**The preview's shape.** The preview is a viewport onto the chosen
-wallpaper at the preview's own aspect, not a scale model of the display:
-nothing an unprivileged program may call reports the screen extent (the
-window channel carries only the app's own client size, and the System
-Information API's display topology is capability-gated as cross-principal
-surface state). A screen of a different shape therefore crops or
-letterboxes differently from the preview. Making it exact needs a decision
-from the ABI owners — an unprivileged "how big is the seat's screen"
-question, served by the session or the display service — and is deliberately
-not invented here.
+**The preview is a scale model of the real screen.** The chooser asks the
+session for the seat's desktop before it opens its window
+(`WindowRequest::QueryDesktop`, read-only and ungated — it describes the
+caller's own seat and authorises nothing), so it knows the screen's exact
+extent. Inside the preview panel it draws the largest box with the
+*screen's* aspect ratio that fits, centred, and renders the wallpaper into
+it as the desktop would — `lib/sandbox`'s render is told the screen it
+models as well as the surface it writes, and scales the source through
+`tairix_wallpaper::nominal_source_size` so `Centre` and `Tile`, which are
+defined in screen pixels, model correctly instead of drawing at 1:1. What
+the preview shows is therefore what the desktop will show. The screen
+extent is part of the preview request, so a preview rendered for one screen
+can never be displayed as if it were for another, and a `DesktopChanged`
+that alters the extent re-renders it.
 
 **Outstanding — listing a user-picked directory.** Offering an image from
 outside the shipped store needs a seam that does not exist yet, so the

@@ -41,17 +41,24 @@ use crate::{
 ///
 /// Carries everything the render needs and nothing else, and compares by
 /// value: the model holds the request its current pixels came from, so a
-/// preview is re-rendered exactly when the selection, the fit, or the panel's
-/// size changes, and never otherwise.
+/// preview is re-rendered exactly when the selection, the fit, the screen
+/// extent, or the model box's size changes, and never otherwise. Keying the
+/// held pixels to this whole request — screen included — is what makes a
+/// preview rendered for one screen unrepresentable as a preview of another:
+/// a screen-extent change can never leave a stale preview on show.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     /// The wallpaper to render.
     pub path: WallpaperPath,
     /// The fit to place it with.
     pub fit: WallpaperFit,
-    /// The preview panel's width in pixels.
+    /// The screen extent, in physical pixels, the render must model (the
+    /// target-only `Run` binary renders it through the sandbox's
+    /// screen-aware wallpaper render, keyed to this same extent).
+    pub screen: (u32, u32),
+    /// The true-scale model box's width in pixels.
     pub width: u32,
-    /// The preview panel's height in pixels.
+    /// The true-scale model box's height in pixels.
     pub height: u32,
 }
 
@@ -290,12 +297,12 @@ impl Chooser {
     }
 
     /// The wallpaper the preview panel is showing, whether or not its pixels
-    /// exist yet — `None` only when the panel has no room, or when the
-    /// selection is the plain backdrop, which decodes nothing.
+    /// exist yet — `None` only when the true-scale model box has no room, or
+    /// when the selection is the plain backdrop, which decodes nothing.
     #[must_use]
     pub fn wanted_preview(&self, style: Style<'_>) -> Option<PreviewRequest> {
-        let panel = self.layout(style).preview();
-        if panel.is_empty() {
+        let model = self.layout(style).preview_model();
+        if model.is_empty() {
             return None;
         }
         let WallpaperChoice::Image(path) = self.candidates.get(self.selected)?.choice.clone()
@@ -305,8 +312,9 @@ impl Chooser {
         Some(PreviewRequest {
             path,
             fit: self.fit(),
-            width: panel.width,
-            height: panel.height,
+            screen: style.screen(),
+            width: model.width,
+            height: model.height,
         })
     }
 
@@ -574,6 +582,7 @@ impl Chooser {
             style.scale(),
             style.theme(),
             style.font(),
+            style.screen(),
         )
     }
 

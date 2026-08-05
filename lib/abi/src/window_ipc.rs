@@ -32,6 +32,7 @@
 //! count, an empty damage rectangle, a malformed title, or a dirty
 //! reserved field refuses rather than guessing.
 
+use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
 use crate::input::PointerButtonCode;
@@ -349,6 +350,24 @@ pub enum WindowRequest {
         /// The window whose offer is withdrawn.
         window: u64,
     },
+    /// Describe the desktop the caller's windows are displayed on: the
+    /// screen extent, the UI scale, and the active appearance
+    /// ([`DesktopInfo`]). The reply is the
+    /// [`WINDOW_DESKTOP_REPLY_LEN`]-byte desktop frame
+    /// ([`encode_desktop_reply`] / [`decode_desktop_reply`]).
+    ///
+    /// Read-only, and the one request that names no window: an app asks
+    /// *before* it opens anything, so its first frame is already the right
+    /// size, at the right density, in the right colours rather than a
+    /// guess it must correct. Thereafter the session pushes a
+    /// [`WindowEvent::DesktopChanged`] to each of the app's windows when
+    /// any of it changes.
+    ///
+    /// It carries no capability: the reply describes the seat's own screen
+    /// and theme — no other principal's data, and no authority to act — so
+    /// gating it would only force every application to guess at facts the
+    /// user can see by looking at their monitor.
+    QueryDesktop,
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -367,6 +386,8 @@ const OP_PIN_BUNDLE: u16 = 6;
 const OP_DRAG_OFFER: u16 = 7;
 /// Wire operation discriminant of [`WindowRequest::DragWithdraw`].
 const OP_DRAG_WITHDRAW: u16 = 8;
+/// Wire operation discriminant of [`WindowRequest::QueryDesktop`].
+const OP_QUERY_DESKTOP: u16 = 9;
 
 /// Byte offset, within the fixed frame, of a bundle-path payload's
 /// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
@@ -462,6 +483,9 @@ impl WindowRequest {
                 put_u16(&mut out, 6, OP_DRAG_WITHDRAW);
                 put_u64(&mut out, 8, window);
             }
+            Self::QueryDesktop => {
+                put_u16(&mut out, 6, OP_QUERY_DESKTOP);
+            }
         }
         out
     }
@@ -504,34 +528,7 @@ impl WindowRequest {
         }
         let op = read_u16(bytes, 6);
         match op {
-            OP_CREATE => {
-                reserved_zero(bytes, 42 + WINDOW_TITLE_MAX + 1)?;
-                let shm_handle = read_u64(bytes, 8);
-                let event_endpoint = read_u64(bytes, 16);
-                if crate::ipc::is_reserved_endpoint(event_endpoint) {
-                    return Err(Errno::OutOfRange);
-                }
-                let layout = read_frame_layout(bytes)?;
-                let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
-                title_bytes.copy_from_slice(&bytes[42..42 + WINDOW_TITLE_MAX]);
-                let title = WindowTitle::from_wire(bytes[41], &title_bytes)?;
-                let resizable = match bytes[42 + WINDOW_TITLE_MAX] {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(Errno::OutOfRange),
-                };
-                Ok(Self::Create {
-                    shm_handle,
-                    event_endpoint,
-                    frame_count: layout.frame_count,
-                    width_px: layout.width_px,
-                    height_px: layout.height_px,
-                    stride_bytes: layout.stride_bytes,
-                    format: layout.format,
-                    title,
-                    resizable,
-                })
-            }
+            OP_CREATE => read_create(bytes),
             OP_PRESENT => {
                 reserved_zero(bytes, 36)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
@@ -589,6 +586,10 @@ impl WindowRequest {
                 let window = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::DragWithdraw { window })
             }
+            OP_QUERY_DESKTOP => {
+                reserved_zero(bytes, 8)?;
+                Ok(Self::QueryDesktop)
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -618,6 +619,41 @@ fn read_bundle_path(bytes: &[u8]) -> Result<(u64, BundleRef), Errno> {
         .copy_from_slice(&bytes[BUNDLE_PATH_OFFSET..BUNDLE_PATH_OFFSET + WINDOW_BUNDLE_PATH_MAX]);
     let path = BundleRef::from_wire(path_len, &path_bytes)?;
     Ok((window, path))
+}
+
+/// Decode the operands of a [`WindowRequest::Create`]: the granted region
+/// and event route, the frame layout, the title, and the resizability the
+/// app asks the window manager for.
+///
+/// The widest operand block the protocol carries, so it reads as its own
+/// step rather than crowding out every other operation in the decoder.
+fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    reserved_zero(bytes, 42 + WINDOW_TITLE_MAX + 1)?;
+    let shm_handle = read_u64(bytes, 8);
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let layout = read_frame_layout(bytes)?;
+    let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
+    title_bytes.copy_from_slice(&bytes[42..42 + WINDOW_TITLE_MAX]);
+    let title = WindowTitle::from_wire(bytes[41], &title_bytes)?;
+    let resizable = match bytes[42 + WINDOW_TITLE_MAX] {
+        0 => false,
+        1 => true,
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowRequest::Create {
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+        title,
+        resizable,
+    })
 }
 
 /// The frame-layout fields `Create` and `Resize` share verbatim at the same
@@ -709,6 +745,41 @@ pub fn encode_create_reply(
     out
 }
 
+/// Reply length, in bytes, of a [`WindowRequest::QueryDesktop`]: the
+/// shared status word followed by the [`DesktopInfo`] record.
+pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN;
+
+/// Encode a `QueryDesktop` outcome: on success the desktop record after a
+/// zero status word; on refusal the shared status frame (a negative
+/// [`Errno`] discriminant) zero-padded to the same length, so a client
+/// always issues one fixed-size receive.
+#[must_use]
+pub fn encode_desktop_reply(result: Result<DesktopInfo, Errno>) -> [u8; WINDOW_DESKTOP_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_DESKTOP_REPLY_LEN];
+    match result {
+        Ok(desktop) => desktop.write_to_at(&mut out, 4),
+        Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
+    }
+    out
+}
+
+/// Decode a `QueryDesktop` reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::OutOfRange`] — a corrupt status word, or a successful reply
+///   carrying a desktop no screen or scale could describe.
+/// * [`Errno::BadMagic`] — a dirty reserved byte in the record.
+/// * The decoded [`Errno`] itself, when the session refused the query.
+pub fn decode_desktop_reply(bytes: &[u8]) -> Result<DesktopInfo, Errno> {
+    if bytes.len() < WINDOW_DESKTOP_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    DesktopInfo::from_bytes_at(bytes, 4)
+}
+
 /// Decode a `Create` reply frame into the assigned window id and the
 /// serving session's [`ProcId`].
 ///
@@ -753,6 +824,8 @@ const EV_MINIMIZED: u16 = 8;
 const EV_RESIZED: u16 = 9;
 /// Wire event discriminant of [`WindowEvent::RedrawRequested`].
 const EV_REDRAW_REQUESTED: u16 = 10;
+/// Wire event discriminant of [`WindowEvent::DesktopChanged`].
+const EV_DESKTOP_CHANGED: u16 = 11;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -897,6 +970,26 @@ pub enum WindowEvent {
         /// Signed vertical scroll ticks.
         dy: i32,
     },
+    /// The desktop this window is displayed on changed: a different screen
+    /// extent, a different UI scale, or a switch between the light and
+    /// dark appearance ([`WindowRequest::QueryDesktop`] is how an app
+    /// learns the state it started from).
+    ///
+    /// The app re-resolves whatever it derived from the old state — its
+    /// scale-dependent metrics, its font sizes, its theme colours — and
+    /// presents again. Ignoring the event is not broken: the window simply
+    /// keeps the appearance it opened with until the app next re-renders
+    /// for a reason of its own.
+    ///
+    /// The desktop belongs to the seat, not to one window, so the session
+    /// sends the event to every live window of every client. A client with
+    /// two windows is told twice, and both tell it the same thing.
+    DesktopChanged {
+        /// The window whose desktop is described.
+        window_id: u64,
+        /// The desktop as it now is.
+        desktop: DesktopInfo,
+    },
 }
 
 impl WindowEvent {
@@ -918,7 +1011,8 @@ impl WindowEvent {
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
             | Self::RedrawRequested { window_id }
-            | Self::Scrolled { window_id, .. } => window_id,
+            | Self::Scrolled { window_id, .. }
+            | Self::DesktopChanged { window_id, .. } => window_id,
         }
     }
 
@@ -964,6 +1058,10 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_SCROLLED);
                 put_i32(&mut out, 16, dx);
                 put_i32(&mut out, 20, dy);
+            }
+            Self::DesktopChanged { desktop, .. } => {
+                put_u16(&mut out, 6, EV_DESKTOP_CHANGED);
+                desktop.write_to_at(&mut out, 16);
             }
             Self::Minimized { .. } => {
                 put_u16(&mut out, 6, EV_MINIMIZED);
@@ -1091,6 +1189,11 @@ impl WindowEvent {
                 event_reserved_zero(bytes, 16)?;
                 Ok(Self::RedrawRequested { window_id })
             }
+            EV_DESKTOP_CHANGED => {
+                event_reserved_zero(bytes, 16 + DesktopInfo::WIRE_LEN)?;
+                let desktop = DesktopInfo::from_bytes_at(bytes, 16)?;
+                Ok(Self::DesktopChanged { window_id, desktop })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1108,11 +1211,12 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_create_reply, encode_create_reply, BundleRef, PointerAction, WindowEvent,
-        WindowRequest, WindowTitle, WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC,
-        WINDOW_TITLE_MAX,
+        decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
+        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_BUNDLE_PATH_MAX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
+    use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
     use crate::seat::SEATMGR_ENDPOINT;
@@ -1412,9 +1516,13 @@ mod tests {
             WindowRequest::from_bytes(&bad_version),
             Err(Errno::AbiVersionUnsupported)
         );
-        let mut bad_op = good;
-        bad_op[6] = 9;
-        assert_eq!(WindowRequest::from_bytes(&bad_op), Err(Errno::OutOfRange));
+        // Neither the never-allocated zero nor a far-future operation
+        // decodes: an unknown op is refused before its payload is read.
+        for op in [0u8, 250] {
+            let mut bad_op = good;
+            bad_op[6] = op;
+            assert_eq!(WindowRequest::from_bytes(&bad_op), Err(Errno::OutOfRange));
+        }
     }
 
     #[test]
@@ -1483,6 +1591,78 @@ mod tests {
         let mut own = sample_create().to_le_bytes();
         own[16..24].copy_from_slice(&WINDOW_ENDPOINT.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&own), Err(Errno::OutOfRange));
+    }
+
+    /// The desktop the query tests round-trip.
+    fn sample_desktop() -> DesktopInfo {
+        match DesktopInfo::new(1024, 768, 100, Appearance::Dark) {
+            Ok(info) => info,
+            Err(_) => unreachable!("a 1024x768 screen at 100% is in range"),
+        }
+    }
+
+    #[test]
+    fn the_desktop_query_round_trips_and_names_no_window() {
+        let request = WindowRequest::QueryDesktop;
+        assert_eq!(
+            WindowRequest::from_bytes(&request.to_le_bytes()),
+            Ok(request)
+        );
+        // The one request with no operands: everything past the header is
+        // reserved, so a smuggled window id or payload is refused rather
+        // than ignored.
+        for at in 8..WindowRequest::WIRE_LEN {
+            let mut dirty = request.to_le_bytes();
+            dirty[at] = 1;
+            assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        }
+    }
+
+    #[test]
+    fn the_desktop_reply_round_trips_and_fails_closed() {
+        let desktop = sample_desktop();
+        assert_eq!(
+            decode_desktop_reply(&encode_desktop_reply(Ok(desktop))),
+            Ok(desktop)
+        );
+        assert_eq!(
+            decode_desktop_reply(&encode_desktop_reply(Err(Errno::PermissionDenied))),
+            Err(Errno::PermissionDenied)
+        );
+
+        let good = encode_desktop_reply(Ok(desktop));
+        assert_eq!(
+            decode_desktop_reply(&good[..WINDOW_DESKTOP_REPLY_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A refusal reply carries no record, and a success reply whose
+        // record is blank is not a desktop: neither can be read as one.
+        assert!(decode_desktop_reply(&[0u8; WINDOW_DESKTOP_REPLY_LEN]).is_err());
+        let mut dirty = good;
+        dirty[WINDOW_DESKTOP_REPLY_LEN - 1] = 1;
+        assert_eq!(decode_desktop_reply(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_desktop_change_event_round_trips_and_fails_closed() {
+        let event = WindowEvent::DesktopChanged {
+            window_id: 7,
+            desktop: sample_desktop(),
+        };
+        let wire = event.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&wire), Ok(event));
+        assert_eq!(event.window_id(), 7);
+
+        // The record ends well before the frame does; the tail past it
+        // must be zero.
+        let mut dirty = wire;
+        dirty[WindowEvent::WIRE_LEN - 1] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        // A malformed record inside a well-formed frame is refused, not
+        // clamped to something plausible.
+        let mut blank = wire;
+        blank[16..16 + DesktopInfo::WIRE_LEN].fill(0);
+        assert_eq!(WindowEvent::from_bytes(&blank), Err(Errno::OutOfRange));
     }
 
     #[test]

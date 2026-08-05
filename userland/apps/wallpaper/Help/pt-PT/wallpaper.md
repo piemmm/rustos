@@ -45,11 +45,10 @@ escolher:
 - **Sort** (Ordenação) — a ordem pela qual os ícones da pasta do
   ambiente de trabalho são listados.
 
-A pré-visualização mostra a imagem, o fundo e o ajuste selecionados na
-própria forma da pré-visualização. Um ecrã de forma diferente recorta ou
-adiciona barras de forma distinta, pelo que a pré-visualização é uma
-visão fiel da imagem e da regra de ajuste, não um modelo à escala do
-ecrã.
+A pré-visualização é um modelo à escala do seu ecrã: tem a mesma forma
+do visor e mostra a imagem, o fundo e o ajuste selecionados
+exatamente como o ambiente de trabalho os irá mostrar. O que vê na
+pré-visualização é o que obtém.
 
 As imagens de papel de parede nunca são descodificadas por este
 programa. Cada uma é renderizada por um processo isolado (sandbox)

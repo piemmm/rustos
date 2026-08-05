@@ -48,11 +48,11 @@ auf eine Auswahl, um sie zu übernehmen:
 - **Sort** (Sortierung) — die Reihenfolge, in der die Symbole des
   Desktop-Ordners aufgelistet werden.
 
-Die Vorschau zeigt das ausgewählte Bild, den Hintergrund und die
-Einpassung in der eigenen Form der Vorschau. Ein Bildschirm mit einer
-anderen Form schneidet das Bild anders zu oder zeigt andere Balken an,
-sodass die Vorschau eine getreue Ansicht des Bildes und der
-Einpassungsregel ist, kein maßstabsgetreues Modell der Anzeige.
+Die Vorschau ist ein maßstabsgetreues Modell Ihres Bildschirms: Sie hat
+dieselbe Form wie die Anzeige und zeigt das gewählte Bild, den
+Hintergrund und die Einpassung genau so an, wie der Desktop sie
+darstellen wird. Was Sie in der Vorschau sehen, entspricht dem
+Ergebnis auf dem Desktop.
 
 Hintergrundbilder werden von diesem Programm niemals dekodiert. Jedes
 wird von einem separaten, sandbox-geschützten Prozess gerendert, der

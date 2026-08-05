@@ -46,11 +46,10 @@ opción para seleccionarla:
 - **Sort** (Ordenación) — el orden en que se enumeran los iconos de la
   carpeta del escritorio.
 
-La vista previa muestra la imagen, el fondo y el ajuste seleccionados
-con la propia forma de la vista previa. Una pantalla de una forma
-diferente recorta o añade bandas de forma distinta, por lo que la vista
-previa es una visión fiel de la imagen y de la regla de ajuste, no un
-modelo a escala de la pantalla.
+La vista previa es un modelo a escala de su pantalla: tiene la misma
+forma que la pantalla y muestra la imagen, el fondo y el ajuste
+seleccionados exactamente como los mostrará el escritorio. Lo que ve
+en la vista previa es lo que obtendrá.
 
 Las imágenes de fondo de pantalla nunca son decodificadas por este
 programa. Cada una es renderizada por un proceso independiente en un

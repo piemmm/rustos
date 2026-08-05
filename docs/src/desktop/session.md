@@ -422,6 +422,36 @@ switches the theme (through `DesktopShell::session_mut`) then calls
 `DesktopShell::sync_background` and `present` to relay the switch to the
 screen.
 
+## Telling applications about their desktop
+
+An application draws into its own frames, so it needs three facts the session
+owns before it can draw them honestly: how large the screen is, what density
+the desktop is at, and which way round the theme's colours run. All three
+belong to the compositor — it owns the output it scans out to, that output's
+`Scale`, and the active `Theme` — and `windows::desktop_info` reads them
+straight from it into one `tairix_abi::desktop::DesktopInfo`. That single
+definition serves both directions, so an answer and an announcement can never
+disagree:
+
+- `ShellWindowHost`'s `WindowHost::desktop` answers an application's
+  `QueryDesktop`, which it issues before creating its first window. The query
+  is read-only and carries no capability: the reply describes the caller's own
+  seat, names no other principal's data, and grants no authority (`AGENTS.md`
+  §5.2). A compositor whose output the record cannot describe — a zero-sized
+  screen, a density outside the percentage the wire carries — refuses rather
+  than answering with a guess (`AGENTS.md` §5.4).
+- `announce_desktop` pushes a `WindowEvent::DesktopChanged` to every live
+  window (`WindowServer::window_ids`) when any of it changes, routed through
+  the same `deliver` path as any other event, so a client that has died is
+  torn down here exactly as it would be otherwise. The interactive light/dark
+  switch calls it: the session can re-theme its own surfaces, but an app's
+  window is the app's pixels, so without the announcement the desktop would
+  switch and every open window would stay in the appearance just left behind.
+
+A desktop the record cannot describe is reported on `stderr` and nothing is
+sent; each application keeps the last state it was given. See
+[Variable DPI and UI scale](./dpi.md) and [Theming](./theming.md).
+
 ## Launch bookkeeping
 
 The `launch` module owns the desktop's launched children. `LaunchTable`

@@ -12,10 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# The one definition of a font weight, which is the ABI type the font service
-# rasterises at (`tairix_abi::font_ipc::FontWeight`). A theme names the weight
-# a text role is set in, and that name must be *the same* value the glyph
-# request carries, so the enum is imported rather than restated here.
+# The two vocabularies a theme shares with an ABI surface, imported rather
+# than restated so the value a theme carries and the value on the wire cannot
+# drift apart: the font weight the font service rasterises at
+# (`tairix_abi::font_ipc::FontWeight`), which a theme names for each text
+# role, and the light/dark `Appearance` (`tairix_abi::desktop::Appearance`),
+# which the window channel reports to every application.
 # This is the crate's only dependency: everything else here is pure theme
 # *data*, the compositing colour algebra lives in `lib/raster`, and the crate
 # stays at the bottom of the layering — depended on, never depending on a

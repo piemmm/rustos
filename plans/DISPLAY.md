@@ -186,6 +186,19 @@ seat manager both build on it, never re-deriving the state machine.
   The syscall table stays generated from `lib/abi/src/syscalls.rs`
   (`AGENTS.md` §9); `cargo xtask abi-check` / `c-header` must stay green.
 
+- **The seat's desktop record is deliberately ungated.**
+  `tairix_abi::desktop::DesktopInfo` — the screen extent, the UI scale, and
+  the active appearance — reaches an application over the window channel it
+  already holds: `WindowRequest::QueryDesktop` answers it, and
+  `WindowEvent::DesktopChanged` re-sends it to every live window when the
+  session changes any of it. **Do not add a capability to it.** It describes
+  the caller's own seat, names no other principal's data, and authorises
+  nothing; gating it would only force every application back to guessing at
+  facts the user can see by looking at their monitor, which is precisely the
+  defect it exists to remove. The display service's own `Query` stays
+  lease-gated: that one is a step toward *driving* the output, not describing
+  it.
+
 ## 5. Work breakdown (stages)
 
 Each stage is a reviewable chunk that ships code + tests + docs and is not
@@ -194,6 +207,23 @@ end of each stage, write the continuation prompt for the next to
 `.junie/next-display-prompt.md` (overwrite each time), recording what landed
 and the exact next work, in the style of the other plans' continuation
 prompts. Plan files state current state, not history (`AGENTS.md` §13).
+
+### Open — a user-settable UI scale
+
+The density is now honest end to end: the compositor owns the output's
+`Scale`, the session reports it in the desktop record, and every application
+and every session-drawn surface resolves its lengths through the reported
+value rather than a hard-coded 100%. What is still missing is any way for a
+user to *choose* it — nothing in the tree calls `Compositor::set_scale` or
+`DesktopShell::set_scale` outside tests, so the desktop always runs at the
+reference density.
+
+What remains: a persisted per-seat scale in the desktop's own settings, a
+control that changes it (the Switchboard capsule's quick actions are the
+natural home, beside the light/dark pair), and the runtime application —
+`DesktopShell::set_scale` followed by the existing `announce_desktop`, which
+already relays a change to every open window. No ABI change is needed: the
+wire already carries the percentage and every consumer already reads it.
 
 ### Stage D1 — `lib/seat`: the arch-neutral seat model `[x]`
 

@@ -112,7 +112,7 @@ mod program {
         artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
         MAX_ARTWORK_BYTES,
     };
-    use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+    use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::IpcTransport;
     use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
@@ -121,7 +121,7 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, EventSource, WindowClient, WindowEvents, WindowTransport,
+        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowTransport,
     };
 
     use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
@@ -999,11 +999,45 @@ mod program {
     /// The font every part of the browser window draws its text in: the
     /// theme's body role, resolved through the one shared role-to-font path.
     ///
-    /// The window is authored in unscaled pixels, so the logical size is the
-    /// physical size; resolving it here once keeps the listing, the overlays,
+    /// Resolving it here once keeps the listing, the overlays,
     /// and the hit-testing that measures them on the same font.
-    fn ui_font(theme: &Theme) -> BitmapFont {
-        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+    fn ui_font(theme: &Theme, scale: Scale) -> BitmapFont {
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
+    }
+
+    /// How the window is drawn at this moment: the active theme, the
+    /// surface a frame is laid out for, and the desktop's UI density.
+    ///
+    /// One value rather than three parameters, because every consumer
+    /// resolves the same two things from them — the text face and the
+    /// window rectangle — and threading them separately is how a painted
+    /// frame and the hit-test that must match it come to disagree. All
+    /// three change together when the desktop does.
+    #[derive(Copy, Clone)]
+    struct Canvas<'a> {
+        /// The active theme, as the desktop reports its appearance.
+        theme: &'a Theme,
+        /// The surface the current frame is laid out for.
+        mode: &'a DisplayMode,
+        /// The desktop's UI density.
+        scale: Scale,
+    }
+
+    impl<'a> Canvas<'a> {
+        /// The active theme.
+        fn theme(&self) -> &'a Theme {
+            self.theme
+        }
+
+        /// The text face every part of the window draws in.
+        fn font(&self) -> BitmapFont {
+            ui_font(self.theme, self.scale)
+        }
+
+        /// The whole window, as a rectangle at its own origin.
+        fn window(&self) -> Rect {
+            Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
+        }
     }
 
     /// Render the browser into `frame` (the shared window surface) and
@@ -1023,6 +1057,7 @@ mod program {
         theme: &Theme,
         target: &mut FrameTarget<'_, T>,
         icons: &RefCell<IconPipeline>,
+        scale: Scale,
     ) -> Result<(), Errno>
     where
         S: DirectorySource,
@@ -1034,7 +1069,7 @@ mod program {
         let can_chown = overlays.can_chown;
         let mode = target.mode;
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = ui_font(theme);
+        let font = ui_font(theme, scale);
         // The rail owns the window's leading edge, so every overlay drawn over
         // the view is placed within what is left — the one shared inset the
         // pointer hit-tests resolve through, so a dialog is never centred over
@@ -1070,7 +1105,7 @@ mod program {
             if let Some(bounds) =
                 tairix_browse::render::selection_rect(browser, font, theme, viewport)
             {
-                field.render(&mut surface, bounds, Scale::ONE, theme, font);
+                field.render(&mut surface, bounds, scale, theme, font);
             }
         }
         // With the Properties overlay open, draw it centered on top of the
@@ -1131,22 +1166,22 @@ mod program {
     /// listing changed (and must re-present) and whether the app should
     /// end (the desktop asked the window to close).
     ///
-    /// `theme` and `mode` give the reveal/scroll helpers the same font and
-    /// content viewport the renderer uses, so the drawn view, the selection
-    /// reveal, and the wheel scroll all agree on the geometry; `link` carries
-    /// the launcher and the window channel the session-facing verbs (launch,
+    /// `canvas` gives the reveal/scroll helpers the same font and content
+    /// viewport the renderer uses, so the drawn view, the selection reveal,
+    /// and the wheel scroll all agree on the geometry; `link` carries the
+    /// launcher and the window channel the session-facing verbs (launch,
     /// pin, drag offer/withdraw) go out over.
     fn apply_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         places: &mut Places,
         link: &mut SessionLink<'_, T>,
-        theme: &Theme,
-        mode: &DisplayMode,
+        canvas: Canvas<'_>,
         event: &WindowEvent,
     ) -> (bool, bool) {
-        let font = ui_font(theme);
-        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let theme = canvas.theme();
+        let font = canvas.font();
+        let window = canvas.window();
         // Everything below the rail lays out in what the rail leaves, resolved
         // through the one shared inset the renderer paints with, so a click
         // lands on exactly the control the user saw.
@@ -1336,6 +1371,11 @@ mod program {
             // handing the event on. The browser's state has not changed, so
             // rendering it again would draw the same pixels at the cost of a
             // second present.
+            //
+            // A desktop change is adopted and, when anything actually moved,
+            // repainted by the event loop itself (through `desktop.apply`)
+            // before `apply_event` is called; nothing here needs to react to
+            // it a second time.
             WindowEvent::Key { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
@@ -1343,7 +1383,8 @@ mod program {
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. } => (false, false),
+            | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DesktopChanged { .. } => (false, false),
         }
     }
 
@@ -2004,13 +2045,10 @@ mod program {
     /// button), or nothing that affects the run. A press anywhere but the
     /// Cancel button is ignored, so nothing navigates behind the modal panel
     /// (fail closed, §5.4).
-    fn operation_control(
-        event: &WindowEvent,
-        theme: &Theme,
-        mode: &DisplayMode,
-    ) -> OperationControl {
-        let font = ui_font(theme);
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+    fn operation_control(event: &WindowEvent, canvas: Canvas<'_>) -> OperationControl {
+        let theme = canvas.theme();
+        let font = canvas.font();
+        let viewport = canvas.window();
         match event {
             WindowEvent::CloseRequested { .. } => OperationControl::Close,
             WindowEvent::Key {
@@ -2030,8 +2068,9 @@ mod program {
             // Nothing else reaches the running operation. A redraw request
             // needs no arm of its own: the modal loop that polls this
             // re-presents the progress panel in full on every pass, so the
-            // released pixels are back on the next step. The rest is input
-            // that must not navigate behind the modal panel.
+            // released pixels are back on the next step. A desktop change is
+            // already adopted by the caller before this is reached. The rest
+            // is input that must not navigate behind the modal panel.
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -2039,7 +2078,8 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::Scrolled { .. }
             | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. } => OperationControl::Ignore,
+            | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DesktopChanged { .. } => OperationControl::Ignore,
         }
     }
 
@@ -3940,9 +3980,28 @@ mod program {
             return fail(EXIT_NO_LISTING, "root directory listing refused");
         };
 
-        // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // window mode, created here and granted to the session.
-        let mut mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
+        // --- Open the window and paint the first listing.
+        let mut client = WindowClient::new(RtWindowTransport);
+        // The screen, the density, and the appearance, before anything is
+        // sized or painted, so the first frame is right rather than a guess
+        // corrected once the user has seen it.
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "files: desktop query refused: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "files: cannot draw this desktop: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+
+        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mut mode = mode_for(w, h);
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
         let mut region_id: u64 = 0;
@@ -3984,8 +4043,6 @@ mod program {
             Err(code) => return code,
         };
 
-        // --- Open the window and paint the first listing.
-        let mut client = WindowClient::new(RtWindowTransport);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) = client.create(
             grant as u64,
@@ -3997,8 +4054,9 @@ mod program {
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
-        let themes = ThemeRegistry::with_builtins();
-        let theme = themes.active();
+        let mut themes = ThemeRegistry::with_builtins();
+        themes.set_appearance(desktop.appearance());
+        let mut theme = themes.active();
         let mut overlays = initial_overlays();
         // The places rail: the user's own shortcuts plus whatever is mounted
         // right now, read once here and re-read whenever the user refreshes.
@@ -4034,6 +4092,7 @@ mod program {
                 mode: &mode,
             },
             &icons,
+            desktop.scale(),
         )
         .is_err()
         {
@@ -4088,6 +4147,7 @@ mod program {
                         mode: &mode,
                     },
                     &icons,
+                    desktop.scale(),
                 )
                 .is_err()
                 {
@@ -4115,6 +4175,7 @@ mod program {
                             mode: &mode,
                         },
                         &icons,
+                        desktop.scale(),
                     )
                     .is_err()
                     {
@@ -4126,18 +4187,44 @@ mod program {
                 // runs; anything else is ignored so nothing navigates behind
                 // the modal progress panel.
                 match poll_operation_event(event_endpoint, server) {
-                    Ok(Some(event)) => match operation_control(&event, theme, &mode) {
-                        OperationControl::Cancel => {
-                            if let Some(operation) = overlays.operation.as_mut() {
-                                operation.progress.request_cancel();
+                    Ok(Some(event)) => {
+                        // A desktop change during a long operation is
+                        // adopted here too: this loop re-presents the
+                        // progress panel on every pass, so re-theming is
+                        // all it takes for the change to reach the screen.
+                        match desktop.apply(&event) {
+                            Ok(true) => {
+                                themes.set_appearance(desktop.appearance());
+                                theme = themes.active();
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                let _ = writeln!(
+                                    Stderr,
+                                    "files: could not apply desktop change: {err}"
+                                );
                             }
                         }
-                        OperationControl::Close => {
-                            let _ = client.close(window);
-                            return 0;
+                        match operation_control(
+                            &event,
+                            Canvas {
+                                theme,
+                                mode: &mode,
+                                scale: desktop.scale(),
+                            },
+                        ) {
+                            OperationControl::Cancel => {
+                                if let Some(operation) = overlays.operation.as_mut() {
+                                    operation.progress.request_cancel();
+                                }
+                            }
+                            OperationControl::Close => {
+                                let _ = client.close(window);
+                                return 0;
+                            }
+                            OperationControl::Ignore => {}
                         }
-                        OperationControl::Ignore => {}
-                    },
+                    }
                     Ok(None) => {}
                     Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
                 }
@@ -4151,6 +4238,35 @@ mod program {
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
+
+            match desktop.apply(&event) {
+                Ok(true) => {
+                    themes.set_appearance(desktop.appearance());
+                    theme = themes.active();
+                    if present_frame(
+                        &browser,
+                        &overlays,
+                        &places,
+                        theme,
+                        &mut FrameTarget {
+                            client: &mut client,
+                            window,
+                            frame: &mut *frames,
+                            mode: &mode,
+                        },
+                        &icons,
+                        desktop.scale(),
+                    )
+                    .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = writeln!(Stderr, "files: could not apply desktop change: {err}");
+                }
+            }
             // The window manager resized (or maximized/restored) the window.
             // Re-map the frame region at the new client size and repaint so the
             // listing fills the new window; the browser lays out to the new
@@ -4189,6 +4305,7 @@ mod program {
                             mode: &mode,
                         },
                         &icons,
+                        desktop.scale(),
                     )
                     .is_err()
                     {
@@ -4206,8 +4323,11 @@ mod program {
                     client: &mut client,
                     window,
                 },
-                theme,
-                &mode,
+                Canvas {
+                    theme,
+                    mode: &mode,
+                    scale: desktop.scale(),
+                },
                 &event,
             );
             if close {
@@ -4228,6 +4348,7 @@ mod program {
                         mode: &mode,
                     },
                     &icons,
+                    desktop.scale(),
                 )
                 .is_err()
             {

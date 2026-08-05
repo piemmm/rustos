@@ -50,8 +50,8 @@ pub fn render<S: ShellSource>(
     terminal: &Terminal<S>,
     theme: &Theme,
     viewport: Rect,
+    font: BitmapFont,
 ) -> Option<Surface> {
-    let font = BitmapFont::console();
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));

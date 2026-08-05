@@ -189,9 +189,18 @@ The preview and every tile are rendered through the same sandboxed path the
 desktop uses, so the chooser decodes nothing itself. A tile is the
 wallpaper at tile size, always placed to fill its square — it says *which*
 wallpaper it is — and the preview panel is where the chosen fit is shown.
-The preview draws at its own shape rather than the display's: no
-unprivileged program can ask how large the screen is, so a screen of a
-different shape crops or letterboxes differently (`plans/PINBOARD.md` §8).
+
+The preview is a **scale model of the real screen**. The chooser asks the
+session for the seat's desktop before it opens its window, so it knows the
+screen's exact extent; inside the preview panel it draws the largest box
+with the screen's aspect ratio that fits, centred, and renders the
+wallpaper into it as the desktop would. The sandboxed render is told the
+screen it models as well as the surface it writes and scales the source
+accordingly, so `centre` and `tile` — which are defined in screen pixels —
+model correctly instead of drawing at 1:1. The extent is part of the
+preview request, so a preview rendered for one screen can never be shown as
+if it were for another, and a change of screen re-renders it. What the
+preview shows is what the desktop will show (`plans/PINBOARD.md` §8).
 
 ## Headless
 

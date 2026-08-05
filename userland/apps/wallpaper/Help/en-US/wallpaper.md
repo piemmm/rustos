@@ -39,10 +39,9 @@ to open it and click a choice to take it:
   from.
 - **Sort** — the order the desktop folder's icons are listed in.
 
-The preview shows the selected image, backdrop and fit at the preview's
-own shape. A screen of a different shape crops or letterboxes
-differently, so the preview is a faithful view of the picture and of the
-fit rule, not a scale model of the display.
+The preview is a scale model of your screen: it has the same shape as the
+display, and shows the selected image, backdrop and fit exactly as the
+desktop will show them. What you see in the preview is what you get.
 
 Wallpaper images are never decoded by this program. Each one is rendered
 by a separate sandboxed process that holds no filesystem, network, or

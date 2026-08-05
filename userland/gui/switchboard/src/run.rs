@@ -87,7 +87,7 @@ mod program {
         MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{WindowClient, WindowTransport};
+    use tairix_window::{Desktop, WindowClient, WindowTransport};
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -153,11 +153,11 @@ mod program {
     /// resolved through the one shared role-to-font conversion.
     ///
     /// The window's extents are authored in unscaled pixels, so the role
-    /// resolves at [`Scale::ONE`] to keep the text and the box it must fit
-    /// in on one density. It is the one place the render and hit-test paths
-    /// agree on a font.
-    fn panel_font(theme: &Theme) -> BitmapFont {
-        BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
+    /// resolves at the desktop's `scale` to keep the text and the box it must
+    /// fit in on one density. It is the one place the render and hit-test
+    /// paths agrees on a font.
+    fn panel_font(theme: &Theme, scale: Scale) -> BitmapFont {
+        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
     }
 
     /// The live frame region: the once-granted shared surface the panel is
@@ -249,6 +249,7 @@ mod program {
         event_endpoint: u64,
         command_endpoint: u64,
         client: WindowClient<RtWindowTransport>,
+        desktop: Desktop,
         themes: ThemeRegistry,
         window: Option<Window>,
         session: Option<ProcId>,
@@ -258,12 +259,13 @@ mod program {
         /// A host with no window open, whose mailboxes are already bound
         /// (the window's not yet armed in `set`) and whose session identity
         /// is not yet known.
-        fn new(set: u64, event_endpoint: u64, command_endpoint: u64) -> Self {
+        fn new(set: u64, event_endpoint: u64, command_endpoint: u64, desktop: Desktop) -> Self {
             Self {
                 set,
                 event_endpoint,
                 command_endpoint,
                 client: WindowClient::new(RtWindowTransport),
+                desktop,
                 themes: ThemeRegistry::with_builtins(),
                 window: None,
                 session: None,
@@ -333,7 +335,8 @@ mod program {
 
     impl ServiceHost for RtHost {
         fn open_window(&mut self) -> Result<(), Errno> {
-            let mode = mode_for(WIN_WIDTH, WIN_HEIGHT);
+            let (initial_w, initial_h) = self.desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+            let mode = mode_for(initial_w, initial_h);
             let frames = allocate_frames(&mode).ok_or(Errno::OutOfMemory)?;
             let surface =
                 Surface::new(mode.width_px, mode.height_px).ok_or(Errno::LengthOutOfRange)?;
@@ -397,18 +400,20 @@ mod program {
             let bounds = self.bounds().ok_or(Errno::NotFound)?;
             let Self {
                 client,
+                desktop,
                 themes,
                 window,
                 ..
             } = self;
             let window = window.as_mut().ok_or(Errno::NotFound)?;
+            themes.set_appearance(desktop.appearance());
             let theme = themes.active();
             panel.render(
                 &mut window.surface,
                 bounds,
-                Scale::ONE,
+                desktop.scale(),
                 theme,
-                panel_font(theme),
+                panel_font(theme, desktop.scale()),
             );
             let pixels = window.surface.pixels();
             let frame = window.frames.as_mut();
@@ -432,7 +437,7 @@ mod program {
                 bounds_width: bounds.width,
                 bounds_height: bounds.height,
                 theme_id: theme.id().0,
-                scale_percent: Scale::ONE.percent(),
+                scale_percent: self.desktop.scale().percent(),
             })
         }
 
@@ -562,7 +567,7 @@ mod program {
     ) -> Option<SwitchboardAction> {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
-        let font = panel_font(theme);
+        let font = panel_font(theme, host.desktop.scale());
         let view = service.panel_mut().view_mut()?;
         let at = Point::new(
             i32::try_from(x).unwrap_or(i32::MAX),
@@ -571,7 +576,7 @@ mod program {
         let moved = view.on_pointer(
             &InputEvent::PointerMoved { to: at },
             bounds,
-            Scale::ONE,
+            host.desktop.scale(),
             theme,
             font,
         );
@@ -582,7 +587,7 @@ mod program {
                     button: to_button(code),
                 },
                 bounds,
-                Scale::ONE,
+                host.desktop.scale(),
                 theme,
                 font,
             ),
@@ -591,7 +596,7 @@ mod program {
                     button: to_button(code),
                 },
                 bounds,
-                Scale::ONE,
+                host.desktop.scale(),
                 theme,
                 font,
             ),
@@ -608,12 +613,12 @@ mod program {
     ) -> Option<SwitchboardAction> {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
-        let font = panel_font(theme);
+        let font = panel_font(theme, host.desktop.scale());
         let view = service.panel_mut().view_mut()?;
         view.on_pointer(
             &InputEvent::PointerScrolled { dx, dy },
             bounds,
-            Scale::ONE,
+            host.desktop.scale(),
             theme,
             font,
         )
@@ -667,6 +672,25 @@ mod program {
             // presented and let that one path draw it.
             WindowEvent::RedrawRequested { .. } => {
                 service.panel_mut().invalidate_presented();
+                return;
+            }
+            // The desktop switched appearance, density, or screen. Bringing
+            // the theme registry into step is all this needs: the panel is
+            // composed from the active theme at the desktop's scale, so the
+            // end-of-wake difference test sees the new composition and
+            // presents it. A refused change states its reason and leaves the
+            // last good desktop standing.
+            WindowEvent::DesktopChanged { .. } => {
+                match host.desktop.apply(event) {
+                    Ok(true) => {
+                        let appearance = host.desktop.appearance();
+                        host.themes.set_appearance(appearance);
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        let _ = writeln!(Stderr, "switchboard: desktop change refused: {err}");
+                    }
+                }
                 return;
             }
             WindowEvent::Key { .. }
@@ -874,9 +898,30 @@ mod program {
             Err(code) => return code,
         };
 
+        let mut client = WindowClient::new(RtWindowTransport);
+        // The desktop this window will be shown on: the screen, the density,
+        // and the appearance, before anything is sized or painted, so the
+        // first frame is right rather than a guess corrected once the user
+        // has seen it.
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "switchboard: desktop query refused: {err}");
+                return EXIT_NO_WAIT_SOURCE;
+            }
+        };
+        let desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "switchboard: cannot draw this desktop: {err}");
+                return EXIT_NO_WAIT_SOURCE;
+            }
+        };
+
         let transport = IpcTransport;
         let authority = RtAuthority;
-        let mut host = RtHost::new(set, events, commands);
+        let mut host = RtHost::new(set, events, commands, desktop);
+        host.client = client;
         let mut service = Service::new(pid, probe_scopes(&transport), &authority);
 
         loop {

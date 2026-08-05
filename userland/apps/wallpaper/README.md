@@ -23,6 +23,18 @@ this same binary is re-entered as. A file the worker refuses is marked
 `unreadable` and is not asked for again — one attempt per bad file, and a
 malformed image cannot take down the chooser.
 
+The preview is a **scale model of the real screen**, not an approximation
+of one. The chooser asks the session for the seat's desktop before it opens
+its window (`WindowClient::desktop` — read-only and ungated, describing the
+caller's own seat and authorising nothing), so it knows the exact extent;
+inside the preview panel it draws the largest box with the *screen's*
+aspect ratio that fits, centred, and asks the sandbox to render the
+wallpaper into it *as the desktop would*. The render is told the screen it
+models as well as the surface it writes, so `Centre` and `Tile` — defined
+in screen pixels — model correctly instead of drawing at 1:1. The extent is
+part of the preview request, so a preview rendered for one screen can never
+be shown as if it were for another, and a screen change re-renders it.
+
 ## Pointer first
 
 The window is driven by the mouse, with the keyboard as a complete
@@ -85,10 +97,6 @@ administration.
   descriptor handle) and the pinboard apply to accept a delegated read
   handle the session can use later; neither exists, so the capability is
   absent rather than half-built. See `plans/PINBOARD.md` §8.
-- The preview shows the chosen image, backdrop and fit at the preview's own
-  shape, not at the display's: no unprivileged program can ask how large
-  the screen is, so a screen of a different shape crops or letterboxes
-  differently from the preview. See `plans/PINBOARD.md` §8.
 - The backdrop colour is a fixed named palette plus whatever colour is
   already in effect, not a free-form colour entry.
 

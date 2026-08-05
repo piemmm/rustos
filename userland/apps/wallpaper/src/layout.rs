@@ -27,24 +27,25 @@
 //! preview band and the gallery give up room. Every region is total: a window
 //! too small for a region yields an empty rectangle there, which every
 //! painter and hit-test treats as absent rather than as an error.
+//!
+//! The preview band itself is shaped to the real screen's own aspect ratio
+//! ([`Layout::compute`] is handed the desktop's screen extent for exactly
+//! this), and [`Layout::preview_model`] is the largest rectangle of that
+//! same aspect ratio, centred, that fits inside the band — the shared
+//! placement geometry's own [`WallpaperFit::Fit`] contains the screen's shape
+//! inside the band precisely as it would contain any other source inside any
+//! other destination, so the model is never a second, private fit
+//! computation. Whatever the band's own proportions leave over is left as
+//! plain window background, so the model reads as a screen sitting inside
+//! the panel rather than filling it edge to edge.
 
 use tairix_browse::layout::{GridFill, GridFlow, GridMetrics, GridView};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::Theme;
+use tairix_wallpaper::WallpaperFit;
 
 use crate::{to_i32, OptionGroup, OPTION_GROUP_COUNT};
-
-/// Width of the preview's aspect ratio, paired with [`PREVIEW_ASPECT_H`].
-///
-/// The preview is a viewport onto the chosen wallpaper, not a scale model of
-/// an unknown screen: no unprivileged program can ask how large the display
-/// is, so the chooser draws the widescreen shape its shipped masters are
-/// authored in and leaves the true framing to the desktop.
-const PREVIEW_ASPECT_W: u32 = 16;
-
-/// Height of the preview's aspect ratio (see [`PREVIEW_ASPECT_W`]).
-const PREVIEW_ASPECT_H: u32 = 9;
 
 /// The option column's field width in logical pixels: room for the longest
 /// choice any of the four groups offers, so the four fields line up as one
@@ -82,6 +83,7 @@ const BUTTON_WIDTH: u32 = 92;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
     preview: Rect,
+    preview_model: Rect,
     option_labels: [Rect; OPTION_GROUP_COUNT],
     option_fields: [Rect; OPTION_GROUP_COUNT],
     caption: Rect,
@@ -96,9 +98,17 @@ pub struct Layout {
 
 impl Layout {
     /// Resolve the geometry of a `width` x `height` client area for the
-    /// active theme, UI scale, and text face.
+    /// active theme, UI scale, and text face, with the preview shaped to
+    /// `screen` — the desktop's own screen extent, in physical pixels.
     #[must_use]
-    pub fn compute(width: u32, height: u32, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
+    pub fn compute(
+        width: u32,
+        height: u32,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        screen: (u32, u32),
+    ) -> Self {
         let metrics = theme.metrics();
         let gap = scale.scale_length(metrics.control_gap).max(1);
         let margin = gap.saturating_mul(2);
@@ -119,18 +129,19 @@ impl Layout {
         let body_h = body_bottom.saturating_sub(body_top);
 
         // The option column claims the least it can read in; the preview
-        // takes the widescreen shape that fits what is left, and whatever
-        // the preview's proportions do not use widens the column rather
-        // than sitting between them as a hole.
+        // takes the screen's own shape, scaled to fit what is left, and
+        // whatever the preview's proportions do not use widens the column
+        // rather than sitting between them as a hole.
+        let (screen_w, screen_h) = (screen.0.max(1), screen.1.max(1));
         let least_column_w = Self::option_column_width(content_w, scale, font);
         let free_w = content_w
             .saturating_sub(least_column_w)
             .saturating_sub(if least_column_w == 0 { 0 } else { gap });
-        let band_h = Self::band_height(body_h, free_w, row, line, gap, scale);
+        let band_h = Self::band_height(body_h, free_w, row, line, gap, scale, screen_w, screen_h);
         let preview_w = free_w.min(
             band_h
-                .saturating_mul(PREVIEW_ASPECT_W)
-                .checked_div(PREVIEW_ASPECT_H)
+                .saturating_mul(screen_w)
+                .checked_div(screen_h)
                 .unwrap_or(0),
         );
         let column_w = content_w
@@ -152,8 +163,10 @@ impl Layout {
         let (apply, close, status) =
             Self::footer(left, footer_y, content_w, footer_h, gap, scale, font);
 
+        let preview = Rect::new(to_i32(left), to_i32(body_top), preview_w, band_h);
         Self {
-            preview: Rect::new(to_i32(left), to_i32(body_top), preview_w, band_h),
+            preview,
+            preview_model: Self::screen_model_box(preview, screen_w, screen_h),
             option_labels,
             option_fields,
             caption,
@@ -199,14 +212,29 @@ impl Layout {
         ideal.min(ceiling)
     }
 
-    /// The preview band's height: the widescreen shape the preview wants,
-    /// capped at its share of the window so the gallery keeps the rest,
-    /// never less than the option column needs, and never so tall that the
-    /// gallery loses its first row of tiles.
-    fn band_height(body_h: u32, free_w: u32, row: u32, line: u32, gap: u32, scale: Scale) -> u32 {
+    /// The preview band's height: the screen's own shape scaled to the
+    /// width available, capped at its share of the window so the gallery
+    /// keeps the rest, never less than the option column needs, and never so
+    /// tall that the gallery loses its first row of tiles.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one private claim over the band's own resolved metrics plus the \
+                  screen aspect it is shaped to; grouping them would only move the \
+                  same values behind a type no other caller has a use for"
+    )]
+    fn band_height(
+        body_h: u32,
+        free_w: u32,
+        row: u32,
+        line: u32,
+        gap: u32,
+        scale: Scale,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> u32 {
         let wanted = free_w
-            .saturating_mul(PREVIEW_ASPECT_H)
-            .checked_div(PREVIEW_ASPECT_W)
+            .saturating_mul(screen_h)
+            .checked_div(screen_w)
             .unwrap_or(0);
         let share = body_h
             .saturating_mul(PREVIEW_BAND_SHARE)
@@ -308,6 +336,41 @@ impl Layout {
     #[must_use]
     pub fn preview(&self) -> Rect {
         self.preview
+    }
+
+    /// The true-scale model of the screen inside [`Self::preview`]: the
+    /// largest rectangle sharing the desktop's own screen aspect ratio,
+    /// centred within the band. This is where the preview's pixels are
+    /// drawn; the rest of the band is left as plain window background so it
+    /// reads as a screen sitting inside the panel.
+    #[must_use]
+    pub fn preview_model(&self) -> Rect {
+        self.preview_model
+    }
+
+    /// [`Self::preview_model`]'s own computation: the shared placement
+    /// geometry's [`WallpaperFit::Fit`] contains a `screen_w`x`screen_h`
+    /// "source" inside the `panel`-sized "screen", centred — exactly the
+    /// model box this wants, so it is never a second, private fit
+    /// computation.
+    fn screen_model_box(panel: Rect, screen_w: u32, screen_h: u32) -> Rect {
+        if panel.is_empty() {
+            return Rect::new(panel.left(), panel.top(), 0, 0);
+        }
+        let Some(placement) = tairix_wallpaper::place(
+            (screen_w, screen_h),
+            (panel.width, panel.height),
+            WallpaperFit::Fit,
+        ) else {
+            return Rect::new(panel.left(), panel.top(), 0, 0);
+        };
+        let model = placement.destination();
+        Rect::new(
+            panel.left().saturating_add(model.left()),
+            panel.top().saturating_add(model.top()),
+            model.width,
+            model.height,
+        )
     }
 
     /// The label of one option group.

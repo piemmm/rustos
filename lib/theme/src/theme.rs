@@ -35,13 +35,12 @@ impl ThemeId {
 /// This is the axis a "switch to light/dark" control toggles; it is
 /// independent of the concrete palette so a custom theme can declare which
 /// side it belongs to.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Appearance {
-    /// Light foreground on dark surfaces.
-    Dark,
-    /// Dark foreground on light surfaces.
-    Light,
-}
+///
+/// The enum itself is `tairix_abi::desktop::Appearance`, imported rather
+/// than restated: the desktop session reports the active appearance to
+/// every application over the window channel, and the byte on that wire
+/// must be the same value a theme carries.
+pub use tairix_abi::desktop::Appearance;
 
 /// A complete, named theme: colours, metrics, fonts, and cursors.
 #[derive(Clone, Debug, Eq, PartialEq)]

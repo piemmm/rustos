@@ -19,8 +19,8 @@ use tairix_log::{Event, Sink};
 use tairix_wallpaper::WallpaperFit;
 
 use super::{
-    render_wallpaper, IconRasterFailure, IconRefusal, ImageRenderService, WallpaperRefusal,
-    WallpaperRenderFailure, MAX_ICON_SIDE,
+    render_wallpaper, render_wallpaper_for_screen, IconRasterFailure, IconRefusal,
+    ImageRenderService, WallpaperRefusal, WallpaperRenderFailure, MAX_ICON_SIDE,
 };
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
@@ -595,6 +595,92 @@ fn wallpaper_tile_repeats_the_source_at_native_scale() {
 }
 
 #[test]
+fn a_screen_larger_than_the_destination_shrinks_a_centred_source_proportionally() {
+    let mut sandbox = sandbox();
+    let source = solid_png(2, 2, WALLPAPER_COLOUR);
+    // A destination a quarter the screen's own pixel count: the true-scale
+    // preview must show the 2x2 source shrunk to a single centred pixel,
+    // never the source at its own native size filling the whole
+    // destination — the shape a `screen == destination` render (the
+    // desktop's own path, and the naive preview this fixes) could never
+    // produce for a screen this much larger than what is drawn.
+    let pixels =
+        render_wallpaper_for_screen(&mut sandbox, (4, 4), 2, 2, WallpaperFit::Centre, &source)
+            .expect("renders");
+    assert_eq!(pixels.len(), 2 * 2 * 4);
+    assert_eq!(
+        rgba_at(&pixels, 2, 0, 0),
+        WALLPAPER_COLOUR,
+        "the one centred pixel"
+    );
+    assert_eq!(rgba_at(&pixels, 2, 1, 0), [0, 0, 0, 0], "top right");
+    assert_eq!(rgba_at(&pixels, 2, 0, 1), [0, 0, 0, 0], "bottom left");
+    assert_eq!(rgba_at(&pixels, 2, 1, 1), [0, 0, 0, 0], "bottom right");
+}
+
+#[test]
+fn a_screen_larger_than_the_destination_shrinks_a_tiled_source_before_repeating() {
+    let mut sandbox = sandbox();
+    let colour_a = [0, 0, 0, 255];
+    let colour_b = [255, 255, 255, 255];
+    // The same 2x2 checkerboard the icon path's own downscale test proves
+    // averages to exact mid-grey.
+    let source = png_with(
+        2,
+        2,
+        |x, y| if (x + y) % 2 == 0 { colour_a } else { colour_b },
+    );
+    // A destination a quarter the screen's own pixel count: the checkerboard
+    // must first shrink to that one averaged mid-grey pixel before it is
+    // tiled, so every destination pixel is uniform mid-grey — never the
+    // checkerboard repeated at its native size, which is what a
+    // `screen == destination` render draws instead (see
+    // `wallpaper_tile_repeats_the_source_at_native_scale` above).
+    let pixels =
+        render_wallpaper_for_screen(&mut sandbox, (8, 8), 4, 4, WallpaperFit::Tile, &source)
+            .expect("renders");
+    assert_eq!(pixels.len(), 4 * 4 * 4);
+    let (chunks, _tail) = pixels.as_chunks::<4>();
+    for chunk in chunks {
+        assert_eq!(*chunk, [128, 128, 128, 255]);
+    }
+}
+
+#[test]
+fn a_screen_equal_to_the_destination_matches_render_wallpaper_exactly() {
+    // The desktop's own path is `render_wallpaper`, a thin wrapper over
+    // `render_wallpaper_for_screen` with `screen == (width, height)`; this
+    // proves the two are still byte-for-byte identical for every fit,
+    // rather than asserting it in prose, so the desktop's own wallpaper
+    // rendering is provably untouched by the screen-aware preview path.
+    let source = png_with(3, 3, |x, y| {
+        if (x + y) % 2 == 0 {
+            [10, 20, 30, 255]
+        } else {
+            [200, 210, 220, 255]
+        }
+    });
+    for fit in [
+        WallpaperFit::Fill,
+        WallpaperFit::Fit,
+        WallpaperFit::Stretch,
+        WallpaperFit::Centre,
+        WallpaperFit::Tile,
+    ] {
+        let mut via_render_wallpaper = sandbox();
+        let plain = render_wallpaper(&mut via_render_wallpaper, 6, 4, fit, &source)
+            .unwrap_or_else(|failure| panic!("{fit:?}: {failure}"));
+
+        let mut via_screen = sandbox();
+        let screen_modelled =
+            render_wallpaper_for_screen(&mut via_screen, (6, 4), 6, 4, fit, &source)
+                .unwrap_or_else(|failure| panic!("{fit:?}: {failure}"));
+
+        assert_eq!(plain, screen_modelled, "{fit:?}");
+    }
+}
+
+#[test]
 fn wallpaper_row_budget_requires_banding_at_4k_but_not_1080p() {
     // A 1920-wide row fits comfortably under one frame's row budget; a
     // 3840-wide (4K) row does not fit the whole 2160-row height in one
@@ -682,7 +768,8 @@ fn a_band_before_any_prepare_is_refused() {
 fn a_band_out_of_range_or_with_zero_rows_is_refused() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
-    super::prepare_wallpaper(&mut sandbox, 2, 2, WallpaperFit::Stretch, &png).expect("prepares");
+    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch, &png)
+        .expect("prepares");
     assert_eq!(
         super::band_wallpaper(&mut sandbox, 1, 5, 2),
         Err(WallpaperRenderFailure::Refused(
@@ -701,7 +788,8 @@ fn a_band_out_of_range_or_with_zero_rows_is_refused() {
 fn release_makes_a_subsequent_band_fail_closed() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
-    super::prepare_wallpaper(&mut sandbox, 2, 2, WallpaperFit::Stretch, &png).expect("prepares");
+    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch, &png)
+        .expect("prepares");
     assert_eq!(super::release_wallpaper(&mut sandbox), Ok(()));
     assert_eq!(
         super::band_wallpaper(&mut sandbox, 0, 1, 2),

@@ -42,10 +42,10 @@ Cliciwch ar un i'w agor a cliciwch ar ddewis i'w gymryd:
   gwaith yn tyfu ohono.
 - **Sort** (Trefnu) — y drefn y rhestrir eiconau ffolder y bwrdd gwaith.
 
-Mae'r rhagolwg yn dangos y ddelwedd, y cefndir a'r ffit a ddewiswyd yn
-siâp y rhagolwg ei hun. Mae sgrin o siâp gwahanol yn tocio neu'n ychwanegu
-bariau'n wahanol, felly mae'r rhagolwg yn olygfa ffyddlon o'r llun ac o'r
-rheol ffitio, nid model graddfa o'r ardangosydd.
+Mae'r rhagolwg yn fodel ar raddfa o'ch sgrin: mae ganddo'r un siâp â'r
+arddangosydd, ac mae'n dangos y ddelwedd, y cefndir a'r ffit a ddewiswyd
+yn union fel y bydd y bwrdd gwaith yn eu dangos. Yr hyn a welwch yn y
+rhagolwg yw'r hyn a gewch.
 
 Nid yw'r rhaglen hon byth yn dadgodio delweddau papur wal. Mae pob un
 yn cael ei rendro gan broses focs tywod ar wahân nad oes ganddi awdurdod

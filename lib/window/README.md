@@ -37,6 +37,24 @@ server and every app's client can never drift apart.
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
+- **The seat's desktop is asked for here, and kept current here.** An app
+  cannot draw honestly without knowing the screen it is on, the desktop's
+  UI scale, and whether the theme runs light or dark — and the compositor
+  that owns all three is another process it must not reach into.
+  `WindowClient::desktop` asks for them as one `tairix_abi::desktop::
+  DesktopInfo`, before the first window is created so the opening frame is
+  already the right size at the right density in the right colours; the
+  server answers from the injected `WindowHost::desktop`, which reads the
+  live compositor rather than a cached copy. The query is read-only and
+  carries no capability: it describes the caller's own seat, names no
+  other principal's data, and grants no authority. `Desktop` is the
+  app-side holder — it resolves the reported percentage into a `Scale`
+  (refusing, never clamping, one outside the range `Scale` admits and
+  keeping the last good value), reports the screen as a `Rect`, caps a
+  wanted window size to it with `fit_window`, and `apply` adopts a
+  `WindowEvent::DesktopChanged` (which the session pushes to every live
+  window, `WindowServer::window_ids`) and answers whether anything
+  changed. One definition of that bookkeeping, so no app repeats it.
 - **The redraw handshake is answered here, not in every app.** The
   session may release a window's retained content to reclaim memory and
   then send `WindowEvent::RedrawRequested`. `WindowClient` remembers each

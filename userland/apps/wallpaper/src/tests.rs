@@ -27,13 +27,28 @@ fn settings_without_a_wallpaper() -> PinboardSettings {
     }
 }
 
+/// The screen every test's preview panel models: an ordinary 1920x1080
+/// landscape desktop, matching the shape `Layout` used to hard-code before
+/// it was taught to read the real screen, so the existing region-overlap
+/// assertions below still hold unchanged.
+const TEST_SCREEN: (u32, u32) = (1920, 1080);
+
 /// The style every test paints and hit-tests through: the built-in dark
-/// theme at the unscaled desktop density, in the interface face.
+/// theme at the unscaled desktop density, in the interface face, modelling
+/// [`TEST_SCREEN`].
 fn style_for(theme: &Theme) -> Style<'_> {
+    style_with_screen(theme, TEST_SCREEN)
+}
+
+/// [`style_for`], modelling `screen` instead of [`TEST_SCREEN`] — for the
+/// tests that care what the preview panel's true-scale model looks like on
+/// a particular screen.
+fn style_with_screen(theme: &Theme, screen: (u32, u32)) -> Style<'_> {
     Style::new(
         theme,
         Scale::ONE,
         BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE),
+        screen,
     )
 }
 
@@ -706,7 +721,14 @@ fn the_layout_keeps_every_region_inside_the_window_at_every_size() {
         (640, 400),
         (1600, 1200),
     ] {
-        let layout = Layout::compute(width, height, style.scale(), style.theme(), style.font());
+        let layout = Layout::compute(
+            width,
+            height,
+            style.scale(),
+            style.theme(),
+            style.font(),
+            style.screen(),
+        );
         let regions = [
             layout.preview(),
             layout.caption(),
@@ -799,4 +821,147 @@ fn a_secondary_button_click_changes_nothing() {
     );
     assert_eq!(action, ChooserAction::None);
     assert_eq!(chooser.selected(), selected);
+}
+
+// ---- the preview panel's true-scale screen model -------------------------
+
+#[test]
+fn the_preview_model_box_matches_the_screens_aspect_stays_within_and_centred_in_the_panel() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    for (width, height) in [
+        (MIN_WIN_WIDTH, MIN_WIN_HEIGHT),
+        (WIN_WIDTH, WIN_HEIGHT),
+        (1600, 1200),
+    ] {
+        for screen in [(1920, 1080), (1080, 1920), (4, 3), (21, 9)] {
+            let style = style_with_screen(theme, screen);
+            let layout = Layout::compute(
+                width,
+                height,
+                style.scale(),
+                style.theme(),
+                style.font(),
+                style.screen(),
+            );
+            let panel = layout.preview();
+            let model = layout.preview_model();
+
+            // A panel with no room models nothing; otherwise the model is
+            // always a real, non-empty rectangle.
+            if panel.is_empty() {
+                assert!(model.is_empty(), "{width}x{height} screen {screen:?}");
+                continue;
+            }
+            assert!(!model.is_empty(), "{width}x{height} screen {screen:?}");
+
+            // Never exceeds the panel.
+            assert!(model.left() >= panel.left(), "{width}x{height} {screen:?}");
+            assert!(model.top() >= panel.top(), "{width}x{height} {screen:?}");
+            assert!(
+                model.right() <= panel.right(),
+                "{width}x{height} {screen:?}"
+            );
+            assert!(
+                model.bottom() <= panel.bottom(),
+                "{width}x{height} {screen:?}"
+            );
+
+            // Centred: the shared placement geometry's own centring offset
+            // is a floor division, so the two margins on an axis differ by
+            // at most the one pixel an odd remainder leaves.
+            let left_margin = model.left() - panel.left();
+            let right_margin = panel.right() - model.right();
+            assert!(
+                (left_margin - right_margin).abs() <= 1,
+                "{width}x{height} {screen:?}: left {left_margin}, right {right_margin}"
+            );
+            let top_margin = model.top() - panel.top();
+            let bottom_margin = panel.bottom() - model.bottom();
+            assert!(
+                (top_margin - bottom_margin).abs() <= 1,
+                "{width}x{height} {screen:?}: top {top_margin}, bottom {bottom_margin}"
+            );
+
+            // The screen's own aspect ratio: `WallpaperFit::Fit`'s contain
+            // arithmetic fixes one dimension to the panel's exactly and
+            // floors the other, so the two cross products can differ by
+            // less than the larger screen dimension, never more or in the
+            // wrong direction.
+            let (screen_w, screen_h) = (u64::from(screen.0), u64::from(screen.1));
+            let width_cross = u64::from(model.width) * screen_h;
+            let height_cross = u64::from(model.height) * screen_w;
+            let diff = width_cross.abs_diff(height_cross);
+            assert!(
+                diff < screen_w.max(screen_h),
+                "{width}x{height} screen {screen:?}: model {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_preview_model_box_for_a_portrait_screen_is_taller_than_wide() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+
+    let landscape = style_with_screen(theme, (1920, 1080));
+    let landscape_model = Layout::compute(
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        landscape.scale(),
+        landscape.theme(),
+        landscape.font(),
+        landscape.screen(),
+    )
+    .preview_model();
+    assert!(
+        landscape_model.width > landscape_model.height,
+        "{landscape_model:?}"
+    );
+
+    let portrait = style_with_screen(theme, (1080, 1920));
+    let portrait_model = Layout::compute(
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        portrait.scale(),
+        portrait.theme(),
+        portrait.font(),
+        portrait.screen(),
+    )
+    .preview_model();
+    assert!(
+        portrait_model.height > portrait_model.width,
+        "{portrait_model:?}"
+    );
+}
+
+#[test]
+fn a_screen_extent_change_invalidates_the_cached_preview_and_asks_again() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut chooser = sample_chooser();
+
+    let landscape = style_with_screen(theme, (1920, 1080));
+    let first = chooser
+        .next_preview(landscape)
+        .expect("a preview to render");
+    let pixels = Surface::new(first.width, first.height).expect("a test surface");
+    chooser.set_preview(first.clone(), pixels);
+    assert!(chooser.next_preview(landscape).is_none());
+    assert!(chooser.preview_surface(&first).is_some());
+
+    // The desktop's screen changed (a monitor swap, say): same window, same
+    // selection, same fit, but a different screen the preview must model.
+    // The held pixels answered the old screen and are unrepresentable as an
+    // answer to the new one.
+    let portrait = style_with_screen(theme, (1080, 1920));
+    let second = chooser
+        .next_preview(portrait)
+        .expect("the screen change asks again");
+    assert_ne!(second, first);
+    assert_eq!(second.path, first.path);
+    assert_eq!(second.fit, first.fit);
+    assert_ne!(second.screen, first.screen);
+    assert!(chooser.preview_surface(&second).is_none());
 }

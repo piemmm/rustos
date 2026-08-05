@@ -41,14 +41,14 @@ use tairix_wm::{
 };
 
 use crate::{
-    build_pin_views, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
-    open_tray, resolve_library_icons, serve_switchboard_request, ArtworkFileReader, ArtworkSandbox,
-    DesktopSession, DesktopShell, DragOrigin, IconRasteriser, InputSource, LaunchTable,
-    LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService,
-    ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter, SessionInputResponse,
-    SessionInputRouter, SessionPins, ShellOutcome, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, Unlocker,
-    SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
+    build_pin_views, deliver_pending_open, desktop_info, load_icon_set, load_library,
+    maybe_send_seat_report, open_tray, resolve_library_icons, serve_switchboard_request,
+    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, IconRasteriser,
+    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
+    PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
+    SessionInputResponse, SessionInputRouter, SessionPins, SessionWindows, ShellOutcome,
+    ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -2541,7 +2541,7 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     // The picker resolves its font from the active theme's UI size; the
     // click row must be computed from the same font so it lands on row 0.
     let theme = shell.session().active_theme();
-    let font = crate::picker::picker_font(theme);
+    let font = crate::picker::picker_font(theme, Scale::ONE);
     // The first entry row sits directly below the chrome (the command toolbar
     // strip over the breadcrumb path bar), so compute it from the shared
     // `chrome_height` the renderer reserves.
@@ -4724,7 +4724,7 @@ fn prompt_action_centre(action: PowerAction, index: usize, shell: &DesktopShell)
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
         Scale::ONE,
         theme,
-        prompt_font(theme),
+        prompt_font(theme, Scale::ONE),
     );
     let rect = rects[index];
     assert!(rect.width > 0, "the button fitted the action band");
@@ -6140,6 +6140,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 use crate::desktop::Desktop;
 use crate::pinboard::PinboardMenu;
 use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
+use tairix_window::WindowHost;
 
 /// The row stride, in bytes, of the [`headless_desktop`] frame.
 const FRAME_STRIDE: usize = 640 * 4;
@@ -6312,4 +6313,124 @@ fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() 
         "closing the menu takes its window down"
     );
     assert_eq!(comp.window_count(), before);
+}
+
+/// The pixel a window's retained content holds at `point`, for asserting
+/// what a repaint actually laid out rather than merely that it ran.
+fn pixel_at(comp: &Compositor, id: WindowId, point: Point) -> tairix_raster::Pixel {
+    let content = comp
+        .window(id)
+        .expect("the window is presented")
+        .content()
+        .expect("content is retained");
+    let x = u32::try_from(point.x).expect("the probe is on-surface");
+    let y = u32::try_from(point.y).expect("the probe is on-surface");
+    content.get(x, y).expect("the probe is within the surface")
+}
+
+/// Every session-owned surface reads the compositor's density rather than
+/// hard-coding its own, so a change to it is reflected in what each one
+/// lays out at its next repaint — not just that a repaint ran.
+#[test]
+fn session_surfaces_adapt_to_display_scale() {
+    let (mut shell, mut comp) = headless_desktop();
+    let scale_200 = Scale::from_percent(200).expect("200% is in range");
+
+    // 1. The confirmation prompt's window grows with the density: its
+    // fixed logical extents are scaled at paint time.
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    let confirm_id = confirm.wm_id().expect("confirm window exists");
+    let size_100 = window_rect(&comp, confirm_id);
+
+    assert!(comp.set_scale(scale_200));
+    confirm.repaint(&mut shell, &mut comp);
+    let size_200 = window_rect(&comp, confirm_id);
+    assert_eq!(
+        size_200.width,
+        scale_200.scale_length(crate::confirm::WIN_WIDTH)
+    );
+    assert_eq!(
+        size_200.height,
+        scale_200.scale_length(crate::confirm::WIN_HEIGHT)
+    );
+    assert!(size_200.width > size_100.width);
+
+    // 2. The picker's window grows the same way, at the browser-view
+    // extent it shares with the file manager.
+    let (mut shell2, mut comp2) = headless_desktop();
+    assert!(comp2.set_scale(scale_200));
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    assert!(picker.begin(1, &mut shell2, &mut comp2).is_ok());
+    let picker_id = picker.wm_id().expect("picker window exists");
+    let p_size_200 = window_rect(&comp2, picker_id);
+    assert_eq!(
+        p_size_200.width,
+        scale_200.scale_length(tairix_browse::WIN_WIDTH)
+    );
+    assert_eq!(
+        p_size_200.height,
+        scale_200.scale_length(tairix_browse::WIN_HEIGHT)
+    );
+
+    // 3. The lock's window is always the whole screen, so the density
+    // shows up in what gets laid out *inside* it instead: the panel
+    // grows enough to newly cover a point that was bare desktop
+    // background at the reference density.
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("user", &shell, &mut comp));
+    let lock_id = locked_window(&comp);
+    let probe = Point::new(20, 200);
+
+    assert!(comp.set_scale(Scale::ONE));
+    lock.repaint(&shell, &mut comp);
+    let pixel_100 = pixel_at(&comp, lock_id, probe);
+
+    assert!(comp.set_scale(scale_200));
+    lock.repaint(&shell, &mut comp);
+    let pixel_200 = pixel_at(&comp, lock_id, probe);
+
+    assert_ne!(
+        pixel_100, pixel_200,
+        "the panel's laid-out extent reaches this point only at the higher density"
+    );
+}
+
+/// `desktop_info` answers with the compositor's own screen rectangle,
+/// density, and active appearance — the same three facts
+/// [`tairix_window::WindowHost::desktop`] hands back to an application,
+/// since [`ShellWindowHost`] answers it by delegating to this very
+/// function.
+#[test]
+fn desktop_info_reports_compositor_state() {
+    let mut comp = compositor();
+    let scale_200 = Scale::from_percent(200).expect("200% is in range");
+    assert!(comp.set_scale(scale_200));
+
+    let info = desktop_info(&comp).expect("info exists");
+    assert_eq!(info.scale_percent(), 200);
+    assert_eq!(info.screen_width_px(), 1920);
+    assert_eq!(info.screen_height_px(), 1080);
+    assert_eq!(info.appearance(), Appearance::Dark);
+
+    let mut shell = shell();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut pins = PinService::new(
+        MemoryAssets::default(),
+        MemoryWriter::default(),
+        SessionPins::default(),
+    );
+    let mut windows = SessionWindows::new();
+    let mut host = ShellWindowHost {
+        shell: &mut shell,
+        compositor: &mut comp,
+        windows: &mut windows,
+        picker: &mut picker,
+        pins: &mut pins,
+    };
+
+    // What an application is actually handed, whole: the record is one
+    // value, so comparing it field by field could miss a field added
+    // later.
+    assert_eq!(WindowHost::desktop(&mut host), Ok(info));
 }

@@ -35,22 +35,34 @@
 //!
 //! # Producing wallpaper pixels
 //!
+//! A wallpaper render is told two extents: the **screen** it models and the
+//! **destination** it actually writes — the same extent for the desktop's
+//! own wallpaper, a smaller one for the chooser's true-scale preview.
 //! `OP_WALLPAPER_PREPARE` sniffs and decodes the source image at the
-//! smallest scale its format offers that still covers the requested
-//! destination (`tairix_image::decode_fitted`, so a 25-megapixel master
-//! bound for a 1080p screen never becomes 25 megapixels of held RGBA),
-//! computes its placement onto that destination through the one shared
-//! placement geometry (`tairix_wallpaper::place`), and holds both until
-//! `OP_WALLPAPER_RELEASE`. `OP_WALLPAPER_BAND` then produces destination
-//! rows of that placement a band at a time — bounded by
-//! [`crate::proto::MAX_FRAME`], never raised to fit a larger reply — either
-//! by repeating the decoded source at 1:1
-//! ([`tairix_wallpaper::WallpaperFit::Tile`])
-//! or by resampling its placed source rectangle through the same shared
-//! resampler the icon path uses. Wherever the destination is not fully
-//! covered by the placement (a letterboxed fit, a source smaller than the
-//! screen), those pixels are fully transparent, so the desktop's own
-//! backdrop colour shows through — this service never draws a backdrop.
+//! smallest scale its format offers that still covers the *screen*
+//! (`tairix_image::decode_fitted`, so a 25-megapixel master bound for a
+//! 1080p screen never becomes 25 megapixels of held RGBA), then asks the
+//! one shared scaling arithmetic (`tairix_wallpaper::nominal_source_size`)
+//! what size that decoded image must be treated as having to draw a
+//! screen-sized composition onto the destination instead. Exactly when the
+//! destination is the screen (the desktop's own case) this nominal size is
+//! the decoded size itself, so nothing more happens; otherwise the decoded
+//! pixels are resampled once, through the crate's one shared resampler, down
+//! to that nominal size before anything is placed — never upscaled, since a
+//! destination larger than the screen it claims to model is refused. The
+//! placement onto the destination is then computed from the nominal size
+//! through the one shared placement geometry (`tairix_wallpaper::place`),
+//! so the held pixels and the placement's source rectangle always share one
+//! coordinate space, and both are held until `OP_WALLPAPER_RELEASE`.
+//! `OP_WALLPAPER_BAND` then produces destination rows of that placement a
+//! band at a time — bounded by [`crate::proto::MAX_FRAME`], never raised to
+//! fit a larger reply — either by repeating the (possibly resampled) source
+//! at 1:1 ([`tairix_wallpaper::WallpaperFit::Tile`]) or by resampling its
+//! placed source rectangle through the same shared resampler the icon path
+//! uses. Wherever the destination is not fully covered by the placement (a
+//! letterboxed fit, a source smaller than the screen), those pixels are
+//! fully transparent, so the desktop's own backdrop colour shows through —
+//! this service never draws a backdrop.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -663,16 +675,28 @@ impl core::fmt::Display for WallpaperRenderFailure {
     }
 }
 
-/// The one decoded wallpaper source and its placement a worker holds
-/// between `OP_WALLPAPER_PREPARE` and `OP_WALLPAPER_RELEASE`.
+/// The one decoded (and, when the destination models a screen larger than
+/// itself, nominally resampled) wallpaper source and its placement a
+/// worker holds between `OP_WALLPAPER_PREPARE` and `OP_WALLPAPER_RELEASE`.
+///
+/// The pixels are held as a plain buffer rather than a [`RasterImage`]:
+/// this crate cannot construct one (its constructor is private to
+/// `tairix_image`), and a render never needs anything a `RasterImage`
+/// offers beyond the width, height, and straight-alpha bytes already kept
+/// here.
 #[derive(Debug)]
 struct PreparedWallpaper {
     /// The full destination canvas width, as prepared.
     dest_w: u32,
     /// The full destination canvas height, as prepared.
     dest_h: u32,
-    /// The decoded source image, straight alpha.
-    image: RasterImage,
+    /// The held source's width, in the same coordinate space as
+    /// [`Self::placement`]'s [`Placement::source`].
+    image_width: u32,
+    /// The held source's height (see [`Self::image_width`]).
+    image_height: u32,
+    /// The held source's straight-alpha RGBA8 pixels, row-major.
+    image_pixels: Vec<u8>,
     /// Where and how the source is drawn onto the destination.
     placement: Placement,
 }
@@ -690,13 +714,17 @@ impl ImageRenderService {
         }
     }
 
-    /// `OP_WALLPAPER_PREPARE`: decode the source, place it, hold both, and
-    /// answer with the band size a reply can carry. Replaces any source
-    /// (and placement) an earlier prepare left held.
+    /// `OP_WALLPAPER_PREPARE`: decode the source at the modelled screen's
+    /// scale, resample it down to the nominal size that same screen's
+    /// composition needs at the destination's own size, place it, hold
+    /// both, and answer with the band size a reply can carry. Replaces any
+    /// source (and placement) an earlier prepare left held.
     fn handle_wallpaper_prepare(
         &mut self,
         r: &mut Reader<'_>,
     ) -> Result<Vec<u8>, WallpaperRefusal> {
+        let screen_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let screen_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
         let dest_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
         let dest_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
         let fit_byte = r.u8().map_err(|_| WallpaperRefusal::MalformedRequest)?;
@@ -714,15 +742,46 @@ impl ImageRenderService {
         {
             return Err(WallpaperRefusal::MalformedRequest);
         }
-        let image = decode_wallpaper_source(image_bytes, dest_w, dest_h)?;
-        let placement = tairix_wallpaper::place((image.width(), image.height()), (dest_w, dest_h), fit)
-            // Unreachable: `place` only returns `None` for a zero-sided
-            // source or screen, and both are already ruled out above.
+        // The destination can never be asked to show more of the screen
+        // than the screen itself holds: a preview never magnifies past the
+        // real display, and requiring this here is what keeps the nominal
+        // scaling below from ever upscaling the decoded source. The screen
+        // itself carries the same fixed bound as any destination, since
+        // the desktop's own wallpaper models a screen no larger than that.
+        if screen_w == 0
+            || screen_w > MAX_WALLPAPER_WIDTH
+            || screen_h == 0
+            || screen_h > MAX_WALLPAPER_HEIGHT
+            || dest_w > screen_w
+            || dest_h > screen_h
+        {
+            return Err(WallpaperRefusal::MalformedRequest);
+        }
+        let image = decode_wallpaper_source(image_bytes, screen_w, screen_h)?;
+        let native = (image.width(), image.height());
+        let nominal = tairix_wallpaper::nominal_source_size(native, (screen_w, screen_h), (dest_w, dest_h))
+            // Unreachable: `native` and `(screen_w, screen_h)` are both
+            // already ruled out as zero-sided above.
+            .ok_or(WallpaperRefusal::Unrenderable)?;
+        let (image_width, image_height, image_pixels) = if nominal == native {
+            (native.0, native.1, image.into_pixels())
+        } else {
+            let source = Rgba8Image::new(native.0, native.1, image.pixels())
+                .map_err(|_| WallpaperRefusal::Unrenderable)?;
+            let shrunk = resample(&source, source.whole(), nominal.0, nominal.1)
+                .map_err(|_| WallpaperRefusal::Unrenderable)?;
+            (nominal.0, nominal.1, shrunk)
+        };
+        let placement = tairix_wallpaper::place((image_width, image_height), (dest_w, dest_h), fit)
+            // Unreachable: a nominal size is never zero-sided (clamped up
+            // to one) and `(dest_w, dest_h)` is already ruled out above.
             .ok_or(WallpaperRefusal::Unrenderable)?;
         self.wallpaper = Some(PreparedWallpaper {
             dest_w,
             dest_h,
-            image,
+            image_width,
+            image_height,
+            image_pixels,
             placement,
         });
         let mut w = Writer::new();
@@ -920,9 +979,9 @@ fn write_tiled_band(
     canvas_first_row: u32,
     out: &mut [u8],
 ) {
-    let src_w = prepared.image.width();
-    let src_h = prepared.image.height();
-    let pixels = prepared.image.pixels();
+    let src_w = prepared.image_width;
+    let src_h = prepared.image_height;
+    let pixels = prepared.image_pixels.as_slice();
     let x_start = u32::try_from(dest_rect.left().max(0)).unwrap_or(0);
     let x_end = u32::try_from(dest_rect.right().max(0))
         .unwrap_or(0)
@@ -959,9 +1018,9 @@ fn write_resampled_band(
     out: &mut [u8],
 ) -> Result<(), WallpaperRefusal> {
     let image = Rgba8Image::new(
-        prepared.image.width(),
-        prepared.image.height(),
-        prepared.image.pixels(),
+        prepared.image_width,
+        prepared.image_height,
+        prepared.image_pixels.as_slice(),
     )
     .map_err(|_| WallpaperRefusal::Unrenderable)?;
     let source = prepared.placement.source();
@@ -1007,18 +1066,9 @@ fn write_resampled_band(
 /// however many `OP_WALLPAPER_BAND` replies the worker's reply-size answer
 /// required.
 ///
-/// `width`, `height`, and `image.len()` are checked locally against
-/// [`MAX_WALLPAPER_WIDTH`]/[`MAX_WALLPAPER_HEIGHT`]/
-/// [`tairix_wallpaper::MAX_WALLPAPER_BYTES`] before anything is sent, so an
-/// out-of-bounds request never round-trips through the sandbox just to be
-/// refused. Every reply is validated fail-closed exactly as
-/// [`rasterise_icon`]'s is: a compromised worker can lie about a band's
-/// geometry, never hand the caller mismatched or wrongly-sized bytes.
-///
-/// The held source is always released before this returns — on the
-/// success path and on every error path alike — so a worker never holds a
-/// decoded wallpaper past one call; a failure while releasing is discarded
-/// rather than overriding this call's own more specific outcome.
+/// The `screen == (width, height)` case of [`render_wallpaper_for_screen`]:
+/// the destination models no screen other than the surface it is itself
+/// written onto — the desktop's own wallpaper, never a preview.
 ///
 /// # Errors
 ///
@@ -1032,17 +1082,64 @@ pub fn render_wallpaper<L: Launcher, S: tairix_log::Sink>(
     fit: WallpaperFit,
     image: &[u8],
 ) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    render_wallpaper_for_screen(sandbox, (width, height), width, height, fit, image)
+}
+
+/// Ask the sandboxed worker to decode `image` and place it under `fit` as
+/// if composing the whole `screen` extent, but render only a
+/// `width`×`height` **destination** that models that screen at its own
+/// scale — a true scale model when `(width, height)` is smaller than
+/// `screen` (a preview), or the screen itself when they are equal (see
+/// [`render_wallpaper`]). Returns the placed straight-alpha RGBA8 pixels:
+/// exactly `width * height * 4` bytes, assembled from however many
+/// `OP_WALLPAPER_BAND` replies the worker's reply-size answer required.
+///
+/// `screen`, `width`, `height`, and `image.len()` are checked locally
+/// against [`MAX_WALLPAPER_WIDTH`]/[`MAX_WALLPAPER_HEIGHT`]/
+/// [`tairix_wallpaper::MAX_WALLPAPER_BYTES`] before anything is sent, so an
+/// out-of-bounds request never round-trips through the sandbox just to be
+/// refused; the destination may never exceed the screen it models (a
+/// preview never magnifies past the real display). Every reply is
+/// validated fail-closed exactly as [`rasterise_icon`]'s is: a compromised
+/// worker can lie about a band's geometry, never hand the caller
+/// mismatched or wrongly-sized bytes.
+///
+/// The held source is always released before this returns — on the
+/// success path and on every error path alike — so a worker never holds a
+/// decoded wallpaper past one call; a failure while releasing is discarded
+/// rather than overriding this call's own more specific outcome.
+///
+/// # Errors
+///
+/// [`WallpaperRenderFailure`]: the sandbox failed, the worker refused the
+/// request (bad shape, an unrecognised format, a decode failure, or an
+/// out-of-range band), or a reply could not be believed.
+pub fn render_wallpaper_for_screen<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    screen: (u32, u32),
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+    image: &[u8],
+) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    let (screen_w, screen_h) = screen;
     if width == 0
         || width > MAX_WALLPAPER_WIDTH
         || height == 0
         || height > MAX_WALLPAPER_HEIGHT
+        || screen_w == 0
+        || screen_w > MAX_WALLPAPER_WIDTH
+        || screen_h == 0
+        || screen_h > MAX_WALLPAPER_HEIGHT
+        || width > screen_w
+        || height > screen_h
         || image.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES
     {
         return Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedRequest,
         ));
     }
-    let outcome = prepare_and_assemble(sandbox, width, height, fit, image);
+    let outcome = prepare_and_assemble(sandbox, screen, width, height, fit, image);
     let _ = release_wallpaper(sandbox);
     outcome
 }
@@ -1050,12 +1147,13 @@ pub fn render_wallpaper<L: Launcher, S: tairix_log::Sink>(
 /// Drive the prepare/band sequence and assemble the whole destination.
 fn prepare_and_assemble<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
+    screen: (u32, u32),
     width: u32,
     height: u32,
     fit: WallpaperFit,
     image: &[u8],
 ) -> Result<Vec<u8>, WallpaperRenderFailure> {
-    let rows_per_band = prepare_wallpaper(sandbox, width, height, fit, image)?;
+    let rows_per_band = prepare_wallpaper(sandbox, screen, width, height, fit, image)?;
     if rows_per_band == 0 {
         return Err(WallpaperRenderFailure::ReplyMalformed);
     }
@@ -1077,6 +1175,7 @@ fn prepare_and_assemble<L: Launcher, S: tairix_log::Sink>(
 /// Send `OP_WALLPAPER_PREPARE` and return the worker's answered band size.
 fn prepare_wallpaper<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
+    screen: (u32, u32),
     width: u32,
     height: u32,
     fit: WallpaperFit,
@@ -1084,6 +1183,8 @@ fn prepare_wallpaper<L: Launcher, S: tairix_log::Sink>(
 ) -> Result<u32, WallpaperRenderFailure> {
     let mut w = Writer::new();
     w.u8(OP_WALLPAPER_PREPARE);
+    w.u32(screen.0);
+    w.u32(screen.1);
     w.u32(width);
     w.u32(height);
     w.u8(fit_to_wire(fit));

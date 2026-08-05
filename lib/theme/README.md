@@ -44,18 +44,28 @@ specific id: `set_appearance(Appearance)` activates the matching built-in and
 appearance. Both return the now-active `ThemeId` and cannot fail (the
 built-ins are always present), so there is no error path to surface.
 
+`Appearance` itself is `tairix_abi::desktop::Appearance`, re-exported rather
+than restated: the desktop session reports the active appearance to every
+application over the window channel, and the byte on that wire must be the
+same value a theme carries (`AGENTS.md` §2.2). An app told the desktop has
+switched simply passes it to `set_appearance`.
+
 ## Why it lives in `lib/`
 
 Sibling userland crates may not depend on one another (`AGENTS.md` §17.4), so
 the one definition the GUI crates and apps all read belongs in `lib/*`,
 exactly as `lib/procinfo` is the shared home for the System Information
-client helpers. The crate has no dependencies and sits at the bottom of the
-§17.4 layering: it is depended on, never depends.
+client helpers. The crate sits at the bottom of the §17.4 layering: its only
+dependency is `lib/abi`, for the two vocabularies a theme shares with an ABI
+surface (`FontWeight`, which the font service rasterises at, and
+`Appearance`, which the window channel reports) — imported rather than
+restated so the values cannot drift. It depends on no kernel, driver, or
+userland crate.
 
 ## Stability tier
 
 `experimental` — the surface is the Stage 7 desktop theming seam, consumed
 first by `userland/gui/wm` and, in later increments, by the taskbar and the
-default apps. It is `no_std` (with `alloc`) and has no dependencies. No
+default apps. It is `no_std` (with `alloc`) and depends only on `lib/abi`. No
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
 §2.9).

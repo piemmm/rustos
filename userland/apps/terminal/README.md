@@ -70,9 +70,15 @@ unchanged (`AGENTS.md` §5.4).
 
 ## Rendering (`render`)
 
-`render(terminal, theme, viewport)` paints the grid into a `lib/raster`
+`render(terminal, theme, viewport, font)` paints the grid into a `lib/raster`
 `Surface` sized to the viewport, using the active theme's palette and the
-shared `lib/font` monospace face. Each cell is drawn with its own rendition:
+shared `lib/font` monospace face it is given. The face is the caller's because
+its size follows the desktop's UI density: the `Run` binary resolves it from
+the scale the session reports, and re-resolves it (re-deriving the grid and
+resizing the pty) when the desktop changes, so the renderer always measures
+cells at the size the window is actually drawn at.
+
+Each cell is drawn with its own rendition:
 its `lib/vt` `Attributes` select the foreground and background, resolved one
 way (`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /
 `surface` roles, the 16 basic colours and the 256-colour palette map through
