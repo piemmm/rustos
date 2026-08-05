@@ -182,6 +182,11 @@ impl GlyphClient {
     /// `static` — one issues syscalls, the other reads the machine's RAM
     /// size — so a real program's defaults are installed here instead,
     /// keeping the client free of explicit setup.
+    ///
+    /// Exists only where there is a default to install: without either
+    /// transport feature the client has nothing it could reach for, and a
+    /// draw with no injected transport composites nothing and fails closed.
+    #[cfg(any(feature = "rt", feature = "test-util"))]
     fn ensure_defaults(&mut self) {
         install_defaults(self);
     }
@@ -200,6 +205,7 @@ impl GlyphClient {
         weight: FontWeight,
         f: impl FnOnce(&CachedGlyph) -> R,
     ) -> Option<R> {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
         self.ensure_defaults();
         let Self {
             transport,
@@ -245,6 +251,7 @@ impl GlyphClient {
     /// console-atlas geometry scaled to `pixel_height` ([`fallback_metrics`])
     /// rather than leaving a caller with nothing to lay text out with.
     fn metrics(&mut self, family: FamilyKey, pixel_height: u32, weight: FontWeight) -> FontMetrics {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
         self.ensure_defaults();
         let key = (family.to_wire(), pixel_height, weight.to_wire());
         if let Some(metrics) = self.metrics.get(key) {
@@ -269,6 +276,7 @@ impl GlyphClient {
     /// The installed families, or an empty list when no transport is
     /// installed or the service refuses the request (fail closed).
     fn families(&mut self) -> Vec<FamilyEntry> {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
         self.ensure_defaults();
         let Some(transport) = self.transport.as_mut() else {
             return Vec::new();

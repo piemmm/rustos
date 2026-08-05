@@ -7,7 +7,6 @@ use alloc::vec::Vec;
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardCommand};
 use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
-use tairix_controls::Section;
 
 use super::{CycleOutcome, Service, MAX_CONSECUTIVE_PUBLISH_FAILURES};
 use crate::model::GroupingEdit;
@@ -18,6 +17,7 @@ use crate::test_host::{
     process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
     PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
 };
+use crate::view::Section;
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.

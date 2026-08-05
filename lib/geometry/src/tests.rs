@@ -1,6 +1,6 @@
 //! Unit tests for the integer geometry primitives.
 
-use super::{Point, Rect, Scale, REFERENCE_DPI};
+use super::{to_i32, Point, Rect, Scale, REFERENCE_DPI};
 
 #[test]
 fn rect_intersection_overlap() {
@@ -98,4 +98,16 @@ fn dpi_round_trips_through_the_reference_density() {
     assert_eq!(Scale::from_dpi(REFERENCE_DPI), Some(Scale::ONE));
     // A density below the floor maps to a rejected percentage.
     assert_eq!(Scale::from_dpi(1), None);
+}
+
+#[test]
+fn to_i32_carries_ordinary_extents_through() {
+    assert_eq!(to_i32(0), 0);
+    assert_eq!(to_i32(40), 40);
+    assert_eq!(to_i32(u32::try_from(i32::MAX).expect("fits")), i32::MAX);
+}
+
+#[test]
+fn to_i32_saturates_rather_than_wrapping() {
+    assert_eq!(to_i32(u32::MAX), i32::MAX);
 }

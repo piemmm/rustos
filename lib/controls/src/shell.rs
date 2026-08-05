@@ -25,11 +25,11 @@ use crate::collection::{Card, CardAction};
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
     plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
-    seam_thickness, seam_width, surface_rect, to_i32, BeadShape, PlateStyle, RenderInvariant,
+    seam_thickness, seam_width, surface_rect, to_i32, BeadShape, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
-    ValidationState,
+    RenderInvariant, ValidationState,
 };
 
 // --- Notification ------------------------------------------------------

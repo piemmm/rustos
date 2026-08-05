@@ -16,7 +16,6 @@ use tairix_abi::switchboard_ipc::{
     CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::{Errno, ProcId};
-use tairix_controls::Section;
 use tairix_wm::{Compositor, WindowId};
 
 use crate::config::SWITCHBOARD_RUN_PATH;
@@ -195,22 +194,6 @@ pub trait SwitchboardMailbox {
     /// and act on the difference.
     #[must_use]
     fn send(&mut self, pid: u64, command: SwitchboardCommand) -> bool;
-}
-
-/// The wire section naming the panel section the taskbar's own gesture
-/// asked for — a quick press on the capsule opening the overview, a hold
-/// opening recovery — so the section the user asked for is the section the
-/// panel opens on, decided once in the bar and relayed unchanged.
-#[must_use]
-pub const fn command_section(section: Section) -> CommandSection {
-    match section {
-        Section::Tasks => CommandSection::Tasks,
-        Section::Jobs => CommandSection::Jobs,
-        Section::Pressure => CommandSection::Pressure,
-        Section::Activities => CommandSection::Activities,
-        Section::Recovery => CommandSection::Recovery,
-        Section::Overview => CommandSection::Overview,
-    }
 }
 
 /// Handle the taskbar's request to open the Switchboard window at

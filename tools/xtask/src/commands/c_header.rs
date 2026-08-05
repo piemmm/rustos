@@ -1652,7 +1652,11 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently\n\
          * scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service\n\
          * level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and\n\
-         * mem_bytes the mapped address-space size. The inline name is valid for\n\
+         * mem_bytes the mapped address-space size. io_bytes_read/io_bytes_written\n\
+         * are the bytes this process's own file reads/writes actually transferred\n\
+         * over its whole lifetime (the quantity Linux reports as rchar/wchar),\n\
+         * never block-device traffic and never the byte count a caller asked for;\n\
+         * both saturate at UINT64_MAX. The inline name is valid for\n\
          * name_len bytes. */\n\
          typedef struct tairix_process_record {\n\
          \x20   uint64_t pid;\n\
@@ -1666,6 +1670,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint32_t priority;\n\
          \x20   uint64_t cpu_time_ns;\n\
          \x20   uint64_t mem_bytes;\n\
+         \x20   uint64_t io_bytes_read;\n\
+         \x20   uint64_t io_bytes_written;\n\
          \x20   uint8_t name_len;\n\
          \x20   uint8_t name[TAIRIX_PROCESS_NAME_MAX];\n\
          } tairix_process_record_t;\n\n",
@@ -3928,7 +3934,7 @@ mod tests {
             (
                 "ProcessRecord",
                 core::mem::size_of::<ProcessRecord>(),
-                120,
+                136,
                 core::mem::align_of::<ProcessRecord>(),
                 8,
             ),
@@ -4225,7 +4231,7 @@ mod tests {
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
             ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("tairix_sysinfo.h", "} tairix_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
-            ("tairix_sysinfo.h", "} tairix_process_record_t;", size_of::<ProcessRecord>(), 120, align_of::<ProcessRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_process_record_t;", size_of::<ProcessRecord>(), 136, align_of::<ProcessRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),

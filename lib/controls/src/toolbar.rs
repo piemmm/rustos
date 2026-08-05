@@ -20,7 +20,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{IconButton, SplitAction, SplitButton};
-use crate::paint::{heavy_contrast, plate_border, surface_rect, to_i32, RenderInvariant};
+use crate::paint::{heavy_contrast, plate_border, surface_rect, to_i32};
+use crate::state::RenderInvariant;
 
 /// Which region of a tool an activation came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

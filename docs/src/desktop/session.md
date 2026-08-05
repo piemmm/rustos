@@ -523,9 +523,11 @@ confused for one another. Two commands travel it:
 - **`OpenPanel { section }`** — the capsule gesture. The bar decides the
   section (a quick press its running-task list, a press held past the bar's
   long-press threshold its recovery list) and emits it as
-  `TaskbarResponse::OpenSwitchboard { section }`; the session only maps that
-  choice onto the wire vocabulary, so the section a user asked for is never
-  re-decided a second time. A press is **never lost**, whatever state the
+  `TaskbarResponse::OpenSwitchboard { section }` already spelled in the wire
+  vocabulary (`switchboard_ipc::CommandSection`); the session relays that
+  choice unchanged, so the section a user asked for is never re-decided a
+  second time and there is no second section vocabulary to keep in step.
+  A press is **never lost**, whatever state the
   service is in. With no instance live the press is itself the demand for
   one: the session revives the service through the same bring-up path and
   holds the section as *one* pending open — replaced, never queued — which

@@ -119,7 +119,11 @@
 //! The [`tabs`] module is the tab strip — [`Tabs`] and [`Tab`]. Tabs select one
 //! of several views: the selected tab carries a strong lower seam, a loading
 //! tab a Heat Seam, and a modified or error tab a shape-coded Signal Bead, all
-//! legible without colour; it emits a typed [`TabsAction`].
+//! legible without colour; it emits a typed [`TabsAction`]. A
+//! [`TabsOrientation`] lays the same strip out as a column instead, so a
+//! sidebar that selects one of several views is this control turned on its side
+//! rather than a second selection model: the selected tab then carries a
+//! leading seam, and the arrow keys follow the strip's own axis.
 //!
 //! The [`combo`] module is the choice-entry control — [`ComboBox`]. It composes
 //! the text-field focus model and the [`Menu`] model rather than re-deriving
@@ -139,7 +143,11 @@
 //! action [`Button`]s; and a panel is a stable-layout container with a header,
 //! grouped actions, a content region, and an anchor notch back to its invoker.
 //! Each interactive one emits a typed action ([`RowAction`], [`CardAction`],
-//! [`PanelAction`]); the owner enforces authority.
+//! [`PanelAction`]); the owner enforces authority. [`TableHeader`] names a
+//! table's columns and reports the sort the reader asked for, which the owner
+//! commits; it derives its column spans from the same one model a [`TableRow`]
+//! does, so a header can never drift out of alignment with its own rows, and it
+//! reorders nothing itself.
 //!
 //! The [`window`] module is the window-manager furniture family —
 //! [`WindowFrame`], [`TitleBar`], the compact [`WindowControl`] command
@@ -170,6 +178,48 @@
 //! actions show the Authority Mark rather than a plain disabled look; a tooltip
 //! is a short anchored affordance hint; and a help tip explains why an action
 //! is unavailable or recommended, with one optional safe next-step action.
+//!
+//! The [`nav`] module is the navigation trail — [`Breadcrumb`] and [`Crumb`].
+//! It names where the reader is as a path: the trailing crumb is the current
+//! location and is deliberately inert, every earlier crumb is an activatable
+//! ancestor, and a trail wider than its box elides oldest-first behind a
+//! leading ellipsis that itself reaches the newest ancestor it hides — so the
+//! current location is never the thing that gets dropped. One layout serves the
+//! render, the measurement, and the hit test, so a press can never land on a
+//! crumb that was not drawn; it emits a typed [`BreadcrumbAction`].
+//!
+//! The [`metric`] module is the metric-readout family — [`MetricTile`],
+//! [`MetricInstrument`], and [`StatusPill`]. A tile states one resource at a
+//! glance: an optional identity icon, a quiet label, a large reading with a
+//! quieter unit beside it, an optional detail line, and an optional instrument
+//! beneath — either a proportional track reusing the meter family's own
+//! [`MeterValue`], so a resource that cannot be measured shows a bare groove
+//! rather than a fabricated zero, or a [`Chart`] trend. Its [`MetricLayout`]
+//! chooses between the stacked form, which fills a column of its own, and the
+//! inline form, which puts label and reading on one line so several readings
+//! can be scanned down a narrow column; an unplated tile draws no plate of its
+//! own, so a stack of them shares one container's surface instead of nesting
+//! plates. A [`StatusPill`] is the compact capsule that names a state, toned by
+//! the theme's own signal roles. Both are read-only instruments: they report,
+//! and offer nothing to press.
+//!
+//! The [`record`] module is the record-list family — [`FactList`] with
+//! [`Fact`], and [`Timeline`] with [`TimelineEvent`]. A fact list reports what
+//! a thing *is*: the label quiet on the left, the value emphasised on the right
+//! and optionally toned, and under a narrow width the label truncates first,
+//! because the reading is what the reader came for. A timeline reports what
+//! *happened*: a spine spanning only the first mark to the last, shape-coded
+//! [`EventMark`]s so the record reads without colour, and a stamp column
+//! measured to the widest stamp so every stamp aligns. An empty collection
+//! draws nothing at all, since an empty frame would assert a record these
+//! controls cannot know exists.
+//!
+//! The [`rail`] module is the action rail — [`ActionRail`]. It is the vertical
+//! counterpart of [`Toolbar`]: the column of full-width [`Button`] commands a
+//! surface offers about whatever it is showing. It composes the button family
+//! rather than restating plate, press, role, disabled, or Authority Mark
+//! rendering, and owns only the stacking geometry, the hover and focus
+//! bookkeeping, and the typed [`RailAction`] it reports.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -184,14 +234,19 @@ pub mod combo;
 pub mod decision;
 pub mod menu;
 pub mod meter;
+pub mod metric;
+pub mod nav;
 mod paint;
+pub mod rail;
+pub mod record;
 pub mod scroll;
 pub mod scrollbar;
 pub mod selector;
 pub mod shell;
 pub mod state;
-pub mod switchboard;
 pub mod tabs;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testkit;
 pub mod text;
 pub mod toolbar;
 pub mod value;
@@ -200,13 +255,17 @@ pub mod window;
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use chart::{Chart, MAX_CHART_SAMPLES};
 pub use collection::{
-    Card, CardAction, CellAlign, IconTile, ListRow, Panel, PanelAction, PanelEdge, RowAction,
-    TableCell, TableRow,
+    Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
+    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use menu::{Menu, MenuAction, MenuItem};
 pub use meter::{Meter, MeterValue};
+pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
+pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
+pub use rail::{ActionRail, RailAction};
+pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
 };
@@ -219,16 +278,10 @@ pub use shell::{
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,
     FocusState, PlateSeating, PointerState, PressureKind, PressureState, ProgressValue,
-    RecoveryState, SelectionState, SizeAction, ValidationState, WindowActivationState,
-    WindowControlKind, WindowFurnitureState, WindowSizeState,
+    RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
+    WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-pub use switchboard::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, JobControl, JobSummary,
-    PressureAction, PressureCause, PressureControl, RecoveryControl, RecoveryItem, ResourceSummary,
-    Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction,
-    TaskSummary,
-};
-pub use tabs::{Tab, Tabs, TabsAction};
+pub use tabs::{Tab, Tabs, TabsAction, TabsOrientation};
 pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
@@ -253,7 +306,15 @@ mod menu_tests;
 #[cfg(test)]
 mod meter_tests;
 #[cfg(test)]
+mod metric_tests;
+#[cfg(test)]
+mod nav_tests;
+#[cfg(test)]
 mod paint_tests;
+#[cfg(test)]
+mod rail_tests;
+#[cfg(test)]
+mod record_tests;
 #[cfg(test)]
 mod scrollbar_tests;
 #[cfg(test)]
@@ -264,8 +325,6 @@ mod shell_tests;
 mod state_tests;
 #[cfg(test)]
 mod tabs_tests;
-#[cfg(test)]
-mod testkit;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

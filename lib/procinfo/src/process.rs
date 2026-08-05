@@ -246,6 +246,16 @@ mod tests {
     }
 
     fn record(pid: u64, name: &[u8], state: ProcessState) -> ProcessRecord {
+        record_with_io(pid, name, state, 0, 0)
+    }
+
+    fn record_with_io(
+        pid: u64,
+        name: &[u8],
+        state: ProcessState,
+        io_bytes_read: u64,
+        io_bytes_written: u64,
+    ) -> ProcessRecord {
         ProcessRecord::new(
             pid,
             1,
@@ -258,6 +268,8 @@ mod tests {
             SchedPriority::Normal,
             0,
             0,
+            io_bytes_read,
+            io_bytes_written,
             name,
         )
         .expect("record")
@@ -371,6 +383,19 @@ mod tests {
         assert_eq!(state_char(ProcessState::Stopped), 'T');
         assert!(PROCESS_HEADER.contains("PID"));
         assert!(PROCESS_HEADER.contains("NAME"));
+    }
+
+    #[test]
+    fn walk_carries_the_io_counters_to_the_sink() {
+        let fixture = Fixture::new(alloc::vec![
+            record_with_io(1, b"init", ProcessState::Running, 4096, 512),
+            record_with_io(2, b"busy", ProcessState::Running, u64::MAX, u64::MAX),
+        ]);
+        let got = collect(false, &fixture).expect("ok");
+        assert_eq!(got[0].io_bytes_read, 4096);
+        assert_eq!(got[0].io_bytes_written, 512);
+        assert_eq!(got[1].io_bytes_read, u64::MAX);
+        assert_eq!(got[1].io_bytes_written, u64::MAX);
     }
 
     #[test]

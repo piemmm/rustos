@@ -19,10 +19,10 @@ use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
 use tairix_abi::{CapabilityQuery, Errno, Signal};
-use tairix_controls::{Section, Switchboard, SwitchboardAction};
 
 use crate::model::{apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel};
 use crate::service::{RenderInputs, ServiceHost};
+use crate::view::{Section, Switchboard, SwitchboardAction};
 
 /// What the panel reports upward after applying an action whose effect
 /// touches the service's own grouping state, since the panel itself stays

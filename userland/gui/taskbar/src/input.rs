@@ -48,8 +48,9 @@
 //! the task list, and a middle press over the capsule switches back to the
 //! previous task.
 
+use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::PowerAction;
-use tairix_controls::{Section, TraySignalAction};
+use tairix_controls::TraySignalAction;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
@@ -163,7 +164,7 @@ pub enum TaskbarResponse {
     /// a dead service, revive and open — its window there.
     OpenSwitchboard {
         /// Which section the window should open showing.
-        section: Section,
+        section: CommandSection,
     },
     /// An appearance row of the system quick-actions menu was chosen. The
     /// embedder switches the desktop's active theme and repaints.
@@ -290,7 +291,7 @@ impl TaskbarInput {
                 self.capsule_press = None;
                 return match taskbar.tray_pointer(&event, scale) {
                     Some(TraySignalAction::Activated) => TaskbarResponse::OpenSwitchboard {
-                        section: Section::Tasks,
+                        section: CommandSection::Tasks,
                     },
                     None => TaskbarResponse::Ignored,
                 };
@@ -346,7 +347,7 @@ impl TaskbarInput {
             ..press
         });
         Some(TaskbarResponse::OpenSwitchboard {
-            section: Section::Recovery,
+            section: CommandSection::Recovery,
         })
     }
 
@@ -419,11 +420,11 @@ impl TaskbarInput {
         }
         if now_ns.saturating_sub(press.started_ns) >= LONG_PRESS_AFTER_NS {
             return TaskbarResponse::OpenSwitchboard {
-                section: Section::Recovery,
+                section: CommandSection::Recovery,
             };
         }
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Tasks,
+            section: CommandSection::Tasks,
         }
     }
 
@@ -660,10 +661,10 @@ impl TaskbarInput {
     fn apply_system_action(action: SystemAction) -> TaskbarResponse {
         match action {
             SystemAction::About => TaskbarResponse::OpenSwitchboard {
-                section: Section::Overview,
+                section: CommandSection::Overview,
             },
             SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
-                section: Section::Tasks,
+                section: CommandSection::Tasks,
             },
             // The row is only actionable when this identifier resolved
             // against the catalog, so a refusal here cannot happen through

@@ -322,6 +322,8 @@ fn record_with(pid: u64, name: &[u8], cpu_time_ns: u64, mem_bytes: u64) -> Proce
         SchedPriority::Normal,
         cpu_time_ns,
         mem_bytes,
+        0,
+        0,
         name,
     )
     .expect("record")

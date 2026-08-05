@@ -5,12 +5,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{
-    TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
-    TrayTaskName,
+    CommandSection, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary,
+    TrayTask, TrayTaskName,
 };
 use tairix_controls::{
-    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, Section,
-    TaskVisibility, TrayBadgeContent, TrayBadgeTone,
+    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, TaskVisibility,
+    TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
@@ -4191,7 +4191,7 @@ fn a_quick_press_on_the_capsule_opens_the_task_section() {
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Tasks
+            section: CommandSection::Tasks
         }
     );
     // The gesture is spent: a stray second release opens nothing.
@@ -4226,7 +4226,7 @@ fn a_long_press_on_the_capsule_opens_recovery_exactly_once() {
     assert_eq!(
         moved_at(&mut input, &mut bar, capsule, NOW_NS + LONG_PRESS_AFTER_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Recovery
+            section: CommandSection::Recovery
         }
     );
     // Already fired: neither a further sample nor the release fires again.
@@ -4256,7 +4256,7 @@ fn a_hold_released_with_no_intervening_sample_still_opens_recovery() {
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS + LONG_PRESS_AFTER_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Recovery
+            section: CommandSection::Recovery
         }
     );
 }
@@ -4303,7 +4303,7 @@ fn the_readout_safe_action_opens_switchboard() {
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Tasks
+            section: CommandSection::Tasks
         }
     );
     assert!(
@@ -5020,10 +5020,10 @@ fn keyboard_navigation_reaches_every_row_and_enter_activates_the_highlighted_one
 fn every_row_maps_to_exactly_its_expected_response() {
     let expected = alloc::vec![
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Overview,
+            section: CommandSection::Overview,
         },
         TaskbarResponse::OpenSwitchboard {
-            section: Section::Tasks,
+            section: CommandSection::Tasks,
         },
         TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.terminal").expect("id"),

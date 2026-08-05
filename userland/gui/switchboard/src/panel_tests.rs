@@ -4,10 +4,7 @@
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{Errno, SchedPriority, Signal};
-use tairix_controls::{
-    ActivityControl, PressureControl, RecoveryControl, Section, SwitchboardAction,
-    WindowControlKind,
-};
+use tairix_controls::WindowControlKind;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
@@ -22,6 +19,7 @@ use crate::test_host::{
     process_summary, process_summary_with, sample_with, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
     PROC_CONTROL_AUTHORITY,
 };
+use crate::view::{ActivityControl, PressureControl, RecoveryControl, Section, SwitchboardAction};
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.

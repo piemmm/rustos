@@ -217,7 +217,7 @@ pub use settings::{
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    command_section, deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,
+    deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,
     serve_switchboard_request, OwnerWindow, SwitchboardMailbox, SwitchboardOutcome,
     SwitchboardRefusal, SwitchboardServe,
 };

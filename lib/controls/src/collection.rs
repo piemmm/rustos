@@ -1,13 +1,19 @@
 //! The collection controls: [`ListRow`], [`TableRow`], [`TableCell`],
-//! [`Card`], and [`Panel`] (spec §11.13–§11.16).
+//! [`TableHeader`], [`Card`], and [`Panel`] (spec §11.13–§11.16).
 //!
 //! Rows, tables, cards, and panels are the surfaces that *group* other state
 //! and actions. They are controls in their own right: a row can be hovered,
 //! selected, focused, and activated; a table keeps its columns aligned while a
-//! row's state changes; a card carries a dominant state on its leading edge,
-//! progress on its bottom edge, and a count/alert on its top-trailing corner;
-//! a panel is a stable-layout container with a header, grouped actions, and a
-//! content region, optionally pointing an anchor notch back at its invoker.
+//! row's state changes; a [`TableHeader`] names those same columns and, for a
+//! sortable one, reports a sort request without ever reordering anything
+//! itself; a card carries a dominant state on its leading edge, progress on
+//! its bottom edge, and a count/alert on its top-trailing corner; a panel is a
+//! stable-layout container with a header, grouped actions, and a content
+//! region, optionally pointing an anchor notch back at its invoker.
+//!
+//! [`TableHeader`] and [`TableRow`] share exactly one column-width model — the
+//! private `column_spans` helper both call — so a header can never drift out
+//! of alignment with the rows it names.
 //!
 //! Every visible property resolves from the active [`Theme`] and [`Scale`], and
 //! every shared recipe (plate rounding, Signal Bead, Pressure Rail, focus ring)
@@ -23,17 +29,20 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_count_badge,
-    paint_icon_slot, plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_rail,
-    seam_thickness, seam_width, surface_rect, to_i32, RenderInvariant,
+    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_chevron,
+    paint_count_badge, paint_icon_slot, plate_border, pointer_activation, rail_thickness,
+    resolve_bead, resolve_rail, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
 };
-use crate::state::{ControlDisposition, ControlRole, ControlState, PointerState, SelectionState};
+use crate::state::{
+    ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
+    SelectionState,
+};
 
 /// The outcome of feeding input to a [`ListRow`] or [`TableRow`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -49,6 +58,16 @@ pub enum RowAction {
 // seam, Signal Bead, and focus ring; only their *content* (a label vs a set
 // of aligned cells) differs. That shared recipe lives here once so a change
 // to how a selected or pressured row reads cannot diverge between the two.
+
+/// The fixed two-rail gutter width reserved on a row's leading edge, always
+/// present regardless of the row's own state (spec §11.13). [`TableHeader`]
+/// reserves this identical gutter before laying its columns out, so its
+/// column titles begin exactly where an ordinary row's cells do — never a
+/// second, independently-derived gutter width that could drift out of step.
+#[must_use]
+fn row_gutter(theme: &Theme, scale: Scale, w: u32) -> u32 {
+    rail_thickness(theme, scale).saturating_mul(2).min(w)
+}
 
 /// Paint the shared row chrome — background tint, leading pressure and
 /// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
@@ -95,7 +114,7 @@ fn paint_row(
     // half and the selection accent rail in the inner half, so both read at
     // once without overlap and without moving the content.
     let rail_w = rail_thickness(theme, scale);
-    let gutter = rail_w.saturating_mul(2).min(w);
+    let gutter = row_gutter(theme, scale, w);
     let lead = x.saturating_add(gutter);
     let outer_w = rail_w.min(gutter);
     if let Some(color) = resolve_rail(theme, state) {
@@ -631,8 +650,11 @@ impl TableRow {
     }
 
     /// Paint the row into `surface` at `bounds`, laying its cells out across
-    /// `columns` (physical pixel widths). The last cell absorbs any rounding
-    /// remainder so the columns fill the content width exactly.
+    /// `columns` (physical pixel widths) through the shared `column_spans`
+    /// helper — the same one [`TableHeader::render`] derives its column
+    /// rectangles from, so a header can never drift out of alignment with the
+    /// rows beneath it. The last cell absorbs any rounding remainder so the
+    /// columns fill the content width exactly.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -649,31 +671,8 @@ impl TableRow {
             return;
         };
         let disposition = self.state.disposition();
-        let declared: u32 = columns.iter().copied().fold(0, u32::saturating_add);
-        if declared == 0 {
-            return;
-        }
-        let mut col_x = cx;
-        let content_end = cx.saturating_add(cw);
-        for (i, cell) in self.cells.iter().enumerate() {
-            let Some(&declared_w) = columns.get(i) else {
-                break;
-            };
-            if col_x >= content_end {
-                break;
-            }
-            // Scale the declared column widths into the actual content width so
-            // the columns stay proportional even when the content rect is
-            // narrower than the sum of the declared widths.
-            let scaled_w =
-                u32::try_from(u64::from(declared_w) * u64::from(cw) / u64::from(declared))
-                    .unwrap_or(cw);
-            let is_last = i + 1 == self.cells.len() || i + 1 == columns.len();
-            let col_w = if is_last {
-                content_end.saturating_sub(col_x)
-            } else {
-                scaled_w.min(content_end.saturating_sub(col_x))
-            };
+        let spans = column_spans(cx, cw, columns, self.cells.len());
+        for (cell, &(col_x, col_w)) in self.cells.iter().zip(spans.iter()) {
             cell.paint(
                 surface,
                 (col_x, cy, col_w, ch),
@@ -682,7 +681,6 @@ impl TableRow {
                 font,
                 disposition,
             );
-            col_x = col_x.saturating_add(col_w);
         }
     }
 
@@ -700,6 +698,591 @@ impl TableRow {
     /// Feed a key event; Space/Enter activates a focused, actionable row.
     pub fn on_key(&mut self, key: Key) -> Option<RowAction> {
         key_activation(self.state, key).then_some(RowAction::Activated)
+    }
+}
+
+/// The on-surface `(x, width)` span of each of the first `item_count` items
+/// laid out across `columns` (physical pixel widths), within a content region
+/// `content_w` pixels wide starting at `content_x`.
+///
+/// [`TableRow::render`] and [`TableHeader::render`]/[`TableHeader::column_at`]
+/// all derive a column's rectangle through this one function — never
+/// independently — so a header can never drift out of alignment with the rows
+/// it names (spec §11.14 "keep columns aligned"). The declared widths are
+/// scaled proportionally into the actual content width (so columns stay
+/// proportional even when the content rect is narrower than the sum of the
+/// declared widths), and the last item absorbs the rounding remainder so the
+/// columns fill the content width exactly. Fewer than `item_count` spans come
+/// back when the declared widths run out or the content width is exhausted
+/// first — the caller then simply has fewer columns to draw.
+fn column_spans(
+    content_x: u32,
+    content_w: u32,
+    columns: &[u32],
+    item_count: usize,
+) -> Vec<(u32, u32)> {
+    let declared: u32 = columns.iter().copied().fold(0, u32::saturating_add);
+    if declared == 0 {
+        return Vec::new();
+    }
+    let count = item_count.min(columns.len());
+    let content_end = content_x.saturating_add(content_w);
+    let mut spans = Vec::with_capacity(count);
+    let mut col_x = content_x;
+    for (i, &declared_w) in columns.iter().take(count).enumerate() {
+        if col_x >= content_end {
+            break;
+        }
+        let scaled_w =
+            u32::try_from(u64::from(declared_w) * u64::from(content_w) / u64::from(declared))
+                .unwrap_or(content_w);
+        let is_last = i + 1 == count;
+        let col_w = if is_last {
+            content_end.saturating_sub(col_x)
+        } else {
+            scaled_w.min(content_end.saturating_sub(col_x))
+        };
+        spans.push((col_x, col_w));
+        col_x = col_x.saturating_add(col_w);
+    }
+    spans
+}
+
+/// The `(x, width)` content span [`TableHeader`] lays its columns out across,
+/// given its surface-pixel bounds `(x, w)`.
+///
+/// A [`TableRow`] always reserves its fixed leading [`row_gutter`] plus the
+/// theme's control padding before its own column content begins, and the
+/// padding alone at the trailing edge (spec §11.13); this is the identical
+/// inset, so a header's [`column_spans`] start and end exactly where an
+/// ordinary row's do, even though the header itself draws no rails. `None`
+/// when the bounds are too narrow to hold any content past that inset.
+#[must_use]
+fn header_content_span(scale: Scale, theme: &Theme, x: u32, w: u32) -> Option<(u32, u32)> {
+    let gutter = row_gutter(theme, scale, w);
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let content_x = x.saturating_add(gutter).saturating_add(pad);
+    let content_right = x.saturating_add(w).saturating_sub(pad);
+    if content_right <= content_x {
+        return None;
+    }
+    Some((content_x, content_right - content_x))
+}
+
+// --- TableHeader ---------------------------------------------------------
+
+/// Which way a [`TableHeader`] column is sorted.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SortOrder {
+    /// Lowest to highest.
+    Ascending,
+    /// Highest to lowest.
+    Descending,
+}
+
+impl SortOrder {
+    /// The other order — what pressing an already-sorted column flips to.
+    #[must_use]
+    fn flipped(self) -> Self {
+        match self {
+            SortOrder::Ascending => SortOrder::Descending,
+            SortOrder::Descending => SortOrder::Ascending,
+        }
+    }
+}
+
+/// The outcome of feeding input to a [`TableHeader`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HeaderAction {
+    /// The reader asked to sort by `column`, in `order`.
+    ///
+    /// The header only *reports* this request; it never reorders anything
+    /// itself and never assumes the request was honoured. The owner commits
+    /// whatever sort it actually applied through [`TableHeader::set_sort`],
+    /// which is what the header then draws.
+    Sort {
+        /// The zero-based index of the column to sort by.
+        column: usize,
+        /// The direction to sort in.
+        order: SortOrder,
+    },
+}
+
+/// One column heading of a [`TableHeader`] (spec §11.14).
+///
+/// A column names one of a [`TableRow`]'s aligned cells and, when sortable,
+/// reports a request to sort by it. Its own composed [`ControlState`] carries
+/// disabled/denied/etc. exactly like a [`TableCell`]'s cell-specific state,
+/// down to the trailing Authority Mark a denied column shows through the same
+/// bead resolution the row family draws from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeaderColumn {
+    title: String,
+    align: CellAlign,
+    sortable: bool,
+    state: ControlState,
+}
+
+impl HeaderColumn {
+    /// A leading-aligned, sortable, enabled column with the given title.
+    ///
+    /// Sortable is the default: most columns of a table are meaningful to
+    /// order by, so a column opts *out* of sorting ([`HeaderColumn::fixed`])
+    /// rather than in.
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            align: CellAlign::Leading,
+            sortable: true,
+            state: ControlState::idle(),
+        }
+    }
+
+    /// A column that cannot be sorted (an actions or icon column).
+    #[must_use]
+    pub fn fixed(title: impl Into<String>) -> Self {
+        Self {
+            sortable: false,
+            ..Self::new(title)
+        }
+    }
+
+    /// This column with the given alignment.
+    #[must_use]
+    pub fn with_align(mut self, align: CellAlign) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// This column with the given composed state.
+    #[must_use]
+    pub fn with_state(mut self, state: ControlState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The column's title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The column's alignment.
+    #[must_use]
+    pub fn align(&self) -> CellAlign {
+        self.align
+    }
+
+    /// Whether pressing this column requests a sort.
+    #[must_use]
+    pub fn is_sortable(&self) -> bool {
+        self.sortable
+    }
+
+    /// The column's composed state.
+    #[must_use]
+    pub fn state(&self) -> ControlState {
+        self.state
+    }
+
+    /// Replace the column's composed state.
+    pub fn set_state(&mut self, state: ControlState) {
+        self.state = state;
+    }
+}
+
+/// The column names above a [`TableRow`]'s cells, sharing that row's
+/// column-width model through the shared `column_spans` helper so a header can
+/// never drift out of alignment with the rows it names (spec §11.14).
+///
+/// The header only *reports* a sort request through [`HeaderAction::Sort`];
+/// it never reorders anything itself and never assumes a reported request was
+/// honoured. The owner commits the sort it actually applied with
+/// [`TableHeader::set_sort`], which is what the header then draws.
+///
+/// Equal headers draw the same pixels, so a host may use `==` as its repaint
+/// gate: the columns, the committed sort, and the keyboard-focused column all
+/// compare, while the pointer coordinate and press latch beneath them — which
+/// no render path reads — do not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableHeader {
+    columns: Vec<HeaderColumn>,
+    sort: Option<(usize, SortOrder)>,
+    focus: Option<usize>,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The column a primary press landed on, held until release so a click
+    /// that slides onto another column does not sort it.
+    armed: RenderInvariant<Option<usize>>,
+}
+
+impl TableHeader {
+    /// A header over the given columns, with no committed sort and no focus.
+    #[must_use]
+    pub fn new(columns: Vec<HeaderColumn>) -> Self {
+        Self {
+            columns,
+            sort: None,
+            focus: None,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(None),
+        }
+    }
+
+    /// The header's columns.
+    #[must_use]
+    pub fn columns(&self) -> &[HeaderColumn] {
+        &self.columns
+    }
+
+    /// Mutable access to the header's columns.
+    pub fn columns_mut(&mut self) -> &mut [HeaderColumn] {
+        &mut self.columns
+    }
+
+    /// The committed sort, if any.
+    #[must_use]
+    pub fn sort(&self) -> Option<(usize, SortOrder)> {
+        self.sort
+    }
+
+    /// Adopt the owner's committed sort.
+    ///
+    /// The header never applies a sort itself; this is how the owner tells it
+    /// which sort it actually committed, so the header draws the caret
+    /// against the real outcome rather than assuming its own report was
+    /// honoured. Ignored (fail closed) for an out-of-range or unsortable
+    /// column, rather than clamping the request onto a different column.
+    pub fn set_sort(&mut self, sort: Option<(usize, SortOrder)>) {
+        self.sort = match sort {
+            None => None,
+            Some((index, order)) => match self.columns.get(index) {
+                Some(column) if column.is_sortable() => Some((index, order)),
+                _ => return,
+            },
+        };
+    }
+
+    /// The keyboard-focused column, if any.
+    #[must_use]
+    pub fn focus(&self) -> Option<usize> {
+        self.focus
+    }
+
+    /// Focus `index` (or clear focus with `None`); an out-of-range index
+    /// clears focus (fail closed).
+    pub fn set_focus(&mut self, index: Option<usize>) {
+        self.focus = index.filter(|&i| i < self.columns.len());
+    }
+
+    /// The scaled height the header needs, from the font's line height and
+    /// the theme's control padding, floored at the theme's standard control
+    /// height so a header never reads shorter than an ordinary row.
+    #[must_use]
+    pub fn measured_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let text_band = font.glyph_height().saturating_add(pad.saturating_mul(2));
+        text_band.max(scale.scale_length(theme.metrics().control_height).max(1))
+    }
+
+    /// The column index under `point`, given the header's `bounds`, the
+    /// active `scale`/`theme` (needed to reserve the same leading gutter an
+    /// ordinary row does), and the same declared `columns` widths the owner
+    /// renders with.
+    #[must_use]
+    pub fn column_at(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+        point: Point,
+    ) -> Option<usize> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (content_x, content_w) = header_content_span(scale, theme, x, w)?;
+        column_spans(content_x, content_w, columns, self.columns.len())
+            .into_iter()
+            .position(|(cx, cw)| {
+                point.x >= to_i32(cx)
+                    && point.x < to_i32(cx.saturating_add(cw))
+                    && point.y >= to_i32(y)
+                    && point.y < to_i32(y.saturating_add(h))
+            })
+    }
+
+    /// Paint the header into `surface` at `bounds`, laying its columns out
+    /// across `columns` (physical pixel widths) — the same declared widths
+    /// [`TableRow::render`] is called with — through the shared
+    /// `column_spans` helper over the shared `header_content_span`
+    /// leading/trailing inset, so a header column begins and ends exactly
+    /// where the cell beneath it does and can never drift out of alignment.
+    /// A `bounds` too small to hold anything omits content rather than
+    /// clipping or painting outside it.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        columns: &[u32],
+    ) {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        if w == 0 || h == 0 {
+            return;
+        }
+        let Some((content_x, content_w)) = header_content_span(scale, theme, x, w) else {
+            return;
+        };
+        for (i, &(cx, cw)) in column_spans(content_x, content_w, columns, self.columns.len())
+            .iter()
+            .enumerate()
+        {
+            let Some(column) = self.columns.get(i) else {
+                break;
+            };
+            let sort = self.sort.and_then(|(si, order)| (si == i).then_some(order));
+            let focused = self.focus == Some(i);
+            Self::paint_column(
+                surface,
+                (cx, y, cw, h),
+                scale,
+                theme,
+                font,
+                column,
+                sort,
+                focused,
+            );
+        }
+    }
+
+    /// Paint one column heading into `rect`, from its title, alignment, and
+    /// composed state, plus the sort caret when it is the currently sorted
+    /// column (`sort`) and the shared keyboard focus ring when `focused`.
+    ///
+    /// This mirrors [`TableCell::paint`] closely — muted-vs-emphasised text
+    /// and the trailing Authority Mark / recovery / completion bead through
+    /// the same [`resolve_bead`] the row family uses — so a header column
+    /// reads as one family with the cells beneath it.
+    // A private layout helper naturally takes every dimension the row
+    // family's own `TableCell::paint` already threads through a
+    // similarly-shaped function; it is not a public API surface.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_column(
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        column: &HeaderColumn,
+        sort: Option<SortOrder>,
+        focused: bool,
+    ) {
+        let (x, y, w, h) = rect;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let palette = theme.palette();
+        let disposition = column.state.disposition();
+        // Titles read muted by default; the sorted column alone takes the
+        // full (disposition-aware) foreground so it stands out from its
+        // neighbours without relying on the caret alone.
+        let fg = if sort.is_some() {
+            foreground(theme, disposition)
+        } else {
+            Color::from(palette.on_surface_muted)
+        };
+
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let mut left = x.saturating_add(pad);
+        let mut right = x.saturating_add(w).saturating_sub(pad);
+
+        // The trailing Authority Mark / recovery / completion bead, exactly
+        // as the row family draws a cell-specific state.
+        if let Some((color, shape)) = resolve_bead(theme, column.state) {
+            let size = scale.scale_length(theme.metrics().bead_size).max(3).min(h);
+            if size > 0 && right > left.saturating_add(size) {
+                let bx = right.saturating_sub(size);
+                let by = y + (h.saturating_sub(size)) / 2;
+                paint_bead(surface, bx, by, size, color, shape);
+                right = bx.saturating_sub(pad);
+            }
+        }
+
+        // The sort caret, beside the title on the side its alignment
+        // implies: a leading or centred title reads left-to-right toward the
+        // caret at the trailing edge; a trailing-aligned (numeric) title
+        // already hugs the trailing edge, so the caret takes the leading
+        // side instead. Either way it is carved out of the column's own
+        // width before the title is laid out, so the two can never overlap.
+        //
+        // The caret's square region is the row's own height, not a bead's
+        // diameter: a bead fills the region it is given, while a chevron
+        // insets its triangle well inside one, so a bead-sized region leaves a
+        // triangle barely two pixels across — a grey smudge whose direction,
+        // the whole point of the mark, cannot be read.
+        if let Some(order) = sort {
+            let caret_size = h;
+            if right > left.saturating_add(caret_size) {
+                let dir = match order {
+                    SortOrder::Ascending => ChevronDir::Up,
+                    SortOrder::Descending => ChevronDir::Down,
+                };
+                if column.align == CellAlign::Trailing {
+                    paint_chevron(
+                        surface,
+                        Rect::new(to_i32(left), to_i32(y), caret_size, caret_size),
+                        dir,
+                        fg,
+                    );
+                    left = left.saturating_add(caret_size).saturating_add(pad);
+                } else {
+                    let cx = right.saturating_sub(caret_size);
+                    paint_chevron(
+                        surface,
+                        Rect::new(to_i32(cx), to_i32(y), caret_size, caret_size),
+                        dir,
+                        fg,
+                    );
+                    right = cx.saturating_sub(pad);
+                }
+            }
+        }
+
+        if right > left {
+            let budget = right - left;
+            let fitted = font.truncate_to_width(&column.title, budget);
+            let tw = font.text_width(fitted);
+            let text_y = centred_text_y(font, y, h);
+            let tx = match column.align {
+                CellAlign::Leading => to_i32(left),
+                CellAlign::Center => to_i32(left) + (to_i32(budget) - to_i32(tw)).max(0) / 2,
+                CellAlign::Trailing => to_i32(right) - to_i32(tw),
+            };
+            font.draw_text(surface, tx, text_y, fitted, fg);
+        }
+
+        // The keyboard focus ring, distinct from the sort emphasis above.
+        if focused {
+            draw_outline(
+                surface,
+                x,
+                y,
+                w,
+                h,
+                plate_border(theme, scale).max(1),
+                Color::from(palette.rim_active),
+            );
+        }
+    }
+
+    /// The sort request pressing `index` would emit — the documented default
+    /// order ([`SortOrder::Ascending`]) when it is not already the sorted
+    /// column, else the flipped order — or `None` when the column is not
+    /// sortable or not actionable (fail closed).
+    fn choose(&self, index: usize) -> Option<HeaderAction> {
+        let column = self.columns.get(index)?;
+        if !column.is_sortable() || !column.state.is_actionable() {
+            return None;
+        }
+        let order = match self.sort {
+            Some((current, order)) if current == index => order.flipped(),
+            _ => SortOrder::Ascending,
+        };
+        Some(HeaderAction::Sort {
+            column: index,
+            order,
+        })
+    }
+
+    /// Feed a pointer event, given the header's `bounds`, the active
+    /// `scale`/`theme`, and the same declared `columns` widths it is rendered
+    /// with; a completed primary click over a sortable, actionable column
+    /// reports [`HeaderAction::Sort`].
+    ///
+    /// The scale and theme are the ones [`Self::render`] was called with:
+    /// hit-testing resolves a column through the very [`Self::column_at`] the
+    /// render path lays its columns out with, so a press can never sort a
+    /// column that was not drawn where the reader saw it.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+    ) -> Option<HeaderAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
+        let over = self.column_at(bounds, scale, theme, columns, *self.pointer);
+        match event {
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            } => {
+                *self.armed = over;
+                None
+            }
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => {
+                let armed = self.armed.take();
+                match (armed, over) {
+                    (Some(a), Some(o)) if a == o => self.choose(o),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Feed a key event: Left/Right move the focused column (wrapping),
+    /// Home/End jump to the ends, and Space/Enter sort the focused column.
+    pub fn on_key(&mut self, key: Key) -> Option<HeaderAction> {
+        if self.columns.is_empty() {
+            return None;
+        }
+        let last = self.columns.len() - 1;
+        match key {
+            Key::Named(NamedKey::Right) => {
+                self.focus = Some(match self.focus {
+                    Some(i) if i < last => i + 1,
+                    _ => 0,
+                });
+                None
+            }
+            Key::Named(NamedKey::Left) => {
+                self.focus = Some(match self.focus {
+                    Some(0) | None => last,
+                    Some(i) => i - 1,
+                });
+                None
+            }
+            Key::Named(NamedKey::Home) => {
+                self.focus = Some(0);
+                None
+            }
+            Key::Named(NamedKey::End) => {
+                self.focus = Some(last);
+                None
+            }
+            _ => {
+                let index = self.focus?;
+                let column = self.columns.get(index)?;
+                let activated = column.state.with_focus(FocusState::FOCUSED);
+                if key_activation(activated, key) {
+                    self.choose(index)
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -823,9 +1406,18 @@ impl Card {
     }
 
     /// The footer button rectangles, laid out equal-width across the bottom of
-    /// the card's content, above the progress seam. Shared by rendering and
-    /// pointer routing so the two never disagree.
-    pub(crate) fn footer_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    /// the card's content, above the progress seam.
+    ///
+    /// This is the one definition of where the footer buttons are: the card
+    /// draws them into these rectangles and hit-tests
+    /// [`on_pointer`](Card::on_pointer) against them, so the two can never
+    /// disagree, and a composer embedding the card reads the same answer the
+    /// card itself acts on rather than re-deriving the layout. The rectangles
+    /// are in the same coordinate space as `bounds`, one per
+    /// [`footer`](Card::footer) button in order; the result is empty when the
+    /// card has no footer or `bounds` is too small to seat one.
+    #[must_use]
+    pub fn footer_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let mut rects = Vec::new();
         if self.footer.is_empty() {
             return rects;

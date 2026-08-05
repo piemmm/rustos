@@ -23,10 +23,13 @@ over a resolution-independent design grid, so the same glyph is
 - `vector` — `IconLayer`, `VectorIcon`: the vector representation and
   `rasterise(side) -> Surface` / `draw_onto(&mut Surface)`.
 - `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
-  battery, and bell; the file manager's folder, folder-open, generic file,
-  app-bundle, text, image, archive, and executable; the file manager's toolbar
-  commands nav-back, nav-forward, nav-up, refresh, view-toggle, sort,
-  new-folder, trash, and empty-trash; and a generic fallback),
+  battery, and bell, its program-library launcher, and its Switchboard tray
+  capsule; the file manager's folder, folder-open, generic file, app-bundle,
+  text, image, archive, and executable; the file manager's toolbar commands
+  nav-back, nav-forward, nav-up, refresh, view-toggle, sort, new-folder,
+  trash, and empty-trash; list-menu, for a screen's own section list behind a
+  location breadcrumb; and a generic fallback. A fine-grained content-type or
+  disk kind names its own asset id and shares its family's built-in glyph),
   `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
   `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`),
   `builtin_icon`, and `disk_icon`.

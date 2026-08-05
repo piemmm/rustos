@@ -111,7 +111,7 @@ impl Activities {
     }
 
     /// Whether another activity may still be created
-    /// ([`SwitchboardModel::can_create_activity`](tairix_controls::SwitchboardModel::can_create_activity)).
+    /// ([`SwitchboardModel::can_create_activity`](crate::view::SwitchboardModel::can_create_activity)).
     #[must_use]
     pub fn can_create(&self) -> bool {
         self.groups.len() < MAX_ACTIVITIES

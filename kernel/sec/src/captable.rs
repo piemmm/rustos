@@ -21,7 +21,9 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE};
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
@@ -159,7 +161,18 @@ impl Default for ProcName {
 /// invariant by writing the effective set directly. Construct via
 /// [`Self::derive`] and mutate only through [`Self::delegate`] and
 /// [`Self::revoke`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Carries no [`Eq`]/[`PartialEq`]: nothing in the kernel compares a whole
+/// record, and the per-process I/O counters are live accounting state, not
+/// a value with a meaningful equality. [`Clone`] is still needed — the
+/// syscall dispatcher clones a snapshot of the caller's record under a
+/// briefly held read lock so the rest of the call runs lock-free — so the
+/// counters are [`Arc`]-shared [`AtomicU64`]s: cloning the record shares the
+/// same underlying counters rather than resetting a fresh pair, so an
+/// increment made through a per-syscall snapshot still lands on the one
+/// total the registry's live entry (and every other outstanding snapshot)
+/// reads back.
+#[derive(Clone, Debug)]
 pub struct TaskCapabilities {
     task: TaskId,
     owner: UserId,
@@ -268,6 +281,41 @@ pub struct TaskCapabilities {
     /// so a per-console service may trust the origin to place its caller on
     /// a console. It confers no capability.
     console: u64,
+    /// Bytes actually transferred by this process's own `fs_read`
+    /// (and delegated-read) system calls: the count the secured VFS really
+    /// moved, never the length the caller asked for. Monotonic for the
+    /// process's lifetime and saturating rather than wrapping.
+    ///
+    /// `Arc<AtomicU64>` rather than a plain `u64` or a bare `AtomicU64`: the
+    /// syscall dispatcher works off a per-call `Clone` of this record (see
+    /// the struct docs), so the counter must be a shared cell every clone
+    /// of one task's record points at, not a value each clone would carry
+    /// its own independent copy of. [`Self::record_bytes_read`] then updates
+    /// it through the shared `&TaskCapabilities` every syscall handler
+    /// already holds, with no additional lock on the file I/O hot path.
+    io_bytes_read: Arc<AtomicU64>,
+    /// Bytes actually transferred by this process's own `fs_write` system
+    /// calls, mirroring [`Self::io_bytes_read`] in every respect but
+    /// direction.
+    io_bytes_written: Arc<AtomicU64>,
+}
+
+/// Add `delta` to the value `counter` holds, clamping at [`u64::MAX`]
+/// rather than wrapping on overflow.
+///
+/// Ordering is [`Ordering::Relaxed`] throughout: the counter is a pure
+/// accounting total with no other memory access it must be ordered
+/// against, so the compare-and-swap loop only needs to converge on a
+/// single, consistent value, never to publish or observe unrelated state.
+fn saturating_fetch_add(counter: &AtomicU64, delta: u64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(delta);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 impl TaskCapabilities {
@@ -327,6 +375,8 @@ impl TaskCapabilities {
             spawn_path: Vec::new(),
             start_time: 0,
             console: ORIGIN_CONSOLE_NONE,
+            io_bytes_read: Arc::new(AtomicU64::new(0)),
+            io_bytes_written: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -532,6 +582,68 @@ impl TaskCapabilities {
     #[must_use]
     pub fn console(&self) -> u64 {
         self.console
+    }
+
+    /// Cumulative bytes this process has actually read through its own
+    /// `fs_read` (and delegated-read) system calls.
+    ///
+    /// Zero for a task that has never read a file. Consumers derive a rate
+    /// from the delta between two samples, exactly as for
+    /// [`Self::start_time`]-relative CPU time.
+    #[must_use]
+    pub fn io_bytes_read(&self) -> u64 {
+        self.io_bytes_read.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative bytes this process has actually written through its own
+    /// `fs_write` system calls.
+    ///
+    /// Zero for a task that has never written a file. Mirrors
+    /// [`Self::io_bytes_read`] in every respect but direction.
+    #[must_use]
+    pub fn io_bytes_written(&self) -> u64 {
+        self.io_bytes_written.load(Ordering::Relaxed)
+    }
+
+    /// Attribute `n` more bytes transferred by this process's own
+    /// `fs_read` (or delegated-read) call to its running total.
+    ///
+    /// Called once, from the one shared descriptor-read path in
+    /// `kernel/core`, with the byte count the secured VFS actually moved —
+    /// never the length the caller requested. Saturates at [`u64::MAX`]
+    /// rather than wrapping. Takes `&self` (not `&mut self`): the counter
+    /// is a plain [`Ordering::Relaxed`] atomic with no ordering relationship
+    /// to any other memory, so every concurrent reader of this task's
+    /// record — including the syscall path itself — can update it without
+    /// taking a write lock on the surrounding [`CapTable`].
+    pub fn record_bytes_read(&self, n: u64) {
+        saturating_fetch_add(&self.io_bytes_read, n);
+    }
+
+    /// Attribute `n` more bytes transferred by this process's own
+    /// `fs_write` call to its running total. Mirrors
+    /// [`Self::record_bytes_read`] in every respect but direction.
+    pub fn record_bytes_written(&self, n: u64) {
+        saturating_fetch_add(&self.io_bytes_written, n);
+    }
+
+    /// Continue `previous`'s I/O totals in this record instead of starting
+    /// fresh ones.
+    ///
+    /// A spawned child's record is installed twice under one task id — the
+    /// empty-set placeholder at admit, then the effective set once its image
+    /// verifies — and each derivation mints its own counter cells. Without
+    /// this, the second install would silently restart the task's totals at
+    /// zero mid-life, so a byte the loading slice moved would vanish and the
+    /// counters would not be monotonic for the process's lifetime as their
+    /// contract promises. [`CapTable::insert`] applies it at the one place a
+    /// record can replace a live entry, so the continuity holds for every
+    /// install path without any caller having to remember it, and only ever
+    /// between records of the *same* task (the registry keys on
+    /// [`Self::task`], which no setter can change after derivation).
+    fn adopt_io_counters(&mut self, previous: &Self) {
+        self.io_bytes_read = Arc::clone(&previous.io_bytes_read);
+        self.io_bytes_written = Arc::clone(&previous.io_bytes_written);
     }
 
     /// The task's kernel-attested monotonic admission timestamp.
@@ -862,9 +974,18 @@ impl CapTable {
     /// return is an unusual condition — task ids are not recycled
     /// within a single scheduler instance (see
     /// `kernel/sched::scheduler` invariants) — but is surfaced rather
-    /// than silently dropped so callers can audit / refuse it.
-    pub fn insert(&mut self, caps: TaskCapabilities) -> Option<TaskCapabilities> {
-        self.entries.insert(caps.task(), caps)
+    /// than silently dropped so callers can audit / refuse it. The one
+    /// routine replacement is a spawned child's effective record taking
+    /// over from its admit-time placeholder; because the entry is keyed on
+    /// the record's own [`TaskCapabilities::task`], a replacement always
+    /// concerns that same task, so the incoming record continues the
+    /// outgoing one's per-process I/O totals rather than restarting them.
+    pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<TaskCapabilities> {
+        let task = caps.task();
+        if let Some(previous) = self.entries.get(&task) {
+            caps.adopt_io_counters(previous);
+        }
+        self.entries.insert(task, caps)
     }
 
     /// Borrow the registry entry for `task` immutably.
@@ -1451,6 +1572,103 @@ mod tests {
         assert!(t.effective().is_empty());
     }
 
+    #[test]
+    fn io_counters_start_at_zero_and_add_the_bytes_moved() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let t = TaskCapabilities::derive(TaskId(60), UserId(1000), grant, grant, &sink);
+        assert_eq!(t.io_bytes_read(), 0);
+        assert_eq!(t.io_bytes_written(), 0);
+
+        // A short transfer credits what actually moved: the caller asked for
+        // 4096 bytes and the VFS returned 100, so 100 is what lands.
+        t.record_bytes_read(100);
+        t.record_bytes_written(7);
+        assert_eq!(t.io_bytes_read(), 100);
+        assert_eq!(t.io_bytes_written(), 7);
+
+        // Successive transfers accumulate, and each direction is separate.
+        t.record_bytes_read(1);
+        assert_eq!(t.io_bytes_read(), 101);
+        assert_eq!(t.io_bytes_written(), 7);
+
+        // A transfer that moved nothing leaves the total untouched.
+        t.record_bytes_read(0);
+        t.record_bytes_written(0);
+        assert_eq!(t.io_bytes_read(), 101);
+        assert_eq!(t.io_bytes_written(), 7);
+    }
+
+    #[test]
+    fn io_counters_saturate_rather_than_wrapping() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let t = TaskCapabilities::derive(TaskId(61), UserId(1000), grant, grant, &sink);
+        t.record_bytes_read(u64::MAX - 1);
+        t.record_bytes_written(u64::MAX);
+
+        t.record_bytes_read(10);
+        t.record_bytes_written(1);
+        assert_eq!(t.io_bytes_read(), u64::MAX);
+        assert_eq!(t.io_bytes_written(), u64::MAX);
+
+        // Clamped, never wrapped back to a small (and so misleadingly
+        // idle-looking) total.
+        t.record_bytes_read(u64::MAX);
+        assert_eq!(t.io_bytes_read(), u64::MAX);
+    }
+
+    #[test]
+    fn io_counters_are_independent_between_tasks() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let parent = TaskCapabilities::derive(TaskId(62), UserId(1000), grant, grant, &sink);
+        let child = TaskCapabilities::derive(TaskId(63), UserId(1000), grant, grant, &sink);
+        parent.record_bytes_read(4096);
+        parent.record_bytes_written(512);
+        // Each task's record is derived on its own, so one task's I/O can
+        // never be credited to another's.
+        assert_eq!(child.io_bytes_read(), 0);
+        assert_eq!(child.io_bytes_written(), 0);
+        child.record_bytes_read(8);
+        assert_eq!(parent.io_bytes_read(), 4096);
+        assert_eq!(child.io_bytes_read(), 8);
+    }
+
+    #[test]
+    fn cloned_snapshots_of_one_task_share_its_counters() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let live = TaskCapabilities::derive(TaskId(64), UserId(1000), grant, grant, &sink);
+        // The dispatcher answers each syscall off a clone of the live record;
+        // an increment made through that snapshot must land on the one total
+        // the registry's entry reads back.
+        let snapshot = live.clone();
+        snapshot.record_bytes_read(2048);
+        snapshot.record_bytes_written(64);
+        assert_eq!(live.io_bytes_read(), 2048);
+        assert_eq!(live.io_bytes_written(), 64);
+        // And the reverse direction: a later snapshot observes earlier bytes.
+        live.record_bytes_read(1);
+        assert_eq!(live.clone().io_bytes_read(), 2049);
+    }
+
+    #[test]
+    fn narrowing_a_record_leaves_its_io_totals_alone() {
+        let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
+        let sink = RecordingSink::new();
+        let mut t = TaskCapabilities::derive(TaskId(65), UserId(1000), grant, grant, &sink);
+        t.record_bytes_read(300);
+        t.record_bytes_written(30);
+        t.delegate(&caps_of(&[CapabilityId::FS_MOUNT]), &sink)
+            .expect("narrowing is permitted");
+        assert!(t.revoke(CapabilityId::FS_MOUNT, &sink));
+        // Capability changes are authority, not accounting: the process's
+        // transferred-byte facts are untouched by either.
+        assert_eq!(t.io_bytes_read(), 300);
+        assert_eq!(t.io_bytes_written(), 30);
+    }
+
     // ---------------------------------------------------------------
     // Stage 2.7 follow-up (f2): per-task CapTable registry.
     // ---------------------------------------------------------------
@@ -1566,5 +1784,74 @@ mod tests {
         assert!(table.caps_for(TaskId(2)).is_none());
         assert!(table.caps_for(TaskId(1)).is_some());
         assert!(table.caps_for(TaskId(3)).is_some());
+    }
+
+    #[test]
+    fn captable_replacement_continues_the_task_io_totals() {
+        // A spawned child's effective record replaces its admit-time
+        // placeholder under the same id; the bytes the placeholder accounted
+        // must survive that handover rather than restarting at zero.
+        let mut table = CapTable::new();
+        let placeholder = make_caps(21, &[]);
+        placeholder.record_bytes_read(4096);
+        placeholder.record_bytes_written(512);
+        table.insert(placeholder);
+
+        let effective = make_caps(21, &[tairix_abi::CapabilityId::FS_MOUNT]);
+        assert_eq!(effective.io_bytes_read(), 0);
+        let displaced = table.insert(effective).expect("placeholder returned");
+        let current = table.caps_for(TaskId(21)).expect("present");
+        assert_eq!(current.io_bytes_read(), 4096);
+        assert_eq!(current.io_bytes_written(), 512);
+        // The new authority is the effective set, not the placeholder's.
+        assert!(current.has(tairix_abi::CapabilityId::FS_MOUNT));
+        // One shared pair of counters, so a byte moved after the handover is
+        // visible through the displaced record too — it is the same task.
+        current.record_bytes_read(4);
+        assert_eq!(displaced.io_bytes_read(), 4100);
+    }
+
+    #[test]
+    fn captable_replacement_never_shares_across_tasks() {
+        let mut table = CapTable::new();
+        let first = make_caps(31, &[]);
+        first.record_bytes_read(1024);
+        table.insert(first);
+        table.insert(make_caps(32, &[]));
+        // A different id is a different task: it starts its own accounting
+        // and observing one never reveals the other's activity.
+        assert_eq!(
+            table.caps_for(TaskId(32)).expect("present").io_bytes_read(),
+            0
+        );
+        table
+            .caps_for(TaskId(32))
+            .expect("present")
+            .record_bytes_read(7);
+        assert_eq!(
+            table.caps_for(TaskId(31)).expect("present").io_bytes_read(),
+            1024
+        );
+        assert_eq!(
+            table.caps_for(TaskId(32)).expect("present").io_bytes_read(),
+            7
+        );
+    }
+
+    #[test]
+    fn captable_reused_id_after_exit_starts_fresh_counters() {
+        // Exit evicts the entry, so a later task that happens to reuse the
+        // numeric id finds no predecessor to continue and starts at zero —
+        // the dead task's activity can never be attributed to it.
+        let mut table = CapTable::new();
+        let first = make_caps(41, &[]);
+        first.record_bytes_read(9999);
+        table.insert(first);
+        table.remove(TaskId(41)).expect("evicted on exit");
+        table.insert(make_caps(41, &[]));
+        assert_eq!(
+            table.caps_for(TaskId(41)).expect("present").io_bytes_read(),
+            0
+        );
     }
 }

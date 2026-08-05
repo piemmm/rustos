@@ -36,5 +36,12 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
 
+[features]
+# Exposes `testkit`'s shared theme fixtures (e.g. the heavy-contrast theme
+# every control's own test suite uses) to another crate's own tests, so a
+# host application composing these controls tests against the identical
+# fixtures rather than a private copy of its own.
+test-support = []
+
 [lints]
 workspace = true

@@ -22,9 +22,9 @@ use tairix_theme::Theme;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame,
-    surface_rect, to_i32, ChevronDir, PlateStyle, RenderInvariant,
+    surface_rect, to_i32, ChevronDir, PlateStyle,
 };
-use crate::state::{ControlRole, ControlState, SelectionState};
+use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
 
 /// The outcome of feeding input to a [`ComboBox`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

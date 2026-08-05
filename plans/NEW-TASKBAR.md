@@ -78,7 +78,8 @@ launchers / popup / pins / task list / notification area / clock and emits
 typed `TaskbarResponse`s; `tairix-session` presents the bar, popup, and
 menu through the compositor, owns the theme, loads/merges the catalog
 stores, and resolves those responses (`plans/FIX-DESKTOP.md` async launch
-is done); `lib/controls::switchboard` already renders a `SwitchboardModel`
+is done); the Switchboard app's own screen composition
+(`userland/gui/switchboard::view`) already renders a `SwitchboardModel`
 → `SwitchboardAction` from the shared Reactive Alloy controls; the `files`
 app is a live windowed browser (`plans/APPWIN.md` AW3/AW5). This plan wires
 the remaining pieces together and fills the gaps.
@@ -199,8 +200,8 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
 - `lib/controls` — add the shared controls the mockups need that do not yet
   exist (resource **Meter**, **PressureRail**, **ActivitySeam**, **SignalBead**
   refinements) so both the taskbar icon and the Switchboard window compose
-  them (T9, T11–T14). The existing `switchboard` composition is extended
-  (Pressure + Activities sections) in place (§2.13).
+  them (T9, T11–T14). The Switchboard app's own screen composition is
+  extended (Pressure + Activities sections) in place (§2.13).
 - `userland/gui/taskbar` — the leading library+files buttons, the pin strip,
   the reserved Switchboard slot, and the richer notification area (T4, T6, T8,
   T9).
@@ -209,8 +210,8 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   relay the tray-signal summary to the taskbar (T4–T9).
 - `userland/gui/switchboard` **(new)** — the Switchboard component: a
   long-running monitor service that samples the system and publishes the
-  tray-signal summary + serves the on-demand overview window built on
-  `lib/controls::switchboard` (T10–T13).
+  tray-signal summary + serves the on-demand overview window, whose screen is
+  this application's own composition over the shared controls (T10–T13).
 - `userland/system/applib` **(new command app)** — the first-class CLI for
   programmatic library add/remove/list, the installer's peer (T2).
 
@@ -808,10 +809,10 @@ What now stands:
   previous task (an MRU-of-two the task list keeps), hover previews via the
   capsule's instrument readout, and a primary press resolves as a **tap or
   a hold** — a quick release reports
-  `TaskbarResponse::OpenSwitchboard { section: Section::Tasks }` (the
+  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Tasks }` (the
   panel's NOW column), a press held past `input::LONG_PRESS_AFTER_NS`
-  (500 ms) reports it with `Section::Recovery`, and the readout's one safe
-  action, "Open Switchboard", reports the tap's response. One press reports
+  (500 ms) reports it with `CommandSection::Recovery`, and the readout's one
+  safe action, "Open Switchboard", reports the tap's response. One press reports
   exactly one response: the threshold is measured against the monotonic
   time the caller passes to `TaskbarInput::handle`, resolved on the next
   event the router handles (a motion sample taken while the press is held,
@@ -925,18 +926,19 @@ tests it rides on. Docs: `userland/gui/switchboard/README.md`,
 ## T11 — Switchboard window: the Open Panel (desktop1 panel 2, desktop2a §1–2)
 
 **Deliverables**
-- `userland/gui/switchboard` hosts the existing `lib/controls::switchboard`
-  composition in a real app window (`plans/APPWIN.md` AW2 channel), fed the
+- `userland/gui/switchboard` hosts its own screen composition
+  (`userland/gui/switchboard::view`, assembled from the shared controls) in a
+  real app window (`plans/APPWIN.md` AW2 channel), fed the
   live `SwitchboardModel` from the T10 sampler and emitting `SwitchboardAction`
   the service authorises + applies (pause/resume, switch-to, reveal window,
   quit, force-quit) through capability-checked syscalls; "lower priority"
   stays in T12 with the scheduler surface it needs (§4).
 - The T9 gestures now have a target. The **taskbar side stands**: the
   capsule's tap reports
-  `TaskbarResponse::OpenSwitchboard { section: Section::Tasks }`, a hold
-  past `LONG_PRESS_AFTER_NS` reports `Section::Recovery`, and the readout's
-  "Open Switchboard" safe action reports the tap's response. The session
-  consumes that response by asking the service to open/raise its window at
+  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Tasks }`, a
+  hold past `LONG_PRESS_AFTER_NS` reports `CommandSection::Recovery`, and the
+  readout's "Open Switchboard" safe action reports the tap's response. The
+  session consumes that response by asking the service to open/raise its window at
   the named section, reviving a dead service on demand — the press is the
   demand.
 - The process-control authority lands here whole (§4): the `signal` target
@@ -1047,10 +1049,10 @@ complete against its replacement.
 
 **Status — the taskbar side (`userland/gui/taskbar`): done.** The capsule's
 primary press resolves as a **tap or a hold** into
-`TaskbarResponse::OpenSwitchboard { section }` — tap → `Section::Tasks`, hold
-past `LONG_PRESS_AFTER_NS` (500 ms) → `Section::Recovery` — and the readout's
-new "Open Switchboard" safe action reports the tap through that same one
-route. The hold is resolved from the `now_ns` the embedder passes in (the
+`TaskbarResponse::OpenSwitchboard { section }` — tap → `CommandSection::Tasks`,
+hold past `LONG_PRESS_AFTER_NS` (500 ms) → `CommandSection::Recovery` — and
+the readout's new "Open Switchboard" safe action reports the tap through that
+same one route. The hold is resolved from the `now_ns` the embedder passes in (the
 next motion sample or the release), never a spin or sleep; a fired hold never
 also fires on release, and a press dragged off the capsule is cancelled
 outright rather than re-armed. T10's interim pin-on-press API
@@ -1076,7 +1078,9 @@ verdict cannot diverge).
 
 The panel carries six sections — Tasks, Jobs, **Pressure**, **Activities**,
 Recovery, Overview — on the same in-place `SwitchboardModel` (no v2), with
-the wire `CommandSection` and the session/service mappings extended in step.
+the wire `CommandSection` — which the bar's own gesture names directly, so the
+section a user asked for is relayed unchanged rather than re-decided — and the
+service mapping extended in step.
 
 **Pressure** ("why is my machine slow") shows one cause `Card` per resource
 the **tray's own latches** flag (CPU ≥ 900‰ enter / < 800‰ exit; memory

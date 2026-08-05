@@ -34,11 +34,10 @@ use tairix_theme::Theme;
 use crate::paint::{
     draw_outline, heavy_contrast, inset, key_activation, paint_bead, paint_plate, plate_border,
     pointer_activation, resolve_bead, resolve_frame, surface_rect, to_i32, PlateStyle,
-    RenderInvariant,
 };
 use crate::state::{
-    ControlDisposition, ControlRole, ControlState, PointerState, SizeAction, WindowActivationState,
-    WindowControlKind, WindowFurnitureState,
+    ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, SizeAction,
+    WindowActivationState, WindowControlKind, WindowFurnitureState,
 };
 
 // --- command glyphs -------------------------------------------------------

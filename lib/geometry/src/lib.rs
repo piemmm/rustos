@@ -159,5 +159,17 @@ fn span(low: i32, high: i32) -> u32 {
     u32::try_from(i64::from(high) - i64::from(low)).unwrap_or(0)
 }
 
+/// A `u32` extent as an `i32` coordinate, saturating rather than wrapping.
+///
+/// Sizes are unsigned while coordinates are signed, so every consumer that
+/// turns a width, height, or other extent into a coordinate to add or
+/// compare needs the same saturating rule; an extent at or past `i32::MAX`
+/// clamps to it rather than wrapping negative, which a downstream bounds
+/// check would fail to catch.
+#[must_use]
+pub fn to_i32(v: u32) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
+}
+
 #[cfg(test)]
 mod tests;

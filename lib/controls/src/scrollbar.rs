@@ -24,11 +24,9 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use crate::paint::{
-    draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir, RenderInvariant,
-};
+use crate::paint::{draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir};
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
-use crate::state::{ControlDisposition, ControlState, PointerState};
+use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
 
 /// The outcome of interacting with a [`ScrollBar`].
 ///

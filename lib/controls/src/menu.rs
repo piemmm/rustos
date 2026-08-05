@@ -23,9 +23,9 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     draw_outline, heavy_contrast, inset, paint_bead, paint_chevron, plate_border, resolve_bead,
-    surface_rect, to_i32, ChevronDir, RenderInvariant,
+    surface_rect, to_i32, ChevronDir,
 };
-use crate::state::{ControlDisposition, ControlRole, ControlState};
+use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
 /// The outcome of feeding input to a [`Menu`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

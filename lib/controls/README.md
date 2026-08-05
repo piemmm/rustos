@@ -207,21 +207,21 @@ content.
 
 ## Equality is render equivalence
 
-Every control and composition in this crate compares equal exactly when the
-two values **would draw the same pixels**. That is a deliberate contract, not
-an accident of `#[derive(PartialEq)]`, and a consumer may rely on it: a host
-that holds the composition it last drew can compare the one it is about to
-draw against it and skip the render and the window present entirely when
-they match. A comparison costs microseconds where a full composition render
-plus a window repaint costs milliseconds, so this is the difference between
-a desktop that stays responsive under a moving pointer and one that does not.
+Every control in this crate compares equal exactly when the two values
+**would draw the same pixels**. That is a deliberate contract, not an accident
+of `#[derive(PartialEq)]`, and a consumer may rely on it: a host that holds
+the surface it last drew can compare the one it is about to draw against it
+and skip the render and the window present entirely when they match. A
+comparison costs microseconds where a full render plus a window repaint costs
+milliseconds, so this is the difference between a desktop that stays
+responsive under a moving pointer and one that does not.
 
 Controls also carry state that exists only for hit testing — the last raw
 pointer coordinate, the press latch that remembers where a button-down
 landed, a scrollbar's drag anchor. None of it reaches `render`, so counting
 it as a difference would defeat the contract: a pointer sample crossing no
 control would look like a change. Such a field is wrapped in
-`RenderInvariant<T>` (see `src/paint.rs`), a transparent newtype whose own
+`RenderInvariant<T>` (see `src/state.rs`), a transparent newtype whose own
 `PartialEq` always compares equal. The exception therefore lives in the
 *type of the excluded field*, so each struct keeps its `derive` and a field
 added later is covered automatically — where a hand-written `PartialEq` per
@@ -250,52 +250,61 @@ orientation at the edge.
 The remaining drawn families are also complete: the value controls
 (`value` — `Slider`/`Progress`), the text entries (`text` — `TextField`/
 `SearchField`), the collection controls (`collection` — `ListRow`/`TableRow`/
-`TableCell`/`IconTile`/`Card`/`Panel`), the scrollbar renderer (`scrollbar` — the one
-orientation-parameterized `ScrollBar` over the `scroll` engine), the
-window-manager furniture (`window` — `WindowFrame`/`TitleBar`/`WindowControl`/
-`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
+`TableCell`/`TableHeader`/`IconTile`/`Card`/`Panel`), the scrollbar renderer
+(`scrollbar` — the one orientation-parameterized `ScrollBar` over the `scroll`
+engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
+`WindowControl`/`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
 `Notification`/`TaskbarItem`/`TraySignal`), and the decision surfaces
 (`decision` — `Dialog`/`Tooltip`/`HelpTip`).
 
-## Switchboard reference composition
+An application's *screen* is not here. This crate holds only behaviour any
+surface may reuse, so a composition that arranges these controls into one
+particular window — the Switchboard screen (design spec §17), which lives in
+`userland/gui/switchboard/src/view/` — belongs to the application that owns
+it. The shared heavier-contrast test fixture is reachable from such a crate
+through the `test-support` feature (`tairix_controls::testkit`), so an
+application's own render tests exercise the same two contrast axes as the
+controls without a second copy of the fixture.
 
-The `switchboard` module assembles **Switchboard** (design spec §17) purely
-from the shared controls above — the window furniture, a header band of `Meter`
-and `Chart` instruments, a `Tabs` strip, `ListRow`/`Card`/`Panel`/`Button`
-content, and one vertical `ScrollBar` over the `scroll` engine — with no
-application-painted chrome and no second copy of any control's behaviour.
-`Switchboard::new` turns
-a typed `SwitchboardModel`
-(`TaskSummary`/`JobSummary`/`PressureCause`/`ActivitySummary`/`RecoveryItem`/
-`ResourceSummary`/`ServiceSummary`/`SystemAction`) into controls, and
-`select_section` opens the panel on whichever section the host's caller asked
-for rather than steering it with synthetic input. Pressure cards carry a
-per-action `ActionVerdict` (ready / disabled-by-state / denied-by-authority —
-one mapping onto `ControlState`, shared with every other action button);
-activity rows compose a flat header+member list with a `Menu`-based Group
-popup on task rows and a `TextField`-based inline rename whose committed text
-the host reads back through `submitted_activity_name`; and a horizontal
-action focus (Left/Right, then Enter) makes every row button
-keyboard-reachable in every section. A host sampling live state publishes
-each new reading with `set_model`, which runs that same one derivation over
-the new model while keeping the section, scroll offsets, and keyboard focus
-the user chose — a scrolled list is never snatched back to the top by the
-next sample — and drops the row selection, hover, any open popup, and any
-half-finished press that named a row the refresh may have replaced (an
-in-flight rename survives only while an activity with the same stable id
-remains). The always-visible resource band draws one column per
-`ResourceSummary` — the same fact the Overview resource cards show — each the
-meter's label and reading over exactly one instrument: a `Chart` of the
-resource's recent history where there is one to plot, the meter's own track
-where there is not, never both of the same number. The band takes no input, so
-a press over it reaches nothing beneath it. Every interaction returns a typed
-`SwitchboardAction` for the hosting service to authorise, and the frame hit
-map (`furniture_at`) keeps the client viewport strictly separate
-from the furniture. A denied action fails closed and renders distinctly from a
-disabled one. It is the proof that no TAIRiX surface needs custom chrome.
+## Reading a system out, and standing beside a list
+
+A monitoring surface reports state without acting on it, and these families
+are what it reports through — each one generic, so no application draws its
+own readout:
+
+- `metric` — `MetricTile`, one at-a-glance report of a resource: a quiet
+  label, a large reading with a quieter unit, an optional detail line, and an
+  optional `MetricInstrument` beneath it (`None`, a `Track` proportional to the
+  current level over the same `MeterValue` a `Meter` reads, or a `Trend`
+  `Chart` of its recent history — never two instruments for one number).
+  `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
+  for a tile with a column of its own, `Inline` puts the label leading and the
+  reading trailing so a narrow stack of readings can be scanned down. A tile
+  takes no input and reports nothing back. `StatusPill` is the compact capsule
+  that names a state in a word, toned by its signal role, where a full tile
+  would not fit.
+- `record` — `FactList`, a column of key/value readouts with the values
+  right-aligned on one another, where the value keeps its room and the label
+  truncates first, so a narrow detail pane loses a word of description rather
+  than a digit; and `Timeline`, a spine spanning only its first to its last
+  mark, with shape-coded `EventMark`s and a stamp column sized to the widest
+  stamp, so one kind of event reads differently from another without colour.
+- `nav` — `Breadcrumb`, the location trail whose trailing crumb is where the
+  reader is and is deliberately not activatable, eliding oldest-first through
+  one activatable ellipsis so the current location is never the crumb dropped.
+- `rail` — `ActionRail`, the vertical counterpart of `Toolbar`: a column of
+  `Button` commands anchored beside content, so plate, role, disabled, and
+  denied rendering are not restated per surface. A rail lights the Edge Wake
+  down its own leading edge (`with_edge_wake`) while the content beside it is
+  scrolled away from its start, so a still frame shows that the list moved
+  under an anchored column rather than the column moving with the list.
+- `collection::TableHeader` — sortable column titles over the same
+  column-width model `TableRow` lays its cells out with, reporting the sort
+  its owner commits rather than reordering anything itself.
+- `tabs::TabsOrientation` — a vertical orientation of the existing strip, so a
+  sidebar of pages is the one selection control rather than a second one.
 
 ## Staged work
 
-The Reactive Alloy control set is complete (see
-`.junie/gui-controls-work.md`). The remaining work is the window-manager /
-taskbar / app consumers adopting these shared controls.
+The Reactive Alloy control set is complete. The remaining work is the
+window-manager / taskbar / app consumers adopting these shared controls.

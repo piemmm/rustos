@@ -48,9 +48,25 @@ decode are each dropped with a stated reason and never touch the model.
 
 ## The live overview window
 
-`OpenPanel` shows the shared `Switchboard` composition
-(`lib/controls/src/switchboard.rs`) on the requested section, through
-`Switchboard::select_section`. There is at most **one** window: a second
+`OpenPanel` shows this application's own `Switchboard` screen composition
+(`src/view/`, one module per section around a shared skeleton) on the
+requested section, through `Switchboard::select_section`. The screen is
+assembled entirely from the shared `lib/controls` controls and paints no
+chrome of its own; it lives in the application rather than in `lib/controls`
+because it arranges those controls into one particular window
+(`plans/NEW-SWITCHBOARD.md` S1).
+
+The window's own chrome is the standard frame and title bar plus a **location
+band** under them: a `Breadcrumb` reading `Switchboard › <section>` and, at
+its trailing end, an `IconButton` that opens a `Menu` of the six sections with
+the one on show marked selected. The trail's leading crumb opens the same
+list, so the section is reachable by pointer or keyboard — with the band
+focused, Space or Enter opens the list, Up/Down walk it, Enter shows the
+section under the cursor, and Escape closes it unchanged. There is no tab
+strip: the band is the whole section switcher, and both routes run the one
+transition `Switchboard::select_section` runs.
+
+There is at most **one** window: a second
 `OpenPanel` asks the session to raise the existing one (naming this
 service's own pid) and switches section rather than stacking a second. The
 window's close control destroys it and the service returns to headless

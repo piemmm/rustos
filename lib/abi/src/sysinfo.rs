@@ -1371,6 +1371,24 @@ pub struct ProcessRecord {
     /// Zero when the process has no registered user address space (a pure
     /// kernel task) — a truthful "nothing mapped", never a guess.
     pub mem_bytes: u64,
+    /// Bytes actually transferred by this process's own file-read system
+    /// calls (`fs_read` and the descriptors it delegates to), across its
+    /// whole lifetime.
+    ///
+    /// This is the byte count the kernel really moved on the caller's
+    /// behalf, never the length a call merely requested: a short read
+    /// advances it by only what came back. It does **not** count pipe,
+    /// pty, or resource reads, and it is not block-device traffic — a
+    /// cached read that never reaches storage still counts, exactly as
+    /// Linux's `rchar` does in `/proc/<pid>/io`. Saturates at [`u64::MAX`]
+    /// rather than wrapping. Consumers derive a rate from the delta between
+    /// two samples, exactly as for [`cpu_time_ns`](Self::cpu_time_ns).
+    pub io_bytes_read: u64,
+    /// Bytes actually transferred by this process's own file-write system
+    /// calls (`fs_write`), across its whole lifetime. Mirrors
+    /// [`io_bytes_read`](Self::io_bytes_read) in every respect but
+    /// direction.
+    pub io_bytes_written: u64,
     /// Valid byte count in the inline name buffer (`<= PROCESS_NAME_MAX`);
     /// read the bytes through [`ProcessRecord::name_bytes`].
     pub name_len: u8,
@@ -1379,7 +1397,7 @@ pub struct ProcessRecord {
 
 impl ProcessRecord {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 76 + PROCESS_NAME_MAX;
+    pub const WIRE_LEN: usize = 92 + PROCESS_NAME_MAX;
 
     /// Construct a record, copying up to [`PROCESS_NAME_MAX`] bytes of
     /// `name`.
@@ -1399,6 +1417,8 @@ impl ProcessRecord {
         priority: SchedPriority,
         cpu_time_ns: u64,
         mem_bytes: u64,
+        io_bytes_read: u64,
+        io_bytes_written: u64,
         name: &[u8],
     ) -> Result<Self, Errno> {
         if name.len() > PROCESS_NAME_MAX {
@@ -1419,6 +1439,8 @@ impl ProcessRecord {
             priority,
             cpu_time_ns,
             mem_bytes,
+            io_bytes_read,
+            io_bytes_written,
             name_len,
             name: buf,
         })
@@ -1446,7 +1468,9 @@ impl ProcessRecord {
         out[59] = self.priority as u8;
         put_u64(&mut out, 60, self.cpu_time_ns);
         put_u64(&mut out, 68, self.mem_bytes);
-        out[76..76 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
+        put_u64(&mut out, 76, self.io_bytes_read);
+        put_u64(&mut out, 84, self.io_bytes_written);
+        out[92..92 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
         out
     }
 
@@ -1470,7 +1494,7 @@ impl ProcessRecord {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; PROCESS_NAME_MAX];
-        name.copy_from_slice(&bytes[76..76 + PROCESS_NAME_MAX]);
+        name.copy_from_slice(&bytes[92..92 + PROCESS_NAME_MAX]);
         Ok(Self {
             pid: read_u64(bytes, 0),
             parent_pid: read_u64(bytes, 8),
@@ -1483,6 +1507,8 @@ impl ProcessRecord {
             priority,
             cpu_time_ns: read_u64(bytes, 60),
             mem_bytes: read_u64(bytes, 68),
+            io_bytes_read: read_u64(bytes, 76),
+            io_bytes_written: read_u64(bytes, 84),
             name_len,
             name,
         })
@@ -6202,6 +6228,8 @@ mod tests {
             SchedPriority::Low,
             1_234_567_890,
             5 * 4096,
+            65_536,
+            8_192,
             b"init",
         )
         .unwrap();
@@ -6214,6 +6242,57 @@ mod tests {
         assert_eq!(decoded.priority, SchedPriority::Low);
         assert_eq!(decoded.cpu_time_ns, 1_234_567_890);
         assert_eq!(decoded.mem_bytes, 5 * 4096);
+        assert_eq!(decoded.io_bytes_read, 65_536);
+        assert_eq!(decoded.io_bytes_written, 8_192);
+    }
+
+    #[test]
+    fn process_record_io_counters_round_trip_at_zero_and_max() {
+        let zero = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            ProcessState::Runnable,
+            PROCESS_CPU_NONE,
+            SchedPriority::Normal,
+            0,
+            0,
+            0,
+            0,
+            b"idle",
+        )
+        .unwrap();
+        assert_eq!(
+            ProcessRecord::from_bytes(&zero.to_le_bytes()).unwrap(),
+            zero
+        );
+        assert_eq!(zero.io_bytes_read, 0);
+        assert_eq!(zero.io_bytes_written, 0);
+
+        let maxed = ProcessRecord::new(
+            1,
+            0,
+            ProcId::KERNEL,
+            ProcId::KERNEL,
+            0,
+            0,
+            ProcessState::Runnable,
+            PROCESS_CPU_NONE,
+            SchedPriority::Normal,
+            0,
+            0,
+            u64::MAX,
+            u64::MAX,
+            b"heavy",
+        )
+        .unwrap();
+        let decoded = ProcessRecord::from_bytes(&maxed.to_le_bytes()).unwrap();
+        assert_eq!(decoded, maxed);
+        assert_eq!(decoded.io_bytes_read, u64::MAX);
+        assert_eq!(decoded.io_bytes_written, u64::MAX);
     }
 
     #[test]
@@ -6230,6 +6309,8 @@ mod tests {
                 ProcessState::Runnable,
                 PROCESS_CPU_NONE,
                 SchedPriority::Normal,
+                0,
+                0,
                 0,
                 0,
                 &too_long,
@@ -6249,6 +6330,8 @@ mod tests {
             SchedPriority::Normal,
             0,
             0,
+            0,
+            0,
             b"a",
         )
         .unwrap()
@@ -6266,6 +6349,8 @@ mod tests {
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
             SchedPriority::Normal,
+            0,
+            0,
             0,
             0,
             b"a",
@@ -6291,6 +6376,8 @@ mod tests {
             ProcessState::Runnable,
             PROCESS_CPU_NONE,
             SchedPriority::Normal,
+            0,
+            0,
             0,
             0,
             b"a",

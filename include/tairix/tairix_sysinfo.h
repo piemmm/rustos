@@ -110,7 +110,7 @@
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
 #define TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN 8u
-#define TAIRIX_PROCESS_RECORD_WIRE_LEN 108u
+#define TAIRIX_PROCESS_RECORD_WIRE_LEN 124u
 #define TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN 40u
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
@@ -148,7 +148,11 @@ typedef struct tairix_process_list_request {
 * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently
 * scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service
 * level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and
-* mem_bytes the mapped address-space size. The inline name is valid for
+* mem_bytes the mapped address-space size. io_bytes_read/io_bytes_written
+* are the bytes this process's own file reads/writes actually transferred
+* over its whole lifetime (the quantity Linux reports as rchar/wchar),
+* never block-device traffic and never the byte count a caller asked for;
+* both saturate at UINT64_MAX. The inline name is valid for
 * name_len bytes. */
 typedef struct tairix_process_record {
     uint64_t pid;
@@ -162,6 +166,8 @@ typedef struct tairix_process_record {
     uint32_t priority;
     uint64_t cpu_time_ns;
     uint64_t mem_bytes;
+    uint64_t io_bytes_read;
+    uint64_t io_bytes_written;
     uint8_t name_len;
     uint8_t name[TAIRIX_PROCESS_NAME_MAX];
 } tairix_process_record_t;

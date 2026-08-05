@@ -15,11 +15,11 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
 };
-use tairix_controls::Switchboard;
 use tairix_procinfo::Transport;
 
 use crate::sample::{DegradedField, ProcessSummary, Sample};
 use crate::service::{RenderInputs, ServiceHost};
+use crate::view::Switchboard;
 use crate::wait::{required_members, WaitToken};
 
 /// The uid [`process_summary`] gives a fixture row when the caller does not
@@ -136,6 +136,8 @@ pub(crate) fn process_record(
         state,
         0,
         SchedPriority::Normal,
+        0,
+        0,
         0,
         0,
         name,

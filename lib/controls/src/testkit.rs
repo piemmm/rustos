@@ -3,6 +3,11 @@
 //! Every family exercises the same two axes — the built-in themes and the
 //! heavier-contrast path — so the fixtures they need in common live here once
 //! rather than being restated in each family's test module.
+//!
+//! Compiled in for this crate's own tests and, behind the `test-support`
+//! feature, for a downstream crate's tests too — a composition built from
+//! these controls exercises the same two axes and must reach for this one
+//! fixture rather than growing its own copy.
 
 use tairix_theme::{Contrast, Theme};
 
@@ -14,7 +19,7 @@ use tairix_theme::{Contrast, Theme};
 /// high-contrast render against a normal one is comparing the contrast
 /// treatment alone.
 #[must_use]
-pub(crate) fn high_contrast() -> Theme {
+pub fn high_contrast() -> Theme {
     let base = Theme::dark();
     Theme::new(
         base.id(),

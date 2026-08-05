@@ -7,9 +7,7 @@ use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{ProcId, SchedPriority, Signal};
 use tairix_controls::{
-    ActionVerdict, ActivityControl, ActivityState, MeterValue, PressureControl, PressureKind,
-    PressureState, ProgressValue, RecoveryControl, ResourceSummary, Section, SwitchboardAction,
-    MAX_CHART_SAMPLES,
+    ActivityState, MeterValue, PressureKind, PressureState, ProgressValue, MAX_CHART_SAMPLES,
 };
 
 use super::{apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, LiveMeters};
@@ -19,6 +17,10 @@ use crate::sample::{MemoryPressureSample, Sample};
 use crate::test_host::{
     process_summary as process, process_summary_with, sample_with, DEFAULT_UID,
     NO_AUTHORITY as NONE, PROC_CONTROL_AUTHORITY as PROC_CONTROL,
+};
+use crate::view::{
+    ActionVerdict, ActivityControl, PressureControl, RecoveryControl, ResourceSummary, Section,
+    SwitchboardAction,
 };
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test

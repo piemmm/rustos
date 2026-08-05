@@ -267,6 +267,8 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 priority,
                 cpu_time_ns,
                 mem_bytes,
+                record.io_bytes_read(),
+                record.io_bytes_written(),
                 record.name().as_bytes(),
             )?;
             out.extend_from_slice(&process.to_le_bytes());

@@ -37,7 +37,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    draw_outline, progress_thickness, rail_thickness, signal_color, surface_rect, to_i32, FULL,
+    paint_measured_track, paint_text_line, progress_thickness, signal_color, surface_rect,
 };
 use crate::state::{PressureKind, PressureState, ProgressValue};
 
@@ -166,9 +166,9 @@ impl Meter {
 
         let label_color = Color::from(palette.on_surface_muted);
         let limits = (bottom, w, gap);
-        let cursor_y = paint_line(surface, &self.label, (x, y), limits, font, label_color);
+        let cursor_y = paint_text_line(surface, &self.label, (x, y), limits, font, label_color);
         let reading_color = Color::from(palette.on_surface);
-        let cursor_y = paint_line(
+        let cursor_y = paint_text_line(
             surface,
             &self.reading,
             (x, cursor_y),
@@ -184,6 +184,11 @@ impl Meter {
     /// Paint the rounded track band: the quiet groove, then — for a measured
     /// value — the tinted proportional fill, then the pressure-emphasis
     /// outline when the owner marked this resource as genuinely under load.
+    ///
+    /// The groove/fill/outline geometry itself is the one every measured
+    /// track shares (`crate::paint::paint_measured_track`); a meter's own
+    /// part is only picking its fill and tint from its typed value and
+    /// resource kind.
     fn paint_track(
         &self,
         surface: &mut Surface,
@@ -191,57 +196,14 @@ impl Meter {
         scale: Scale,
         theme: &Theme,
     ) {
-        let (x, y, w, avail_h) = band;
-        let band_h = progress_thickness(theme, scale).min(avail_h);
-        if band_h == 0 || w == 0 {
-            return;
-        }
-        let palette = theme.palette();
-        let radius = band_h / 2;
-        surface.fill_round_rect(x, y, w, band_h, radius, Color::from(palette.scroll_track));
-
-        let MeterValue::Measured(value) = self.value else {
+        let fill = match self.value {
+            MeterValue::Measured(value) => Some(value.permille()),
             // Honest unmeasured state: the quiet groove alone, never a
             // fabricated fill.
-            return;
+            MeterValue::Unmeasured => None,
         };
-        let fill = signal_color(theme, self.kind);
-        let fill_w = proportional(w, value.permille()).max(band_h.min(w));
-        surface.fill_round_rect(x, y, fill_w, band_h, radius, fill);
-
-        if matches!(self.pressure, PressureState::Under(_)) {
-            let thickness = rail_thickness(theme, scale).min(band_h / 2).max(1);
-            draw_outline(surface, x, y, w, band_h, thickness, fill);
-        }
+        let tint = signal_color(theme, self.kind);
+        let emphasised = matches!(self.pressure, PressureState::Under(_));
+        paint_measured_track(surface, band, fill, tint, emphasised, scale, theme);
     }
-}
-
-/// Draw one text line at `pos` (`(x, y)`) if a full line still fits before
-/// `limits`' `bottom` within its `w`, returning the y the next line starts
-/// at (advanced by the line height and `gap`, the third element of
-/// `limits`). A bound too short to hold the line is left untouched — the
-/// line is simply omitted rather than overlapping whatever follows it.
-fn paint_line(
-    surface: &mut Surface,
-    text: &str,
-    pos: (u32, u32),
-    limits: (u32, u32, u32),
-    font: BitmapFont,
-    color: Color,
-) -> u32 {
-    let (x, y) = pos;
-    let (bottom, w, gap) = limits;
-    let line_h = font.line_height();
-    if w == 0 || y.saturating_add(line_h) > bottom {
-        return y;
-    }
-    let fitted = font.truncate_to_width(text, w);
-    font.draw_text(surface, to_i32(x), to_i32(y), fitted, color);
-    y.saturating_add(line_h).saturating_add(gap)
-}
-
-/// `extent` scaled by `permille / 1000`, rounded down and never exceeding
-/// `extent` (arithmetic saturates rather than overflowing).
-fn proportional(extent: u32, permille: u16) -> u32 {
-    u32::try_from(u64::from(extent) * u64::from(permille) / u64::from(FULL)).unwrap_or(extent)
 }

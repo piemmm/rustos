@@ -1,14 +1,19 @@
 //! The tab strip: [`Tab`] and [`Tabs`] (spec §11.12).
 //!
-//! A tab strip is a row of equal-width items that select one of several views.
-//! The selected tab carries a strong lower seam and reads on the content
-//! surface; a loading tab shows a Heat Seam on its lower edge; a modified tab
-//! shows a small Signal Bead; and an error tab shows a warning or recovery
-//! bead so its state is legible without colour (spec §11.12, §15). The strip
-//! owns keyboard navigation (Left/Right move the current tab, Home/End jump to
-//! the ends, Enter/Space select it) and pointer hover/click, emitting a typed
-//! [`TabsAction`]; it enforces no authority. Every colour,
-//! metric, and radius resolves from the active [`Theme`] and [`Scale`].
+//! A tab strip is a row (or, in [`TabsOrientation::Vertical`], a column) of
+//! equal-extent items that select one of several views. In its default
+//! [`TabsOrientation::Horizontal`] the selected tab carries a strong lower
+//! seam and reads on the content surface; laid out [`TabsOrientation::Vertical`]
+//! it instead carries a strong leading seam and a quiet selected plate. A
+//! loading tab shows a Heat Seam on the same edge as the selection seam; a
+//! modified tab shows a small Signal Bead; and an error tab shows a warning or
+//! recovery bead so its state is legible without colour (spec §11.12, §15).
+//! One definition drives both orientations: the strip owns keyboard navigation
+//! (Left/Right move the current tab in a horizontal strip, Up/Down in a
+//! vertical one, Home/End jump to the ends in either, Enter/Space select it)
+//! and pointer hover/click, emitting a typed [`TabsAction`]; it enforces no
+//! authority. Every colour, metric, and radius resolves from the active
+//! [`Theme`] and [`Scale`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,11 +25,12 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    draw_outline, heavy_contrast, paint_bead, plate_border, surface_rect, to_i32, BeadShape,
-    RenderInvariant,
+    draw_outline, heavy_contrast, paint_bead, plate_border, seam_thickness, seam_width,
+    surface_rect, to_i32, BeadShape,
 };
 use crate::state::{
-    ActivityState, ControlDisposition, ControlState, SelectionState, ValidationState,
+    ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
+    ValidationState,
 };
 
 /// The outcome of feeding input to a [`Tabs`] strip.
@@ -35,6 +41,21 @@ pub enum TabsAction {
         /// The zero-based index of the chosen tab.
         index: usize,
     },
+}
+
+/// Which axis a [`Tabs`] strip stacks its items along (spec §11.12).
+///
+/// [`Tabs::new`] always produces [`TabsOrientation::Horizontal`]; a sidebar
+/// selects [`TabsOrientation::Vertical`] with [`Tabs::with_orientation`]. Both
+/// share the one selection, hit-testing, keyboard, and action model — only the
+/// axis tabs stack along, and which edge carries the selection seam, differ.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TabsOrientation {
+    /// A strip across the top: the selected tab carries a strong lower seam.
+    Horizontal,
+    /// A column down the side: the selected tab carries a strong leading seam
+    /// and a quiet selected plate.
+    Vertical,
 }
 
 /// One tab in a [`Tabs`] strip (spec §11.12).
@@ -107,7 +128,63 @@ impl Tab {
     }
 }
 
-/// A row of equal-width items selecting one of several views (spec §11.12).
+/// The `(offset, extent)` span of item `index` when `count` equal items share
+/// `total` pixels along one axis, the last absorbing the rounding remainder.
+///
+/// [`Tabs::tab_rect`] calls this once for whichever axis the strip's
+/// [`TabsOrientation`] stacks along — the width for a horizontal strip, the
+/// height for a vertical one — so both orientations share the exact same
+/// equal-split arithmetic and can never diverge into two recipes.
+fn axis_span(index: usize, count: usize, total: u32) -> Option<(u32, u32)> {
+    let count_u32 = u32::try_from(count).ok()?;
+    if count_u32 == 0 || total == 0 || index >= count {
+        return None;
+    }
+    let idx = u32::try_from(index).ok()?;
+    let each = total / count_u32;
+    if each == 0 {
+        return None;
+    }
+    let offset = idx * each;
+    // The last item absorbs the rounding remainder so the strip fills the
+    // whole axis.
+    let extent = if index + 1 == count {
+        total - idx * each
+    } else {
+        each
+    };
+    Some((offset, extent))
+}
+
+/// The `(x, y, w, h)` a seam `thickness` deep and `extent` long occupies on a
+/// tab's own `rect`: the lower edge of a horizontal tab, the leading (left)
+/// edge of a vertical one.
+///
+/// This is the one definition of which edge carries a seam, so a tab's
+/// selection seam and its Heat Seam can never end up on different edges of the
+/// same tab. The extent is capped by the tab's own span along that edge, so a
+/// seam never runs past the tab it belongs to.
+#[must_use]
+fn seam_rect(
+    orientation: TabsOrientation,
+    rect: (u32, u32, u32, u32),
+    thickness: u32,
+    extent: u32,
+) -> (u32, u32, u32, u32) {
+    let (x, y, w, h) = rect;
+    match orientation {
+        TabsOrientation::Horizontal => (
+            x,
+            y.saturating_add(h).saturating_sub(thickness),
+            extent.min(w),
+            thickness,
+        ),
+        TabsOrientation::Vertical => (x, y, thickness, extent.min(h)),
+    }
+}
+
+/// A row (or, laid out [`TabsOrientation::Vertical`], a column) of
+/// equal-extent items selecting one of several views (spec §11.12).
 ///
 /// The strip tracks a *current* tab for keyboard focus (distinct from the
 /// *selected* tab, which is the one whose view is shown). Selection commits
@@ -115,13 +192,14 @@ impl Tab {
 /// items' [`SelectionState`] (helper [`Tabs::set_selected`]).
 ///
 /// Equal strips draw the same pixels, so a host may use `==` as its repaint
-/// gate: the items, the current tab, and whether that focus came from the
-/// keyboard all compare. The pointer coordinate and the pressed-tab latch do
-/// not — no render path reads either, and the *visible* consequence of a press
-/// is the `current` tab the same event sets.
+/// gate: the items, the orientation, the current tab, and whether that focus
+/// came from the keyboard all compare. The pointer coordinate and the
+/// pressed-tab latch do not — no render path reads either, and the *visible*
+/// consequence of a press is the `current` tab the same event sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tabs {
     items: Vec<Tab>,
+    orientation: TabsOrientation,
     current: Option<usize>,
     keyboard_focus: bool,
     /// The last pointer position, mapped to a tab on the next press or
@@ -134,15 +212,55 @@ pub struct Tabs {
 }
 
 impl Tabs {
-    /// A tab strip over the given items.
+    /// A horizontal tab strip over the given items.
     #[must_use]
     pub fn new(tabs: Vec<Tab>) -> Self {
         Self {
             items: tabs,
+            orientation: TabsOrientation::Horizontal,
             current: None,
             keyboard_focus: false,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
+        }
+    }
+
+    /// This strip laid out along `orientation`.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: TabsOrientation) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// The strip's orientation.
+    #[must_use]
+    pub fn orientation(&self) -> TabsOrientation {
+        self.orientation
+    }
+
+    /// The extent the strip needs along its own axis — the height a
+    /// horizontal strip occupies, or the width a vertical one does — from the
+    /// font's line height and the theme's control padding, floored at the
+    /// theme's standard control height so a strip never reads shorter than an
+    /// ordinary control.
+    ///
+    /// A horizontal strip's height is the same for every tab regardless of
+    /// how many share it, but a vertical strip's *width* is fixed regardless
+    /// of how many tabs stack down it; that fixed width has to comfortably
+    /// hold the modified/error Signal Bead beside the label without the two
+    /// competing for space, so the vertical extent additionally reserves the
+    /// bead's own footprint.
+    #[must_use]
+    pub fn measured_extent(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let text_band = font.glyph_height().saturating_add(pad.saturating_mul(2));
+        let base = text_band.max(scale.scale_length(theme.metrics().control_height).max(1));
+        match self.orientation {
+            TabsOrientation::Horizontal => base,
+            TabsOrientation::Vertical => {
+                let bead = scale.scale_length(theme.metrics().bead_size).max(3);
+                base.saturating_add(bead).saturating_add(pad)
+            }
         }
     }
 
@@ -201,26 +319,25 @@ impl Tabs {
     }
 
     /// The surface rectangle of tab `index` within `bounds`, or `None` if it
-    /// collapses. Tabs share the width equally.
+    /// collapses. Tabs share the strip's own axis equally — width for a
+    /// horizontal strip, height for a vertical one — through the shared
+    /// [`axis_span`] helper, so a press can never select a tab that render
+    /// did not draw at that same span.
     fn tab_rect(&self, index: usize, bounds: Rect) -> Option<(u32, u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;
-        let count = u32::try_from(self.items.len()).ok()?;
-        if count == 0 || w == 0 || h == 0 || index >= self.items.len() {
+        if w == 0 || h == 0 || index >= self.items.len() {
             return None;
         }
-        let idx = u32::try_from(index).ok()?;
-        let each = w / count;
-        if each == 0 {
-            return None;
+        match self.orientation {
+            TabsOrientation::Horizontal => {
+                let (ox, ow) = axis_span(index, self.items.len(), w)?;
+                Some((x + ox, y, ow, h))
+            }
+            TabsOrientation::Vertical => {
+                let (oy, oh) = axis_span(index, self.items.len(), h)?;
+                Some((x, y + oy, w, oh))
+            }
         }
-        let tx = x + idx * each;
-        // The last tab absorbs the rounding remainder so the strip fills width.
-        let tw = if index + 1 == self.items.len() {
-            w - idx * each
-        } else {
-            each
-        };
-        Some((tx, y, tw, h))
     }
 
     /// The tab index under `point`, if any, for the given bounds.
@@ -245,40 +362,39 @@ impl Tabs {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        for (i, tab) in self.items.iter().enumerate() {
-            if let Some(rect) = self.tab_rect(i, bounds) {
-                let current = self.current == Some(i);
-                let focused = current && self.keyboard_focus;
-                Self::paint_tab(surface, rect, scale, theme, font, tab, current, focused);
+        for index in 0..self.items.len() {
+            if let Some(rect) = self.tab_rect(index, bounds) {
+                self.paint_tab(surface, index, rect, scale, theme, font);
             }
         }
     }
 
-    /// Paint one tab cell.
-    #[allow(clippy::too_many_arguments)]
+    /// Paint the tab at `index` into the `rect` [`Self::tab_rect`] gave it:
+    /// its plate, the seam its orientation carries, the keyboard focus ring,
+    /// then its label and Signal Bead.
     fn paint_tab(
+        &self,
         surface: &mut Surface,
+        index: usize,
         rect: (u32, u32, u32, u32),
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        tab: &Tab,
-        current: bool,
-        focused: bool,
     ) {
+        let Some(tab) = self.items.get(index) else {
+            return;
+        };
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 {
             return;
         }
         let palette = theme.palette();
-        let metrics = theme.metrics();
-        let border = plate_border(theme, scale);
-        let selected = tab.is_selected();
-        let disposition = tab.state.disposition();
+        let current = self.current == Some(index);
 
-        // Tab plate: the selected tab reads on the content surface; an
-        // unselected tab is quieter; a hovered tab lifts. Disabled stays muted.
-        let plate = if selected {
+        // Tab plate: the selected tab reads as a quiet selected plate on the
+        // content surface in either orientation; an unselected tab is
+        // quieter; a hovered tab lifts. Disabled stays muted.
+        let plate = if tab.is_selected() {
             palette.surface
         } else if current {
             palette.surface_raised
@@ -287,50 +403,85 @@ impl Tabs {
         };
         surface.fill_rect(x, y, w, h, Color::from(plate));
 
-        // The lower seam: a strong accent seam for the selected tab, a Heat
-        // Seam for a loading tab (proportional if the fraction is known).
-        let seam_h = scale.scale_length(metrics.seam_thickness).max(1).min(h);
-        if selected {
-            let thick = seam_h
-                .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-                .min(h);
-            surface.fill_rect(x, y + h - thick, w, thick, Color::from(palette.accent));
-        } else if tab.is_loading() {
-            let seam_w = match tab.state.activity {
-                ActivityState::Progress(value) => {
-                    u32::try_from(u64::from(w) * u64::from(value.permille()) / 1000).unwrap_or(w)
-                }
-                _ => w,
-            };
-            if seam_w > 0 {
-                surface.fill_rect(
-                    x,
-                    y + h - seam_h,
-                    seam_w,
-                    seam_h,
-                    Color::from(palette.accent),
-                );
-            }
-        }
+        Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
 
         // The keyboard focus ring, distinct from a hover lift.
-        if focused {
+        if current && self.keyboard_focus {
             draw_outline(
                 surface,
                 x,
                 y,
                 w,
                 h,
-                border.max(1),
+                plate_border(theme, scale).max(1),
                 Color::from(palette.rim_active),
             );
         }
 
+        Self::paint_label(surface, rect, scale, theme, font, tab);
+    }
+
+    /// Paint `tab`'s seam onto the edge its `orientation` carries it on: a
+    /// strong accent seam for the selected tab, else a Heat Seam while its
+    /// view loads (proportional when the fraction is known).
+    ///
+    /// A selected tab shows selection rather than progress, so its seam wins
+    /// over a Heat Seam it would otherwise draw on the very same edge.
+    fn paint_seam(
+        surface: &mut Surface,
+        orientation: TabsOrientation,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        tab: &Tab,
+    ) {
+        let (_, _, w, h) = rect;
+        let (along, cross) = match orientation {
+            TabsOrientation::Horizontal => (w, h),
+            TabsOrientation::Vertical => (h, w),
+        };
+        let base = seam_thickness(theme, scale);
+        let (thickness, extent) = if tab.is_selected() {
+            // Heavier contrast doubles the selected seam, so selection still
+            // carries where a hue shift alone would not.
+            let heavy = if heavy_contrast(theme) { 2 } else { 1 };
+            (base.saturating_mul(heavy).min(cross), along)
+        } else if tab.is_loading() {
+            (base.min(cross), seam_width(tab.state.activity, along))
+        } else {
+            return;
+        };
+        if thickness == 0 || extent == 0 {
+            return;
+        }
+        let (sx, sy, sw, sh) = seam_rect(orientation, rect, thickness, extent);
+        surface.fill_rect(sx, sy, sw, sh, Color::from(theme.palette().accent));
+    }
+
+    /// Paint `tab`'s label centred in `rect`, and its modified/error Signal
+    /// Bead at the top-trailing corner.
+    ///
+    /// The bead's footprint is carved out of the label's own budget before the
+    /// label is laid out, so a long label is truncated rather than running
+    /// under the bead.
+    fn paint_label(
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        tab: &Tab,
+    ) {
+        let (x, y, w, h) = rect;
+        let palette = theme.palette();
+        let metrics = theme.metrics();
+        let border = plate_border(theme, scale);
+
         // The label, centred, with weight conveyed by colour (accent when
         // selected) since the bitmap font has one weight.
-        let label_color = match disposition {
+        let label_color = match tab.state.disposition() {
             ControlDisposition::DisabledByState => palette.on_surface_muted,
-            _ if selected => palette.accent,
+            _ if tab.is_selected() => palette.accent,
             _ => palette.on_surface,
         };
         let pad = scale.scale_length(metrics.control_inset).max(1);
@@ -356,17 +507,22 @@ impl Tabs {
             );
         }
 
-        // The modified / error Signal Bead at the top-trailing corner.
         if let Some((color, shape)) = bead {
             let size = scale.scale_length(metrics.bead_size).max(3).min(w).min(h);
-            paint_bead(
-                surface,
-                x + w - border - size,
-                y + border,
-                size,
-                color,
-                shape,
-            );
+            // A bead that cannot sit inside its own tab past the plate border
+            // is omitted: a cramped strip loses the marker rather than
+            // stamping it over the neighbouring tab.
+            let corner = border.saturating_add(size);
+            if corner <= w.min(h) {
+                paint_bead(
+                    surface,
+                    x.saturating_add(w - corner),
+                    y.saturating_add(border),
+                    size,
+                    color,
+                    shape,
+                );
+            }
         }
     }
 
@@ -429,15 +585,24 @@ impl Tabs {
         }
     }
 
-    /// Feed a key event: Left/Right move the current tab (wrapping), Home/End
-    /// jump to the ends, and Enter/Space select the current tab.
+    /// Feed a key event: Left/Right move the current tab (wrapping) in a
+    /// horizontal strip, Up/Down do the same in a vertical one, Home/End jump
+    /// to the ends in either, and Enter/Space select the current tab.
+    ///
+    /// The two arrow pairs are deliberately exclusive to their own axis: a
+    /// vertical strip ignores Left/Right and a horizontal one ignores Up/Down,
+    /// so a reader is never misled into thinking the wrong arrows move it.
     pub fn on_key(&mut self, key: Key) -> Option<TabsAction> {
         if self.items.is_empty() {
             return None;
         }
         let last = self.items.len() - 1;
+        let (forward, backward) = match self.orientation {
+            TabsOrientation::Horizontal => (NamedKey::Right, NamedKey::Left),
+            TabsOrientation::Vertical => (NamedKey::Down, NamedKey::Up),
+        };
         match key {
-            Key::Named(NamedKey::Right) => {
+            Key::Named(named) if named == forward => {
                 let next = match self.current {
                     Some(i) if i < last => i + 1,
                     _ => 0,
@@ -446,7 +611,7 @@ impl Tabs {
                 self.keyboard_focus = true;
                 None
             }
-            Key::Named(NamedKey::Left) => {
+            Key::Named(named) if named == backward => {
                 let prev = match self.current {
                     Some(0) | None => last,
                     Some(i) => i - 1,

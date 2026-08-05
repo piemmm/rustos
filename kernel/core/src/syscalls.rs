@@ -3031,6 +3031,13 @@ where
         }) {
             Some(Ok(())) => {
                 pos.advance(entry, n as u64);
+                // Credit the *calling* task with the bytes the VFS actually
+                // moved, not the length it asked for — the delegated arm
+                // routes through this same function under the grantor's
+                // uid/caps, but `caller` is always the task that issued the
+                // syscall, so a delegation never attributes its bytes to the
+                // grantor.
+                caller.caps.record_bytes_read(n as u64);
                 Ok(n as u64)
             }
             Some(Err(err)) => Err(copy_fault_errno(err)),
@@ -3089,6 +3096,10 @@ where
                     &data,
                 )?;
                 pos.advance(entry, n as u64);
+                // Credit the calling task with the bytes the VFS actually
+                // accepted, never the length it staged in — a short write
+                // must not overstate this process's disk activity.
+                caller.caps.record_bytes_written(n as u64);
                 Ok(n as u64)
             }
             // A resource-, pipe-, or pty-backed descriptor has no position;
@@ -25249,6 +25260,8 @@ mod tests {
             SchedPriority::Normal,
             0,
             0,
+            0,
+            0,
             b"init",
         )
         .expect("record");
@@ -28421,6 +28434,13 @@ mod tests {
             fs.calls()
         );
 
+        // Authority and accounting part company here: the read ran under the
+        // grantor's identity, but the bytes are this process's own disk
+        // activity, so they land on the holder's counters and never on the
+        // grantor's.
+        assert_eq!(recipient_caps.io_bytes_read(), 5);
+        assert_eq!(grantor_caps.io_bytes_read(), 0);
+
         // The delegation is read-only: a write through it is refused by
         // the descriptor's own flags before the filesystem is touched
         // (the holder's absent `CAP_FS_ACCESS` never enters it — nothing
@@ -30830,6 +30850,11 @@ mod tests {
         entries: Vec<crate::fs::ReaddirEntry>,
         stat: FileStat,
         open_err: Option<Errno>,
+        /// Bytes a write accepts at most, or [`None`] to accept the whole
+        /// buffer. A real service may take fewer bytes than were offered
+        /// (a volume filling up mid-write), and the accounting must credit
+        /// what it accepted rather than what was staged.
+        write_accept: Option<usize>,
         sync_err: Option<Errno>,
         /// Shared-clock stamp of the whole-system flush, or `0` while no
         /// flush has been asked for, so a test can order the flush against
@@ -30857,6 +30882,7 @@ mod tests {
                     times: tairix_abi::NodeTimes::default(),
                 },
                 open_err: None,
+                write_accept: None,
                 sync_err: None,
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 busy_endpoints: Vec::new(),
@@ -30937,7 +30963,10 @@ mod tests {
             self.record(alloc::format!(
                 "write uid={uid} path={path} off={offset} append={append} data={data:?}"
             ));
-            Ok(data.len())
+            Ok(match self.write_accept {
+                Some(cap) => data.len().min(cap),
+                None => data.len(),
+            })
         }
 
         fn readdir(
@@ -31360,6 +31389,95 @@ mod tests {
             h.fs_write(&ctx, ro, 0, 0x1000, 2),
             Err(Errno::PermissionDenied)
         );
+    }
+
+    /// The per-process I/O counters record the bytes the filesystem
+    /// **actually transferred**, never the length the call asked for, and a
+    /// transfer that never reached the caller (or never left it) is not
+    /// counted at all.
+    #[test]
+    fn io_accounting_counts_transferred_bytes_and_nothing_more() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The path sits at 0x1000; reads land at 0x1100 in the same page so
+        // the delivered bytes never overwrite it.
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        // The file holds two bytes, and the service accepts only one byte of
+        // any write: both directions are deliberately short.
+        mock.read_data = b"hi".to_vec();
+        mock.write_accept = Some(1);
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // A task that has done no file I/O reports none.
+        assert_eq!(caps.io_bytes_read(), 0);
+        assert_eq!(caps.io_bytes_written(), 0);
+
+        let fd = u32::try_from(
+            h.fs_open(
+                &ctx,
+                0x1000,
+                "/f".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("open"),
+        )
+        .unwrap();
+
+        // A short read: five bytes asked for, two delivered, two counted.
+        assert_eq!(h.fs_read(&ctx, fd, 0, 0x1100, 5), Ok(2));
+        assert_eq!(caps.io_bytes_read(), 2);
+        assert_eq!(caps.io_bytes_written(), 0);
+
+        // A short write: two bytes staged, one accepted, one counted.
+        assert_eq!(h.fs_write(&ctx, fd, 0, 0x1000, 2), Ok(1));
+        assert_eq!(caps.io_bytes_written(), 1);
+        assert_eq!(caps.io_bytes_read(), 2);
+
+        // A read whose destination is unmapped faults after the service ran:
+        // the bytes never reached the process, so none are credited.
+        assert_eq!(h.fs_read(&ctx, fd, 0, 0x9000, 2), Err(Errno::BadAddress));
+        assert_eq!(caps.io_bytes_read(), 2);
+
+        // A write whose source is unmapped never reaches the service at all.
+        assert_eq!(h.fs_write(&ctx, fd, 0, 0x9000, 2), Err(Errno::BadAddress));
+        assert_eq!(caps.io_bytes_written(), 1);
+
+        // A refused call counts nothing: a read-only handle's write is
+        // rejected on the descriptor's own flags.
+        let ro = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open ro"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.fs_write(&ctx, ro, 0, 0x1000, 2),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(caps.io_bytes_read(), 2);
+        assert_eq!(caps.io_bytes_written(), 1);
     }
 
     /// Sequential `stream_read` serves an **ordinary** descriptor, not only
@@ -32364,6 +32482,8 @@ mod tests {
             tairix_abi::sysinfo::ProcessState::Running,
             0,
             SchedPriority::Normal,
+            0,
+            0,
             0,
             0,
             b"init",

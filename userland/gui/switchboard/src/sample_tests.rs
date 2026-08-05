@@ -130,6 +130,8 @@ fn process(
         SchedPriority::Normal,
         cpu_time_ns,
         0,
+        0,
+        0,
         name,
     )
     .expect("valid record")

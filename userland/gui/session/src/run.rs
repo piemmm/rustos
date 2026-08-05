@@ -100,18 +100,18 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::{
-        build_pin_views, command_section, deliver_pending_open, load_library,
-        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
-        serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
-        CliError, Command, ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser,
-        InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
-        PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
-        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
-        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
-        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        build_pin_views, deliver_pending_open, load_library, maybe_send_seat_report, open_tray,
+        parse, reap_launched, relay_power, serve_pinboard_apply, serve_switchboard_request,
+        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
+        ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
+        DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser, InputSource,
+        KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion, PinBridge,
+        PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError,
+        ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel, SessionFileReader,
+        SessionFileWriter, SessionPicker, SessionPins, SessionWindows, ShellWindowHost,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker, FILES_LABEL,
+        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
+        WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -2616,7 +2616,7 @@ mod program {
                 // first publish proves it is listening.
                 if let Some(revived) = open_tray(
                     pending_open,
-                    command_section(section),
+                    section,
                     *switchboard,
                     &mut RtSwitchboardMailbox,
                     || spawn_switchboard(launched),

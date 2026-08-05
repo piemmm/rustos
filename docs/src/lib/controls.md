@@ -17,9 +17,12 @@ another.
 | `selector` | `Toggle`, `Checkbox`, `Radio` |
 | `value` | `Slider`, `Progress` |
 | `meter`, `chart` | `Meter`, `Chart` |
+| `metric` | `MetricTile`, `StatusPill` |
+| `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
-| `collection` | `ListRow`, `TableRow`, `Card`, `Panel` |
+| `nav`, `rail` | `Breadcrumb`, `ActionRail` |
+| `collection` | `ListRow`, `TableRow`, `TableHeader`, `Card`, `Panel` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `TraySignal` |
@@ -31,6 +34,42 @@ appearance from the typed `state` vocabulary, and emits a typed action for the
 owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
+
+### Reporting a reading, and standing beside a list
+
+The families a monitoring surface is built from report state without acting on
+it, or frame the content that does:
+
+- `MetricTile` is one at-a-glance report of a resource: a quiet label, a large
+  reading with a quieter unit, an optional detail line, and an optional
+  `MetricInstrument` beneath it — nothing, a `Track` proportional to the
+  current level (the same `MeterValue` a `Meter` reads, tinted by the tile's
+  resource kind), or a `Trend` `Chart` of its recent history, never two
+  instruments for one number. `MetricLayout` picks the anatomy: `Stacked` puts
+  the label above the reading for a tile with a column of its own, `Inline`
+  puts the label leading and the reading trailing so a narrow stack of
+  readings can be scanned down. A tile takes no input and reports nothing.
+- `StatusPill` is the compact capsule that names a state in a word, toned by
+  its signal role, for a place a full tile would not fit.
+- `FactList` is a column of key/value readouts with the values right-aligned
+  on one another: the value keeps its room and the label truncates first, so a
+  narrow detail pane loses a word of description rather than a digit.
+- `Timeline` is a vertical spine spanning only its first to its last mark,
+  with shape-coded `EventMark`s and a stamp column sized to the widest stamp,
+  so a reader can tell one kind of event from another without colour.
+- `Breadcrumb` is the location trail: its trailing crumb is where the reader
+  is and is deliberately not activatable, and a trail too long for its bounds
+  elides oldest-first through one activatable ellipsis, so the current
+  location is never the crumb that gets dropped.
+- `ActionRail` is the vertical counterpart of `Toolbar`: a column of `Button`
+  commands anchored beside content, so plate, role, disabled, and denied
+  rendering are not restated per surface. It lights the Edge Wake described
+  below down its own leading edge while the content beside it is scrolled.
+- `TableHeader` gives the row family sortable column titles over the same
+  column-width model `TableRow` lays its cells out with, and reports the sort
+  its owner commits rather than reordering anything itself.
+- `TabsOrientation` gives the existing strip a vertical orientation, so a
+  sidebar of pages is the one selection control rather than a second one.
 
 ## Plate seating: a panel or a bar
 
@@ -166,9 +205,9 @@ still actionable and still takes its plain role emphasis — is lifted.
 
 An anchored control that content scrolls past does not move, which leaves a
 still frame ambiguous: did the column stay put, or is it merely where the rows
-left it? The **Edge Wake** answers that on the control's edge. The Switchboard
-lights the leading edge of its action column for exactly as long as the rows
-beside it are displaced from the top of the list.
+left it? The **Edge Wake** answers that on the control's edge. An `ActionRail`
+anchored beside a list lights its own leading edge (`ActionRail::with_edge_wake`)
+for exactly as long as the content beside it is displaced from its start.
 
 It is a state, not an animation. There is nothing to fade, so a reduced-motion
 theme needs no second path and a screenshot carries the same information as a

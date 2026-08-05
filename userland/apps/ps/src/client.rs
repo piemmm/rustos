@@ -249,6 +249,8 @@ mod tests {
             SchedPriority::Normal,
             0,
             0,
+            0,
+            0,
             name,
         )
         .unwrap()

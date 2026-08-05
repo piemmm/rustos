@@ -41,11 +41,16 @@
 //!   [`sample::Sample`], the rolling [`model::LiveMeters`] state, the
 //!   session's [`tairix_abi::switchboard_ipc::SeatReport`], and the
 //!   service's [`activities::Activities`] into the live overview panel's
-//!   [`tairix_controls::SwitchboardModel`], and [`model::apply_action`],
-//!   which maps the panel's reported [`tairix_controls::SwitchboardAction`]
+//!   [`view::SwitchboardModel`], and [`model::apply_action`],
+//!   which maps the panel's reported [`view::SwitchboardAction`]
 //!   back onto the outbound [`model::Effect`]s it implies.
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
 //!   raise, refresh, close) and effect application.
+//! * [`view`] — [`view::Switchboard`], the overview window's own screen:
+//!   the window furniture, resource band, location band, and per-section lists
+//!   assembled purely from the shared Reactive Alloy controls, turning a
+//!   [`view::SwitchboardModel`] into pixels and a gesture into a typed
+//!   [`view::SwitchboardAction`].
 //! * [`service`] — [`service::ServiceHost`], the single seam through which
 //!   everything outside this process is reached, and [`service::Service`],
 //!   the run loop's body: sample, derive, record, prune and refresh the
@@ -59,7 +64,7 @@
 //! # Honest-data rules
 //!
 //! Every field this crate produces is either a real measurement or an
-//! explicit absence (`None`, a [`tairix_controls::MeterValue::Unmeasured`]
+//! explicit absence (`None`, a [`MeterValue::Unmeasured`](tairix_controls::MeterValue::Unmeasured)
 //! meter, or a documented honest zero such as `jobs`); nothing here ever
 //! synthesises a plausible-looking value to fill a gap. A denied or failed
 //! query degrades the one field it backs, is noted once (never spammed) at
@@ -115,6 +120,7 @@ pub mod publish;
 pub mod sample;
 pub mod schedule;
 pub mod service;
+pub mod view;
 pub mod wait;
 
 #[cfg(test)]
@@ -141,5 +147,11 @@ pub use sample::{
 pub use schedule::{MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
 pub use service::{
     CycleOutcome, RenderInputs, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES,
+};
+pub use view::{
+    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, JobControl, JobSummary,
+    PressureAction, PressureCause, PressureControl, RecoveryControl, RecoveryItem, ResourceSummary,
+    Section, ServiceSummary, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction,
+    TaskSummary,
 };
 pub use wait::{required_members, WaitToken};

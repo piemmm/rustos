@@ -117,9 +117,9 @@ owns:
   capsule or the readout cycles the running tasks, and a middle press
   switches to the previous task.
 - **The capsule's tap-or-hold gesture** — a primary press and quick release
-  reports `OpenSwitchboard { section: Section::Tasks }`; a press held past
-  `LONG_PRESS_AFTER_NS` (half a second) reports
-  `OpenSwitchboard { section: Section::Recovery }`; and the readout's one
+  reports `OpenSwitchboard { section: CommandSection::Tasks }`; a press held
+  past `LONG_PRESS_AFTER_NS` (half a second) reports
+  `OpenSwitchboard { section: CommandSection::Recovery }`; and the readout's one
   safe action, "Open Switchboard", reports the same response as the quick
   press. The session asks the Switchboard service to open — or revive and
   open — its window at that section. The threshold is resolved against the

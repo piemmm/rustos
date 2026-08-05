@@ -8,11 +8,6 @@
 //! than being copied into each family's module, so the whole control set
 //! rounds, insets, and thickens identically and a change to the recipe cannot
 //! silently diverge between two controls.
-//!
-//! It is also the home of [`RenderInvariant`], the one marker that keeps a
-//! control's derived equality honest about what it draws.
-
-use core::ops::{Deref, DerefMut};
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -21,87 +16,12 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, Theme};
 
+pub(crate) use tairix_geometry::to_i32;
+
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
     PressureKind, PressureState, RecoveryState, ValidationState,
 };
-
-/// A value the renderer never reads, wrapped so it cannot make two controls
-/// that draw the same pixels compare unequal.
-///
-/// # The contract it buys
-///
-/// Every drawn control in this crate derives `PartialEq`, and a host uses that
-/// equality as a *render gate*: it re-renders and re-presents only when the
-/// composition it is about to draw differs from the one it last drew. That is
-/// sound only if equality means "these two would draw the same pixels", so a
-/// control may hold no field that changes without changing the picture. Raw
-/// pointer coordinates, press latches, and drag anchors are exactly such
-/// fields: they are hit-testing bookkeeping consumed by `on_pointer`, and the
-/// *visible* consequence of a press or a hover is a separate, still-compared
-/// `ControlState`. Left bare, one pointer sample over inert background would
-/// make the whole composition compare as changed and pay a full repaint.
-///
-/// Wrapping such a field in `RenderInvariant` makes it compare equal to every
-/// other value of its type, so it drops out of the surrounding `derive` while
-/// every other field keeps its ordinary meaning.
-///
-/// # Why a wrapper rather than a hand-written `PartialEq`
-///
-/// The alternative — writing `impl PartialEq` per control and simply omitting
-/// the excluded field — has to restate every *remaining* field. A field added
-/// later is then silently absent from equality, and a visible change stops
-/// forcing a repaint: stale pixels, the failure direction that a test is
-/// unlikely to catch. Localising the exception in the *type of the excluded
-/// field* inverts that: the struct keeps `#[derive(PartialEq)]`, a new field is
-/// covered automatically, and exempting one takes a deliberate, greppable,
-/// self-documenting change at the field itself.
-///
-/// # The obligation on the author
-///
-/// Wrap a field only with positive evidence that no render path reads it, and
-/// prove it with a drift-guard test that renders two values differing only in
-/// that field and compares the surfaces byte for byte. The cost of the two
-/// mistakes is not symmetric: a field wrongly left bare only costs a needless
-/// repaint, while one wrongly wrapped freezes the screen on stale pixels.
-///
-/// It deliberately implements no `Hash`: equality here is coarser than the
-/// wrapped value, so any hash derived from that value would break the
-/// `Hash`/`Eq` agreement.
-#[derive(Copy, Clone, Debug, Default)]
-pub(crate) struct RenderInvariant<T>(T);
-
-impl<T> RenderInvariant<T> {
-    /// Mark `value` as state the renderer never reads.
-    pub(crate) const fn new(value: T) -> Self {
-        Self(value)
-    }
-}
-
-/// Two wrapped values are always equal — that is the whole point of the
-/// wrapper, and the reason the surrounding control's derived equality means
-/// "would draw the same pixels".
-impl<T> PartialEq for RenderInvariant<T> {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
-impl<T> Eq for RenderInvariant<T> {}
-
-impl<T> Deref for RenderInvariant<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-
-impl<T> DerefMut for RenderInvariant<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-}
 
 /// Map a resource pressure to its theme signal role, in one place so no
 /// renderer restates the mapping.
@@ -210,10 +130,85 @@ fn track_thickness(theme: &Theme, scale: Scale, logical: u32) -> u32 {
         .saturating_add(u32::from(heavy_contrast(theme)))
 }
 
-/// A `u32` extent as an `i32` coordinate, saturating rather than wrapping.
+/// Paint a measured track band: the quiet groove, then — when `fill` is
+/// `Some` — the tinted proportional fill, then a pressure-emphasis outline
+/// when `emphasised`.
+///
+/// This is the one "rounded groove with a proportional tinted fill and an
+/// optional pressure-emphasis outline" recipe every measured instrument track
+/// shares — a [`Meter`](crate::Meter)'s resource track and a
+/// [`MetricTile`](crate::metric::MetricTile)'s embedded track both draw
+/// through this one definition, so the groove/fill/outline geometry has
+/// exactly one home. `band` is `(x, y, w, avail_h)`; the band's own thickness
+/// is the theme's progress thickness capped by `avail_h`, never the whole of
+/// it, so a tall slot still draws an instrument line rather than a block.
+/// `fill` is `None` for an honestly unmeasured reading: the groove alone,
+/// never a fabricated fill.
+pub(crate) fn paint_measured_track(
+    surface: &mut Surface,
+    band: (u32, u32, u32, u32),
+    fill: Option<u16>,
+    tint: Color,
+    emphasised: bool,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let (x, y, w, avail_h) = band;
+    let band_h = progress_thickness(theme, scale).min(avail_h);
+    if band_h == 0 || w == 0 {
+        return;
+    }
+    let palette = theme.palette();
+    let radius = band_h / 2;
+    surface.fill_round_rect(x, y, w, band_h, radius, Color::from(palette.scroll_track));
+
+    let Some(permille) = fill else {
+        return;
+    };
+    let fill_w = proportional(w, permille).max(band_h.min(w));
+    surface.fill_round_rect(x, y, fill_w, band_h, radius, tint);
+
+    if emphasised {
+        let thickness = rail_thickness(theme, scale).min(band_h / 2).max(1);
+        draw_outline(surface, x, y, w, band_h, thickness, tint);
+    }
+}
+
+/// `extent` scaled by `permille / 1000`, rounded down and never exceeding
+/// `extent` (arithmetic saturates rather than overflowing).
 #[must_use]
-pub(crate) fn to_i32(v: u32) -> i32 {
-    i32::try_from(v).unwrap_or(i32::MAX)
+fn proportional(extent: u32, permille: u16) -> u32 {
+    u32::try_from(u64::from(extent) * u64::from(permille) / u64::from(FULL)).unwrap_or(extent)
+}
+
+/// Draw one text line at `pos` (`(x, y)`) if a full line still fits before
+/// `limits`' `bottom` within its `w`, returning the y the next line starts at
+/// (advanced by the line height and `gap`, the third element of `limits`). A
+/// bound too short to hold the line is left untouched — the line is simply
+/// omitted rather than overlapping whatever follows it.
+///
+/// This is the one "fits, truncates, draws, advances" recipe every stacked
+/// text anatomy shares — a [`Meter`](crate::Meter)'s label/reading pair and a
+/// [`MetricTile`](crate::metric::MetricTile)'s label/detail lines both
+/// degrade through this one definition, so a tile too short for its content
+/// can never overlap a line onto the one below it.
+pub(crate) fn paint_text_line(
+    surface: &mut Surface,
+    text: &str,
+    pos: (u32, u32),
+    limits: (u32, u32, u32),
+    font: BitmapFont,
+    color: Color,
+) -> u32 {
+    let (x, y) = pos;
+    let (bottom, w, gap) = limits;
+    let line_h = font.line_height();
+    if w == 0 || y.saturating_add(line_h) > bottom {
+        return y;
+    }
+    let fitted = font.truncate_to_width(text, w);
+    font.draw_text(surface, to_i32(x), to_i32(y), fitted, color);
+    y.saturating_add(line_h).saturating_add(gap)
 }
 
 /// Paint a content icon at `(x, y)` into a `side`-pixel square slot: the
@@ -730,6 +725,14 @@ pub(crate) enum ChevronDir {
 /// One definition shared by the split button's disclosure, the combo box's
 /// disclosure, a menu's submenu anchor, and a scrollbar's end-button steps, so
 /// no family carries its own triangle recipe.
+///
+/// `rect` is the *region the mark sits in*, not the mark: the triangle is
+/// inset well within it — a little over a third of the region wide and a
+/// little over a fifth of it tall — so a caller hands over the whole control
+/// (or end button) it belongs to and the chevron places itself. A caller that
+/// passes a mark-sized region instead gets a triangle only a pixel or two
+/// across, which area coverage spreads across its neighbours as a grey smudge
+/// with no direction left to read.
 pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
     let Some((x, y, w, h)) = surface_rect(rect) else {
         return;
@@ -798,22 +801,22 @@ pub(crate) fn seam_thickness(theme: &Theme, scale: Scale) -> u32 {
     scale.scale_length(theme.metrics().seam_thickness).max(1)
 }
 
-/// Paint an Edge Wake down the leading edge of `bounds`: a lit seam on the
-/// side of an anchored control that displaced content sits against.
+/// Paint an Edge Wake down the leading edge of `bounds`: a lit seam that
+/// draws the eye to a region under genuine emphasis without touching its
+/// own fill.
 ///
-/// The design language uses the wake to answer a question the user would
-/// otherwise have to answer by eye — *did this column move, or did the list
-/// move under it?* The control never moves, so the confirmation has to come
-/// from its edge, and the edge that carries it is the one facing the content;
-/// the caller passes the anchored control's own bounds.
+/// [`ActionRail`](crate::ActionRail) lights this along its own leading edge
+/// while the content beside it is scrolled away from its start (see
+/// [`ActionRail::with_edge_wake`](crate::rail::ActionRail::with_edge_wake)),
+/// so the reader can see the list has moved under an anchored column that
+/// itself never does.
 ///
 /// It is a state, not an animation: the seam is lit for exactly as long as
-/// the adjacent content is displaced, so a reduced-motion theme needs no
-/// separate path (there is nothing to animate) and a still frame carries the
-/// same information as a moving one. It is drawn in the active rim colour, at
-/// the shared seam breadth, doubled under heavy contrast so the wake
-/// strengthens with the rest of the theme's edges rather than relying on a
-/// glow a high-contrast palette would flatten.
+/// the emphasis holds, so a reduced-motion theme needs no separate path —
+/// there is nothing to animate. It is drawn in the active rim colour, at the
+/// shared seam breadth, doubled under heavy contrast so the wake strengthens
+/// with the rest of the theme's edges rather than relying on a glow a
+/// high-contrast palette would flatten.
 pub(crate) fn paint_edge_wake(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
     let Some((x, y, w, h)) = surface_rect(bounds) else {
         return;

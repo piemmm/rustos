@@ -29,10 +29,11 @@ use tairix_theme::Theme;
 use crate::paint::{
     clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
     progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect,
-    to_i32, PlateStyle, RenderInvariant, FULL,
+    to_i32, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
+    RenderInvariant,
 };
 
 /// The outcome of interacting with a [`Slider`].

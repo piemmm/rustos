@@ -405,8 +405,30 @@ the request/render libraries stay testable against in-memory fixtures.
   across time, or distinguish two lifetimes that reused a numeric id, keys
   on the `proc_id` pair. The record also carries `uid`, `gid`,
   [`ProcessState`], the CPU it is currently running on (or
-  [`PROCESS_CPU_NONE`] when it is not presently scheduled), and an inline
+  [`PROCESS_CPU_NONE`] when it is not presently scheduled), the
+  scheduler's own [`SchedPriority`] service level, and an inline
   (allocation-free) name buffer bounded by [`PROCESS_NAME_MAX`].
+  Three cumulative usage figures ride alongside them, each a `u64` a
+  consumer turns into a rate by sampling twice and differencing:
+  `cpu_time_ns` (on-CPU nanoseconds), `mem_bytes` (bytes currently mapped
+  in the process's address space), and the `io_bytes_read` /
+  `io_bytes_written` pair below.
+- **Per-process disk I/O** (`io_bytes_read`, `io_bytes_written`) is the
+  count of bytes the kernel *actually transferred* for that process's own
+  file-read and file-write system calls, accounted at the syscall boundary
+  against the task the kernel itself identifies. It is the same quantity
+  Linux reports as `rchar`/`wchar` in `/proc/<pid>/io`, and the honest
+  measure of "this process's disk activity" in a system where the
+  filesystem and block services may live outside the kernel: the process
+  that *asked* is charged, never the service that served it. A short read
+  advances the counter by what came back, never by the length requested,
+  and a transfer that faulted before reaching the process is not counted at
+  all. The pair excludes pipe, pty, and resource I/O, and is **not**
+  block-device traffic — a cached read that never reaches storage still
+  counts. Both saturate at `u64::MAX` rather than wrapping, and are
+  monotonic for the process's lifetime: a spawned child's effective
+  capability record taking over from its admit-time placeholder continues
+  the same totals rather than restarting them.
 - [`KernelMemoryStats`] — total/free/kernel-heap/user-resident bytes and
   the architecture page size.
 - [`Uptime`] — the monotonic span since boot as a [`Duration64`] and the
@@ -477,6 +499,7 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`ProcessListRequest`]: ../../tairix_abi/sysinfo/struct.ProcessListRequest.html
 [`ProcessRecord`]: ../../tairix_abi/sysinfo/struct.ProcessRecord.html
 [`ProcessState`]: ../../tairix_abi/sysinfo/enum.ProcessState.html
+[`SchedPriority`]: ../../tairix_abi/process/enum.SchedPriority.html
 [`PROCESS_NAME_MAX`]: ../../tairix_abi/sysinfo/constant.PROCESS_NAME_MAX.html
 [`PROCESS_CPU_NONE`]: ../../tairix_abi/sysinfo/constant.PROCESS_CPU_NONE.html
 [`ProcId`]: ../../tairix_abi/origin/struct.ProcId.html

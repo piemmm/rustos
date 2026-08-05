@@ -1164,7 +1164,7 @@ mod tests {
         }
 
         fn new() -> Self {
-            let mk = |pid, uid, name: &[u8]| {
+            let mk = |pid, uid, name: &[u8], io_bytes_read, io_bytes_written| {
                 ProcessRecord::new(
                     pid,
                     1,
@@ -1177,16 +1177,21 @@ mod tests {
                     SchedPriority::Normal,
                     0,
                     0,
+                    io_bytes_read,
+                    io_bytes_written,
                     name,
                 )
                 .unwrap()
             };
             Self {
-                own: [mk(10, 1000, b"shell"), mk(11, 1000, b"editor")],
+                own: [
+                    mk(10, 1000, b"shell", 4096, 512),
+                    mk(11, 1000, b"editor", 8192, 1024),
+                ],
                 global: [
-                    mk(1, 0, b"init"),
-                    mk(10, 1000, b"shell"),
-                    mk(11, 1000, b"editor"),
+                    mk(1, 0, b"init", u64::MAX, u64::MAX),
+                    mk(10, 1000, b"shell", 4096, 512),
+                    mk(11, 1000, b"editor", 8192, 1024),
                 ],
                 hwtree: tree_blob(7, &tree_nodes()),
                 mounts: [
@@ -1606,8 +1611,37 @@ mod tests {
         assert_eq!(n, 2 * ProcessRecord::WIRE_LEN);
         let first = ProcessRecord::from_bytes(&resp[..ProcessRecord::WIRE_LEN]).unwrap();
         assert_eq!(first.name_bytes(), b"shell");
+        assert_eq!(first.io_bytes_read, 4096);
+        assert_eq!(first.io_bytes_written, 512);
         // Self-scoped queries are not audited.
         assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    /// The per-process I/O counters survive the service's re-serialisation
+    /// in the system-wide view too, saturated value included, and the
+    /// capability gate on that view is unchanged.
+    #[test]
+    fn global_process_list_carries_the_io_counters() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let plr = ProcessListRequest {
+            offset: 0,
+            limit: 3,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
+        let mut resp = [0u8; 512];
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 3 * ProcessRecord::WIRE_LEN);
+        let init = ProcessRecord::from_bytes(&resp[..ProcessRecord::WIRE_LEN]).unwrap();
+        assert_eq!(init.name_bytes(), b"init");
+        assert_eq!(init.io_bytes_read, u64::MAX);
+        assert_eq!(init.io_bytes_written, u64::MAX);
+        let editor = ProcessRecord::from_bytes(&resp[2 * ProcessRecord::WIRE_LEN..]).unwrap();
+        assert_eq!(editor.name_bytes(), b"editor");
+        assert_eq!(editor.io_bytes_read, 8192);
+        assert_eq!(editor.io_bytes_written, 1024);
     }
 
     #[test]

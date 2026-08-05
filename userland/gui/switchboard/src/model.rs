@@ -19,15 +19,18 @@ use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{CapabilityId, CapabilityQuery, ProcId, SchedPriority, Signal};
 use tairix_controls::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivityState, ActivitySummary, MeterValue,
-    PressureAction, PressureCause, PressureControl, PressureKind, PressureState, ProgressValue,
-    RecoveryControl, RecoveryItem, RecoveryState, ResourceSummary, Section, SwitchboardAction,
-    SwitchboardModel, TaskSummary, WindowControlKind, MAX_CHART_SAMPLES,
+    ActivityState, MeterValue, PressureKind, PressureState, ProgressValue, RecoveryState,
+    WindowControlKind, MAX_CHART_SAMPLES,
 };
 
 use crate::activities::Activities;
 use crate::derive::{memory_pressured, Hysteresis};
 use crate::sample::{ProcessSummary, Sample};
+use crate::view::{
+    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, PressureAction, PressureCause,
+    PressureControl, RecoveryControl, RecoveryItem, ResourceSummary, Section, SwitchboardAction,
+    SwitchboardModel, TaskSummary,
+};
 
 /// The task row action's label: every task's row action is the same
 /// switch-to-window request, so the label never varies per row.
@@ -790,7 +793,7 @@ pub enum GroupingEdit {
         task: usize,
     },
     /// Commit the pending rename, read from the widget with
-    /// [`tairix_controls::Switchboard::submitted_activity_name`].
+    /// [`Switchboard::submitted_activity_name`](crate::view::Switchboard::submitted_activity_name).
     Rename {
         /// The activity's index within the model.
         activity: usize,

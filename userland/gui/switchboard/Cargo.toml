@@ -14,16 +14,18 @@ workspace = true
 # The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
 # optional, on-by-default build feature, mirroring `tairix-fontd` and
 # `tairix-top`. `cargo build -p tairix-switchboard` builds the service
-# program with it; host tooling builds only the sampler/derive/publish/
-# schedule *library*, so the host test build never pulls the userland
-# runtime's `_start` / `#[global_allocator]` / panic handler.
+# program with it; host tooling builds only the *library* — sampler, derive,
+# publish, schedule, and the window's own screen — so the host test build
+# never pulls the userland runtime's `_start` / `#[global_allocator]` /
+# panic handler.
 [features]
 default = ["program"]
 program = ["dep:tairix-rt"]
 
-# The package is both the `tairix-switchboard` sampler/derive/publish/
-# schedule library (host-testable against a fake `Transport`) and the `Run`
-# entry-point binary of the service installed at
+# The package is both the `tairix-switchboard` library — the sampler,
+# derive, publish and schedule core plus the overview window's own screen
+# (`src/view/`), all host-testable against a fake `Transport` — and the
+# `Run` entry-point binary of the service installed at
 # `/System/Services/switchboard.app/Run`. The binary is a freestanding
 # pure-Rust program on the native Tier-1 targets and an inert host stub
 # elsewhere (see `src/run.rs`).
@@ -33,49 +35,63 @@ path = "src/run.rs"
 
 [dependencies]
 # The frozen `Errno` table plus the Switchboard tray-summary wire vocabulary
-# (`SWITCHBOARD_ENDPOINT`, `SwitchboardRequest`, `TraySummary`) and the
-# shared status-reply frame the publish step decodes.
+# (`SWITCHBOARD_ENDPOINT`, `SwitchboardRequest`, `TraySummary`, the
+# `CommandSection` a taskbar gesture names) and the shared status-reply frame
+# the publish step decodes.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared System Information API client helpers: the `Transport` seam,
 # the process-list and CPU-time paging walks, and the memory-pressure fetch.
 # The sampler consumes these rather than duplicating them.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
-# The already-built `Switchboard` composition and its typed view model
-# (`SwitchboardModel`, `TaskSummary`, `RecoveryItem`, `ResourceSummary`, …)
-# the live-data builder assembles and the panel's window lifecycle drives
-# through `Switchboard::select_section` / `render` / `on_pointer` / `on_key`.
+# The shared Reactive Alloy controls the screen is assembled from — window
+# furniture, meters, charts, the location breadcrumb, list rows, cards, action
+# rails, buttons, menus, and the one scrollbar — so this application paints no
+# chrome of its own.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The closed built-in glyph vocabulary: the location band's section-list
+# command names its glyph from that one set rather than carrying artwork.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The screen lives in the library target, so the crates it draws through are
+# ordinary dependencies rather than program-only ones: logical geometry and
+# the one logical-to-physical scale, the design tokens every visible property
+# resolves from, the premultiplied-alpha rasteriser it paints into, the
+# pointer/keyboard vocabulary its interaction consumes, and the text
+# rasteriser its labels and readings measure and draw with.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, `ipc_call`,
 # `ipc_recv`, `port_bind`, the shared-memory and wait-set syscalls,
 # `clock_get`, `cap_query`, `signal`, `signal_intake`, `stderr`), the
 # production `sysinfo` transport seam in `lib/procinfo` (`IpcTransport`), the
-# window-channel client, the shared desktop input vocabulary the wire events
-# are translated into, and the geometry/theme/font/raster crates the
-# composition renders through. All are pulled in only for the bare-metal
-# targets the program is actually built for; on the host none of these
-# bare-metal-only crates are linked.
+# window-channel client, and the glyph service the font crate reaches through
+# `tairix-rt`. These are pulled in only for the bare-metal targets the program
+# is actually built for; on the host none of them are linked, and the font
+# crate falls back to its host transport.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
-tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
-tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
-tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 
-# The panel's own tests drive the composition's interaction path the way the
-# compositor does — a wheel event resolved against real window geometry,
-# theme metrics, and font metrics — so a scroll offset a test observes is the
-# one a user would really have, not a stand-in. Only the tests need these:
-# the service library measures and draws nothing itself, and the freestanding
-# program takes the same crates from the bare-metal block above.
+# The screen's and the panel's tests draw and hit-test for real — a wheel
+# event resolved against real window geometry, theme metrics, and font
+# metrics — so a scroll offset or a pixel a test observes is the one a user
+# would really have, not a stand-in. That needs two test-only additions on
+# top of the ordinary dependencies above: the font crate's solid test
+# transport (never a running `fontd`), and the controls' shared theme
+# fixtures, so the screen's tests assert against the identical heavy-contrast
+# theme every control's own suite uses rather than a private copy.
 [dev-dependencies]
-tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
-tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
+    "test-support",
+] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
+    "test-util",
+] }

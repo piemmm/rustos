@@ -57,10 +57,28 @@ yields no top task rather than a mangled one.
 
 ## The live overview window
 
-The session's `OpenPanel` command shows the shared `Switchboard`
-composition (`lib/controls/src/switchboard.rs`) on a requested section,
+The session's `OpenPanel` command shows this crate's own `Switchboard`
+screen composition (`src/view/`: `mod.rs` holds the retained widget tree,
+the window chrome, input dispatch, the scroll model and the shared
+per-section layout skeleton, and one sibling module per section owns that
+section's view models, layout, painting and input) on a requested section,
 selected through its own `Switchboard::select_section`. `src/panel.rs` owns
-the lifecycle and `src/model.rs` builds what it shows.
+the lifecycle and `src/model.rs` builds what it shows. The screen is
+assembled purely from the shared `lib/controls` controls and paints no chrome
+of its own; it lives here because it arranges those controls into one
+particular window, while `lib/controls` holds only behaviour any surface may
+reuse (`plans/NEW-SWITCHBOARD.md` S1).
+
+Its chrome is the standard window frame and title bar plus a **location
+band**: a `Breadcrumb` reading `Switchboard › <section>` with a trailing
+`IconButton` that opens a `Menu` of the six sections, the one on show marked
+selected and current exactly as a `ComboBox` marks its own choice. The
+trail's leading crumb opens the same list — its trailing crumb is the current
+location, which a breadcrumb never activates — and with the band focused,
+Space or Enter opens the list, Up/Down walk it, Enter shows the section under
+the cursor and Escape closes it unchanged. Both routes run the one section
+transition, so the trail, the content and the per-section scroll offset can
+never disagree.
 
 There is at most **one** window. A second `OpenPanel` asks the session to
 raise the one already open — naming this service's own pid, since the
@@ -270,21 +288,28 @@ Exit rules — every abnormal exit states its reason on `stderr` first:
 
 The library is `no_std` (with `alloc`) and consumes only `tairix-abi` (the
 wire vocabulary and `Errno`), `tairix-procinfo` (the shared sysinfo client
-helpers), and `tairix-controls` (the already-built `Switchboard`
-composition it hosts — it is not its author) — no kernel or driver crate,
-no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9, §17.4). The `Run` binary additionally links `tairix-rt`
-(the pure-Rust userland runtime), the window-channel client, and the
-input/geometry/theme/font/raster crates, for the bare-metal targets only;
-on the host it is an inert stub so workspace-wide builds, clippy, and fmt
-still cover the file. Nothing outside `userland/gui/*` depends on this
-crate (`AGENTS.md` §17.3), so a headless image omits it cleanly.
+helpers), `tairix-controls` (the shared controls its own screen composition
+is assembled from), and the crates that screen draws through —
+`tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-input`, and
+`tairix-font` — no kernel or driver crate, no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9, §17.4).
+The `Run` binary additionally links `tairix-rt` (the pure-Rust userland
+runtime), the window-channel client, and the font crate's glyph-service
+transport, for the bare-metal targets only; on the host it is an inert stub
+so workspace-wide builds, clippy, and fmt still cover the file. The screen's
+own tests additionally take the controls' shared heavy-contrast theme
+fixture through the `test-support` feature, so they assert against the
+identical fixture every control's own suite uses rather than a private copy.
+Nothing outside `userland/gui/*` depends on this crate (`AGENTS.md` §17.3),
+so a headless image omits it cleanly.
 
 Everything with behaviour worth testing is host-tested, with the modules
 and their tests side by side under `src/`: the sampler against a scripted
-in-memory `Transport` fixture, and the whole run-loop body plus the window
-lifecycle against a recording `ServiceHost` (`src/test_host.rs`) whose
-wait-set bookkeeping mirrors the production host's, so the membership
-assertions are real. The `Run` binary is left holding only the wiring the
-host cannot run: syscalls, mailboxes, painting, and wire-event
-translation.
+in-memory `Transport` fixture, the screen composition against real window
+geometry, theme metrics, and font metrics — so a pixel or a scroll offset a
+test observes is the one a user would really have — and the whole run-loop
+body plus the window lifecycle against a recording `ServiceHost`
+(`src/test_host.rs`) whose wait-set bookkeeping mirrors the production
+host's, so the membership assertions are real. The `Run` binary is left
+holding only the wiring the host cannot run: syscalls, mailboxes, painting,
+and wire-event translation.

@@ -1314,68 +1314,20 @@ Controls emit typed userland actions. The receiving service performs the operati
 
 ---
 
-## 17. Switchboard as a Reference Composition
+## 17. Composing an Application Screen
 
-Switchboard should use the same general controls as every other TAIRiX surface.
+An application's screen is composed of these controls; it is not specified here. This document defines the shared vocabulary, and each application's own plan defines the surface it builds from that vocabulary — which is why a screen's composition lives in the application crate rather than in `lib/controls`.
 
-### Window frame and viewport
+What this specification does bind for every such screen:
 
-- The top-level Switchboard window uses the standard `WindowFrame` and `TitleBar`; it does not ship custom application-painted chrome.
-- Close, minimize, put-to-back, and size toggle are the standard window-manager controls with the same glyph, focus, tooltip, and keyboard semantics as every other TAIRiX window.
-- When content exceeds the client viewport, the standard vertical or horizontal scrollbar appears according to the root viewport model.
-- A resizable window exposes the standard ResizeGrabber at the frame corner or scrollbar junction.
-- Minimize keeps background jobs active and visible through the taskbar item; close remains a cooperative application request.
+- The window uses the standard `WindowFrame` and `TitleBar` with the standard window-manager commands; an application never paints its own frame chrome.
+- Content taller or wider than the client viewport is governed by the standard scrollbar and the root viewport model, with the standard `ResizeGrabber` at the frame corner or scrollbar junction.
+- A live screen is one sample of a moving system. A host publishes each new reading in place, running the one model-to-controls derivation the constructor runs; it never rebuilds the composition, which would discard the reader's place in it every sample. What survives a refresh is what the reader chose — the selected view, every view's scroll offset, keyboard focus and its list position, the last pointer position, and any move, resize or thumb drag in flight. What is dropped is what names a row that may now be a different object: row selection, pointer hover, and any half-finished press, so a press begun on one row can never complete against the row that replaced it.
+- A focused list position is clamped into the new content and the active offset re-ranged through the same clamp a view switch uses, so a shortened list leaves neither past its end. An emptied view stays valid and renderable with nothing to activate.
+- A reading with no wired measurement renders honestly — the unmeasured track, no fabricated fill — never a fabricated number.
+- A screen composes controls and emits typed actions. It never re-derives a control's painting, layout, hit-testing or keyboard handling, and never enforces authority itself.
 
-### Header resource band
-
-- Immediately below the title bar sits an always-visible band of resource `Meter` (§11.33) controls, one per resource in the model, spaced evenly across the band's width; the tab strip and every section below it shift down by exactly the band's measured height.
-- The band is an instrument, not a control: it takes no pointer or keyboard input and never emits a `SwitchboardAction`, so a press over it can never reach the tab strip, the section content, or the scrollbar it sits above.
-- Each resource's identity, reading, and Pressure Rail state are the same fact the Overview resource card below shows; there is no second copy of that data, only the column's own instrument layered on top — a Chart (§11.35) of the resource's recent history where there is one to plot, the Meter's own track (§11.33) where there is not, never both of the same number.
-- A resource with no wired measurement renders an honestly quiet meter (the unmeasured track, no fabricated fill), never a fabricated reading.
-- A model with no resources collapses the band to zero height; nothing below it moves.
-
-### Section selection
-
-- One `Tabs` strip below the header resource band selects the four sections (Tasks, Jobs, Recovery, Overview); the marked tab, the drawn content, and the active scroll offset are always the same fact.
-- The host chooses which section the panel opens on — Recovery for a long-press on a flagged tray capsule, Tasks for an ordinary press — by asking for it directly (`Switchboard::select_section`), never by feeding synthetic tab or key events.
-- A tab press, the keyboard, and the direct request run the one transition and leave identical state. Each section keeps its own scroll offset, re-ranged and re-clamped against that section's content on the next render.
-- Asking for the section already shown changes nothing: no scroll reset, no focus reset. The sections are a closed set, so there is no invalid request to refuse and no error to report.
-
-### Live data refresh
-
-- The model is one sample of a moving system. A host publishes each new reading in place (`Switchboard::set_model`), running the one model-to-controls derivation `Switchboard::new` runs; it never rebuilds the composition, which would discard the user's place in it every sample.
-- What survives a refresh is what the user chose: the selected section and its tab mark, every section's scroll offset, the keyboard focus region and its list position, the last pointer position, and any window move, resize, or scroll-thumb drag in flight.
-- What is dropped is what names a row that may now be a different object: row selection, pointer hover, and any half-finished press. A press begun on one row can never complete against the row that replaced it; hover returns with the next pointer movement.
-- The focused list position is clamped into the new content and the active section's offset is re-ranged through the same clamp a section switch uses, so a shortened list leaves neither past its end. An emptied section stays valid and renderable with nothing to activate.
-
-### Task list
-
-- `ListRow` for each task.
-- Activity history as a `Chart` (§11.35) in row content, not a custom state engine.
-- Resource pressure as `PressureRail` on the row.
-- Hung or recovery state as `SignalBead` and `RecoveryState`.
-- Row actions as standard `Button` or `IconButton` controls.
-
-### Background jobs
-
-- `Card` or `ListRow` for each job.
-- Known progress as `HeatSeam` and numeric text.
-- Job actions as `Button` controls sharing the job's progress identity.
-- Open destination or inspect output actions use quiet Action Warmth only when useful.
-
-### Recovery
-
-- Hung object rows use recovery beads and leading recovery rails.
-- Restart uses `RecoveryLatch` treatment.
-- Force action uses destructive role with confirmation posture.
-- Timeline and logs use standard tab, row, and panel controls.
-
-### System overview
-
-- Resource cards use semantic rails and numeric content, built from the same per-resource model the header resource band's meters render.
-- Service rows use `ListRow` with state bead and capability-aware actions.
-- System actions use `Button`, `IconButton`, and `MenuItem` roles.
-- Shutdown or lock actions use destructive or system roles, not custom artwork.
+The Switchboard screen is the largest composition built this way; its sections, chrome and data sources are specified in `plans/NEW-SWITCHBOARD.md`.
 
 ---
 

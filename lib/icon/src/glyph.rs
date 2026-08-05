@@ -131,6 +131,10 @@ pub enum IconKind {
     DiskUsb,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
+    /// Three bulleted horizontal bars, for opening a menu that lists a
+    /// screen's own sections (a Switchboard-style location breadcrumb's
+    /// trailing list button).
+    ListMenu,
 }
 
 impl IconKind {
@@ -178,6 +182,7 @@ impl IconKind {
             "disk-hard" => Self::DiskHard,
             "disk-solid-state" => Self::DiskSolidState,
             "disk-usb" => Self::DiskUsb,
+            "list-menu" => Self::ListMenu,
             _ => Self::Generic,
         }
     }
@@ -231,6 +236,7 @@ impl IconKind {
             Self::DiskHard => 36,
             Self::DiskSolidState => 37,
             Self::DiskUsb => 38,
+            Self::ListMenu => 39,
         }
     }
 
@@ -283,6 +289,7 @@ impl IconKind {
             Self::DiskHard => "disk-hard",
             Self::DiskSolidState => "disk-solid-state",
             Self::DiskUsb => "disk-usb",
+            Self::ListMenu => "list-menu",
         }
     }
 }
@@ -348,6 +355,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
             disk(color)
         }
         IconKind::Generic => generic(color),
+        IconKind::ListMenu => list_menu(color),
     };
     VectorIcon::new(DESIGN, layers)
 }
@@ -552,6 +560,26 @@ fn view_toggle(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, TR),
         IconLayer::from_points(color, BL),
         IconLayer::from_points(color, BR),
+    ]
+}
+
+/// Three equal-length bulleted horizontal bars, for opening a list of a
+/// screen's own sections — a small leading bullet on each bar keeps it
+/// reading as a list rather than [`sort`]'s decreasing ranked bars.
+fn list_menu(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BULLET1: &[(i32, i32)] = &[(3, 6), (6, 6), (6, 9), (3, 9)];
+    const BAR1: &[(i32, i32)] = &[(9, 6), (21, 6), (21, 9), (9, 9)];
+    const BULLET2: &[(i32, i32)] = &[(3, 11), (6, 11), (6, 14), (3, 14)];
+    const BAR2: &[(i32, i32)] = &[(9, 11), (21, 11), (21, 14), (9, 14)];
+    const BULLET3: &[(i32, i32)] = &[(3, 16), (6, 16), (6, 19), (3, 19)];
+    const BAR3: &[(i32, i32)] = &[(9, 16), (21, 16), (21, 19), (9, 19)];
+    vec![
+        IconLayer::from_points(color, BULLET1),
+        IconLayer::from_points(color, BAR1),
+        IconLayer::from_points(color, BULLET2),
+        IconLayer::from_points(color, BAR2),
+        IconLayer::from_points(color, BULLET3),
+        IconLayer::from_points(color, BAR3),
     ]
 }
 

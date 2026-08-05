@@ -21,10 +21,11 @@ use tairix_theme::Theme;
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
     pointer_activation, resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape,
-    ChevronDir, PlateStyle, RenderInvariant,
+    ChevronDir, PlateStyle,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
+    RenderInvariant,
 };
 
 /// What a button displays: a label, an icon, or an icon with a label.

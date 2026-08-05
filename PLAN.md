@@ -3185,9 +3185,10 @@ session's attested relay + `HangTracker` delivery-evidence hang detection,
 and the `userland/gui/switchboard` monitor service (tickless
 `lib/procinfo` sampler, change-only publisher, capability-sized manifest
 intersected with the seat user's ceiling, spawned by the session and calm
-on death) — and **as a live panel** (T11): the monitor now hosts the
-`lib/controls::switchboard` composition as a real window with genuinely
-working actions, implementing `plans/desktop1.png`'s Open Panel. The
+on death) — and **as a live panel** (T11): the monitor hosts its own screen
+composition (`userland/gui/switchboard::view`, assembled from the shared
+controls) as a real window with genuinely working actions, implementing
+`plans/desktop1.png`'s Open Panel. The
 composition gained the shared `Meter` control (rail-tinted rounded track, an
 honest `Unmeasured` state that never fabricates a zero) and its history
 counterpart `Chart`, the always-visible header resource band it tiles,
@@ -3925,11 +3926,15 @@ per-app recipes (§2.2).
   explains why an action is unavailable or recommended (reason tone by role)
   with one optional safe next-step `Button` (typed `HelpTipAction`). 17 host
   tests.
-- **Switchboard reference composition — DONE.** `lib/controls::switchboard`
-  assembles Switchboard (spec §17) purely from the shared controls above — the
+- **Switchboard screen composition — DONE.** The Switchboard *screen* is
+  application-specific composition, so it lives in the application
+  (`userland/gui/switchboard::view`, `plans/NEW-SWITCHBOARD.md` S1);
+  `lib/controls` holds only controls any surface may reuse. The screen
+  assembles Switchboard (spec §17) purely from the shared controls — the
   `WindowFrame`/`TitleBar`/`ResizeGrabber`/`ScrollCorner` furniture, a `Tabs`
-  strip, `ListRow`/`Card`/`Panel`/`Button` content, and one vertical `ScrollBar`
-  over the Stage A/B scroll engine — proving no surface needs custom chrome. It
+  strip, `ListRow`/`Card`/`Panel`/`Button` content, an `ActionRail` beside the
+  list, and one vertical `ScrollBar` over the Stage A/B scroll engine —
+  proving no surface needs custom chrome. It
   turns a typed `SwitchboardModel` (Task/Job/Recovery/Resource/Service/System
   view models) into controls and emits a typed `SwitchboardAction`; the client
   can never receive furniture input (`furniture_at` over the frame hit map), a
@@ -3940,7 +3945,10 @@ per-app recipes (§2.2).
   header band tiles one `Meter` per resource above the tab strip and takes no
   input; a host opens the panel on a chosen section (`select_section`) and
   refreshes live data in place (`set_model`, preserving section, per-section
-  scroll, focus and any in-flight drag). 38 host tests. The Reactive Alloy
+  scroll, focus and any in-flight drag). Its own host tests take the controls'
+  shared heavy-contrast fixture through the `tairix-controls` `test-support`
+  feature, so an application's render tests exercise the same two contrast
+  axes as the controls with no second copy of the fixture. The Reactive Alloy
   control set is now complete (Stages A–F).
 - **Instruments: `Meter` and `Chart` — DONE.** `lib/controls::meter` draws one
   resource reading (label, reading text, rounded track tinted by the

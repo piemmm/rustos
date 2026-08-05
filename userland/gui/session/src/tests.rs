@@ -16,7 +16,7 @@ use tairix_abi::{
     AppInfoHeader, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX,
     BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
 };
-use tairix_controls::{PointerState, Section};
+use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
 use tairix_icon::{
     artwork_cache, icon_artwork_path, ArtworkCache, IconArtworkSource, IconKind, IconSet,
@@ -41,14 +41,14 @@ use tairix_wm::{
 };
 
 use crate::{
-    build_pin_views, command_section, deliver_pending_open, load_icon_set, load_library,
-    maybe_send_seat_report, open_tray, resolve_library_icons, serve_switchboard_request,
-    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, IconRasteriser,
-    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
-    PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
-    SessionInputResponse, SessionInputRouter, SessionPins, ShellOutcome, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
+    build_pin_views, deliver_pending_open, load_icon_set, load_library, maybe_send_seat_report,
+    open_tray, resolve_library_icons, serve_switchboard_request, ArtworkFileReader, ArtworkSandbox,
+    DesktopSession, DesktopShell, DragOrigin, IconRasteriser, InputSource, LaunchTable,
+    LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource, PinService,
+    ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter, SessionInputResponse,
+    SessionInputRouter, SessionPins, ShellOutcome, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, Unlocker,
+    SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
 };
 use tairix_window::PinDecision;
 
@@ -4045,7 +4045,7 @@ fn capsule_gestures_ask_the_session_to_open_switchboard() {
     assert_eq!(
         shell.handle(PRIMARY_RELEASE, &mut comp, QUICK_PRESS_NS),
         ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard {
-            section: Section::Tasks,
+            section: CommandSection::Tasks,
         })
     );
 
@@ -4054,7 +4054,7 @@ fn capsule_gestures_ask_the_session_to_open_switchboard() {
     assert_eq!(
         shell.handle(PRIMARY_RELEASE, &mut comp, LONG_PRESS_NS),
         ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard {
-            section: Section::Recovery,
+            section: CommandSection::Recovery,
         })
     );
 }
@@ -4491,21 +4491,6 @@ fn restart_owner_relaunches_the_recorded_bundle() {
         relaunches.launched,
         vec![(String::from("/Apps/Editor.app/Run"), String::from("Editor"))]
     );
-}
-
-/// The bar's own gesture decides the section; the session relays it
-/// unchanged onto the wire.
-#[test]
-fn every_bar_section_maps_onto_its_wire_section() {
-    assert_eq!(command_section(Section::Tasks), CommandSection::Tasks);
-    assert_eq!(command_section(Section::Jobs), CommandSection::Jobs);
-    assert_eq!(command_section(Section::Pressure), CommandSection::Pressure);
-    assert_eq!(
-        command_section(Section::Activities),
-        CommandSection::Activities
-    );
-    assert_eq!(command_section(Section::Recovery), CommandSection::Recovery);
-    assert_eq!(command_section(Section::Overview), CommandSection::Overview);
 }
 
 /// With an instance live, the press sends exactly one `OpenPanel` on the

@@ -39,7 +39,10 @@ panicking (`AGENTS.md` §2.9).
 `Archive`/`Executable`, the toolbar's `NavBack`/`NavForward`/`NavUp`/
 `Refresh`/`ViewToggle`/`Sort`/`NewFolder`, and `Trash`/`EmptyTrash`), the
 taskbar's `Library` (the program-library launcher's three-by-three tile
-grid, `plans/NEW-TASKBAR.md` T4), and a `Generic` fallback diamond.
+grid, `plans/NEW-TASKBAR.md` T4) and `Switchboard` (its always-trailing tray
+capsule), `ListMenu` (three bulleted bars, for the button that opens a
+screen's own section list beside a location breadcrumb,
+`plans/NEW-SWITCHBOARD.md` S2), and a `Generic` fallback diamond.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).

@@ -35,9 +35,11 @@ use tairix_util::secret::wipe;
 
 use crate::paint::{
     paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead, resolve_frame,
-    surface_rect, to_i32, PlateStyle, RenderInvariant,
+    surface_rect, to_i32, PlateStyle,
 };
-use crate::state::{ControlDisposition, ControlRole, ControlState, PointerState, ValidationState};
+use crate::state::{
+    ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
+};
 
 /// The outcome of feeding input to a text control.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

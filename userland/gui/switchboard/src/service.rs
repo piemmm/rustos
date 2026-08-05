@@ -23,7 +23,6 @@ use tairix_abi::switchboard_ipc::{
     SeatReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
-use tairix_controls::Switchboard;
 use tairix_procinfo::Transport;
 
 use crate::activities::{Activities, Member};
@@ -32,6 +31,7 @@ use crate::model::{build_model, derive_self_uid, GroupingEdit, LiveMeters};
 use crate::panel::{Panel, PanelOutcome, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
+use crate::view::Switchboard;
 
 /// Consecutive non-clean publish failures after which the service gives up
 /// rather than retrying forever.

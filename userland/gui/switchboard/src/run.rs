@@ -75,7 +75,6 @@ mod program {
         CapabilityId, CapabilityQuery, Errno, Origin, PowerAction, ProcId, SchedPriority, Signal,
         SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
-    use tairix_controls::{Switchboard, SwitchboardAction};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -84,8 +83,8 @@ mod program {
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
-        RenderInputs, Service, ServiceHost, WaitToken, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,
-        WIN_HEIGHT, WIN_WIDTH,
+        RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken,
+        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{WindowClient, WindowTransport};

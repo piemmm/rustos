@@ -25,9 +25,11 @@ use tairix_theme::Theme;
 
 use crate::paint::{
     key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle, RenderInvariant,
+    resolve_frame, resolve_mark, resolve_rail, surface_rect, to_i32, PlateStyle,
 };
-use crate::state::{ControlDisposition, ControlRole, ControlState, SelectionState};
+use crate::state::{
+    ControlDisposition, ControlRole, ControlState, RenderInvariant, SelectionState,
+};
 
 /// The outcome of activating a boolean selector.
 ///

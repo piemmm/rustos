@@ -558,7 +558,8 @@ one of two destinations, reported as
 `OpenSwitchboard { section }`:
 
 - **tap** — a press and quick release opens the running-task section
-  (`Section::Tasks`), the panel's NOW column;
+  (`CommandSection::Tasks`, the wire section the bar names directly), the
+  panel's NOW column;
 - **hold** — a press held past `LONG_PRESS_AFTER_NS` (half a second) opens
   the **Recovery** section instead, where a hung application's recovery
   actions live;

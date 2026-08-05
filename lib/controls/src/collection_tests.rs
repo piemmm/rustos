@@ -9,6 +9,13 @@
 //! state marks, the card's three-edge state (leading dominant rail, bottom
 //! progress seam, top-trailing count/alert) with footer actions, and the panel's
 //! header/content layout, header actions, and anchor notch.
+//!
+//! The table-header cases cover the column-span agreement that is the point of
+//! the shared column model (a header column and the cell beneath it occupy the
+//! same span), the default sort order and its flip once the owner commits it,
+//! the fail-closed refusals (a fixed, disabled, or denied column, and an
+//! out-of-range `set_sort`), the caret's direction and side, the keyboard model,
+//! degenerate bounds, and both themes plus the heavier-contrast path.
 
 use alloc::vec;
 
@@ -21,8 +28,8 @@ use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::collection::{
-    Card, CardAction, CellAlign, IconTile, ListRow, Panel, PanelAction, PanelEdge, RowAction,
-    TableCell, TableRow,
+    Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
+    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
 };
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
@@ -462,6 +469,597 @@ fn table_row_selection_and_activation() {
     assert_eq!(row.on_pointer(&moved(40, 14), bounds), None);
     assert_eq!(row.on_pointer(&PRESS, bounds), None);
     assert_eq!(row.on_pointer(&RELEASE, bounds), Some(RowAction::Activated));
+}
+
+// --- TableHeader (spec §11.14) -----------------------------------------
+
+/// The declared column widths a header and its rows are laid out across.
+const COLUMNS: [u32; 3] = [100, 80, 60];
+
+/// A `u32` coordinate as an `i32` (test coordinates always fit).
+fn xi(v: u32) -> i32 {
+    i32::try_from(v).expect("coordinate fits in i32")
+}
+
+fn three_columns() -> TableHeader {
+    TableHeader::new(vec![
+        HeaderColumn::new("Name"),
+        HeaderColumn::new("Kind"),
+        HeaderColumn::new("Size").with_align(CellAlign::Trailing),
+    ])
+}
+
+fn header_surface(header: &TableHeader, theme: &Theme, scale: Scale, columns: &[u32]) -> Surface {
+    let mut surface = Surface::new(W, H).expect("surface");
+    header.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        scale,
+        theme,
+        font(),
+        columns,
+    );
+    surface
+}
+
+/// Whether nothing at all was painted — every pixel is still an untouched
+/// surface's.
+fn is_blank(surface: &Surface) -> bool {
+    let blank = Surface::new(surface.width(), surface.height()).expect("blank surface");
+    surface.pixels() == blank.pixels()
+}
+
+/// The half-open x range over which `column_at` reports `index`, read from the
+/// header's own hit test so a test never re-derives the layout it checks.
+fn column_x_range(
+    header: &TableHeader,
+    theme: &Theme,
+    columns: &[u32],
+    index: usize,
+) -> Option<(u32, u32)> {
+    let bounds = Rect::new(0, 0, W, H);
+    let hit = |x: u32| {
+        header.column_at(
+            bounds,
+            Scale::ONE,
+            theme,
+            columns,
+            Point::new(xi(x), xi(H / 2)),
+        )
+    };
+    let start = (0..W).find(|&x| hit(x) == Some(index))?;
+    let end = (start..W).find(|&x| hit(x) != Some(index)).unwrap_or(W);
+    Some((start, end))
+}
+
+/// The number of `want` pixels in the upper and lower halves of their own
+/// bounding box.
+///
+/// This is how a caret's direction reads: a chevron's wide base is its flat
+/// edge, so one pointing up is bottom-heavy and one pointing down top-heavy.
+///
+/// The two halves are counted the same number of rows deep from each end, so
+/// the comparison measures the shape rather than the split. An odd row count
+/// leaves a centre row belonging to neither half: charging it to one side
+/// would make a bottom-heavy triangle three rows tall (two, four then five
+/// pixels wide) report six above against five below and read as pointing the
+/// wrong way.
+fn halves(surface: &Surface, want: Pixel) -> Option<(usize, usize)> {
+    let (_, y0, _, y1) = bbox(surface, want)?;
+    let rows = y1 - y0 + 1;
+    let deep = rows / 2;
+    let row = |at: u32| {
+        (0..surface.width())
+            .filter(|&x| surface.get(x, at) == Some(want))
+            .count()
+    };
+    let upper = (y0..y0 + deep).map(row).sum();
+    let lower = ((y1 + 1 - deep)..=y1).map(row).sum();
+    Some((upper, lower))
+}
+
+#[test]
+fn header_column_defaults() {
+    let column = HeaderColumn::new("Name");
+    assert_eq!(column.title(), "Name");
+    assert_eq!(column.align(), CellAlign::Leading);
+    assert!(
+        column.is_sortable(),
+        "most columns are meaningful to order by, so a column opts out rather than in"
+    );
+    assert_eq!(column.state(), ControlState::idle());
+    assert!(!HeaderColumn::fixed("Actions").is_sortable());
+    assert_eq!(
+        HeaderColumn::new("Size")
+            .with_align(CellAlign::Trailing)
+            .align(),
+        CellAlign::Trailing
+    );
+    let mut column = HeaderColumn::new("Name").with_state(ControlState::disabled());
+    assert_eq!(column.state(), ControlState::disabled());
+    column.set_state(ControlState::idle());
+    assert_eq!(column.state(), ControlState::idle());
+
+    let mut header = three_columns();
+    assert_eq!(header.columns().len(), 3);
+    assert_eq!(header.sort(), None);
+    assert_eq!(header.focus(), None);
+    header.columns_mut()[1].set_state(ControlState::disabled());
+    assert_eq!(header.columns()[1].state(), ControlState::disabled());
+}
+
+#[test]
+fn a_header_column_spans_exactly_the_row_cell_beneath_it() {
+    let theme = Theme::dark();
+    let denied = ControlState::idle().with_authority(AuthorityState::Denied);
+    // A denied column marks its own trailing edge, so the two marks pin where
+    // columns 1 and 2 end; a leading-aligned glyph pins where column 0 begins.
+    let row = TableRow::new(vec![
+        TableCell::new("A"),
+        TableCell::new("B").with_state(denied),
+        TableCell::new("C").with_state(denied),
+    ]);
+    let header = TableHeader::new(vec![
+        HeaderColumn::new("A"),
+        HeaderColumn::new("B").with_state(denied),
+        HeaderColumn::new("C").with_state(denied),
+    ]);
+    let mut beneath = Surface::new(W, H).expect("surface");
+    row.render(
+        &mut beneath,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        &theme,
+        font(),
+        &COLUMNS,
+    );
+    let above = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
+
+    let mark = premul(theme.palette().denied);
+    let row_marks = bbox(&beneath, mark).expect("the row's Authority Marks");
+    assert_eq!(
+        bbox(&above, mark),
+        Some(row_marks),
+        "a header column must end exactly where the cell beneath it does"
+    );
+    assert_eq!(
+        first_col(&above, premul(theme.palette().on_surface_muted)),
+        first_col(&beneath, premul(theme.palette().on_surface)),
+        "…and begin exactly where that cell's content does"
+    );
+}
+
+#[test]
+fn a_first_press_sorts_ascending_and_the_next_flips_the_committed_order() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut header = three_columns();
+    let (start, end) = column_x_range(&header, &theme, &COLUMNS, 1).expect("column 1 laid out");
+    let over = moved(xi(start + (end - start) / 2), xi(H / 2));
+
+    assert_eq!(
+        header.on_pointer(&over, bounds, Scale::ONE, &theme, &COLUMNS),
+        None
+    );
+    assert_eq!(
+        header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS),
+        None,
+        "a press alone commits nothing"
+    );
+    assert_eq!(
+        header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+        Some(HeaderAction::Sort {
+            column: 1,
+            order: SortOrder::Ascending
+        })
+    );
+    assert_eq!(
+        header.sort(),
+        None,
+        "the header reports the request; only the owner commits it"
+    );
+
+    header.set_sort(Some((1, SortOrder::Ascending)));
+    header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(
+        header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+        Some(HeaderAction::Sort {
+            column: 1,
+            order: SortOrder::Descending
+        }),
+        "pressing the already-sorted column flips its order"
+    );
+}
+
+#[test]
+fn an_uncommitted_request_is_asked_again_rather_than_assumed_honoured() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut header = three_columns();
+    let (start, end) = column_x_range(&header, &theme, &COLUMNS, 0).expect("column 0 laid out");
+    let over = moved(xi(start + (end - start) / 2), xi(H / 2));
+    let ascending = Some(HeaderAction::Sort {
+        column: 0,
+        order: SortOrder::Ascending,
+    });
+
+    header.on_pointer(&over, bounds, Scale::ONE, &theme, &COLUMNS);
+    header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(
+        header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+        ascending
+    );
+    header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
+    assert_eq!(
+        header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+        ascending,
+        "with no committed sort there is nothing to flip"
+    );
+}
+
+#[test]
+fn a_release_off_the_pressed_column_sorts_nothing() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut header = three_columns();
+    let first = column_x_range(&header, &theme, &COLUMNS, 0).expect("column 0 laid out");
+    let third = column_x_range(&header, &theme, &COLUMNS, 2).expect("column 2 laid out");
+    header.on_pointer(
+        &moved(xi(first.0 + 2), xi(H / 2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+    );
+    header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
+    header.on_pointer(
+        &moved(xi(third.0 + 2), xi(H / 2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+    );
+    assert_eq!(
+        header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+        None
+    );
+}
+
+#[test]
+fn a_fixed_disabled_or_denied_column_refuses_to_sort() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let denied = ControlState::idle().with_authority(AuthorityState::Denied);
+    let refusing = [
+        HeaderColumn::fixed("Actions"),
+        HeaderColumn::new("Locked").with_state(ControlState::disabled()),
+        HeaderColumn::new("Secret").with_state(denied),
+    ];
+    for column in refusing {
+        let mut header = TableHeader::new(vec![HeaderColumn::new("Name"), column]);
+        let (start, end) = column_x_range(&header, &theme, &COLUMNS, 1).expect("column 1 laid out");
+        let over = moved(xi(start + (end - start) / 2), xi(H / 2));
+        header.on_pointer(&over, bounds, Scale::ONE, &theme, &COLUMNS);
+        header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
+        assert_eq!(
+            header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
+            None
+        );
+        header.set_focus(Some(1));
+        assert_eq!(header.on_key(Key::Named(NamedKey::Enter)), None);
+        assert_eq!(header.on_key(Key::Char(' ')), None);
+        assert_eq!(header.sort(), None);
+    }
+}
+
+#[test]
+fn a_denied_column_draws_its_authority_mark() {
+    let theme = Theme::dark();
+    let denied = ControlState::idle().with_authority(AuthorityState::Denied);
+    let header = TableHeader::new(vec![
+        HeaderColumn::new("Name"),
+        HeaderColumn::new("Secret").with_state(denied),
+    ]);
+    let surface = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
+    assert!(
+        has_pixel(&surface, premul(theme.palette().denied)),
+        "a denied column shows the Authority Mark the row family draws"
+    );
+}
+
+#[test]
+fn set_sort_refuses_an_out_of_range_or_unsortable_column() {
+    let mut header = TableHeader::new(vec![HeaderColumn::new("Name"), HeaderColumn::fixed("Act")]);
+    header.set_sort(Some((5, SortOrder::Ascending)));
+    assert_eq!(header.sort(), None, "an out-of-range column is refused");
+    header.set_sort(Some((1, SortOrder::Ascending)));
+    assert_eq!(header.sort(), None, "an unsortable column is refused");
+
+    header.set_sort(Some((0, SortOrder::Descending)));
+    assert_eq!(header.sort(), Some((0, SortOrder::Descending)));
+    header.set_sort(Some((5, SortOrder::Ascending)));
+    assert_eq!(
+        header.sort(),
+        Some((0, SortOrder::Descending)),
+        "a refused request must not clamp onto another column, nor clear the real one"
+    );
+    header.set_sort(None);
+    assert_eq!(header.sort(), None);
+}
+
+#[test]
+fn the_sorted_column_alone_takes_the_emphasised_foreground() {
+    let theme = Theme::dark();
+    let muted = premul(theme.palette().on_surface_muted);
+    let emphasised = premul(theme.palette().on_surface);
+    let plain = header_surface(&three_columns(), &theme, Scale::ONE, &COLUMNS);
+    assert!(has_pixel(&plain, muted), "titles read muted by default");
+    assert!(!has_pixel(&plain, emphasised));
+
+    let mut sorted = three_columns();
+    sorted.set_sort(Some((1, SortOrder::Ascending)));
+    let surface = header_surface(&sorted, &theme, Scale::ONE, &COLUMNS);
+    assert!(has_pixel(&surface, emphasised));
+    assert!(
+        has_pixel(&surface, muted),
+        "the columns that are not sorted stay muted"
+    );
+}
+
+#[test]
+fn a_sort_caret_reads_as_a_caret_at_the_unscaled_desktop() {
+    let theme = Theme::dark();
+    let emphasised = premul(theme.palette().on_surface);
+    // An empty title leaves the caret as the only emphasised mark.
+    let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
+    header.set_sort(Some((0, SortOrder::Ascending)));
+    let surface = header_surface(&header, &theme, Scale::ONE, &[W]);
+    let (x0, y0, x1, y1) = bbox(&surface, emphasised)
+        .expect("a caret drawn only in coverage fringe is a grey smudge, not a mark");
+    assert!(
+        x1 - x0 >= 2 && y1 - y0 >= 1,
+        "a triangle needs a base and a narrowing run before a direction reads: {} by {}",
+        x1 - x0 + 1,
+        y1 - y0 + 1
+    );
+    let (top, bottom) = halves(&surface, emphasised).expect("caret drawn");
+    assert!(
+        bottom > top,
+        "an ascending caret reads upward at the plainest scale too ({top} vs {bottom})"
+    );
+}
+
+#[test]
+fn a_sort_caret_points_up_for_ascending_and_down_for_descending() {
+    let theme = Theme::dark();
+    let emphasised = premul(theme.palette().on_surface);
+    // A denser scale gives the caret enough pixels for its direction to read
+    // unambiguously; an empty title leaves it the only emphasised mark.
+    let scale = Scale::from_percent(300).expect("valid scale");
+    let tall = TableHeader::measured_height(scale, &theme, font());
+    let caret = |order| {
+        let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
+        header.set_sort(Some((0, order)));
+        let mut surface = Surface::new(W, tall).expect("surface");
+        header.render(
+            &mut surface,
+            Rect::new(0, 0, W, tall),
+            scale,
+            &theme,
+            font(),
+            &[W],
+        );
+        halves(&surface, emphasised).expect("caret drawn")
+    };
+    let (up_top, up_bottom) = caret(SortOrder::Ascending);
+    assert!(
+        up_bottom > up_top,
+        "an ascending caret points up, so its wide base sits low ({up_top} vs {up_bottom})"
+    );
+    let (down_top, down_bottom) = caret(SortOrder::Descending);
+    assert!(
+        down_top > down_bottom,
+        "a descending caret points down, so its wide base sits high ({down_top} vs {down_bottom})"
+    );
+}
+
+#[test]
+fn a_sort_caret_sits_on_the_side_the_alignment_implies() {
+    let theme = Theme::dark();
+    let emphasised = premul(theme.palette().on_surface);
+    for (align, leading_side) in [
+        (CellAlign::Leading, false),
+        (CellAlign::Center, false),
+        (CellAlign::Trailing, true),
+    ] {
+        // An empty title leaves the caret as the only emphasised mark.
+        let mut header = TableHeader::new(vec![HeaderColumn::new("").with_align(align)]);
+        header.set_sort(Some((0, SortOrder::Ascending)));
+        let surface = header_surface(&header, &theme, Scale::ONE, &[W]);
+        let (x0, _, x1, _) = bbox(&surface, emphasised).expect("caret drawn");
+        let (start, end) = column_x_range(&header, &theme, &[W], 0).expect("column laid out");
+        let middle = start + (end - start) / 2;
+        if leading_side {
+            assert!(
+                x1 < middle,
+                "a trailing-aligned title hugs its trailing edge, so the caret takes the other side"
+            );
+        } else {
+            assert!(
+                x0 > middle,
+                "a title read left to right leads toward the caret at its trailing edge"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_sort_caret_shortens_its_title_rather_than_overlapping_it() {
+    let theme = Theme::dark();
+    let long = "Modified at a very long moment indeed";
+    let count = |header: &TableHeader, want| {
+        header_surface(header, &theme, Scale::ONE, &[W])
+            .pixels()
+            .iter()
+            .filter(|&&pixel| pixel == want)
+            .count()
+    };
+    let sorted = |title: &str| {
+        let mut header = TableHeader::new(vec![HeaderColumn::new(title)]);
+        header.set_sort(Some((0, SortOrder::Ascending)));
+        header
+    };
+    let emphasised = premul(theme.palette().on_surface);
+    // The caret is identical in both sorted renders, so the difference is the
+    // title's own ink.
+    let with_title = count(&sorted(long), emphasised);
+    let caret_only = count(&sorted(""), emphasised);
+    let beside_caret = with_title.saturating_sub(caret_only);
+    assert!(beside_caret > 0, "the title still draws beside the caret");
+    assert!(
+        beside_caret
+            < count(
+                &TableHeader::new(vec![HeaderColumn::new(long)]),
+                premul(theme.palette().on_surface_muted)
+            ),
+        "the caret's slot comes out of the title's own width, never over the title"
+    );
+}
+
+#[test]
+fn the_keyboard_moves_focus_across_columns_and_sorts_the_focused_one() {
+    let theme = Theme::dark();
+    let mut header = three_columns();
+    header.on_key(Key::Named(NamedKey::Right));
+    assert_eq!(header.focus(), Some(0));
+    header.on_key(Key::Named(NamedKey::Right));
+    assert_eq!(header.focus(), Some(1));
+    header.on_key(Key::Named(NamedKey::End));
+    assert_eq!(header.focus(), Some(2));
+    header.on_key(Key::Named(NamedKey::Right));
+    assert_eq!(header.focus(), Some(0), "…and wraps at the ends");
+    header.on_key(Key::Named(NamedKey::Left));
+    assert_eq!(header.focus(), Some(2));
+    header.on_key(Key::Named(NamedKey::Home));
+    assert_eq!(header.focus(), Some(0));
+
+    let ascending = Some(HeaderAction::Sort {
+        column: 0,
+        order: SortOrder::Ascending,
+    });
+    assert_eq!(header.on_key(Key::Char(' ')), ascending);
+    assert_eq!(header.on_key(Key::Named(NamedKey::Enter)), ascending);
+    assert!(
+        has_pixel(
+            &header_surface(&header, &theme, Scale::ONE, &COLUMNS),
+            premul(theme.palette().rim_active)
+        ),
+        "the focused column wears the shared focus ring"
+    );
+
+    header.set_focus(Some(9));
+    assert_eq!(header.focus(), None, "an out-of-range focus fails closed");
+    assert_eq!(
+        header.on_key(Key::Named(NamedKey::Enter)),
+        None,
+        "with no focused column there is nothing to sort"
+    );
+    assert_eq!(
+        TableHeader::new(vec![]).on_key(Key::Named(NamedKey::Right)),
+        None
+    );
+}
+
+#[test]
+fn degenerate_bounds_omit_the_header_rather_than_clipping_it() {
+    let theme = Theme::dark();
+    let header = three_columns();
+    // The last case is narrower than the leading gutter and padding a row
+    // reserves, so no column can be laid out at all.
+    for (w, h) in [(0, H), (W, 0), (4, H)] {
+        let bounds = Rect::new(0, 0, w, h);
+        let mut surface = Surface::new(W, H).expect("surface");
+        header.render(&mut surface, bounds, Scale::ONE, &theme, font(), &COLUMNS);
+        assert!(is_blank(&surface), "a header with no room draws nothing");
+        assert_eq!(
+            header.column_at(bounds, Scale::ONE, &theme, &COLUMNS, Point::new(1, 1)),
+            None
+        );
+    }
+    // An off-surface origin is refused rather than wrapped into the surface.
+    let off = Rect::new(-4, -4, W, H);
+    let mut surface = Surface::new(W, H).expect("surface");
+    header.render(&mut surface, off, Scale::ONE, &theme, font(), &COLUMNS);
+    assert!(is_blank(&surface));
+    assert_eq!(
+        header.column_at(off, Scale::ONE, &theme, &COLUMNS, Point::new(1, 1)),
+        None
+    );
+    // No declared widths means no columns to lay out.
+    let empty = header_surface(&header, &theme, Scale::ONE, &[]);
+    assert!(is_blank(&empty));
+}
+
+#[test]
+fn measured_height_never_reads_shorter_than_a_control() {
+    let theme = Theme::dark();
+    let one = TableHeader::measured_height(Scale::ONE, &theme, font());
+    assert!(one >= Scale::ONE.scale_length(theme.metrics().control_height));
+    let dense = Scale::from_percent(200).expect("valid scale");
+    assert!(TableHeader::measured_height(dense, &theme, font()) > one);
+}
+
+#[test]
+fn a_header_reads_in_both_themes_and_under_heavy_contrast() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let mut header = three_columns();
+        header.set_sort(Some((2, SortOrder::Descending)));
+        header.set_focus(Some(0));
+        let surface = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
+        assert!(
+            has_pixel(&surface, premul(theme.palette().on_surface_muted)),
+            "an unsorted title stays muted in every theme"
+        );
+        assert!(
+            has_pixel(&surface, premul(theme.palette().on_surface)),
+            "the sorted column and its caret take the emphasised foreground"
+        );
+        assert!(
+            has_pixel(&surface, premul(theme.palette().rim_active)),
+            "the focus ring reads in every theme"
+        );
+    }
+}
+
+#[test]
+fn hit_test_bookkeeping_is_invisible_to_a_table_header() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut a = three_columns();
+    let mut b = a.clone();
+    a.on_pointer(
+        &moved(OFF_A.0, OFF_A.1),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+    );
+    b.on_pointer(
+        &moved(OFF_B.0, OFF_B.1),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+    );
+    assert_eq!(
+        a, b,
+        "a coordinate clear of the header is not a drawn property"
+    );
+    assert_eq!(
+        header_surface(&a, &theme, Scale::ONE, &COLUMNS).pixels(),
+        header_surface(&b, &theme, Scale::ONE, &COLUMNS).pixels(),
+        "…and the two must therefore paint identically"
+    );
 }
 
 // --- IconTile (spec §11.34) --------------------------------------------
