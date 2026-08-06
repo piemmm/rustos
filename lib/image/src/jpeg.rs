@@ -96,30 +96,12 @@ const ZIGZAG: [usize; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// Fixed-point precision of [`IDCT_BASIS`]'s entries: each is
-/// `alpha(u) * cos((2x+1) * u * pi / 16)` scaled by `1 << IDCT_SCALE_BITS`
-/// and rounded to the nearest integer, `alpha(0) = 1/sqrt(2)`, `alpha(u) =
-/// 1` otherwise (ITU-T T.81 Annex A.3.3, the inverse DCT definition).
+/// Fixed-point precision of every inverse-DCT basis constant in this
+/// module: a value `alpha(u) * cos((2x+1) * u * pi / (2m))` scaled by
+/// `1 << IDCT_SCALE_BITS` and rounded to the nearest integer, with
+/// `alpha(0) = 1/sqrt(2)` and `alpha(u) = 1` otherwise (ITU-T T.81 Annex
+/// A.3.3, the inverse DCT definition).
 const IDCT_SCALE_BITS: u32 = 13;
-
-/// The 8-point inverse-DCT basis matrix, precomputed once rather than
-/// evaluated with trigonometric functions this `no_std` crate has no
-/// access to. A reduced-scale inverse DCT of size `m` (`1`, `2`, `4`, or
-/// `8`) uses exactly the top-left `m`×`m` submatrix: restricting both the
-/// coefficients summed over and the output positions evaluated to `0..m`
-/// is the standard scaled-IDCT technique (the basis itself is unchanged,
-/// since it is still an 8-point transform, only a subset of its inputs
-/// and outputs are used), which is why one table serves every scale.
-const IDCT_BASIS: [[i32; 8]; 8] = [
-    [5793, 8035, 7568, 6811, 5793, 4551, 3135, 1598],
-    [5793, 6811, 3135, -1598, -5793, -8035, -7568, -4551],
-    [5793, 4551, -3135, -8035, -5793, 1598, 7568, 6811],
-    [5793, 1598, -7568, -4551, 5793, 6811, -3135, -8035],
-    [5793, -1598, -7568, 4551, 5793, -6811, -3135, 8035],
-    [5793, -4551, -3135, 8035, -5793, -1598, 7568, -6811],
-    [5793, -6811, 3135, 1598, -5793, 8035, -7568, 4551],
-    [5793, -8035, 7568, -6811, 5793, -4551, 3135, -1598],
-];
 
 // ---------------------------------------------------------------------
 // Reduced-scale decoding
@@ -127,6 +109,17 @@ const IDCT_BASIS: [[i32; 8]; 8] = [
 
 /// A JPEG DCT decode scale: how many of the 8 samples along each block
 /// edge the inverse DCT actually reconstructs.
+///
+/// A reduced scale discards the block's high-frequency coefficients and
+/// inverse-transforms the surviving top-left `m`×`m` corner with the
+/// **`m`-point** basis — `alpha(u) * cos((2x+1) * u * pi / (2m))` — so the
+/// `m` samples it produces span the whole 8-sample block. That is the
+/// band-limited decimation of the block, and it is why a reduced decode is
+/// a faithful smaller picture rather than a piece of a larger one:
+/// re-using the *8*-point basis over the same corner would instead
+/// evaluate the block's first `m` spatial positions, which is a magnified
+/// crop of its top-left corner and tiles the image with visible block
+/// seams.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Scale {
     Eighth,
@@ -348,18 +341,31 @@ struct QuantTable {
 /// fast table (`1 << FAST_BITS` entries) unreasonably.
 const FAST_BITS: u32 = 9;
 
+/// The number of fast-table slots: one per distinct [`FAST_BITS`]-bit
+/// window.
+const FAST_SLOTS: usize = 1 << FAST_BITS;
+
+/// A fast-table slot holding no code, distinguishable from every real
+/// entry because a Huffman code is at least one bit long.
+const FAST_MISS: u16 = 0;
+
 /// A canonical Huffman table (ITU-T T.81 Annex C), plus a fast lookup for
 /// codes of at most [`FAST_BITS`] bits.
 struct HuffmanTable {
-    /// `fast[prefix]` is `Some((symbol, length))` when a code of `length`
-    /// (`<= FAST_BITS`) bits matches every entry-`prefix` bit pattern that
-    /// starts with that code — i.e. every possible padding of the
-    /// remaining `FAST_BITS - length` bits. `None` means no code that
-    /// short exists with this prefix: the caller must have a genuine
-    /// [`FAST_BITS`]-bit window (not one padded with invented bits) before
-    /// trusting a `None` to mean "fall back to the slow search", since a
-    /// short real window could still hold a valid short code.
-    fast: Vec<Option<(u8, u8)>>,
+    /// `fast[prefix]` packs `(symbol << 5) | length` when a code of
+    /// `length` (`1..=FAST_BITS`) bits matches every entry-`prefix` bit
+    /// pattern that starts with that code — i.e. every possible padding of
+    /// the remaining `FAST_BITS - length` bits. [`FAST_MISS`] means no
+    /// code that short exists with this prefix: the caller must have a
+    /// genuine [`FAST_BITS`]-bit window (not one padded with invented
+    /// bits) before trusting a miss to mean "fall back to the slow
+    /// search", since a short real window could still hold a valid short
+    /// code.
+    ///
+    /// A fixed-size array rather than a `Vec`, so the per-symbol lookup is
+    /// an indexed load the compiler can prove in range against the
+    /// [`FAST_BITS`]-bit window that indexes it.
+    fast: [u16; FAST_SLOTS],
     /// The standard `mincode`/`maxcode`/`valptr` slow-path decode arrays
     /// (ITU-T T.81 Annex F.2.2.3, Figure F.16), indexed by code length
     /// `1..=16`; `maxcode[len] == -1` means no code of that length exists.
@@ -379,7 +385,7 @@ impl HuffmanTable {
         let mut mincode = [0i32; 17];
         let mut maxcode = [-1i32; 17];
         let mut valptr = [0usize; 17];
-        let mut fast = vec![None; 1usize << FAST_BITS];
+        let mut fast = [FAST_MISS; FAST_SLOTS];
 
         let mut code: u32 = 0;
         let mut k: usize = 0;
@@ -428,8 +434,14 @@ impl HuffmanTable {
     fn decode(&self, bits: &mut BitReader<'_>) -> Result<u8, DecodeError> {
         let (window, available) = bits.peek(FAST_BITS);
         if available == FAST_BITS {
-            if let Some((symbol, length)) = self.fast[window as usize] {
-                bits.consume(u32::from(length))?;
+            let entry = self.fast[usize::try_from(window).unwrap_or(0) % FAST_SLOTS];
+            if entry != FAST_MISS {
+                bits.drop_bits(u32::from(entry & FAST_LENGTH_MASK));
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "the packed symbol is the entry's high 8 bits"
+                )]
+                let symbol = (entry >> FAST_LENGTH_BITS) as u8;
                 return Ok(symbol);
             }
         }
@@ -452,17 +464,24 @@ impl HuffmanTable {
     }
 }
 
+/// How many low bits of a fast-table entry hold the code length.
+const FAST_LENGTH_BITS: u32 = 5;
+
+/// The mask selecting a fast-table entry's code length.
+const FAST_LENGTH_MASK: u16 = (1 << FAST_LENGTH_BITS) - 1;
+
 /// Populate every fast-table slot whose top `length` bits equal `code`
 /// (there are `1 << (FAST_BITS - length)` of them, one per possible
-/// padding of the remaining low bits) with `(symbol, length)`.
-fn fill_fast_entries(fast: &mut [Option<(u8, u8)>], code: u32, length: u32, symbol: u8) {
+/// padding of the remaining low bits) with the packed `(symbol, length)`
+/// entry [`HuffmanTable::fast`] describes.
+fn fill_fast_entries(fast: &mut [u16; FAST_SLOTS], code: u32, length: u32, symbol: u8) {
     let pad_bits = FAST_BITS - length;
     let base = code << pad_bits;
-    let pad_count = 1u32 << pad_bits;
-    let length = u8::try_from(length).unwrap_or(u8::MAX);
-    for pad in 0..pad_count {
+    let entry = (u16::from(symbol) << FAST_LENGTH_BITS)
+        | (u16::try_from(length).unwrap_or(0) & FAST_LENGTH_MASK);
+    for pad in 0..(1u32 << pad_bits) {
         if let Some(slot) = fast.get_mut(usize::try_from(base | pad).unwrap_or(usize::MAX)) {
-            *slot = Some((symbol, length));
+            *slot = entry;
         }
     }
 }
@@ -475,16 +494,23 @@ fn fill_fast_entries(fast: &mut [Option<(u8, u8)>], code: u32, length: u32, symb
 /// `0xFF00` byte-stuffing transparently and stopping cleanly (without
 /// consuming) at a genuine marker.
 ///
-/// Bytes are fetched into the buffer one at a time, each validated for
-/// stuffing before being trusted as data, so buffering several bytes
-/// ahead (for the Huffman fast-table peek) can never misread a restart
-/// marker's bytes as entropy data: whichever byte the marker's leading
-/// `0xFF` is, that byte is checked at the moment it would be fetched, not
-/// blindly consumed.
+/// Every byte is checked for a leading `0xFF` before it is trusted as
+/// data, so buffering ahead (for the Huffman fast-table peek) can never
+/// misread a marker's bytes as entropy data. The four-byte refill does not
+/// weaken that: it is taken only when all four bytes are non-`0xFF`, so a
+/// marker or a stuffed pair always falls to the byte-at-a-time path that
+/// resolves it.
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    buf: u32,
+    /// The buffered entropy bits, **left justified**: bit 63 is the next
+    /// bit out, and everything below the top `count` bits is zero padding,
+    /// never data. Left justification is what makes a peek a single shift
+    /// — the alternative, keeping the bits at the bottom, costs a
+    /// subtract, a mask and a re-justifying shift on the hottest path in
+    /// the decoder.
+    buf: u64,
+    /// How many of [`Self::buf`]'s top bits are genuine stream bits.
     count: u32,
 }
 
@@ -498,69 +524,103 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Try to have at least `want` bits buffered (capped at 32); fetches
+    /// Try to have at least `want` bits buffered (`want <= 32`); fetches
     /// stop early, with fewer bits than `want` buffered, at the end of
     /// input or at a genuine marker.
+    ///
+    /// Entropy data is overwhelmingly free of `0xFF`, so the common case
+    /// takes four bytes in one load rather than four unstuffing decisions.
+    /// The byte-at-a-time path handles the stuffed bytes, the marker, and
+    /// the last few bytes of the stream.
+    #[inline]
     fn fill_to(&mut self, want: u32) {
-        while self.count < want && self.count <= 24 {
-            let Some(&byte) = self.data.get(self.pos) else {
+        while self.count < want {
+            if self.count <= 32 {
+                if let Some(word) = self.take_plain_word() {
+                    self.buf |= u64::from(word) << (32 - self.count);
+                    self.count += 32;
+                    continue;
+                }
+            }
+            let Some(byte) = self.take_entropy_byte() else {
                 break;
             };
-            if byte == 0xFF {
-                match self.data.get(self.pos + 1) {
-                    Some(0x00) => {
-                        self.pos += 2;
-                        self.push_byte(0xFF);
-                    }
-                    // A genuine marker (or a trailing `0xFF` with nothing
-                    // to check it against): stop without consuming it, so
-                    // the marker-scanning loop above finds it intact.
-                    _ => break,
-                }
-            } else {
-                self.pos += 1;
-                self.push_byte(byte);
-            }
+            self.buf |= u64::from(byte) << (56 - self.count);
+            self.count += 8;
         }
     }
 
-    fn push_byte(&mut self, byte: u8) {
-        self.buf = (self.buf << 8) | u32::from(byte);
-        self.count += 8;
+    /// Consume the next four entropy bytes as one big-endian word, if
+    /// there are four left and none of them is `0xFF` — that is, if none
+    /// needs unstuffing and none can start a marker.
+    #[inline]
+    fn take_plain_word(&mut self) -> Option<u32> {
+        let chunk: &[u8; 4] = self.data.get(self.pos..self.pos + 4)?.try_into().ok()?;
+        if chunk.contains(&0xFF) {
+            return None;
+        }
+        self.pos += 4;
+        Some(u32::from_be_bytes(*chunk))
     }
 
-    /// Peek the next `n` bits (`n <= 32`), left-justified into an `n`-bit
-    /// value; the second element is how many of those bits are genuinely
-    /// buffered (`<= n`) — a caller must not trust the value as more than
-    /// padding unless this equals `n`.
+    /// Consume the next single entropy byte, resolving `FF 00` stuffing
+    /// (ITU-T T.81 §B.1.1.5). A genuine marker — or a trailing `0xFF`
+    /// with nothing to check it against — yields `None` without consuming
+    /// it, so the marker-scanning loop finds it intact.
+    #[inline]
+    fn take_entropy_byte(&mut self) -> Option<u8> {
+        let &byte = self.data.get(self.pos)?;
+        if byte != 0xFF {
+            self.pos += 1;
+            return Some(byte);
+        }
+        match self.data.get(self.pos + 1) {
+            Some(0x00) => {
+                self.pos += 2;
+                Some(0xFF)
+            }
+            _ => None,
+        }
+    }
+
+    /// Peek the next `n` bits (`n <= 32`) as an `n`-bit value; the second
+    /// element is how many of those bits are genuinely buffered (`<= n`) —
+    /// a caller must not trust the value as more than zero padding unless
+    /// this equals `n`.
+    #[inline]
     fn peek(&mut self, n: u32) -> (u32, u32) {
         self.fill_to(n);
-        let available = self.count.min(n);
-        if available == 0 {
+        if n == 0 {
             return (0, 0);
         }
-        let raw = (self.buf >> (self.count - available)) & mask(available);
-        (raw << (n - available), available)
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "shifted down to `n <= 32` bits"
+        )]
+        let value = (self.buf >> (u64::BITS - n)) as u32;
+        (value, self.count.min(n))
     }
 
-    /// Consume `n` bits already known to be available (via a prior
-    /// [`Self::peek`] of at least `n`).
-    fn consume(&mut self, n: u32) -> Result<(), DecodeError> {
-        self.fill_to(n);
-        if self.count < n {
-            return Err(DecodeError::JpegEntropyDataTruncated);
-        }
-        self.count -= n;
-        Ok(())
+    /// Discard `n` bits a preceding [`Self::peek`] has already reported as
+    /// available.
+    ///
+    /// Every caller peeks and then takes exactly what the peek reported, so
+    /// the buffer is never refilled or re-checked between the two. The
+    /// saturation is unreachable for such a caller and keeps a mistaken one
+    /// from underflowing.
+    #[inline]
+    fn drop_bits(&mut self, n: u32) {
+        self.buf = self.buf.wrapping_shl(n);
+        self.count = self.count.saturating_sub(n);
     }
 
     fn next_bit(&mut self) -> Result<u32, DecodeError> {
-        self.fill_to(1);
-        if self.count == 0 {
+        let (value, available) = self.peek(1);
+        if available == 0 {
             return Err(DecodeError::JpegEntropyDataTruncated);
         }
-        self.count -= 1;
-        Ok((self.buf >> self.count) & 1)
+        self.drop_bits(1);
+        Ok(value)
     }
 
     /// Read `n` (`<= 16`) raw bits, MSB first, as an unsigned value.
@@ -569,12 +629,13 @@ impl<'a> BitReader<'a> {
     /// non-zero coefficient in a scan reads its magnitude bits here, so this
     /// is the hottest loop in an entropy decode and a per-bit shift-and-test
     /// would multiply its cost by the magnitude's width for no gain.
+    #[inline]
     fn read_bits(&mut self, n: u32) -> Result<u32, DecodeError> {
         let (value, available) = self.peek(n);
         if available < n {
             return Err(DecodeError::JpegEntropyDataTruncated);
         }
-        self.consume(n)?;
+        self.drop_bits(n);
         Ok(value)
     }
 
@@ -582,7 +643,9 @@ impl<'a> BitReader<'a> {
     /// next bytes to be a restart marker with cyclic sequence number
     /// `expected` (ITU-T T.81 §B.2.5): the entropy coder pads the current
     /// byte with 1-bits before emitting the marker, so any leftover
-    /// buffered bits are exactly that padding, never real data.
+    /// buffered bits are exactly that padding, never real data. Refilling
+    /// ahead cannot carry the reader past the marker, because a fetch
+    /// stops at the marker's `0xFF` rather than consuming it.
     fn expect_restart(&mut self, expected: u8) -> Result<(), DecodeError> {
         self.buf = 0;
         self.count = 0;
@@ -602,14 +665,6 @@ impl<'a> BitReader<'a> {
     /// from once the caller is done with entropy data).
     const fn position(&self) -> usize {
         self.pos
-    }
-}
-
-const fn mask(bits: u32) -> u32 {
-    if bits >= 32 {
-        u32::MAX
-    } else {
-        (1u32 << bits) - 1
     }
 }
 
@@ -1397,7 +1452,8 @@ impl Decoder<'_> {
             .as_ref()
             .ok_or(DecodeError::JpegMissingQuantizationTable)?
             .natural;
-        let m = self.scale.m();
+        let scale = self.scale;
+        let m = scale.m();
         let plane_stride = usize::try_from(
             ctx.frame
                 .blocks_per_line_padded(ctx.component)
@@ -1411,7 +1467,7 @@ impl Decoder<'_> {
         idct_and_store(
             &coeffs,
             &quant,
-            m,
+            scale,
             plane,
             plane_stride,
             usize::try_from(ctx.block_row.saturating_mul(m)).unwrap_or(0),
@@ -1649,7 +1705,7 @@ impl Decoder<'_> {
                     idct_and_store(
                         &block,
                         &quant,
-                        m,
+                        self.scale,
                         &mut plane,
                         plane_stride,
                         usize::try_from(block_row.saturating_mul(m)).unwrap_or(0),
@@ -1738,24 +1794,52 @@ impl Decoder<'_> {
             }
 
             let (pixels, _tail) = out_row.as_chunks_mut::<4>();
-            for (x, px) in (0usize..).zip(pixels.iter_mut()) {
-                let sample = |row: &[u8]| row.get(x).copied().unwrap_or(0);
-                let rgb = if upsamplers.len() == 1 {
-                    let s = sample(rows[0]);
-                    [s, s, s]
-                } else if use_rgb {
-                    [sample(rows[0]), sample(rows[1]), sample(rows[2])]
-                } else {
-                    ycbcr_to_rgb(sample(rows[0]), sample(rows[1]), sample(rows[2]))
-                };
-                px[0] = rgb[0];
-                px[1] = rgb[1];
-                px[2] = rgb[2];
-                px[3] = 255;
-            }
+            write_pixel_row(pixels, &rows, upsamplers.len(), use_rgb)?;
         }
         Ok(RasterImage::from_parts(output_width, output_height, out))
     }
+}
+
+/// Write one output row's worth of RGBA pixels from `rows`, each holding
+/// one component's samples for that row.
+///
+/// The component count and colour space are decided once per row, not once
+/// per pixel, and each component's samples are narrowed to the row width up
+/// front, so the pixel loops are a straight zip with no per-pixel bounds
+/// check. A component whose row is shorter than the output row can only
+/// come from a frame whose declared geometry and sample planes disagree:
+/// that refuses the decode rather than inventing pixels.
+fn write_pixel_row(
+    pixels: &mut [[u8; 4]],
+    rows: &[&[u8]; 3],
+    components: usize,
+    use_rgb: bool,
+) -> Result<(), DecodeError> {
+    fn narrow(row: &[u8], width: usize) -> Result<&[u8], DecodeError> {
+        row.get(..width).ok_or(DecodeError::DimensionsOverflow)
+    }
+    let width = pixels.len();
+    let first = narrow(rows[0], width)?;
+    if components == 1 {
+        for (px, &s) in pixels.iter_mut().zip(first) {
+            *px = [s, s, s, 255];
+        }
+        return Ok(());
+    }
+    let second = narrow(rows[1], width)?;
+    let third = narrow(rows[2], width)?;
+    let triples = first.iter().zip(second).zip(third);
+    if use_rgb {
+        for (px, ((&r, &g), &b)) in pixels.iter_mut().zip(triples) {
+            *px = [r, g, b, 255];
+        }
+    } else {
+        for (px, ((&y, &cb), &cr)) in pixels.iter_mut().zip(triples) {
+            let [r, g, b] = ycbcr_to_rgb(y, cb, cr);
+            *px = [r, g, b, 255];
+        }
+    }
+    Ok(())
 }
 
 /// One component's hoisted upsampling parameters for [`Decoder::assemble`]:
@@ -1781,20 +1865,26 @@ impl CompMap<'_> {
     }
 }
 
-/// Fixed-point one for an upsampling tap weight.
-const UPSAMPLE_ONE: u32 = 256;
+/// How many fractional bits an upsampling tap weight carries: `1 <<
+/// UPSAMPLE_BITS` is one whole sample.
+const UPSAMPLE_BITS: u32 = 8;
 
 /// The two samples an upsampled coordinate lies between, and how far
 /// towards the second of them it falls.
 ///
 /// `weight` is zero exactly when the coordinate lands on `low` itself, so a
 /// component that needs no upsampling on this axis is recognised by its
-/// taps rather than by a separate flag.
+/// taps rather than by a separate flag. It is a `u8` because a tap always
+/// falls *short* of its second sample — a coordinate landing exactly on a
+/// sample is that sample's own zero-weight tap — so the weight is at most
+/// `(1 << UPSAMPLE_BITS) - 1`. Saying so in the type is what lets
+/// [`interpolate`] be provably in range, and so compile to a handful of
+/// vectorisable operations instead of a checked conversion per sample.
 #[derive(Copy, Clone)]
 struct Tap {
     low: u32,
     high: u32,
-    weight: u32,
+    weight: u8,
 }
 
 /// The samples output coordinate `output` interpolates between, for a
@@ -1825,11 +1915,11 @@ fn axis_tap(output: u32, factor: u32, max_factor: u32, limit: u32) -> Tap {
     let numerator = (2 * i64::from(output) + 1) * i64::from(factor) - i64::from(max_factor);
     let floor = numerator.div_euclid(denominator);
     let fraction = numerator.rem_euclid(denominator);
-    let weight = fraction * i64::from(UPSAMPLE_ONE) / denominator;
+    let weight = (fraction << UPSAMPLE_BITS) / denominator;
     Tap {
         low: clamp_sample(floor, limit),
         high: clamp_sample(floor + 1, limit),
-        weight: u32::try_from(weight).unwrap_or(0),
+        weight: u8::try_from(weight).unwrap_or(0),
     }
 }
 
@@ -1841,12 +1931,18 @@ fn clamp_sample(coordinate: i64, limit: u32) -> u32 {
     u32::try_from(held).unwrap_or(0)
 }
 
-/// Interpolate between two samples: `low` when `weight` is zero, `high`
-/// when it is [`UPSAMPLE_ONE`], rounded to nearest in between.
-fn interpolate(low: u8, high: u8, weight: u32) -> u8 {
-    let complement = UPSAMPLE_ONE.saturating_sub(weight);
-    let sum = u32::from(low) * complement + u32::from(high) * weight + UPSAMPLE_ONE / 2;
-    u8::try_from(sum / UPSAMPLE_ONE).unwrap_or(u8::MAX)
+/// Interpolate between two samples, `weight` of the way from `low` to
+/// `high` in units of `1 << UPSAMPLE_BITS`, rounded to nearest.
+///
+/// Both weights are non-negative and sum to exactly one whole unit, and
+/// the samples are 8-bit, so the total cannot exceed `255 << UPSAMPLE_BITS`
+/// and the descaled result is always a valid `u8`.
+#[inline]
+fn interpolate(low: u8, high: u8, weight: u8) -> u8 {
+    let weight = u32::from(weight);
+    let complement = (1 << UPSAMPLE_BITS) - weight;
+    let sum = u32::from(low) * complement + u32::from(high) * weight + (1 << (UPSAMPLE_BITS - 1));
+    u8::try_from(sum >> UPSAMPLE_BITS).unwrap_or(u8::MAX)
 }
 
 /// Which buffer the row an [`Upsampler`] last prepared lives in.
@@ -1965,13 +2061,7 @@ impl<'a> Upsampler<'a> {
 }
 
 /// Write the interpolation of two plane rows into `out`.
-fn blend_rows(
-    plane: &[u8],
-    low: (usize, usize),
-    high: (usize, usize),
-    weight: u32,
-    out: &mut [u8],
-) {
+fn blend_rows(plane: &[u8], low: (usize, usize), high: (usize, usize), weight: u8, out: &mut [u8]) {
     let top = plane.get(low.0..low.1).unwrap_or(&[]);
     let bottom = plane.get(high.0..high.1).unwrap_or(&[]);
     for (slot, (&above, &below)) in out.iter_mut().zip(top.iter().zip(bottom.iter())) {
@@ -2059,46 +2149,90 @@ fn shift_to_i16(value: i32, shift: u32) -> i16 {
     i16::try_from(widened.clamp(i64::from(i16::MIN), i64::from(i16::MAX))).unwrap_or(0)
 }
 
-/// Round `value / (1 << scale_bits)` to the nearest integer, correctly
-/// for either sign (round-half-away-from-zero).
-fn scaled_round(value: i32, scale_bits: u32) -> i32 {
-    let denom = 1i64 << scale_bits;
-    let half = denom / 2;
-    let value = i64::from(value);
-    let rounded = if value >= 0 {
-        (value + half) / denom
-    } else {
-        -((-value + half) / denom)
-    };
-    i32::try_from(rounded).unwrap_or(0)
-}
-
 /// Clamp `value` into `0..=255`.
+///
+/// Spelled as two comparisons rather than a range-checked conversion: this
+/// runs on every sample of every component of every decoded image, and the
+/// conversion's own "can this fail?" test is dead weight once the clamp
+/// has already bounded the value.
+#[inline]
 fn clamp_u8(value: i32) -> u8 {
-    u8::try_from(value.clamp(0, 255)).unwrap_or(0)
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the clamp leaves exactly the non-negative values a `u8` holds"
+    )]
+    let clamped = value.clamp(0, 255) as u8;
+    clamped
 }
 
-/// JFIF's fixed-point YCbCr → RGB matrix (ITU-T T.871), scaled by
-/// `1 << 16`: `r = y + 1.402(cr-128)`, `g = y - 0.344136(cb-128) -
-/// 0.714136(cr-128)`, `b = y + 1.772(cb-128)`.
-fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
-    const SCALE_BITS: u32 = 16;
-    const CR_TO_R: i32 = 91_881;
-    const CB_TO_G: i32 = -22_553;
-    const CR_TO_G: i32 = -46_802;
-    const CB_TO_B: i32 = 116_130;
+/// Fixed-point precision of the YCbCr → RGB matrix below.
+const YCC_SCALE_BITS: u32 = 16;
 
-    let y = i32::from(y);
-    let cb = i32::from(cb) - 128;
-    let cr = i32::from(cr) - 128;
-    let r = y + scaled_round(cr.saturating_mul(CR_TO_R), SCALE_BITS);
-    let g = y + scaled_round(
-        cb.saturating_mul(CB_TO_G)
-            .saturating_add(cr.saturating_mul(CR_TO_G)),
-        SCALE_BITS,
-    );
-    let b = y + scaled_round(cb.saturating_mul(CB_TO_B), SCALE_BITS);
-    [clamp_u8(r), clamp_u8(g), clamp_u8(b)]
+/// Round `value / (1 << YCC_SCALE_BITS)` to the nearest integer, for
+/// either sign (round-half-away-from-zero).
+///
+/// Every argument is a matrix term over an 8-bit chroma pair, bounded in
+/// magnitude by `128 * (22_553 + 46_802)`, so the arithmetic here cannot
+/// overflow `i32` — including the negation, whose only unrepresentable
+/// input is `i32::MIN`.
+const fn ycc_round(value: i32) -> i32 {
+    const HALF: i32 = 1 << (YCC_SCALE_BITS - 1);
+    if value >= 0 {
+        (value + HALF) >> YCC_SCALE_BITS
+    } else {
+        -((HALF - value) >> YCC_SCALE_BITS)
+    }
+}
+
+/// JFIF's YCbCr → RGB matrix (ITU-T T.871) in fixed point: `r = y +
+/// 1.402(cr-128)`, `g = y - 0.344136(cb-128) - 0.714136(cr-128)`, `b = y +
+/// 1.772(cb-128)`.
+///
+/// Every term depends on one chroma sample alone, so all four are
+/// tabulated over the 256 values that sample can take: per-pixel
+/// conversion is then three table reads, three adds and a shift, with no
+/// multiply and no division. The red and blue terms are tabulated already
+/// rounded; the two green terms are not, because the matrix rounds their
+/// *sum*, and rounding them separately would shift the green channel.
+struct ChromaTerms {
+    red: [i32; 256],
+    green_cb: [i32; 256],
+    green_cr: [i32; 256],
+    blue: [i32; 256],
+}
+
+/// `(c - 128) * factor` for every 8-bit `c`, optionally descaled to whole
+/// units by [`ycc_round`].
+const fn chroma_terms(factor: i32, rounded: bool) -> [i32; 256] {
+    let mut table = [0i32; 256];
+    let mut index = 0;
+    let mut centred = -128;
+    while index < table.len() {
+        let term = centred * factor;
+        table[index] = if rounded { ycc_round(term) } else { term };
+        index += 1;
+        centred += 1;
+    }
+    table
+}
+
+static CHROMA: ChromaTerms = ChromaTerms {
+    red: chroma_terms(91_881, true),
+    green_cb: chroma_terms(-22_553, false),
+    green_cr: chroma_terms(-46_802, false),
+    blue: chroma_terms(116_130, true),
+};
+
+fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
+    let luma = i32::from(y);
+    let cb = usize::from(cb);
+    let cr = usize::from(cr);
+    [
+        clamp_u8(luma + CHROMA.red[cr]),
+        clamp_u8(luma + ycc_round(CHROMA.green_cb[cb] + CHROMA.green_cr[cr])),
+        clamp_u8(luma + CHROMA.blue[cb]),
+    ]
 }
 
 /// The five scan shapes ITU-T T.81 §G.1.2 defines. `Sequential` is this
@@ -2152,45 +2286,61 @@ fn dequantize(coeffs: &[i32; 64], quant: &[u16; 64]) -> [i32; 64] {
     deq
 }
 
-/// Dequantise `coeffs` and inverse-DCT them at scale `m` (`1`, `2`, `4`, or
-/// `8`), writing the resulting `m`×`m` samples (level-shifted by 128 and
-/// clamped to `0..=255`) into `plane` at `(row_offset, col_offset)`,
-/// `plane_stride` samples per row.
+/// Dequantise `coeffs` and inverse-DCT them at `scale`, writing the
+/// resulting `m`×`m` samples (level-shifted by 128 and clamped to
+/// `0..=255`) into `plane` at `(row_offset, col_offset)`, `plane_stride`
+/// samples per row.
 ///
-/// The full-scale (`m == 8`) case — the overwhelming majority of a
-/// non-reduced decode's work — runs the fast fixed-point AAN /
-/// Loeffler-Ligtenberg-Moerlein row-column inverse DCT ([`idct8_islow`]).
-/// The reduced scales (`m` of `1`, `2`, or `4`) keep the direct
-/// scaled-basis matrix routine ([`idct_general`]): at those sizes it
-/// evaluates only a handful of outputs and is already cheap, and it is the
-/// reference the fast routine's equivalence test checks against. Neither
-/// path re-derives the dequantisation, which happens once here.
+/// Each scale runs its own fast fixed-point butterfly, and dequantises
+/// only the coefficients that butterfly reads: a reduced scale never
+/// forms the 48 (or 60, or 63) products of coefficients it is about to
+/// discard.
 fn idct_and_store(
     coeffs: &[i32; 64],
     quant: &[u16; 64],
-    m: u32,
+    scale: Scale,
     plane: &mut [u8],
     plane_stride: usize,
     row_offset: usize,
     col_offset: usize,
 ) {
-    let deq = dequantize(coeffs, quant);
-    if m == 8 {
-        let samples = idct8_islow(&deq);
-        for r in 0..8 {
-            let Some(row_samples) = samples.get(r * 8..r * 8 + 8) else {
-                continue;
-            };
-            let row = row_offset.saturating_add(r);
-            let dst_start = row.saturating_mul(plane_stride).saturating_add(col_offset);
-            if let Some(end) = dst_start.checked_add(8) {
-                if let Some(dst) = plane.get_mut(dst_start..end) {
-                    dst.copy_from_slice(row_samples);
-                }
+    let mut emit = |samples: &[u8], side: usize| {
+        store_block(samples, side, plane, plane_stride, row_offset, col_offset);
+    };
+    match scale {
+        Scale::Full => emit(&idct8_islow(&dequantize(coeffs, quant)), 8),
+        Scale::Half => emit(&idct4_islow(&dequantize_corner::<4>(coeffs, quant)), 4),
+        Scale::Quarter => emit(&idct2_islow(&dequantize_corner::<2>(coeffs, quant)), 2),
+        Scale::Eighth => emit(
+            &[idct1_islow(coeffs[0].wrapping_mul(i32::from(quant[0])))],
+            1,
+        ),
+    }
+}
+
+/// Write an `m`×`m` block of samples, held row-major in `samples`, into
+/// `plane` at `(row_offset, col_offset)`.
+///
+/// A block whose grid position runs past the plane is skipped row by row
+/// rather than panicking: the plane is sized from the frame's own padded
+/// block grid, so this cannot happen for a well-formed frame, and a
+/// malformed one loses a block instead of the decode.
+fn store_block(
+    samples: &[u8],
+    m: usize,
+    plane: &mut [u8],
+    plane_stride: usize,
+    row_offset: usize,
+    col_offset: usize,
+) {
+    for (r, row_samples) in samples.chunks_exact(m).enumerate() {
+        let row = row_offset.saturating_add(r);
+        let start = row.saturating_mul(plane_stride).saturating_add(col_offset);
+        if let Some(end) = start.checked_add(m) {
+            if let Some(dst) = plane.get_mut(start..end) {
+                dst.copy_from_slice(row_samples);
             }
         }
-    } else {
-        idct_general(&deq, m, plane, plane_stride, row_offset, col_offset);
     }
 }
 
@@ -2349,64 +2499,135 @@ const fn descale(x: i32, n: u32) -> i32 {
     x.wrapping_add(1i32.wrapping_shl(n.saturating_sub(1))) >> n
 }
 
-/// The direct scaled-basis inverse DCT for the reduced scales (`m` of `1`,
-/// `2`, or `4`): a separable two-pass matrix multiply over the top-left
-/// `m`×`m` submatrix of [`IDCT_BASIS`], writing the `m`×`m` samples into
-/// `plane` at `(row_offset, col_offset)`.
+/// Dequantise just the top-left `M`×`M` coefficients of `coeffs`, the only
+/// ones an `M`-point reduced inverse DCT reads, into an `M`×`M` row-major
+/// block.
 ///
-/// `deq` is the already-dequantised coefficients in natural order. The
-/// accumulation stays in `i64`: a hostile coefficient set can drive the
-/// two-pass sum well past `i32`, and `i64` with saturating steps keeps the
-/// routine total — a pathological input degrades to a clamped-but-safe
-/// pixel, never a panic — at a cost that is irrelevant for the at-most
-/// 16 outputs a reduced scale evaluates. (This same routine, invoked at
-/// `m == 8`, is the reference [`idct8_islow`]'s equivalence test measures
-/// against.)
-fn idct_general(
-    deq: &[i32; 64],
-    m: u32,
-    plane: &mut [u8],
-    plane_stride: usize,
-    row_offset: usize,
-    col_offset: usize,
-) {
-    let m = usize::try_from(m).unwrap_or(8).clamp(1, 8);
+/// The product wraps for exactly the reason [`dequantize`] documents: the
+/// reduced butterflies below finish with the same clamp to `0..=255`.
+fn dequantize_corner<const M: usize>(coeffs: &[i32; 64], quant: &[u16; 64]) -> [[i32; M]; M] {
+    core::array::from_fn(|u| {
+        core::array::from_fn(|v| {
+            let i = u * 8 + v;
+            coeffs[i].wrapping_mul(i32::from(quant[i]))
+        })
+    })
+}
 
-    let mut intermediate = [[0i64; 8]; 8];
-    for (x, row) in intermediate.iter_mut().enumerate().take(m) {
-        for (v, cell) in row.iter_mut().enumerate().take(m) {
-            let mut sum = 0i64;
-            for (u, &basis) in IDCT_BASIS[x].iter().enumerate().take(m) {
-                sum =
-                    sum.saturating_add(i64::from(basis).saturating_mul(i64::from(deq[u * 8 + v])));
-            }
-            *cell = sum;
+/// Fixed-point `alpha(0)` — equivalently `cos(pi/4)`, the two being the
+/// same number — at [`IDCT_SCALE_BITS`] precision.
+const FIX_ALPHA0: i32 = 5793;
+
+/// Fixed-point `cos(pi/8)` at [`IDCT_SCALE_BITS`] precision.
+const FIX_COS_PI_8: i32 = 7568;
+
+/// Fixed-point `cos(3*pi/8)` at [`IDCT_SCALE_BITS`] precision.
+const FIX_COS_3PI_8: i32 = 3135;
+
+/// The row-pass descale a reduced-scale inverse DCT finishes with.
+///
+/// Two passes of the `2^IDCT_SCALE_BITS` basis and the transform's own
+/// `1/4` leave `2 * IDCT_SCALE_BITS + 2` bits to shed, of which the column
+/// pass has already shed `IDCT_SCALE_BITS - IDCT_PASS1_BITS`. (The
+/// full-scale pass sheds one bit more, because [`idct_1d`]'s AAN
+/// formulation folds `alpha(0)` away and so carries an extra factor of two
+/// per axis.)
+const IDCT_REDUCED_ROW_SHIFT: u32 = IDCT_SCALE_BITS + IDCT_PASS1_BITS + 2;
+
+/// One 4-point 1-D inverse DCT — the sum over `u` of `alpha(u) *
+/// cos((2x+1) * u * pi / 8) * s[u]` — evaluated as the usual even/odd
+/// butterfly. The return is the 4 spatial samples, still scaled by
+/// `1 << IDCT_SCALE_BITS`.
+///
+/// Every step is `wrapping_*`; the overflow argument is [`idct4_islow`]'s.
+fn idct4_1d(s: &[i32; 4]) -> [i32; 4] {
+    let even_sum = s[0].wrapping_add(s[2]).wrapping_mul(FIX_ALPHA0);
+    let even_dif = s[0].wrapping_sub(s[2]).wrapping_mul(FIX_ALPHA0);
+    let odd_lo = s[1]
+        .wrapping_mul(FIX_COS_PI_8)
+        .wrapping_add(s[3].wrapping_mul(FIX_COS_3PI_8));
+    let odd_hi = s[1]
+        .wrapping_mul(FIX_COS_3PI_8)
+        .wrapping_sub(s[3].wrapping_mul(FIX_COS_PI_8));
+    [
+        even_sum.wrapping_add(odd_lo),
+        even_dif.wrapping_add(odd_hi),
+        even_dif.wrapping_sub(odd_hi),
+        even_sum.wrapping_sub(odd_lo),
+    ]
+}
+
+/// The half-scale (`4`×`4`) inverse DCT: [`idct4_1d`] run over the four
+/// columns and then the four rows of the block's dequantised low-frequency
+/// corner. The return is the 16 level-shifted, clamped `0..=255` samples in
+/// natural (row-major) order.
+///
+/// Overflow: for a valid 8-bit frame `|deq| <= ~2^11`, so the largest
+/// intermediate stays well inside `i32` and the transform is exact. A
+/// hostile file whose coefficients exceed that range can only make an
+/// intermediate wrap, and the closing clamp turns any such value into a
+/// valid, if meaningless, sample — never a panic under the workspace's
+/// overflow checks, and never a pixel outside `0..=255`.
+fn idct4_islow(deq: &[[i32; 4]; 4]) -> [u8; 16] {
+    let mut ws = [0i32; 16];
+    for c in 0..4 {
+        let column = [deq[0][c], deq[1][c], deq[2][c], deq[3][c]];
+        let spatial = idct4_1d(&column);
+        for (k, &value) in spatial.iter().enumerate() {
+            ws[k * 4 + c] = descale(value, IDCT_SCALE_BITS - IDCT_PASS1_BITS);
         }
     }
 
-    let shift_bits = IDCT_SCALE_BITS * 2 + 2; // divide by SCALE^2 * 4
-    let denom = 1i64 << shift_bits;
-    let half = denom / 2;
-    for (x, inter_row) in intermediate.iter().enumerate().take(m) {
-        for (y, basis_row) in IDCT_BASIS.iter().enumerate().take(m) {
-            let mut sum = 0i64;
-            for (&basis, &inter) in basis_row.iter().zip(inter_row.iter()).take(m) {
-                sum = sum.saturating_add(i64::from(basis).saturating_mul(inter));
-            }
-            let rounded = if sum >= 0 {
-                sum.saturating_add(half) / denom
-            } else {
-                -((-sum).saturating_add(half) / denom)
-            };
-            let sample = clamp_u8(i32::try_from(rounded.saturating_add(128)).unwrap_or(255));
-            let row = row_offset.saturating_add(x);
-            let col = col_offset.saturating_add(y);
-            if let Some(slot) = plane.get_mut(row.saturating_mul(plane_stride).saturating_add(col))
-            {
-                *slot = sample;
-            }
+    let mut out = [0u8; 16];
+    for r in 0..4 {
+        let base = r * 4;
+        let row: [i32; 4] = core::array::from_fn(|k| ws[base + k]);
+        let spatial = idct4_1d(&row);
+        for (k, &value) in spatial.iter().enumerate() {
+            out[base + k] = clamp_u8(descale(value, IDCT_REDUCED_ROW_SHIFT).wrapping_add(128));
         }
     }
+    out
+}
+
+/// The quarter-scale (`2`×`2`) inverse DCT. The 2-point basis is
+/// `alpha(0)` and `+-cos(pi/4)`, the same number, so both passes collapse
+/// to a sum and a difference scaled once. Overflow and clamping are as
+/// [`idct4_islow`] documents.
+fn idct2_islow(deq: &[[i32; 2]; 2]) -> [u8; 4] {
+    let pass1 = |a: i32, b: i32| {
+        [
+            descale(
+                a.wrapping_add(b).wrapping_mul(FIX_ALPHA0),
+                IDCT_SCALE_BITS - IDCT_PASS1_BITS,
+            ),
+            descale(
+                a.wrapping_sub(b).wrapping_mul(FIX_ALPHA0),
+                IDCT_SCALE_BITS - IDCT_PASS1_BITS,
+            ),
+        ]
+    };
+    let left = pass1(deq[0][0], deq[1][0]);
+    let right = pass1(deq[0][1], deq[1][1]);
+
+    let mut out = [0u8; 4];
+    for (r, row) in [[left[0], right[0]], [left[1], right[1]]]
+        .into_iter()
+        .enumerate()
+    {
+        let sum = row[0].wrapping_add(row[1]).wrapping_mul(FIX_ALPHA0);
+        let dif = row[0].wrapping_sub(row[1]).wrapping_mul(FIX_ALPHA0);
+        out[r * 2] = clamp_u8(descale(sum, IDCT_REDUCED_ROW_SHIFT).wrapping_add(128));
+        out[r * 2 + 1] = clamp_u8(descale(dif, IDCT_REDUCED_ROW_SHIFT).wrapping_add(128));
+    }
+    out
+}
+
+/// The eighth-scale (`1`×`1`) inverse DCT: with one coefficient and one
+/// output the whole transform is the block's mean, `dc / 8`, level-shifted
+/// and clamped.
+fn idct1_islow(dc: i32) -> u8 {
+    clamp_u8(descale(dc, 3).wrapping_add(128))
 }
 
 #[cfg(test)]

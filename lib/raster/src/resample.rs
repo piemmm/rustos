@@ -287,22 +287,76 @@ pub fn resample_rows(
 
     let columns = Axis::plan(region.x, region.width, dest_width);
     let rows_plan = Axis::plan(region.y, region.height, dest_height);
-    let mut cache = RowCache::new(dest_width, rows_plan.taps);
+    if columns.is_identity() && rows_plan.is_identity() {
+        return copy_rows(src, region, first_row, rows, out);
+    }
+    let mut cache = RowCache::new(dest_width, rows_plan.stride);
     let mut accumulator = vec![0i64; samples_per_row(dest_width)];
     let row_bytes = expected / rows_as_usize(rows);
     for (dest_y, chunk) in (first_row..last).zip(out.chunks_exact_mut(row_bytes)) {
-        accumulator.fill(0);
-        for tap in 0..rows_plan.taps {
-            let (weight, source_row) = rows_plan.tap(dest_y, tap);
-            if weight == 0 {
+        // The first contributing tap *writes* the accumulator and the rest
+        // add to it, so a destination row never pays to clear a buffer it
+        // is about to overwrite — which for a resample near 1:1, where a
+        // row has a single tap, is the whole of the accumulation cost.
+        let mut started = false;
+        for tap in rows_plan.taps_of(dest_y as usize) {
+            if tap.weight == 0 {
                 continue;
             }
-            let filtered = cache.filtered_row(src, &columns, source_row);
-            for (slot, &value) in accumulator.iter_mut().zip(filtered) {
-                *slot += i64::from(weight) * i64::from(value);
+            let weight = i64::from(tap.weight);
+            let filtered = cache.filtered_row(src, &columns, tap.source);
+            if started {
+                for (slot, &value) in accumulator.iter_mut().zip(filtered) {
+                    *slot += weight * i64::from(value);
+                }
+            } else {
+                for (slot, &value) in accumulator.iter_mut().zip(filtered) {
+                    *slot = weight * i64::from(value);
+                }
+                started = true;
             }
         }
+        if !started {
+            accumulator.fill(0);
+        }
         write_row(&accumulator, chunk);
+    }
+    Ok(())
+}
+
+/// Copy `region` of `src` straight into destination rows `first_row`
+/// through `first_row + rows`.
+///
+/// A resample whose two axis plans are both the identity *is* a copy:
+/// every destination pixel draws one source pixel at full weight, so the
+/// filter would premultiply each channel by its alpha and then divide it
+/// back out to reproduce the byte it started from. That case is not
+/// exotic on a desktop — an image decoded at exactly the size it will be
+/// drawn hits it, and a decode is asked for the size the composition
+/// wants — and paying a full separable filter to change nothing is work
+/// worth not doing.
+///
+/// A source row the region names but the image does not hold is
+/// unreachable for a validated region; it leaves the destination row
+/// transparent rather than reporting bytes it did not read.
+fn copy_rows(
+    src: &Rgba8Image<'_>,
+    region: Region,
+    first_row: u32,
+    rows: u32,
+    out: &mut [u8],
+) -> Result<(), ResampleError> {
+    let row_bytes = pixel_bytes(region.width, 1).ok_or(ResampleError::OutputSizeMismatch)?;
+    let left = region.x as usize;
+    let right = left.saturating_add(region.width as usize);
+    for (dest_y, chunk) in
+        (first_row..first_row.saturating_add(rows)).zip(out.chunks_exact_mut(row_bytes.max(1)))
+    {
+        let source_y = region.y.saturating_add(dest_y);
+        match src.row(source_y).and_then(|row| row.get(left..right)) {
+            Some(span) => chunk.copy_from_slice(span.as_flattened()),
+            None => chunk.fill(0),
+        }
     }
     Ok(())
 }
@@ -323,30 +377,29 @@ fn validate_region(src: &Rgba8Image<'_>, region: Region) -> Result<(), ResampleE
     Ok(())
 }
 
+/// One tap of a resample: the source sample it reads and the fixed-point
+/// weight it reads it with.
+#[derive(Copy, Clone)]
+struct Tap {
+    source: u32,
+    weight: i32,
+}
+
 /// One axis of a resample, fully resolved: for each destination sample, the
 /// source samples it reads and the weight of each.
 ///
 /// Resolving the geometry up front is what keeps the accumulation loops
-/// pure arithmetic — no division and no branch on the direction of the
-/// resample once a row is being filtered — and the table is small: a
-/// destination sample's tap count is about the ratio between the extents,
-/// so the whole plan is on the order of the source extent plus the
+/// pure arithmetic — no division, no edge clamp, and no branch on the
+/// direction of the resample once a row is being filtered. The table is
+/// small: a destination sample's tap count is about the ratio between the
+/// extents, so the whole plan is on the order of the source extent plus the
 /// destination extent regardless of how extreme that ratio is.
 struct Axis {
-    /// Local index of each destination sample's first tap. Signed because a
-    /// cubic reconstruction reaches one sample past the region's leading
-    /// edge, where the edge sample stands in.
-    first: Vec<i64>,
-    /// Fixed-point weight per tap, destination-major, summing to
-    /// [`WEIGHT_ONE`] across each destination sample.
-    weights: Vec<i32>,
-    /// Taps per destination sample. Samples needing fewer carry zero
-    /// weights, so one stride serves the whole axis.
-    taps: usize,
-    /// First source sample of the region this axis samples.
-    origin: u32,
-    /// Source samples in the region this axis samples.
-    extent: u32,
+    /// [`Self::stride`] taps per destination sample, destination-major,
+    /// the weights of each summing to [`WEIGHT_ONE`].
+    taps: Vec<Tap>,
+    /// Taps per destination sample.
+    stride: usize,
 }
 
 impl Axis {
@@ -354,17 +407,17 @@ impl Axis {
     /// samples starting at `origin`.
     fn plan(origin: u32, extent: u32, dest_extent: u32) -> Self {
         let reducing = extent > dest_extent;
-        let taps = if reducing {
+        let width = if reducing {
             area_taps(extent, dest_extent)
         } else {
             CUBIC_TAPS
         };
         let dest = dest_extent as usize;
         let mut first = vec![0i64; dest];
-        let mut weights = vec![0i32; dest.saturating_mul(taps)];
+        let mut weights = vec![0i32; dest.saturating_mul(width)];
         for dest_sample in 0..dest_extent {
-            let span = dest_sample as usize * taps;
-            let Some(row) = weights.get_mut(span..span + taps) else {
+            let span = dest_sample as usize * width;
+            let Some(row) = weights.get_mut(span..span + width) else {
                 continue;
             };
             let (start, written) = if reducing {
@@ -379,30 +432,77 @@ impl Axis {
                 *slot = start;
             }
         }
-        Self {
-            first,
-            weights,
-            taps,
-            origin,
-            extent,
+
+        let (lead, stride) = live_span(&weights, width);
+        let mut taps = Vec::with_capacity(dest.saturating_mul(stride));
+        for (dest_sample, row) in weights.chunks_exact(width).enumerate() {
+            let base = first.get(dest_sample).copied().unwrap_or(0);
+            for tap in lead..lead + stride {
+                let local = base.saturating_add(i64::try_from(tap).unwrap_or(i64::MAX));
+                taps.push(Tap {
+                    source: absolute_sample(local, origin, extent),
+                    weight: row.get(tap).copied().unwrap_or(0),
+                });
+            }
         }
+        Self { taps, stride }
     }
 
-    /// Tap `tap` of destination sample `dest_sample`: its weight and the
-    /// absolute source sample it reads.
-    fn tap(&self, dest_sample: u32, tap: usize) -> (i32, u32) {
-        let index = (dest_sample as usize)
-            .saturating_mul(self.taps)
-            .saturating_add(tap);
-        let weight = self.weights.get(index).copied().unwrap_or(0);
-        let local = self
-            .first
-            .get(dest_sample as usize)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(i64::try_from(tap).unwrap_or(i64::MAX));
-        (weight, absolute_sample(local, self.origin, self.extent))
+    /// The taps of destination sample `dest_sample`, or nothing when the
+    /// plan does not describe it.
+    fn taps_of(&self, dest_sample: usize) -> &[Tap] {
+        let start = dest_sample.saturating_mul(self.stride);
+        self.taps
+            .get(start..start.saturating_add(self.stride))
+            .unwrap_or(&[])
     }
+
+    /// Every destination sample's taps, in destination order.
+    fn rows(&self) -> impl Iterator<Item = &[Tap]> {
+        self.taps.chunks_exact(self.stride.max(1))
+    }
+
+    /// Whether this plan reproduces its source samples unchanged: every
+    /// destination sample reads one source sample, in order, at full
+    /// weight.
+    fn is_identity(&self) -> bool {
+        let Some(first) = self.taps.first() else {
+            return false;
+        };
+        self.stride == 1
+            && self.taps.iter().enumerate().all(|(dest, tap)| {
+                tap.weight == WEIGHT_ONE
+                    && u64::from(tap.source) == u64::from(first.source).saturating_add(dest as u64)
+            })
+    }
+}
+
+/// The tap columns of a `width`-wide weight plan that any destination
+/// sample can carry weight in, as an offset and a length.
+///
+/// A plan is sized for the worst destination sample, so its outer columns
+/// are often zero for *every* sample: a 1:1 cubic resample weights only its
+/// second tap, and an area reduction whose ratio divides exactly leaves its
+/// last tap empty. Those columns are dropped here, once, rather than
+/// multiplied by zero for every pixel of every row. The span is never
+/// empty — normalisation leaves each destination sample summing to one, so
+/// some column always carries weight.
+fn live_span(weights: &[i32], width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    let mut lead = width;
+    let mut end = 0;
+    for row in weights.chunks_exact(width) {
+        if let Some(first) = row.iter().position(|&weight| weight != 0) {
+            lead = lead.min(first);
+        }
+        if let Some(last) = row.iter().rposition(|&weight| weight != 0) {
+            end = end.max(last + 1);
+        }
+    }
+    if end <= lead {
+        return (0, width);
+    }
+    (lead, end - lead)
 }
 
 /// The most source samples one destination sample reads while reducing an
@@ -589,23 +689,18 @@ fn filter_row(src: &Rgba8Image<'_>, columns: &Axis, source_row: u32, out: &mut [
     // A filtered row is a whole number of samples by construction, so the
     // ragged tail this splits off is always empty.
     let (samples, _tail) = out.as_chunks_mut::<CHANNELS>();
-    for (dest_x, slot) in samples.iter_mut().enumerate() {
-        let dest_x = u32::try_from(dest_x).unwrap_or(u32::MAX);
+    for (slot, taps) in samples.iter_mut().zip(columns.rows()) {
         let mut sums = [0i64; CHANNELS];
-        for tap in 0..columns.taps {
-            let (weight, source_x) = columns.tap(dest_x, tap);
-            if weight == 0 {
-                continue;
-            }
-            let Some(pixel) = pixels.get(source_x as usize) else {
+        for tap in taps {
+            let Some(pixel) = pixels.get(tap.source as usize) else {
                 continue;
             };
-            let weight = i64::from(weight);
             let alpha = i64::from(pixel[3]);
-            sums[0] += weight * i64::from(pixel[0]) * alpha;
-            sums[1] += weight * i64::from(pixel[1]) * alpha;
-            sums[2] += weight * i64::from(pixel[2]) * alpha;
-            sums[3] += weight * alpha * 255;
+            let weighted_alpha = i64::from(tap.weight) * alpha;
+            sums[0] += weighted_alpha * i64::from(pixel[0]);
+            sums[1] += weighted_alpha * i64::from(pixel[1]);
+            sums[2] += weighted_alpha * i64::from(pixel[2]);
+            sums[3] += weighted_alpha * 255;
         }
         for (channel, sum) in slot.iter_mut().zip(sums) {
             *channel = i32::try_from(descale(sum)).unwrap_or(i32::MAX);
@@ -637,20 +732,43 @@ fn write_row(accumulator: &[i64], out: &mut [u8]) {
     let (pixels, _tail) = out.as_chunks_mut::<CHANNELS>();
     let (accumulated, _rest) = accumulator.as_chunks::<CHANNELS>();
     for (samples, pixel) in accumulated.iter().zip(pixels) {
-        let alpha_scaled = descale(samples[3]);
+        // A descaled sample is a weighted mean of `channel * alpha` over
+        // weights summing to one, so it cannot exceed `255 * 255`, and the
+        // arithmetic below stays inside a 32-bit word. Saying so lets the
+        // divisions be 32-bit, which is worth stating because there are
+        // three of them for every pixel of every resampled image.
+        let alpha_scaled = narrow(descale(samples[3]));
         if alpha_scaled <= 0 {
             *pixel = [0, 0, 0, 0];
             continue;
         }
         for (channel, sample) in pixel.iter_mut().zip(samples).take(CHANNELS - 1) {
-            let premultiplied = descale(*sample).max(0);
+            let premultiplied = narrow(descale(*sample)).max(0);
             let scaled = premultiplied.saturating_mul(255) + alpha_scaled / 2;
-            let straight = scaled / alpha_scaled;
-            *channel = u8::try_from(straight.clamp(0, 255)).unwrap_or(u8::MAX);
+            *channel = clamp_u8(scaled / alpha_scaled);
         }
-        let alpha = (alpha_scaled + 127) / 255;
-        pixel[3] = u8::try_from(alpha.clamp(0, 255)).unwrap_or(u8::MAX);
+        pixel[3] = clamp_u8((alpha_scaled + 127) / 255);
     }
+}
+
+/// A descaled sample as an `i32`, saturating rather than wrapping.
+///
+/// The saturation is unreachable for a sample a filter produced (they are
+/// bounded by `255 * 255` either side of zero) and is what keeps this total
+/// without a panic if one ever were not.
+fn narrow(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// Clamp `value` into `0..=255`.
+fn clamp_u8(value: i32) -> u8 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the clamp leaves exactly the non-negative values a `u8` holds"
+    )]
+    let clamped = value.clamp(0, 255) as u8;
+    clamped
 }
 
 /// Remove one [`WEIGHT_SHIFT`] of fixed-point scale, rounding to nearest.

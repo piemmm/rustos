@@ -18,7 +18,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{decode, decode_fitted, dequantize, idct8_islow, idct_general};
+use super::{
+    decode, decode_fitted, dequantize, dequantize_corner, idct1_islow, idct2_islow, idct4_islow,
+    idct8_islow,
+};
 use crate::{sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
 
 /// Generous limits for every fixture that is not itself exercising a
@@ -688,16 +691,82 @@ fn progressive_scans_decode_to_the_same_pixels_as_the_equivalent_baseline() {
     assert_eq!(baseline, progressive);
 }
 
+/// `round(cos(j * pi / 16) * 2^13)` for `j` in `0..=8` — the quarter
+/// period [`cos_sixteenth`] reduces every angle into.
+const COS_QUARTER: [i64; 9] = [8192, 8035, 7568, 6811, 5793, 4551, 3135, 1598, 0];
+
+/// `round(cos(j * pi / 16) * 2^13)` for any `j`, by the cosine's symmetry
+/// about `pi/2` and `pi`. Every angle an `m`-point inverse DCT needs is a
+/// multiple of `pi/16` for `m` in `1, 2, 4, 8`, so this one table serves
+/// every scale's reference.
+fn cos_sixteenth(j: usize) -> i64 {
+    match j % 32 {
+        k @ 0..=8 => COS_QUARTER[k],
+        k @ 9..=16 => -COS_QUARTER[16 - k],
+        k @ 17..=24 => -COS_QUARTER[k - 16],
+        k => COS_QUARTER[32 - k],
+    }
+}
+
+/// `round(2^13 / sqrt(2))`: the `alpha(0)` the inverse DCT definition
+/// weights its constant term by.
+const ALPHA_ZERO: i64 = 5793;
+
+/// The inverse DCT at scale `m`, evaluated straight from ITU-T T.81 Annex
+/// A.3.3 — `f(x,y) = 1/4 * sum_u sum_v alpha(u) alpha(v) F(u,v)
+/// cos((2x+1) u pi / 2m) cos((2y+1) v pi / 2m)` — restated here from the
+/// standard rather than reached for inside the decoder, so a mistake in
+/// the decoder's own basis cannot cancel itself out.
+///
+/// `deq` is the whole block's dequantised coefficients in natural order;
+/// only the top-left `m`x`m` corner participates, which is what makes a
+/// reduced scale a band-limited decimation of the block.
+fn reference_idct(deq: &[i32; 64], m: usize) -> Vec<u8> {
+    let basis = |x: usize, u: usize| -> i64 {
+        if u == 0 {
+            ALPHA_ZERO
+        } else {
+            cos_sixteenth((2 * x + 1) * u * (8 / m))
+        }
+    };
+    let mut out = vec![0u8; m * m];
+    for x in 0..m {
+        for y in 0..m {
+            let mut sum = 0i64;
+            for u in 0..m {
+                for v in 0..m {
+                    sum += basis(x, u) * basis(y, v) * i64::from(deq[u * 8 + v]);
+                }
+            }
+            // Two passes of the 2^13 basis, and the transform's own 1/4.
+            let denom = 1i64 << (13 + 13 + 2);
+            let rounded = if sum >= 0 {
+                (sum + denom / 2) / denom
+            } else {
+                -((-sum + denom / 2) / denom)
+            };
+            out[x * m + y] = u8::try_from((rounded + 128).clamp(0, 255)).expect("clamped");
+        }
+    }
+    out
+}
+
 #[test]
-fn fast_idct_matches_the_direct_reference_within_one() {
-    // The regression test for the fast full-scale inverse DCT: over many
-    // pseudo-random full (DC + all-AC) coefficient blocks, the fast
-    // `idct8_islow` and the direct `idct_general` matrix routine — the two
-    // being different fixed-point roundings of the same transform — must
-    // never disagree by more than one 8-bit level, the tolerance the JPEG
-    // standard's own accuracy requirement leaves. Coefficients stay inside
-    // the 12-bit signed magnitude a valid 8-bit frame's dequantised
-    // coefficients occupy, so both routines compute in range.
+fn every_scale_of_the_fast_idct_matches_the_direct_reference_within_one() {
+    // The regression test for all four inverse DCTs: over many
+    // pseudo-random full (DC + all-AC) coefficient blocks, each fast
+    // butterfly and the direct reference above — different fixed-point
+    // roundings of the same transform — must never disagree by more than
+    // one 8-bit level, the tolerance the JPEG standard's own accuracy
+    // requirement leaves. Coefficients stay inside the 12-bit signed
+    // magnitude a valid 8-bit frame's dequantised coefficients occupy, so
+    // every routine computes in range.
+    //
+    // The reduced scales are what a wallpaper or an icon actually decodes
+    // through, and getting their basis wrong does not fail loudly: it
+    // silently reconstructs each block's top-left corner magnified, which
+    // reads as a blocky, low-resolution picture. Holding every scale to
+    // the standard's own definition is what catches that.
     let mut state = 0x0123_4567_89AB_CDEFu64;
     let quant = [1u16; 64];
     let mut worst = 0i32;
@@ -708,37 +777,89 @@ fn fast_idct_matches_the_direct_reference_within_one() {
             *c = raw - 2048;
         }
         let deq = dequantize(&coeffs, &quant);
-        let fast = idct8_islow(&deq);
-        let mut reference = [0u8; 64];
-        idct_general(&deq, 8, &mut reference, 8, 0, 0);
-        for (i, (&f, &r)) in fast.iter().zip(reference.iter()).enumerate() {
-            let diff = (i32::from(f) - i32::from(r)).abs();
-            worst = worst.max(diff);
-            assert!(
-                diff <= 1,
-                "sample {i}: fast {f} vs reference {r} (diff {diff})"
-            );
+        let scales: [(usize, Vec<u8>); 4] = [
+            (8, idct8_islow(&deq).to_vec()),
+            (
+                4,
+                idct4_islow(&dequantize_corner::<4>(&coeffs, &quant)).to_vec(),
+            ),
+            (
+                2,
+                idct2_islow(&dequantize_corner::<2>(&coeffs, &quant)).to_vec(),
+            ),
+            (1, vec![idct1_islow(deq[0])]),
+        ];
+        for (m, fast) in scales {
+            let reference = reference_idct(&deq, m);
+            for (i, (&f, &r)) in fast.iter().zip(reference.iter()).enumerate() {
+                let diff = (i32::from(f) - i32::from(r)).abs();
+                worst = worst.max(diff);
+                assert!(
+                    diff <= 1,
+                    "m {m} sample {i}: fast {f} vs reference {r} (diff {diff})"
+                );
+            }
         }
     }
-    // A block whose AC coefficients are all zero (the flat-DC fast path)
-    // must reconstruct exactly the direct routine's constant value.
-    let deq = dequantize(
-        &{
-            let mut c = [0i32; 64];
-            c[0] = 576;
-            c
-        },
-        &quant,
-    );
-    let fast = idct8_islow(&deq);
-    let mut reference = [0u8; 64];
-    idct_general(&deq, 8, &mut reference, 8, 0, 0);
-    assert_eq!(fast, reference);
+    // A block whose AC coefficients are all zero reconstructs to the same
+    // flat value at every scale — the block's own mean — which is what
+    // makes a reduced decode a smaller picture of the block rather than a
+    // piece of it.
+    let mut flat = [0i32; 64];
+    flat[0] = 576;
+    let deq = dequantize(&flat, &quant);
+    assert_eq!(idct8_islow(&deq).to_vec(), reference_idct(&deq, 8));
+    assert!(idct8_islow(&deq).iter().all(|&s| s == 200));
+    assert!(idct4_islow(&dequantize_corner::<4>(&flat, &quant))
+        .iter()
+        .all(|&s| s == 200));
+    assert!(idct2_islow(&dequantize_corner::<2>(&flat, &quant))
+        .iter()
+        .all(|&s| s == 200));
+    assert_eq!(idct1_islow(deq[0]), 200);
     // Sanity that the loop actually exercised non-trivial rounding.
     assert!(
         worst >= 1,
         "random blocks never differed, tolerance not exercised"
     );
+}
+
+#[test]
+fn a_reduced_scale_block_carries_the_same_mean_as_the_full_scale_one() {
+    // The property a scaled inverse DCT must have and a magnified corner
+    // crop cannot: reducing a block preserves its mean, because the mean
+    // *is* the DC coefficient and no reduced scale discards it. Evaluated
+    // over random AC-only blocks, whose true mean is exactly the level
+    // shift, so any leaning towards one corner of the block shows up
+    // immediately. Coefficients are small enough that no sample reaches
+    // the `0..=255` clamp, which would bias the mean by itself.
+    let mut state = 0xDEAD_BEEF_1234_5678u64;
+    let quant = [1u16; 64];
+    for _ in 0..500 {
+        let mut coeffs = [0i32; 64];
+        for c in coeffs.iter_mut().skip(1) {
+            let raw = i32::try_from(lcg_next(&mut state) % 64).unwrap_or(0);
+            *c = raw - 32;
+        }
+        for (m, samples) in [
+            (
+                2,
+                idct2_islow(&dequantize_corner::<2>(&coeffs, &quant)).to_vec(),
+            ),
+            (
+                4,
+                idct4_islow(&dequantize_corner::<4>(&coeffs, &quant)).to_vec(),
+            ),
+            (8, idct8_islow(&dequantize(&coeffs, &quant)).to_vec()),
+        ] {
+            let total: i32 = samples.iter().map(|&s| i32::from(s)).sum();
+            let count = i32::try_from(samples.len()).unwrap_or(1);
+            assert!(
+                (total - 128 * count).abs() <= count,
+                "m {m}: block mean drifted from the level shift ({total} over {count} samples)"
+            );
+        }
+    }
 }
 
 // =======================================================================

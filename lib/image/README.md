@@ -42,21 +42,25 @@ refusal rather than a best effort: arithmetic coding, lossless and
 hierarchical (differential) frames, 12-bit precision, 2- or 4-component
 images, a height deferred to a `DNL` marker, and any malformed stream.
 
-Reconstruction inverse-DCTs each block with no per-pixel allocation. The
-full-scale (unreduced) decode — the path that dominates a wallpaper-sized
-render — uses a fast fixed-point integer inverse DCT: the standard AAN /
-Loeffler-Ligtenberg-Moerlein separable row-column butterfly (the
-formulation libjpeg names `jpeg_idct_islow`), in `i32` with the usual
-descale/rounding shifts and a flat-block (all-AC-zero) fast path, replacing
-the direct routine's per-block `O(8^3)` matrix multiply with `O(8^2)`
-multiply-adds. The reduced scales (one half/quarter/eighth) keep the direct
-scaled-basis matrix routine, which is already cheap when it evaluates only
-1, 2, or 4 samples per block edge and is the reference the fast routine's
-equivalence test is checked against. The arithmetic is `wrapping_*`: for a
-valid 8-bit frame the coefficients are bounded and no wrap ever occurs, so
-the transform is exact, while a hostile file can at worst wrap an
-intermediate into the closing fixed clamp to `0..=255` — never a panic, and
-never a pixel outside range.
+Reconstruction inverse-DCTs each block with no per-pixel allocation, at
+every scale through a fast fixed-point integer butterfly of that scale's own
+size. The full-scale path is the standard AAN / Loeffler-Ligtenberg-Moerlein
+separable row-column inverse DCT (the formulation libjpeg names
+`jpeg_idct_islow`), in `i32` with the usual descale/rounding shifts and a
+flat-block (all-AC-zero) fast path, replacing a direct `O(8^3)` matrix
+multiply with `O(8^2)` multiply-adds.
+
+A reduced scale discards the block's high-frequency coefficients and
+inverse-transforms the surviving top-left `m`×`m` corner with the
+**`m`-point** basis, so its `m` samples span the whole 8-sample block — the
+block's band-limited decimation. Re-using the *8*-point basis over that
+corner would instead evaluate the block's first `m` spatial positions, a
+magnified crop that tiles the image with visible block seams; each reduced
+scale therefore has its own butterfly and dequantises only the coefficients
+it reads. The arithmetic is `wrapping_*`: for a valid 8-bit frame the
+coefficients are bounded and no wrap ever occurs, so the transform is exact,
+while a hostile file can at worst wrap an intermediate into the closing
+fixed clamp to `0..=255` — never a panic, and never a pixel outside range.
 
 The final assembly reconstructs a subsampled component by **triangle
 interpolation** on both axes: a chroma sample sits at the centre of the
@@ -178,10 +182,12 @@ that sandbox, never the calling service.
 Host-unit-tested beside the code (`src/png_tests.rs`, `src/jpeg_tests.rs`,
 `src/crc32.rs`) with no external fixture files: the JPEG tests build their
 streams marker by marker, check a progressive stream against the pixels of
-the equivalent baseline one, and check the fast full-scale inverse DCT
-against the direct matrix reference over many pseudo-random full coefficient
-blocks (asserting no more than a one-level per-sample difference). Both
-formats are fuzzed by
+the equivalent baseline one, check **every** inverse-DCT scale against a
+direct reference the test file restates from the standard's own definition
+over many pseudo-random full coefficient blocks (asserting no more than a
+one-level per-sample difference), and assert that reducing a block preserves
+its mean — the property a scaled transform has and a magnified corner crop
+does not. Both formats are fuzzed by
 `tests/fuzz_image.rs` — random bytes, random bytes behind each valid
 signature, and structurally mutated valid fixtures (baseline and
 progressive) through the shared `tests/fuzzseed` seed and budget seam —

@@ -53,25 +53,40 @@ decoding uses a fast lookup table for short Huffman codes and a
 bit-at-a-time canonical search only for the long ones, and reconstruction
 inverse-DCTs each block with no per-pixel allocation.
 
-The full-scale (unreduced) decode — the path that dominates a
-wallpaper-sized render — reconstructs each 8×8 block with a fast
-fixed-point integer inverse DCT: the standard AAN /
-Loeffler-Ligtenberg-Moerlein separable row-column butterfly (the
+Every decode scale reconstructs its block with a fast fixed-point integer
+butterfly of its own size. The full-scale path is the standard AAN /
+Loeffler-Ligtenberg-Moerlein separable row-column inverse DCT (the
 formulation libjpeg names `jpeg_idct_islow`), in `i32` with the usual
-descale/rounding shifts and a flat-block (all-AC-zero) fast path. That
-replaces the direct routine's per-block `O(8^3)` scaled-basis matrix
-multiply with `O(8^2)` multiply-adds; on the shipped 8.29-megapixel light
-wallpaper it cut a full-scale decode from roughly 276 ms to 64 ms on the
-development host. The reduced scales (one half, quarter, or eighth) keep the
-direct matrix routine, which is already cheap when it evaluates only 1, 2, or
-4 samples per block edge and doubles as the reference a permanent unit test
-checks the fast routine against (no more than a one-level per-sample
-difference, the tolerance the standard's accuracy requirement leaves). The
-transform's arithmetic is `wrapping_*`: a valid 8-bit frame's coefficients
-are bounded so no wrap ever occurs and the result is exact, while a hostile
-file can at worst wrap an intermediate into the closing fixed clamp to
-`0..=255` — never a panic under the workspace's overflow checks, and never a
-pixel outside range.
+descale/rounding shifts and a flat-block (all-AC-zero) fast path, which
+replaces a direct `O(8^3)` matrix multiply with `O(8^2)` multiply-adds.
+
+A **reduced** scale discards the block's high-frequency coefficients and
+inverse-transforms the surviving top-left `m`×`m` corner with the
+**`m`-point** basis — `alpha(u) * cos((2x+1) * u * pi / (2m))` — so the `m`
+samples it produces span the whole 8-sample block. That is the block's
+band-limited decimation, and it is what makes a reduced decode a faithful
+smaller picture rather than a piece of a larger one: re-using the *8*-point
+basis over the same corner would instead evaluate the block's first `m`
+spatial positions, which is a magnified crop of its top-left corner and
+tiles the image with visible block seams. Each reduced scale has its own
+butterfly (`idct4_islow`, `idct2_islow`, `idct1_islow`) and dequantises only
+the coefficients that butterfly reads, so it never forms the products of
+coefficients it is about to discard.
+
+The transform's arithmetic is `wrapping_*`: a valid 8-bit frame's
+coefficients are bounded so no wrap ever occurs and the result is exact,
+while a hostile file can at worst wrap an intermediate into the closing
+fixed clamp to `0..=255` — never a panic under the workspace's overflow
+checks, and never a pixel outside range.
+
+The surrounding hot paths are held to the same bar. The entropy reader
+keeps its bits **left justified** in a 64-bit buffer, so a peek is one shift
+rather than a mask and a re-justification, and refills four bytes in one
+load whenever none of them is `0xFF` (falling to the byte-at-a-time path
+that resolves stuffing and stops at a marker). YCbCr → RGB tabulates all
+four chroma terms over the 256 values a chroma sample can take, leaving
+three table reads, three adds and a shift per pixel with no multiply and no
+division.
 
 Final assembly reconstructs a subsampled component by **triangle
 interpolation** on both axes, the reconstruction a quality decoder performs:
@@ -87,7 +102,12 @@ per pixel: the horizontal taps are identical for every row, so each component
 resolves one whole output-width row at a time and the per-pixel loop does
 nothing but read three bytes and colour-convert. A component already sampled
 as densely as the frame — luma, or every channel of an RGB image — is read
-straight from its plane with no copy and no arithmetic at all.
+straight from its plane with no copy and no arithmetic at all. The
+component count and colour space are resolved once per row rather than once
+per pixel, so the pixel loop is a straight three-way zip with no per-pixel
+bounds check; a component row shorter than the output row means the frame's
+declared geometry and its sample planes disagree, and refuses the decode
+rather than inventing pixels.
 
 Everything else a stream can declare is a typed, fail-closed refusal
 rather than a best effort: arithmetic coding, lossless and hierarchical
@@ -100,11 +120,11 @@ deferred to a `DNL` marker, and any malformed stream.
 to be to cover the caller's `FitBox` on both axes. For JPEG it picks the
 smallest DCT decode scale — one whole, one half, one quarter, or one eighth
 of natural size, produced by inverse-DCT transforming only the
-coefficients that scale needs — whose output still covers the box. It never
-scales up and never resamples; reduced dimensions round up, so the result
-can be modestly larger than the box but never smaller. Decoding a
-8.3-megapixel wallpaper master straight to an eighth costs a fraction of the
-full-size arithmetic and output buffer.
+coefficients that scale needs, through that scale's own `m`-point basis —
+whose output still covers the box. It never scales up and never resamples;
+reduced dimensions round up, so the result can be modestly larger than the
+box but never smaller. Decoding a 8.3-megapixel wallpaper master straight to
+an eighth costs a fraction of the full-size arithmetic and output buffer.
 
 ### Degrading rather than refusing
 
@@ -216,9 +236,12 @@ never the calling service.
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by
 marker, check a progressive stream against the pixels of the equivalent
-baseline one, and check the fast full-scale inverse DCT against the direct
-matrix reference over many pseudo-random full coefficient blocks (asserting
-no more than a one-level per-sample difference). Both formats are fuzzed by
+baseline one, and check **every** inverse-DCT scale against a direct
+reference the test file restates from the standard's own definition, over
+many pseudo-random full coefficient blocks (asserting no more than a
+one-level per-sample difference). A further test asserts the property a
+scaled transform must have and a magnified corner crop cannot: reducing a
+block preserves its mean. Both formats are fuzzed by
 `tests/fuzz_image.rs` — random
 bytes, random bytes behind each valid signature, and structurally mutated
 valid fixtures, baseline and progressive — registered with

@@ -57,6 +57,61 @@ fn a_one_to_one_resample_is_an_exact_copy() {
 }
 
 #[test]
+fn a_one_to_one_resample_of_a_sub_region_is_that_region_exactly() {
+    // The 1:1 case is not only the whole image: a crop drawn at its own
+    // size is one too, and it must answer the cropped pixels rather than
+    // the image's leading ones. Alpha varies across the region, because
+    // reproducing a partly transparent pixel exactly is the property a
+    // premultiplying filter has to round-trip to reach.
+    let pixels = vec![
+        1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 0, //
+        10, 11, 12, 64, 13, 14, 15, 255, 16, 17, 18, 200, //
+        19, 20, 21, 7, 22, 23, 24, 255, 25, 26, 27, 255,
+    ];
+    let src = Rgba8Image::new(3, 3, &pixels).expect("well-formed");
+    let region = Region {
+        x: 1,
+        y: 1,
+        width: 2,
+        height: 2,
+    };
+    let out = resample(&src, region, 2, 2).expect("resampled");
+    assert_eq!(
+        out,
+        vec![13, 14, 15, 255, 16, 17, 18, 200, 22, 23, 24, 255, 25, 26, 27, 255]
+    );
+}
+
+#[test]
+fn a_one_to_one_band_is_the_slice_of_the_copy_it_claims_to_be() {
+    // Bands must stay independent of each other for the 1:1 case exactly
+    // as they are for a filtered one: the desktop assembles a wallpaper
+    // from them, and a band that read the wrong source row would tear the
+    // picture at every band boundary.
+    let pixels: Vec<u8> = (0..4 * 5 * 4)
+        .map(|i| u8::try_from(i % 256).unwrap_or(0))
+        .collect();
+    let src = Rgba8Image::new(4, 5, &pixels).expect("well-formed");
+    let whole = resample(&src, src.whole(), 4, 5).expect("resampled");
+    let mut assembled = vec![0u8; whole.len()];
+    for first_row in 0..5 {
+        let row = &mut assembled[first_row * 16..(first_row + 1) * 16];
+        resample_rows(
+            &src,
+            src.whole(),
+            4,
+            5,
+            u32::try_from(first_row).expect("small"),
+            1,
+            row,
+        )
+        .expect("banded");
+    }
+    assert_eq!(assembled, whole);
+    assert_eq!(assembled, pixels);
+}
+
+#[test]
 fn a_halving_downscale_averages_every_source_pixel_it_covers() {
     let pixels = quad();
     let src = Rgba8Image::new(2, 2, &pixels).expect("well-formed");
