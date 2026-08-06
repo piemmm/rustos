@@ -848,15 +848,14 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
     }
 }
 
-/// Leak a zeroed `&'static [AtomicU64]` of `count` slots — the per-CPU
-/// preemption backing sized to the *discovered* core count (never a
-/// baked-in ceiling), alive for the kernel's lifetime like the other
-/// boot-leaked state.
+/// Leak a zeroed `&'static [T]` of `count` slots — per-CPU backing sized
+/// to the *discovered* core count (never a baked-in ceiling), alive for
+/// the kernel's lifetime like the other boot-leaked state. Each consumer
+/// resets the slots to its own sentinel as it publishes them.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-fn leak_per_cpu_slots(count: usize) -> &'static [core::sync::atomic::AtomicU64] {
-    use core::sync::atomic::AtomicU64;
+fn leak_per_cpu_slots<T: Default>(count: usize) -> &'static [T] {
     let mut slots = alloc::vec::Vec::with_capacity(count);
-    slots.resize_with(count, || AtomicU64::new(0));
+    slots.resize_with(count, T::default);
     alloc::boxed::Box::leak(slots.into_boxed_slice())
 }
 
@@ -1057,6 +1056,18 @@ pub fn arm_preemption(cpu_count: u32) {
             tairix_arch_aarch64::halt_current_cpu();
         }
 
+        // Give each CPU a slot to publish the interrupt it has
+        // acknowledged but not yet completed, before any core can take one.
+        // A never-completed *banked* line (an SGI or the timer/watchdog
+        // PPI) leaves that core's interface running priority raised and
+        // stops it taking any further interrupt, and no observer can read
+        // another CPU's banked state — so only the victim's own record can
+        // name it in a hard-lockup report. A refused publication simply
+        // leaves the read `unsupported`, which the report renders honestly
+        // instead of claiming an idle core. Debug image only.
+        #[cfg(feature = "watchdog-diagnostics")]
+        let _ = tairix_arch_api::watchdog::in_flight::register_slots(leak_per_cpu_slots(count));
+
         // Install the EL0-preemption callback *before* arming the timer, so
         // the first tick taken from EL0 already has a handler.
         preempt::set_preempt_callback(production_preempt_dispatch);
@@ -1112,13 +1123,25 @@ pub fn arm_preemption(cpu_count: u32) {
         // secure) it falls back to the complete cross-CPU buddy detector with
         // no broken channel — the empirical, fail-closed capability the D13
         // masked-section sampler consumes (`plans/WATCHDOG.md`,
-        // `plans/FIX-HARDWARE-FEATURES.md`). Debug image only; a shippable
-        // image compiles this and the whole FIQ path out.
+        // `plans/FIX-HARDWARE-FEATURES.md`).
+        //
+        // Report that verdict too: it decides whether the non-maskable
+        // self-sample exists at all, so a reader of a later
+        // `sampled=pre_silence` hard-lockup record needs it to tell a real
+        // wedge from a false report against a healthy core the watchdog could
+        // not observe. The diagnostic sink is not up this early, so the
+        // reporter stashes the verdict and its install flushes it — the line
+        // is never lost. Debug image only; a shippable image compiles this and
+        // the whole FIQ path out.
         #[cfg(feature = "watchdog-diagnostics")]
-        // SAFETY: boot CPU during bring-up; the GIC is up
-        // (`install_device_irq_dispatch` ran) and the EL1 vector table is
-        // installed (`boot::init_vectors`), with IRQs still masked.
-        let _ = unsafe { tairix_arch_aarch64::watchdog::probe_fiq_deliverability(counter_hz) };
+        {
+            // SAFETY: boot CPU during bring-up; the GIC is up
+            // (`install_device_irq_dispatch` ran) and the EL1 vector table is
+            // installed (`boot::init_vectors`), with IRQs still masked.
+            let support =
+                unsafe { tairix_arch_aarch64::watchdog::probe_fiq_deliverability(counter_hz) };
+            tairix_kernel_core::report_watchdog_self_sample(support);
+        }
 
         // SAFETY: this is the boot CPU (id 0); the preempt and IPI
         // callbacks are installed (above), the per-CPU storage is

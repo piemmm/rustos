@@ -1,10 +1,11 @@
-//! Unit tests for the Switchboard window's frame, chrome and shared
-//! per-section skeleton (spec §17, §20).
+//! Unit tests for the Switchboard window's shared per-section skeleton
+//! (spec §17, §20).
 //!
 //! These prove the composition is assembled from the shared controls and
-//! behaves correctly: the window chrome and scrollbar junction stay separate
-//! from the client, the location band's trail and section list both switch
-//! sections (by pointer and keyboard) and mark the one on show, a host can
+//! behaves correctly: the window manager decorates server-side so the app's
+//! own content fills the client from the top edge, the location band's trail
+//! and section list both switch sections (by pointer and keyboard) and mark
+//! the one on show, a host can
 //! open the panel on any section and lands in exactly the state the keyboard
 //! would have reached, a refreshed model re-derives the controls while leaving
 //! the user's section, scroll offset, and focus alone and never lets a stale
@@ -19,8 +20,7 @@ use tairix_theme::Theme;
 
 use tairix_controls::testkit::high_contrast;
 use tairix_controls::{
-    ActivityState, ControlDisposition, Crumb, FurniturePart, PressureState, RecoveryState,
-    SelectionState,
+    ActivityState, ControlDisposition, Crumb, PressureState, RecoveryState, SelectionState,
 };
 
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
@@ -52,38 +52,34 @@ fn render_paints_content() {
 }
 
 #[test]
-fn scroll_track_and_resize_corner_do_not_overlap() {
-    let theme = Theme::dark();
-    let sb = Switchboard::new(&model());
-    let layout = sb.compute_layout(bounds(), Scale::ONE, &theme);
-    // The corner sits below the scroll track, so they never share a pixel.
-    assert!(layout.scroll.bottom() <= layout.corner.top());
-    // The content area stops where the scrollbar gutter begins.
-    assert_eq!(layout.content.right(), layout.scroll.left());
-    // Everything stays inside the frame's client viewport.
-    let client = layout.frame.client;
-    assert!(layout.location.right() <= client.right());
-    assert!(layout.corner.bottom() <= client.bottom());
-}
-
-#[test]
-fn client_content_is_isolated_from_furniture() {
+fn scroll_track_sits_beside_the_content_inside_bounds() {
     let theme = Theme::dark();
     let sb = Switchboard::new(&model());
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let (cx, cy) = centre(layout.content);
-    // A point in the content area is the client viewport, never furniture.
-    assert_eq!(
-        sb.furniture_at(b, Scale::ONE, &theme, Point::new(cx, cy)),
-        FurniturePart::Client
-    );
-    // A point in the title bar is furniture, never the client.
-    let (tx, ty) = centre(layout.frame.title_bar);
-    assert_ne!(
-        sb.furniture_at(b, Scale::ONE, &theme, Point::new(tx, ty)),
-        FurniturePart::Client
-    );
+    // The content area stops where the scrollbar gutter begins, and the two
+    // together stay inside the bounds the compositor carved out.
+    assert_eq!(layout.content.right(), layout.scroll.left());
+    assert!(layout.scroll.right() <= b.right());
+    assert!(layout.content.bottom() <= b.bottom());
+    assert!(layout.scroll.bottom() <= b.bottom());
+}
+
+#[test]
+fn the_client_content_begins_at_the_top_of_bounds() {
+    let theme = Theme::dark();
+    let sb = Switchboard::new(&model());
+    let b = bounds();
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    // The window manager decorates server-side, so the app draws no title bar
+    // of its own: its first region, the location band, sits at the very top
+    // edge of the bounds it was handed. A re-introduced private title bar
+    // would inset the client and push the band down, failing this.
+    assert_eq!(layout.location.top(), b.top());
+    // And the band really is placed there: its trail, the band's one keyboard
+    // stop, resolves to the first rows of the client.
+    let trail = sb.band(layout.location, &theme, Scale::ONE).trail;
+    assert_eq!(trail.top(), b.top());
 }
 
 /// Open the section list the way a reader does — a click on the location
@@ -314,8 +310,8 @@ fn keyboard_scrolls_the_focused_scrollbar() {
 #[test]
 fn keyboard_cycles_focus_and_selects_a_section() {
     let mut sb = Switchboard::new(&model());
-    // Content -> Scrollbar -> TitleBar -> Location.
-    for _ in 0..3 {
+    // Content -> Scrollbar -> Location.
+    for _ in 0..2 {
         assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
     }
     // The band's leading crumb opens the section list, which then walks to
@@ -336,7 +332,7 @@ fn keyboard_cycles_focus_and_selects_a_section() {
 #[test]
 fn escape_closes_the_section_list_and_leaves_the_section_alone() {
     let mut sb = Switchboard::new(&model());
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
     }
     assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
@@ -458,7 +454,7 @@ fn press_on_the_location_bands_first_row_reaches_its_command() {
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     let command = sb.band(layout.location, &theme, Scale::ONE).command;
-    // The band's very first row of pixels, immediately under the title bar.
+    // The band's very first row of pixels, at the very top of the client.
     let x = centre(command).0;
     let y = layout.location.top();
     let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
@@ -473,16 +469,15 @@ fn press_on_the_location_bands_first_row_reaches_its_command() {
 fn window_too_short_for_the_anatomy_still_renders_in_bounds() {
     let theme = Theme::dark();
     let mut sb = Switchboard::new(&model());
-    // Shorter than the title bar and location band together would ordinarily
-    // need.
+    // Shorter than the location band would ordinarily need.
     let b = Rect::new(0, 0, 600, 24);
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    // Must not panic: every region clips to the client instead.
+    // Must not panic: every region clips to the bounds instead.
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    assert!(layout.location.bottom() <= layout.frame.client.bottom());
-    assert!(layout.content.bottom() <= layout.frame.client.bottom());
-    assert!(layout.scroll.bottom() <= layout.frame.client.bottom());
+    assert!(layout.location.bottom() <= b.bottom());
+    assert!(layout.content.bottom() <= b.bottom());
+    assert!(layout.scroll.bottom() <= b.bottom());
 }
 
 #[test]
@@ -494,11 +489,10 @@ fn the_minimum_window_size_seats_every_declared_anatomy() {
     // declared floor: the optional columns beside it are shed in the frame's
     // drop order, which is the designed outcome on a narrow window rather than
     // a lost region — but the sidebar and the action rail are last in that
-    // order and must still be there. Measuring the whole window as if it were
-    // the client is deliberately strict — the real client is smaller — so a
-    // section seated here is seated there, and a section that later declares a
-    // wider row-command strip, sidebar or rail than this floor can hold fails
-    // here instead of pushing its own commands off the row on a small window.
+    // order and must still be there. A section seated in this content area is
+    // seated in the real client, and a section that later declares a wider
+    // row-command strip, sidebar or rail than this floor can hold fails here
+    // instead of pushing its own commands off the row on a small window.
     let b = Rect::new(0, 0, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     for section in Section::ALL {
@@ -669,9 +663,9 @@ fn pointer_after_selection_reaches_the_new_sections_content() {
 fn direct_selection_and_the_keyboard_path_agree() {
     let mut by_key = Switchboard::new(&model());
     let mut direct = Switchboard::new(&model());
-    // Put both on the location band (Content -> Scrollbar -> TitleBar ->
-    // Location) so the only difference is how the section is chosen.
-    for _ in 0..3 {
+    // Put both on the location band (Content -> Scrollbar -> Location) so the
+    // only difference is how the section is chosen.
+    for _ in 0..2 {
         assert_eq!(by_key.on_key(Key::Named(NamedKey::Tab)), None);
         assert_eq!(direct.on_key(Key::Named(NamedKey::Tab)), None);
     }
@@ -847,7 +841,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     );
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    assert!(layout.content.bottom() <= layout.frame.client.bottom());
+    assert!(layout.content.bottom() <= b.bottom());
 }
 
 #[test]

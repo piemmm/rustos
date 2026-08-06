@@ -182,7 +182,9 @@ record under the `log` phase and halts.
 
 ## Audit event catalogue
 
-`kernel/core` owns the `4_000..5_000` event-id range:
+`kernel/core` owns the `4_000..5_000` event-id range. A `diag` sink means the
+record goes to the diagnostic (log/UART) stream rather than the tamper-evident
+audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 
 | ID   | Level | Name                    | Sink   |
 |-----:|-------|-------------------------|--------|
@@ -226,6 +228,8 @@ record under the `log` phase and halts.
 | 4082 | Error | `CPU_HARD_LOCKUP_DETECTED`  | audit  |
 | 4083 | Warn  | `CPU_HARD_LOCKUP_CLEARED`   | audit  |
 | 4084 | Warn  | `CPU_LOCKUP_RECOVERY`       | audit  |
+| 4085 | Error | `CPU_LOCKUP_DIAGNOSTIC`     | diag   |
+| 4086 | Info  | `CPU_WATCHDOG_SELF_SAMPLE`  | diag   |
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
 | 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
 | 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
@@ -413,6 +417,16 @@ The acknowledge/end-of-interrupt handshake now carries the **full** IAR
 value end to end (dispatch masks it to the INTID only for the handler
 decision), so an SGI from any CPU is completed correctly.
 
+Because no observer can ever read a banked line's state, the *victim*
+publishes it instead: each CPU records the interrupt it acknowledged into its
+own per-CPU slot on entry and clears it at the end-of-interrupt (two relaxed
+stores, off any lock, no change to delivery or completion ordering). A
+hard-lockup detail then renders `in_flight` beside `stuck_irq`, so a core
+wedged inside an SGI or PPI names that interrupt instead of being reported
+against whatever device line happened to be pending. The field distinguishes
+"nothing in flight" from "in flight, intid N" and from "no reading taken", so
+it never implies an observation it did not make.
+
 The breadcrumb, backtrace, and sampled `pc`/`pstate` described next are a
 **debug-only** facility, compiled in only under the `watchdog-diagnostics`
 Cargo feature that `tools/xtask` enables for the non-shippable `debug` image
@@ -429,6 +443,22 @@ rendered **image-base-relative** (`pc=+0x…`, `k_bt=+0x…`), never the
 absolute runtime address — the `%pK`/`kptr_restrict` discipline, so a
 capture resolves against the debug kernel ELF without revealing the
 KASLR-relocatable load base.
+
+How much of such a record to believe depends on whether the port's
+non-maskable self-sample is actually live on this boot, which the port decides
+at run time from a delivery probe. That verdict is reported once, on the boot
+CPU, as `CpuWatchdogSelfSample` (`self_sample=live`, or `unsupported`/`pending`
+with the reason the honesty verdict carries), so a reader of a later
+`sampled=pre_silence` record can tell an image whose sampler was working from
+one where it never ran. It carries no address and no secret — it is a
+capability statement.
+
+A `context=kernel`/`user` reading is only as fresh as the sample that recorded
+it, so a report marks it `sampled=pre_silence` whenever the last sample is
+older than the cadence interval. That binds the CPU's *own* timer-tick stall
+report too: the maskable tick keeps firing on a core whose non-maskable cadence
+has stopped, and without the marker such a report printed a confident
+`context=kernel` from a field ten seconds out of date.
 
 Because a hard lockup's sampled `pc` is `pre_silence` — and on a board with
 no non-maskable channel (the Raspberry Pi 4's GICv2 in the non-secure

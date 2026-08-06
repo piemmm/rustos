@@ -1516,6 +1516,14 @@ mod tests {
                     PUBLISHED_DURING_SWITCH.store(true, Ordering::SeqCst);
                 }
             }
+            // Sample CPU 48's kernel-activity crumb here, mid-switch: the
+            // crumb stamped on the way in is overwritten by `switch_return`
+            // the instant this call returns, so it is observable nowhere
+            // else.
+            #[cfg(feature = "watchdog-diagnostics")]
+            if let Some(state) = cpu_state::get(48) {
+                CRUMB_DURING_SWITCH.store(state.kbc_site.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
             // No control transfer on the host (see the module docs); the
             // real switch is proven by the per-arch QEMU verticals.
         }
@@ -1660,6 +1668,10 @@ mod tests {
     /// switch or early task execution (before its first trap re-stamps the
     /// crumb) is diagnosed as `user_switch` rather than the coarse
     /// scheduler `dispatch` region.
+    ///
+    /// Observed from inside the switch, because the crumb is deliberately
+    /// replaced by `switch_return` the moment control comes back; after
+    /// `dispatch_step` returns there is nothing left to read.
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn dispatch_step_stamps_the_user_switch_breadcrumb() {
@@ -1668,15 +1680,24 @@ mod tests {
         // test threads never observe each other through it.
         const CPU: CpuId = 48;
         let rec = recorder();
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let hits = leak_counter();
+        // A *user* kthread: a kernel one never leaves EL1 and is crumbed
+        // `kernel_body` instead.
+        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
 
         let _ = dispatch_step(&mut control, CPU);
 
+        assert_eq!(
+            CRUMB_DURING_SWITCH.load(Ordering::SeqCst),
+            crate::watchdog::KernelBreadcrumb::UserSwitch as u8,
+            "the crumb into the context switch is user_switch",
+        );
+        // And it is replaced on the way back out, so a wedge in the
+        // dispatcher-side teardown is not misattributed to the task.
         let state = cpu_state::get(CPU).expect("test CPU index is in range");
         assert_eq!(
             state.kbc_site.load(Ordering::SeqCst),
-            crate::watchdog::KernelBreadcrumb::UserSwitch as u8,
-            "the crumb into the context switch is user_switch",
+            crate::watchdog::KernelBreadcrumb::SwitchReturn as u8,
         );
     }
 
@@ -2005,6 +2026,12 @@ mod tests {
     /// Set by [`RecordingCs::switch`] when the resume slot for CPU 62 is
     /// published at switch time (the kernel-kthread publish assertion).
     static PUBLISHED_DURING_SWITCH: AtomicBool = AtomicBool::new(false);
+
+    /// CPU 48's kernel-activity crumb as [`RecordingCs::switch`] saw it,
+    /// mid-switch (the `user_switch` crumb assertion).
+    #[cfg(feature = "watchdog-diagnostics")]
+    static CRUMB_DURING_SWITCH: core::sync::atomic::AtomicU8 =
+        core::sync::atomic::AtomicU8::new(u8::MAX);
 
     #[test]
     fn kernel_body_suspend_skips_the_cooperative_park_bracket() {

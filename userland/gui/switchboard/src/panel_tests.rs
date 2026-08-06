@@ -4,7 +4,6 @@
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{Errno, SchedPriority, Signal};
-use tairix_controls::WindowControlKind;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
@@ -311,11 +310,8 @@ fn closing_returns_to_headless_sampling() {
     let mut panel = Panel::new(OWN_PID, empty_model());
     open(&mut panel, &mut host, CommandSection::Tasks);
 
-    panel.act(
-        &mut host,
-        SwitchboardAction::Window(WindowControlKind::Close),
-        &NO_AUTHORITY,
-    );
+    // The window manager's close request drives the panel's own close.
+    panel.close(&mut host);
 
     assert!(!panel.is_open());
     assert_eq!(panel.section(), None);

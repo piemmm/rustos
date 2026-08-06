@@ -4,21 +4,19 @@
 //! the live task, background-job, pressure, activity, recovery, and
 //! system-overview state this service samples, laid out for a reader. It is
 //! assembled **purely from the shared Reactive Alloy controls** (spec §17) —
-//! the window-manager
-//! [`WindowFrame`]/[`TitleBar`](tairix_controls::TitleBar)/[`ResizeGrabber`]
-//! furniture, a [`Breadcrumb`] location band, the collection controls
+//! a [`Breadcrumb`] location band, the collection controls
 //! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card),
 //! [`Panel`](tairix_controls::Panel)), action
-//! [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`] — so the
-//! application paints no chrome of its own and carries no second copy of any
-//! control's behaviour.
+//! [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`]. The
+//! window manager decorates the window server-side, so the application draws
+//! no chrome of its own and carries no second copy of any control's behaviour.
 //!
 //! # Package layout
 //!
 //! This module is the shared skeleton every section draws into: the
 //! [`Switchboard`] retained widget tree, [`SwitchboardModel`], [`Section`],
-//! [`SwitchboardAction`], the window frame and chrome, input dispatch, the
-//! scroll model, and the list geometry every section's primary column reuses.
+//! [`SwitchboardAction`], input dispatch, the scroll model, and the list
+//! geometry every section's primary column reuses.
 //! Each section is a struct in its own sibling module — [`mod@tasks`],
 //! [`mod@background`], [`mod@pressure`], [`mod@activities`],
 //! [`mod@recovery`], and [`mod@system`] — owning its own view models,
@@ -28,12 +26,9 @@
 //!
 //! # What it composes
 //!
-//! - The outer window is a [`WindowFrame`] with the standard
-//!   [`TitleBar`](tairix_controls::TitleBar) and
-//!   the four window commands; the only application region is the client
-//!   viewport, so the client can never receive furniture input (the frame's
-//!   hit map enforces this).
-//! - Immediately below the title bar sits the **location band**: a [`Breadcrumb`] reading
+//! - The window manager decorates the window server-side, so the whole
+//!   application region is the client content described here.
+//! - Along the top of the client sits the **location band**: a [`Breadcrumb`] reading
 //!   `Switchboard › <section>` with a section-list [`IconButton`] at its
 //!   trailing end. The trail's leading crumb and that command both open the
 //!   one [`Menu`] of the six [`Section`]s — the one being shown marked
@@ -48,8 +43,6 @@
 //!   standard vertical [`ScrollBar`] governs it (mouse wheel, thumb drag, end
 //!   buttons, track paging, and keyboard, all from the one shared scroll
 //!   engine).
-//! - A [`ResizeGrabber`] sits at the scrollbar junction, kept clear of the
-//!   scroll thumb.
 //!
 //! # Data in, typed actions out
 //!
@@ -83,10 +76,8 @@ use tairix_theme::Theme;
 
 use tairix_controls::{
     ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, CardAction,
-    ControlRole, ControlState, Crumb, FrameLayout, FurniturePart, IconButton, Menu, MenuAction,
-    MenuItem, RenderInvariant, ResizeEvent, ResizeGrabber, ScrollAction, ScrollBar, ScrollCorner,
-    ScrollModel, ScrollOrientation, ScrollRange, SelectionState, TitleBarEvent,
-    WindowActivationState, WindowControlKind, WindowFrame, WindowFurnitureState, WindowSizeState,
+    ControlRole, ControlState, Crumb, IconButton, Menu, MenuAction, MenuItem, RenderInvariant,
+    ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SelectionState,
 };
 use tairix_icon::IconKind;
 
@@ -231,8 +222,6 @@ impl ActionVerdict {
 pub struct SwitchboardModel {
     /// The window title.
     pub title: String,
-    /// The window's furniture state (activation, size, movable, resizable).
-    pub furniture: WindowFurnitureState,
     /// The live tasks.
     pub tasks: Vec<TaskSummary>,
     /// The background jobs.
@@ -259,18 +248,11 @@ pub struct SwitchboardModel {
 }
 
 impl SwitchboardModel {
-    /// An empty model with the given title on an active, restored, movable,
-    /// resizable window — the resting frame every Switchboard opens in.
+    /// An empty model with the given title and no data yet.
     #[must_use]
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
-            furniture: WindowFurnitureState {
-                activation: WindowActivationState::Active,
-                size: WindowSizeState::Restored,
-                movable: true,
-                resizable: true,
-            },
             tasks: Vec::new(),
             jobs: Vec::new(),
             recovery: Vec::new(),
@@ -290,30 +272,6 @@ impl SwitchboardModel {
 /// updated model back (a refusal fails closed rather than acting).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwitchboardAction {
-    /// A window command (close/minimize/put-to-back/size toggle) was invoked.
-    Window(WindowControlKind),
-    /// The window should be activated (title-bar press).
-    Activate,
-    /// A cooperative window move gesture began.
-    MoveBegin,
-    /// A cooperative window move continued to `to` (screen coordinates).
-    MoveTo {
-        /// The new pointer position.
-        to: Point,
-    },
-    /// A cooperative window move ended.
-    MoveEnd,
-    /// A resize gesture began; the host should capture the pointer.
-    ResizeBegin,
-    /// A resize gesture continued to `to` (screen coordinates).
-    ResizeTo {
-        /// The new pointer position.
-        to: Point,
-    },
-    /// A resize gesture ended.
-    ResizeEnd,
-    /// A resize gesture was cancelled (restore the pre-drag geometry).
-    ResizeCancel,
     /// The active section changed.
     SectionChanged {
         /// The newly selected section.
@@ -390,8 +348,7 @@ pub enum SwitchboardAction {
     },
 }
 
-/// The screen's own name: the title bar's application name and the leading
-/// crumb of the location trail are the same word, so it is spelled once.
+/// The screen's own name: the leading crumb of the location trail.
 const APP_NAME: &str = "Switchboard";
 
 /// The text every surface shows in place of a figure the service did not
@@ -480,8 +437,6 @@ fn select_pressed_card(
 /// the Tab key so the whole surface is keyboard-navigable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FocusRegion {
-    /// The window-command group in the title bar.
-    TitleBar,
     /// The location band: its trail's leading crumb, which opens the section
     /// list.
     Location,
@@ -493,11 +448,10 @@ enum FocusRegion {
 
 impl FocusRegion {
     /// The regions in Tab-cycle order.
-    const ORDER: [FocusRegion; 4] = [
+    const ORDER: [FocusRegion; 3] = [
         FocusRegion::Location,
         FocusRegion::Content,
         FocusRegion::Scrollbar,
-        FocusRegion::TitleBar,
     ];
 
     /// The next region in the cycle.
@@ -561,8 +515,8 @@ struct SectionCtx<'a> {
 /// This is the whole surface the screen needs from a section, so it reaches
 /// the section on show through a single dispatch
 /// ([`Switchboard::active`]/[`Switchboard::active_mut`]) rather than a `match`
-/// per question. Everything *shared* deliberately stays out: the window
-/// chrome, the scroll model, the section transition, and the keyboard policy
+/// per question. Everything *shared* deliberately stays out: the location
+/// band, the scroll model, the section transition, and the keyboard policy
 /// (Tab cycles the regions, the arrows move the content cursor, and the
 /// focused item is scrolled into view) all live in the screen, so a section
 /// reports its counts and holds its own cursor rather than re-deriving any of
@@ -695,7 +649,7 @@ trait SectionView {
     }
 
     /// Paint this section's overlay, above every other region including the
-    /// scrollbar and grabber.
+    /// scrollbar.
     fn render_overlay(&self, _surface: &mut Surface, _ctx: SectionCtx<'_>) {}
 
     /// Route a pointer event to this section's overlay while it
@@ -760,7 +714,6 @@ trait SectionView {
 /// equality by default.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Switchboard {
-    frame: WindowFrame,
     /// The location trail: the screen's name, then the section on show.
     trail: Breadcrumb,
     /// The location band's trailing command, which opens the same section list
@@ -768,8 +721,6 @@ pub struct Switchboard {
     section_list: IconButton,
     /// The open section list, or `None` while it is closed.
     section_menu: Option<Menu>,
-    grabber: ResizeGrabber,
-    corner: ScrollCorner,
     scroll: ScrollBar,
     /// The six sections, each owning its own view models, controls, cursor and
     /// overlays. The screen reaches the one on show through
@@ -802,12 +753,9 @@ impl Switchboard {
     #[must_use]
     pub fn new(model: &SwitchboardModel) -> Self {
         let mut switchboard = Self {
-            frame: WindowFrame::new(model.furniture),
             trail: Self::build_trail(Section::Tasks),
             section_list: IconButton::new(IconKind::ListMenu, ControlRole::Navigation),
             section_menu: None,
-            grabber: ResizeGrabber::new(),
-            corner: ScrollCorner::new(),
             scroll: ScrollBar::new(
                 ScrollOrientation::Vertical,
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
@@ -823,7 +771,6 @@ impl Switchboard {
             focus: FocusRegion::Content,
             pointer: RenderInvariant::new(Point::ORIGIN),
         };
-        switchboard.frame.title_bar_mut().set_app_name(APP_NAME);
         switchboard.adopt(model);
         switchboard
     }
@@ -877,8 +824,7 @@ impl Switchboard {
     /// **Kept, because the user set it:** the selected [`Section`] and the
     /// location trail naming it, every section's scroll offset, the keyboard
     /// focus region and its position in the list, the last pointer position,
-    /// an open section list, and any window move, resize, or scroll-thumb drag
-    /// in flight.
+    /// an open section list, and any scroll-thumb drag in flight.
     ///
     /// **Dropped, because it names a row that may now be a different object:**
     /// row selection, pointer hover, and any half-finished press. A row index
@@ -901,10 +847,9 @@ impl Switchboard {
         );
     }
 
-    /// Derive every model-shaped part of the composition from `model` — the
-    /// window furniture and title, and every section's own controls — then
-    /// re-assert the keyboard focus onto the controls that replaced the old
-    /// ones.
+    /// Derive every model-shaped part of the composition from `model` — every
+    /// section's own controls — then re-assert the keyboard focus onto the
+    /// controls that replaced the old ones.
     ///
     /// This is the one model-to-controls derivation. Both
     /// [`new`](Switchboard::new) and [`set_model`](Switchboard::set_model) run
@@ -920,16 +865,6 @@ impl Switchboard {
     /// from under the reader mid-gesture. What each section does with its own
     /// overlay is that section's own business.
     fn adopt(&mut self, model: &SwitchboardModel) {
-        let furniture = model.furniture;
-        self.frame.set_furniture(furniture);
-        self.frame.title_bar_mut().set_title(&model.title);
-
-        let active = furniture.activation != WindowActivationState::Inactive;
-        self.grabber
-            .set_enabled(furniture.resizable && furniture.size == WindowSizeState::Restored);
-        self.grabber.set_active_frame(active);
-        self.corner.set_active_frame(active);
-
         for section in Section::ALL {
             self.section_mut(section).adopt(model);
         }
@@ -1042,18 +977,14 @@ impl Switchboard {
 /// The laid-out regions of a Switchboard for one outer bounds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct SbLayout {
-    /// The window frame's laid-out rectangles.
-    frame: FrameLayout,
     /// The location band along the top of the client: the trail, the active
     /// section's own band summary, and the trailing section-list command,
     /// split by [`resolve_band`].
     location: Rect,
     /// The section content area (excludes the scrollbar gutter).
     content: Rect,
-    /// The vertical scrollbar track (kept clear of the corner below).
+    /// The vertical scrollbar track.
     scroll: Rect,
-    /// The scrollbar junction / resize corner.
-    corner: Rect,
 }
 
 /// The scrollable list of the active section: where it draws, one item's
@@ -1111,17 +1042,17 @@ impl ListInfo {
 impl Switchboard {
     /// Lay the composition out within `bounds` for the active theme.
     ///
-    /// The location band claims one control height immediately below the title
-    /// bar and the content and scrollbar take what is left, clipped so a
-    /// window too short for the full anatomy still lays out in bounds
-    /// (fail closed, never negative or overlapping).
+    /// The window manager carves out the client area server-side, so the
+    /// bounds handed in are the client itself. The location band claims its
+    /// section's band height along the top and the content and scrollbar take
+    /// what is left, clipped so a window too short for the full anatomy still
+    /// lays out in bounds (fail closed, never negative or overlapping).
     fn compute_layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> SbLayout {
-        let frame = self.frame.layout(bounds, scale, theme);
-        let client = frame.client;
+        let client = bounds;
 
-        // The band is shared chrome, but how tall it is belongs to the
-        // section on show: one that seats a census there needs more than the
-        // resting control height, and one that does not must not pay for it.
+        // How tall the band is belongs to the section on show: one that seats
+        // a census there needs more than the resting control height, and one
+        // that does not must not pay for it.
         let location_h = self
             .active()
             .anatomy()
@@ -1138,17 +1069,13 @@ impl Switchboard {
         let content_w = client.width.saturating_sub(gutter);
         let content = Rect::new(client.left(), below_top, content_w, below_h);
 
-        let scroll_h = below_h.saturating_sub(gutter);
         let gutter_left = client.left() + to_i32(content_w);
-        let scroll = Rect::new(gutter_left, below_top, gutter, scroll_h);
-        let corner = Rect::new(gutter_left, below_top + to_i32(scroll_h), gutter, gutter);
+        let scroll = Rect::new(gutter_left, below_top, gutter, below_h);
 
         SbLayout {
-            frame,
             location,
             content,
             scroll,
-            corner,
         }
     }
 
@@ -1318,18 +1245,14 @@ impl Switchboard {
         let layout = self.compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
-        self.frame.render(surface, bounds, scale, theme, font);
         self.render_location(surface, layout.location, scale, theme, font);
         self.render_section(surface, ctx);
 
-        // The scrollbar and its junction/resize corner, drawn last so they sit
-        // above the content and the corner never overlaps the thumb.
+        // The scrollbar, drawn after the content so its thumb sits above it.
         self.scroll.render(surface, layout.scroll, scale, theme);
-        self.corner.render(surface, layout.corner, scale, theme);
-        self.grabber.render(surface, layout.corner, scale, theme);
 
         // The popups, painted last of all so they sit above every other
-        // region, including the scrollbar and grabber. Only one can be open:
+        // region, including the scrollbar. Only one can be open:
         // each is modal over the whole composition while it is, so no input
         // can reach the control that would open the other.
         self.active().render_overlay(surface, ctx);
@@ -1391,20 +1314,6 @@ impl Switchboard {
         }
     }
 
-    /// Classify a point against the window frame's furniture hit map, so a
-    /// host can prove the client viewport and the frame furniture stay
-    /// strictly separate (the client can never receive furniture input).
-    #[must_use]
-    pub fn furniture_at(
-        &self,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        point: Point,
-    ) -> FurniturePart {
-        self.frame.hit(bounds, scale, theme, point)
-    }
-
     /// Feed one pointer or scroll event, returning the typed action it
     /// produced (if any). Must be preceded by a [`render`](Switchboard::render)
     /// so the scroll model matches the current layout.
@@ -1443,21 +1352,6 @@ impl Switchboard {
                 return Some(SwitchboardAction::Scrolled { offset });
             }
             return None;
-        }
-
-        // Title bar (window commands + cooperative move). Fed first so a move
-        // drag that leaves the bar still continues.
-        if let Some(event) =
-            self.frame
-                .title_bar_mut()
-                .on_pointer(event, layout.frame.title_bar, scale, theme)
-        {
-            return Some(translate_title(event));
-        }
-
-        // The resize grabber at the scrollbar junction.
-        if let Some(event) = self.grabber.on_pointer(event, layout.corner) {
-            return Some(translate_resize(event));
         }
 
         // The scrollbar.
@@ -1587,8 +1481,8 @@ impl Switchboard {
     /// popup — takes every key first: it is modal over the composition, so no
     /// key reaches the regions beneath it until it commits, cancels, or
     /// dismisses. Otherwise Tab cycles keyboard focus between the location
-    /// band, the content list, the scrollbar, and the title-bar command group;
-    /// keys are then routed to the focused region's control.
+    /// band, the content list, and the scrollbar; keys are then routed to the
+    /// focused region's control.
     ///
     /// Sections are reachable without a pointer: with focus on the location
     /// band, Space or Enter opens the section list, Up/Down walk it, and Enter
@@ -1608,7 +1502,6 @@ impl Switchboard {
             return None;
         }
         match self.focus {
-            FocusRegion::TitleBar => self.frame.title_bar_mut().on_key(key).map(translate_title),
             // The trail is the band's keyboard route: its leading crumb opens
             // the section list, which then owns the keys until it closes. The
             // trailing command is the same command for the pointer, so giving
@@ -1756,20 +1649,6 @@ impl Switchboard {
         self.scroll
             .set_focused(self.focus == FocusRegion::Scrollbar);
 
-        if self.focus != FocusRegion::TitleBar {
-            for kind in [
-                WindowControlKind::Close,
-                WindowControlKind::Minimize,
-                WindowControlKind::PutToBack,
-                WindowControlKind::SizeToggle,
-            ] {
-                self.frame
-                    .title_bar_mut()
-                    .control_mut(kind)
-                    .set_focused(false);
-            }
-        }
-
         // Every section is told, so the one on show lights its focused item
         // and the five behind it are cleared rather than left glowing under
         // content nobody is looking at.
@@ -1779,26 +1658,5 @@ impl Switchboard {
             self.section_mut(section)
                 .apply_focus_marks(content && section == active);
         }
-    }
-}
-/// Translate a title-bar event into a Switchboard action, mapping a command to
-/// [`SwitchboardAction::Window`] and a drag to the cooperative-move actions.
-fn translate_title(event: TitleBarEvent) -> SwitchboardAction {
-    match event {
-        TitleBarEvent::Control(kind) => SwitchboardAction::Window(kind),
-        TitleBarEvent::Activate => SwitchboardAction::Activate,
-        TitleBarEvent::DragBegin => SwitchboardAction::MoveBegin,
-        TitleBarEvent::DragMoved { to } => SwitchboardAction::MoveTo { to },
-        TitleBarEvent::DragEnd => SwitchboardAction::MoveEnd,
-    }
-}
-
-/// Translate a resize-grabber event into a Switchboard resize action.
-fn translate_resize(event: ResizeEvent) -> SwitchboardAction {
-    match event {
-        ResizeEvent::Begin => SwitchboardAction::ResizeBegin,
-        ResizeEvent::Moved { to } => SwitchboardAction::ResizeTo { to },
-        ResizeEvent::End => SwitchboardAction::ResizeEnd,
-        ResizeEvent::Cancel => SwitchboardAction::ResizeCancel,
     }
 }

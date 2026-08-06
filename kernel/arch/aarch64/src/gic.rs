@@ -298,6 +298,24 @@ pub const IAR_INTID_MASK: u32 = 0x3FF;
 /// not `EOI` it.
 pub const SPURIOUS_INTID: u32 = 1023;
 
+/// The INTID a `GICC_IAR` reading acknowledged, or `None` for the spurious
+/// reading (nothing was pending, so no completion is owed and no interrupt
+/// is in flight).
+///
+/// One decode shared by the IRQ and FIQ entry paths, which must agree on
+/// what counts as acknowledged. The source-CPU field an SGI carries in
+/// bits `[12:10]` is stripped here — dispatch keys on the id alone, while
+/// the end-of-interrupt handshake writes the *whole* reading back.
+#[must_use]
+pub const fn acknowledged_intid(iar: u32) -> Option<u32> {
+    let intid = iar & IAR_INTID_MASK;
+    if intid == SPURIOUS_INTID {
+        None
+    } else {
+        Some(intid)
+    }
+}
+
 /// Word written to `GICD_SGIR` to raise SGI `intid` on the CPUs named in
 /// `target_list` (one bit per CPU, bits `[23:16]`), with target-list
 /// filter `0b00` ("forward to the listed CPUs").
@@ -1093,6 +1111,20 @@ mod tests {
     fn iar_mask_and_spurious_match_gicv2_spec() {
         assert_eq!(IAR_INTID_MASK, 0x3FF);
         assert_eq!(SPURIOUS_INTID, 1023);
+    }
+
+    #[test]
+    fn acknowledged_intid_names_every_delivered_line_and_rejects_the_spurious_read() {
+        // Timer PPI, watchdog PPI and a device SPI acknowledge as
+        // themselves; an SGI's source-CPU field (bits [12:10]) is stripped
+        // from the id but is not part of this decode's answer.
+        assert_eq!(acknowledged_intid(30), Some(30));
+        assert_eq!(acknowledged_intid(27), Some(27));
+        assert_eq!(acknowledged_intid(77), Some(77));
+        assert_eq!(acknowledged_intid(0b010 << 10), Some(0));
+        // The spurious reading acknowledged nothing: no completion is owed
+        // and no interrupt is in flight.
+        assert_eq!(acknowledged_intid(SPURIOUS_INTID), None);
     }
 
     #[test]

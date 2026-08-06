@@ -89,6 +89,16 @@ suspects. Only shared lines are observable this way — aarch64 GICv2 SPIs
 another CPU's banked state. `stuck_irq` is omitted when no deliverable line is
 stuck (a pure in-kernel spin with IRQs masked, not a storm).
 
+A banked line is therefore reported by the **victim**, not the observer:
+`WatchdogArch::in_flight_interrupt` reads back what that CPU published into its
+own per-CPU slot when it acknowledged an interrupt (recorded at the acknowledge,
+cleared at the end-of-interrupt — two relaxed stores, off any lock, no change to
+delivery or completion). The detail renders it as `in_flight` beside
+`stuck_irq`, so a core that never completed an SGI or PPI names that interrupt
+instead of the innocent pending SPI the shared scan falls through to.
+`InFlightInterrupt` distinguishes "nothing in flight", "in flight, intid N", and
+"no reading taken", so the record never implies an observation it did not make.
+
 Reporting undeliverable lines was a real defect, not a cosmetic one: before
 this, the fallback returned *any* pending line regardless of its enable bit,
 so a masked, unowned, contained line (the recurring `stuck_irq=111` that was
@@ -164,6 +174,17 @@ runtime address: the port registers the kernel image base
 registered base is omitted, never emitted raw (fail closed). `k_detail`
 carries only a syscall number, a faulting VA, or a task id — never a syscall
 argument value, buffer contents, key, credential, or capability token.
+
+A third record states the *capability* the other two depend on. Whether the
+port's non-maskable self-sample exists at all is a run-time verdict
+(`probe_fiq_deliverability` on aarch64), and discarding it made an image whose
+sampler never ran indistinguishable in the log from one where it worked — so a
+reader could not tell a credible `sampled=pre_silence` record from a
+meaningless one. The verdict is now reported once, on the boot CPU, as
+`CpuWatchdogSelfSample` (id 4086, `self_sample=live` or
+`unsupported`/`pending` with the honesty verdict's own reason text). Debug-only
+like the detail, address-free and secret-free, latched so it is emitted exactly
+once whichever of "port reports" / "sink installed" happens first.
 
 On a board with no non-maskable interrupt channel (the Raspberry Pi 4's
 GICv2 in the non-secure world), a CPU wedged with interrupts masked cannot
@@ -331,22 +352,41 @@ charter forbids). It is *not* a lockup — its own ~1 Hz cadence sample keeps
 liveness fresh, and a lone user task owes no scheduler progress — so neither
 detector fires; it simply pegs a core.
 
-The watchdog cadence closes this. When `on_watchdog_tick` samples an `Active`
-CPU running a **user** task (`!in_kernel`) whose progress heartbeat is stale
-past `DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS` (1 s — well below the 10 s
-soft/hard thresholds), it calls `preempt::request_forced_yield`. The
-return-to-user preempt point this same interrupt runs honours the request in
-`preempt_current`, suspending the task back to the dispatcher **unconditionally**
-(the forced-yield latch is *not* competitor-gated, unlike `note_preempt_tick`).
-The dispatch loop then runs one iteration — re-stamping progress, draining
-housekeeping — before re-dispatching the task. Kernel code is never
-force-yielded (the kernel is non-preemptible). Crucially this arms **no new
-timer**: it rides the watchdog cadence already firing on the CPU, so the
-tickless invariant is preserved. Latch: `CpuState::force_yield`, cleared by the
-dispatcher's `clear_preempt_pending` so the incoming task earns a fresh guard
-window. Host-tested (`monopolises_cpu` predicate; `on_watchdog_tick` sets the
-latch for a monopolising user CPU only; `preempt_current` honours a forced
-yield with no competitor).
+The watchdog closes this, from **both** per-CPU interrupt paths.
+
+* The cadence: when `on_watchdog_tick` samples an `Active` CPU running a
+  **user** task (`!in_kernel`) whose progress heartbeat is stale past
+  `DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS` (1 s — well below the 10 s soft/hard
+  thresholds), it calls `preempt::request_forced_yield`. Kernel code is never
+  force-yielded on this path (the kernel is non-preemptible), and the reading
+  is sound because the very sample calling in produced it.
+* The maskable timer tick: `check_stall` requests the same yield whenever
+  `progress_overdue` holds. This is the path that matters on a wedged core,
+  because the guard above rides a cadence that has *stopped* there — and its
+  `in_kernel` input is refreshed only by that cadence, so it rots at whatever
+  the last sample read and suppresses the guard exactly when it is needed.
+  `progress_overdue` therefore takes no context argument at all;
+  `monopolises_cpu` is `!in_kernel && progress_overdue(…)`, one definition of
+  the predicate. The request is read **unlatched**, not behind the
+  once-per-episode soft-lockup latch, so a core that stays out of the dispatch
+  loop is pushed back at every tick rather than once.
+
+Either preemption point honours it — the port's return-to-user callback
+(`preempt_current`) and the in-kernel boundary (`yield_if_owed`) share one
+`honour_latches` decision — suspending the task back to the dispatcher
+**unconditionally** (the forced-yield latch is *not* competitor-gated, unlike
+`note_preempt_tick`). Both are needed: a task wedged in EL1 never reaches a
+return-to-user point. The dispatch loop then runs one iteration — re-stamping
+progress, draining the deferred wakes and the console transmit — before
+re-dispatching the task. Crucially this arms **no new timer**: it rides an
+interrupt already firing on the CPU, so the tickless invariant is preserved.
+Latch: `CpuState::force_yield`, cleared by the dispatcher's
+`clear_preempt_pending` so the incoming task earns a fresh guard window.
+Host-tested (the `progress_overdue`/`monopolises_cpu` predicates, including
+that a rotted `in_kernel` reading does not suppress the tick guard;
+`on_watchdog_tick` sets the latch for a monopolising user CPU only;
+`check_stall_at` sets it for an overdue CPU; both preemption points honour a
+forced yield with no competitor and no latched tick).
 
 ## The in-kernel boundary: a burst of never-waiting operations (done)
 
@@ -364,11 +404,12 @@ soft-lockup detector reports as `context=kernel` with no spin anywhere: the
 report is honest and the defect is the missing boundary, not the sample.
 
 `preempt::yield_if_owed` is that boundary. In-kernel code calls it *between*
-units of work; it consumes the same pending-preemption latch and applies the
-same competitor-gated decision the return-to-user point applies (one shared
-`honour_latched_tick`), so a burst gives the CPU up at most one unit after its
-quantum expires and costs a single atomic read when nothing is owed. Placement
-is the caller's obligation — only where no spin lock is held; a point that can
+units of work; it consumes the same two latches and applies the same decision
+the return-to-user point applies (one shared `honour_latches`), so a burst
+gives the CPU up at most one unit after its quantum expires — or immediately on
+a forced yield, which a body wedged in EL1 can be reached by nowhere else — and
+costs two atomic swaps when nothing is owed. Placement is the caller's
+obligation — only where no spin lock is held; a point that can
 already park on a slow device is sound by construction. Call sites: the storage
 funnel every in-kernel device operation passes through
 (`SharedBlockHandle::with_device`, before the shared device's sleeping lock is

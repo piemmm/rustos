@@ -192,7 +192,6 @@ impl Panel {
         let mut outcome = None;
         for effect in apply_action(&self.model, action, authority) {
             match effect {
-                Effect::CloseWindow => self.close(host),
                 Effect::ActivateOwner { owner } => {
                     Self::attempt(
                         host,
@@ -376,8 +375,8 @@ fn sweep_action(signal: Signal) -> &'static str {
     }
 }
 
-/// The window title the panel opens under, shared by the composition's
-/// title bar and the window the session registers for it.
+/// The window title the panel opens under, used by the window the session
+/// registers and decorates for it.
 pub const PANEL_TITLE: &str = "Switchboard";
 
 /// The overview window's initial client width in physical pixels.

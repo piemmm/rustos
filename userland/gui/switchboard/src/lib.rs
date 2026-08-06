@@ -52,8 +52,8 @@
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
 //!   raise, refresh, close) and effect application.
 //! * [`view`] — [`view::Switchboard`], the overview window's own screen:
-//!   the window furniture, location band, and per-section lists
-//!   assembled purely from the shared Reactive Alloy controls, turning a
+//!   the location band and per-section lists assembled purely from the
+//!   shared Reactive Alloy controls, turning a
 //!   [`view::SwitchboardModel`] into pixels and a gesture into a typed
 //!   [`view::SwitchboardAction`].
 //! * [`service`] — [`service::ServiceHost`], the single seam through which

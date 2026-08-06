@@ -412,6 +412,23 @@ pub enum AuditEvent {
     /// the id is reserved so the catalogue stays stable
     /// (`plans/WATCHDOG.md`).
     CpuLockupDiagnostic,
+    /// The boot probe's verdict on whether the lockup watchdog's
+    /// **non-maskable** self-sample is live on this hardware — the sample
+    /// that lets a lone CPU-bound task be observed, so a false hard-lockup
+    /// report against a healthy core can be told from a real wedge
+    /// (`crate::watchdog`).
+    ///
+    /// Emitted once on the boot CPU by a `watchdog-diagnostics` build,
+    /// through the diagnostic (log/UART) stream, never the persistent
+    /// hash-chained audit trail. `self_sample` states plainly whether the
+    /// sample is `live` or `inactive`; `verdict` carries the honesty term
+    /// (`supported`/`unsupported`/`pending`) and `reason` the note a
+    /// non-live verdict carries, so a reader of a later
+    /// `sampled=pre_silence` lockup record can immediately tell whether it
+    /// is credible. Carries no kernel address and no secret. A shippable
+    /// image compiles the whole facility out; the id is reserved so the
+    /// catalogue stays stable (`plans/WATCHDOG.md`).
+    CpuWatchdogSelfSample,
     /// A bound IRQ line fired past its rate budget and was **quarantined**
     /// by the runaway-interrupt safety net (`kernel/irq`): the kernel kept
     /// it masked and stopped delivering it, so a never-quiesced or hostile
@@ -588,6 +605,7 @@ impl AuditEvent {
             Self::CpuHardLockupCleared => 4083,
             Self::CpuLockupRecovery => 4084,
             Self::CpuLockupDiagnostic => 4085,
+            Self::CpuWatchdogSelfSample => 4086,
             Self::IrqLineQuarantined => 4090,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
@@ -651,6 +669,7 @@ impl AuditEvent {
             Self::CpuHardLockupCleared => "cpu hard lockup cleared",
             Self::CpuLockupRecovery => "cpu lockup recovery requested",
             Self::CpuLockupDiagnostic => "cpu lockup diagnostic detail",
+            Self::CpuWatchdogSelfSample => "cpu watchdog non-maskable self-sample capability",
             Self::IrqLineQuarantined => "irq line quarantined (runaway interrupt)",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
@@ -729,6 +748,7 @@ mod tests {
             AuditEvent::CpuHardLockupCleared,
             AuditEvent::CpuLockupRecovery,
             AuditEvent::CpuLockupDiagnostic,
+            AuditEvent::CpuWatchdogSelfSample,
             AuditEvent::IrqLineQuarantined,
             AuditEvent::FsNodeMutated,
             AuditEvent::FsMutationDenied,
@@ -795,6 +815,7 @@ mod tests {
             AuditEvent::CpuHardLockupCleared.id().0,
             AuditEvent::CpuLockupRecovery.id().0,
             AuditEvent::CpuLockupDiagnostic.id().0,
+            AuditEvent::CpuWatchdogSelfSample.id().0,
             AuditEvent::IrqLineQuarantined.id().0,
             AuditEvent::FsNodeMutated.id().0,
             AuditEvent::FsMutationDenied.id().0,

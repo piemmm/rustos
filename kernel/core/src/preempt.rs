@@ -55,16 +55,24 @@
 //! and the task withholds the CPU indefinitely — the monopolisation the
 //! charter forbids.
 //!
-//! A second, *un-gated* latch closes that hole. The lockup watchdog's
-//! cadence sample — already firing on every CPU for liveness detection —
-//! calls [`request_forced_yield`] when it observes an `Active` CPU running
-//! a user task whose scheduler progress has been stale past a monopoly
-//! guard. [`preempt_current`] honours it at the same return-to-user point
-//! by suspending the task back to the dispatcher unconditionally (no
-//! competitor required), so the dispatch loop runs one iteration —
-//! stamping progress, draining housekeeping — before re-dispatching the
-//! task. It arms no new periodic timer: it rides the watchdog cadence that
-//! is already running, so the tickless invariant is untouched.
+//! A second, *un-gated* latch closes that hole. The lockup watchdog calls
+//! [`request_forced_yield`] when it observes an `Active` CPU whose
+//! scheduler progress has been stale past a monopoly guard, from both of
+//! the per-CPU interrupts that may still be running there: its
+//! non-maskable cadence sample and its maskable preemption tick. Either
+//! preemption point then honours it by suspending the task back to the
+//! dispatcher unconditionally (no competitor required), so the dispatch
+//! loop runs one iteration — stamping progress, draining housekeeping —
+//! before re-dispatching the task. It arms no new periodic timer: it rides
+//! an interrupt already firing on that CPU, so the tickless invariant is
+//! untouched.
+//!
+//! Two request paths are not redundancy for its own sake. The cadence is
+//! the only channel that survives a CPU that has stopped taking maskable
+//! interrupts; the tick is the only one that survives a CPU whose cadence
+//! has died — and a dead cadence also kills the guard that rides it, so
+//! without the tick path a core in exactly that state monopolises itself
+//! unopposed.
 //!
 //! # The in-kernel boundary (long in-kernel work)
 //!
@@ -85,13 +93,14 @@
 //! an in-kernel stall once the burst outlasts its threshold.
 //!
 //! [`yield_if_owed`] is the boundary that bounds it: in-kernel code calls it
-//! between units of work, and it honours a latched tick through exactly the
+//! between units of work, and it consumes both latches through exactly the
 //! same policy [`preempt_current`] applies at the return-to-user point — both
-//! go through the one private `honour_latched_tick` decision, so the two can
-//! never drift apart: reschedule when this CPU owes a switch, otherwise keep a
-//! non-tickless policy's deadline alive. A caller may only place it where
-//! suspending is already sound (no spin lock held); at a point the same code
-//! path can already park on a slow device, it is sound by construction.
+//! go through the one private `honour_latches` decision, so the two can never
+//! drift apart: honour a forced yield outright, reschedule a tick when this
+//! CPU owes a switch, otherwise keep a non-tickless policy's deadline alive.
+//! A caller may only place it where suspending is already sound (no spin lock
+//! held); at a point the same code path can already park on a slow device, it
+//! is sound by construction.
 
 use core::sync::atomic::Ordering;
 
@@ -217,21 +226,27 @@ pub fn take_preempt_pending(cpu: CpuId) -> bool {
     cpu_state::get(cpu).is_some_and(|state| state.preempt_pending.swap(false, Ordering::AcqRel))
 }
 
-/// Request a **forced** yield-to-scheduler for the user task currently
-/// running on `cpu`, even when it is the only runnable task there.
+/// Request a **forced** yield-to-scheduler for the task currently running
+/// on `cpu`, even when it is the only runnable task there.
 ///
-/// The watchdog cadence calls this when it samples an `Active` CPU running
-/// a user task that has withheld the CPU from the scheduler past the
-/// monopoly-guard window. Unlike [`note_preempt_tick`], the yield this
-/// requests is **not** gated on a runnable competitor: its purpose is
-/// precisely to return a lone CPU-bound task to the dispatcher so the
-/// dispatch loop's housekeeping (deferred-wake drain, console-transmit
-/// drain) and its progress/liveness heartbeats run again — the charter's
-/// guarantee that a runnable task can never monopolise a CPU by refusing
-/// to yield. It arms no new timer; it rides the watchdog cadence already
-/// firing on the CPU, so the tickless invariant is preserved. Pure
-/// accounting (one atomic store); an out-of-range `cpu` is dropped (fail
-/// closed).
+/// The watchdog calls this for an `Active` CPU that has withheld itself
+/// from the scheduler past the monopoly-guard window, from both of the
+/// per-CPU interrupt paths that can still be running there (its
+/// non-maskable cadence sample and its maskable preemption tick). Unlike
+/// [`note_preempt_tick`], the yield this requests is **not** gated on a
+/// runnable competitor: its purpose is precisely to return a lone
+/// CPU-bound task to the dispatcher so the dispatch loop's housekeeping
+/// (deferred-wake drain, console-transmit drain) and its progress/liveness
+/// heartbeats run again — the guarantee that a runnable task can never
+/// monopolise a CPU by refusing to yield. It arms no new timer; it rides
+/// an interrupt already firing on the CPU, so the tickless invariant is
+/// preserved. Pure accounting (one atomic store); an out-of-range `cpu` is
+/// dropped (fail closed).
+///
+/// The request is only *latched* here. It is acted on at the next
+/// preemption point the CPU reaches — the port's return-to-user callback
+/// ([`preempt_current`]) or an in-kernel boundary ([`yield_if_owed`]) — so
+/// the kernel is never preempted mid-operation.
 pub fn request_forced_yield(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         state.force_yield.store(true, Ordering::Release);
@@ -301,8 +316,8 @@ fn honour_latched_tick(cpu: CpuId) -> bool {
 /// Honour the running CPU's pending-preemption latch from **in-kernel**
 /// code, at a boundary between units of work where suspending is sound.
 ///
-/// The in-kernel counterpart of [`preempt_current`]: same latch, same
-/// `honour_latched_tick` policy, a different safe point. An in-kernel
+/// The in-kernel counterpart of [`preempt_current`]: same latches, same
+/// `honour_latches` policy, a different safe point. An in-kernel
 /// body never passes through a return-to-user preempt point, so without
 /// this a kernel loop that issues one bounded operation after another —
 /// a service kthread draining its request queue, a filesystem read walking
@@ -313,8 +328,14 @@ fn honour_latched_tick(cpu: CpuId) -> bool {
 /// is runnable before the body resumes where it left off.
 ///
 /// It is *not* a busy-yield: nothing is given up unless this CPU's quantum
-/// tick has already fired and the CPU owes a switch, so an uncontended
-/// burst costs one atomic swap per unit and never a context switch.
+/// tick has already fired and the CPU owes a switch, or the watchdog has
+/// forced a yield, so an uncontended burst costs two atomic swaps per unit
+/// and never a context switch.
+///
+/// Honouring the forced yield here is what covers a body that never
+/// returns to user mode: an in-kernel loop passes no return-to-user preempt
+/// point, so this is the only boundary at which a monopoly it has taken can
+/// be broken.
 ///
 /// The CPU is resolved here rather than passed in, because the only CPU an
 /// in-kernel body can yield is the one it is running on; a call before the
@@ -336,18 +357,7 @@ pub fn yield_if_owed() -> bool {
     else {
         return false;
     };
-    yield_if_owed_on(cpu)
-}
-
-/// [`yield_if_owed`] for an explicit `cpu`: consume that CPU's latch and act
-/// on it. Split from the public entry point so the behaviour can be pinned
-/// against a chosen CPU slot without a live scheduler hook.
-#[must_use]
-fn yield_if_owed_on(cpu: CpuId) -> bool {
-    if !take_preempt_pending(cpu) {
-        return false;
-    }
-    honour_latched_tick(cpu)
+    honour_latches(cpu)
 }
 
 /// Discard any tick latched on `cpu` before the scheduler's current
@@ -391,19 +401,30 @@ pub(crate) fn clear_preempt_pending(cpu: CpuId) {
 /// suspension, never on a spurious call.
 #[must_use]
 pub fn preempt_current(cpu: CpuId) -> bool {
-    // Consume both latches on every visit so neither lingers to fire a
-    // spurious switch on a later, unrelated preempt point.
+    honour_latches(cpu)
+}
+
+/// Consume both of `cpu`'s reschedule latches and act on whichever is set.
+///
+/// The single definition of what the two latches *mean*, shared by the
+/// return-to-user preempt point ([`preempt_current`]) and the in-kernel
+/// boundary ([`yield_if_owed`]), so a monopoly is broken at whichever
+/// boundary the CPU reaches first and the two can never drift into
+/// different policies. Both are consumed on every visit so neither lingers
+/// to fire a spurious switch on a later, unrelated preempt point.
+///
+/// A forced yield is *not* gated on a competitor: it exists precisely to
+/// return a lone CPU-bound task to the dispatcher (so the dispatch loop's
+/// housekeeping and its progress/liveness heartbeats run again), which a
+/// competitor-gated tick would skip. It rides an interrupt already firing
+/// on this CPU, so it arms no new timer. A plain tick takes the shared
+/// competitor-gated decision.
+///
+/// Returns `true` if a task was suspended (and the preemption counted).
+#[must_use]
+fn honour_latches(cpu: CpuId) -> bool {
     let tick_pending = take_preempt_pending(cpu);
-    let forced = take_forced_yield(cpu);
-    if !tick_pending && !forced {
-        return false;
-    }
-    // A forced yield is *not* gated on a competitor: it exists precisely to
-    // return a lone CPU-bound user task to the dispatcher (so the dispatch
-    // loop's housekeeping and its progress/liveness heartbeats run again),
-    // which a competitor-gated tick would skip. It rides the watchdog
-    // cadence already firing on this CPU, so it arms no new timer.
-    if forced {
+    if take_forced_yield(cpu) {
         if !reschedule_current(cpu, RescheduleAction::Yield) {
             keep_periodic_tick(cpu);
             return false;
@@ -411,9 +432,7 @@ pub fn preempt_current(cpu: CpuId) -> bool {
         count_preemption(cpu);
         return true;
     }
-    // The latch is consumed either way — the tick was honoured — and the
-    // competitor-gated decision it implies is the shared one.
-    honour_latched_tick(cpu)
+    tick_pending && honour_latched_tick(cpu)
 }
 
 /// The number of involuntary preemptions performed on `cpu` since boot.
@@ -624,7 +643,7 @@ mod tests {
         set_test_gate(&TEST_COMPETITOR_GATE);
         let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
         assert!(!take_preempt_pending(CPU));
-        assert!(!yield_if_owed_on(CPU));
+        assert!(!honour_latches(CPU));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before);
         assert_eq!(preemption_count(CPU), 0);
     }
@@ -643,12 +662,12 @@ mod tests {
         set_test_gate(&TEST_COMPETITOR_GATE);
         let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
         note_preempt_tick(CPU);
-        assert!(!yield_if_owed_on(CPU));
+        assert!(!honour_latches(CPU));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
         // Consumed at the boundary, so the next unit of work starts clean and
         // a single tick cannot yield twice.
         assert!(!take_preempt_pending(CPU));
-        assert!(!yield_if_owed_on(CPU));
+        assert!(!honour_latches(CPU));
         assert_eq!(preemption_count(CPU), 0);
     }
 
@@ -660,13 +679,60 @@ mod tests {
         const CPU_B: CpuId = 35;
         set_test_gate(&TEST_COMPETITOR_GATE);
         note_preempt_tick(CPU_A);
-        assert!(!yield_if_owed_on(CPU_B));
+        assert!(!honour_latches(CPU_B));
         assert!(take_preempt_pending(CPU_A));
     }
 
     /// An out-of-range CPU fails closed: no phantom yield, no rearm.
     #[test]
     fn the_in_kernel_boundary_fails_closed_for_an_unknown_cpu() {
-        assert!(!yield_if_owed_on(u32::MAX));
+        assert!(!honour_latches(u32::MAX));
+    }
+
+    /// A CPU whose scheduler progress has aged past the monopoly guard is
+    /// pushed to the reschedule path from the *timer-tick* channel, with no
+    /// competitor and no latched tick. This is the wedge the cadence-driven
+    /// guard cannot break, because on such a CPU the cadence has stopped
+    /// too; the tick is the only issuer left.
+    #[test]
+    fn an_overdue_cpu_is_forced_to_yield_from_the_tick_channel() {
+        const CPU: CpuId = 30;
+        const STAMPED_NS: u64 = 1_000;
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
+        crate::watchdog::set_activity(CPU, crate::watchdog::WatchdogActivity::Active);
+        crate::watchdog::note_progress(CPU, STAMPED_NS);
+        crate::watchdog::check_stall_at(
+            CPU,
+            STAMPED_NS + crate::watchdog::DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS,
+        );
+        // No tick was latched, so reaching the (host: fail-closed) reschedule
+        // path — which restores the periodic deadline — is only possible via
+        // the forced latch the stall check just set.
+        assert!(!take_preempt_pending(CPU));
+        assert!(!preempt_current(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        // Consumed exactly once: a second visit reaches nothing.
+        assert!(!preempt_current(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+    }
+
+    /// The same forced yield is honoured at the **in-kernel** boundary. A
+    /// task wedged in kernel mode never reaches a return-to-user preempt
+    /// point, so without this the monopoly could only be broken on a path
+    /// it never takes.
+    #[test]
+    fn a_forced_yield_alone_reaches_the_reschedule_path_in_kernel() {
+        const CPU: CpuId = 31;
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
+        assert!(!take_preempt_pending(CPU));
+        request_forced_yield(CPU);
+        // Reaches the (host: fail-closed) reschedule path, which restores the
+        // periodic deadline, and consumes the latch exactly once.
+        assert!(!honour_latches(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        assert!(!honour_latches(CPU));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
     }
 }

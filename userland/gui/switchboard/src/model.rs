@@ -20,8 +20,7 @@ use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
 use tairix_abi::sysinfo::{CrashFaultBucket, CrashFaultClass, ProcessState};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{
-    ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, WindowControlKind,
-    MAX_CHART_SAMPLES,
+    ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, MAX_CHART_SAMPLES,
 };
 
 use crate::activities::Activities;
@@ -1434,8 +1433,6 @@ pub enum GroupingEdit {
 /// the caller re-render.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
-    /// Close the window and return to headless sampling.
-    CloseWindow,
     /// Ask the session to raise the named owner's front window.
     ActivateOwner {
         /// The owner's scheduler task id.
@@ -1508,7 +1505,6 @@ pub fn apply_action(
                 }
             }
         }
-        SwitchboardAction::Window(WindowControlKind::Close) => alloc::vec![Effect::CloseWindow],
         SwitchboardAction::Pressure { index, control } => apply_pressure(panel, index, control),
         SwitchboardAction::TaskGrouped { task, activity } => {
             if panel.task_ident(task).is_none() {
@@ -1538,20 +1534,9 @@ pub fn apply_action(
         // resolve to a real target; no service-enumeration query or
         // power/lock interface exists either, so service and system-action
         // rows are never populated and their actions never fire in
-        // practice. A furniture gesture the window channel cannot yet
-        // carry (move/resize/activate/minimize/put-to-back), a section
-        // change, and a scroll all need only the re-render the caller
-        // already performs.
-        SwitchboardAction::Window(_)
-        | SwitchboardAction::Activate
-        | SwitchboardAction::MoveBegin
-        | SwitchboardAction::MoveTo { .. }
-        | SwitchboardAction::MoveEnd
-        | SwitchboardAction::ResizeBegin
-        | SwitchboardAction::ResizeTo { .. }
-        | SwitchboardAction::ResizeEnd
-        | SwitchboardAction::ResizeCancel
-        | SwitchboardAction::SectionChanged { .. }
+        // practice. A section change and a scroll need only the re-render
+        // the caller already performs.
+        SwitchboardAction::SectionChanged { .. }
         | SwitchboardAction::Job { .. }
         | SwitchboardAction::Service { .. }
         | SwitchboardAction::System { .. }

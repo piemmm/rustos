@@ -1266,18 +1266,6 @@ fn a_recovery_force_action_is_never_attempted_without_the_capability() {
 }
 
 #[test]
-fn a_close_window_action_maps_to_close_window() {
-    let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Window(tairix_controls::WindowControlKind::Close),
-        &NONE,
-    );
-    assert_eq!(effect, alloc::vec![Effect::CloseWindow]);
-}
-
-#[test]
 fn a_scroll_action_has_no_effect() {
     let sample = Sample::default();
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);

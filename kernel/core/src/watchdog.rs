@@ -46,9 +46,20 @@
 //!     the kernel even when it is the only runnable task; a lone,
 //!     preemptible *user* task owes no progress and is never flagged).
 //! * The CPU's own armed timer tick also calls [`check_stall`], the
-//!   same-CPU soft check that catches a *contended* CPU whose preemption
-//!   stopped making progress. Both share the per-episode latch, so a
-//!   lockup is reported exactly once whichever path sees it first.
+//!   same-CPU soft check. Both share the per-episode latch, so a lockup is
+//!   reported exactly once whichever path sees it first.
+//!
+//! # Breaking a monopoly
+//!
+//! Detection alone leaves a wedged machine wedged, so a CPU that has not
+//! returned to the dispatch loop within
+//! [`DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS`] is *forced* back to it
+//! ([`crate::preempt::request_forced_yield`]). Both per-CPU interrupt paths
+//! request it — the non-maskable cadence and the maskable timer tick — for
+//! the same reason the two detectors exist: whichever channel a given wedge
+//! leaves running is the one that has to break it. The tick matters most,
+//! because a CPU whose cadence has stopped is precisely the CPU whose
+//! cadence-driven guard has stopped with it.
 //!
 //! # Diagnosis and recovery
 //!
@@ -84,6 +95,14 @@ use tairix_arch_api::{
 // detail record, so its type is imported only with that facility.
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_arch_api::RemotePcSample;
+// The non-maskable self-sample deliverability verdict is reported only by
+// the debug-only diagnostic facility, so its type is imported only with it.
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_arch_api::cpufeatures::FeatureSupport;
+// The victim-published in-flight interrupt reaches only the debug detail
+// record, so its type is imported only with that facility.
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_arch_api::InFlightInterrupt;
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
 use tairix_util::fmt::format_hex_u64;
@@ -111,23 +130,28 @@ pub const DEFAULT_SOFT_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 /// late. Diagnostic policy, not a capacity.
 pub const DEFAULT_HARD_LOCKUP_THRESHOLD_NS: u64 = 10_000_000_000;
 
-/// How long an `Active` CPU may run a **user** task without returning to
-/// the scheduler before the watchdog cadence forces that task to yield, in
-/// nanoseconds (1 second).
+/// How long an `Active` CPU may run without returning to the scheduler
+/// before it is forced to yield, in nanoseconds (1 second).
 ///
-/// A lone CPU-bound user task has no competitor, so the ordinary
+/// A lone CPU-bound task has no competitor, so the ordinary
 /// competitor-gated preemption tick deliberately leaves it running; without
 /// this guard it would withhold the CPU from the dispatch loop
 /// indefinitely, stalling per-dispatch housekeeping and the progress
-/// heartbeat (a runnable task monopolising a CPU by refusing to yield). A
-/// task that returns to the scheduler normally re-stamps progress long
+/// heartbeat (a runnable task monopolising a CPU by refusing to yield).
+/// That housekeeping includes the deferred-wake drain, so a CPU held out of
+/// the loop strands every interrupt-flagged wake queued against it — the
+/// device interrupts still arrive and still flag, but nothing unparks their
+/// waiters, and on a machine that routes device lines to one CPU that is
+/// indistinguishable from a dead system.
+///
+/// A task that returns to the scheduler normally re-stamps progress long
 /// before this window elapses, so a healthy task never triggers it; only a
 /// genuine monopoliser does. Well below the 10-second soft/hard thresholds,
 /// so the guard forces a housekeeping yield many times over before a stall
 /// could ever be misjudged. A diagnostic/policy value, not a resource
-/// capacity, and not a scheduler quantum: it rides the ~1 Hz watchdog
-/// cadence already firing on the CPU and arms no new timer, so the tickless
-/// invariant is preserved.
+/// capacity, and not a scheduler quantum: it is evaluated on interrupts
+/// already firing on the CPU (the ~1 Hz watchdog cadence and the preemption
+/// tick) and arms no new timer, so the tickless invariant is preserved.
 pub const DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS: u64 = 1_000_000_000;
 
 /// Nanoseconds per millisecond, for rendering the human-facing duration.
@@ -178,6 +202,20 @@ static RECOVERY: OnceCell<&'static (dyn WatchdogArch + Sync)> = OnceCell::new();
 /// with the debug-diagnostics facility.
 #[cfg(feature = "watchdog-diagnostics")]
 static DIAG_SINK: OnceCell<&'static (dyn Sink + Sync)> = OnceCell::new();
+
+/// The boot probe's non-maskable self-sample deliverability verdict,
+/// recorded by the port ([`report_self_sample`]) before the diagnostic
+/// sink exists, so it can be logged the instant that sink is installed.
+/// `None` until the port reports it. Present only in a debug-diagnostics
+/// build.
+#[cfg(feature = "watchdog-diagnostics")]
+static SELF_SAMPLE: OnceCell<FeatureSupport> = OnceCell::new();
+
+/// Latches once the self-sample verdict has been logged, so the record is
+/// emitted exactly once whichever of the record/install order wins the
+/// race to a ready sink. Present only in a debug-diagnostics build.
+#[cfg(feature = "watchdog-diagnostics")]
+static SELF_SAMPLE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The kernel image's runtime base address, registered once by the port
 /// ([`set_kernel_image_base`]) from its linker `__kernel_start` symbol.
@@ -268,12 +306,101 @@ fn recovery() -> Option<&'static (dyn WatchdogArch + Sync)> {
 #[cfg(feature = "watchdog-diagnostics")]
 pub(crate) fn install_diagnostic_sink(sink: &'static (dyn Sink + Sync)) {
     let _ = DIAG_SINK.set(sink);
+    // A self-sample verdict recorded before the sink existed is flushed the
+    // moment the channel is ready, so the capability line is never lost to
+    // boot ordering.
+    try_log_self_sample();
 }
 
 /// The diagnostic sink the debug detail currently emits through, if any.
 #[cfg(feature = "watchdog-diagnostics")]
 fn diag_sink() -> Option<&'static (dyn Sink + Sync)> {
     DIAG_SINK.get().ok().flatten().copied()
+}
+
+/// Record the boot probe's verdict on whether the lockup watchdog's
+/// non-maskable self-sample is deliverable on this hardware, and log it
+/// once the diagnostic sink is ready.
+///
+/// The port probes this on the boot CPU during interrupt bring-up, *before*
+/// the diagnostic sink is installed, so the verdict is stashed and flushed
+/// by [`install_diagnostic_sink`] the moment the channel exists. Recording
+/// it after the sink is already up logs immediately instead. Either way the
+/// line is emitted exactly once. The whole self-sample discipline gates on
+/// this verdict, so a reader of a later `sampled=pre_silence` hard-lockup
+/// record needs it to judge whether that record names a real wedge or a
+/// healthy core the watchdog simply could not observe. Present only in a
+/// debug-diagnostics build; a shippable image never links it.
+#[cfg(feature = "watchdog-diagnostics")]
+pub fn report_self_sample(support: FeatureSupport) {
+    let _ = SELF_SAMPLE.set(support);
+    try_log_self_sample();
+}
+
+/// Emit the recorded self-sample verdict through the diagnostic sink, at
+/// most once, once both the verdict and the sink are available. A no-op
+/// while either is missing (fail-safe: the record is retried on the next
+/// call), and after the one-shot latch has fired.
+#[cfg(feature = "watchdog-diagnostics")]
+fn try_log_self_sample() {
+    let Some(support) = SELF_SAMPLE.get().ok().flatten().copied() else {
+        return;
+    };
+    let Some(sink) = diag_sink() else {
+        return;
+    };
+    if SELF_SAMPLE_LOGGED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    emit_self_sample(sink, support);
+}
+
+/// The log line's plain fields for a self-sample verdict: the record
+/// `Level`, whether the non-maskable sample is `live` or `inactive`, the
+/// honesty term, and the non-live verdict's reason note (`None` when live).
+/// A `live` sample makes a `sampled=pre_silence` lockup report credible; an
+/// `inactive` one means the whole self-sample discipline is inert on this
+/// hardware, so a hard-lockup report against a lone task is suspect — worth
+/// a `Warn`.
+#[cfg(feature = "watchdog-diagnostics")]
+fn self_sample_labels(
+    support: FeatureSupport,
+) -> (Level, &'static str, &'static str, Option<&'static str>) {
+    match support {
+        FeatureSupport::Supported => (Level::Info, "live", "supported", None),
+        FeatureSupport::Unsupported(reason) => {
+            (Level::Warn, "inactive", "unsupported", Some(reason))
+        }
+        FeatureSupport::Pending(note) => (Level::Warn, "inactive", "pending", Some(note)),
+    }
+}
+
+/// Render one [`AuditEvent::CpuWatchdogSelfSample`] record through `sink`.
+/// Split out so a host test drives it against a recording sink. Carries no
+/// kernel address and no secret — a capability statement, not a detail.
+#[cfg(feature = "watchdog-diagnostics")]
+fn emit_self_sample(sink: &dyn Sink, support: FeatureSupport) {
+    let (level, self_sample, verdict, reason) = self_sample_labels(support);
+    // Repeat-fill then overwrite, so the trailing slot is a real field until
+    // a reason (when present) replaces it — the same construction the lockup
+    // records use.
+    let mut fields: [tairix_log::Field<'_>; 3] = [tairix_log::Field {
+        key: "self_sample",
+        value: tairix_log::FieldValue::Str(self_sample),
+    }; 3];
+    fields[1] = tairix_log::Field {
+        key: "verdict",
+        value: tairix_log::FieldValue::Str(verdict),
+    };
+    let mut n = 2;
+    if let Some(reason) = reason {
+        fields[n] = tairix_log::Field {
+            key: "reason",
+            value: tairix_log::FieldValue::Str(reason),
+        };
+        n += 1;
+    }
+    emit(sink, level, AuditEvent::CpuWatchdogSelfSample, &fields[..n]);
 }
 
 /// Register the kernel image's runtime base address (the port's linker
@@ -859,20 +986,20 @@ pub fn on_watchdog_tick(cpu: CpuId, now_ns: u64, sample: &WatchdogSample) {
     scan(cpu, now_ns);
 }
 
-/// Whether `state`'s CPU is an `Active` core running a **user** task that
-/// has withheld the CPU from the scheduler past
-/// [`DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS`].
+/// Whether `state`'s CPU is an `Active` core that has withheld the CPU
+/// from the scheduler past [`DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS`].
 ///
 /// Pure predicate (no I/O, no latch), so the monopoly policy is unit-tested
-/// directly. Only a CPU that is `Active`, was sampled in *user* mode
-/// (kernel code is never preempted — the kernel is non-preemptible), and
-/// has an *armed* progress heartbeat older than the guard qualifies; an
-/// unarmed heartbeat (`0`) or a clock that went backwards never does (fail
-/// closed — no phantom yield).
-fn monopolises_cpu(state: &CpuState, now_ns: u64, in_kernel: bool) -> bool {
-    if in_kernel {
-        return false;
-    }
+/// directly. Only a CPU that is `Active` and has an *armed* progress
+/// heartbeat older than the guard qualifies; an unarmed heartbeat (`0`) or
+/// a clock that went backwards never does (fail closed — no phantom yield).
+///
+/// Deliberately takes no sampled context: the recorded kernel/user field is
+/// refreshed only by a cadence sample, so on a CPU whose cadence has
+/// stopped it rots at whatever it last read and would suppress the guard
+/// exactly when it is needed. Callers that *do* hold a fresh context apply
+/// it themselves ([`monopolises_cpu`]).
+fn progress_overdue(state: &CpuState, now_ns: u64) -> bool {
     if WatchdogActivity::from_u8(state.wd_activity.load(Ordering::Acquire))
         != WatchdogActivity::Active
     {
@@ -883,6 +1010,26 @@ fn monopolises_cpu(state: &CpuState, now_ns: u64, in_kernel: bool) -> bool {
         return false;
     }
     now_ns.saturating_sub(last_progress) >= DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS
+}
+
+/// [`progress_overdue`] for a caller holding a **fresh** sample of what the
+/// CPU was running: the cadence path, whose `in_kernel` reading was taken
+/// by the very sample now calling in. Kernel code is never preempted (the
+/// kernel is non-preemptible), so an in-kernel sample owes no yield.
+fn monopolises_cpu(state: &CpuState, now_ns: u64, in_kernel: bool) -> bool {
+    !in_kernel && progress_overdue(state, now_ns)
+}
+
+/// Whether `state`'s recorded context is older than the port's cadence
+/// interval — the CPU stopped sampling itself, so pc/aux/kernel-or-user
+/// name the code it last returned to rather than what it is running now.
+///
+/// A never-sampled heartbeat (`0`) counts as stale: nothing vouches for the
+/// context at all. One cadence interval of slack, so an ordinary sample
+/// that merely straddles a report is not cried down as stale.
+fn context_stale(state: &CpuState, now_ns: u64) -> bool {
+    let last_seen = state.last_seen_ns.load(Ordering::Acquire);
+    last_seen == 0 || now_ns.saturating_sub(last_seen) > tairix_arch_api::WATCHDOG_CADENCE_NS
 }
 
 /// The verdict of classifying one CPU during the cross-CPU scan.
@@ -973,6 +1120,14 @@ fn scan(observer: CpuId, now_ns: u64) {
                     diag.live_pc = Some(pc);
                     diag.live_context = context;
                 }
+                // What the victim itself published as still in flight. The
+                // shared-controller read above cannot see a banked SGI or
+                // PPI, so without this a core wedged inside one is reported
+                // against whatever device line happened to be pending.
+                #[cfg(feature = "watchdog-diagnostics")]
+                if let Some(in_flight) = recovery().map(|r| r.in_flight_interrupt(target)) {
+                    diag.in_flight = in_flight;
+                }
                 report_lockup(
                     AuditEvent::CpuHardLockupDetected,
                     Level::Error,
@@ -984,10 +1139,12 @@ fn scan(observer: CpuId, now_ns: u64) {
                 drive_recovery(target, WatchdogKind::Hard);
             }
             Verdict::SoftOnset(elapsed) => {
-                // A soft-locked CPU is still taking its watchdog sample, so
-                // its recorded context is fresh (`sample_stale` stays false)
-                // and there is no stuck-line story to tell.
-                let diag = Diag::snapshot(state);
+                // A soft-locked CPU is normally still taking its watchdog
+                // sample, so its context is fresh — but that is read, not
+                // assumed, because a context older than the cadence names
+                // innocent code. There is no stuck-line story to tell.
+                let mut diag = Diag::snapshot(state);
+                diag.sample_stale = context_stale(state, now_ns);
                 report_lockup(
                     AuditEvent::CpuStallDetected,
                     Level::Error,
@@ -1003,22 +1160,43 @@ fn scan(observer: CpuId, now_ns: u64) {
     }
 }
 
-/// Check `cpu` for a **soft** lockup from its own armed timer-tick path.
+/// Break a CPU's monopoly and check it for a **soft** lockup, from its own
+/// armed timer-tick path.
 ///
-/// The same-CPU complement of the cross-CPU `scan`'s check: it catches a
-/// *contended* CPU whose preemption has stopped making scheduler progress
-/// (the tick only fires when the CPU has a competitor, so a lone
-/// preemptible task is never sampled here — no false positive). Reads the
-/// installed monotonic clock; before it, or for an out-of-range `cpu`, it
-/// is a fail-safe no-op. Shares the soft-episode latch with `scan`, so a
-/// soft lockup is reported exactly once whichever path sees it first.
+/// The same-CPU complement of the cross-CPU `scan`'s check, and the
+/// watchdog's *last* working channel on a CPU whose non-maskable cadence
+/// has stopped: the maskable tick keeps firing there, so this runs when
+/// [`on_watchdog_tick`] — and with it the cadence-driven monopoly guard —
+/// no longer does. It therefore does two things: request the forced yield
+/// that returns a CPU withholding itself from the dispatcher, and report a
+/// soft lockup once the no-progress gap crosses the threshold.
+///
+/// Reads the installed monotonic clock; before it, or for an out-of-range
+/// `cpu`, it is a fail-safe no-op. Shares the soft-episode latch with
+/// `scan`, so a soft lockup is reported exactly once whichever path sees
+/// it first — but the yield request deliberately does *not* share it.
 pub fn check_stall(cpu: CpuId) {
     let Some(now_ns) = crate::waitq::wait_now_ns() else {
         return;
     };
+    check_stall_at(cpu, now_ns);
+}
+
+/// [`check_stall`] at an explicit `now_ns`. Split from the public entry
+/// point so host tests can drive both halves against a chosen instant
+/// without the installed clock.
+pub(crate) fn check_stall_at(cpu: CpuId, now_ns: u64) {
     let Some(state) = cpu_state::get(cpu) else {
         return;
     };
+    // Break the monopoly first, and on every tick: this is the one channel
+    // still running on a CPU whose non-maskable cadence has stopped, and
+    // that CPU's cadence-driven guard is dead with it. Read unlatched, so a
+    // core that stays out of the dispatch loop is pushed back at every tick
+    // rather than once per episode.
+    if progress_overdue(state, now_ns) {
+        crate::preempt::request_forced_yield(cpu);
+    }
     let soft = evaluate(
         state.last_progress_ns.load(Ordering::Acquire),
         &state.stall_reported,
@@ -1026,7 +1204,11 @@ pub fn check_stall(cpu: CpuId) {
         DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
     );
     if let Sample::Onset(elapsed) = soft {
-        let diag = Diag::snapshot(state);
+        let mut diag = Diag::snapshot(state);
+        // This path runs from the maskable tick, which keeps firing on a
+        // CPU whose non-maskable cadence has died — so the context it
+        // renders can be arbitrarily old and must say so.
+        diag.sample_stale = context_stale(state, now_ns);
         report_lockup(
             AuditEvent::CpuStallDetected,
             Level::Error,
@@ -1196,6 +1378,16 @@ struct Diag {
     /// verbatim as `live_ctx`.
     #[cfg(feature = "watchdog-diagnostics")]
     live_context: u64,
+    /// The interrupt the wedged CPU published as acknowledged-but-not-yet
+    /// completed ([`WatchdogArch::in_flight_interrupt`]), rendered as
+    /// `in_flight`. This is the only way a *banked* line shows up: the
+    /// observer's [`Self::stuck`] read sees shared device lines alone, so a
+    /// never-completed SGI or PPI leaves that scan to fall through to an
+    /// innocent pending device line. An id here means the core is still
+    /// inside that interrupt and owes it a completion. Set on the
+    /// hard-lockup path after the snapshot.
+    #[cfg(feature = "watchdog-diagnostics")]
+    in_flight: InFlightInterrupt,
 }
 
 /// Attribution of a stuck controller line to the task that owns its IRQ
@@ -1221,6 +1413,13 @@ enum StuckOwner {
 }
 
 impl Diag {
+    /// The [`Self::in_flight`] reading before the observer has taken one.
+    /// Only the hard-lockup path reads it, so every other record carries
+    /// this and renders no `in_flight` field at all rather than implying
+    /// the CPU was inside no interrupt.
+    #[cfg(feature = "watchdog-diagnostics")]
+    const IN_FLIGHT_UNREAD: InFlightInterrupt = InFlightInterrupt::Unsupported("not read");
+
     /// An empty diagnosis (a recovery/clear record carries no context).
     const EMPTY: Self = Self {
         pc: 0,
@@ -1249,6 +1448,8 @@ impl Diag {
         live_pc: None,
         #[cfg(feature = "watchdog-diagnostics")]
         live_context: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
+        in_flight: Self::IN_FLIGHT_UNREAD,
     };
 
     /// Whether this diagnosis carries a real captured sample (as opposed to
@@ -1341,6 +1542,8 @@ impl Diag {
             live_pc: None,
             #[cfg(feature = "watchdog-diagnostics")]
             live_context: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            in_flight: Self::IN_FLIGHT_UNREAD,
         }
     }
 }
@@ -1579,12 +1782,32 @@ fn report_diagnostic_detail(level: Level, cpu: CpuId, observer: Option<CpuId>, d
         || diag.breadcrumb != KernelBreadcrumb::None
         || diag.bt_len != 0
         || diag.lock_site != 0
-        || diag.live_pc.is_some();
+        || diag.live_pc.is_some()
+        || in_flight_field(diag.in_flight).is_some();
     if !has_detail {
         return;
     }
     if let Some(sink) = diag_sink() {
         report_detail_to(sink, level, cpu, observer, diag);
+    }
+}
+
+/// The `in_flight` field value for a published reading, or `None` when the
+/// port published none.
+///
+/// An unread/unsupported reading renders nothing at all: a record must
+/// never let "the port cannot tell us" read as "the core is inside no
+/// interrupt". Both other readings are load-bearing — `none` clears a
+/// missed completion as the cause, an id names the interrupt the core
+/// still owes a completion to.
+#[cfg(feature = "watchdog-diagnostics")]
+fn in_flight_field(in_flight: InFlightInterrupt) -> Option<tairix_log::FieldValue<'static>> {
+    match in_flight {
+        InFlightInterrupt::Idle => Some(tairix_log::FieldValue::Str("none")),
+        InFlightInterrupt::Acknowledged { intid } => {
+            Some(tairix_log::FieldValue::UnsignedInt(u64::from(intid)))
+        }
+        InFlightInterrupt::Unsupported(_) => None,
     }
 }
 
@@ -1626,10 +1849,10 @@ fn report_detail_to(
     let mut kdetail_buf = [0u8; 18];
     let mut bt_buf = [0u8; BT_RENDER_BYTES];
 
-    let mut fields: [tairix_log::Field<'_>; 14] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; 15] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 14];
+    }; 15];
     let mut n = 1;
     // `observer` correlates this detail line with its summary line on the
     // audit trail (both carry the same `cpu`/`observer`).
@@ -1672,6 +1895,19 @@ fn report_detail_to(
             };
             n += 1;
         }
+    }
+    // What the wedged core published as acknowledged but not completed —
+    // an interrupt id, not an address. `none` is as load-bearing as an id:
+    // it clears a missed completion as the cause, whereas an id names the
+    // interrupt the core is still inside, *including* a banked SGI or PPI
+    // the observer's `stuck_irq` scan is structurally blind to (it reads
+    // shared device lines only and falls through to the first pending one).
+    if let Some(value) = in_flight_field(diag.in_flight) {
+        fields[n] = tairix_log::Field {
+            key: "in_flight",
+            value,
+        };
+        n += 1;
     }
     // The raw processor-state word (aarch64 `SPSR_EL1`): a register value,
     // not an address, so it is rendered verbatim.
@@ -1886,6 +2122,8 @@ mod tests {
             live_pc: None,
             #[cfg(feature = "watchdog-diagnostics")]
             live_context: 0,
+            #[cfg(feature = "watchdog-diagnostics")]
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         }
     }
 
@@ -2215,6 +2453,71 @@ mod tests {
         assert!(state.force_yield.load(Ordering::Relaxed));
     }
 
+    /// The tick-driven guard reads no sampled context, so a CPU whose
+    /// recorded kernel/user field has rotted at `true` — the state of a core
+    /// whose cadence stopped mid-dispatch — is still force-yielded. Pinning
+    /// this is the point: gating on that field is what let a wedged core
+    /// monopolise itself unopposed.
+    #[test]
+    fn a_stale_in_kernel_reading_does_not_suppress_the_tick_guard() {
+        let state = active_with_progress(24, 1_000);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        let now = 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
+        assert!(progress_overdue(state, now));
+        // The cadence caller, which holds a *fresh* reading, still defers to
+        // it: the kernel is non-preemptible.
+        assert!(!monopolises_cpu(state, now, true));
+    }
+
+    /// A context no cadence sample has refreshed within the cadence interval
+    /// is stale, and a never-sampled one is stale too (nothing vouches for
+    /// it). A sample within the interval is not.
+    #[test]
+    fn a_context_older_than_the_cadence_is_stale() {
+        let cadence = tairix_arch_api::WATCHDOG_CADENCE_NS;
+        let state = reset(25);
+        assert!(context_stale(state, 1_000));
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        assert!(!context_stale(state, 1_000 + cadence));
+        assert!(context_stale(state, 1_000 + cadence + 1));
+    }
+
+    /// The same-CPU stall report renders a rotted context as `pre_silence`.
+    /// It used to print a confident `context=kernel` from a field ten
+    /// seconds out of date, which read as evidence the CPU was wedged in the
+    /// kernel when it was only running the code it last returned to.
+    #[test]
+    fn the_same_cpu_stall_report_marks_a_rotted_context_stale() {
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let state = active_with_progress(26, 1_000);
+        state.wd_ctx_pc.store(0x4000_0000, Ordering::Relaxed);
+        state.wd_ctx_task.store(9, Ordering::Relaxed);
+        state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
+        // Last sampled at the same instant progress stopped, so by the time
+        // the soft threshold elapses the context is ten seconds old.
+        state.last_seen_ns.store(1_000, Ordering::Relaxed);
+        let now = 1_000 + DEFAULT_SOFT_LOCKUP_THRESHOLD_NS;
+        let mut d = Diag::snapshot(state);
+        d.sample_stale = context_stale(state, now);
+        report_summary_to(
+            sink,
+            AuditEvent::CpuStallDetected,
+            Level::Error,
+            26,
+            None,
+            DEFAULT_SOFT_LOCKUP_THRESHOLD_NS,
+            &d,
+        );
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(field(ev, "context"), Some("kernel"));
+        assert_eq!(field(ev, "sampled"), Some("pre_silence"));
+        // No observer: the field's absence is what identifies this as the
+        // victim's own tick rather than a cross-CPU scan.
+        assert_eq!(field(ev, "observer"), None);
+    }
+
     #[test]
     fn on_watchdog_tick_does_not_force_yield_a_kernel_or_recent_cpu() {
         // Sampled in the kernel: never force-yielded.
@@ -2348,6 +2651,7 @@ mod tests {
             lock_acquiring: false,
             live_pc: Some(TEST_IMAGE_BASE + 0x0018_1dc0),
             live_context: 0x0000_2000,
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         };
         report_detail_to(sink, Level::Error, 2, Some(0), &d);
         let events = sink.snapshot();
@@ -2410,6 +2714,7 @@ mod tests {
             lock_acquiring: false,
             live_pc: None,
             live_context: 0,
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         };
         report_detail_to(sink, Level::Error, 1, None, &d);
         let ev = &sink.snapshot()[0];
@@ -2422,6 +2727,141 @@ mod tests {
         // And no raw address slipped through.
         assert!(no_field_contains(ev, "21d42c"));
         assert!(no_field_contains(ev, "1234"));
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_debug_detail_names_the_interrupt_a_wedged_core_is_still_inside() {
+        // The reproduction this field exists for: the observer's shared
+        // scan can only see device lines, so it falls through to an
+        // innocent pending one while the real wedge is a banked PPI the
+        // victim acknowledged and never completed. The victim's own record
+        // names it.
+        set_kernel_image_base(TEST_IMAGE_BASE);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let d = Diag {
+            in_flight: InFlightInterrupt::Acknowledged { intid: 27 },
+            stuck: Some(StuckInterrupt {
+                intid: 77,
+                active: false,
+            }),
+            ..Diag::EMPTY
+        };
+        report_detail_to(sink, Level::Error, 0, Some(2), &d);
+        let ev = &sink.snapshot()[0];
+        assert_eq!(field(ev, "in_flight"), Some("27"));
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_debug_detail_tells_no_interrupt_in_flight_apart_from_no_reading() {
+        // `none` clears a missed completion as the cause and is worth
+        // rendering; an unread reading renders nothing at all, so a record
+        // can never let "the port cannot tell us" read as "the core is
+        // inside no interrupt".
+        set_kernel_image_base(TEST_IMAGE_BASE);
+        let idle: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        report_detail_to(
+            idle,
+            Level::Error,
+            0,
+            None,
+            &Diag {
+                in_flight: InFlightInterrupt::Idle,
+                ..Diag::EMPTY
+            },
+        );
+        assert_eq!(field(&idle.snapshot()[0], "in_flight"), Some("none"));
+
+        let unread: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        report_detail_to(
+            unread,
+            Level::Error,
+            0,
+            None,
+            &Diag {
+                pc: TEST_IMAGE_BASE + 0x10,
+                ..Diag::EMPTY
+            },
+        );
+        assert_eq!(field(&unread.snapshot()[0], "in_flight"), None);
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn a_published_in_flight_reading_is_detail_enough_on_its_own() {
+        // A wedge with no pc, breadcrumb, backtrace or lock site to report
+        // must still emit the detail line when the victim named the
+        // interrupt it is inside — that reading is the whole diagnosis.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        report_detail_to(
+            sink,
+            Level::Error,
+            0,
+            Some(1),
+            &Diag {
+                in_flight: InFlightInterrupt::Acknowledged { intid: 0 },
+                ..Diag::EMPTY
+            },
+        );
+        assert_eq!(field(&sink.snapshot()[0], "in_flight"), Some("0"));
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_self_sample_verdict_states_whether_the_non_maskable_sample_is_live() {
+        // A live sample makes a later `sampled=pre_silence` record
+        // credible, so the capability is stated plainly rather than
+        // discarded.
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        emit_self_sample(sink, FeatureSupport::Supported);
+        let ev = &sink.snapshot()[0];
+        assert_eq!(ev.id, AuditEvent::CpuWatchdogSelfSample.id());
+        assert_eq!(ev.level, Level::Info);
+        assert_eq!(field(ev, "self_sample"), Some("live"));
+        assert_eq!(field(ev, "verdict"), Some("supported"));
+        // A live verdict has no reason to give.
+        assert_eq!(field(ev, "reason"), None);
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn an_inactive_self_sample_is_a_warning_that_carries_its_reason() {
+        // Both non-live verdicts say the discipline is inert on this
+        // hardware and why, so a hard-lockup report against a lone task can
+        // be judged rather than believed.
+        for (support, verdict, reason) in [
+            (
+                FeatureSupport::Unsupported("group 0 belongs to the secure world"),
+                "unsupported",
+                "group 0 belongs to the secure world",
+            ),
+            (
+                FeatureSupport::Pending("not yet probed"),
+                "pending",
+                "not yet probed",
+            ),
+        ] {
+            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            emit_self_sample(sink, support);
+            let ev = &sink.snapshot()[0];
+            assert_eq!(ev.level, Level::Warn);
+            assert_eq!(field(ev, "self_sample"), Some("inactive"));
+            assert_eq!(field(ev, "verdict"), Some(verdict));
+            assert_eq!(field(ev, "reason"), Some(reason));
+        }
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn the_self_sample_record_carries_no_address() {
+        // A capability statement, not an address-bearing detail.
+        set_kernel_image_base(TEST_IMAGE_BASE);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        emit_self_sample(sink, FeatureSupport::Supported);
+        let ev = &sink.snapshot()[0];
+        assert!(no_field_contains(ev, "0x"));
+        assert!(no_field_contains(ev, "+0"));
     }
 
     /// The per-CPU lock-site stack tracks the *innermost* lock and stays
@@ -2501,10 +2941,11 @@ mod tests {
             breadcrumb_seq: 0,
             bt: [0; cpu_state::WD_BT_MAX],
             bt_len: 0,
-            lock_site: site as *const core::panic::Location<'static> as usize,
+            lock_site: core::ptr::from_ref::<core::panic::Location<'static>>(site) as usize,
             lock_acquiring: true,
             live_pc: None,
             live_context: 0,
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         };
         report_detail_to(sink, Level::Error, 3, Some(0), &d);
         let ev = &sink.snapshot()[0];
@@ -2528,7 +2969,7 @@ mod tests {
     #[test]
     fn the_lock_site_field_discloses_no_runtime_address() {
         let site = core::panic::Location::caller();
-        let ptr = site as *const core::panic::Location<'static> as usize;
+        let ptr = core::ptr::from_ref::<core::panic::Location<'static>>(site) as usize;
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let d = Diag {
             pc: 0,
@@ -2547,6 +2988,7 @@ mod tests {
             lock_acquiring: false,
             live_pc: None,
             live_context: 0,
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         };
         report_detail_to(sink, Level::Error, 3, None, &d);
         let ev = &sink.snapshot()[0];
@@ -2877,6 +3319,7 @@ mod tests {
             lock_acquiring: false,
             live_pc: None,
             live_context: 0,
+            in_flight: Diag::IN_FLIGHT_UNREAD,
         };
         report_detail_to(sink, Level::Error, 1, Some(0), &d);
         let ev = &sink.snapshot()[0];

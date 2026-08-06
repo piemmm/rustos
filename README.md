@@ -1,8 +1,7 @@
-# TAIRiX /'taɪ.rɪks/ - An OS experiment.
+# TAIRiX /'taɪ.rɪks/ - An attempt at making a sensible OS.
 
 A security-first, multi-user, multi-core operating system written in Rust,
-targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via
-`wasm32-unknown-unknown`.
+targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via wasm32. TAIRiX is _not_ Linux.
 
 This file is intentionally brief. Authoritative documents live alongside the
 code:
@@ -18,9 +17,7 @@ for prime time, if it ever will be. <span style="color:red">**Do not expect anyt
 
 ## Screenshots
 
-Early days, but here is TAIRiX running (aarch64, Raspberry Pi image booted in
-QEMU). Click a thumbnail for the full-size image.
-
+Here are some screenshots of TAIRiX running, showcasing the current state of the project 
 <table>
   <tr>
     <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="140"></a><br><sub>Filesystem unlock</sub></td>

@@ -468,13 +468,17 @@ unsafe fn user_register_frame(frame: *const u64) -> tairix_arch_api::backtrace::
 ))]
 fn handle_fiq(frame: *const u64) {
     let iar = crate::gic::acknowledge();
-    let intid = iar & crate::gic::IAR_INTID_MASK;
-    if intid == crate::gic::SPURIOUS_INTID {
+    let Some(intid) = crate::gic::acknowledged_intid(iar) else {
         // Nothing pending (an FIQ that raced its own deactivation): the
         // GIC requires no EOI for a spurious read.
         return;
-    }
+    };
     let cpu = crate::smp::current_cpu_index();
+    // Publish what this CPU is now inside, so an observer can name it if
+    // the core goes silent before completing it. An FIQ nests inside an
+    // IRQ handler, so the displaced record is put back at completion
+    // rather than cleared.
+    let displaced = tairix_arch_api::watchdog::in_flight::record(cpu, intid);
     // Record the delivery for the boot probe before any other work, so a
     // probe FIQ that fires on a bare cadence PPI is still observed.
     crate::watchdog::note_fiq_taken();
@@ -484,6 +488,7 @@ fn handle_fiq(frame: *const u64) {
     // Complete the interrupt with the full IAR cookie so the CPU interface
     // does not wedge with an active Group-0 priority.
     crate::gic::end_of_interrupt(iar);
+    tairix_arch_api::watchdog::in_flight::restore(cpu, displaced);
 }
 
 /// Handle an IRQ: acknowledge the GIC, dispatch the timer PPI to the
@@ -511,15 +516,21 @@ fn handle_irq(from_el0: bool, frame: *const u64) {
     // the core under IPI-heavy load). Dispatch decisions use only the INTID
     // field; the end-of-interrupt handshake writes the whole value.
     let iar = crate::gic::acknowledge();
-    let intid = iar & crate::gic::IAR_INTID_MASK;
-    if intid == crate::gic::SPURIOUS_INTID {
+    let Some(intid) = crate::gic::acknowledged_intid(iar) else {
         // Spurious read: nothing pending, and the GIC requires no EOI.
         return;
-    }
+    };
     // The running CPU's dense id, recovered from `MPIDR_EL1`, drives both
     // the per-CPU timer slot and the IPI callback (one
     // identity source).
     let cpu = crate::smp::current_cpu_index();
+    // Publish what this CPU is now inside. A core that never reaches the
+    // end-of-interrupt below leaves its interface's running priority
+    // raised and takes no further interrupt, and when the culprit is a
+    // banked SGI or PPI no other CPU can see it — only this record names
+    // it. Diagnostics build only; a shippable image records nothing.
+    #[cfg(feature = "watchdog-diagnostics")]
+    let displaced = tairix_arch_api::watchdog::in_flight::record(cpu, intid);
     if intid == crate::preempt::TIMER_PPI {
         crate::preempt::on_timer_interrupt(cpu);
     } else if intid == crate::watchdog::WATCHDOG_PPI {
@@ -547,6 +558,11 @@ fn handle_irq(from_el0: bool, frame: *const u64) {
     // **full** IAR value is written back (source-CPU field included) so an
     // SGI from any CPU is actually deactivated.
     crate::gic::end_of_interrupt(iar);
+    // Nothing is in flight once the completion is written — and the record
+    // is cleared before the preemption point below, which may switch away
+    // and not return to this frame for a long time.
+    #[cfg(feature = "watchdog-diagnostics")]
+    tairix_arch_api::watchdog::in_flight::restore(cpu, displaced);
 
     // Check for a pending reschedule on the way back to user mode, for
     // **any** interrupt — a timer quantum expiry, a cross-CPU reschedule

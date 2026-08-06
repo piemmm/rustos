@@ -56,8 +56,10 @@ chrome of its own; it lives in the application rather than in `lib/controls`
 because it arranges those controls into one particular window
 (`plans/NEW-SWITCHBOARD.md` S1).
 
-The window's own chrome is the standard frame and title bar plus a **location
-band** under them: a `Breadcrumb` reading `Switchboard › <section>` and, at
+The window manager decorates the window server-side (the frame, title bar,
+window commands, and resize grabber — see `plans/COMPOSITOR-WORK.md`);
+Switchboard draws only its client content, beginning with a **location band**
+at the top: a `Breadcrumb` reading `Switchboard › <section>` and, at
 its trailing end, an `IconButton` that opens a `Menu` of the six sections with
 the one on show marked selected. The trail's leading crumb opens the same
 list, so the section is reachable by pointer or keyboard — with the band

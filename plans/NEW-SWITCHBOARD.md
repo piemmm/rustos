@@ -24,10 +24,14 @@ without a second copy of the fixture.
 
 ## S2 — Chrome — done
 
-The window is a `WindowFrame` with the standard `TitleBar` and window
-commands; the client viewport is the only application region.
+The window is decorated **server-side** by the window manager (see
+`plans/COMPOSITOR-WORK.md`): the title bar, window commands, frame, and
+resize grabber are the compositor's, drawn around the client. Switchboard
+draws no chrome of its own — its content is the whole client, starting with
+the location band — and resizes only by re-mapping its region on
+`WindowEvent::Resized`.
 
-Below the title bar sits the **location band**:
+At the top of the client sits the **location band**:
 
 - a `Breadcrumb` on the left reading `Switchboard › <section>`. Its trailing
   crumb is the current location, which a breadcrumb never activates, so the
@@ -66,7 +70,7 @@ actually asked for. Tasks' census rides the location band precisely because
 it is a census of *that* section, not of the machine.
 
 Content taller than the section's primary column is governed by the one
-shared vertical `ScrollBar`, with the `ResizeGrabber` at its junction.
+shared vertical `ScrollBar`.
 
 ## S3 — The section frame — done
 

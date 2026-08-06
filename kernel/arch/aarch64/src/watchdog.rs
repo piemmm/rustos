@@ -900,6 +900,16 @@ impl WatchdogArch for Watchdog {
         }
     }
 
+    fn in_flight_interrupt(&self, target: CpuId) -> tairix_arch_api::InFlightInterrupt {
+        // The banked-line counterpart of `stuck_interrupt`'s shared-line
+        // read: `GICD_ISACTIVER0` is banked per CPU, so an observer reading
+        // it sees its *own* SGI/PPI state, never the wedged core's — and a
+        // never-completed SGI or PPI is exactly what leaves that core's
+        // interface running priority raised. The victim publishes what it
+        // acknowledged at interrupt entry, so this reads it back.
+        tairix_arch_api::watchdog::in_flight::read(target)
+    }
+
     fn remote_pc_sample(&self, target: CpuId) -> tairix_arch_api::RemotePcSample {
         // The *code*-side "why" the stale pre-silence sample cannot give: a
         // read of the wedged core's PC over its discovered CoreSight

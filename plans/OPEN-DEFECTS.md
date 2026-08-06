@@ -1811,6 +1811,157 @@ xtask ci` pipeline — every other job had long finished.
 
 ---
 
+## D32 — CPU 0 never returned to the dispatch loop, so every deferred wake stranded and the desktop froze (OPEN)
+
+**State:** open. Observability and the recovery path have landed; *why the
+non-maskable cadence stopped on CPU 0* is not yet determined. Reported from the
+field on the aarch64 `virt` debug image, ~150 s into ordinary desktop use.
+
+**Symptom.** The desktop stops responding — no keyboard, no pointer, nothing
+repaints — while the log shows a soft stall and then a hard-lockup set against
+CPU 0 alone:
+
+```
+[169.385] [ERROR] id=4080 cpu stall detected cpu=0 stalled_ms=10000 context=kernel
+[169.386] [ERROR] id=4085 cpu lockup diagnostic detail cpu=0 pc=+0x1fae90 pstate=0x20000305 k_site=user_switch k_seq=1181763 k_lock=kernel/sched/cfq/src/scheduler.rs k_lock_line=753 k_lock_state=held
+[169.475] [ERROR] id=4082 cpu hard lockup detected cpu=0 observer=2 stalled_ms=10089 context=kernel sampled=pre_silence stuck_irq=77 stuck_state=pending stuck_owner=0x9
+[169.476] [WARN]  id=4084 cpu lockup recovery requested cpu=0 kind=hard outcome=attention
+```
+
+This is a **real** user-visible hang, not the D29 false positive: that class
+reports a core that is demonstrably alive on a machine that stays responsive.
+CPUs 1–3 are healthy throughout, but every device SPI is routed to CPU 0 alone
+(`CPU0_TARGET`, `kernel/tairix-kernel/src/aarch64/gic_irq.rs`), so a CPU 0 that
+stops servicing input freezes the whole session.
+
+**Proven: CPU 0 was alive and taking interrupts.** `id=4080` and `id=4085`
+carry **no `observer=` field**, and that identifies the emitter: the summary and
+detail renderers emit `observer` only when it is `Some`, `scan` always passes
+`Some(observer)`, and `check_stall` passes `None`. `check_stall` is reached only
+from the per-arch tick dispatcher — on aarch64 `production_tick_dispatch` via
+`handle_irq` → `preempt::on_timer_interrupt` → `TimerHal::dispatch_tick`. CPU 0
+therefore took, dispatched and serviced timer PPI 30 at the moment it was
+reported stalled.
+
+That arithmetically **excludes an un-EOI'd interrupt**: every enabled line sits
+at `MID_RANGE_PRIORITY`, so anything left active would have blocked PPI 30 too.
+It also excludes the D13 ISR-shared-`SpinLock` theory — an exhaustive audit found
+no plain `SpinLock` reachable from both an ISR and a syscall path (the one
+genuinely shared structure, the console RX ring, is correctly gated by the
+`IrqSafeSpinLock` `UART_RX_GATE`), and the record says `k_lock_state=held`, not
+`acquiring`. An audit of the userland GUI event loops likewise found no
+busy-poll.
+
+**Mechanism.** CPU 0 dispatched a task (`k_site=user_switch`, the CFQ body lock
+held by design across the whole user run at `kernel/sched/cfq/src/scheduler.rs`
+:753) and **never returned to `run_dispatch_loop`**. Both liveness heartbeats
+froze within 1 ms of each other at the last dispatch-loop iteration, because
+`note_progress`/`note_alive` are stamped only by that loop. Every
+interrupt-context wake is deferred by design — the ISR only flags
+(`IrqTable::fire` sets `ready`, `WaitQueue::request_wake` sets `wake_pending`)
+and the real `wake_all`/`unpark` happens in `drain_pending_wakes()`, **which runs
+only from the dispatch loop**. So while CPU 0 stayed out of the loop no deferred
+wake was ever delivered: the `virtio_kbd` owner parked on `IRQ_WAITQ` (task 9)
+was never unparked, no input reached seatmgr/wm, and the desktop froze.
+`stuck_irq=77 stuck_owner=0x9` is the *symptom* of that stranded owner, not the
+cause. `sampled=pre_silence` on the `id=4082` record is honest; the `id=4080`
+record's confident `context=kernel` was **not** (see Fix 2).
+
+**Why nothing forced CPU 0 back — this is the defect.** Two mechanisms could
+have, and both were disarmed:
+
+1. The ordinary preempt point is competitor-gated: `reschedule_owed` returns
+   `false` with no runnable competitor and no flagged deferred wake, so a lone
+   CPU-bound task keeps the CPU by design.
+2. The monopoly safety net rode a channel that had stopped. `request_forced_yield`
+   had exactly **one** issuer, `on_watchdog_tick` → `monopolises_cpu`, which
+   bailed immediately `if in_kernel` — reading `wd_ctx_in_kernel`, a field
+   refreshed **only** by a cadence sample. CPU 0's last sample was taken inside
+   `Scheduler::dispatch`, so the field **rotted at `true`** and the guard could
+   never fire; and with the ~1 Hz cadence dead on that core, `on_watchdog_tick`
+   never ran there at all.
+
+The anti-monopoly guarantee was thus suppressed by exactly the condition it
+exists to break, while the one path provably still running on the wedged core —
+the maskable timer tick — computed the identical "no dispatch progress for 10 s"
+condition in `check_stall` and **only logged it**.
+
+**Fix 1 — the forced yield now rides the timer tick (landed).**
+`monopolises_cpu` is split: `progress_overdue(state, now_ns)` is the
+`Active` + armed + past-threshold half and takes **no** context argument, and
+`monopolises_cpu` is `!in_kernel && progress_overdue(…)` for the cadence caller
+that holds a fresh reading. `check_stall` calls `request_forced_yield` whenever
+`progress_overdue` holds, read **unlatched** and evaluated independently of the
+latched soft-lockup report, so an overdue core is pushed back at every tick
+rather than once per episode. The forced-yield latch is consumed by the same
+interrupt's return-to-user preempt point and is deliberately not
+competitor-gated, so the CPU returns to `run_dispatch_loop`, which drains the
+pending wakes, unparks the `IRQ_WAITQ` owner, and restores input. It arms no new
+timer, so ticklessness is untouched. Recovery now takes ~1 s (the monopoly
+window) instead of never.
+
+**Fix 1b — the EL1 case (landed).** A task wedged in EL1 never reaches a
+return-to-user preempt point, and `yield_if_owed_on` consumed only the *tick*
+latch, so a forced yield could not be honoured there at all. `preempt_current`
+and `yield_if_owed` now share one `honour_latches` decision that consumes both
+latches, so a monopoly is broken at whichever boundary the CPU reaches first.
+
+**Fix 2 — the diagnostic no longer lies (landed).** `context=kernel|user` was
+rendered from `wd_ctx_in_kernel` unconditionally, even when that field was older
+than the cadence interval — so `check_stall`'s report printed a confident
+`context=kernel` from a field ten seconds out of date. That misreading cost two
+wrong diagnoses of this very defect. A context older than the cadence interval
+is now marked `sampled=pre_silence`, exactly as `scan` already did for the hard
+path, from one shared `context_stale` predicate.
+
+**Also landed (observability).** The `probe_fiq_deliverability` verdict was
+discarded with `let _ =`, making an image whose non-maskable self-sample never
+ran indistinguishable in the log from one where it worked; it is now reported
+once on the boot CPU as `CpuWatchdogSelfSample` (id 4086, debug-only,
+address-free). And because `GICD_ISACTIVER0` is banked per CPU — so an observer
+reads its *own* SGI/PPI state, never the victim's, and `first_stuck_spi` scans
+SPIs only — each CPU now publishes the interrupt it acknowledged into its own
+per-CPU slot and clears it at the EOI, rendered as `in_flight` beside
+`stuck_irq`. A core wedged inside a banked SGI or PPI will name it instead of
+falling through to an innocent pending SPI.
+
+**Open residual — why the ~1 Hz cadence stopped on CPU 0.** Undetermined. This
+is a *detection* failure; Fix 1 makes the freeze recoverable regardless of which
+candidate is right, but the candidate must still be found:
+
+1. **`DAIF.F` masked for the window (strongest lead).** `el0_spsr` is applied
+   only on **first** EL0 entry (`kernel/arch/aarch64/src/userentry.rs`:125), so a
+   task first entered *before* the FIQ probe completed carries `F=1` for its
+   whole life — D29's unmask is then inert for that task, exactly as if the probe
+   had answered `Unsupported`. Worth its own investigation. The new `id=4086`
+   record settles the probe half of the question on the next reproduction.
+2. **Priority starvation.** The cadence PPI runs at the deliberately lowest
+   `WATCHDOG_FIQ_PRIORITY` (0xC0); sustained 0x80 activity could hold it off.
+3. **A missed first re-arm** of the one-shot cadence.
+
+D29 is **not** the explanation for this report: that class is a false positive on
+a machine that stays responsive, and this one hangs the desktop.
+
+**Regression cover.** Host: `progress_overdue` fires for a CPU whose
+`wd_ctx_in_kernel` has rotted at `true` (pinning that the guard no longer depends
+on the rotting field); a context older than the cadence interval renders
+`sampled=pre_silence`; an overdue CPU reaches the reschedule path from the
+tick channel with no competitor and no latched tick; and a forced yield alone
+reaches it through the in-kernel boundary too. All three fail before the fix and
+pass after.
+
+**Still needed — the QEMU vertical.** Extend
+`tests/integration/preempt_el0_qemu_aarch64` with a **lone** CPU-bound EL0
+spinner on one core, no other runnable task on that core, plus a second task
+blocked in `irq_wait` on a device line; assert that the dispatch-loop progress
+heartbeat advances within the monopoly window **and** that the `irq_wait` owner
+is woken while the spinner still runs. It must be a *lone* runnable task, or
+`reschedule_owed` short-circuits and the test passes vacuously. Do **not**
+repurpose `preempt_inkernel_qemu_aarch64` (D24) or `fiq_selfsample_qemu_aarch64`
+(D29).
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

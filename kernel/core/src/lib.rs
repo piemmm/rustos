@@ -292,6 +292,7 @@ pub use watchdog::{
 // build, so a shippable image never links either.
 #[cfg(feature = "watchdog-diagnostics")]
 pub use watchdog::{
-    install_lock_diagnostics, note_watchdog_backtrace, set_kernel_image_base,
+    install_lock_diagnostics, note_watchdog_backtrace,
+    report_self_sample as report_watchdog_self_sample, set_kernel_image_base,
     WATCHDOG_BACKTRACE_MAX,
 };

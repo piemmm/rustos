@@ -216,8 +216,8 @@ pub use quiesce::{
 };
 
 pub use watchdog::{
-    conformance as watchdog_conformance, RecoveryOutcome, RemotePcSample, StuckInterrupt,
-    WatchdogArch, WatchdogKind, WatchdogSample, CADENCE_NS as WATCHDOG_CADENCE_NS,
+    conformance as watchdog_conformance, InFlightInterrupt, RecoveryOutcome, RemotePcSample,
+    StuckInterrupt, WatchdogArch, WatchdogKind, WatchdogSample, CADENCE_NS as WATCHDOG_CADENCE_NS,
 };
 
 /// Identifier for a logical CPU (hardware thread) the kernel manages.

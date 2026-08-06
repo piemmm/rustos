@@ -220,6 +220,274 @@ impl RemotePcSample {
     }
 }
 
+/// The interrupt a CPU acknowledged and has **not yet completed** — the
+/// one observation a wedged core can only make about *itself*.
+///
+/// [`WatchdogArch::stuck_interrupt`] reads the controller's globally-shared
+/// state, so it sees shared device lines only: per-CPU **banked** lines
+/// (aarch64 GICv2 SGIs and PPIs) are invisible to an observer, which reads
+/// its own banked bits rather than the victim's. Yet a banked line whose
+/// end-of-interrupt never runs is precisely what leaves a CPU interface's
+/// running priority raised, blocking every later interrupt on that core —
+/// its preemption timer included — while the shared scan innocently falls
+/// through to the first enabled-and-pending device line.
+///
+/// The gap closes from the other side: each CPU publishes what it
+/// acknowledged into its own per-CPU slot and clears it at the matching
+/// end-of-interrupt, so the observer reads back the victim's own record.
+/// Purely observational — publishing it changes no acknowledge/complete
+/// ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InFlightInterrupt {
+    /// The target has no acknowledged-but-uncompleted interrupt: it is not
+    /// inside a handler, so no missed completion is wedging its interface.
+    Idle,
+    /// The target acknowledged `intid` and has not completed it. On a core
+    /// that has gone silent this names the interrupt it is still inside —
+    /// including a banked SGI or PPI no observer could otherwise see.
+    Acknowledged {
+        /// The acknowledged interrupt id, with any port-specific
+        /// acknowledge cookie (an aarch64 SGI's source-CPU field) already
+        /// stripped: an id, never a raw register value.
+        intid: u32,
+    },
+    /// This port does not publish an in-flight interrupt for `target`.
+    /// Fail closed — the caller renders nothing rather than implying the
+    /// target is idle.
+    Unsupported(&'static str),
+}
+
+impl InFlightInterrupt {
+    /// The acknowledged id when one is in flight, else `None`. A
+    /// convenience for a caller that treats [`Self::Idle`] and
+    /// [`Self::Unsupported`] alike (nothing to name).
+    #[must_use]
+    pub const fn intid(self) -> Option<u32> {
+        match self {
+            Self::Acknowledged { intid } => Some(intid),
+            Self::Idle | Self::Unsupported(_) => None,
+        }
+    }
+}
+
+/// Per-CPU publication of the interrupt each CPU has acknowledged but not
+/// yet completed, so an observer can read back what a *silent* core is
+/// still inside.
+///
+/// The bookkeeping is identical on every port — a per-CPU slot written by
+/// its own CPU at interrupt entry and restored at completion — so it lives
+/// here once and each port supplies only its two call sites and its
+/// acknowledge/complete decode. Reads are plain loads of published state:
+/// no lock, no block, safe from a non-maskable sample path.
+///
+/// Publication is a *diagnostic* capability: a build that never registers
+/// backing storage never records anything and [`in_flight::read`] answers
+/// [`InFlightInterrupt::Unsupported`], so a shippable image pays nothing
+/// and claims nothing.
+pub mod in_flight {
+    use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+
+    use super::{CpuId, InFlightInterrupt};
+
+    /// Slot value meaning "this CPU has no interrupt in flight". No
+    /// architecture numbers an interrupt `u32::MAX` (a GICv2 id is at most
+    /// 1019, an x86 vector at most 255), so the sentinel cannot collide
+    /// with a real acknowledgement.
+    pub const NO_IN_FLIGHT: u32 = u32::MAX;
+
+    // Compile-time guard for the invariant NO_IN_FLIGHT documents: a GICv2
+    // id is at most 1019 and an x86 vector at most 255.
+    const _: () = assert!(NO_IN_FLIGHT > 1023);
+
+    /// The slot value an interrupt entry displaced, which its matching
+    /// completion must put back so a *nested* interrupt cannot erase the
+    /// record of the interrupt it interrupted.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[must_use = "an interrupt entry's displaced record must be restored at its completion"]
+    pub struct DisplacedInFlight(u32);
+
+    /// Why per-CPU in-flight publication could not be registered.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegisterError {
+        /// Backing storage was already published this boot (set-once).
+        AlreadyRegistered,
+        /// The supplied slice covers no CPU, so nothing could be recorded.
+        Empty,
+    }
+
+    /// Latches on the first [`register_slots`], so the live per-CPU slice
+    /// can never be re-pointed underneath a CPU that is mid-interrupt.
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+
+    /// Base of the registered per-CPU slice, null until [`register_slots`].
+    static SLOTS: AtomicPtr<AtomicU32> = AtomicPtr::new(core::ptr::null_mut());
+
+    /// Length of the registered per-CPU slice, published before the base so
+    /// a reader that sees a non-null base also sees the matching length.
+    static SLOT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    /// Publish caller-leaked per-CPU in-flight slots, one per discovered
+    /// CPU, and return how many were registered.
+    ///
+    /// Every slot is reset to [`NO_IN_FLIGHT`] before publication, so a
+    /// caller may hand in plainly-zeroed storage. Set-once per boot, and
+    /// called before any CPU takes an interrupt through the publishing
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// * [`RegisterError::Empty`] when `slots` is empty.
+    /// * [`RegisterError::AlreadyRegistered`] on a second publish; nothing
+    ///   is re-pointed.
+    pub fn register_slots(slots: &'static [AtomicU32]) -> Result<usize, RegisterError> {
+        if slots.is_empty() {
+            return Err(RegisterError::Empty);
+        }
+        if REGISTERED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(RegisterError::AlreadyRegistered);
+        }
+        for slot in slots {
+            slot.store(NO_IN_FLIGHT, Ordering::Relaxed);
+        }
+        SLOT_COUNT.store(slots.len(), Ordering::Release);
+        SLOTS.store(slots.as_ptr().cast_mut(), Ordering::Release);
+        Ok(slots.len())
+    }
+
+    /// The slot for `cpu`, or `None` before registration or for a `cpu`
+    /// beyond the registered count (fail closed rather than index outside
+    /// the published slice).
+    fn slot(cpu: CpuId) -> Option<&'static AtomicU32> {
+        let base = SLOTS.load(Ordering::Acquire);
+        if base.is_null() {
+            return None;
+        }
+        let index = cpu as usize;
+        if index >= SLOT_COUNT.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: a non-null base is published only from a `&'static
+        // [AtomicU32]` whose length was stored (release) before the base,
+        // and the index was just bounds-checked against that length, so
+        // this element is in bounds and lives for `'static`.
+        Some(unsafe { &*base.add(index) })
+    }
+
+    /// Record that `cpu` has acknowledged `intid` and owes it a completion,
+    /// returning the record it displaced for the matching [`restore`].
+    ///
+    /// Called by the port from its own CPU's interrupt entry, after the
+    /// acknowledge that named `intid`. A no-op before registration.
+    pub fn record(cpu: CpuId, intid: u32) -> DisplacedInFlight {
+        match slot(cpu) {
+            Some(slot) => {
+                // Only this CPU writes its own slot (an observer only
+                // reads), so the read-then-write needs no atomic swap.
+                let displaced = slot.load(Ordering::Relaxed);
+                slot.store(intid, Ordering::Relaxed);
+                DisplacedInFlight(displaced)
+            }
+            None => DisplacedInFlight(NO_IN_FLIGHT),
+        }
+    }
+
+    /// Put back the record `displaced` by the matching [`record`], at the
+    /// point `cpu` completes the interrupt it acknowledged. A no-op before
+    /// registration.
+    pub fn restore(cpu: CpuId, displaced: DisplacedInFlight) {
+        if let Some(slot) = slot(cpu) {
+            slot.store(displaced.0, Ordering::Relaxed);
+        }
+    }
+
+    /// Read back what `cpu` published — the observation a wedged core's own
+    /// stale sample cannot give, and the only way to see a banked line.
+    #[must_use]
+    pub fn read(cpu: CpuId) -> InFlightInterrupt {
+        let Some(slot) = slot(cpu) else {
+            return InFlightInterrupt::Unsupported("no in-flight interrupt publication registered");
+        };
+        match slot.load(Ordering::Relaxed) {
+            NO_IN_FLIGHT => InFlightInterrupt::Idle,
+            intid => InFlightInterrupt::Acknowledged { intid },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            read, record, register_slots, restore, AtomicU32, InFlightInterrupt, RegisterError,
+        };
+
+        /// The one process-wide registration every test in this module
+        /// shares (registration is set-once, so it cannot be per-test).
+        /// Zeroed on purpose: `register_slots` must reset each slot to the
+        /// idle sentinel itself.
+        static SLOTS: [AtomicU32; 4] = [
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ];
+
+        fn registered() -> usize {
+            match register_slots(&SLOTS) {
+                Ok(count) => count,
+                Err(RegisterError::AlreadyRegistered) => SLOTS.len(),
+                Err(RegisterError::Empty) => 0,
+            }
+        }
+
+        #[test]
+        fn an_acknowledged_line_is_published_and_cleared_at_completion() {
+            assert_eq!(registered(), 4);
+            // A device line, a banked timer PPI and a banked SGI all
+            // publish and clear identically — the banked ones being the
+            // whole point (no observer can read them).
+            for intid in [77_u32, 30, 27, 0] {
+                let displaced = record(1, intid);
+                assert_eq!(read(1), InFlightInterrupt::Acknowledged { intid });
+                restore(1, displaced);
+                assert_eq!(read(1), InFlightInterrupt::Idle);
+            }
+        }
+
+        #[test]
+        fn a_nested_interrupt_does_not_erase_the_one_it_interrupted() {
+            assert_eq!(registered(), 4);
+            let outer = record(2, 77);
+            let inner = record(2, 27);
+            assert_eq!(read(2), InFlightInterrupt::Acknowledged { intid: 27 });
+            restore(2, inner);
+            assert_eq!(read(2), InFlightInterrupt::Acknowledged { intid: 77 });
+            restore(2, outer);
+            assert_eq!(read(2), InFlightInterrupt::Idle);
+        }
+
+        #[test]
+        fn a_cpu_beyond_the_registered_count_reads_unsupported() {
+            assert_eq!(registered(), 4);
+            // Fail closed: an out-of-range CPU is never claimed idle, and
+            // recording for it writes nothing.
+            let displaced = record(9, 77);
+            assert!(matches!(read(9), InFlightInterrupt::Unsupported(_)));
+            restore(9, displaced);
+        }
+
+        #[test]
+        fn re_registration_is_refused() {
+            assert_eq!(registered(), 4);
+            assert_eq!(
+                register_slots(&SLOTS),
+                Err(RegisterError::AlreadyRegistered)
+            );
+        }
+    }
+}
+
 /// The per-architecture non-maskable-recovery handle the watchdog reaches
 /// through.
 ///
@@ -300,6 +568,26 @@ pub trait WatchdogArch: Send + Sync {
         let _ = target;
         RemotePcSample::Unsupported("this port exposes no external-debug PC sampling")
     }
+
+    /// The interrupt `target` acknowledged and has not yet completed, as
+    /// `target` itself published it (see [`InFlightInterrupt`]).
+    ///
+    /// This is the *banked*-line counterpart of [`Self::stuck_interrupt`]'s
+    /// shared-line "why". A missed completion leaves the target's interface
+    /// running priority raised and blocks every later interrupt on that
+    /// core, but when the culprit is a per-CPU banked line the observer
+    /// cannot read it — so the victim publishes it and the observer reads
+    /// it back here. A plain load of already-published state: non-blocking,
+    /// lock-free, never panicking, safe from the sample path exactly as
+    /// [`Self::request_recovery`].
+    ///
+    /// The default is [`InFlightInterrupt::Unsupported`]: a port that does
+    /// not publish the cookie says so rather than claiming the target is
+    /// idle (fail closed).
+    fn in_flight_interrupt(&self, target: CpuId) -> InFlightInterrupt {
+        let _ = target;
+        InFlightInterrupt::Unsupported("this port publishes no in-flight interrupt")
+    }
 }
 
 /// Host-run conformance vertical every port drives over its
@@ -311,7 +599,9 @@ pub trait WatchdogArch: Send + Sync {
 /// never panics. A port with no recovery channel legitimately answers
 /// [`RecoveryOutcome::Unsupported`]; the check accepts that.
 pub mod conformance {
-    use super::{CpuId, RecoveryOutcome, RemotePcSample, WatchdogArch, WatchdogKind};
+    use super::{
+        CpuId, InFlightInterrupt, RecoveryOutcome, RemotePcSample, WatchdogArch, WatchdogKind,
+    };
 
     /// Run the full [`WatchdogArch`] conformance suite over `arch`.
     ///
@@ -358,6 +648,35 @@ pub mod conformance {
                     }
                 }
             }
+            // An in-flight-interrupt query must never panic and must answer
+            // one of the three honest variants for any target; a port that
+            // publishes no cookie legitimately answers `Unsupported`, and
+            // neither non-acknowledged variant may fabricate an id.
+            for probe in [self_cpu, self_cpu.wrapping_add(1)] {
+                let in_flight = arch.in_flight_interrupt(probe);
+                match in_flight {
+                    InFlightInterrupt::Acknowledged { intid } => {
+                        if in_flight.intid() != Some(intid) {
+                            return Err(
+                                "in_flight_interrupt intid() disagrees with the Acknowledged reading",
+                            );
+                        }
+                    }
+                    InFlightInterrupt::Unsupported(reason) => {
+                        if reason.trim().is_empty() {
+                            return Err("in_flight_interrupt returned an empty reason");
+                        }
+                        if in_flight.intid().is_some() {
+                            return Err("in_flight_interrupt intid() fabricated an id");
+                        }
+                    }
+                    InFlightInterrupt::Idle => {
+                        if in_flight.intid().is_some() {
+                            return Err("in_flight_interrupt intid() fabricated an id");
+                        }
+                    }
+                }
+            }
             let outcome = arch.request_recovery(self_cpu.wrapping_add(1), kind);
             match outcome {
                 RecoveryOutcome::Rescheduled
@@ -372,7 +691,8 @@ pub mod conformance {
     #[cfg(test)]
     mod tests {
         use super::super::{
-            RecoveryOutcome, RemotePcSample, StuckInterrupt, WatchdogArch, WatchdogKind,
+            InFlightInterrupt, RecoveryOutcome, RemotePcSample, StuckInterrupt, WatchdogArch,
+            WatchdogKind,
         };
         use super::run_all;
         use crate::CpuId;
@@ -478,6 +798,44 @@ pub mod conformance {
             assert!(sample_reason(sample).is_some_and(|r| !r.trim().is_empty()));
         }
 
+        #[test]
+        fn a_handle_that_publishes_an_in_flight_line_passes_conformance() {
+            // A port whose CPUs publish their acknowledge cookie answers a
+            // concrete id; conformance accepts it alongside the default.
+            struct CookieArch;
+            impl WatchdogArch for CookieArch {
+                fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                    RecoveryOutcome::AttentionRaised
+                }
+                fn in_flight_interrupt(&self, target: CpuId) -> InFlightInterrupt {
+                    if target == 0 {
+                        InFlightInterrupt::Acknowledged { intid: 27 }
+                    } else {
+                        InFlightInterrupt::Idle
+                    }
+                }
+            }
+            assert_eq!(run_all(&CookieArch, 0), Ok(()));
+            assert_eq!(CookieArch.in_flight_interrupt(0).intid(), Some(27));
+            assert_eq!(CookieArch.in_flight_interrupt(1).intid(), None);
+        }
+
+        #[test]
+        fn a_handle_with_an_empty_in_flight_reason_fails_conformance() {
+            // A port that publishes nothing must justify itself, exactly as
+            // a non-sampled PC read must.
+            struct MuteCookieArch;
+            impl WatchdogArch for MuteCookieArch {
+                fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                    RecoveryOutcome::Unsupported
+                }
+                fn in_flight_interrupt(&self, _target: CpuId) -> InFlightInterrupt {
+                    InFlightInterrupt::Unsupported("")
+                }
+            }
+            assert!(run_all(&MuteCookieArch, 0).is_err());
+        }
+
         fn sample_reason(sample: RemotePcSample) -> Option<&'static str> {
             match sample {
                 RemotePcSample::Unavailable(r) | RemotePcSample::Unsupported(r) => Some(r),
@@ -521,5 +879,30 @@ mod tests {
             }
         }
         assert_eq!(DefaultArch.stuck_interrupt(), None);
+    }
+
+    #[test]
+    fn in_flight_interrupt_defaults_to_unsupported_with_a_reason() {
+        // A port that publishes no cookie says so — never `Idle`, which
+        // would wrongly clear the target of a missed completion.
+        struct DefaultArch;
+        impl WatchdogArch for DefaultArch {
+            fn request_recovery(&self, _target: CpuId, _kind: WatchdogKind) -> RecoveryOutcome {
+                RecoveryOutcome::Unsupported
+            }
+        }
+        let in_flight = DefaultArch.in_flight_interrupt(1);
+        assert!(matches!(in_flight, InFlightInterrupt::Unsupported(r) if !r.trim().is_empty()));
+        assert_eq!(in_flight.intid(), None);
+    }
+
+    #[test]
+    fn in_flight_intid_is_only_carried_by_the_acknowledged_reading() {
+        assert_eq!(
+            InFlightInterrupt::Acknowledged { intid: 30 }.intid(),
+            Some(30)
+        );
+        assert_eq!(InFlightInterrupt::Idle.intid(), None);
+        assert_eq!(InFlightInterrupt::Unsupported("no cookie").intid(), None);
     }
 }

@@ -340,13 +340,16 @@ mod program {
             let frames = allocate_frames(&mode).ok_or(Errno::OutOfMemory)?;
             let surface =
                 Surface::new(mode.width_px, mode.height_px).ok_or(Errno::LengthOutOfRange)?;
+            // Resizable: the window manager decorates and resizes the window
+            // server-side; the app draws no chrome and only re-maps its region
+            // when a `WindowEvent::Resized` arrives.
             let created = self.client.create(
                 frames.grant,
                 self.event_endpoint,
                 FRAME_COUNT,
                 &mode,
                 PANEL_TITLE,
-                false,
+                true,
             );
             let (id, server) = match created {
                 Ok(pair) => pair,
