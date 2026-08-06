@@ -33,6 +33,12 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # never embeds a second reference parser (§2.2).
 tairix-resref = { path = "../resref", version = "=0.0.0" }
 
+# The shared reclaimable-memory model: `pressure` publishes the band it reads
+# into a `ReportedPressure` gauge, so a caching program learns the band through
+# the one model every other cache on the machine obeys rather than a private
+# copy of the band vocabulary (§2.2).
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+
 # The `program`-feature client seams (`IpcTransport`, `RtOutput`) link the
 # freestanding userland runtime for `ipc_call` and the standard streams. It is
 # pulled only for the bare-metal targets a `Run` binary is actually built for;

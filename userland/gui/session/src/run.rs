@@ -115,8 +115,6 @@ mod program {
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_procinfo::IpcTransport;
-    use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -270,26 +268,6 @@ mod program {
     fn fail(code: i32, reason: &str) -> i32 {
         let _ = writeln!(Stderr, "desktop: {reason}");
         code
-    }
-
-    /// Read the machine's current memory-pressure band and publish it to
-    /// the process gauge every cache in this session consults, returning
-    /// whether the band actually moved.
-    ///
-    /// The band is fetched through the shared System Information client
-    /// (the ungated band-only query, which takes no free-memory reading),
-    /// so the desktop learns the same band the kernel's own caches obey.
-    /// A refused or failed read publishes nothing: the gauge keeps the
-    /// band it already had rather than assuming the machine is
-    /// comfortable, which costs cache hits and never correctness.
-    fn refresh_pressure_band() -> bool {
-        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
-            return false;
-        };
-        // The wire decode already refuses a depth outside the known set,
-        // and the shared model's own decode reads anything unrecognised
-        // as the deepest band — shrink everything — never as normal.
-        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
     }
 
     /// The production [`DisplayTransport`]: one synchronous `ipc_call` to
@@ -803,14 +781,10 @@ mod program {
         // below keeps current from the kernel's band.
         //
         // Publish the band *before* those caches exist: the gauge starts in
-        // its fail-closed unknown state, in which every cache admits
-        // nothing, so a desktop that first read the band from its wait-set
-        // member would draw its whole bring-up — the first frame included —
-        // with no cached cursor, glyph, or icon artwork at all, and would
-        // keep doing so until the machine happened to move band. The
-        // member's own read below closes the race between here and its
-        // registration.
-        refresh_pressure_band();
+        // its fail-closed unknown state, where every cache admits nothing, so
+        // a desktop that waited for its wait-set member would draw the whole
+        // bring-up with no cached cursor, glyph, or icon artwork.
+        let _ = tairix_procinfo::pressure::refresh();
         let mut shell = DesktopShell::new(
             TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
             SEAT_PRIMARY,
@@ -1096,22 +1070,12 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "child wait refused");
         }
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::MemoryPressure,
-            0,
-            PRESSURE_TOKEN,
-        ) != 0
-        {
+        // `watch` re-reads the band as it registers the member, closing the
+        // race between the bring-up read above and this registration — a
+        // move in between would otherwise never be seen.
+        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             return fail(EXIT_WAIT_FAILED, "memory-pressure wait refused");
         }
-        // Re-read the band now the member is registered: it reports only
-        // *changes*, so a move between the bring-up read above and this
-        // registration would otherwise never be seen. A read that fails
-        // leaves the gauge as it stands, which costs cache hits and
-        // nothing else.
-        refresh_pressure_band();
 
         // The window channel's server state: the engine, the session-side
         // window table, the kernel-attested caller identity, the app-ward
@@ -1369,8 +1333,9 @@ mod program {
                 // Window *content* is the one thing the desktop cannot
                 // re-render itself, so every window whose pixels the same
                 // trim released is asked to present again straight away.
-                if refresh_pressure_band() {
+                if tairix_procinfo::pressure::refresh() {
                     let _ = shell.trim_caches(&mut compositor);
+                    tairix_font::trim_glyph_cache();
                     deliver_pending_redraws(
                         &mut server,
                         &mut sink,
@@ -1891,20 +1856,21 @@ mod program {
                     if matches!(event, tairix_wm::InputEvent::PointerMoved { .. }) {
                         let _ = shell.handle(event, compositor, now_ns);
                     }
-                    let acted = match shell.pinboard_menu_bounds(compositor, &pinboard.menu) {
-                        Some(bounds) => pinboard.menu.on_pointer(
+                    let acted = if let Some(bounds) =
+                        shell.pinboard_menu_bounds(compositor, &pinboard.menu)
+                    {
+                        pinboard.menu.on_pointer(
                             &event,
                             shell.router().pointer(),
                             bounds,
                             compositor.scale(),
                             shell.session().active_theme(),
-                        ),
+                        )
+                    } else {
                         // An open menu the shell cannot place has no plate to
                         // route against; dismiss rather than guess at one.
-                        None => {
-                            pinboard.menu.close();
-                            PinboardMenuOutcome::Dismissed
-                        }
+                        pinboard.menu.close();
+                        PinboardMenuOutcome::Dismissed
                     };
                     settle_pinboard_menu(
                         acted,

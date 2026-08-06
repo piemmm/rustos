@@ -114,7 +114,6 @@ mod program {
     };
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
-    use tairix_reclaim::PressureBand;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -613,26 +612,6 @@ mod program {
     /// refuses anything longer before a byte of it reaches the decoder.
     const ARTWORK_READ_MAX: usize = MAX_ARTWORK_BYTES + 1;
 
-    /// Read the machine's current memory-pressure band and publish it to the
-    /// process gauge the artwork cache consults, reporting whether the band
-    /// actually moved.
-    ///
-    /// The band comes from the shared System Information client (the ungated
-    /// band-only query, which takes no free-memory reading), so the app obeys
-    /// the same band every other cache on the machine does. A refused or
-    /// failed read publishes nothing: the gauge keeps the band it already had
-    /// rather than assuming the machine is comfortable, which costs cache hits
-    /// and never correctness.
-    fn refresh_pressure_band() -> bool {
-        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
-            return false;
-        };
-        // The wire decode already refuses a depth outside the known set, and
-        // the shared model reads anything unrecognised as the deepest band —
-        // shrink everything — never as normal.
-        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
-    }
-
     /// The grid's [`ArtworkReader`]: one shipped icon asset read through the
     /// app's own capability-checked filesystem access, under its own identity
     /// and with no authority beyond it.
@@ -817,13 +796,15 @@ mod program {
                         // the park (it is drained the instant it fires).
                         if token == CHILD_TOKEN {
                             self.launcher.borrow_mut().reap();
-                        } else if token == PRESSURE_TOKEN && refresh_pressure_band() {
+                        } else if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
                             // The machine's band moved: give back whatever the
                             // new band says the decoded artwork may no longer
                             // keep, here at the wake rather than at the next
                             // user input. A band that did not really move costs
-                            // one read and no eviction work.
+                            // one read and no eviction work. The glyph cache
+                            // this window drew through gives back the same way.
                             let _ = self.icons.borrow_mut().cache.trim();
+                            tairix_font::trim_glyph_cache();
                         }
                     }
                     Err(err) => return Err(errno_from(err)),
@@ -3836,14 +3817,7 @@ mod program {
         // memory tightens instead of held until something else is starved. This
         // is the app's only pressure notification — it neither polls nor times
         // the band.
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::MemoryPressure,
-            0,
-            PRESSURE_TOKEN,
-        ) != 0
-        {
+        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             return Err(fail(EXIT_NO_EVENTS, "memory-pressure wait refused"));
         }
         Ok((event_endpoint, set))
@@ -4071,14 +4045,10 @@ mod program {
         // through it) and the parked event source (which trims it when the
         // machine reports a deeper memory-pressure band); dropping it releases
         // the retained pixels.
+        // `bind_event_mailbox` already primed the gauge with the band in
+        // force now (`tairix_procinfo::pressure::watch`), so the cache never
+        // runs on the fail-closed unknown state before the first draw.
         let icons = RefCell::new(IconPipeline::new(frame_len));
-        // Start from the band in force now: the wait-set member reports only
-        // *changes*, so without this read the cache would run on the gauge's
-        // fail-closed unknown state — retaining nothing, and so decoding every
-        // tile every frame — until the machine happened to move band. A read
-        // that fails leaves the gauge closed, which costs cache hits and
-        // nothing else.
-        refresh_pressure_band();
 
         if present_frame(
             &browser,

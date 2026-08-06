@@ -273,6 +273,15 @@ impl GlyphClient {
         metrics
     }
 
+    /// Shrink the glyph cache to the band's ceiling, returning the bytes
+    /// released. No cache installed is nothing to release, and no cache is
+    /// built to answer.
+    fn trim(&mut self) -> usize {
+        self.cache
+            .as_mut()
+            .map_or(0, ReclaimCache::enforce_pressure)
+    }
+
     /// The installed families, or an empty list when no transport is
     /// installed or the service refuses the request (fail closed).
     fn families(&mut self) -> Vec<FamilyEntry> {
@@ -427,12 +436,22 @@ fn install_defaults(client: &mut GlyphClient) {
 /// admits nothing and serves every glyph freshly fetched. That is the honest
 /// outcome: slower, never wrong, and never a hand-picked ceiling standing in
 /// for a figure the machine did not supply.
+///
+/// The process gauge is primed in the same breath, because a cache built
+/// against an unreported gauge is born unable to retain anything: the gauge
+/// answers "critical" until told otherwise, and at that band nothing is
+/// admitted, so every glyph would cost an IPC round trip for the life of the
+/// process. Priming is not a substitute for the program parking on the
+/// pressure wake — that is what keeps the band *current* — but it means a
+/// program that has not yet armed the wake starts from the machine's real
+/// band rather than a fail-closed guess.
 #[cfg(feature = "rt")]
 fn default_cache() -> GlyphCache {
     use tairix_reclaim::ReclaimOwner;
 
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
+    let _ = tairix_procinfo::pressure::refresh();
     let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
     let cache = ReclaimCache::new(
         CLIENT_CACHE_LABEL,
@@ -479,6 +498,22 @@ pub fn set_font_transport(transport: Box<dyn FontTransport>) {
 /// declared sensitivity requires.
 pub fn set_glyph_cache(cache: GlyphCache) {
     CLIENT.lock().cache = Some(cache);
+}
+
+/// Shrink the glyph cache to what the band now in force allows, returning the
+/// bytes released.
+///
+/// The client counterpart of the service's own trim: a program that learns
+/// the band moved gives the memory back at that moment rather than at its
+/// next draw. Without it a program that has stopped drawing — a minimised
+/// window, an idle tray client — would hold its rendered glyphs through a
+/// pressure event it was told about, which is precisely what the shared
+/// reclaim model exists to prevent.
+///
+/// Trims only an already-installed cache: it never builds one, so a program
+/// that has not drawn yet pays no service round trip to report zero.
+pub fn trim_glyph_cache() -> usize {
+    CLIENT.lock().trim()
 }
 
 /// Fetch the coverage glyph for `(scalar, family, pixel_height, weight)` and
@@ -712,7 +747,9 @@ pub fn install_test_transport() {
 mod tests {
     use super::*;
 
+    use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use tairix_log::DiscardSink;
     use tairix_reclaim::{CacheBudget, PressureBand, ReclaimOwner, ReportedPressure};
 
@@ -744,6 +781,35 @@ mod tests {
         let mut client = GlyphClient::new();
         client.transport = Some(Box::new(transport));
         client
+    }
+
+    /// A shared tally of the service calls a [`CountingTransport`] served.
+    #[derive(Clone, Default)]
+    struct CallTally(Arc<AtomicUsize>);
+
+    impl CallTally {
+        fn get(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A [`SolidTestTransport`] that tallies the calls it served, so a test
+    /// can assert what a redraw *costs* rather than only what it looks like.
+    /// The tally is shared because the transport is moved into the client and
+    /// cannot be read back out.
+    struct CountingTransport(CallTally);
+
+    impl FontTransport for CountingTransport {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            self.0 .0.fetch_add(1, Ordering::Relaxed);
+            SolidTestTransport.call(request, reply)
+        }
+    }
+
+    /// A client over a counting transport, with the tally to read it by.
+    fn counting_client() -> (GlyphClient, CallTally) {
+        let tally = CallTally::default();
+        (client_with(CountingTransport(tally.clone())), tally)
     }
 
     /// A cache built exactly as production builds one — the shared
@@ -939,6 +1005,83 @@ mod tests {
             0,
             "no growth while the band forbids it"
         );
+    }
+
+    /// The bug this counting exists to catch: a client whose gauge was never
+    /// told a band admits nothing, so every character drawn is a fresh
+    /// service call. On a desktop redrawing text that is one IPC round trip
+    /// per glyph per repaint, and the font service carries all of it.
+    #[test]
+    fn an_unreported_band_makes_every_draw_a_service_call() {
+        static SINK: DiscardSink = DiscardSink;
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        let (mut client, tally) = counting_client();
+        client.cache = Some(ReclaimCache::new(
+            "test.font.glyphs",
+            glyph_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
+            glyph_cache_budget(1 << 30),
+            gauge,
+            &SINK,
+        ));
+
+        for _ in 0..8 {
+            assert!(coverage(&mut client, 'A', FamilyKey::MONO, 28).is_some());
+        }
+        assert_eq!(
+            tally.get(),
+            8,
+            "an unreported gauge retains nothing, so every draw re-fetches"
+        );
+        assert_eq!(client.cache.as_ref().expect("installed").len(), 0);
+
+        // Learning the band is the whole fix: the very next draw is retained
+        // and every repeat after it is free.
+        gauge.report(PressureBand::Normal);
+        for _ in 0..8 {
+            assert!(coverage(&mut client, 'A', FamilyKey::MONO, 28).is_some());
+        }
+        assert_eq!(tally.get(), 9, "one fetch to populate the cache, then none");
+    }
+
+    #[test]
+    fn redrawing_a_run_of_text_issues_no_further_calls() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let (mut client, tally) = counting_client();
+        client.cache = Some(cache);
+
+        let run = "Switchboard";
+        let distinct = {
+            let mut seen: Vec<char> = run.chars().collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen.len()
+        };
+        for _ in 0..5 {
+            for ch in run.chars() {
+                assert!(coverage(&mut client, ch, FamilyKey::MONO, 28).is_some());
+            }
+        }
+        assert_eq!(
+            tally.get(),
+            distinct,
+            "a steady-state repaint must cost nothing beyond the first sight of each scalar"
+        );
+    }
+
+    #[test]
+    fn trimming_releases_the_cache_and_needs_no_cache_to_be_installed() {
+        let (mut client, gauge) = cached_client();
+        assert_eq!(client.trim(), 0, "nothing retained, nothing to release");
+        assert!(coverage(&mut client, 'A', FamilyKey::MONO, 28).is_some());
+        assert!(client.cache.as_ref().expect("installed").charged_bytes() > 0);
+
+        gauge.report(PressureBand::Mild);
+        assert!(client.trim() > 0, "the band's ceiling is applied at once");
+        assert_eq!(client.cache.as_ref().expect("installed").len(), 0);
+
+        let mut bare = client_with(SolidTestTransport);
+        assert_eq!(bare.trim(), 0, "no cache installed is not an error");
+        assert!(bare.cache.is_none(), "trimming never builds one");
     }
 
     #[test]

@@ -54,6 +54,10 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # the runtime `ipc_call` transport; the base dependency stays host-neutral so
 # host tests inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The System Information client the memory-pressure band is read through, so
+# the font client's glyph cache obeys the same band every other cache on the
+# machine does.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 # The gallery model's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).

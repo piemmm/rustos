@@ -71,6 +71,10 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # dependency with the `rt` transport for the bare-metal build only, so host
 # tests still inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The System Information client the memory-pressure band is read through, so
+# the font client's glyph cache obeys the same band every other cache on the
+# machine does.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 # The engine library's host tests draw text, so they inject the shared solid
 # test transport (never a running `fontd`) via the `test-util` feature.

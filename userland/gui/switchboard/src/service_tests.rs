@@ -706,6 +706,41 @@ fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
     let t1 = service.wait_timeout_ns(0);
     let t2 = service.wait_timeout_ns(crate::SAMPLE_PERIOD_NS / 2);
 
-    assert!(t2 < t1);
-    assert!(t2 >= crate::schedule::MIN_WAIT_NS);
+    assert_eq!(t1, crate::SAMPLE_PERIOD_NS);
+    assert_eq!(t2, crate::SAMPLE_PERIOD_NS / 2);
+}
+
+/// A cycle whose own work costs a whole sample period must still park for a
+/// period afterwards. The deadline is anchored to the clock as it stood
+/// before the work, so without re-anchoring the wait the loop would find
+/// nothing left to wait for, re-enter the full cycle at once, and keep doing
+/// so — the runaway a busy monitor was observed to fall into.
+#[test]
+fn a_cycle_that_costs_a_whole_period_still_parks_for_one() {
+    let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);
+    let mut host = RecordingHost::new();
+
+    let entered = 0;
+    service.cycle(&mut host, &DeadTransport, entered, &NO_AUTHORITY);
+    let finished = entered + 3 * crate::SAMPLE_PERIOD_NS;
+
+    let timeout = service.wait_timeout_ns(finished);
+
+    assert_eq!(timeout, crate::SAMPLE_PERIOD_NS);
+    // And the adopted deadline is the one the next cycle checks, so the
+    // sample after this park is due exactly when the park ends.
+    assert_eq!(
+        service.cycle(
+            &mut host,
+            &DeadTransport,
+            finished + crate::SAMPLE_PERIOD_NS - 1,
+            &NO_AUTHORITY
+        ),
+        CycleOutcome::Continue
+    );
+    assert_eq!(
+        host.published.len(),
+        1,
+        "a cycle before the adopted deadline samples nothing"
+    );
 }

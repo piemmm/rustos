@@ -37,15 +37,6 @@ pub const MEMORY_SAMPLE_DIVIDER: u64 = 5;
 /// queries to every tick.
 pub const INVENTORY_SAMPLE_DIVIDER: u64 = MEMORY_SAMPLE_DIVIDER * 3;
 
-/// The minimum relative wait a single `waitset_wait` call is given, even
-/// when the schedule is already overdue.
-///
-/// A deadline that has already passed (e.g. after a slow publish attempt)
-/// still yields a strictly positive timeout rather than `0`, so the loop
-/// never spins requesting an immediate re-wait — the kernel wait-set call
-/// itself is the park point, and it always parks for at least this long.
-pub const MIN_WAIT_NS: u64 = 1_000_000;
-
 /// Advance the absolute next-sample deadline from `previous_deadline_ns`,
 /// anchored to the schedule rather than to `now_ns`, so successive samples
 /// land on a steady [`SAMPLE_PERIOD_NS`] cadence instead of drifting later
@@ -65,12 +56,44 @@ pub(crate) fn advance_deadline(previous_deadline_ns: u64, now_ns: u64) -> u64 {
     }
 }
 
-/// The relative timeout, in nanoseconds, a `waitset_wait` call should be
-/// given to park until `next_deadline_ns`, floored at [`MIN_WAIT_NS`] so an
-/// already-overdue deadline never yields a zero-length (spinning) wait.
+/// The deadline to hold and the relative timeout, in nanoseconds, to park
+/// until it — re-anchoring a deadline that is already at or behind `now_ns`.
+///
+/// The schedule is advanced from the clock reading taken *before* a cycle's
+/// work, but the park happens after it, so a cycle whose sampling, model
+/// rebuild, publish and repaint together cost a whole period leaves nothing
+/// left to wait for. Parking for that remainder would re-enter the full cycle
+/// at once, and again, and again: the sampler would free-run at whatever rate
+/// it can complete a cycle instead of its nominal one per period. Skipping the
+/// missed period instead is what bounds an expensive cycle's duty to the work
+/// itself plus a full idle period, and is why the returned timeout is always
+/// strictly positive.
+///
+/// The caller adopts the returned deadline, so the wait and the next cycle's
+/// due-check are decided against the same reading rather than drifting apart.
 #[must_use]
-pub(crate) fn wait_timeout_ns(next_deadline_ns: u64, now_ns: u64) -> u64 {
-    next_deadline_ns.saturating_sub(now_ns).max(MIN_WAIT_NS)
+pub(crate) fn park_until(next_deadline_ns: u64, now_ns: u64) -> (u64, u64) {
+    if let Some(remaining) = next_deadline_ns
+        .checked_sub(now_ns)
+        .filter(|left| *left > 0)
+    {
+        return (next_deadline_ns, remaining);
+    }
+    let deadline = advance_deadline(next_deadline_ns, now_ns);
+    // `advance_deadline` lands strictly ahead of `now_ns` in every case but
+    // one: a nanosecond clock at the top of its range, where the addition
+    // saturates and no deadline can be ahead of anything. Parking a whole
+    // period there keeps the loop parked instead of spinning on a schedule
+    // that can no longer move.
+    let remaining = deadline.saturating_sub(now_ns);
+    (
+        deadline,
+        if remaining > 0 {
+            remaining
+        } else {
+            SAMPLE_PERIOD_NS
+        },
+    )
 }
 
 /// Whether a periodic reading gated by `divider` (see
@@ -139,8 +162,8 @@ impl Cadence {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_deadline, periodic_due, wait_timeout_ns, Cadence, INVENTORY_SAMPLE_DIVIDER,
-        MEMORY_SAMPLE_DIVIDER, MIN_WAIT_NS, SAMPLE_PERIOD_NS,
+        advance_deadline, park_until, periodic_due, Cadence, INVENTORY_SAMPLE_DIVIDER,
+        MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS,
     };
 
     #[test]
@@ -167,20 +190,59 @@ mod tests {
     }
 
     #[test]
-    fn wait_timeout_is_the_remaining_time() {
-        // Values comfortably above the `MIN_WAIT_NS` floor, so the
-        // remaining time itself is returned.
-        assert_eq!(wait_timeout_ns(10_000_000, 4_000_000), 6_000_000);
+    fn park_until_waits_the_remaining_time_and_keeps_the_deadline() {
+        assert_eq!(park_until(10_000_000, 4_000_000), (10_000_000, 6_000_000));
     }
 
+    /// The regression this function exists for: a cycle that overran its
+    /// deadline must still park, and the cadence stays on the period grid
+    /// rather than drifting by the overrun.
     #[test]
-    fn wait_timeout_floors_at_the_minimum_when_overdue() {
-        assert_eq!(wait_timeout_ns(1_000, 5_000), MIN_WAIT_NS);
+    fn park_until_re_anchors_a_deadline_the_cycle_overran() {
+        let deadline = SAMPLE_PERIOD_NS;
+        let now = deadline + 1;
+        let (next, timeout) = park_until(deadline, now);
+        assert_eq!(next, deadline + SAMPLE_PERIOD_NS);
+        assert_eq!(timeout, SAMPLE_PERIOD_NS - 1);
     }
 
+    /// A cycle costing more than a whole period skips the period it missed
+    /// rather than firing a burst of catch-up samples back to back.
     #[test]
-    fn wait_timeout_saturates_rather_than_underflows() {
-        assert_eq!(wait_timeout_ns(0, u64::MAX), MIN_WAIT_NS);
+    fn park_until_skips_a_wholly_missed_period() {
+        let now = 10 * SAMPLE_PERIOD_NS;
+        assert_eq!(
+            park_until(SAMPLE_PERIOD_NS, now),
+            (now + SAMPLE_PERIOD_NS, SAMPLE_PERIOD_NS)
+        );
+    }
+
+    /// However far behind the schedule is — and however the deadline
+    /// arithmetic saturates — the loop parks: a zero-length wait would turn
+    /// the sampler into a busy poll of the whole cycle.
+    #[test]
+    fn park_until_never_returns_a_zero_wait() {
+        for now in [
+            0,
+            1,
+            SAMPLE_PERIOD_NS,
+            SAMPLE_PERIOD_NS + 1,
+            17 * SAMPLE_PERIOD_NS,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            for deadline in [0, 1, SAMPLE_PERIOD_NS, u64::MAX - 1, u64::MAX] {
+                let (_, timeout) = park_until(deadline, now);
+                assert!(timeout > 0, "deadline {deadline}, now {now}");
+            }
+        }
+    }
+
+    /// At the very top of the clock's range the deadline saturates, so the
+    /// timeout — not the distance to it — is what keeps the loop parked.
+    #[test]
+    fn park_until_still_parks_when_the_deadline_saturates() {
+        assert_eq!(park_until(u64::MAX, u64::MAX), (u64::MAX, SAMPLE_PERIOD_NS));
     }
 
     #[test]

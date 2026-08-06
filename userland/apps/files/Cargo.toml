@@ -62,12 +62,10 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # is decoded in a minimum-capability worker this binary re-enters itself as,
 # never in this process.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
-# The System Information client the memory-pressure band is read through, so
-# the artwork cache obeys the same band every other cache on the machine does.
+# The System Information client's shared memory-pressure wake/prime helper,
+# so the artwork cache obeys the same band every other cache on the machine
+# does.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
-# The shared reclaimable-memory model: the `PressureBand` the band read above
-# is published to this process's gauge as.
-tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The shared Reactive Alloy GUI controls: the in-place rename editor is the
 # one shared `TextField` (its caret/selection editor and validation-message
 # surface), never a browser-private text box (§2.2, §17.4).

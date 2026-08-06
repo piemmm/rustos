@@ -3273,8 +3273,12 @@ Shipped (headless-testable, model + renderer over injected seams):
 - Shared desktop libs (§2.2, one path each): `lib/raster`, `lib/theme`,
   `lib/geometry` (DPI/`Scale`),
   `lib/reclaim` (the reclaimable-cache model the desktop's cursor,
-  notification-glyph, pinned-artwork and window-furniture caches are all
-  built from, shared with the kernel's own caches),
+  notification-glyph, pinned-artwork, glyph and window-furniture caches are
+  all built from, shared with the kernel's own caches; a process gauge admits
+  nothing until told the band, so every `Run` binary that caches arms the
+  pressure wake through the one `tairix_procinfo::pressure` helper and
+  `lib/font` primes it when it builds its cache — `plans/SMARTRAM.md` SMART5,
+  `plans/FONT-SERVICE.md` §3.2),
   `lib/font` (the text-rendering front end: a small compiled-in console atlas
   — the primary Inconsolata EX face's repertoire only, `cargo xtask
   font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a

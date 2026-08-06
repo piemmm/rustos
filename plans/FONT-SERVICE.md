@@ -377,6 +377,30 @@ the hundreds of megabytes a hostile client could walk it up to. The byte budget
 closes that; the protocol's own size validation (§2.2) is a separate, unchanged
 security bound and is what refuses an out-of-range request in the first place.
 
+### 3.2 The client cache only works if the process knows its band
+
+`ReportedPressure` starts at `PressureBand::Critical` and `growth_permitted`
+is true only at `Normal`, so a client process that never publishes a band
+admits **nothing**: every character drawn becomes one `FONT_ENDPOINT` round
+trip, for the life of that process, and `fontd` carries the whole desktop's
+per-glyph traffic. That is a silent hundredfold cost, not a degraded cache, so
+the wiring is load-bearing and is defined once rather than per program:
+
+- `tairix_procinfo::pressure` is the single definition. `watch(set, token)`
+  adds the `WaitSourceKind::MemoryPressure` member **and** primes the gauge
+  with the band in force (the wake reports only *changes*, so neither half
+  works alone); `refresh()` re-reads on the wake and reports whether it moved.
+  Its `refresh_into(transport, gauge)` core is host-tested against a fixture.
+- Every `Run` binary that links `tairix-font/rt` arms it — `files`,
+  `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard`, and the desktop
+  `session` (which hosts the compositor's and taskbar's caches too) — and on
+  the wake calls `tairix_font::trim_glyph_cache()` alongside its own caches,
+  so glyph memory is returned when the band moves rather than at the next
+  draw. `fontd` arms the same member for its service-side cache.
+- `lib/font`'s lazy `rt` cache constructor primes the band in the same breath
+  as its RAM read, so a cache is never *born* against the fail-closed unknown
+  band even before its program's loop is up.
+
 ## 4. Cross-references
 
 - `AGENTS.md` §2.2, §2.3, §2.14, §5.2, §5.4, §16.2, §16.4, §16.5, §18.3,

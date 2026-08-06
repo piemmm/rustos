@@ -324,11 +324,19 @@ impl Service {
         }
     }
 
-    /// The relative timeout, in nanoseconds, to park the service until
-    /// its next sample is due.
+    /// The relative timeout, in nanoseconds, to park the service until its
+    /// next sample is due, adopting the deadline that wait is taken against.
+    ///
+    /// The deadline [`cycle`](Self::cycle) set was anchored to the clock as it
+    /// stood *before* that cycle's work, so a cycle whose own cost reached the
+    /// sample period leaves it already spent. Re-anchoring here — against the
+    /// reading the loop is actually about to park on — is what stops an
+    /// expensive cycle from re-firing immediately and indefinitely.
     #[must_use]
-    pub fn wait_timeout_ns(&self, now_ns: u64) -> u64 {
-        crate::schedule::wait_timeout_ns(self.next_sample_ns, now_ns)
+    pub fn wait_timeout_ns(&mut self, now_ns: u64) -> u64 {
+        let (deadline, timeout) = crate::schedule::park_until(self.next_sample_ns, now_ns);
+        self.next_sample_ns = deadline;
+        timeout
     }
 
     /// Apply one authenticated command from the desktop session.

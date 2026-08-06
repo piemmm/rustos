@@ -102,6 +102,12 @@ mod program {
     /// The wait-set token of the shell-child member.
     const CHILD_TOKEN: u64 = 3;
 
+    /// The wait-set token of the memory-pressure member: the kernel wakes the
+    /// park when the machine's pressure band changes, so the glyph cache is
+    /// trimmed as memory tightens instead of being held until something else
+    /// is starved.
+    const PRESSURE_TOKEN: u64 = 4;
+
     /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
     /// tightly-packed four-bytes-per-pixel row. One definition so the initial
     /// window and every resize build the surface identically (§2.2).
@@ -406,6 +412,9 @@ mod program {
                 return fail(EXIT_NO_EVENTS, "wait-set member refused");
             }
         }
+        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
+            return fail(EXIT_NO_EVENTS, "memory-pressure wake refused");
+        }
 
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) = client.create(
@@ -608,9 +617,13 @@ mod program {
                     }
                     return 0;
                 }
-                // A token outside the registered members cannot occur (the
-                // set holds exactly the three added above); re-park rather
-                // than act on a value this program never minted.
+                PRESSURE_TOKEN if tairix_procinfo::pressure::refresh() => {
+                    tairix_font::trim_glyph_cache();
+                }
+                // A band that did not move needs no trim, and a token outside
+                // the registered members cannot occur (the set holds exactly
+                // the four added above); either way, re-park rather than act
+                // on a value this program never minted.
                 _ => {}
             }
         }

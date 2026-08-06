@@ -89,6 +89,31 @@ reading is unavailable (a zero total yields a zero budget), every glyph is
 fetched and served without being retained: correct, merely one call per
 glyph.
 
+### A drawing program must keep its pressure band current
+
+The cache is governed by the process-wide gauge in `tairix_rt::pressure`, and
+that gauge answers `PressureBand::Critical` until the process reports
+otherwise — a fail-closed default, so a program that cannot see the machine's
+memory state never grows a cache on one that may be starving. Growth is
+permitted only at `PressureBand::Normal`, so an **unreported** gauge admits
+nothing at all and every character drawn costs a `FONT_ENDPOINT` round trip
+for the life of the process.
+
+Two things therefore hold together, and neither is optional:
+
+- Building the lazy `rt` cache primes the gauge (`tairix_procinfo::pressure`),
+  so a cache is never born against the fail-closed unknown band.
+- A program with an event loop arms the memory-pressure wake with
+  `tairix_procinfo::pressure::watch` and, on that wake, calls
+  `tairix_procinfo::pressure::refresh` and — when the band moved —
+  `tairix_font::trim_glyph_cache`. That is what keeps the band *current* and
+  hands the glyph memory back at the moment the machine tightens rather than
+  at the program's next draw.
+
+A drawing program that skips the second half does not merely cache
+imperfectly; it stops caching the moment the band tightens and does not
+resume, so the font service carries its per-glyph traffic instead.
+
 Construct a font by what it is for: `BitmapFont::console` for the native
 console size, `BitmapFont::monospace` for a fixed-pitch run at another size,
 `BitmapFont::new` for a named family, and `BitmapFont::for_role` for themed

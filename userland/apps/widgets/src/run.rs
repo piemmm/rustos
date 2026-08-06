@@ -60,6 +60,12 @@ mod program {
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
 
+    /// The wait-set token of the memory-pressure member: the kernel wakes the
+    /// park when the machine's pressure band changes, so the glyph cache is
+    /// trimmed as memory tightens instead of being held until something else
+    /// is starved.
+    const PRESSURE_TOKEN: u64 = 2;
+
     /// Exit code when the shared frame region could not be created or granted.
     const EXIT_NO_FRAMES: i32 = 81;
     /// Exit code when the event mailbox could not be bound or observed.
@@ -125,6 +131,9 @@ mod program {
                         let mut token = 0u64;
                         if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                             return Err(Errno::NotFound);
+                        }
+                        if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+                            tairix_font::trim_glyph_cache();
                         }
                     }
                     Err(err) => return Err(errno_from(err)),
@@ -317,6 +326,9 @@ mod program {
         ) != 0
         {
             return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
+        }
+        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
+            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wake refused"));
         }
         Ok((event_endpoint, set))
     }

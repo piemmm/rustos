@@ -928,6 +928,18 @@ weaker policy:
   drain. Reporting the member advances its observed band, so a band that
   deepens and relaxes before the waiter runs correctly reports nothing.
   Adding the member needs no capability and a non-zero `id` is refused.
+- **One definition of the wiring (`tairix_procinfo::pressure`).** Arming
+  the wake, reading the band, and publishing it to the process gauge are
+  the same three steps in every caching program, so they are written
+  once: `watch(set, token)` adds the member *and* primes the gauge with
+  the band in force (the member reports only changes, so neither half
+  works alone), and `refresh()` drains the edge on the wake, reporting
+  whether the band moved. The `refresh_into(transport, gauge)` core is
+  host-tested against a fixture, so the policy is exercised with no
+  service running. This is load-bearing, not convenience: an unwired
+  process admits nothing, so a cache it holds is not merely smaller but
+  entirely inert, and every value it would have cached is rebuilt on
+  every use — for a glyph, one IPC round trip per character drawn.
 - **A band-only read to drain the edge.**
   `SysinfoQueryId::MEMORY_PRESSURE_BAND` (28) →
   `IntrospectDomain::MemoryPressureBand` (18) returns the published band

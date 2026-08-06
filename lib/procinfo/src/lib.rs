@@ -65,6 +65,8 @@
 //!   viewers share.
 //! * [`kstats`] — the shared kernel-statistics fetches.
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
+//! * [`pressure`] — arming the memory-pressure wake and publishing the band
+//!   to this process's gauge, so every caching program does it one way.
 //! * [`process`] — the process-list paging walk and row rendering.
 //! * [`mount`] — the mount-table paging walk and row rendering.
 //! * [`netsock`] — the open-socket-table paging walk.
@@ -101,6 +103,7 @@ pub mod kstats;
 pub mod list;
 pub mod mount;
 pub mod netsock;
+pub mod pressure;
 pub mod process;
 pub mod raid;
 pub mod request;

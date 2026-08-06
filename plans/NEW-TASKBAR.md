@@ -914,11 +914,31 @@ What now stands:
   keepalive republish (10 s) that doubles as orphan detection; bounded
   consecutive-failure tolerance, then a stated exit — never an unbounded
   silent retry (§2.1).
+- **The park is re-anchored against the clock it actually parks on**
+  (`schedule::park_until`, adopted by `Service::wait_timeout_ns`). `cycle`
+  advances the deadline from the reading taken *before* its work, so a cycle
+  whose sampling, rebuild, publish and repaint together cost a whole period
+  leaves nothing to wait for; parking that remainder would re-enter the full
+  cycle at once and keep doing so — a monitor free-running at whatever rate it
+  can complete a cycle. `park_until` returns the deadline to hold *and* a
+  strictly positive timeout, skipping a wholly missed period rather than
+  replaying it, so an expensive cycle costs the work plus a full idle period
+  and never more. There is no minimum-wait floor: a floor would only hide the
+  overrun as a fast poll.
+- **The memory-pressure band is watched, not assumed**
+  (`tairix_procinfo::pressure`, permanent wait-set member, armed even with no
+  window open). This process caches rendered glyphs, and the process gauge
+  admits nothing until it is told the band, so without this every character it
+  draws would be an IPC round trip to `fontd`; on a band change it refreshes
+  and trims (`plans/FONT-SERVICE.md` §3.2).
 
 Tested: sampler scope probing and degradation, delta/permille arithmetic,
 stopped counting, top-task selection across samples, memory cadence divider;
 derive matrix incl. hysteresis boundaries and dominance; publisher
-change-only + keepalive + failure exits; schedule deadlines (tickless);
+change-only + keepalive + failure exits; schedule deadlines (tickless),
+including that an overrunning cycle still parks a full period and that the
+timeout is never zero at any clock value; the pressure member is armed even
+with the window closed;
 manifest ∩ ceiling behaviour is covered by the grant-intersection kernel
 tests it rides on. Docs: `userland/gui/switchboard/README.md`,
 `docs/src/desktop/switchboard.md` (+ the session/taskbar pages), `AGENTS.md`

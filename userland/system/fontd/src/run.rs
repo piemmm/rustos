@@ -63,7 +63,6 @@ mod program {
     use tairix_fontface::FAMILY_MANIFEST;
     use tairix_log::{Event, EventId, Level};
     use tairix_procinfo::IpcTransport;
-    use tairix_reclaim::PressureBand;
     use tairix_rt::{File, LogSink};
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
@@ -93,20 +92,6 @@ mod program {
         fn drop(&mut self) {
             tairix_rt::cachereport::withdraw();
         }
-    }
-
-    /// Read the machine's current memory-pressure band and publish it to the
-    /// process gauge the glyph cache consults, returning whether the band
-    /// actually moved.
-    ///
-    /// A refused or failed read publishes nothing: the gauge keeps the band it
-    /// already had rather than assuming the machine is comfortable, which
-    /// costs cache hits and never correctness.
-    fn refresh_pressure_band() -> bool {
-        let Ok(reported) = tairix_procinfo::memory_pressure_band(&IpcTransport) else {
-            return false;
-        };
-        tairix_rt::pressure::report(PressureBand::from_depth(reported.band))
     }
 
     /// Record a startup or runtime outcome. Recorded through the kernel audit
@@ -285,14 +270,7 @@ mod program {
             );
             return None;
         }
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::MemoryPressure,
-            0,
-            PRESSURE_TOKEN,
-        ) != 0
-        {
+        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             record(
                 SERVICE_UNAVAILABLE,
                 Level::Warn,
@@ -335,7 +313,7 @@ mod program {
                 continue;
             }
             if token == PRESSURE_TOKEN {
-                if refresh_pressure_band() {
+                if tairix_procinfo::pressure::refresh() {
                     service.trim_cache();
                 }
             } else {
@@ -380,14 +358,11 @@ mod program {
             );
             return 1;
         };
+        // Arms the pressure wake and primes the gauge with the band in force,
+        // so the cache never runs on the fail-closed unknown band.
         let Some(set) = bind_and_watch() else {
             return 1;
         };
-        // Start from the band in force now: the member reports only *changes*,
-        // so without this the cache would run on the gauge's fail-closed
-        // unknown state — retaining nothing — until the machine happened to
-        // move band.
-        refresh_pressure_band();
         record(SERVICE_READY, Level::Info, "fontd: serving FONT_ENDPOINT");
         serve(&mut service, set)
     }

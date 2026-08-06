@@ -82,7 +82,8 @@ mod tests;
 
 #[cfg(feature = "render")]
 pub use client::{
-    families, set_font_transport, set_glyph_cache, FontTransport, GlyphCache, GlyphKey,
+    families, set_font_transport, set_glyph_cache, trim_glyph_cache, FontTransport, GlyphCache,
+    GlyphKey,
 };
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};

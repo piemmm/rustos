@@ -909,6 +909,15 @@ mod program {
                 "cannot arm the command mailbox wait-set member",
             ));
         }
+        // Arms the band wake and reads the band in force now, so the glyph
+        // cache starts from what the machine actually reports rather than the
+        // fail-closed unknown that admits nothing.
+        if !tairix_procinfo::pressure::watch(set, WaitToken::MemoryPressure.as_u64()) {
+            return Err(fail(
+                EXIT_NO_WAIT_SOURCE,
+                "cannot arm the memory-pressure wait-set member",
+            ));
+        }
         Ok(set)
     }
 
@@ -1019,9 +1028,13 @@ mod program {
                 Some(WaitToken::WindowEvent) => {
                     drain_window_events(&mut service, &mut host, &authority);
                 }
-                // A token the loop never arms is a spurious wake: re-sample
+                Some(WaitToken::MemoryPressure) if tairix_procinfo::pressure::refresh() => {
+                    tairix_font::trim_glyph_cache();
+                }
+                // A band that did not move needs no trim, and a token the
+                // loop never arms is a spurious wake: either way, re-sample
                 // on the next iteration rather than acting on a guess.
-                None => {}
+                Some(WaitToken::MemoryPressure) | None => {}
             }
         }
     }

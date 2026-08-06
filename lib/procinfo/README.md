@@ -39,6 +39,9 @@ The crate provides:
 - `for_each_mount` / `render_mount` / `render_options` — the paged
   mount-table walk and its `source on target type fstype (options)`
   rendering.
+- `pressure::refresh_into` — reading the published memory-pressure band and
+  publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
+  definition every caching program keeps its band current through.
 
 Each consuming tool keeps its own argument grammar, usage banner, and error
 enum; this crate owns only the parts they share.
@@ -58,6 +61,12 @@ binary lands):
 - `args` / `write_stderr_line` — the shared argument-vector walk and the
   standard-error diagnostic sink the tool `Run` binaries use, written once
   here rather than pasted into each (`AGENTS.md` §2.2).
+- `pressure::watch` / `pressure::refresh` — arming the edge-triggered
+  `WaitSourceKind::MemoryPressure` wake against this process's gauge, and
+  draining it. `watch` also primes the gauge, because the wake reports only
+  *changes* and the gauge admits nothing until it is told a band: a program
+  that skips this does not cache imperfectly, it caches nothing at all and
+  rebuilds every value on every use (`plans/SMARTRAM.md` SMART5).
 
 The feature pulls the freestanding userland runtime `tairix-rt` and is enabled
 only for a bare-metal (`target_os = "none"`) program build; the host tooling
@@ -68,7 +77,9 @@ See the crate-level rustdoc for the full surface.
 ## Stability tier
 
 `experimental` — the surface tracks the `sysinfo-v1` ABI in `lib/abi` and is
-consumed by `userland/shell/sysinfo`, `userland/apps/ps`, and
-`userland/apps/mount`. It is `no_std` (with `alloc`) and depends only on the
-audited `lib/abi` crate (`AGENTS.md` §17.4). No `unsafe`, and no
+consumed by `userland/shell/sysinfo`, `userland/apps/ps`,
+`userland/apps/mount`, and every program that keeps a reclaimable cache. It is
+`no_std` (with `alloc`) and depends only on the audited `lib/abi` crate, the
+shared reference parser `lib/resref`, and the shared reclaim model
+`lib/reclaim` (`AGENTS.md` §17.4). No `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
