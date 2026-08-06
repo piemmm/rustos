@@ -460,11 +460,11 @@ reach it. In a `watchdog-diagnostics` build the port clears `DAIF.F` where the
 wedge lives — **but only when the boot probe (`fiq_cadence_enabled()`) proved a
 non-maskable FIQ is genuinely deliverable to the non-secure kernel.** The lock
 critical-section base mask is unconditionally I+F (the shippable discipline);
-`DaifIrqControl::disable` re-clears F *inside* the section, and
+`DaifIrqControl::disable` re-clears F *inside* the section,
 `exceptions::enable_fiq_delivery()` clears F on the `svc`/fault sync-handler
-entry, **only** under that runtime predicate. `halt_current_cpu` (`#0xf`) and
-the EL0 `SPSR` stay F-masked (nested-FIQ-unsafe), and the FIQ trap arm never
-re-clears F.
+entry, and the EL0 entry `SPSR` leaves F clear (B5), **only** under that
+runtime predicate. `halt_current_cpu` (`#0xf`) stays F-masked, and the FIQ trap
+arm never re-clears F (both genuinely nested-FIQ-unsafe).
 
 *Defect fixed here (Pi 4 boot lockup):* the discipline was originally gated on
 the **compile-time** feature alone (`daif::critical_section_mask(cfg!(...))`,
@@ -570,6 +570,54 @@ it cannot wedge, and no diagnostic value is lost — the handler body, the span
 worth observing, stays fully sampled. A `pre_silence` PC *inside* that tail is
 now a signature worth reading as "the resume state was destroyed", not as "the
 CPU was innocently returning".
+
+**B5 — the cadence must reach a core running *user* code — DONE.** A core is
+just as unsampleable while it runs a CPU-bound EL0 task as inside a masked
+kernel section, and for the same reason: exception entry to EL0 masks `DAIF.F`
+in hardware, so an EL0 `SPSR` that keeps F set makes the FIQ-routed cadence
+undeliverable for as long as the task stays in user mode. B1 originally kept the
+EL0 `SPSR` F-masked as "nested-FIQ-unsafe", over-generalising from the two
+windows where that is real (`halt_current_cpu`, the FIQ arm itself): EL0 is not
+inside an FIQ handler, the FIQ vector runs on `SP_EL1` with F re-masked by the
+PE, and both `eret` sequences already mask every asynchronous exception before
+programming `ELR_EL1`/`SPSR_EL1` (B4). Interrupted user code holds no kernel
+lock, so an EL0 sample is strictly safer than a kernel-section one.
+
+The consequence was a **false hard lockup on a healthy core**, and the reported
+shape is indistinguishable from a real wedge: the last liveness stamp is
+whatever kernel entry was sampled before the task settled in user mode, it then
+rots for the whole run, and a buddy reports `id=4082 … context=kernel
+sampled=pre_silence` with a stale `k_site`/`k_bt`/`k_lock` from that unrelated
+entry — while the core is demonstrably alive and taking thousands of IRQs. The
+soft detector mis-fires the same way (`classify` only reports a stall for a CPU
+*last seen in the kernel*, and a rotting kernel-context flag satisfies that),
+and `monopolises_cpu` — which fires only on a *user*-context sample — could
+never trigger at all, so the guard against a task withholding the CPU was dead
+code on exactly the configuration that has the sampler.
+
+The trigger is a **lone** runnable user task, which is what made it look
+intermittent: being tickless, the scheduler disarms the preemption one-shot for a
+sole runnable task, so its core takes no kernel entry at all and the pending
+cadence FIQ has no window to land in. Several runnable tasks on one core keep
+letting it through at each preemption entry — measured, `stress --cpu 20` is
+clean even *before* the fix while `stress --cpu 1` reports 4/4 — so it is the
+idle-ish desktop (one busy app, everything else parked) that shows it.
+
+Fixed by deciding the EL0 entry `SPSR` in one place from the boot probe:
+`userentry::el0_spsr(fiq_cadence)` clears `DAIF.F` when
+`watchdog::fiq_cadence_enabled()` is true and is otherwise the unchanged
+F-masked value, so a shippable image and a board whose probe answered
+`Unsupported` behave exactly as before (fail closed). Every later return to EL0
+restores the `SPSR` this entry established from the frame `vectors.s` saved, so
+there is one definition. Measured on the `virt` debug image (4 vCPU, `stress
+--cpu 1`): a spinner took **1** sample against its idle siblings' ~46 before the
+fix while thousands of IRQs still reached it, and the false
+`4080`/`4082`/`4084`/`4085` set reproduced 4/4; after the fix the same workload is
+clean 10/10 and a spinner is sampled in EL0 at the full cadence. Regression
+cover: `userentry`'s host tests pin the two `SPSR` values and that only the F bit
+differs, and the B3 vertical additionally asserts on the real board that a
+`Supported` probe leaves the EL0 entry state F-clear. Recorded as
+`plans/OPEN-DEFECTS.md` D29.
 
 Metal delivery on a real Pi 4B stays a boot-time hardware capability
 (`plans/FIX-HARDWARE-FEATURES.md`) — there the probe returns `Unsupported` and

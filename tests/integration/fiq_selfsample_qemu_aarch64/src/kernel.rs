@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::{
-    exceptions, gic, handle_panic_via_serial, qemu_exit, watchdog, SERIAL_SINK,
+    exceptions, gic, handle_panic_via_serial, qemu_exit, userentry, watchdog, SERIAL_SINK,
 };
 use tairix_arch_api::{CpuId, FeatureSupport};
 use tairix_fdt::Fdt;
@@ -34,6 +34,11 @@ const MAX_SPINS: u64 = 40_000_000_000;
 /// `SPSR_EL1.I` bit — the IRQ-mask state of the interrupted context. If set,
 /// the sampled code was running with `DAIF.I` masked, the property under test.
 const SPSR_I_MASK_BIT: u64 = 1 << 7;
+
+/// `SPSR_EL1.F` bit — the FIQ-mask state a context runs with. The EL0 entry
+/// state must leave it **clear** on a board where the probe proved the cadence
+/// is FIQ-routed, or a task running user code can never be sampled.
+const SPSR_F_MASK_BIT: u64 = 1 << 6;
 
 /// Set by the FIQ self-sample callback once it captures a live sample.
 static SAMPLED: AtomicBool = AtomicBool::new(false);
@@ -71,6 +76,8 @@ const FAIL_NOT_KERNEL: u16 = 8;
 const FAIL_PC_OUT_OF_RANGE: u16 = 9;
 const FAIL_BT_EMPTY: u16 = 10;
 const FAIL_BT_MISMATCH: u16 = 11;
+const FAIL_CADENCE_NOT_FIQ: u16 = 12;
+const FAIL_EL0_FIQ_MASKED: u16 = 13;
 
 fn note(id: EventId, message: &'static str) {
     log(
@@ -207,6 +214,23 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         TEST_PROBED,
         "aarch64 FIQ self-sample test: Group-0/FIQ deliverability Supported",
     );
+
+    // A `Supported` probe must actually route the cadence as an FIQ, and the
+    // state this port enters EL0 with must then leave `DAIF.F` clear. Both are
+    // read on the real board, not assumed: with FIQ masked in EL0 the cadence
+    // could only ever fire during a kernel entry, so a core running a
+    // CPU-bound *user* task would never be sampled at all — its liveness
+    // heartbeat would rot until a buddy core reported a hard lockup that never
+    // happened, and the guard against a task withholding the CPU (which fires
+    // only on a user-context sample) could never trigger either. Sampling user
+    // code is also strictly safer than sampling a kernel section: interrupted
+    // user code holds no kernel lock.
+    if !watchdog::fiq_cadence_enabled() {
+        qemu_exit::exit_failure(FAIL_CADENCE_NOT_FIQ);
+    }
+    if userentry::el0_spsr(watchdog::fiq_cadence_enabled()) & SPSR_F_MASK_BIT != 0 {
+        qemu_exit::exit_failure(FAIL_EL0_FIQ_MASKED);
+    }
 
     // 4. Install the self-sample callback and arm a short Group-0 (FIQ)
     //    cadence on this CPU. `init_local_watchdog` routes the cadence PPI to

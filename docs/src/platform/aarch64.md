@@ -1098,7 +1098,12 @@ system-register/assembly/MMIO operations to the freestanding target.
   because the syscall/fault path deliberately runs with `DAIF.F` clear so
   that a wedged core can be sampled. The same masking closes the
   `enter_user` EL0-entry `eret` (`userentry`), whose `ELR_EL1`/`SPSR_EL1`
-  writes are the same single-copy window.
+  writes are the same single-copy window. That entry also decides the
+  `SPSR` user mode *runs* with (`userentry::el0_spsr`): EL0 always runs
+  IRQ-unmasked so it is preemptible, and where the boot probe proved the
+  cadence is FIQ-delivered it additionally runs `DAIF.F`-clear, so a core
+  busy in a user task is sampled instead of going silent and being
+  mistaken for wedged.
 - **Syscall entry** (`syscall_entry`). The `svc` exception class decode
   and the `x8`/`x0`–`x5` → `tairix_abi` `[u64; SYSCALL_MAX_ARGS]`
   marshalling, with a set-once dispatch callback (the same shape the

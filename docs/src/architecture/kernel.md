@@ -346,6 +346,17 @@ the other CPUs; a buddy whose liveness is stale past
 `CPU_HARD_LOCKUP_CLEARED` (a `Warn`) closes the record when that CPU takes
 its sample again.
 
+For that to mean "wedged" rather than merely "busy", the cadence must be
+deliverable everywhere a healthy CPU can be — including while it runs a
+user task. Where a port delivers the cadence as a genuinely non-maskable
+interrupt (aarch64's Group-0/FIQ debug sampler), user mode therefore runs
+with that interrupt *unmasked* (`userentry::el0_spsr`): a core executing a
+CPU-bound user task takes its sample in EL0 and keeps its liveness
+heartbeat fresh. Leaving it masked in user mode made the heartbeat rot
+while the task ran and reported a hard lockup against a demonstrably
+healthy core, with every stale field (`k_site`, `k_bt`, `k_lock`) pointing
+at the unrelated kernel entry it was last sampled in.
+
 A detection carries the full diagnosis, never secrets: `cpu` (the locked
 CPU), `observer` (the CPU that caught a cross-CPU lockup), `stalled_ms` (how
 long it has been silent), and — from the last-known context each cadence

@@ -1671,6 +1671,146 @@ number of blocks.
 
 ---
 
+## D29 — a CPU-bound user task was never sampled, so a healthy core was reported hard-locked
+
+**State:** done. Reported from the field: opening the Switchboard window on the
+`virt` debug image "often" produced a lockup record in the debug log.
+
+**Mechanism.** The debug image's liveness cadence is delivered as a Group-0
+**FIQ** (the probe answers `Supported` on the single-Security-state `virt` GIC,
+`plans/WATCHDOG.md` B2), but the port entered EL0 with `DAIF.F` **set**. A task
+running in user mode therefore could not take the cadence at all: the FIQ could
+only land during a kernel entry, so a core executing a CPU-bound user task went
+unsampled for as long as the task ran. `last_seen_ns` kept the stamp of the last
+kernel entry, aged past the 10 s hard threshold, and a buddy reported `id=4080`
+→ `id=4082` → `id=4084` against a core that was demonstrably alive and taking
+thousands of IRQs. Because the stale sample also froze `wd_ctx_in_kernel`,
+`k_site`, `k_bt` and `k_lock` at that unrelated kernel entry, the record read
+exactly like a real kernel wedge — the field report's `k_site=syscall`,
+`k_lock=…/cfq/src/scheduler.rs:753 k_lock_state=held`,
+`sampled=pre_silence` were all stale, not the cause. Two further consequences:
+the soft detector mis-fired for the same reason (`classify` reports a stall only
+for a CPU *last seen in the kernel*, which a rotting flag satisfies), and
+`monopolises_cpu` — the guard against a task withholding the CPU, which fires
+only on a *user*-context sample — was unreachable on the one configuration that
+has the sampler.
+
+Nothing about the Switchboard is special: any user task that stays in EL0 for
+~10 s does it. The window's first paint (glyph rasterisation, chart and icon
+drawing) is simply long enough under TCG.
+
+**Why "often" and not "always" — the tickless interaction.** The trigger is a
+core running a *lone* runnable user task. Being tickless, the scheduler disarms
+the preemption one-shot when a task is the only runnable one on its CPU, so that
+core takes **no** kernel entry at all and the pending cadence FIQ has no window
+to land in. Put several runnable tasks on the same core and every preemption tick
+is a kernel entry that lets the FIQ through, so the cadence still lands and
+nothing is reported — measured: `stress --cpu 20` (20 spinners over 4 vCPUs) is
+**clean even before the fix**, while `stress --cpu 1` reports 4/4. That is why
+the defect looked intermittent and why it is the *idle-ish desktop* case — one
+busy app, everything else parked — that shows it.
+
+**Fix.** `kernel/arch/aarch64/src/userentry.rs` decides the EL0 entry `SPSR`
+once, from the boot probe: `el0_spsr(fiq_cadence)` clears `DAIF.F` when
+`watchdog::fiq_cadence_enabled()` is true, and is otherwise the unchanged
+F-masked value — so a shippable image (no FIQ routed at all) and a board whose
+probe answered `Unsupported` behave exactly as before (fail closed). Every later
+return to EL0 restores the `SPSR` this entry established from the frame
+`vectors.s` saved, so there is one definition of the EL0 mask state.
+`plans/WATCHDOG.md` B1's "the EL0 `SPSR` stays F-masked (nested-FIQ-unsafe)" was
+an over-generalisation from the two windows where nesting is genuinely unsafe
+(`halt_current_cpu`, the FIQ arm itself) and is corrected there: EL0 is not
+inside an FIQ handler, the FIQ vector runs on `SP_EL1` with F re-masked by the
+PE, both `eret` sequences already mask asynchronous exceptions before
+programming the return state (D23/B4), and interrupted user code holds no kernel
+lock — an EL0 sample is strictly safer than a kernel-section one. The
+diagnostic path needed no change: a non-kernel `pc` is omitted rather than
+disclosed raw, and the frame walk rejects a user return address and a
+below-floor frame pointer, so an EL0 sample yields one honest entry and cannot
+fault.
+
+**Evidence (A/B on the same tree, two kernels differing only in this
+condition).** `stress --cpu 1 --timeout 30s` after a scripted unlock + login on
+the 4-vCPU `virt` debug image: **before**, 4/4 runs produced the reported
+`4080`/`4082`/`4084`/`4085` set, and a per-CPU FIQ-delivery census (QEMU `-d
+int`) showed the spinner's core taking **1** sample while its idle siblings took
+~46, with thousands of IRQs delivered to it throughout — the core was never
+wedged; **after**, 10/10 runs clean. A live register dump during the reported
+"lockup" showed the accused core in `EL0t` with `PSTATE.I` clear and its PC
+advancing. `stress --cpu 20 --timeout 40s` is clean on **both** kernels, for the
+tickless reason above.
+
+**Regression cover.** `userentry`'s host tests pin both `SPSR` values, that only
+the F bit differs between them, that EL0t/IRQ-unmasked/SError+Debug-masked hold
+either way, and that an unprobed or shippable build keeps F masked. The
+`fiq_selfsample_qemu_aarch64` vertical additionally asserts on the real board
+that a `Supported` probe leaves the EL0 entry state F-clear, so the two cannot
+drift apart again.
+
+---
+
+## D30 — the Switchboard panel is not served at its cascade slot (OPEN)
+
+**State:** open, **deterministic**, and **not** caused by D29 — reproduced both
+inside the full matrix and standalone (`cargo xtask test --qemu --only
+taskbar-pin`), on a tree whose only other changes are D29's, which that binary
+does not compile in (it carries no `watchdog-diagnostics` symbols, so its EL0
+entry state is byte-identical to before).
+
+**Symptom.** `tairix-test-taskbar-pin-qemu-aarch64` fails its second
+screendump:
+
+```
+screendump …taskbar-pin-qemu-aarch64.pinned-bar.screendump.ppm shows no served
+Switchboard window at its cascade slot: only 0.000 of the window body differs
+from the desktop wallpaper behind it (expected >= 0.95)
+```
+
+**What the dumps show.** Comparing the vertical's own two dumps: 20 658 of
+786 432 pixels differ, and the change is **not** at the cascade slot the
+assertion samples — it is a flat, theme-background-coloured region low on the
+screen (rows ~576–703 gain ~11 700 background-coloured pixels between the two
+dumps, i.e. something *was* drawn there). So the panel is plausibly served but
+positioned somewhere other than the slot the checker reads, rather than never
+existing; the alternative (the click never raised it and the region is
+unrelated chrome) is not yet excluded. The first dump (bare pin slot) passes.
+
+**Next step.** Capture the guest's serial for a standalone run and decide
+between the two: an `id=3040` window-endpoint create + first present for the
+Switchboard means the panel is served and the defect is geometry (the cascade
+slot the compositor chose vs. the one `plans/NEW-TASKBAR.md` T15 asserts); their
+absence means the trailing-capsule click never reached the service.
+
+---
+
+## D31 — a QEMU vertical whose guest stays chatty can run unbounded (OPEN)
+
+**State:** open, **not** caused by D29 (same symbol-level argument as D30).
+Observed twice: `tairix-test-autoload-input-qemu-aarch64` ran **54 minutes**
+(guest clock 3264 s) before being killed by hand, holding the whole `cargo
+xtask ci` pipeline — every other job had long finished.
+
+**Two distinct problems.**
+
+1. *The choreography stalls.* The run ends `pointer script incomplete: a step's
+   readiness marker was not seen (or a dump it waited on never verified)`. The
+   guest is healthy and idle-ish while it stalls (47 s of host CPU across 54
+   minutes), so nothing is wedged — a readiness marker the script waits on
+   simply never arrives. Given D30 fails in the same graphical world, a common
+   desktop cause is likely; the serial tail is left at
+   `target/aarch64-unknown-none/debug/tairix-test-autoload-input-qemu-aarch64.serial.log`.
+2. *The budget cannot bound it.* The 300 s budget is deliberately an
+   **inactivity** budget ("the longest the guest may fall silent"), so a guest
+   that keeps emitting serial output can never trip it. Here the desktop's own
+   periodic refresh (the switchboard service's ~1 Hz `ipc_call` burst to
+   `sysinfod`, visible to the last line) is enough to keep it alive forever, so
+   a stalled choreography degrades into an unbounded CI hang rather than a
+   failure. An inactivity budget alone cannot bound a run; a wall-clock cap
+   (generous, sized to the choreography, not to the host's load) is needed
+   alongside it so a stalled vertical fails loudly instead of hanging.
+
+---
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall
