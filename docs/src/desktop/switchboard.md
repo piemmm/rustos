@@ -518,7 +518,8 @@ leaves them denied: fail closed, never optimistic.
 ## Waiting
 
 The loop is tickless and event-driven: **one** `waitset_wait` per iteration
-covers the termination signal, the command mailbox, and — only while a
+covers the termination signal, the command mailbox, the machine's
+memory-pressure band, and — only while a
 window is open — that window's event mailbox, with a timeout equal to the
 time until the next real sample is due. Sampling is strict: a cycle
 triggered by an input or command wake before the deadline is a no-op that
@@ -559,8 +560,20 @@ with its reason stated on `stderr` first:
 - `NotFound` / `PermissionDenied` from the endpoint (no session, or the
   session refused a stale instance) → clean exit — the service has no
   purpose without a session to report to;
-- five consecutive publish failures, or a wait-set failure → a stated
-  abnormal exit rather than an unbounded silent retry or a busy loop.
+- five consecutive **faulty** publish attempts, or a wait-set failure → a
+  stated abnormal exit rather than an unbounded silent retry or a busy loop.
+
+`WouldBlock` is explicitly **not** one of those faults. A call endpoint at
+capacity refuses the post outright rather than blocking, so a full queue
+says only that the session has not drained it yet — the transient
+back-pressure condition the kernel defines it to be. It is not evidence of
+a fault here nor of an absent session, so it costs the service nothing: the
+summary stays unacknowledged, the change gate re-offers it on the next
+sample, and one attempt per sample period is paced by the sampler rather
+than a retry loop. Counting it as a failure meant a desktop that was merely
+busy for five sample periods killed the monitor watching it, and nothing
+restarts one — the tray capsule then stayed dead until the user pressed it
+again after the session had reaped the corpse.
 
 Design details and constants live in the crate's rustdoc and
 `userland/gui/switchboard/README.md`.

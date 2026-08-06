@@ -33,8 +33,11 @@ use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
 use crate::view::Switchboard;
 
-/// Consecutive non-clean publish failures after which the service gives up
+/// Consecutive faulty publish attempts after which the service gives up
 /// rather than retrying forever.
+///
+/// A session that has simply not drained its queue yet is not counted: see
+/// [`Service::cycle`].
 pub const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = 5;
 
 /// A cheap-to-compare snapshot of every render input besides the
@@ -131,7 +134,9 @@ pub trait ServiceHost {
     /// The session's typed refusal or a transport failure.
     /// [`Errno::NotFound`] (nothing bound the endpoint) and
     /// [`Errno::PermissionDenied`] (the session refused this instance) are
-    /// the two the service stops cleanly on.
+    /// the two the service stops cleanly on;
+    /// [`Errno::WouldBlock`] (the session's queue is full) is back-pressure
+    /// the next sample retries.
     fn publish(&mut self, summary: TraySummary) -> Result<(), Errno>;
 
     /// Deliver `signal` to the process `pid`.
@@ -186,7 +191,8 @@ pub enum CycleOutcome {
     /// orphaned (a session restart left it behind).
     SessionRefused,
     /// Stop: [`MAX_CONSECUTIVE_PUBLISH_FAILURES`] publish attempts in a row
-    /// failed for a reason that is neither of the clean ones above.
+    /// failed for a reason that is neither of the clean ones above nor mere
+    /// back-pressure.
     PublishFailed,
 }
 
@@ -314,6 +320,15 @@ impl Service {
             }
             Err(Errno::NotFound) => CycleOutcome::SessionUnbound,
             Err(Errno::PermissionDenied) => CycleOutcome::SessionRefused,
+            // A full queue is the session not having drained it yet, not a
+            // fault of this instance and not evidence there is no session:
+            // the endpoint refuses a post at capacity so the caller can
+            // come back, which is what the next sample does — the summary
+            // still differs from the last one acknowledged, so the change
+            // gate re-offers it. Counting this towards the give-up budget
+            // let a desktop that was merely busy for a few seconds kill the
+            // monitor watching it, and nothing restarts one.
+            Err(Errno::WouldBlock) => CycleOutcome::Continue,
             Err(_) => {
                 if self.publisher.record_failure() >= MAX_CONSECUTIVE_PUBLISH_FAILURES {
                     CycleOutcome::PublishFailed

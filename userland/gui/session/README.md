@@ -505,9 +505,11 @@ mailbox is reported on `stderr` and dropped, never retried (`AGENTS.md`
   listening) and cleared, so it is never re-sent on a later publish.
 - `SeatReport { report }` — the unresponsive-owner view of this seat, from the
   session's own delivery evidence. Every app-ward window event is a
-  non-blocking mailbox send. To avoid flooding an app with samples it can
-  only act on the newest of, `pump` coalesces adjacent pointer motions over
-  one window into the latest position, while ensuring every sample still
+  non-blocking mailbox send. To avoid flooding an app with a dense gesture
+  it must drain one sample at a time from a bounded mailbox, `pump` folds
+  an adjacent run of one gesture over one window: motion to the latest
+  position, and wheel ticks in one direction to their sum (a reversal ends
+  the run). Every sample still
   drives the window manager's own state. The production event sink folds
   each outcome into the `vigil::HangTracker`: an owner whose sends come
   back refused as the kernel's transient `WouldBlock` backpressure signal

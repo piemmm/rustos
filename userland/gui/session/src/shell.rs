@@ -1084,26 +1084,34 @@ impl DesktopShell {
 
     /// Drain every pending event from `source`, routing each through
     /// [`handle`](Self::handle) against the monotonic `now_ns`, and return
-    /// their outcomes in order — coalescing an adjacent run of pointer
-    /// motion over the same window into the newest sample.
+    /// their outcomes in order — folding an adjacent run of one continuing
+    /// gesture over the same window into a single outcome.
     ///
     /// One drain is one instant: every event of this batch resolves against
     /// the same `now_ns`, which the embedder read when the source woke it.
     /// Every drained event still runs through [`handle`](Self::handle), so
     /// the window manager's own hover, drag, and cursor state track the full
     /// sample stream; only the *returned* outcome list is compressed. That
-    /// is what makes the coalescing safe: it is the app-ward forwarding path
-    /// (the embedder turns a [`ClientPointerMoved`](InputResponse::ClientPointerMoved)
-    /// outcome into one event to the owning app) that a dense mouse sweep
-    /// would otherwise flood with samples the app can only ever act on the
-    /// newest of — pointer position is level-triggered, not edge-triggered.
-    /// A run collapses only while it stays an unbroken sequence of
-    /// [`ClientPointerMoved`](InputResponse::ClientPointerMoved) outcomes
-    /// naming the *same* window: a press, a release, a scroll, a taskbar
-    /// response, an [`Ignored`](ShellOutcome::Ignored), or a motion over a
-    /// different window ends the run, so nothing the app must see (a
-    /// `Moved, Moved, Released` sequence still delivers both a `Moved` and
-    /// the `Released`) can ever be reordered or dropped.
+    /// is what makes the folding safe: it is the app-ward forwarding path
+    /// (the embedder turns each outcome into one event to the owning app)
+    /// that a dense gesture would otherwise flood with samples the app must
+    /// then drain one at a time from a bounded mailbox.
+    ///
+    /// Two gestures fold, each by the rule its own quantity obeys: pointer
+    /// motion carries a position, which is level-triggered, so the newest
+    /// sample supersedes the ones before it; wheel ticks carry a delta,
+    /// which is additive, so a run in one direction sums into a single
+    /// tick that leaves the app's scroll model exactly where the run
+    /// would. A reversal is a distinct gesture — a tick that clamps at a
+    /// range end is not recovered by the tick back — so it ends the run.
+    ///
+    /// A run holds only while it stays an unbroken
+    /// sequence of the same foldable outcome naming the *same* window: a
+    /// press, a release, a taskbar response, an
+    /// [`Ignored`](ShellOutcome::Ignored), a switch between motion and
+    /// scrolling, or one over a different window ends the run, so nothing
+    /// the app must see (a `Moved, Moved, Released` sequence still delivers
+    /// both a `Moved` and the `Released`) can ever be reordered or dropped.
     ///
     /// # Errors
     ///
@@ -1123,14 +1131,11 @@ impl DesktopShell {
         let mut outcomes: Vec<ShellOutcome> = Vec::new();
         while let Some(event) = source.poll()? {
             let outcome = self.handle(event, compositor, now_ns);
-            let collapses_into_last = pointer_moved_window(&outcome)
-                .zip(outcomes.last().and_then(pointer_moved_window))
-                .is_some_and(|(window, last_window)| window == last_window);
-            if collapses_into_last {
-                if let Some(last) = outcomes.last_mut() {
-                    *last = outcome;
-                }
-            } else {
+            let unfolded = match outcomes.last_mut() {
+                Some(last) => fold_outcome(last, outcome),
+                None => Some(outcome),
+            };
+            if let Some(outcome) = unfolded {
                 outcomes.push(outcome);
             }
         }
@@ -1165,16 +1170,42 @@ impl DesktopShell {
     }
 }
 
-/// The window a `ClientPointerMoved` outcome names, or `None` for every
-/// other outcome — the key [`pump`](DesktopShell::pump) collapses an
-/// adjacent motion run on.
-fn pointer_moved_window(outcome: &ShellOutcome) -> Option<WindowId> {
-    match outcome {
-        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window, .. }) => {
-            Some(*window)
+/// Fold `next` into `last` when the two are one continuing gesture over the
+/// same window — motion by latest-wins, wheel ticks by summing a run in one
+/// direction — returning [`None`] once folded and `Some(next)` when it must
+/// be kept as its own outcome. [`DesktopShell::pump`] states the rules.
+fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutcome> {
+    match (&mut *last, next) {
+        (
+            ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { window: into, .. }),
+            moved @ ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+                window, ..
+            }),
+        ) if *into == window => {
+            *last = moved;
+            None
         }
-        _ => None,
+        (
+            ShellOutcome::WindowManager(InputResponse::AppScroll {
+                window: into,
+                dx: sideways,
+                dy: downward,
+            }),
+            ShellOutcome::WindowManager(InputResponse::AppScroll { window, dx, dy }),
+        ) if *into == window && continues(*sideways, dx) && continues(*downward, dy) => {
+            *sideways = sideways.saturating_add(dx);
+            *downward = downward.saturating_add(dy);
+            None
+        }
+        (_, next) => Some(next),
     }
+}
+
+/// Whether `next` continues a run of `so_far` on one axis: a zero on either
+/// side adds nothing to decide, and two ticks of the same sign are one
+/// gesture. Opposite signs are not.
+const fn continues(so_far: i32, next: i32) -> bool {
+    so_far == 0 || next == 0 || (so_far < 0) == (next < 0)
 }
 
 /// The screen rectangle with the taskbar's edge band removed.

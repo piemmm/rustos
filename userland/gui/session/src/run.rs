@@ -1182,8 +1182,13 @@ mod program {
             // source: `call_recv` *blocks* when nothing is pending, so a
             // seat-input wake must never touch the window endpoint (and
             // vice versa). Readiness is a non-consuming peek, so a member
-            // left pending re-reports on the very next wait — handling one
-            // source per wake starves nothing.
+            // left pending re-reports on the very next wait, and the
+            // wait-set hands ready members out in turn — which is what
+            // makes one source per wake safe. Were it fixed priority by
+            // registration order instead, a hand on the mouse would hold
+            // the seat member ready for as long as it moved and every
+            // application blocked in a window call would hang until it
+            // stopped.
             if token == WINDOW_TOKEN {
                 // Serve the pending window request: the wait-set peeked a
                 // queued call and only this task ever dequeues, so the

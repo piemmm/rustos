@@ -232,7 +232,8 @@ a timeout equal to the time until the next real sample is due
 (`src/schedule.rs`). Sampling is strict: a cycle triggered by an input or
 command wake before the deadline is a no-op that never re-queries the
 system. That single wait covers every source (`src/wait.rs`):
-the termination signal, the command mailbox, and — only while a window is
+the termination signal, the command mailbox, the machine's memory-pressure
+band, and — only while a window is
 open — that window's event mailbox, which joins the set when the window
 opens and leaves it when the window closes so a closed window's channel is
 never left armed. There is no poll loop and no sleep anywhere.
@@ -241,8 +242,8 @@ never left armed. There is no poll loop and no sleep anywhere.
   tray reads as live, sparse enough that the ungated per-sample queries
   stay a negligible fraction of system load. Deadlines advance anchored to
   the schedule (not to "now"), so the cadence does not drift by the work
-  time of each cycle, and an overdue schedule resyncs rather than firing a
-  catch-up burst.
+  time of each cycle, and an overdue schedule skips the period it missed
+  rather than firing a catch-up burst.
 - **Memory cadence: every 5th sample** (`MEMORY_SAMPLE_DIVIDER`, i.e. every
   10 s) — the memory-pressure query is audited per call, so its rate is
   bounded independently of the sample period; the reading is carried
@@ -276,9 +277,18 @@ Exit rules — every abnormal exit states its reason on `stderr` first:
   exited) or **`PermissionDenied`** (the session refused this instance —
   e.g. an orphan after a session restart) → a stated **clean** exit `0`:
   the service has no purpose without a session to report to.
+- **Publish refused with `WouldBlock`** → back-pressure, not a fault, and
+  it costs the service nothing. A call endpoint at capacity refuses the
+  post outright rather than blocking, so a full queue says only that the
+  session has not drained it yet: the summary stays unacknowledged and the
+  change gate re-offers it next sample. Counting it towards the give-up
+  budget below let a desktop that was merely busy for five sample periods
+  kill the monitor watching it — and nothing restarts one, so the tray
+  capsule stayed dead until the user pressed it again after the session had
+  reaped the corpse.
 - **Any other publish failure** → the summary stays unacknowledged and is
-  retried next cycle; after 5 consecutive failures the service exits with
-  a stated reason rather than retrying forever.
+  retried next cycle; after 5 consecutive such faults the service exits
+  with a stated reason rather than retrying forever.
 - **Wait-set failure** → stated exit: continuing without a real park would
   busy-loop.
 - **Command mailbox bind refused** → stated exit: a monitor that can never

@@ -45,7 +45,12 @@ This crate owns:
   every segment keeps its full width whatever its slope, and consecutive
   segments overlap at the vertex they share — which is what joins them, with no
   seam and no darkened joint, since compositing an opaque source twice yields
-  the same pixel.
+  the same pixel. That perpendicular is scaled by the segment's length, which
+  is `u64::isqrt` over a widened sum of squares: bounded by construction, and
+  exact for a segment far longer than any screen. It was once a hand-rolled
+  Newton iteration that stopped when two successive estimates agreed — for a
+  squared length one below a perfect square the estimates cycle and never
+  agree, so an unlucky graph reading spun its process forever.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

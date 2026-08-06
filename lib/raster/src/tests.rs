@@ -503,6 +503,74 @@ fn a_degenerate_subpixel_ring_is_a_no_op() {
     assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
 }
 
+// ---- stroked polyline ------------------------------------------------
+
+/// Every slope draws, and draws in bounded time.
+///
+/// The regression: the segment length came from a hand-rolled Newton
+/// iteration that stopped only when two successive estimates agreed, and for
+/// a squared length one below a perfect square (8 here, from a (2, 2) step)
+/// the estimates cycle between two values and never agree. A graph trace or a
+/// furniture diagonal that happened to step that way wedged its process in a
+/// loop that issues no syscall — a pegged core, and a window that never
+/// answers again.
+#[test]
+fn a_stroke_of_any_slope_draws_and_terminates() {
+    const CENTRE: i32 = 4 * SUBPIXEL;
+    for dx in -24..=24 {
+        for dy in -24..=24 {
+            let mut s = Surface::new(8, 8).expect("allocates");
+            s.stroke_polyline(
+                &[(CENTRE, CENTRE), (CENTRE + dx, CENTRE + dy)],
+                SUBPIXEL,
+                RED,
+            );
+            let painted = s.pixels().iter().any(|p| *p != Pixel::TRANSPARENT);
+            // A step of a whole pixel or more always leaves a mark; a shorter
+            // one may fall between the coverage samples, and coincident
+            // points are no segment at all.
+            if dx.abs() >= SUBPIXEL || dy.abs() >= SUBPIXEL {
+                assert!(painted, "step ({dx}, {dy}) drew nothing");
+            } else if (dx, dy) == (0, 0) {
+                assert!(!painted, "coincident points are not a segment");
+            }
+        }
+    }
+}
+
+/// A segment far longer than a screen keeps its stated weight.
+///
+/// The regression: the squared length was accumulated in `i32` and saturated,
+/// so a long segment measured shorter than it is and its perpendicular offset
+/// — the half weight divided by that length — came out proportionally too
+/// large. A one-pixel line then painted as a band tens of pixels wide,
+/// swallowing the surface.
+#[test]
+fn a_stroke_longer_than_the_surface_keeps_its_weight() {
+    let mut s = Surface::new(64, 64).expect("allocates");
+    let far = 2_000_000;
+    s.stroke_polyline(&[(-far, -far), (far, far)], SUBPIXEL, RED);
+
+    let on_diagonal = s.get(10, 10).expect("in bounds");
+    assert!(on_diagonal.a > 0, "the trace itself must be drawn");
+    for (x, y) in [(0, 63), (63, 0), (0, 40), (40, 0)] {
+        assert_eq!(
+            s.get(x, y),
+            Some(Pixel::TRANSPARENT),
+            "a hairline must not reach ({x}, {y})"
+        );
+    }
+}
+
+#[test]
+fn a_stroke_needs_two_points_and_a_positive_weight() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.stroke_polyline(&[(0, 0)], SUBPIXEL, RED);
+    s.stroke_polyline(&[(0, 0), (4 * SUBPIXEL, 0)], 0, RED);
+    s.stroke_polyline(&[(0, 0), (4 * SUBPIXEL, 0)], -SUBPIXEL, RED);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
 // ---- blit ------------------------------------------------------------
 
 #[test]

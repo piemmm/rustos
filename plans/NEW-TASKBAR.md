@@ -912,8 +912,18 @@ What now stands:
 - **Publish on change** over `ipc_call` to the seat-scoped
   `SWITCHBOARD_ENDPOINT`: one publish per changed summary, plus a slow
   keepalive republish (10 s) that doubles as orphan detection; bounded
-  consecutive-failure tolerance, then a stated exit — never an unbounded
+  consecutive-**fault** tolerance, then a stated exit — never an unbounded
   silent retry (§2.1).
+- **Back-pressure is not a fault, and must never cost the service its
+  life.** A call endpoint at capacity refuses the post outright rather than
+  blocking, so `WouldBlock` says only that the session has not drained its
+  queue yet. It is excluded from the give-up budget: the summary stays
+  unacknowledged, the change gate re-offers it next sample, and one attempt
+  per period is paced by the sampler, not a retry loop. Counting it let a
+  busy desktop kill the monitor watching it — and nothing restarts one, so
+  the tray capsule stayed dead. The two clean exits (`NotFound`,
+  `PermissionDenied`) still catch the genuinely session-less cases, so
+  orphan detection is unweakened.
 - **The park is re-anchored against the clock it actually parks on**
   (`schedule::park_until`, adopted by `Service::wait_timeout_ns`). `cycle`
   advances the deadline from the reading taken *before* its work, so a cycle

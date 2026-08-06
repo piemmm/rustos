@@ -8235,7 +8235,10 @@ where
         // Owner-checked membership snapshot (a forged/foreign handle fails
         // closed `NotFound`). Membership can be mutated only by this same
         // task, which is about to park inside this call, so one snapshot is
-        // stable for the whole wait.
+        // stable for the whole wait. The registry rotates it to resume after
+        // the member the previous wait reported, which is what makes the
+        // first-ready scan below a fair round robin rather than a fixed
+        // priority by registration order.
         let members = crate::waitset::members(caller.task_id.0, set)?;
 
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -8345,7 +8348,7 @@ where
                 break Err(Errno::DeviceFault);
             }
             let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
-            // Scan in registration order; first ready wins. Each member's
+            // First ready in the rotated snapshot wins. Each member's
             // readiness is the non-consuming, caller-re-checked peek of
             // `waitset_member_ready`, so a faulting `token_out` below never
             // drops a delivered event and a torn-down resource simply is
@@ -8496,6 +8499,11 @@ where
                 band,
             );
         }
+        // Advance the round robin past the member just reported, so the next
+        // wait scans the rest of the set first. Recorded only once the token
+        // has actually reached the caller: a wait that failed to report
+        // reported nothing, and must not cost the member its turn.
+        let _ = crate::waitset::note_reported(caller.task_id.0, set, kind, id);
         Ok(0)
     }
 
@@ -29219,6 +29227,100 @@ mod tests {
 
         crate::callreg::unregister(EndpointId(id));
         assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
+    }
+
+    /// Two members ready at once are reported in turn, not by registration
+    /// order.
+    ///
+    /// The regression: endpoint readiness is a peek the *caller's* drain
+    /// clears, so a server that handles one source per wake leaves the others
+    /// pending. Awarding the wait to the first-registered ready member then
+    /// starves everything behind a source that is busy — a desktop draining a
+    /// dragged pointer never serves the window endpoint its applications are
+    /// blocked in, and they hang for as long as the drag lasts.
+    #[test]
+    fn waitset_wait_reports_two_ready_members_in_turn() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5F03), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5F03, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5F03),
+            caps: &caps,
+        };
+
+        // Two endpoints the caller owns, each left holding an undrained
+        // request, so both members stay ready across every wait.
+        let poster = make_caps_record(99, &[], sink);
+        let mut endpoints = Vec::new();
+        for id in [0xCA11_6001_u64, 0xCA11_6002] {
+            let creator = make_caps_record(0x5F03, &[], sink);
+            let ep = Arc::new(
+                CallEndpoint::create(
+                    EndpointId(id),
+                    &creator,
+                    CapabilitySet::empty(),
+                    CapabilitySet::empty(),
+                    CallEndpointLimits {
+                        max_request: 64,
+                        max_reply: 64,
+                        capacity: 4,
+                    },
+                    sink,
+                )
+                .expect("endpoint"),
+            );
+            crate::callreg::register(ep.clone(), sink).expect("registered");
+            ep.post(&poster, 99, b"x", u64::MAX, sink)
+                .expect("post a request");
+            endpoints.push(ep);
+        }
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_ENDPOINT, 0xCA11_6001, 0xAA)
+            .expect("add the busy member");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_ENDPOINT, 0xCA11_6002, 0xBB)
+            .expect("add the member behind it");
+
+        let reported = |h: &KernelSyscallHandlers<'_, TestArch>| {
+            assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+            let bytes = read_reply_page(
+                aspaces
+                    .read()
+                    .resolve(SecTaskId(0x5F03))
+                    .expect("registered")
+                    .1,
+                8,
+            );
+            u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
+        };
+
+        assert_eq!(
+            [reported(&h), reported(&h), reported(&h), reported(&h)],
+            [0xAA, 0xBB, 0xAA, 0xBB],
+            "a member that is always ready must not hold the scan head"
+        );
+
+        for id in [0xCA11_6001, 0xCA11_6002] {
+            crate::callreg::unregister(EndpointId(id));
+        }
+        drop(endpoints);
+        assert_eq!(crate::waitset::release_owned_by(0x5F03), 1);
     }
 
     /// A `CallReply` wait-set member reports ready when the reply to a

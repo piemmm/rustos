@@ -183,6 +183,78 @@ fn repeated_publish_failures_eventually_stop_the_service() {
     );
 }
 
+/// A desktop that has not drained its queue must never cost this service
+/// its life.
+///
+/// The regression, and the whole reason the tray capsule went permanently
+/// dead: a call endpoint at capacity refuses the post outright rather than
+/// blocking, so a session busy enough to leave its queue full for five
+/// sample periods used to exhaust the give-up budget and the monitor exited
+/// — and nothing restarts one. It is back-pressure, not a fault: the
+/// summary is still unacknowledged, so the next sample simply offers it
+/// again, and one attempt per period is not a retry loop.
+#[test]
+fn a_session_that_has_not_drained_its_queue_never_stops_the_service() {
+    let mut host = RecordingHost::new();
+    host.publish_refusal = Some(Errno::WouldBlock);
+    let mut service = service();
+
+    let periods = MAX_CONSECUTIVE_PUBLISH_FAILURES * 4;
+    for period in 1..=periods {
+        assert_eq!(
+            cycle(
+                &mut service,
+                &mut host,
+                u64::from(period).saturating_mul(crate::SAMPLE_PERIOD_NS)
+            ),
+            CycleOutcome::Continue
+        );
+    }
+
+    // Every period tried, so the summary is offered the moment the session
+    // drains rather than waiting on a keepalive.
+    assert_eq!(host.published.len(), periods as usize);
+    host.publish_refusal = None;
+    assert_eq!(
+        cycle(
+            &mut service,
+            &mut host,
+            u64::from(periods + 1).saturating_mul(crate::SAMPLE_PERIOD_NS)
+        ),
+        CycleOutcome::Continue
+    );
+    assert_eq!(host.published.len(), periods as usize + 1);
+}
+
+/// Back-pressure does not launder a genuine fault: a real failure that
+/// follows one still counts.
+#[test]
+fn back_pressure_does_not_clear_the_give_up_budget() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let mut period = 0;
+    let mut next = |host: &mut RecordingHost, service: &mut Service, refusal| {
+        host.publish_refusal = refusal;
+        period += 1;
+        cycle(service, host, period * crate::SAMPLE_PERIOD_NS)
+    };
+
+    for _ in 1..MAX_CONSECUTIVE_PUBLISH_FAILURES {
+        assert_eq!(
+            next(&mut host, &mut service, Some(Errno::DeviceFault)),
+            CycleOutcome::Continue
+        );
+    }
+    assert_eq!(
+        next(&mut host, &mut service, Some(Errno::WouldBlock)),
+        CycleOutcome::Continue
+    );
+    assert_eq!(
+        next(&mut host, &mut service, Some(Errno::DeviceFault)),
+        CycleOutcome::PublishFailed
+    );
+}
+
 #[test]
 fn an_open_command_shows_the_panel_without_waiting_for_a_cycle() {
     let mut host = RecordingHost::new();

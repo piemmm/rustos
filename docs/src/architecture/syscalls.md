@@ -813,6 +813,25 @@ legitimately mints afresh. Wrappers
 `tairix_rt::fd_grant` / `tairix_rt::fd_redeem`; C stubs
 `tairix_sys_fd_grant` / `tairix_sys_fd_redeem`.
 
+`waitset_wait` (no. 45) reports **one** member per call, and hands the
+ready ones out **in turn**. Most member kinds are level-triggered peeks
+that only the owner's own drain clears (an endpoint stays ready while a
+request is queued, a seat while input is buffered), so several are
+routinely ready at once and a server that handles one source per wake
+leaves the rest pending. Awarding every wait to the first-registered
+ready member would therefore be a fixed priority, and a source that is
+busy would starve everything behind it indefinitely — a desktop draining a
+moving pointer would never serve the window endpoint its applications are
+blocked in, never reap an exited child, and never drain the queues those
+peers post to, so their sends would begin failing `WouldBlock` and the
+peers would conclude the desktop was gone. The set instead keeps a resume
+cursor: each wait scans from just after the member the previous wait
+reported, wrapping once, so every ready member reaches the head within one
+lap and no source can hold it. Registration order still decides within a
+lap, the cursor moves only when a token actually reached the caller (a
+wait that failed to report costs the member nothing), and a member removed
+in the meantime simply falls back to registration order.
+
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
 caller holds** (owner-checked at add, oracle-free `NotFound` otherwise),

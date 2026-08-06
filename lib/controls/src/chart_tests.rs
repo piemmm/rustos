@@ -236,6 +236,35 @@ fn a_chart_renders_in_both_themes() {
     );
 }
 
+/// Every reading a live series can take plots, at every width the instrument
+/// is laid out at.
+///
+/// The regression this covers is the one a monitor actually hit: a chart is
+/// fed fresh measurements every sample, so its trace steps by a different
+/// amount each time, and the shared stroke path used to compute a segment's
+/// length by an iteration that never converged for certain lengths. One
+/// unlucky reading wedged the drawing process in a loop it never left — the
+/// window simply stopped repainting and a core sat at full tilt.
+#[test]
+fn every_reading_plots_at_every_width() {
+    let theme = Theme::dark();
+    let ink = cpu(&theme);
+    for width in 9..=20 {
+        for reading in 0..=1000_u16 {
+            let surface = chart_surface_of(
+                &Chart::new(PressureKind::Cpu).with_samples([reading, 0]),
+                &theme,
+                width,
+                H,
+            );
+            assert!(
+                has_pixel(&surface, ink),
+                "a {width}-wide chart dropped the reading {reading}"
+            );
+        }
+    }
+}
+
 // --- Fail-closed ----------------------------------------------------------
 
 #[test]

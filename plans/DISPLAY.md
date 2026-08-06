@@ -468,6 +468,16 @@ is the only difference).
   revocation*, so a session that lost its seat wakes, observes the typed
   `SeatRevoked` on its next drain, and tears down instead of parking
   forever or scribbling on.
+- **Input must never starve the session's other duties.** The session
+  handles one woken source per wake, so its seat member sharing a set with
+  the window endpoint, the child reaper and the service mailboxes only
+  works because `waitset_wait` hands ready members out **in turn** (the
+  registry's resume cursor, `docs/src/architecture/syscalls.md`). Under
+  first-registered priority a hand on the mouse held the seat member ready
+  continuously and nothing else in the set was ever served: applications
+  blocked in a window call hung, exits went unreaped, and the queues peers
+  post to filled until their sends failed `WouldBlock` — which the tray
+  monitor then read as five publish failures and exited on.
 - **A full-screen frame ring exceeds the single buddy block.** A shared
   region is backed by a *list* of buddy chunks (`SharedChunk`) mapped into
   one guard-bracketed contiguous virtual window, so the double buffer is

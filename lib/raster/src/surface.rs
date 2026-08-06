@@ -11,6 +11,7 @@
 //! routine trimming its own geometry to an edge.
 
 use core::mem::size_of;
+use core::num::NonZeroU64;
 use core::ops::Range;
 
 use alloc::vec;
@@ -390,10 +391,16 @@ impl Surface {
             let (bx, by) = pair[1];
             let dx = bx.saturating_sub(ax);
             let dy = by.saturating_sub(ay);
-            let len = isqrt(dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)));
-            if len == 0 {
+            // Widened before squaring: the sum of two squared `i32`
+            // components cannot overflow a `u64`, so a segment spanning a
+            // large surface keeps its true length instead of saturating to a
+            // shorter one and over-widening its own stroke.
+            let (mx, my) = (u64::from(dx.unsigned_abs()), u64::from(dy.unsigned_abs()));
+            // Coincident points are no segment, and a zero length has no
+            // perpendicular to offset along.
+            let Some(len) = NonZeroU64::new((mx * mx + my * my).isqrt()) else {
                 continue;
-            }
+            };
             // Perpendicular to (dx, dy) is (-dy, dx), scaled to the half
             // weight. Rounding, not truncating, is what keeps a hairline at its
             // full width instead of fading it toward nothing.
@@ -600,30 +607,18 @@ pub const SUPERSAMPLE: u32 = SUBPIXEL.unsigned_abs() / 2;
 
 /// One component of a stroke's half-width offset: `component * half / len`,
 /// rounded to the nearest sub-unit and keeping its sign.
-fn perpendicular(component: i32, half: i32, len: i32) -> i32 {
-    let scaled = component.saturating_mul(half);
-    let rounded = (scaled.saturating_abs().saturating_add(len / 2)) / len;
+///
+/// `len` is the segment's own length, so it is never shorter than either
+/// component and the quotient never exceeds `half`.
+fn perpendicular(component: i32, half: i32, len: NonZeroU64) -> i32 {
+    let scaled = i64::from(component) * i64::from(half);
+    let rounded = (scaled.unsigned_abs() + len.get() / 2) / len.get();
+    let rounded = i32::try_from(rounded).unwrap_or(i32::MAX);
     if scaled < 0 {
         -rounded
     } else {
         rounded
     }
-}
-
-/// The floor of the square root of a non-negative `n`, by Newton's method. A
-/// first-party helper because the workspace minimum Rust version predates
-/// `i32::isqrt`.
-fn isqrt(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut x = n;
-    let mut prev = 0;
-    while x != prev {
-        prev = x;
-        x = i32::midpoint(x, n / x);
-    }
-    x
 }
 
 /// The source indices along one axis whose destination index `origin + i` falls

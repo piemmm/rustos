@@ -488,10 +488,13 @@ independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   calm rather than freezing a dead service's last summary.
 - **The session's own delivery evidence.** The desktop is the one component
   that observes whether an app drains its window events: every app-ward
-  event is a non-blocking mailbox send. To avoid flooding an app with samples
-  it can only act on the newest of, `pump` coalesces adjacent pointer motions
-  over one window into the latest position, while ensuring every sample still
-  drives the window manager's own hover and drag state. The production event
+  event is a non-blocking mailbox send. To avoid flooding an app with a dense
+  gesture it must then drain one sample at a time from a bounded mailbox,
+  `pump` folds an adjacent run of one gesture over one window — motion by
+  latest-wins (a position is level-triggered) and wheel ticks by summing a run
+  in one direction (a delta is additive, and a reversal ends the run) — while
+  ensuring every sample still drives the window manager's own hover and drag
+  state. The production event
   sink folds each outcome into the `vigil::HangTracker` — an owner whose sends
   come back refused as the kernel's transient `WouldBlock` back-pressure
   signal continuously for `UNRESPONSIVE_AFTER_NS` (4 s) is flagged *not
@@ -790,10 +793,12 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
 - `pump(source, &mut Compositor, now_ns)` drains every pending event, routing
   each through `handle(event, &mut Compositor, now_ns)` and returning a
-  `ShellOutcome` per event. To avoid flooding an app with samples it can only
-  act on the newest of, adjacent pointer motions over one window are
-  coalesced into the latest position in the returned list; every sample still
-  drives the window manager's own hover and drag state, so the coalescing
+  `ShellOutcome` per event. To avoid flooding an app with a dense gesture, an
+  adjacent run of one gesture over one window is folded in the returned list:
+  pointer motions collapse to the latest position, and wheel ticks in one
+  direction sum into a single delta (a reversal ends the run, because a tick
+  that clamps at a range end is not recovered by the tick back). Every sample
+  still drives the window manager's own hover and drag state, so the folding
   is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder
   may observe, or a `Taskbar` response. One drain is one instant: the
   embedder reads the monotonic clock once when the source wakes it and every

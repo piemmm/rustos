@@ -1532,6 +1532,116 @@ fn pump_motion_run_interrupted_by_different_outcome_does_not_collapse_across_int
     );
 }
 
+/// A wheel delta is additive, so a run of ticks one way is one app-ward
+/// event carrying their sum.
+///
+/// The regression: wheel ticks were the one gesture `pump` never folded, so
+/// a fast scroll sent the owning app one event — and cost it one full
+/// repaint — per tick, and could outrun its bounded event mailbox.
+#[test]
+fn pump_folds_a_run_of_wheel_ticks_over_one_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+
+    let events = &[
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+    ];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(
+        outcomes,
+        alloc::vec![ShellOutcome::WindowManager(InputResponse::AppScroll {
+            window,
+            dx: 0,
+            dy: 3,
+        })]
+    );
+}
+
+/// A reversal is a separate gesture: folding it would move the app's scroll
+/// model somewhere the tick-by-tick sequence would not, because a tick that
+/// clamps at a range end is not recovered by the tick back.
+#[test]
+fn pump_ends_a_wheel_run_at_a_reversal() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+
+    let events = &[
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        InputEvent::PointerScrolled { dx: 0, dy: -1 },
+    ];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(
+        outcomes,
+        alloc::vec![
+            ShellOutcome::WindowManager(InputResponse::AppScroll {
+                window,
+                dx: 0,
+                dy: 2,
+            }),
+            ShellOutcome::WindowManager(InputResponse::AppScroll {
+                window,
+                dx: 0,
+                dy: -1,
+            }),
+        ]
+    );
+}
+
+/// Motion and wheel are different gestures over the same window, so neither
+/// swallows the other.
+#[test]
+fn pump_keeps_a_wheel_tick_and_a_motion_apart() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+
+    let events = &[
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        moved(251, 251),
+        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+    ];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes.len(), 3);
+    assert!(matches!(
+        outcomes[0],
+        ShellOutcome::WindowManager(InputResponse::AppScroll { dy: 1, .. })
+    ));
+    assert!(matches!(
+        outcomes[1],
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { .. })
+    ));
+    assert!(matches!(
+        outcomes[2],
+        ShellOutcome::WindowManager(InputResponse::AppScroll { dy: 1, .. })
+    ));
+}
+
 #[test]
 fn pump_does_not_coalesce_adjacent_non_motion_outcomes() {
     let mut shell = shell();

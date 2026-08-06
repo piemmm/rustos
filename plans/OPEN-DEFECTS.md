@@ -385,6 +385,18 @@ The open items, in priority order:
   diagnostic that misdirected the reading is fixed too: a kernel kthread body
   now stamps `k_site=kernel_body` instead of sharing `user_switch` with a real
   user task's EL0 run.
+- **D33 — `waitset_wait` fixed-priority starvation — DONE.** A
+  level-triggered member with work outstanding held the scan head, so a
+  server handling one source per wake served nothing else. The registry now
+  rotates the scan past the member each wait reported.
+- **D34 — the tray monitor exited on session back-pressure — DONE.** A full
+  session queue (`WouldBlock`) counted as a publish fault, so five busy
+  sample periods killed the monitor; nothing restarts one. Back-pressure is
+  now excluded from the give-up budget.
+- **D35 — an app-ward window event is dropped when its mailbox is full
+  (OPEN).** The session's delivery is one non-blocking send with no
+  hold-back, so a state edge (`Resized`, `FilePicked`, …) can be lost.
+  Needs a "destination has space" wait-set member kind first.
 - **D25 — `boot_audit_ring`'s scripted test clock was process-wide, making its
   exact-instant assertions order-dependent — DONE.** Noticed while running the
   `kernel/core` suite for D24: `records_are_retained_and_read_non_destructively`
@@ -1968,6 +1980,163 @@ repurpose `preempt_inkernel_qemu_aarch64` (D24) or `fiq_selfsample_qemu_aarch64`
 (D29).
 
 ---
+
+## D33 — `waitset_wait` was a fixed priority, so a busy source starved every member behind it — DONE
+
+**Symptom.** The desktop's Switchboard monitor became permanently
+unresponsive after scrolling and clicking over its window, and sometimes
+before its window was ever opened. It never recovered on its own.
+
+**Root cause.** `waitset_wait` scanned members in registration order and
+took the first ready one. Most member kinds are level-triggered peeks that
+only the owner's own drain clears, so a source with work outstanding is
+ready on *every* scan and held the head indefinitely. The desktop session
+registers `SeatInput` first, then the window endpoint, the notification and
+Switchboard mailboxes, and the child reaper — and it handles one source per
+wake by design (`call_recv` blocks, so it must not touch an endpoint it was
+not woken for). A hand on the mouse therefore served input and *nothing
+else*, for as long as the input kept coming: applications blocked in a
+window call hung, exited children went unreaped, and the mailboxes peers
+post to filled until their sends began failing `WouldBlock`.
+
+**Fix.** The wait-set registry keeps a resume cursor (`resume_after`) and
+rotates the member snapshot to begin just after the member the previous
+wait reported (`waitset::members` / `waitset::note_reported`), so every
+ready member reaches the head within one lap. The cursor advances only once
+the token has actually reached the caller, so a wait that failed to report
+costs the member nothing; a member removed meanwhile falls back to
+registration order. Registration order still decides within a lap.
+
+**Regression cover.** `waitset_wait_reports_two_ready_members_in_turn`
+(`kernel/core/src/syscalls.rs`) — two endpoints each holding an undrained
+request; four consecutive waits must alternate. It reports the same token
+four times without the cursor. Registry-level, in
+`kernel/core/src/waitset.rs`:
+
+- `a_fresh_set_scans_in_registration_order`
+- `reporting_a_member_moves_the_scan_past_it`
+- `the_rotation_is_per_kind_as_well_as_per_id`
+- `removing_the_last_reported_member_falls_back_to_registration_order`
+- `an_empty_set_rotates_to_nothing`
+- `note_reported_is_owner_checked`
+
+## D34 — the tray monitor treated a full session queue as a fault and exited — DONE
+
+**Symptom.** The half of D33 that made the freeze *permanent*: the
+Switchboard process was gone, and nothing restarts it. The session relaunches
+it only from a fresh capsule press that finds no live instance, and a press
+while the exit is still unreaped is held as a pending open aimed at a corpse.
+
+**Root cause.** `Service::cycle` counted every non-`NotFound`,
+non-`PermissionDenied` publish refusal towards
+`MAX_CONSECUTIVE_PUBLISH_FAILURES` (5). A call endpoint at capacity refuses
+the post with `WouldBlock` rather than blocking, so a session that had not
+drained its queue for five sample periods (10 s — routine under D33) exhausted
+the budget and the monitor exited with `PublishFailed`.
+
+**Fix.** `WouldBlock` is excluded from the budget: it is the transient
+back-pressure signal, not evidence of a fault or of an absent session. The
+summary stays unacknowledged so the change gate re-offers it on the next
+sample — one attempt per period, paced by the sampler, never a retry loop.
+The two clean exits still catch the genuinely session-less cases, so orphan
+detection is unweakened.
+
+**Regression cover.**
+`a_session_that_has_not_drained_its_queue_never_stops_the_service` (20
+consecutive refused periods, then delivery on the first accepted one) and
+`back_pressure_does_not_clear_the_give_up_budget` (a real fault after a
+`WouldBlock` still trips it).
+
+## D35 — an app-ward window event is silently dropped when its mailbox is full (OPEN)
+
+**Symptom.** None currently reproducible — D33/D34 removed the condition
+that made the 32-slot mailbox fill routinely. Recorded because the lossy
+channel itself is unfixed.
+
+**The defect.** `RtEventSink::deliver` (`userland/gui/session/src/run.rs`)
+is one non-blocking `ipc_send`; on `WouldBlock` the session drops the event
+and never retries. That is right for a pure delta (a wheel tick, a motion
+sample) and wrong for everything else: `Resized` leaves the client
+hit-testing and rendering at a size the compositor no longer uses, with no
+second chance until the next resize; `CloseRequested`, `Focus`,
+`Minimized` and `DesktopChanged` are state edges with no re-derivation
+path; `FilePicked`/`PickCancelled` are one-shot conclusions whose loss
+leaves `WindowServer::pick_pending` set for the life of the window, so that
+window can never open another picker. An app is not required to be hung for
+this: 32 slots is a bounded resource and a slow drain is enough.
+
+**Why it is not fixed here.** The correct shape is a per-window hold-back
+with per-kind coalescing, flushed when the destination drains — and the
+wait-set has no "destination has space" member kind, so there is nothing to
+park on. The kernel surface today exposes readability for every kind and
+writability for none; a hold-back without it would either poll or rely on
+the session's incidental wakes, and neither is a fix. Closing this means
+adding that member kind (edge-triggered on a port's occupancy falling,
+authorised by the same send-authority check `ipc_send` applies), then the
+session-side hold-back. Explicitly **not** to be "fixed" by enlarging
+`EVENT_MAILBOX_CAPACITY`.
+
+**Regression cover to land with the fix.** A session-level test that fills
+a window's mailbox, delivers a `Resized` and a `PickCancelled`, and asserts
+both arrive once the mailbox drains; a kernel test that the new member
+reports exactly on the full→not-full edge and consumes it.
+
+## D36 — the shared stroke path never converged, so a graph reading wedged its own process — DONE
+
+**Symptom.** The Switchboard monitor stopped updating, one core went to
+100%, and the desktop's own hang detector flagged it as not responding. It
+never recovered. Distinct from D33/D34: the *desktop* stayed healthy
+throughout and the verdict was correct — the monitor really had stopped.
+Not input-related, and no interaction is needed to reach it.
+
+**Root cause.** `Surface::stroke_polyline` (`lib/raster/src/surface.rs`)
+scaled each segment's perpendicular by the segment's length, and that
+length came from a private Newton iteration that terminated on
+`while x != prev`. For every `n = m² − 1` the iteration reaches a two-value
+cycle (`m`, `m − 1`) and the successive estimates never agree, so the loop
+runs forever — 315 such values below 100 000, and a squared segment length
+lands on one for a whole family of ordinary slopes (a (2, 2) step is
+already `8 = 3² − 1`). The loop issues no syscall, so the task is a lone
+runnable CPU burner: nothing to park on, nothing to drain, no wake to miss.
+
+The monitor draws a live `Chart` per resource on its Tasks, System and
+Background sections. Its trace steps by whatever the last two readings
+differ by, so every 2 s sample is a fresh chance to hit a bad length — the
+observed "it just stops eventually, sometimes without touching it". The
+same primitive draws window-furniture diagonals, so any window with a close
+button was exposed at the sizes whose glyph geometry lands on one.
+
+The justification comment for the hand-rolled helper ("the workspace
+minimum Rust version predates `i32::isqrt`") had gone stale: the pinned
+toolchain is 1.96.
+
+**Fix.** The helper is deleted. The length is `u64::isqrt` over a widened
+sum of squares — bounded by construction, and correct where the old `i32`
+accumulation saturated (a segment longer than about 46 340 sub-units
+measured short, so its perpendicular came out proportionally too large and
+a hairline painted as a band tens of pixels wide). The divisor is a
+`NonZeroU64`, so the zero-length case is discharged once at the top rather
+than guarded inside the offset arithmetic.
+
+**Regression cover.** In `lib/raster/src/tests.rs`:
+
+- `a_stroke_of_any_slope_draws_and_terminates` — strokes every step in
+  ±24 × ±24 and asserts a whole-pixel step always leaves a mark. Hangs
+  before the fix (first bad step is (−18, −6), `18² + 6² = 19² − 1`).
+- `a_stroke_longer_than_the_surface_keeps_its_weight` — a 4-million-unit
+  diagonal must not reach the far corners. Fails before the fix.
+- `a_stroke_needs_two_points_and_a_positive_weight`.
+
+In `lib/controls/src/chart_tests.rs`,
+`every_reading_plots_at_every_width` reproduces the field failure through
+the instrument that hit it: every reading 0–1000 at every box width 9–20.
+It hangs before the fix and takes 0.57 s after.
+
+**Related.** This is exactly the task shape D32's forced-yield fix exists
+to break — a lone runnable task that never returns to the dispatch loop —
+and it confirms that a userland spin is reachable in practice. It is not
+D32 itself: the desktop and the other cores stayed live here, because a
+user-mode spinner is preemptible and only the wedged process is lost.
 
 ## Non-goals / do not do
 

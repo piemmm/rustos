@@ -764,9 +764,6 @@ mod program {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
         loop {
-            let Some(server) = host.window_server() else {
-                return;
-            };
             let Some(len) = next_message(
                 host.event_endpoint,
                 &mut frame,
@@ -774,6 +771,13 @@ mod program {
                 "read the window event mailbox",
             ) else {
                 return;
+            };
+            // Every rejection below still takes its message with it. A drain
+            // that returned with the mailbox non-empty would be woken for it
+            // again at once, and the loop would spin instead of parking.
+            let Some(server) = host.window_server() else {
+                io::write_stderr_line("switchboard: dropped a window event for a closed window");
+                continue;
             };
             if !from_identity(&sender, server) {
                 io::write_stderr_line(

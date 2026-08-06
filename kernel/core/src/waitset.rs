@@ -60,13 +60,23 @@ pub struct Member {
     pub observed: u64,
 }
 
-/// A caller-owned wait-set: the owning task and its growable membership.
+/// A caller-owned wait-set: the owning task, its growable membership, and
+/// the round-robin position that keeps the membership fair.
 struct WaitSet {
     /// Task that created the set. Only this task may add/remove members, wait
     /// on it, or have it observed; every entry point owner-checks against it
     /// (no ambient authority).
     owner: u64,
     members: Vec<Member>,
+    /// The `(kind, id)` the previous successful wait reported, so the next
+    /// scan resumes *after* it.
+    ///
+    /// A wait reports one member, so without this the scan would always
+    /// start at the head and a source that is ready on every scan would
+    /// permanently starve every source behind it — a desktop draining a
+    /// dragged pointer would never serve the endpoint its applications are
+    /// blocked on.
+    resume_after: Option<(WaitSourceKind, u64)>,
 }
 
 /// The lock-guarded registry state.
@@ -97,6 +107,7 @@ pub fn create(owner: u64) -> u64 {
         WaitSet {
             owner,
             members: Vec::new(),
+            resume_after: None,
         },
     );
     handle
@@ -201,7 +212,8 @@ pub fn advance_observed(
     })
 }
 
-/// Snapshot the members of the owner's wait-set `handle`.
+/// Snapshot the members of the owner's wait-set `handle`, in the order the
+/// next wait must scan them.
 ///
 /// Returns an owned copy so the syscall handler can scan readiness (which
 /// reaches into the call-endpoint registry and IRQ table) without holding this
@@ -209,11 +221,47 @@ pub fn advance_observed(
 /// is parked inside its own `waitset_wait` while this snapshot is in use, so a
 /// single snapshot per wait is stable.
 ///
+/// # Ordering discipline
+///
+/// The snapshot is rotated to begin just after the member
+/// [`note_reported`] last recorded, so successive waits hand the ready
+/// members out round-robin rather than always awarding the first-registered
+/// one. That is what bounds the wait to a fair share per source: the scan
+/// itself still takes the first ready member it meets, but *which* member it
+/// meets first advances every time one is reported. Registration order is
+/// preserved within a rotation, and a set whose last-reported member has
+/// since been removed falls back to registration order.
+///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
 pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
-    with_owned(owner, handle, |set| set.members.clone())
+    with_owned(owner, handle, |set| {
+        let resume = set
+            .resume_after
+            .and_then(|(kind, id)| {
+                set.members
+                    .iter()
+                    .position(|m| m.kind == kind && m.id == id)
+            })
+            .map_or(0, |at| at + 1);
+        let mut scan = Vec::with_capacity(set.members.len());
+        scan.extend_from_slice(&set.members[resume..]);
+        scan.extend_from_slice(&set.members[..resume]);
+        scan
+    })
+}
+
+/// Record `(kind, id)` as the member the wait just reported, so the next
+/// [`members`] snapshot resumes after it.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
+pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<(), Errno> {
+    with_owned(owner, handle, |set| {
+        set.resume_after = Some((kind, id));
+    })
 }
 
 /// Tear down every wait-set owned by the exiting task `owner`, returning how
@@ -349,5 +397,122 @@ mod tests {
         let b = create(0x7007);
         assert_ne!(a, b, "each create mints a fresh handle");
         assert_eq!(release_owned_by(0x7007), 2);
+    }
+
+    fn ids(owner: u64, handle: u64) -> Vec<u64> {
+        members(owner, handle)
+            .expect("owned set")
+            .iter()
+            .map(|m| m.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_set_scans_in_registration_order() {
+        let h = create(0x8008);
+        for id in 1..=3 {
+            assert_eq!(add(0x8008, h, ep(id, id * 10)), Ok(()));
+        }
+        assert_eq!(ids(0x8008, h), alloc::vec![1, 2, 3]);
+        assert_eq!(release_owned_by(0x8008), 1);
+    }
+
+    /// The regression this cursor exists for: the scan takes the first ready
+    /// member, so a source ready on every scan would hold the head forever
+    /// and never let the members behind it be reported. Each report moves the
+    /// start on, so every member reaches the head within one lap.
+    #[test]
+    fn reporting_a_member_moves_the_scan_past_it() {
+        let h = create(0x9009);
+        for id in 1..=3 {
+            assert_eq!(add(0x9009, h, ep(id, id * 10)), Ok(()));
+        }
+        assert_eq!(
+            note_reported(0x9009, h, WaitSourceKind::Endpoint, 1),
+            Ok(())
+        );
+        assert_eq!(ids(0x9009, h), alloc::vec![2, 3, 1]);
+        assert_eq!(
+            note_reported(0x9009, h, WaitSourceKind::Endpoint, 2),
+            Ok(())
+        );
+        assert_eq!(ids(0x9009, h), alloc::vec![3, 1, 2]);
+        // A lap brings the first member back to the head, so the rotation
+        // cycles rather than walking off the end.
+        assert_eq!(
+            note_reported(0x9009, h, WaitSourceKind::Endpoint, 3),
+            Ok(())
+        );
+        assert_eq!(ids(0x9009, h), alloc::vec![1, 2, 3]);
+        assert_eq!(release_owned_by(0x9009), 1);
+    }
+
+    #[test]
+    fn the_rotation_is_per_kind_as_well_as_per_id() {
+        let h = create(0xa00a);
+        assert_eq!(add(0xa00a, h, ep(5, 50)), Ok(()));
+        assert_eq!(
+            add(
+                0xa00a,
+                h,
+                Member {
+                    kind: WaitSourceKind::Irq,
+                    id: 5,
+                    token: 55,
+                    file: FileId::NONE,
+                    observed: 0,
+                }
+            ),
+            Ok(())
+        );
+        // Reporting the endpoint must not move past the same-id IRQ member.
+        assert_eq!(
+            note_reported(0xa00a, h, WaitSourceKind::Endpoint, 5),
+            Ok(())
+        );
+        assert_eq!(
+            members(0xa00a, h).expect("owned set")[0].kind,
+            WaitSourceKind::Irq
+        );
+        assert_eq!(release_owned_by(0xa00a), 1);
+    }
+
+    #[test]
+    fn removing_the_last_reported_member_falls_back_to_registration_order() {
+        let h = create(0xb00b);
+        for id in 1..=3 {
+            assert_eq!(add(0xb00b, h, ep(id, id * 10)), Ok(()));
+        }
+        assert_eq!(
+            note_reported(0xb00b, h, WaitSourceKind::Endpoint, 2),
+            Ok(())
+        );
+        assert_eq!(ids(0xb00b, h), alloc::vec![3, 1, 2]);
+        assert_eq!(remove(0xb00b, h, WaitSourceKind::Endpoint, 2), Ok(()));
+        assert_eq!(ids(0xb00b, h), alloc::vec![1, 3]);
+        assert_eq!(release_owned_by(0xb00b), 1);
+    }
+
+    #[test]
+    fn an_empty_set_rotates_to_nothing() {
+        let h = create(0xc00c);
+        assert_eq!(ids(0xc00c, h), Vec::<u64>::new());
+        assert_eq!(
+            note_reported(0xc00c, h, WaitSourceKind::Endpoint, 1),
+            Ok(()),
+            "recording a member the set no longer holds is not an error"
+        );
+        assert_eq!(ids(0xc00c, h), Vec::<u64>::new());
+        assert_eq!(release_owned_by(0xc00c), 1);
+    }
+
+    #[test]
+    fn note_reported_is_owner_checked() {
+        let h = create(0xd00d);
+        assert_eq!(
+            note_reported(0xe00e, h, WaitSourceKind::Endpoint, 1),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(release_owned_by(0xd00d), 1);
     }
 }
