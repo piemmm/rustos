@@ -22,15 +22,18 @@ Here are some screenshots of TAIRiX running, showcasing the current state of the
   <tr>
     <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="140"></a><br><sub>Filesystem unlock</sub></td>
     <td align="center"><a href="docs/screenshots/user-login.png"><img src="docs/screenshots/user-login.png" alt="User login" width="140"></a><br><sub>User login</sub></td>
-    <td align="center"><a href="docs/screenshots/booted-and-logged-in.png"><img src="docs/screenshots/booted-and-logged-in.png" alt="Booted and logged in" width="140"></a><br><sub>Logged in</sub></td>
-    <td align="center"><a href="docs/screenshots/basic-desktop.png"><img src="docs/screenshots/basic-desktop.png" alt="Basic desktop" width="140"></a><br><sub>basic desktop PoC</sub></td>
-    <td align="center"><a href="docs/screenshots/top.app.png"><img src="docs/screenshots/top.app.png" alt="The top app" width="140"></a><br><sub>top app</sub></td>
-  </tr>
+    <td align="center"><a href="docs/screenshots/basic-desktop.png"><img src="docs/screenshots/basic-desktop.png" alt="Basic desktop" width="140"></a><br><sub>The desktop</sub></td>
+    <td align="center"><a href="docs/screenshots/wallpaper.png"><img src="docs/screenshots/wallpaper.png" alt="Wallpaper selector" width="140"></a><br><sub>The wallpaper chooser</sub></td>
+     <td align="center"><a href="docs/screenshots/filemanager.png"><img src="docs/screenshots/filemanager.png" alt="File manager PoC" width="140"></a><br><sub>File manager PoC</sub></td>
+
+</tr>
   <tr>
+    <td align="center"><a href="docs/screenshots/booted-and-logged-in.png"><img src="docs/screenshots/booted-and-logged-in.png" alt="Booted and logged in" width="140"></a><br><sub>Logged in</sub></td>
     <td align="center"><a href="docs/screenshots/wide-character-support-korean.png"><img src="docs/screenshots/wide-character-support-korean.png" alt="Wide-character (Korean) text support" width="140"></a><br><sub>Korean text</sub></td>
     <td align="center"><a href="docs/screenshots/japanese-text.png"><img src="docs/screenshots/japanese-text.png" alt="Japanese text support" width="140"></a><br><sub>Japanese text</sub></td>
     <td align="center"><a href="docs/screenshots/system-monitor.png"><img src="docs/screenshots/system-monitor.png" alt="The sysmon system-monitor app" width="140"></a><br><sub>sysmon app</sub></td>
-  </tr>
+    <td align="center"><a href="docs/screenshots/top.app.png"><img src="docs/screenshots/top.app.png" alt="The top app" width="140"></a><br><sub>top app</sub></td> 
+</tr>
 </table>
 
 ## Feature / architecture support
