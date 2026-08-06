@@ -15,7 +15,7 @@
 
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::testkit::high_contrast;
@@ -340,6 +340,39 @@ fn escape_closes_the_section_list_and_leaves_the_section_alone() {
     assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
     assert!(sb.section_menu.is_none());
     assert_eq!(sb.section(), Section::Tasks);
+}
+
+#[test]
+fn no_part_of_the_client_is_left_transparent() {
+    let b = bounds();
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let mut sb = Switchboard::new(&model());
+        let mut surface = Surface::new(b.width, b.height).expect("surface");
+        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+
+        // The window manager decorates the window; its content pixels are the
+        // client's own. Any pixel left clear shows whatever the shared frame
+        // region held before, which reads as a transparent window.
+        let clear = (0..b.width)
+            .flat_map(|x| (0..b.height).map(move |y| (x, y)))
+            .find(|&(x, y)| surface.get(x, y).is_some_and(|p| p.a == 0));
+        assert_eq!(clear, None, "pixel {clear:?} was left transparent");
+    }
+}
+
+#[test]
+fn the_client_is_laid_over_the_theme_surface_tint() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(&model());
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    assert!(
+        surface
+            .pixels()
+            .contains(&Color::from(theme.palette().surface).premultiply()),
+        "the base surface tint must show wherever no control covers it"
+    );
 }
 
 #[test]

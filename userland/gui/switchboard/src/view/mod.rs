@@ -71,7 +71,7 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
@@ -1079,6 +1079,20 @@ impl Switchboard {
         }
     }
 
+    /// Lay the theme's base surface tint over the whole client area.
+    fn fill_client(surface: &mut Surface, bounds: Rect, theme: &Theme) {
+        let (Ok(x), Ok(y)) = (u32::try_from(bounds.left()), u32::try_from(bounds.top())) else {
+            return;
+        };
+        surface.fill_rect(
+            x,
+            y,
+            bounds.width,
+            bounds.height,
+            Color::from(theme.palette().surface),
+        );
+    }
+
     /// The location band's rectangles for the section on show, resolved
     /// through the one [`resolve_band`] every paint and hit test reads.
     fn band(&self, location: Rect, theme: &Theme, scale: Scale) -> BandLayout {
@@ -1245,6 +1259,11 @@ impl Switchboard {
         let layout = self.compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
+        // The window manager decorates the window, but its content pixels are
+        // the client's own: without laying the surface tint down first, every
+        // pixel no control covers keeps whatever the shared frame region held
+        // before, which reads as a transparent window.
+        Self::fill_client(surface, bounds, theme);
         self.render_location(surface, layout.location, scale, theme, font);
         self.render_section(surface, ctx);
 
