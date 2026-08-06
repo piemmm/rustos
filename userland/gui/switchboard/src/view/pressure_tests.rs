@@ -47,8 +47,6 @@ fn pressure_model(actions: alloc::vec::Vec<PressureAction>) -> SwitchboardModel 
             pressure: PressureState::None,
             activity: ActivityState::Idle,
             recovery: RecoveryState::None,
-            action: alloc::string::String::from("End"),
-            action_allowed: true,
             group: None,
             ..TaskSummary::default()
         });

@@ -42,7 +42,11 @@ taskbar's `Library` (the program-library launcher's three-by-three tile
 grid, `plans/NEW-TASKBAR.md` T4) and `Switchboard` (its always-trailing tray
 capsule), `ListMenu` (three bulleted bars, for the button that opens a
 screen's own section list beside a location breadcrumb,
-`plans/NEW-SWITCHBOARD.md` S2), and a `Generic` fallback diamond.
+`plans/NEW-SWITCHBOARD.md` S2), the task-command kinds the Switchboard's
+Tasks section names its commands with — `Job` (an hourglass, for queued or
+background work), `TaskSwitch` (an arrow entering a window body),
+`Reveal` (the window frame itself), `Pause`, `Resume`, `Priority` (a
+downward arrow) and `Quit` (a cross) — and a `Generic` fallback diamond.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).

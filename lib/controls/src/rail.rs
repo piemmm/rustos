@@ -32,7 +32,7 @@ use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use crate::button::{icon_content_side, Button, ButtonContent};
+use crate::button::{icon_content_side, Button, ButtonContent, ContentAlign};
 use crate::paint::{paint_edge_wake, plate_border, surface_rect, to_i32};
 
 /// The outcome of feeding input to an [`ActionRail`].
@@ -47,6 +47,11 @@ pub enum RailAction {
 }
 
 /// A vertical column of full-width command [`Button`]s.
+///
+/// Every item is seated [`ContentAlign::Leading`], so the icons and labels of
+/// the whole column line up and the rail reads as a list of commands rather
+/// than a stack of centred captions. The rail imposes that on the items it is
+/// given, so no caller has to remember it and two rails can never disagree.
 ///
 /// The rail owns keyboard focus (Up/Down move it, clamping at the ends;
 /// Home/End jump to the ends) and pointer routing; every event is forwarded
@@ -75,10 +80,15 @@ pub struct ActionRail {
 impl ActionRail {
     /// A rail over the given items, with no item focused and its Edge Wake
     /// unlit.
+    ///
+    /// Each item is re-seated [`ContentAlign::Leading`] as it is taken in.
     #[must_use]
     pub fn new(items: Vec<Button>) -> Self {
         Self {
-            items,
+            items: items
+                .into_iter()
+                .map(|item| item.aligned(ContentAlign::Leading))
+                .collect(),
             focus: None,
             edge_wake: false,
         }

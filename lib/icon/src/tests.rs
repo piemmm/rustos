@@ -119,6 +119,36 @@ fn a_fine_grained_kind_shares_its_family_glyph() {
 }
 
 #[test]
+fn each_task_command_glyph_is_its_own_mark() {
+    // A command's glyph is how a reader tells one command from another
+    // without reading, so none of these may share artwork with a sibling or
+    // fall back to the placeholder diamond.
+    let commands = [
+        IconKind::Job,
+        IconKind::TaskSwitch,
+        IconKind::Reveal,
+        IconKind::Pause,
+        IconKind::Resume,
+        IconKind::Priority,
+        IconKind::Quit,
+    ];
+    for (position, kind) in commands.iter().enumerate() {
+        assert_ne!(
+            builtin_icon(*kind, FG),
+            builtin_icon(IconKind::Generic, FG),
+            "{kind:?} fell back to the placeholder"
+        );
+        for other in &commands[position + 1..] {
+            assert_ne!(
+                builtin_icon(*kind, FG),
+                builtin_icon(*other, FG),
+                "{kind:?} and {other:?} draw the same mark"
+            );
+        }
+    }
+}
+
+#[test]
 fn disk_icon_maps_every_medium() {
     assert_eq!(
         disk_icon(Some(BlkDeviceClass::Rotational)),

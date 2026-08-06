@@ -32,11 +32,23 @@ Below the title bar sits the **location band**:
 - a `Breadcrumb` on the left reading `Switchboard › <section>`. Its trailing
   crumb is the current location, which a breadcrumb never activates, so the
   leading crumb is the route: activating it opens the section list.
+- the active section's own **band summary**, if it declares one: a handful of
+  counts describing the whole list at a glance, seated between the trail and
+  the command. Tasks' four census tiles live here.
 - a section-list `IconButton` (`IconKind::ListMenu`) at the trailing end,
   which opens that same `Menu` of the six sections. The section on show is
   marked with `Menu::set_current` *and* the item's `SelectionState::Selected`
   — the pair `ComboBox` already marks its own choice with, not a second
   convention.
+
+The band's three regions are resolved once by `frame::resolve_band`, which
+both the paint and the hit test read, so a press can never land on a control
+drawn elsewhere. The band's *height* belongs to the section on show
+(`SectionAnatomy::band_height`): one control height at rest, or as much more
+as its summary needs, so a section with no census pays for none. A band too
+narrow to seat the summary beside a whole trail drops the summary rather than
+abbreviating the trail — the reader's own location outranks a census the
+table still states.
 
 There is no global tab strip: the band is the whole section switcher, and
 both routes run the one `select_section_index` transition, so the trail, the
@@ -50,7 +62,8 @@ There is **no permanent resource band**: a resource reading belongs to the
 section that is about it, so the readings are the System section's header
 tiles and Tasks' own census tiles. A strip of meters above every section
 would state the same numbers twice and steal height from the section a reader
-actually asked for.
+actually asked for. Tasks' census rides the location band precisely because
+it is a census of *that* section, not of the machine.
 
 Content taller than the section's primary column is governed by the one
 shared vertical `ScrollBar`, with the `ResizeGrabber` at its junction.
@@ -152,33 +165,80 @@ genuinely went away. The view never interprets the identity; it only compares.
 
 ### Tasks (`plans/switchboard1.png`) — done
 
-- **header** — four census `MetricTile`s (Processes, Jobs, Services, Alerts);
-  a filter `Tabs` strip (All, Processes, Jobs, Services, Faults) whose labels
-  carry each filter's count and which filters the table rather than switching
-  section; a `SearchField` matching on task name, case-insensitively. Every
-  tile and every tab counts adopted rows through the *same* predicate, so a
-  tile and its tab can never state different numbers.
+- **band summary** — four census `MetricTile`s (Processes, Jobs, Services,
+  Alerts) in the location band (S2), each *plated* and carrying the glyph of
+  the thing it counts, tinted by a `PressureKind` used as an identity colour
+  rather than as a claim that a resource is strained. `CENSUS` is their one
+  declaration: the tiles are built from it and the room the band is asked for
+  is measured from it, so the band can never seat a different number of tiles
+  than the section draws.
+- **header** — the filter `Tabs` strip (All, Processes, Jobs, Services,
+  Faults) on its own row, whose labels carry each filter's count and which
+  filters the table rather than switching section; then a `SearchField`
+  matching on task name, case-insensitively, over its own full-width row
+  beneath it. *Which kind* of task and *which* task are separate questions, so
+  each gets a row. Every tile and every tab counts adopted rows through the
+  *same* predicate, so a tile and its tab can never state different numbers.
 - **primary** — a sortable `TableHeader` over `TableRow`s: Task (its
   `IconKind` and name), Type, State, Activity (a per-task CPU `Chart`
-  sparkline), CPU, Memory, Disk, Network, Last active, and Actions. Sorting is
-  the header's, applied over the filtered rows and stable, so rows it cannot
-  separate keep the order the sample reported. `COLUMN_WEIGHTS` is the one
-  definition of the column geometry: the heading, the cells and the sparkline's
-  own rect (`TableRow::cell_rects`) all read it.
-- **actions** — Tasks commands *each row*, not a selection, so its commands
-  are the trailing table column rather than an `ActionRail`: a reader kills or
-  pauses the task on the line they are reading. Each button renders its
-  verdict — allowed, disabled by the task's state, or the Authority Mark.
-- **footer** — the shown/total count, the grouping `ComboBox` (ungrouped, by
-  type, by activity — an arrangement of the same rows, not a new query), and
-  the Auto-refresh `Toggle`, which holds the table on the sample the reader is
-  reading rather than moving it under them.
+  sparkline), CPU, Memory, Disk, Network, Last active. Every column is a
+  *reading* about the task; what may be done to it is the rail's business.
+  Sorting is the header's, applied over the filtered rows and stable, so rows
+  it cannot separate keep the order the sample reported. `COLUMN_WEIGHTS` is
+  the one definition of the column geometry: the heading, the cells and the
+  sparkline's own rect (`TableRow::cell_rects`) all read it.
+- **rail** — `ACTIONS` for the *selected* task, in the standard trailing
+  `ActionRail` seated in a `Panel` that captions it, so the commands stay
+  anchored while the rows scroll beneath them. `RAIL_COMMANDS` declares them
+  in reading order — Switch to, Reveal window, Pause, Resume, Lower priority,
+  Open logs, Group…, Force quit — each with the glyph that says it without
+  words. Force quit is `ControlRole::Destructive`, so it wears the danger rim
+  and sits last, where a mis-aimed press is least likely to land. Every item
+  renders its own verdict: permitted, plainly disabled where the task's state
+  rules it out, or the Authority Mark where the caller lacks the authority.
+  With nothing selected the rail holds no commands at all rather than a column
+  of refusals, and the plate keeps its place either way.
+- **footer** — the shown/total count and the Auto-refresh `Toggle` beneath the
+  table, and the grouping `ComboBox` (ungrouped, by type, by activity — an
+  arrangement of the same rows, not a new query) beneath the rail, so each
+  control sits under what it governs. Auto-refresh holds the table on the
+  sample the reader is reading rather than moving it under them.
 - **cursor** — the section's content cursor spans header stops, then rows,
-  then footer stops, so every control is keyboard-reachable without hanging
-  off a row that a filter could remove. `SectionView::focus_row` maps a cursor
-  stop back to the row it names (`None` for the two chrome bands), which keeps
-  the scroll-into-view arithmetic in `view/mod.rs` as the one definition;
-  `item_count`/`list_info` still mean the filtered, sorted rows alone.
+  then the rail's commands, then footer stops, so every control is
+  keyboard-reachable without hanging off a row that a filter could remove.
+  `SectionView::focus_row` maps a cursor stop back to the row it names (`None`
+  for the chrome bands and the anchored rail), which keeps the scroll-into-view
+  arithmetic in `view/mod.rs` as the one definition; `item_count`/`list_info`
+  still mean the filtered, sorted rows alone.
+
+**The commands act on the selection, not on a row.** A `ProcId` — the task's
+stable, never-reused instance identity — is what the selection remembers, so
+it survives a refresh, a re-filter and a re-sort rather than following
+whichever row slid into its place, and it drops only when the task genuinely
+goes. A table with rows always has one selected (the shared
+`view::resolve_selection` rule), so the commands always have a subject. This
+is what lets the rail state a task's whole repertoire instead of the one or
+two buttons a row's trailing cell could hold.
+
+`TaskAuthority` carries one verdict per command, reached in `model.rs` where
+the caller's authority *and* the task's lifecycle state are both known:
+signalling needs `PROC_CONTROL`, and with it the state still rules out what
+makes no sense (pausing a stopped task, resuming a running one, anything at
+all for a task that has already exited). `apply_action` re-checks that same
+verdict before acting, so a command drawn as denied or disabled can never be
+carried out by an unexpected report of it. `TaskControl::Reveal` is the same
+request of the session as `Switch` — raising the window is how this system
+shows a reader where it is, and there is no separate highlight-without-raising
+interface to invent one for. `TaskControl::OpenLogs` is permanently disabled:
+no capability-gated query for a task's own log entries exists (S6), so the
+command states its absence rather than pretending to work.
+
+**A row wears no activity seam.** An activity in a control's state paints a
+Heat Seam along its whole lower edge, which under a table row reads as an
+orange rule beneath every working task rather than as a reading about one. A
+task's activity is shown in the Activity column instead, as the sparkline the
+heading promises; the row's state carries only its pressure (a Pressure Rail
+in the leading gutter) and its recovery posture (a Signal Bead).
 
 **Type** names what the row *is*, not what it is for: `TaskKind::Process` is
 what the process list reports, and `Job`/`Service` are the kinds a job

@@ -92,6 +92,24 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
 // --- Construction and empty rail ----------------------------------------
 
 #[test]
+fn every_item_is_seated_leading_so_the_column_lines_up() {
+    let rail = ActionRail::new(vec![
+        Button::labelled("One"),
+        Button::new(
+            ButtonContent::IconLabel {
+                icon: tairix_icon::IconKind::Pause,
+                label: "Two".into(),
+            },
+            ControlRole::Neutral,
+        ),
+    ]);
+    assert!(rail
+        .items()
+        .iter()
+        .all(|item| item.align() == crate::button::ContentAlign::Leading));
+}
+
+#[test]
 fn an_empty_rail_reports_empty_and_answers_none_everywhere() {
     let theme = Theme::dark();
     let mut rail = ActionRail::new(vec![]);

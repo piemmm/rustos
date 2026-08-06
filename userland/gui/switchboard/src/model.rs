@@ -13,7 +13,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
@@ -32,12 +32,9 @@ use crate::system_report::{build_system_report, reading, HeadlinePressure};
 use crate::view::{
     ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact,
     FaultMark, PressureAction, PressureCause, PressureControl, Reading, RecoveryControl,
-    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskKind, TaskSummary, Unmeasured,
+    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl,
+    TaskKind, TaskSummary, Unmeasured,
 };
-
-/// The task row action's label: every task's row action is the same
-/// switch-to-window request, so the label never varies per row.
-const SWITCH_LABEL: &str = "Switch";
 
 /// Convert a wire [`CommandSection`] into the shared control's own
 /// [`Section`] — the two are defined independently because `lib/abi` may
@@ -649,8 +646,13 @@ pub fn build_model(
     let mut model = SwitchboardModel::new(title);
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
-    let (tasks, task_owners, task_idents) =
-        build_tasks(&sample.processes, seat_report, &meters.tasks, activities);
+    let (tasks, task_owners, task_idents) = build_tasks(
+        &sample.processes,
+        seat_report,
+        &meters.tasks,
+        activities,
+        can_force,
+    );
     let (recovery, recovery_owners) = build_recovery(sample, seat_report, meters, can_force);
     let (pressure, pressure_targets) = build_pressure(sample, meters, self_uid, authority);
     let (activity_summaries, activity_ids, activity_members) =
@@ -703,6 +705,7 @@ fn build_tasks(
     seat_report: &SeatReport,
     meters: &TaskMeters,
     activities: &Activities,
+    can_force: bool,
 ) -> (Vec<TaskSummary>, Vec<u64>, Vec<TaskIdent>) {
     let mut tasks = Vec::with_capacity(processes.len());
     let mut owners = Vec::with_capacity(processes.len());
@@ -710,6 +713,7 @@ fn build_tasks(
     for process in processes {
         let name = display_name(&process.name);
         tasks.push(TaskSummary {
+            proc_id: process.proc_id,
             name: name.clone(),
             kind: TaskKind::Process,
             lifecycle: Some(process.state),
@@ -720,11 +724,7 @@ fn build_tasks(
             pressure: PressureState::None,
             activity: process_activity(process.state),
             recovery: process_recovery(process, seat_report),
-            action: SWITCH_LABEL.to_string(),
-            // Every task's switch action is a plain session request that
-            // needs no capability of its own to attempt; the session is
-            // free to refuse it.
-            action_allowed: true,
+            authority: task_authority(process.state, can_force),
             group: activities.group_index_of(process.proc_id),
         });
         owners.push(process.pid);
@@ -735,6 +735,39 @@ fn build_tasks(
         });
     }
     (tasks, owners, idents)
+}
+
+/// What the caller may do to one sampled process.
+///
+/// Two things decide each command: the caller's own authority, and the
+/// task's lifecycle state. Signalling a task — pausing it, continuing it,
+/// ending it — needs `PROC_CONTROL`, so without it those wear the Authority
+/// Mark; with it, the state still rules out the ones that make no sense for
+/// this task, which is a plain disablement rather than a refusal of
+/// authority. A task that has already exited can be signalled to no effect,
+/// so nothing is offered for it at all.
+///
+/// Raising a task's window is a plain session request needing no capability
+/// to *attempt* — the session is free to refuse it — and lowering a priority
+/// is the same signal-level authority as the rest.
+fn task_authority(state: ProcessState, can_force: bool) -> TaskAuthority {
+    let signal = |permitted: bool| match (can_force, permitted) {
+        (false, _) => ActionVerdict::DeniedByAuthority,
+        (true, false) => ActionVerdict::DisabledByState,
+        (true, true) => ActionVerdict::Ready,
+    };
+    let live = !matches!(state, ProcessState::Zombie);
+    TaskAuthority {
+        switch: if live {
+            ActionVerdict::Ready
+        } else {
+            ActionVerdict::DisabledByState
+        },
+        pause: signal(live && state != ProcessState::Stopped),
+        resume: signal(state == ProcessState::Stopped),
+        lower_priority: signal(live && state != ProcessState::Stopped),
+        force_quit: signal(live),
+    }
 }
 
 /// The recovery posture a sampled process is in.
@@ -1456,11 +1489,7 @@ pub fn apply_action(
     authority: &dyn CapabilityQuery,
 ) -> Vec<Effect> {
     match action {
-        SwitchboardAction::Task { index } => {
-            panel.task_owner(index).map_or_else(Vec::new, |owner| {
-                alloc::vec![Effect::ActivateOwner { owner }]
-            })
-        }
+        SwitchboardAction::Task { index, control } => apply_task(panel, index, control),
         SwitchboardAction::Recovery { index, control } => {
             let Some(owner) = panel.recovery_owner(index) else {
                 return Vec::new();
@@ -1527,6 +1556,50 @@ pub fn apply_action(
         | SwitchboardAction::Service { .. }
         | SwitchboardAction::System { .. }
         | SwitchboardAction::Scrolled { .. } => Vec::new(),
+    }
+}
+
+/// One task command, re-checked against the verdict [`build_model`] already
+/// computed for that very task rather than re-deriving authority from
+/// scratch — the model's verdict *is* the server-side check, computed once
+/// under the real authority, so a command the rail drew as denied or
+/// disabled can never be carried out by a scripted or otherwise unexpected
+/// report of it (fail closed).
+///
+/// [`TaskControl::Reveal`] is the same request of the session as
+/// [`TaskControl::Switch`]: raising a task's window is how this system shows
+/// the reader where it is, and there is no separate "highlight without
+/// raising" interface to invent one for. [`TaskControl::OpenLogs`] resolves
+/// to nothing at all: no capability-gated query for a task's own log entries
+/// exists, which is exactly why its verdict is permanently disabled.
+fn apply_task(panel: &PanelModel, index: usize, control: TaskControl) -> Vec<Effect> {
+    let Some(task) = panel.model.tasks.get(index) else {
+        return Vec::new();
+    };
+    if task.authority.verdict(control) != ActionVerdict::Ready {
+        return Vec::new();
+    }
+    let Some(owner) = panel.task_owner(index) else {
+        return Vec::new();
+    };
+    match control {
+        TaskControl::Switch | TaskControl::Reveal => {
+            alloc::vec![Effect::ActivateOwner { owner }]
+        }
+        TaskControl::Pause => alloc::vec![Effect::Signal {
+            pid: owner,
+            signal: Signal::Stop,
+        }],
+        TaskControl::Resume => alloc::vec![Effect::Signal {
+            pid: owner,
+            signal: Signal::Continue,
+        }],
+        TaskControl::LowerPriority => alloc::vec![Effect::LowerPriority { pid: owner }],
+        TaskControl::ForceQuit => alloc::vec![Effect::Signal {
+            pid: owner,
+            signal: Signal::Kill,
+        }],
+        TaskControl::OpenLogs => Vec::new(),
     }
 }
 

@@ -19,8 +19,8 @@ use super::{
     ActionVerdict, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact, FaultMark,
     HeadlineTile, HealthSeverity, JobSummary, LimitRow, NetworkInterface, PressureAction,
     PressureCause, PressureControl, Reading, RecoveryItem, SessionSeat, StorageVolume, Switchboard,
-    SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemReport, TaskSummary,
-    TileInstrument, Unmeasured,
+    SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemReport, TaskAuthority,
+    TaskSummary, TileInstrument, Unmeasured,
 };
 
 pub(super) fn font() -> BitmapFont {
@@ -51,6 +51,7 @@ pub(super) fn model() -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for i in 0..50 {
         m.tasks.push(TaskSummary {
+            proc_id: task_id(i),
             name: alloc::format!("task {i}"),
             cpu_permille: Some(u16::try_from(i).unwrap_or(0) * 10),
             pressure: if i % 3 == 0 {
@@ -60,8 +61,13 @@ pub(super) fn model() -> SwitchboardModel {
             },
             activity: ActivityState::Progress(ProgressValue::new(500)),
             recovery: RecoveryState::None,
-            action: alloc::string::String::from("End"),
-            action_allowed: true,
+            authority: TaskAuthority {
+                switch: ActionVerdict::Ready,
+                pause: ActionVerdict::Ready,
+                resume: ActionVerdict::DisabledByState,
+                lower_priority: ActionVerdict::Ready,
+                force_quit: ActionVerdict::Ready,
+            },
             group: None,
             ..TaskSummary::default()
         });
@@ -122,6 +128,16 @@ pub(super) fn recovery_item(index: usize, recovery: RecoveryState) -> RecoveryIt
 pub(super) fn fault_id(index: usize) -> ProcId {
     let mut bytes = [0u8; PROC_ID_LEN];
     bytes[0] = 0x9f;
+    bytes[1] = u8::try_from(index).unwrap_or(u8::MAX);
+    ProcId::from_raw(bytes)
+}
+
+/// The identity of the fixture task at `index`, distinct from every
+/// [`fault_id`], so a test can move a task in the list and still assert the
+/// selection followed it rather than the position it used to hold.
+pub(super) fn task_id(index: usize) -> ProcId {
+    let mut bytes = [0u8; PROC_ID_LEN];
+    bytes[0] = 0x5a;
     bytes[1] = u8::try_from(index).unwrap_or(u8::MAX);
     ProcId::from_raw(bytes)
 }
@@ -294,28 +310,49 @@ pub(super) fn click(
     out
 }
 
-/// The action-button rectangles of the Tasks table's shown row `row`.
+/// The Tasks section's command-rail item rectangles, in rail order.
 ///
-/// The Tasks table draws its per-row commands inside its trailing Actions
-/// *column* rather than in an anchored rail beside the list, so a test
-/// reaches them through the row's own cell geometry — the very rectangles
-/// the render path uses — instead of re-deriving a split of its own.
-pub(super) fn task_action_rects(
+/// Read from the rail's own layout — the very rectangles the render path
+/// paints into — rather than re-derived, so a test aims at exactly what a
+/// reader sees.
+pub(super) fn task_rail_rects(
+    sb: &Switchboard,
+    b: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> alloc::vec::Vec<Rect> {
+    let layout = sb.compute_layout(b, scale, theme);
+    let ctx = sb.section_ctx(&layout, b, scale, theme, font());
+    sb.tasks.rail_item_rects(&ctx)
+}
+
+/// The window point that hits shown task row `row`.
+pub(super) fn task_row_point(
+    sb: &Switchboard,
+    b: Rect,
+    scale: Scale,
+    theme: &Theme,
+    row: usize,
+) -> (i32, i32) {
+    let layout = sb.compute_layout(b, scale, theme);
+    let info = sb.list_info(&layout, scale, theme);
+    centre(info.item_rect(u32::try_from(row).unwrap_or(0)))
+}
+
+/// Select shown task row `row` with the pointer, which is what gives the
+/// command rail its subject.
+pub(super) fn select_task_row(
     sb: &mut Switchboard,
     b: Rect,
     scale: Scale,
     theme: &Theme,
     row: usize,
-) -> alloc::vec::Vec<Rect> {
-    let layout = sb.compute_layout(b, scale, theme);
-    let info = sb.list_info(&layout, scale, theme);
-    let slot = u32::try_from(row).unwrap_or(0);
-    let item = info.item_rect(slot);
-    sb.tasks
-        .entries
-        .get(row)
-        .map(|entry| entry.action_rects(item, scale, theme))
-        .unwrap_or_default()
+) {
+    let (x, y) = task_row_point(sb, b, scale, theme, row);
+    assert!(
+        click(sb, b, scale, theme, x, y).is_empty(),
+        "selecting a row emits nothing of its own"
+    );
 }
 
 /// Put the Tasks section's content cursor on shown row `row`.

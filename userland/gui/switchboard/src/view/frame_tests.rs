@@ -4,12 +4,13 @@
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::Theme;
 
-use super::{resolve_section_frame, SectionAnatomy};
+use super::{resolve_band, resolve_section_frame, BandSummary, SectionAnatomy};
 
 /// An anatomy asking for every optional region, each a comfortably small
 /// logical size so a modest content rect can seat them all.
 fn full_anatomy() -> SectionAnatomy {
     SectionAnatomy {
+        band_summary: None,
         sidebar_width: 48,
         header_height: 32,
         detail_width: 96,
@@ -520,4 +521,108 @@ fn minimum_width_counts_the_declared_floor_not_a_bare_pixel() {
     assert!(frame.impact.is_some());
     assert!(frame.rail.is_some());
     assert!(frame.primary.width >= anatomy.primary_floor(scale, &theme));
+}
+
+// --- The location band ---------------------------------------------------
+
+/// A band the width of a comfortable window, one control high.
+fn band(width: u32, theme: &Theme) -> Rect {
+    Rect::new(
+        0,
+        0,
+        width,
+        Scale::ONE.scale_length(theme.metrics().control_height),
+    )
+}
+
+#[test]
+fn a_band_with_no_summary_gives_the_trail_everything_but_the_command() {
+    let theme = Theme::dark();
+    let rect = band(600, &theme);
+    let layout = resolve_band(rect, None, Scale::ONE, &theme);
+
+    assert_eq!(layout.summary, None, "no summary was asked for");
+    assert_eq!(
+        layout.command,
+        Rect::new(
+            rect.right() - i32::try_from(rect.height).unwrap_or(0),
+            rect.top(),
+            rect.height,
+            rect.height
+        ),
+        "the command is a square at the trailing edge"
+    );
+    assert_eq!(layout.trail.left(), rect.left());
+    assert!(layout.trail.right() <= layout.command.left());
+}
+
+#[test]
+fn a_summary_is_seated_between_the_trail_and_the_command() {
+    let theme = Theme::dark();
+    let rect = band(600, &theme);
+    let layout = resolve_band(
+        rect,
+        Some(BandSummary {
+            width: 240,
+            height: 52,
+        }),
+        Scale::ONE,
+        &theme,
+    );
+
+    let summary = layout.summary.expect("a summary this wide band can seat");
+    assert_eq!(summary.width, 240);
+    assert!(
+        layout.trail.right() <= summary.left(),
+        "the trail comes first and does not overlap the summary"
+    );
+    assert!(
+        summary.right() <= layout.command.left(),
+        "and the summary stops short of the command"
+    );
+    assert_eq!(summary.height, rect.height, "it fills the band's height");
+}
+
+#[test]
+fn a_band_too_narrow_for_the_summary_keeps_the_trail_whole() {
+    let theme = Theme::dark();
+    let rect = band(220, &theme);
+    let layout = resolve_band(
+        rect,
+        Some(BandSummary {
+            width: 240,
+            height: 52,
+        }),
+        Scale::ONE,
+        &theme,
+    );
+
+    assert_eq!(
+        layout.summary, None,
+        "the reader's own location outranks a census they can read elsewhere"
+    );
+    assert_eq!(layout.trail.left(), rect.left());
+    assert!(layout.trail.right() <= layout.command.left());
+}
+
+#[test]
+fn the_band_grows_only_for_a_section_that_asks_it_to() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let resting = scale.scale_length(theme.metrics().control_height);
+
+    assert_eq!(
+        SectionAnatomy::PRIMARY_ONLY.band_height(scale, &theme),
+        resting,
+        "a section with no census pays for none"
+    );
+
+    let anatomy = SectionAnatomy {
+        band_summary: Some(BandSummary {
+            width: 240,
+            height: 52,
+        }),
+        ..SectionAnatomy::PRIMARY_ONLY
+    };
+    assert_eq!(anatomy.band_height(scale, &theme), scale.scale_length(52));
 }

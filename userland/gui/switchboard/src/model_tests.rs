@@ -23,7 +23,7 @@ use crate::test_host::{
 };
 use crate::view::{
     ActionVerdict, ActivityControl, PressureControl, Reading, RecoveryControl, Section,
-    SwitchboardAction, TileInstrument, Unmeasured,
+    SwitchboardAction, TaskControl, TileInstrument, Unmeasured,
 };
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test
@@ -94,8 +94,24 @@ fn tasks_are_built_in_sampled_order_with_a_switch_action() {
     assert_eq!(panel.model.tasks.len(), 2);
     assert_eq!(panel.model.tasks[0].name, "alpha");
     assert_eq!(panel.model.tasks[0].cpu_permille, Some(500));
-    assert_eq!(panel.model.tasks[0].action, "Switch");
-    assert!(panel.model.tasks[0].action_allowed);
+    // A live task's window may always be asked for; nothing else is, without
+    // the process-control capability this caller does not hold.
+    assert_eq!(
+        panel.model.tasks[0].authority.verdict(TaskControl::Switch),
+        ActionVerdict::Ready
+    );
+    for control in [
+        TaskControl::Pause,
+        TaskControl::Resume,
+        TaskControl::LowerPriority,
+        TaskControl::ForceQuit,
+    ] {
+        assert_eq!(
+            panel.model.tasks[0].authority.verdict(control),
+            ActionVerdict::DeniedByAuthority,
+            "{control:?} needs process control"
+        );
+    }
     assert_eq!(panel.model.tasks[0].group, None);
     assert_eq!(panel.task_owner(0), Some(10));
     assert_eq!(panel.task_owner(1), Some(20));
@@ -1003,7 +1019,7 @@ fn can_create_activity_reflects_activities_can_create() {
 // --- apply_action: existing actions -------------------------------------
 
 #[test]
-fn a_task_action_maps_to_activate_owner() {
+fn switch_and_reveal_both_ask_the_session_for_that_owner() {
     let sample = sample_with(alloc::vec![process(
         10,
         ProcessState::Running,
@@ -1011,15 +1027,170 @@ fn a_task_action_maps_to_activate_owner() {
         None
     )]);
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
-    let effect = apply_action(&panel, SwitchboardAction::Task { index: 0 }, &NONE);
-    assert_eq!(effect, alloc::vec![Effect::ActivateOwner { owner: 10 }]);
+    for control in [TaskControl::Switch, TaskControl::Reveal] {
+        let effect = apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE);
+        assert_eq!(
+            effect,
+            alloc::vec![Effect::ActivateOwner { owner: 10 }],
+            "{control:?} raises the task's own window"
+        );
+    }
+}
+
+#[test]
+fn each_signalling_command_maps_to_its_own_signal() {
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    let panel = model(
+        &sample,
+        &SeatReport::HEALTHY,
+        &meters_for(&sample),
+        &PROC_CONTROL,
+    );
+    for (control, expected) in [
+        (
+            TaskControl::Pause,
+            Effect::Signal {
+                pid: 10,
+                signal: Signal::Stop,
+            },
+        ),
+        (
+            TaskControl::LowerPriority,
+            Effect::LowerPriority { pid: 10 },
+        ),
+        (
+            TaskControl::ForceQuit,
+            Effect::Signal {
+                pid: 10,
+                signal: Signal::Kill,
+            },
+        ),
+    ] {
+        let effect = apply_action(
+            &panel,
+            SwitchboardAction::Task { index: 0, control },
+            &PROC_CONTROL,
+        );
+        assert_eq!(effect, alloc::vec![expected], "{control:?}");
+    }
+}
+
+#[test]
+fn resume_only_reaches_a_stopped_task() {
+    let running = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    let panel = model(
+        &running,
+        &SeatReport::HEALTHY,
+        &meters_for(&running),
+        &PROC_CONTROL,
+    );
+    assert!(
+        apply_action(
+            &panel,
+            SwitchboardAction::Task {
+                index: 0,
+                control: TaskControl::Resume,
+            },
+            &PROC_CONTROL,
+        )
+        .is_empty(),
+        "a running task has nothing to continue"
+    );
+
+    let stopped = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Stopped,
+        b"alpha",
+        None
+    )]);
+    let panel = model(
+        &stopped,
+        &SeatReport::HEALTHY,
+        &meters_for(&stopped),
+        &PROC_CONTROL,
+    );
+    assert_eq!(
+        apply_action(
+            &panel,
+            SwitchboardAction::Task {
+                index: 0,
+                control: TaskControl::Resume,
+            },
+            &PROC_CONTROL,
+        ),
+        alloc::vec![Effect::Signal {
+            pid: 10,
+            signal: Signal::Continue,
+        }]
+    );
+}
+
+#[test]
+fn a_task_command_the_caller_may_not_use_produces_no_effect() {
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    // Built *and* dispatched without process control: the verdict the model
+    // reached is the server-side check, so the effect never happens.
+    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    for control in [TaskControl::Pause, TaskControl::ForceQuit] {
+        assert!(
+            apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE,).is_empty(),
+            "{control:?} must fail closed"
+        );
+    }
+}
+
+#[test]
+fn open_logs_produces_no_effect_because_no_interface_exists() {
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    let panel = model(
+        &sample,
+        &SeatReport::HEALTHY,
+        &meters_for(&sample),
+        &PROC_CONTROL,
+    );
+    assert!(apply_action(
+        &panel,
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::OpenLogs,
+        },
+        &PROC_CONTROL,
+    )
+    .is_empty());
 }
 
 #[test]
 fn an_out_of_range_task_index_produces_no_effect() {
     let sample = Sample::default();
     let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
-    let effect = apply_action(&panel, SwitchboardAction::Task { index: 0 }, &NONE);
+    let effect = apply_action(
+        &panel,
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::Switch,
+        },
+        &NONE,
+    );
     assert!(effect.is_empty());
 }
 

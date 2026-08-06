@@ -1,12 +1,23 @@
 //! The Tasks section: the live task/application table
 //! (`plans/NEW-SWITCHBOARD.md` S3, S4).
 //!
-//! Owns the caller's task view model ([`TaskSummary`]), the header band
-//! (census [`MetricTile`]s, the filter [`Tabs`] and the [`SearchField`]),
-//! the sortable [`TableHeader`] and its [`TableRow`]s, the footer band (the
-//! shown/total count, the grouping [`ComboBox`] and the auto-refresh
-//! [`Toggle`]), the grouping [`Menu`] a row's group action opens, and the
-//! section's layout, painting and input.
+//! Owns the caller's task view model ([`TaskSummary`]), the census
+//! [`MetricTile`]s the location band seats, the header band (the filter
+//! [`Tabs`] over its own row and the [`SearchField`] over the next), the
+//! sortable [`TableHeader`] and its [`TableRow`]s, the selected task's
+//! command [`ActionRail`], the footer band (the shown/total count, the
+//! auto-refresh [`Toggle`] and the grouping [`ComboBox`]), the grouping
+//! [`Menu`] the Group command opens, and the section's layout, painting and
+//! input.
+//!
+//! # The commands act on the selection, not on a row
+//!
+//! The table states what each task *is*; the trailing rail states what may be
+//! *done* to whichever task is selected. Keeping the commands out of the rows
+//! is what lets the rail name a task's whole repertoire — switch to it, pause
+//! it, lower it, end it — instead of the one or two buttons a row's trailing
+//! cell could hold, and it keeps the anchored commands still while the rows
+//! scroll beneath them.
 //!
 //! # Arrangement, not a second query
 //!
@@ -21,24 +32,27 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
+use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key, Modifiers, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActivityState, Button, ButtonAction, CellAlign, Chart, ComboAction, ComboBox, ControlState,
-    HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem, MetricLayout, MetricTile, PressureKind,
-    PressureState, RecoveryState, RowAction, SearchField, SelectorAction, SortOrder, StatusPill,
-    Tab, TableCell, TableHeader, TableRow, Tabs, TabsAction, Toggle,
+    ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
+    ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
+    MetricLayout, MetricTile, Panel, PressureKind, PressureState, RailAction, RecoveryState,
+    RowAction, SearchField, SelectionState, SelectorAction, SortOrder, StatusPill, Tab, TableCell,
+    TableHeader, TableRow, Tabs, TabsAction, Toggle,
 };
 
-use super::frame::{SectionAnatomy, SectionFrame};
+use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::{
-    action_state, ListInfo, SectionCtx, SectionOutcome, SectionView, Switchboard,
-    SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView,
+    Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 use crate::format::{format_bytes, format_rate, percent};
 
@@ -80,8 +94,88 @@ impl TaskKind {
     pub const fn icon(self) -> IconKind {
         match self {
             Self::Process => IconKind::Executable,
-            Self::Job => IconKind::Generic,
+            Self::Job => IconKind::Job,
             Self::Service => IconKind::ServiceBundle,
+        }
+    }
+}
+
+/// A command the Tasks section can invoke on the selected task.
+///
+/// Each variant names an operation the service can genuinely carry out
+/// ([`crate::model::apply_action`]), so the rail offers no command the system
+/// cannot perform.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TaskControl {
+    /// Raise the task's own window and give it the focus.
+    Switch,
+    /// Show where the task's window is.
+    Reveal,
+    /// Suspend the task.
+    Pause,
+    /// Continue a suspended task.
+    Resume,
+    /// Lower the task's scheduling priority.
+    LowerPriority,
+    /// Show the task's own log entries.
+    OpenLogs,
+    /// End the task outright.
+    ForceQuit,
+}
+
+/// What the caller may do to one task: one verdict per command, decided
+/// where the caller's authority and the task's own state are both known
+/// (`crate::model`) rather than guessed at render time.
+///
+/// [`Default`] refuses everything, so a task built without an explicit
+/// verdict offers no command at all rather than a permitted one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TaskAuthority {
+    /// Whether the session may be asked to raise the task's window. Shared
+    /// by [`TaskControl::Switch`] and [`TaskControl::Reveal`], which are the
+    /// same request of the session.
+    pub switch: ActionVerdict,
+    /// Whether the task may be suspended.
+    pub pause: ActionVerdict,
+    /// Whether the task may be continued.
+    pub resume: ActionVerdict,
+    /// Whether the task's priority may be lowered.
+    pub lower_priority: ActionVerdict,
+    /// Whether the task may be ended outright.
+    pub force_quit: ActionVerdict,
+}
+
+impl Default for TaskAuthority {
+    /// Every command refused: an unstated authority never grants one.
+    fn default() -> Self {
+        Self {
+            switch: ActionVerdict::DeniedByAuthority,
+            pause: ActionVerdict::DeniedByAuthority,
+            resume: ActionVerdict::DeniedByAuthority,
+            lower_priority: ActionVerdict::DeniedByAuthority,
+            force_quit: ActionVerdict::DeniedByAuthority,
+        }
+    }
+}
+
+impl TaskAuthority {
+    /// The verdict for one command — the single mapping the rail renders
+    /// through and [`crate::model::apply_action`] re-checks against, so what
+    /// is drawn and what is permitted can never disagree.
+    ///
+    /// [`TaskControl::OpenLogs`] is always [`ActionVerdict::DisabledByState`]:
+    /// no capability-gated query for a task's own log entries exists yet, so
+    /// the command states its absence plainly rather than pretending to be
+    /// available or hiding the fact that logs are the natural next question.
+    #[must_use]
+    pub const fn verdict(&self, control: TaskControl) -> ActionVerdict {
+        match control {
+            TaskControl::Switch | TaskControl::Reveal => self.switch,
+            TaskControl::Pause => self.pause,
+            TaskControl::Resume => self.resume,
+            TaskControl::LowerPriority => self.lower_priority,
+            TaskControl::OpenLogs => ActionVerdict::DisabledByState,
+            TaskControl::ForceQuit => self.force_quit,
         }
     }
 }
@@ -89,17 +183,24 @@ impl TaskKind {
 /// One live task/application, as the caller's typed view model
 /// (`plans/NEW-SWITCHBOARD.md`).
 ///
-/// Switchboard renders it as a [`TableRow`] carrying the task's activity as
-/// a Heat Seam, its resource pressure as a Pressure Rail, and its recovery
-/// posture as a Signal Bead, with the row's own action [`Button`]s in the
-/// trailing Actions column.
+/// Switchboard renders it as a [`TableRow`] carrying the task's resource
+/// pressure as a Pressure Rail and its recovery posture as a Signal Bead;
+/// its activity is the Activity column's own sparkline, drawn where the
+/// heading names it rather than as a seam under the whole row.
 ///
 /// Every measured figure is an [`Option`]: `None` means the service did not
 /// measure it, and the cell renders the explicit unmeasured mark. A zero
 /// would read as a genuine idle reading, so an absent figure is never
 /// flattened into one.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskSummary {
+    /// The task's stable, never-reused instance identity.
+    ///
+    /// What the selection and the rail's subject are keyed by, so neither
+    /// silently re-points at a different task when a refresh, a re-sort or a
+    /// re-filter moves the rows around it. A numeric pid would be no better
+    /// — the kernel reuses it.
+    pub proc_id: ProcId,
     /// The task's display name.
     pub name: String,
     /// What this row is, for the Type column.
@@ -125,14 +226,33 @@ pub struct TaskSummary {
     pub activity: ActivityState,
     /// The task's recovery posture (hung, restart recommended, …).
     pub recovery: RecoveryState,
-    /// The row action's label (e.g. "Sleep", "End").
-    pub action: String,
-    /// Whether the caller may perform the row action. A false value renders
-    /// the action denied (Authority Mark) and fails closed on activation.
-    pub action_allowed: bool,
+    /// What the caller may do to this task, one verdict per rail command.
+    pub authority: TaskAuthority,
     /// The activity this task is grouped into, as an index into
     /// [`SwitchboardModel::activities`](super::SwitchboardModel::activities); `None` when it is ungrouped.
     pub group: Option<usize>,
+}
+
+impl Default for TaskSummary {
+    /// An unnamed, unmeasured task offering no command — the shape a caller
+    /// fills in field by field, never a row that reads as a real one.
+    fn default() -> Self {
+        Self {
+            proc_id: ProcId::KERNEL,
+            name: String::new(),
+            kind: TaskKind::default(),
+            lifecycle: None,
+            cpu_permille: None,
+            memory_bytes: None,
+            disk_bytes_per_sec: None,
+            cpu_history: Vec::new(),
+            pressure: PressureState::None,
+            activity: ActivityState::Idle,
+            recovery: RecoveryState::None,
+            authority: TaskAuthority::default(),
+            group: None,
+        }
+    }
 }
 
 impl TaskSummary {
@@ -174,67 +294,62 @@ struct ColumnSpec {
 
 /// The Tasks table's columns, in draw order (`plans/switchboard1.png`).
 ///
-/// The Activity column carries a sparkline rather than text, and the
-/// Actions column carries the row's buttons, so neither is sortable: there
-/// is no single value to order by.
-const COLUMNS: [ColumnSpec; 10] = [
+/// Every column is a *reading* about the task; what may be done to it is the
+/// trailing rail's business, not a column's. The Activity column carries a
+/// sparkline rather than text and so is not sortable: there is no single
+/// value to order by.
+const COLUMNS: [ColumnSpec; 9] = [
     ColumnSpec {
         title: "Task",
-        weight: 26,
+        weight: 28,
         align: CellAlign::Leading,
         sortable: true,
     },
     ColumnSpec {
         title: "Type",
-        weight: 9,
+        weight: 10,
         align: CellAlign::Leading,
         sortable: true,
     },
     ColumnSpec {
         title: "State",
-        weight: 9,
+        weight: 10,
         align: CellAlign::Leading,
         sortable: true,
     },
     ColumnSpec {
         title: "Activity",
-        weight: 10,
+        weight: 12,
         align: CellAlign::Center,
         sortable: false,
     },
     ColumnSpec {
         title: "CPU",
-        weight: 7,
+        weight: 8,
         align: CellAlign::Trailing,
         sortable: true,
     },
     ColumnSpec {
         title: "Memory",
-        weight: 9,
+        weight: 10,
         align: CellAlign::Trailing,
         sortable: true,
     },
     ColumnSpec {
         title: "Disk",
-        weight: 9,
+        weight: 10,
         align: CellAlign::Trailing,
         sortable: true,
     },
     ColumnSpec {
         title: "Network",
-        weight: 9,
-        align: CellAlign::Trailing,
-        sortable: false,
-    },
-    ColumnSpec {
-        title: "Last active",
         weight: 10,
         align: CellAlign::Trailing,
         sortable: false,
     },
     ColumnSpec {
-        title: "Actions",
-        weight: 14,
+        title: "Last active",
+        weight: 12,
         align: CellAlign::Trailing,
         sortable: false,
     },
@@ -260,12 +375,10 @@ const COL_NETWORK: usize = 7;
 /// The Last-active column, which has no interface to read and is always
 /// unmeasured.
 const COL_LAST_ACTIVE: usize = 8;
-/// The trailing Actions column, which holds the row's own buttons.
-const COL_ACTIONS: usize = 9;
 
 /// The column weights alone, in draw order — the one geometry every column
-/// query is resolved through, so the heading, the cells, the sparkline and
-/// the action buttons can never land in different places.
+/// query is resolved through, so the heading, the cells and the sparkline can
+/// never land in different places.
 ///
 /// Held as a constant rather than collected per call: every row asks for it
 /// twice on every redraw, and the table redraws on every sample, so
@@ -390,13 +503,15 @@ impl TaskGrouping {
     }
 }
 
-/// Which of a Tasks section's three cursor bands the keyboard is in.
+/// Which of a Tasks section's four cursor bands the keyboard is in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FocusBand {
     /// A header control, by its stop.
     Header(usize),
     /// A shown row, by its position in the arrangement.
     Row(usize),
+    /// A rail command, by its slot.
+    Rail(usize),
     /// A footer control, by its stop.
     Footer(usize),
 }
@@ -418,27 +533,163 @@ const STOP_GROUPING: usize = 0;
 /// The auto-refresh toggle's offset within the footer's stops.
 const STOP_REFRESH: usize = 1;
 
-/// The census band's logical height: one tile row.
-const CENSUS_HEIGHT: u32 = 56;
-/// The filter/search band's logical height.
+/// The census tiles' logical height, which is the height the location band
+/// grows to in order to seat them: a stacked tile shows its label above its
+/// reading, so it needs more than a single line.
+const CENSUS_HEIGHT: u32 = 52;
+/// One census tile's logical width: enough at the reference density for the
+/// longest label ("Services") beside its icon.
+const CENSUS_TILE_WIDTH: u32 = 104;
+/// The filter strip's own logical row height.
 const FILTER_HEIGHT: u32 = 28;
+/// The search field's own logical row height, beneath the filter strip.
+const SEARCH_HEIGHT: u32 = 30;
 /// The footer band's logical height.
 const FOOTER_HEIGHT: u32 = 28;
 
-/// The share of the filter band's width the search field claims, as a
-/// denominator: the strip takes the rest.
-const SEARCH_WIDTH_DIVISOR: u32 = 4;
+/// The rail's caption. The rail control carries no caption of its own, so
+/// the section seats it in a [`Panel`], which already defines what a titled
+/// container looks like.
+const RAIL_TITLE: &str = "ACTIONS";
 
-/// One task rendered as a [`TableRow`] plus its primary action [`Button`]
-/// and its `Group` [`Button`] (which opens the Group popup menu).
+/// One command the rail offers for the selected task.
+///
+/// Most are a [`TaskControl`] the service carries out; `Group` is this
+/// section's own popup, which reports its choice as a grouping edit rather
+/// than as a task control, so it is named here rather than forced into the
+/// control vocabulary.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TaskCommand {
+    /// Invoke a control on the selected task.
+    Control(TaskControl),
+    /// Open the Group popup for the selected task.
+    Group,
+}
+
+/// One census tile: what it counts, what it says, and the glyph and identity
+/// tint it wears.
+struct CensusSpec {
+    label: &'static str,
+    /// The filter whose admitted tasks this tile counts — the same predicate
+    /// the matching tab counts through, so a tile and its tab can never
+    /// state different numbers for the same tasks.
+    filter: TaskFilter,
+    icon: IconKind,
+    /// What tints the tile's glyph. An identity colour per kind of thing
+    /// counted, not a claim that a resource is under strain.
+    tint: PressureKind,
+}
+
+/// The census tiles, in reading order (`plans/switchboard1.png`).
+///
+/// The one declaration: the tiles are built from it and the room the location
+/// band is asked for is measured from it, so the band can never seat a
+/// different number of tiles than the section draws.
+const CENSUS: [CensusSpec; 4] = [
+    CensusSpec {
+        label: "Processes",
+        filter: TaskFilter::Processes,
+        icon: IconKind::Executable,
+        tint: PressureKind::Cpu,
+    },
+    CensusSpec {
+        label: "Jobs",
+        filter: TaskFilter::Jobs,
+        icon: IconKind::Job,
+        tint: PressureKind::Disk,
+    },
+    CensusSpec {
+        label: "Services",
+        filter: TaskFilter::Services,
+        icon: IconKind::ServiceBundle,
+        tint: PressureKind::Network,
+    },
+    CensusSpec {
+        label: "Alerts",
+        filter: TaskFilter::Faults,
+        icon: IconKind::Bell,
+        tint: PressureKind::Thermal,
+    },
+];
+
+/// One rail command's presentation: what it does, what it says, the glyph
+/// that says it without words, and the weight the plate carries.
+struct CommandSpec {
+    command: TaskCommand,
+    label: &'static str,
+    icon: IconKind,
+    role: ControlRole,
+}
+
+/// The rail's commands, in the order they are offered
+/// (`plans/switchboard1.png`).
+///
+/// Reading order is the order a reader reaches for them: go to the task,
+/// then find it, then throttle it, then group it, and only last end it.
+/// Force quit is [`ControlRole::Destructive`] so its plate wears the danger
+/// rim, and it sits at the foot of the list where a mis-aimed press is
+/// least likely to land on it.
+const RAIL_COMMANDS: [CommandSpec; 8] = [
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::Switch),
+        label: "Switch to",
+        icon: IconKind::TaskSwitch,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::Reveal),
+        label: "Reveal window",
+        icon: IconKind::Reveal,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::Pause),
+        label: "Pause",
+        icon: IconKind::Pause,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::Resume),
+        label: "Resume",
+        icon: IconKind::Resume,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::LowerPriority),
+        label: "Lower priority",
+        icon: IconKind::Priority,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::OpenLogs),
+        label: "Open logs",
+        icon: IconKind::Text,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Group,
+        label: "Group\u{2026}",
+        icon: IconKind::Library,
+        role: ControlRole::Neutral,
+    },
+    CommandSpec {
+        command: TaskCommand::Control(TaskControl::ForceQuit),
+        label: "Force quit",
+        icon: IconKind::Quit,
+        role: ControlRole::Destructive,
+    },
+];
+
+/// One task rendered as a [`TableRow`] and its Activity sparkline.
+///
+/// The row carries no buttons: what may be done to a task belongs to the
+/// section's own rail, which acts on the selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TaskEntry {
     pub(super) row: TableRow,
-    pub(super) action: Button,
-    pub(super) group_button: Button,
     /// The task's own CPU history, as the Activity column's sparkline.
     pub(super) spark: Chart,
-    /// The task's activity, as of the last
+    /// The activity this task is grouped into, as of the last
     /// [`adopt`](SectionView::adopt), mirroring [`TaskSummary::group`] so the
     /// Group popup can be built without the model.
     pub(super) group: Option<usize>,
@@ -475,21 +726,42 @@ pub(super) struct GroupPopup {
     pub(super) menu: Menu,
 }
 
+/// Where the footer's controls sit: the shown/total count and the
+/// auto-refresh toggle under the table, the grouping choice under the rail.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct FooterLayout {
+    /// The shown/total readout.
+    count: Rect,
+    /// The auto-refresh toggle.
+    refresh: Rect,
+    /// The grouping choice, or `None` when the frame seated no rail for it
+    /// to stand under.
+    grouping: Option<Rect>,
+}
+
 /// The Tasks section: the adopted rows, the arrangement shown over them,
-/// the header and footer bands, the Group popup, and the keyboard's place
-/// among all of it.
+/// the header and footer bands, the selected task's commands, the Group
+/// popup, and the keyboard's place among all of it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TasksSection {
     /// Every adopted task, in model order — what the filter, search, sort
     /// and grouping arrange, and what a reported action's index names.
     pub(super) tasks: Vec<TaskSummary>,
-    /// One row plus its two actions per *shown* task, in shown order.
+    /// One row per *shown* task, in shown order.
     pub(super) entries: Vec<TaskEntry>,
     /// `order[i]` is the model index of shown row `i`, so a row the reader
     /// points at resolves back to the task rather than to a position.
     pub(super) order: Vec<usize>,
-    /// The four census tiles, in header order.
+    /// The four census tiles the location band seats, in reading order.
     pub(super) census: Vec<MetricTile>,
+    /// The selected task's own identity, so the selection survives a
+    /// refresh, a re-filter and a re-sort rather than following whichever
+    /// row slid into its place.
+    pub(super) selected: Option<ProcId>,
+    /// The selected task's commands.
+    pub(super) rail: ActionRail,
+    /// The plate the rail is seated in, which carries its caption.
+    pub(super) rail_panel: Panel,
     /// The filter strip, each tab labelled with its own real count.
     pub(super) filters: Tabs,
     /// The name search over the shown rows.
@@ -510,24 +782,25 @@ pub(super) struct TasksSection {
     /// The open Group popup, or `None` while it is closed.
     pub(super) popup: Option<GroupPopup>,
     /// Where the content cursor is among this section's focusable things:
-    /// the header's stops, then one per shown row, then the footer's.
+    /// the header's stops, one per shown row, the rail's commands, then the
+    /// footer's stops.
     pub(super) focus: usize,
     /// Which of the focused thing's actions the cursor is on.
     pub(super) action: usize,
 }
 
 impl TasksSection {
-    /// The number of inline actions a task row carries: its primary action,
-    /// then `Group`.
-    const BUTTONS: u32 = 2;
-
-    /// An empty Tasks section: no tasks, no popup, cursor on the filters.
+    /// An empty Tasks section: no tasks, no selection, no popup, cursor on
+    /// the filters.
     pub(super) fn new() -> Self {
         let mut section = Self {
             tasks: Vec::new(),
             entries: Vec::new(),
             order: Vec::new(),
             census: Vec::new(),
+            selected: None,
+            rail: ActionRail::new(Vec::new()),
+            rail_panel: Panel::new(RAIL_TITLE),
             filters: Tabs::new(
                 TaskFilter::ALL
                     .iter()
@@ -634,14 +907,80 @@ impl TasksSection {
                 None => Ordering::Equal,
             }
         });
-        self.entries = order
+        self.order = order;
+        // The selection is re-resolved against the rows now on show, so a
+        // task the filter or the search has hidden stops being the subject
+        // of commands the reader can no longer see it for.
+        self.selected = resolve_selection(
+            self.selected,
+            self.order
+                .iter()
+                .filter_map(|index| self.tasks.get(*index))
+                .map(|task| task.proc_id),
+        );
+        let selected = self.selected;
+        self.entries = self
+            .order
             .iter()
             .filter_map(|index| self.tasks.get(*index))
-            .map(Self::build)
+            .map(|task| Self::build(task, selected == Some(task.proc_id)))
             .collect();
-        self.order = order;
         self.count = StatusPill::new(count_line(self.entries.len(), self.tasks.len()));
+        self.rebuild_rail();
         self.restore_band(band);
+    }
+
+    /// The model index of the selected task, or `None` when nothing is
+    /// selected or the selection is not among the rows on show.
+    fn selected_index(&self) -> Option<usize> {
+        let id = self.selected?;
+        self.tasks.iter().position(|task| task.proc_id == id)
+    }
+
+    /// The identity of the task shown at row `row`.
+    fn id_at_row(&self, row: usize) -> Option<ProcId> {
+        self.tasks
+            .get(*self.order.get(row)?)
+            .map(|task| task.proc_id)
+    }
+
+    /// The selected task, or `None` when nothing is selected.
+    fn selected_task(&self) -> Option<&TaskSummary> {
+        self.tasks.get(self.selected_index()?)
+    }
+
+    /// Select `id` and rebuild everything that depends on which task is
+    /// selected: the rows' selection marks and the rail's commands.
+    fn select(&mut self, id: ProcId) {
+        self.selected = Some(id);
+        for row in 0..self.entries.len() {
+            let selected = self.id_at_row(row) == Some(id);
+            if let Some(entry) = self.entries.get_mut(row) {
+                entry.row.set_selected(selected);
+            }
+        }
+        self.rebuild_rail();
+    }
+
+    /// Rebuild the rail from the selected task's own verdicts.
+    ///
+    /// With nothing selected the rail holds no commands at all rather than a
+    /// row of disabled ones: there is no subject for them to act on, and an
+    /// empty rail states that more plainly than eight refusals would.
+    fn rebuild_rail(&mut self) {
+        let items = match self.selected_task() {
+            Some(task) => {
+                let authority = task.authority;
+                RAIL_COMMANDS
+                    .iter()
+                    .map(|spec| command_button(spec, authority))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let focus = self.rail.focus();
+        self.rail = ActionRail::new(items);
+        self.rail.set_focus(focus);
     }
 
     /// Which band the content cursor is in, and where within it.
@@ -651,11 +990,17 @@ impl TasksSection {
     /// footer control in an empty one — so a re-arrangement resolves the
     /// cursor through its band rather than by keeping the number.
     fn focus_band(&self) -> FocusBand {
-        match self.focus.checked_sub(HEADER_STOPS) {
-            None => FocusBand::Header(self.focus),
-            Some(past) if past < self.entries.len() => FocusBand::Row(past),
-            Some(past) => FocusBand::Footer(past.saturating_sub(self.entries.len())),
+        let Some(past_header) = self.focus.checked_sub(HEADER_STOPS) else {
+            return FocusBand::Header(self.focus);
+        };
+        if past_header < self.entries.len() {
+            return FocusBand::Row(past_header);
         }
+        let past_rows = past_header.saturating_sub(self.entries.len());
+        if past_rows < self.rail.len() {
+            return FocusBand::Rail(past_rows);
+        }
+        FocusBand::Footer(past_rows.saturating_sub(self.rail.len()))
     }
 
     /// Put the cursor back in `band` against the arrangement now on show.
@@ -674,8 +1019,21 @@ impl TasksSection {
                     HEADER_STOPS.saturating_add(row.min(self.entries.len().saturating_sub(1)))
                 }
             }
+            // A rail whose commands have gone with the selection has no stop
+            // to return to, so the cursor falls back to the last row — where
+            // choosing a subject, which is what brings the rail back, lives.
+            FocusBand::Rail(slot) => {
+                if self.rail.is_empty() {
+                    self.rows_end()
+                } else {
+                    HEADER_STOPS
+                        .saturating_add(self.entries.len())
+                        .saturating_add(slot.min(self.rail.len().saturating_sub(1)))
+                }
+            }
             FocusBand::Footer(stop) => HEADER_STOPS
                 .saturating_add(self.entries.len())
+                .saturating_add(self.rail.len())
                 .saturating_add(stop.min(FOOTER_STOPS.saturating_sub(1))),
         };
         self.action = self
@@ -683,13 +1041,32 @@ impl TasksSection {
             .min(self.focused_action_count().saturating_sub(1));
     }
 
-    /// Build a task's table row + primary action button + Group button +
-    /// its own CPU sparkline.
-    fn build(task: &TaskSummary) -> TaskEntry {
-        let state = ControlState::idle()
+    /// The cursor stop of the last shown row, or the first header stop when
+    /// no row is shown at all.
+    fn rows_end(&self) -> usize {
+        if self.entries.is_empty() {
+            0
+        } else {
+            HEADER_STOPS.saturating_add(self.entries.len().saturating_sub(1))
+        }
+    }
+
+    /// Build a task's table row and its own CPU sparkline.
+    ///
+    /// The row's state carries its resource pressure (a Pressure Rail down
+    /// its leading edge), its recovery posture (a Signal Bead) and whether it
+    /// is the selected row — but deliberately *not* its activity: an activity
+    /// in a control's state paints a Heat Seam along the whole lower edge,
+    /// which under a table row reads as a rule beneath every working task
+    /// rather than as a reading about one. The activity is shown in the
+    /// Activity column instead, as the sparkline the heading promises.
+    fn build(task: &TaskSummary, selected: bool) -> TaskEntry {
+        let mut state = ControlState::idle()
             .with_pressure(task.pressure)
-            .with_activity(task.activity)
             .with_recovery(task.recovery);
+        if selected {
+            state = state.with_selection(SelectionState::Selected);
+        }
         let mut cells = Vec::with_capacity(COLUMNS.len());
         cells.push(TaskEntry::cell(COL_TASK, &task.name).with_icon(task.kind.icon()));
         cells.push(TaskEntry::cell(COL_TYPE, task.kind.label()));
@@ -712,16 +1089,9 @@ impl TasksSection {
         // than a zero or a plausible-looking number.
         cells.push(TaskEntry::reading(COL_NETWORK, None));
         cells.push(TaskEntry::reading(COL_LAST_ACTIVE, None));
-        cells.push(TaskEntry::cell(COL_ACTIONS, ""));
 
-        let row = TableRow::new(cells).with_state(state);
-        let mut action = Button::labelled(task.action.clone());
-        action.set_state(action_state(task.action_allowed));
-        let group_button = Button::labelled("Group");
         TaskEntry {
-            row,
-            action,
-            group_button,
+            row: TableRow::new(cells).with_state(state),
             spark: Chart::new(PressureKind::Cpu).with_samples(task.cpu_history.iter().copied()),
             group: task.group,
         }
@@ -738,19 +1108,24 @@ impl TasksSection {
     /// Every tile counts adopted rows through the same filter predicate the
     /// tabs count through, so the Alerts tile and the Faults tab can never
     /// state different numbers for the same tasks.
+    ///
+    /// Each tile is plated and carries the glyph of the thing it counts, so
+    /// the census reads as four distinct readings on the band rather than as
+    /// four numbers running into the location trail beside them. The tile's
+    /// [`PressureKind`] is what tints that glyph, so each kind of thing keeps
+    /// its own identity colour; it is a tint, not a pressure verdict, and no
+    /// tile claims a resource is under strain.
     fn build_census(&self) -> Vec<MetricTile> {
-        let counts = [
-            ("Processes", self.count_of(TaskFilter::Processes)),
-            ("Jobs", self.count_of(TaskFilter::Jobs)),
-            ("Services", self.count_of(TaskFilter::Services)),
-            ("Alerts", self.count_of(TaskFilter::Faults)),
-        ];
-        counts
+        CENSUS
             .iter()
-            .map(|(label, count)| {
-                MetricTile::new(*label, count_text(*count), PressureKind::Cpu)
-                    .with_layout(MetricLayout::Stacked)
-                    .unplated()
+            .map(|spec| {
+                MetricTile::new(
+                    spec.label,
+                    count_text(self.count_of(spec.filter)),
+                    spec.tint,
+                )
+                .with_layout(MetricLayout::Stacked)
+                .with_icon(spec.icon)
             })
             .collect()
     }
@@ -778,78 +1153,143 @@ impl TasksSection {
         self.filters.set_selected(selected);
     }
 
-    /// The shown row a model `task` index currently occupies, or `None`
-    /// when the active filter or search is hiding it.
-    fn shown_row_of(&self, task: usize) -> Option<usize> {
-        self.order.iter().position(|index| *index == task)
-    }
-
     /// The content-cursor stop that focuses shown row `row`, for a caller
     /// that knows a row and needs the cursor position naming it.
     pub(super) fn focus_index_for_row(&self, row: usize) -> usize {
         HEADER_STOPS.saturating_add(row.min(self.entries.len().saturating_sub(1)))
     }
 
-    /// The rectangles of the header band's two rows: the census tiles above
-    /// the filter strip and search field.
+    /// The content-cursor stop that focuses rail slot `slot`.
+    #[cfg(test)]
+    pub(super) fn rail_focus_index(&self, slot: usize) -> usize {
+        HEADER_STOPS
+            .saturating_add(self.entries.len())
+            .saturating_add(slot.min(self.rail.len().saturating_sub(1)))
+    }
+
+    /// The rectangles of the header band's two rows: the filter strip, then
+    /// the search field beneath it.
+    ///
+    /// The search reads over the whole table it searches rather than being
+    /// squeezed into the end of the filter row: the two are separate
+    /// questions — *which kind* of task, and *which* task — so each gets its
+    /// own row and its own full width. The strip is clipped before the search
+    /// is, so a header band too short for both still shows the filters.
     fn header_rows(frame: &SectionFrame, scale: Scale) -> (Rect, Rect) {
-        let census_h = scale.scale_length(CENSUS_HEIGHT).min(frame.header.height);
-        let census = Rect::new(
+        let filters_h = scale.scale_length(FILTER_HEIGHT).min(frame.header.height);
+        let filters = Rect::new(
             frame.header.left(),
             frame.header.top(),
             frame.header.width,
-            census_h,
+            filters_h,
         );
-        let filter = Rect::new(
+        let search = Rect::new(
             frame.header.left(),
-            frame.header.top() + to_i32(census_h),
+            frame.header.top() + to_i32(filters_h),
             frame.header.width,
-            frame.header.height.saturating_sub(census_h),
+            frame.header.height.saturating_sub(filters_h),
         );
-        (census, filter)
+        (filters, search)
     }
 
-    /// The filter strip's and search field's rectangles within the filter
-    /// band: the search claims a trailing share, the strip takes the rest.
-    fn filter_split(band: Rect) -> (Rect, Rect) {
-        let search_w = band.width / SEARCH_WIDTH_DIVISOR;
-        let tabs_w = band.width.saturating_sub(search_w);
-        (
-            Rect::new(band.left(), band.top(), tabs_w, band.height),
-            Rect::new(
-                band.left() + to_i32(tabs_w),
-                band.top(),
-                search_w,
-                band.height,
-            ),
-        )
+    /// The census tiles' own rectangles within the band summary the location
+    /// band seated, laid out in reading order with the theme's control gap
+    /// between them.
+    ///
+    /// The one layout the paint reads, so a tile can never be drawn outside
+    /// the region the band resolved for the whole census.
+    fn census_rects(&self, summary: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+        let count = u32::try_from(self.census.len()).unwrap_or(0);
+        if count == 0 {
+            return Vec::new();
+        }
+        let gap = scale.scale_length(theme.metrics().control_gap);
+        let gaps = gap.saturating_mul(count.saturating_sub(1));
+        let each = summary.width.saturating_sub(gaps) / count;
+        (0..count)
+            .map(|i| {
+                Rect::new(
+                    summary.left() + to_i32(each.saturating_add(gap).saturating_mul(i)),
+                    summary.top(),
+                    each,
+                    summary.height,
+                )
+            })
+            .collect()
     }
 
-    /// The footer's three rectangles: the count text, the grouping control,
-    /// then the auto-refresh toggle, each claiming a third.
-    fn footer_split(frame: &SectionFrame) -> [Rect; 3] {
-        let third = frame.footer.width / 3;
-        let last = frame.footer.width.saturating_sub(third.saturating_mul(2));
-        [
+    /// The footer's rectangles: the shown/total count and the auto-refresh
+    /// toggle share the width the table occupies, and the grouping control
+    /// takes the column the rail stands in.
+    ///
+    /// Seating the grouping control under the rail rather than between the
+    /// other two keeps each footer control beneath what it governs — the
+    /// count and the refresh under the table, the arrangement under the
+    /// commands — and it is the last region to be dropped, since a frame too
+    /// narrow for the rail has no column to seat it in.
+    fn footer_split(frame: &SectionFrame) -> FooterLayout {
+        let table_w = frame.primary.width.min(frame.footer.width);
+        let half = table_w / 2;
+        let count = Rect::new(
+            frame.footer.left(),
+            frame.footer.top(),
+            half,
+            frame.footer.height,
+        );
+        let refresh = Rect::new(
+            frame.footer.left() + to_i32(half),
+            frame.footer.top(),
+            table_w.saturating_sub(half),
+            frame.footer.height,
+        );
+        let grouping = frame.rail.map(|rail| {
             Rect::new(
-                frame.footer.left(),
+                rail.left(),
                 frame.footer.top(),
-                third,
+                rail.width,
                 frame.footer.height,
-            ),
-            Rect::new(
-                frame.footer.left() + to_i32(third),
-                frame.footer.top(),
-                third,
-                frame.footer.height,
-            ),
-            Rect::new(
-                frame.footer.left() + to_i32(third.saturating_mul(2)),
-                frame.footer.top(),
-                last,
-                frame.footer.height,
-            ),
-        ]
+            )
+        });
+        FooterLayout {
+            count,
+            refresh,
+            grouping,
+        }
+    }
+
+    /// The rail's own content rectangle inside the plate that captions it,
+    /// or `None` when the frame seated no rail or the plate leaves no room.
+    fn rail_content(
+        frame: &SectionFrame,
+        panel: &Panel,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        panel.content_rect(frame.rail?, scale, theme)
+    }
+
+    /// The rail's item rectangles, in rail order — the very rectangles the
+    /// paint and the hit test share.
+    #[cfg(test)]
+    pub(super) fn rail_item_rects(&self, ctx: &SectionCtx<'_>) -> Vec<Rect> {
+        let Some(content) = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
+        else {
+            return Vec::new();
+        };
+        (0..self.rail.len())
+            .filter_map(|slot| {
+                self.rail
+                    .item_rect(content, slot, ctx.scale, ctx.theme, ctx.font)
+            })
+            .collect()
+    }
+
+    /// Which rail slot holds the `Group…` command.
+    pub(super) fn group_slot() -> usize {
+        RAIL_COMMANDS
+            .iter()
+            .position(|spec| spec.command == TaskCommand::Group)
+            .unwrap_or(0)
     }
 
     /// The pinned column-heading rectangle at the top of the primary
@@ -865,8 +1305,14 @@ impl TasksSection {
     }
 
     /// The expanded grouping popup's rectangle, clamped inside the window.
+    ///
+    /// A frame too narrow to seat the rail has no footer slot for the
+    /// grouping control either, so the popup falls back to the footer itself
+    /// — somewhere inside the window rather than off its edge.
     fn grouping_popup_rect(&self, ctx: SectionCtx<'_>) -> Rect {
-        let field = Self::footer_split(&ctx.frame)[1];
+        let field = Self::footer_split(&ctx.frame)
+            .grouping
+            .unwrap_or(ctx.frame.footer);
         let (w, h) = self
             .grouping
             .popup_size(field.width, ctx.scale, ctx.theme, ctx.font);
@@ -880,36 +1326,25 @@ impl TasksSection {
         Rect::new(left, top, w, h)
     }
 
-    /// The Group popup's anchor rectangle: the shown row's `Group` button,
-    /// re-derived from the current arrangement, layout and scroll offset
-    /// every time, so it can never go stale across a resize, a scroll, or a
-    /// re-filter that moved the row.
+    /// The Group popup's anchor rectangle: the rail's own `Group` command,
+    /// re-derived from the current layout every time, so it can never go
+    /// stale across a resize or a scroll.
     ///
-    /// A task that is scrolled out of view, or that the active filter is
-    /// hiding, has no rectangle to anchor on; the primary column's own
-    /// rectangle is used instead so the popup still lands somewhere inside
-    /// the window (fail closed, never a panic).
-    fn anchor_rect(&self, task: usize, ctx: SectionCtx<'_>) -> Rect {
-        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        if let Some(row) = self.shown_row_of(task) {
-            if let Some(slot) = row.checked_sub(ctx.start) {
-                if let Ok(slot) = u32::try_from(slot) {
-                    if slot < info.visible() {
-                        if let Some(entry) = self.entries.get(row) {
-                            let buttons =
-                                entry.action_rects(info.item_rect(slot), ctx.scale, ctx.theme);
-                            if let Some(rect) = buttons.get(1) {
-                                return *rect;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ctx.frame.primary
+    /// The rail is anchored beside the table rather than scrolling with it,
+    /// so the anchor no longer depends on where — or whether — the subject's
+    /// row is on screen. A frame too narrow to seat the rail has no command
+    /// to anchor on; the primary column's own rectangle is used instead so
+    /// the popup still lands inside the window (fail closed, never a panic).
+    fn anchor_rect(&self, ctx: SectionCtx<'_>) -> Rect {
+        let anchored = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
+            .and_then(|content| {
+                self.rail
+                    .item_rect(content, Self::group_slot(), ctx.scale, ctx.theme, ctx.font)
+            });
+        anchored.unwrap_or(ctx.frame.primary)
     }
 
-    /// Open the Group popup, anchored on the given task's `Group` button.
+    /// Open the Group popup for the given task.
     ///
     /// The item list is built once from the current group targets (spec T12):
     /// each activity, disabled with a reason when it is the task's current
@@ -917,13 +1352,9 @@ impl TasksSection {
     /// may not create one; then, only when the task is already grouped,
     /// `"Remove from activity"`.
     fn open_popup(&mut self, task: usize) {
-        let Some(row) = self.shown_row_of(task) else {
+        let Some(current) = self.tasks.get(task).map(|task| task.group) else {
             return;
         };
-        let Some(entry) = self.entries.get(row) else {
-            return;
-        };
-        let current = entry.group;
         let mut items: Vec<MenuItem> = self
             .group_targets
             .iter()
@@ -984,25 +1415,58 @@ impl TasksSection {
         (row < self.entries.len()).then_some(row)
     }
 
-    /// Which footer stop the content cursor is on, or `None` when it is on
-    /// the header or a row.
-    fn focused_footer(&self) -> Option<usize> {
+    /// Which rail command the content cursor is on, or `None` when it is
+    /// elsewhere.
+    fn focused_rail(&self) -> Option<usize> {
         let past_rows = self
             .focus
             .checked_sub(HEADER_STOPS.saturating_add(self.entries.len()))?;
-        (past_rows < FOOTER_STOPS).then_some(past_rows)
+        (past_rows < self.rail.len()).then_some(past_rows)
     }
 
-    /// Total content-cursor stops: the header's, one per shown row, then
-    /// the footer's.
+    /// Which footer stop the content cursor is on, or `None` when it is
+    /// elsewhere.
+    fn focused_footer(&self) -> Option<usize> {
+        let past_rail = self.focus.checked_sub(
+            HEADER_STOPS
+                .saturating_add(self.entries.len())
+                .saturating_add(self.rail.len()),
+        )?;
+        (past_rail < FOOTER_STOPS).then_some(past_rail)
+    }
+
+    /// Total content-cursor stops: the header's, one per shown row, one per
+    /// rail command, then the footer's.
     ///
     /// The header and footer are always reachable, so the cursor still has
     /// somewhere to be when the filter, the search, or an empty sample
-    /// leaves no rows at all.
+    /// leaves no rows at all — and an empty rail simply contributes no stops
+    /// rather than a stop that does nothing.
     fn focus_count(&self) -> usize {
         HEADER_STOPS
             .saturating_add(self.entries.len())
+            .saturating_add(self.rail.len())
             .saturating_add(FOOTER_STOPS)
+    }
+
+    /// Dispatch the rail command in `slot` for the selected task.
+    ///
+    /// Nothing is dispatched without a selection: the rail holds no commands
+    /// then, so this can only be reached with a subject in hand.
+    fn invoke_rail(&mut self, slot: usize) -> Option<SectionOutcome> {
+        let task = self.selected_index()?;
+        match RAIL_COMMANDS.get(slot)?.command {
+            TaskCommand::Control(control) => {
+                Some(SectionOutcome::Action(SwitchboardAction::Task {
+                    index: task,
+                    control,
+                }))
+            }
+            TaskCommand::Group => {
+                self.open_popup(task);
+                None
+            }
+        }
     }
 
     /// Apply a sort request from the column headings and re-arrange.
@@ -1039,6 +1503,17 @@ impl TasksSection {
             }
             _ => None,
         }
+    }
+
+    /// Feed a key to the row the cursor is on: a row is selected, which is
+    /// what the rail's commands act on.
+    fn row_on_key(&mut self, row: usize, key: Key) -> Option<SectionOutcome> {
+        if !matches!(key, Key::Named(NamedKey::Enter) | Key::Char(' ')) {
+            return None;
+        }
+        let id = self.id_at_row(row)?;
+        self.select(id);
+        None
     }
 
     /// Feed a key to whichever footer control the cursor is on.
@@ -1087,30 +1562,6 @@ impl TaskEntry {
         }
     }
 
-    /// The rectangles of this row's action buttons, laid out inside the
-    /// Actions column's own cell rect.
-    ///
-    /// The geometry comes from [`TableRow::cell_rects`] — the same spans the
-    /// row draws its cells with — so the buttons can never drift from the
-    /// column the heading names.
-    pub(super) fn action_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
-        let rects = self.row.cell_rects(bounds, scale, theme, &COLUMN_WEIGHTS);
-        let Some(cell) = rects.get(COL_ACTIONS) else {
-            return Vec::new();
-        };
-        let each = cell.width / TasksSection::BUTTONS;
-        (0..TasksSection::BUTTONS)
-            .map(|i| {
-                Rect::new(
-                    cell.left() + to_i32(each.saturating_mul(i)),
-                    cell.top(),
-                    each,
-                    cell.height,
-                )
-            })
-            .collect()
-    }
-
     /// The Activity column's own rectangle, which the sparkline is drawn
     /// into — taken from the row's cell spans rather than re-derived.
     fn spark_rect(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
@@ -1134,6 +1585,39 @@ fn count_line(shown: usize, total: usize) -> String {
 /// A count as tile text.
 fn count_text(count: usize) -> String {
     format!("{count}")
+}
+
+/// How many census tiles there are, for the room the location band is asked
+/// to seat them in.
+///
+/// Derived from the one [`CENSUS`] declaration, so the room asked for and the
+/// tiles drawn cannot disagree.
+fn census_tiles() -> u32 {
+    u32::try_from(CENSUS.len()).unwrap_or(0)
+}
+
+/// One rail command's [`Button`], carrying the verdict `authority` reached
+/// for it.
+///
+/// A refused command keeps its slot with the Authority Mark, and one the
+/// task's own state rules out is plainly disabled, so the rail always states
+/// the task's whole repertoire and why a part of it is unavailable rather
+/// than hiding commands and leaving the reader to guess.
+fn command_button(spec: &CommandSpec, authority: TaskAuthority) -> Button {
+    let mut button = Button::new(
+        ButtonContent::IconLabel {
+            icon: spec.icon,
+            label: String::from(spec.label),
+        },
+        spec.role,
+    );
+    button.set_state(match spec.command {
+        TaskCommand::Control(control) => authority.verdict(control).to_state(),
+        // Grouping is this section's own arrangement of tasks it can already
+        // see, so it needs no authority over the task itself.
+        TaskCommand::Group => ActionVerdict::Ready.to_state(),
+    });
+    button
 }
 
 /// Whether `haystack` contains `needle`, ignoring ASCII case.
@@ -1182,13 +1666,21 @@ fn compare_reading<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
 }
 
 impl SectionView for TasksSection {
+    /// The census sits in the location band beside the trail; the header band
+    /// carries the filter strip and the search field, one row each; the rail
+    /// carries the selected task's commands; and the footer carries the
+    /// count, the refresh toggle and the grouping choice.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
+            band_summary: Some(BandSummary {
+                width: CENSUS_TILE_WIDTH.saturating_mul(census_tiles()),
+                height: CENSUS_HEIGHT,
+            }),
             sidebar_width: 0,
-            header_height: CENSUS_HEIGHT.saturating_add(FILTER_HEIGHT),
+            header_height: FILTER_HEIGHT.saturating_add(SEARCH_HEIGHT),
             detail_width: 0,
             impact_width: 0,
-            rail_width: 0,
+            rail_width: ACTION_RAIL_WIDTH,
             footer_height: FOOTER_HEIGHT,
             primary_row_commands: 0,
         }
@@ -1236,24 +1728,20 @@ impl SectionView for TasksSection {
         ListInfo::rows(rows, self.entries.len(), scale, theme)
     }
 
-    /// Zero: this table's actions are its trailing Actions *column*, which
-    /// scrolls with the rows, not an anchored rail beside them.
+    /// Zero: a task's commands live in the anchored rail beside the table,
+    /// so no row carries inline buttons of its own.
     fn row_buttons(&self) -> u32 {
         0
     }
 
+    /// One per filter tab or sortable heading where the cursor traverses a
+    /// strip; one everywhere else, since a row carries no controls of its own
+    /// and a rail command is its own cursor stop.
     fn focused_action_count(&self) -> usize {
         match self.focus {
             STOP_FILTERS => self.filters.len().max(1),
-            STOP_SEARCH => 1,
             STOP_SORT => self.header.columns().len().max(1),
-            _ => {
-                if self.focused_row().is_some() {
-                    Self::BUTTONS as usize
-                } else {
-                    1
-                }
-            }
+            _ => 1,
         }
     }
 
@@ -1297,39 +1785,39 @@ impl SectionView for TasksSection {
         if let Some(stop) = self.focused_footer() {
             return self.footer_on_key(stop, key);
         }
+        if let Some(slot) = self.focused_rail() {
+            // The rail's own item decides whether it may act, so a refused
+            // command consumes the key without dispatching anything.
+            self.rail.set_focus(Some(slot));
+            let RailAction::Activate { index } = self.rail.on_key(key)?;
+            return self.invoke_rail(index);
+        }
         let row = self.focused_row()?;
-        let index = *self.order.get(row)?;
-        let action = self.action;
-        let entry = self.entries.get_mut(row)?;
-        if action == 0 {
-            return (entry.action.on_key(key) == Some(ButtonAction::Activated))
-                .then_some(SectionOutcome::Action(SwitchboardAction::Task { index }));
+        self.row_on_key(row, key)
+    }
+
+    /// Paint the census tiles the location band seated for this section.
+    fn render_band(
+        &self,
+        surface: &mut Surface,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        for (tile, rect) in self
+            .census
+            .iter()
+            .zip(self.census_rects(rect, scale, theme))
+        {
+            tile.render(surface, rect, scale, theme, font);
         }
-        if entry.group_button.on_key(key) == Some(ButtonAction::Activated) {
-            self.open_popup(index);
-        }
-        None
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
-        let (census, filter) = Self::header_rows(&ctx.frame, ctx.scale);
-        let tile_w = census
-            .width
-            .checked_div(u32::try_from(self.census.len().max(1)).unwrap_or(1))
-            .unwrap_or(0);
-        for (i, tile) in self.census.iter().enumerate() {
-            let x = census.left() + to_i32(tile_w.saturating_mul(u32::try_from(i).unwrap_or(0)));
-            tile.render(
-                surface,
-                Rect::new(x, census.top(), tile_w, census.height),
-                ctx.scale,
-                ctx.theme,
-                ctx.font,
-            );
-        }
-        let (tabs, search) = Self::filter_split(filter);
+        let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         self.filters
-            .render(surface, tabs, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, filters, ctx.scale, ctx.theme, ctx.font);
         self.search
             .render(surface, search, ctx.scale, ctx.theme, ctx.font);
 
@@ -1359,31 +1847,36 @@ impl SectionView for TasksSection {
             if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
                 entry.spark.render(surface, rect, ctx.scale, ctx.theme);
             }
-            let buttons = entry.action_rects(item, ctx.scale, ctx.theme);
-            if let Some(rect) = buttons.first() {
-                entry
-                    .action
-                    .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
-            }
-            if let Some(rect) = buttons.get(1) {
-                entry
-                    .group_button
-                    .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
+        }
+
+        // The commands, in the plate that captions them. The plate is drawn
+        // whether or not a task is selected, so the column keeps its place
+        // and its caption rather than appearing and vanishing under the
+        // reader as the selection changes.
+        if let Some(rail) = ctx.frame.rail {
+            self.rail_panel
+                .render(surface, rail, ctx.scale, ctx.theme, ctx.font);
+            if let Some(content) =
+                Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
+            {
+                self.rail
+                    .render(surface, content, ctx.scale, ctx.theme, ctx.font);
             }
         }
 
-        let [count, grouping, refresh] = Self::footer_split(&ctx.frame);
+        let footer = Self::footer_split(&ctx.frame);
         self.count
-            .render(surface, count, ctx.scale, ctx.theme, ctx.font);
-        self.grouping
-            .render(surface, grouping, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, footer.count, ctx.scale, ctx.theme, ctx.font);
         self.auto_refresh
-            .render(surface, refresh, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, footer.refresh, ctx.scale, ctx.theme, ctx.font);
+        if let Some(grouping) = footer.grouping {
+            self.grouping
+                .render(surface, grouping, ctx.scale, ctx.theme, ctx.font);
+        }
     }
 
     fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
-        let (_, filter) = Self::header_rows(&ctx.frame, ctx.scale);
-        let (tabs, search) = Self::filter_split(filter);
+        let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
         if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs) {
             self.filters.set_selected(index);
             self.arrange();
@@ -1408,59 +1901,64 @@ impl SectionView for TasksSection {
             return None;
         }
 
-        let [_, grouping, refresh] = Self::footer_split(&ctx.frame);
-        let popup = self.grouping_popup_rect(ctx);
-        match self
-            .grouping
-            .on_pointer(event, grouping, popup, ctx.scale, ctx.theme)
-        {
-            Some(ComboAction::Selected { index }) => {
-                self.grouping.set_selected(index);
-                self.arrange();
-                return None;
+        let footer = Self::footer_split(&ctx.frame);
+        if let Some(grouping) = footer.grouping {
+            let popup = self.grouping_popup_rect(ctx);
+            match self
+                .grouping
+                .on_pointer(event, grouping, popup, ctx.scale, ctx.theme)
+            {
+                Some(ComboAction::Selected { index }) => {
+                    self.grouping.set_selected(index);
+                    self.arrange();
+                    return None;
+                }
+                Some(ComboAction::Opened | ComboAction::Closed) => return None,
+                None => {}
             }
-            Some(ComboAction::Opened | ComboAction::Closed) => return None,
-            None => {}
         }
-        if let Some(SelectorAction::Set { on }) = self.auto_refresh.on_pointer(event, refresh) {
+        if let Some(SelectorAction::Set { on }) =
+            self.auto_refresh.on_pointer(event, footer.refresh)
+        {
             self.auto_refresh.set_on(on);
             return None;
         }
 
+        // The commands, before the rows: the rail is anchored beside the
+        // table and never overlaps it, so the order is only a matter of
+        // reaching the pressed control in one pass.
+        if let Some(content) =
+            Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
+        {
+            if let Some(RailAction::Activate { index }) = self
+                .rail
+                .on_pointer(event, content, ctx.scale, ctx.theme, ctx.font)
+            {
+                return self.invoke_rail(index);
+            }
+        }
+
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        let mut selected = None;
+        let mut pressed = None;
         for slot in 0..info.visible() {
             let row = ctx.start + slot as usize;
-            let Some(&index) = self.order.get(row) else {
+            let Some(id) = self.id_at_row(row) else {
                 break;
             };
             let item = info.item_rect(slot);
             let Some(entry) = self.entries.get_mut(row) else {
                 break;
             };
-            let buttons = entry.action_rects(item, ctx.scale, ctx.theme);
-            if buttons.first().is_some_and(|rect| {
-                entry.action.on_pointer(event, *rect) == Some(ButtonAction::Activated)
-            }) {
-                return Some(SectionOutcome::Action(SwitchboardAction::Task { index }));
-            }
-            if buttons.get(1).is_some_and(|rect| {
-                entry.group_button.on_pointer(event, *rect) == Some(ButtonAction::Activated)
-            }) {
-                self.open_popup(index);
-                return None;
-            }
             if entry.row.on_pointer(event, item) == Some(RowAction::Activated) {
-                selected = Some(index);
+                pressed = Some(id);
             }
         }
-        if let Some(index) = selected {
+        if let Some(id) = pressed {
             // Selection names the task, not the position it happens to
             // occupy: a re-sort or re-filter must not move the highlight to
-            // whatever row slid into that slot.
-            for (row, entry) in self.entries.iter_mut().enumerate() {
-                entry.row.set_selected(self.order.get(row) == Some(&index));
-            }
+            // whatever row slid into that slot. Choosing a task is also what
+            // gives the rail its subject, so the commands are rebuilt for it.
+            self.select(id);
         }
         None
     }
@@ -1468,6 +1966,7 @@ impl SectionView for TasksSection {
     fn apply_focus_marks(&mut self, focused: bool) {
         let (stop, action) = (self.focus, self.action);
         let row_focus = self.focused_row();
+        let rail_focus = self.focused_rail();
         let footer_focus = self.focused_footer();
 
         self.filters
@@ -1480,15 +1979,19 @@ impl SectionView for TasksSection {
         self.auto_refresh
             .set_focused(focused && footer_focus == Some(STOP_REFRESH));
 
+        // A row carries no controls of its own, so it takes the ring itself
+        // rather than passing it to an action.
         for (i, entry) in self.entries.iter_mut().enumerate() {
             let here = focused && row_focus == Some(i);
-            // The row is a member of the field but never takes the ring:
-            // the ring belongs to whichever of its actions the cursor is on.
+            entry.row.set_focused(here);
             entry.row.set_in_focus_field(here);
-            entry.action.set_focused(here && action == 0);
-            entry.action.set_in_focus_field(here);
-            entry.group_button.set_focused(here && action == 1);
-            entry.group_button.set_in_focus_field(here);
+        }
+
+        let slot = focused.then_some(rail_focus).flatten();
+        self.rail.set_focus(slot);
+        for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
+            button.set_focused(slot == Some(index));
+            button.set_in_focus_field(focused);
         }
     }
 
@@ -1513,7 +2016,7 @@ impl SectionView for TasksSection {
         let Some(popup) = &self.popup else {
             return;
         };
-        let anchor = self.anchor_rect(popup.task, ctx);
+        let anchor = self.anchor_rect(ctx);
         let rect = Switchboard::popup_rect(
             &popup.menu,
             anchor,
@@ -1535,7 +2038,9 @@ impl SectionView for TasksSection {
         ctx: SectionCtx<'_>,
     ) -> Option<SectionOutcome> {
         if self.grouping.is_expanded() {
-            let [_, field, _] = Self::footer_split(&ctx.frame);
+            let field = Self::footer_split(&ctx.frame)
+                .grouping
+                .unwrap_or(ctx.frame.footer);
             let popup = self.grouping_popup_rect(ctx);
             if let Some(ComboAction::Selected { index }) = self
                 .grouping
@@ -1547,7 +2052,7 @@ impl SectionView for TasksSection {
             return None;
         }
         let popup = self.popup.as_ref()?;
-        let anchor = self.anchor_rect(popup.task, ctx);
+        let anchor = self.anchor_rect(ctx);
         let popup_rect = Switchboard::popup_rect(
             &popup.menu,
             anchor,

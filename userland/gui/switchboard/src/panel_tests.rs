@@ -19,7 +19,9 @@ use crate::test_host::{
     process_summary, process_summary_with, sample_with, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
     PROC_CONTROL_AUTHORITY,
 };
-use crate::view::{ActivityControl, PressureControl, RecoveryControl, Section, SwitchboardAction};
+use crate::view::{
+    ActivityControl, PressureControl, RecoveryControl, Section, SwitchboardAction, TaskControl,
+};
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.
@@ -397,7 +399,10 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     // the process the refreshed sample put there, not the one it replaced.
     panel.act(
         &mut host,
-        SwitchboardAction::Task { index: 0 },
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::Switch,
+        },
         &NO_AUTHORITY,
     );
     assert_eq!(
@@ -414,7 +419,10 @@ fn a_task_action_asks_the_session_to_activate_that_owner() {
 
     panel.act(
         &mut host,
-        SwitchboardAction::Task { index: 0 },
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::Switch,
+        },
         &NO_AUTHORITY,
     );
 
@@ -515,7 +523,10 @@ fn a_refused_action_is_stated_and_the_panel_stays_open() {
 
     panel.act(
         &mut host,
-        SwitchboardAction::Task { index: 0 },
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::Switch,
+        },
         &NO_AUTHORITY,
     );
 

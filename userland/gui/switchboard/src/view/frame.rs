@@ -41,6 +41,22 @@ pub const ACTION_RAIL_WIDTH: u32 = 136;
 /// pane seats (a register table's name and value columns).
 pub const DETAIL_PANE_WIDTH: u32 = 208;
 
+/// What a section seats in the trailing end of the shared location band, in
+/// logical (unscaled) lengths.
+///
+/// The band names where the reader is; a section with a *census* of its own —
+/// a handful of counts describing the whole list at a glance — shows it there,
+/// beside that name, rather than spending a row of its own content on it. The
+/// band is chrome shared by every section, so the section states the room it
+/// needs and [`resolve_band`] decides where it goes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BandSummary {
+    /// The width the summary needs, trailing the band's own command.
+    pub width: u32,
+    /// The height the whole band must be to seat it.
+    pub height: u32,
+}
+
 /// What a section asks the frame to seat, in logical (unscaled) lengths.
 ///
 /// A zero length means the section does not want that region at all: the
@@ -50,6 +66,9 @@ pub const DETAIL_PANE_WIDTH: u32 = 208;
 /// frame has left after the regions below are seated.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct SectionAnatomy {
+    /// The summary this section seats in the shared location band, or `None`
+    /// when it has none and the band keeps its resting height.
+    pub band_summary: Option<BandSummary>,
     /// The leading navigation column's width (e.g. System's page `Tabs`).
     /// Zero when the section has no sidebar.
     pub sidebar_width: u32,
@@ -96,6 +115,7 @@ impl SectionAnatomy {
     /// The anatomy of a section with no sidebar, header, detail pane, rail
     /// or footer — just the primary column filling the whole content rect.
     pub const PRIMARY_ONLY: Self = Self {
+        band_summary: None,
         sidebar_width: 0,
         header_height: 0,
         detail_width: 0,
@@ -104,6 +124,21 @@ impl SectionAnatomy {
         footer_height: 0,
         primary_row_commands: 0,
     };
+
+    /// The physical height the location band must be for this section: its
+    /// resting one control height, or as much more as its band summary needs.
+    ///
+    /// The band is shared chrome, so its height is asked of whichever section
+    /// is on show rather than fixed: a section with no summary gets exactly
+    /// the resting band every other one has.
+    #[must_use]
+    pub fn band_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let resting = scale.scale_length(theme.metrics().control_height).max(1);
+        match self.band_summary {
+            Some(summary) => resting.max(scale.scale_length(summary.height)),
+            None => resting,
+        }
+    }
 
     /// The narrowest physical width `primary` may be given before
     /// [`resolve_section_frame`] sheds an optional column to widen it.
@@ -245,6 +280,84 @@ pub fn row_commands_width(commands: u32, scale: Scale, theme: &Theme) -> u32 {
         .saturating_mul(commands)
         .saturating_add(gap.saturating_mul(commands.saturating_sub(1)))
 }
+
+/// The location band resolved to physical rectangles: the trail naming where
+/// the reader is, the command that opens the section list, and the active
+/// section's own summary.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BandLayout {
+    /// Where the [`Breadcrumb`](tairix_controls::Breadcrumb) draws.
+    pub trail: Rect,
+    /// The square the trailing section-list command occupies.
+    pub command: Rect,
+    /// The section's own summary, or `None` when it asked for none or the
+    /// band was too narrow to seat it.
+    pub summary: Option<Rect>,
+}
+
+/// Resolve the location band into the rectangles its paint and its hit test
+/// both read, so a press can never land on a control drawn somewhere else.
+///
+/// The band reads leading to trailing: the trail, then the active section's
+/// `summary`, then the section-list command as a square at the very edge —
+/// the shape an [`IconButton`](tairix_controls::IconButton) wants. The trail
+/// takes whatever is left, so it is the region that gives way as the window
+/// narrows, and a band with no room for the summary drops it rather than
+/// starving the trail: the reader's own location outranks a census they can
+/// still read from the table.
+#[must_use]
+pub fn resolve_band(
+    location: Rect,
+    summary: Option<BandSummary>,
+    scale: Scale,
+    theme: &Theme,
+) -> BandLayout {
+    let side = location.height.min(location.width);
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let command = Rect::new(
+        location.right() - to_i32(side),
+        location.top(),
+        side,
+        location.height,
+    );
+    let after_command = location.width.saturating_sub(side).saturating_sub(gap);
+
+    // The trail keeps at least the width its own leading crumb needs before
+    // the summary is seated at all; below that there is nothing to share.
+    let wanted = summary.map_or(0, |summary| scale.scale_length(summary.width));
+    let floor = scale.scale_length(TRAIL_FLOOR);
+    let seated = (wanted > 0 && after_command >= wanted.saturating_add(gap).saturating_add(floor))
+        .then_some(wanted);
+    let summary = seated.map(|width| {
+        Rect::new(
+            location.left() + to_i32(after_command.saturating_sub(width)),
+            location.top(),
+            width,
+            location.height,
+        )
+    });
+
+    let trail_w = match seated {
+        Some(width) => after_command
+            .saturating_sub(width)
+            .saturating_sub(gap)
+            .min(location.width),
+        None => after_command.min(location.width),
+    };
+    let trail = Rect::new(location.left(), location.top(), trail_w, location.height);
+    BandLayout {
+        trail,
+        command,
+        summary,
+    }
+}
+
+/// The logical width the location trail keeps for itself before a section's
+/// band summary is seated beside it.
+///
+/// The trail names where the reader is, which is the band's whole purpose, so
+/// it is never reduced to an ellipsis to make room for a census.
+const TRAIL_FLOOR: u32 = 160;
 
 /// The [`SectionAnatomy`] resolved to physical rectangles within one content
 /// rect (`plans/NEW-SWITCHBOARD.md` S3).

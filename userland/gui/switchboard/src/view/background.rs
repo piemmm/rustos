@@ -460,6 +460,7 @@ fn job_timeline(item: &JobSummary) -> Timeline {
 impl SectionView for JobsSection {
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
+            band_summary: None,
             sidebar_width: 0,
             header_height: 0,
             detail_width: DETAIL_PANE_WIDTH,

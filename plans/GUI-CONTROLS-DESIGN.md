@@ -603,6 +603,14 @@ Buttons are Alloy Plates with a Signal Rim and optional Heat Seam.
 
 A button should not use a spinner unless the action itself owns the work. If the work belongs to another object, use a linked Heat Seam instead.
 
+**Content seating.** A button standing on its own centres its content group. A
+button in a *stack* of commands seats it against the plate's leading inset
+instead (`Button::aligned(ContentAlign::Leading)`), so the icons and labels of
+the whole stack line up and the stack reads as a list of commands rather than a
+column of centred captions. A container that stacks buttons imposes that on the
+items it is given — `ActionRail` does — so no caller has to remember it and two
+stacks can never disagree.
+
 ### 11.2 IconButton
 
 Icon buttons use the same state model as buttons. The icon must come from a theme-aware glyph source and must support high-contrast rendering.

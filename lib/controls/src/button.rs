@@ -44,6 +44,21 @@ pub enum ButtonContent {
     },
 }
 
+/// Where a [`Button`] seats its content group within its plate.
+///
+/// A button standing on its own centres its content; one in a stack of
+/// commands aligns to the leading edge so the icons and labels of the whole
+/// stack line up and the stack reads as a list of commands rather than a
+/// column of centred captions.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum ContentAlign {
+    /// Centred within the plate — the standalone default.
+    #[default]
+    Center,
+    /// Against the plate's leading inset, so sibling buttons align.
+    Leading,
+}
+
 /// The outcome of feeding input to a [`Button`] or [`IconButton`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ButtonAction {
@@ -237,17 +252,36 @@ pub(crate) fn icon_content_side(w: u32, h: u32, border: u32) -> u32 {
     plate.saturating_sub(margin.saturating_mul(2))
 }
 
-/// Paint the content group (icon and/or label) centred within the plate.
+/// What a plate draws inside itself: the content group and where it sits.
+struct ContentGroup<'a> {
+    content: &'a ButtonContent,
+    align: ContentAlign,
+}
+
+impl<'a> ContentGroup<'a> {
+    /// A centred group — what a control with no seating choice of its own
+    /// draws.
+    const fn centred(content: &'a ButtonContent) -> Self {
+        Self {
+            content,
+            align: ContentAlign::Center,
+        }
+    }
+}
+
+/// Paint the content group (icon and/or label) within the plate, seated as
+/// the group asks.
 fn paint_content(
     surface: &mut Surface,
     rect: (u32, u32, u32, u32),
     scale: Scale,
     theme: &Theme,
     res: &Resolved,
-    content: &ButtonContent,
+    group: &ContentGroup<'_>,
     font: BitmapFont,
 ) {
     let (x, y, w, h) = rect;
+    let (content, align) = (group.content, group.align);
     let border = plate_border(theme, scale);
     let pad = scale.scale_length(theme.metrics().control_inset);
     let edge = border.saturating_add(pad);
@@ -259,12 +293,17 @@ fn paint_content(
     let cx = to_i32(x) + to_i32(w) / 2;
     let glyph_h = font.glyph_height();
     let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
+    // Where a content group `total` wide begins, for the requested seating.
+    let group_start = |total: u32| match align {
+        ContentAlign::Center => cx - to_i32(total) / 2,
+        ContentAlign::Leading => to_i32(x) + to_i32(edge),
+    };
 
     match content {
         ButtonContent::Label(text) => {
             let fitted = font.truncate_to_width(text, avail_w);
             let width = font.text_width(fitted);
-            font.draw_text(surface, cx - to_i32(width) / 2, text_y, fitted, res.label);
+            font.draw_text(surface, group_start(width), text_y, fitted, res.label);
         }
         ButtonContent::Icon(kind) => {
             // An icon-only button has no label competing for the plate, so the
@@ -290,7 +329,7 @@ fn paint_content(
             let fitted = font.truncate_to_width(label, label_budget);
             let width = font.text_width(fitted);
             let total = side.saturating_add(gap).saturating_add(width);
-            let start = cx - to_i32(total) / 2;
+            let start = group_start(total);
             if side > 0 {
                 if let Some(image) = builtin_icon(*icon, res.label).rasterise(side) {
                     let iy = to_i32(y) + (to_i32(h) - to_i32(side)).max(0) / 2;
@@ -314,15 +353,16 @@ fn paint_content(
 ///
 /// Equal buttons draw the same pixels for the same bounds, scale, theme, and
 /// font, so a host may use `==` to decide whether a surface holding one needs
-/// repainting. The content, role, and every visible part of the composed
-/// [`ControlState`] — hover, press, focus, validation, authority — take part.
-/// The last pointer coordinate and the press latch do not: they are
-/// hit-testing bookkeeping no render path reads, and the *visible* result of a
-/// press is the state's [`PointerState`], which is compared.
+/// repainting. The content, role, content seating, and every visible part of
+/// the composed [`ControlState`] — hover, press, focus, validation, authority
+/// — take part. The last pointer coordinate and the press latch do not: they
+/// are hit-testing bookkeeping no render path reads, and the *visible* result
+/// of a press is the state's [`PointerState`], which is compared.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Button {
     content: ButtonContent,
     role: ControlRole,
+    align: ContentAlign,
     state: ControlState,
     /// The last pointer position, resolved against `bounds` on the next press
     /// or release — hit-testing input, never a drawn property.
@@ -339,6 +379,7 @@ impl Button {
         Self {
             content,
             role,
+            align: ContentAlign::Center,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
@@ -351,6 +392,17 @@ impl Button {
         Self::new(ButtonContent::Label(label.into()), ControlRole::Neutral)
     }
 
+    /// The same button with its content group seated as given.
+    ///
+    /// A container stacking buttons into a list of commands asks for
+    /// [`ContentAlign::Leading`] so their icons and labels line up down the
+    /// stack; a standalone button keeps the centred default.
+    #[must_use]
+    pub fn aligned(mut self, align: ContentAlign) -> Self {
+        self.align = align;
+        self
+    }
+
     /// The button's content.
     #[must_use]
     pub fn content(&self) -> &ButtonContent {
@@ -361,6 +413,12 @@ impl Button {
     #[must_use]
     pub fn role(&self) -> ControlRole {
         self.role
+    }
+
+    /// Where the button seats its content group.
+    #[must_use]
+    pub fn align(&self) -> ContentAlign {
+        self.align
     }
 
     /// The button's current composed state.
@@ -400,7 +458,18 @@ impl Button {
         let res = resolve(theme, self.role, self.state, PlateSeating::Panel);
         paint_frame(surface, bounds, scale, theme, &res);
         if let Some(rect) = surface_rect(bounds) {
-            paint_content(surface, rect, scale, theme, &res, &self.content, font);
+            paint_content(
+                surface,
+                rect,
+                scale,
+                theme,
+                &res,
+                &ContentGroup {
+                    content: &self.content,
+                    align: self.align,
+                },
+                font,
+            );
         }
     }
 
@@ -714,7 +783,15 @@ impl SplitButton {
         }
 
         if let Some(rect) = surface_rect(primary_rect) {
-            paint_content(surface, rect, scale, theme, &res, &self.content, font);
+            paint_content(
+                surface,
+                rect,
+                scale,
+                theme,
+                &res,
+                &ContentGroup::centred(&self.content),
+                font,
+            );
         }
         paint_chevron(surface, disclosure_rect, ChevronDir::Down, res.label);
     }

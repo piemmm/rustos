@@ -471,6 +471,7 @@ fn fact_of(fact: &SystemFact) -> PageLine {
 impl SectionView for SystemSection {
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
+            band_summary: None,
             sidebar_width: SIDEBAR_WIDTH,
             header_height: HEADER_HEIGHT,
             detail_width: 0,

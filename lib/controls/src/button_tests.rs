@@ -12,7 +12,9 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
-use crate::button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
+use crate::button::{
+    Button, ButtonAction, ButtonContent, ContentAlign, IconButton, SplitAction, SplitButton,
+};
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState,
@@ -44,6 +46,11 @@ fn render(button: &Button, theme: &Theme) -> Surface {
 
 fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
+}
+
+/// The leftmost surface column holding `want`, if any.
+fn leftmost_column(surface: &Surface, want: Pixel) -> Option<u32> {
+    (0..W).find(|&x| (0..H).any(|y| surface.get(x, y) == Some(want)))
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -112,6 +119,62 @@ fn destructive_role_uses_the_danger_rim() {
     );
     let surface = render(&button, &theme);
     assert_eq!(surface.get(0, H / 2), Some(premul(theme.palette().danger)));
+}
+
+// --- Content seating ----------------------------------------------------
+
+#[test]
+fn content_alignment_defaults_to_centred_and_records_the_choice() {
+    let button = Button::labelled("Pause");
+    assert_eq!(button.align(), ContentAlign::Center);
+    let leading = button.clone().aligned(ContentAlign::Leading);
+    assert_eq!(leading.align(), ContentAlign::Leading);
+    // Seating is drawn, so it takes part in render equivalence.
+    assert_ne!(button, leading);
+}
+
+#[test]
+fn leading_alignment_seats_the_label_against_the_plate_inset() {
+    let theme = Theme::dark();
+    let button = Button::labelled("Pause");
+    let label = premul(theme.palette().on_surface);
+
+    let centred = leftmost_column(&render(&button, &theme), label).expect("centred label");
+    let leading = leftmost_column(
+        &render(&button.clone().aligned(ContentAlign::Leading), &theme),
+        label,
+    )
+    .expect("leading label");
+
+    assert!(leading < centred, "{leading} should precede {centred}");
+    // Clear of the frame border and content inset, and within one glyph cell
+    // of them — seated at the inset rather than adrift inside the plate.
+    let inset = crate::paint::plate_border(&theme, Scale::ONE)
+        + Scale::ONE.scale_length(theme.metrics().control_inset);
+    assert!(leading >= inset, "{leading} must clear the inset {inset}");
+    assert!(leading <= inset + font().text_width("P"));
+}
+
+#[test]
+fn leading_alignment_seats_an_icon_and_label_group_together() {
+    let theme = Theme::dark();
+    let button = Button::new(
+        ButtonContent::IconLabel {
+            icon: IconKind::Pause,
+            label: "Pause".into(),
+        },
+        ControlRole::Neutral,
+    );
+    let label = premul(theme.palette().on_surface);
+
+    let centred = leftmost_column(&render(&button, &theme), label).expect("centred group");
+    let leading = leftmost_column(
+        &render(&button.aligned(ContentAlign::Leading), &theme),
+        label,
+    )
+    .expect("leading group");
+
+    assert!(leading < centred, "{leading} should precede {centred}");
 }
 
 // --- Theme switching ----------------------------------------------------

@@ -107,12 +107,13 @@ pub use system_data::{
     HeadlineTile, HealthSeverity, LimitRow, NetworkInterface, Reading, SessionSeat, StorageVolume,
     SystemAction, SystemFact, SystemPage, SystemReport, TileInstrument, Unmeasured,
 };
-pub use tasks::{TaskKind, TaskSummary};
+pub use tasks::{TaskAuthority, TaskControl, TaskKind, TaskSummary};
 
 use activities::ActivitiesSection;
 use background::JobsSection;
 use frame::{
-    action_button_width, resolve_section_frame, row_commands_width, SectionAnatomy, SectionFrame,
+    action_button_width, resolve_band, resolve_section_frame, row_commands_width, BandLayout,
+    SectionAnatomy, SectionFrame,
 };
 use pressure::PressureSection;
 use recovery::RecoverySection;
@@ -318,10 +319,12 @@ pub enum SwitchboardAction {
         /// The newly selected section.
         section: Section,
     },
-    /// A task's row action was invoked.
+    /// A command was invoked on the selected task.
     Task {
         /// The task's index within the model.
         index: usize,
+        /// Which task command.
+        control: TaskControl,
     },
     /// A background job's action was invoked.
     Job {
@@ -646,6 +649,23 @@ trait SectionView {
 
     /// Paint the section into its own regions.
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>);
+
+    /// Paint the summary this section asked the location band to seat
+    /// ([`SectionAnatomy::band_summary`]), into the rectangle the band
+    /// resolved for it.
+    ///
+    /// Nothing by default: a section with no census in its anatomy is never
+    /// given a rectangle to paint into, so the two can never disagree.
+    fn render_band(
+        &self,
+        surface: &mut Surface,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let _ = (surface, rect, scale, theme, font);
+    }
 
     /// Route a pointer event to the section's items.
     fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome>;
@@ -1024,9 +1044,9 @@ impl Switchboard {
 struct SbLayout {
     /// The window frame's laid-out rectangles.
     frame: FrameLayout,
-    /// The location band along the top of the client: the trail and its
-    /// trailing section-list command, split by
-    /// [`Switchboard::location_split`].
+    /// The location band along the top of the client: the trail, the active
+    /// section's own band summary, and the trailing section-list command,
+    /// split by [`resolve_band`].
     location: Rect,
     /// The section content area (excludes the scrollbar gutter).
     content: Rect,
@@ -1099,9 +1119,13 @@ impl Switchboard {
         let frame = self.frame.layout(bounds, scale, theme);
         let client = frame.client;
 
-        let location_h = scale
-            .scale_length(theme.metrics().control_height)
-            .max(1)
+        // The band is shared chrome, but how tall it is belongs to the
+        // section on show: one that seats a census there needs more than the
+        // resting control height, and one that does not must not pay for it.
+        let location_h = self
+            .active()
+            .anatomy()
+            .band_height(scale, theme)
             .min(client.height);
         let location = Rect::new(client.left(), client.top(), client.width, location_h);
 
@@ -1128,29 +1152,10 @@ impl Switchboard {
         }
     }
 
-    /// Split the location band into the rectangle its [`Breadcrumb`] draws in
-    /// and the square its trailing section-list command occupies.
-    ///
-    /// The command is a square at the band's trailing edge — the shape an
-    /// [`IconButton`] wants — and the trail takes everything left of it, less
-    /// the theme's control gap. Both the paint and the hit test read this one
-    /// split, so a press can never land on a control drawn somewhere else.
-    fn location_split(location: Rect, theme: &Theme, scale: Scale) -> (Rect, Rect) {
-        let side = location.height.min(location.width);
-        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let command = Rect::new(
-            location.right() - to_i32(side),
-            location.top(),
-            side,
-            location.height,
-        );
-        let trail_w = location
-            .width
-            .saturating_sub(side)
-            .saturating_sub(gap)
-            .min(location.width);
-        let trail = Rect::new(location.left(), location.top(), trail_w, location.height);
-        (trail, command)
+    /// The location band's rectangles for the section on show, resolved
+    /// through the one [`resolve_band`] every paint and hit test reads.
+    fn band(&self, location: Rect, theme: &Theme, scale: Scale) -> BandLayout {
+        resolve_band(location, self.active().anatomy().band_summary, scale, theme)
     }
 
     /// The section on show, for everything the screen asks a section that
@@ -1334,9 +1339,9 @@ impl Switchboard {
         }
     }
 
-    /// Paint the location band: the trail naming where the reader is, then the
-    /// command that opens the section list, over the one
-    /// [`Switchboard::location_split`] the hit test reads.
+    /// Paint the location band: the trail naming where the reader is, the
+    /// section's own summary beside it, then the command that opens the
+    /// section list, over the one [`Switchboard::band`] the hit test reads.
     fn render_location(
         &self,
         surface: &mut Surface,
@@ -1345,10 +1350,14 @@ impl Switchboard {
         theme: &Theme,
         font: BitmapFont,
     ) {
-        let (trail, command) = Self::location_split(location, theme, scale);
-        self.trail.render(surface, trail, scale, theme, font);
+        let band = self.band(location, theme, scale);
+        self.trail.render(surface, band.trail, scale, theme, font);
+        if let Some(summary) = band.summary {
+            self.active()
+                .render_band(surface, summary, scale, theme, font);
+        }
         self.section_list
-            .render(surface, command, scale, theme, font, None);
+            .render(surface, band.command, scale, theme, font, None);
     }
 
     /// Paint the active section's content, then the Edge Wake on the action
@@ -1461,7 +1470,8 @@ impl Switchboard {
 
         // The location band: the trail's leading crumb and the trailing
         // section-list command are two ways to the same list.
-        let (trail, command) = Self::location_split(layout.location, theme, scale);
+        let band = self.band(layout.location, theme, scale);
+        let (trail, command) = (band.trail, band.command);
         if let Some(BreadcrumbAction::Activate { .. }) =
             self.trail.on_pointer(event, trail, scale, theme, font)
         {

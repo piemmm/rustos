@@ -84,9 +84,9 @@ costs no render and no present. What it carries:
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list, as a filterable, searchable, sortable table — see below. Each row's primary action asks the session to raise that owner's window, and its `Group` button files the task into an activity (below) |
+| Tasks | the sampled process list, as a filterable, searchable, sortable table with the selected task's commands beside it — see below |
 | Pressure | "why is my machine slow": one cause card per resource the **tray's own latches** flag (CPU ≥ 90 % with < 80 % release; memory band ≥ mild), naming the measured culprit — the busiest sampled task for CPU, the largest mapped address space for memory — with a plain-language cause line and recommended actions, each rendered `Ready`, `DisabledByState` (a culprit already at `Low` priority or already stopped) or `DeniedByAuthority` per the same rule the kernel enforces. No latch, no card; no per-task rate yet, a culprit-less card with the one action that is still honest (`Show tasks`) |
-| Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from a task row's `Group` menu; renamed inline; paused/resumed/closed as a set |
+| Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from the Tasks section's `Group…` command; renamed inline; paused/resumed/closed as a set |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
 | System | the machine's own readings, over eight sidebar pages beneath four header tiles — see below |
 | Jobs | always empty — the list states the absence rather than reading as "nothing is running"; see below |
@@ -127,40 +127,56 @@ it lands on for the same reason.
 
 ### The Tasks table
 
-Tasks is a table with a header band, the rows, and a footer band
-(`plans/NEW-SWITCHBOARD.md` S4).
+Tasks is a census in the location band, a header band, the rows, the selected
+task's commands beside them, and a footer band (`plans/NEW-SWITCHBOARD.md` S4).
 
-The **header** carries four census `MetricTile`s — Processes, Jobs, Services,
-Alerts — a filter `Tabs` strip (All, Processes, Jobs, Services, Faults) whose
-labels carry each filter's own count, and a `SearchField` that matches on the
-task's name, case-insensitively. Every tile and every tab counts the adopted
-rows through the *same* predicate the filter itself applies, so a tile, its tab
-and the rows it shows can never state different numbers. Filtering, searching,
-grouping and sorting are arrangements of the rows already sampled; none of them
-issues a new query.
+The window's **location band** carries the table's census: four plated
+`MetricTile`s — Processes, Jobs, Services, Alerts — beside the trail naming
+where the reader is, each with the glyph of the thing it counts. The band grows
+to seat them and shrinks back for a section that has no census; a window too
+narrow to seat both drops the census rather than abbreviating the reader's own
+location.
 
-The **rows** are a sortable `TableHeader` over ten columns: Task (its icon and
-name), Type, State, Activity, CPU, Memory, Disk, Network, Last active, and
-Actions. The sort is the header's own, applied over the filtered rows and
-stable — rows a column cannot separate keep the order the sample reported them
-in. *Activity* is the task's own CPU sparkline, drawn into that column's rect;
-the column geometry has one definition, which the heading, the cells and the
-sparkline all read.
+The **header** carries a filter `Tabs` strip (All, Processes, Jobs, Services,
+Faults) whose labels carry each filter's own count, and beneath it a
+full-width `SearchField` that matches on the task's name, case-insensitively —
+*which kind* of task and *which* task are separate questions, so each gets its
+own row. Every tile and every tab counts the adopted rows through the *same*
+predicate the filter itself applies, so a tile, its tab and the rows it shows
+can never state different numbers. Filtering, searching, grouping and sorting
+are arrangements of the rows already sampled; none of them issues a new query.
 
-**Actions is a column, not a rail.** Tasks commands *each row* rather than one
-selected subject, so a reader acts on the line they are reading and the buttons
-scroll with it; the sections that command a selection (Recovery, Background,
-System) are the ones with an `ActionRail`. Each button still renders its own
-verdict: allowed, disabled by the task's state, or the Authority Mark.
+The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
+name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. Every
+column is a *reading* about the task. The sort is the header's own, applied
+over the filtered rows and stable — rows a column cannot separate keep the
+order the sample reported them in. *Activity* is the task's own CPU sparkline,
+drawn into that column's rect; the column geometry has one definition, which
+the heading, the cells and the sparkline all read. A working task draws no line
+under its row: the trend belongs in the column whose heading promises it.
 
-The **footer** states how many rows are shown of the total, a grouping
-`ComboBox` (ungrouped, by type, by activity), and an Auto-refresh `Toggle` that
-holds the table on the sample the reader is reading rather than letting it move
-under them.
+The **commands** are an `ActionRail` captioned `ACTIONS`, anchored to the right
+of the table so they stay still while the rows scroll: Switch to, Reveal
+window, Pause, Resume, Lower priority, Open logs, Group…, and Force quit, each
+with its own glyph. They act on the **selected** task — clicking a row selects
+it, and a table with rows always has one selected — which is what lets the list
+name a task's whole repertoire rather than the one or two buttons a row could
+hold. Force quit carries the destructive weight and sits last. Each command
+renders its own verdict: permitted, plainly disabled where the task's state
+rules it out (resuming a task that is not stopped), or the Authority Mark where
+the caller lacks `CAP_PROC_CONTROL`. *Open logs* is always disabled: no
+capability-gated query for a task's own log entries exists yet, so the command
+states its absence rather than pretending to work.
 
-The content cursor spans the header controls, then the rows, then the footer
-controls, so every control is reachable from the keyboard whatever the filter
-leaves showing — including nothing.
+The **footer** states how many rows are shown of the total and carries an
+Auto-refresh `Toggle` beneath the table — holding it on the sample the reader
+is reading rather than letting it move under them — and the grouping `ComboBox`
+(ungrouped, by type, by activity) beneath the commands, so each control sits
+under what it governs.
+
+The content cursor spans the header controls, then the rows, then the commands,
+then the footer controls, so every control is reachable from the keyboard
+whatever the filter leaves showing — including nothing.
 
 Type names what a row *is*, not what it is for: a row from the process list is
 a `Process`. `Job` and `Service` are the kinds a job registry and a service
@@ -442,8 +458,12 @@ honest absence, so these stay empty.
 
 | Control | Effect |
 |---|---|
-| Task row | `SwitchboardRequest::ActivateOwner { owner }` to the session |
-| Task *Group* menu | file the task into an activity / a new activity / out of its activity (service-local state; no syscall) |
+| Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session — raising the window is how this system shows a reader where it is, so both commands make the same request |
+| Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` on the selected task — requires `CAP_PROC_CONTROL` |
+| Task *Lower priority* | `sched_set_priority(pid, Low)` on the selected task |
+| Task *Force quit* | `signal(pid, Kill)` on the selected task — requires `CAP_PROC_CONTROL` |
+| Task *Open logs* | nothing: no journal-read query exists, which is why the command is disabled |
+| Task *Group…* menu | file the task into an activity / a new activity / out of its activity (service-local state; no syscall) |
 | Pressure *Pause* | `signal(pid, Stop)` on the measured culprit |
 | Pressure *Lower priority* | `sched_set_priority(pid, Low)` on the culprit — lowering follows the kernel's own-child / same-principal / `CAP_PROC_CONTROL` target rule, and the card renders the action spent once the record already reads `Low` |
 | Pressure *Show tasks* | resolved inside the widget: jumps to the Tasks section focused on the culprit row |

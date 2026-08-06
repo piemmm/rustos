@@ -26,12 +26,13 @@ use tairix_controls::{
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, has_ink, model, moved, task_action_rects, PRESS,
-    RELEASE,
+    bounds, centre, click, focus_task_row, font, has_ink, model, moved, select_task_row, task_id,
+    task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use super::{
-    resolve_section_frame, Reading, RecoveryControl, Section, Switchboard, SwitchboardAction,
-    SwitchboardModel, SystemFact, SystemReport, TaskSummary,
+    resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, Switchboard,
+    SwitchboardAction, SwitchboardModel, SystemFact, SystemReport, TaskAuthority, TaskControl,
+    TaskSummary,
 };
 
 #[test]
@@ -90,7 +91,7 @@ fn client_content_is_isolated_from_furniture() {
 fn open_section_list(sb: &mut Switchboard, theme: &Theme) -> alloc::vec::Vec<SwitchboardAction> {
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let (_, command) = Switchboard::location_split(layout.location, theme, Scale::ONE);
+    let command = sb.band(layout.location, theme, Scale::ONE).command;
     let (x, y) = centre(command);
     click(sb, b, Scale::ONE, theme, x, y)
 }
@@ -103,7 +104,7 @@ fn open_section_list_from_trail(
 ) -> alloc::vec::Vec<SwitchboardAction> {
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let (trail, _) = Switchboard::location_split(layout.location, theme, Scale::ONE);
+    let trail = sb.band(layout.location, theme, Scale::ONE).trail;
     let x = trail.left() + 1;
     let y = centre(trail).1;
     // Aim through the trail's own hit test, so the click is proven to land on
@@ -183,7 +184,8 @@ fn the_location_band_paints_the_trail_and_its_command() {
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let (trail, command) = Switchboard::location_split(layout.location, &theme, Scale::ONE);
+    let band = sb.band(layout.location, &theme, Scale::ONE);
+    let (trail, command) = (band.trail, band.command);
     assert!(has_ink(&surface, trail), "the trail names the location");
     assert!(
         has_ink(&surface, command),
@@ -346,22 +348,35 @@ fn escape_closes_the_section_list_and_leaves_the_section_alone() {
 
 #[test]
 fn denied_action_renders_distinct_from_disabled() {
+    let theme = Theme::dark();
     let mut m = SwitchboardModel::new("Switchboard");
     m.tasks.push(TaskSummary {
+        proc_id: task_id(0),
         name: alloc::string::String::from("locked task"),
         pressure: PressureState::None,
         activity: ActivityState::Idle,
         recovery: RecoveryState::None,
-        action: alloc::string::String::from("End"),
-        action_allowed: false,
+        // Refused for want of authority, and one command the task's own
+        // state rules out — so the two treatments can be told apart.
+        authority: TaskAuthority {
+            resume: ActionVerdict::DisabledByState,
+            ..TaskAuthority::default()
+        },
         group: None,
         ..TaskSummary::default()
     });
-    let sb = Switchboard::new(&m);
-    // A refused action is DeniedByAuthority, never a plain disabled control.
+    let mut sb = Switchboard::new(&m);
+    select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 0);
+
     assert_eq!(
-        sb.tasks.entries[0].action.state().disposition(),
-        ControlDisposition::DeniedByAuthority
+        sb.tasks.rail.items()[7].state().disposition(),
+        ControlDisposition::DeniedByAuthority,
+        "a command the caller may not use wears the Authority Mark"
+    );
+    assert_eq!(
+        sb.tasks.rail.items()[3].state().disposition(),
+        ControlDisposition::DisabledByState,
+        "one the task's state rules out is plainly disabled instead"
     );
 }
 
@@ -442,7 +457,7 @@ fn press_on_the_location_bands_first_row_reaches_its_command() {
     let mut sb = Switchboard::new(&model());
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let (_, command) = Switchboard::location_split(layout.location, &theme, Scale::ONE);
+    let command = sb.band(layout.location, &theme, Scale::ONE).command;
     // The band's very first row of pixels, immediately under the title bar.
     let x = centre(command).0;
     let y = layout.location.top();
@@ -690,13 +705,25 @@ fn refreshed_model(tasks: usize, facts: usize) -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for i in 0..tasks {
         m.tasks.push(TaskSummary {
+            proc_id: task_id(100 + i),
             name: alloc::format!("fresh {i}"),
             memory_bytes: Some(u64::try_from(i).unwrap_or(0) * 1024 * 1024),
             pressure: PressureState::None,
             activity: ActivityState::Idle,
             recovery: RecoveryState::None,
-            action: alloc::string::String::from("End"),
-            action_allowed: i > 0,
+            // The first task refuses every command; the rest permit them, so
+            // a test can tell a refused row from a permitted one.
+            authority: if i > 0 {
+                TaskAuthority {
+                    switch: ActionVerdict::Ready,
+                    pause: ActionVerdict::Ready,
+                    resume: ActionVerdict::Ready,
+                    lower_priority: ActionVerdict::Ready,
+                    force_quit: ActionVerdict::Ready,
+                }
+            } else {
+                TaskAuthority::default()
+            },
             group: None,
             ..TaskSummary::default()
         });
@@ -831,34 +858,46 @@ fn pointer_after_set_model_addresses_the_new_rows() {
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
 
-    // Three tasks replace fifty, and the first of the three is refused.
+    // Three tasks replace fifty, and the first of the three refuses every
+    // command while the rest permit them.
     sb.set_model(&refreshed_model(3, 3));
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
-    let action_button = |sb: &mut Switchboard, row: usize| {
-        centre(task_action_rects(sb, b, Scale::ONE, &theme, row)[0])
-    };
 
-    let (x, y) = action_button(&mut sb, 0);
+    // Choosing row 2 must select the task the refresh put there.
+    select_task_row(&mut sb, b, Scale::ONE, &theme, 2);
+    let switch = centre(task_rail_rects(&sb, b, Scale::ONE, &theme)[0]);
     assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
+        click(&mut sb, b, Scale::ONE, &theme, switch.0, switch.1).contains(
+            &SwitchboardAction::Task {
+                index: 2,
+                control: TaskControl::Switch,
+            }
+        ),
+        "the command names the task now at that row"
+    );
+
+    // Row 0's replacement refuses everything, so its commands fail closed.
+    select_task_row(&mut sb, b, Scale::ONE, &theme, 0);
+    let switch = centre(task_rail_rects(&sb, b, Scale::ONE, &theme)[0]);
+    assert!(
+        click(&mut sb, b, Scale::ONE, &theme, switch.0, switch.1).is_empty(),
         "the refused new row must answer, not the permitted row it replaced"
     );
 
-    let (x, y) = action_button(&mut sb, 2);
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).contains(&SwitchboardAction::Task { index: 2 })
-    );
-
-    // Row three is gone, so the table has no such cell; probe one row-height
-    // below the last one it does have, which is where that row used to sit.
-    let last = task_action_rects(&mut sb, b, Scale::ONE, &theme, 2)[0];
+    // Row three is gone; a press one row-height below the last row it does
+    // have must select nothing at all.
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let info = sb.list_info(&layout, Scale::ONE, &theme);
+    let last = info.item_rect(2);
     let (x, y) = (
         centre(last).0,
         centre(last).1 + to_i32(last.height).saturating_add(4),
     );
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
-        "a row the refresh removed must never be actionable"
+    let before = sb.tasks.selected;
+    assert!(click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty());
+    assert_eq!(
+        sb.tasks.selected, before,
+        "a row the refresh removed must never be selectable"
     );
 }
 
@@ -869,12 +908,15 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
-    let buttons = task_action_rects(&mut sb, b, Scale::ONE, &theme, 0);
-    let (x, y) = centre(buttons[0]);
+    // Move the selection off row 0 first, so a press completing there would
+    // be visible as a change rather than hidden by the resting selection.
+    select_task_row(&mut sb, b, Scale::ONE, &theme, 3);
+    let held = sb.tasks.selected.expect("row 3 selected");
+    let (x, y) = task_row_point(&sb, b, Scale::ONE, &theme, 0);
 
-    // Arm the first task's action, refresh under the held pointer, let go.
-    // The replacement row sits at the same place and is equally permitted, so
-    // only the dropped arm can keep it from firing.
+    // Arm row 0, refresh under the held pointer, let go. The replacement row
+    // sits at the same place, so only the dropped arm can keep the release
+    // from selecting it.
     assert_eq!(
         sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
         None
@@ -882,13 +924,17 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
     sb.set_model(&model());
 
+    assert_eq!(sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
     assert_eq!(
-        sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
-        None,
+        sb.tasks.selected,
+        Some(held),
         "a press must not complete against the row that replaced its target"
     );
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).contains(&SwitchboardAction::Task { index: 0 }),
+
+    select_task_row(&mut sb, b, Scale::ONE, &theme, 0);
+    assert_eq!(
+        sb.tasks.selected,
+        Some(task_id(0)),
         "a fresh gesture on the new row must still work"
     );
 }
@@ -1005,26 +1051,42 @@ fn offsets_persist_for_the_new_sections() {
 #[test]
 fn action_focus_clamps_and_resets_with_the_row_focus() {
     let mut sb = Switchboard::new(&model());
+    // The Tasks table's rows carry no controls of their own, so the sideways
+    // cursor has nowhere to go within a row; the filter strip, whose tabs it
+    // does traverse, is where the clamp is worth proving.
     focus_task_row(&mut sb, 0);
+    for key in [NamedKey::Left, NamedKey::Right] {
+        assert_eq!(sb.on_key(Key::Named(key)), None);
+        assert_eq!(
+            sb.active().row_action(),
+            0,
+            "a row has one action slot, so sideways moves stay put"
+        );
+    }
+
+    // A fresh screen rests on the filter strip, whose tabs the sideways
+    // cursor does traverse.
+    let mut sb = Switchboard::new(&model());
+    let stops = sb.tasks.filters.len();
     assert_eq!(sb.on_key(Key::Named(NamedKey::Left)), None);
     assert_eq!(
         sb.active().row_action(),
         0,
-        "Left at the first button stays put"
+        "Left at the first tab stays put"
     );
-    for _ in 0..5 {
+    for _ in 0..stops + 2 {
         assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
     }
     assert_eq!(
         sb.active().row_action(),
-        1,
-        "Right clamps at the last button"
+        stops - 1,
+        "Right clamps at the last tab"
     );
     assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
     assert_eq!(
         sb.active().row_action(),
         0,
-        "moving the row focus resets the action focus"
+        "moving the cursor resets the action focus"
     );
 }
 
@@ -1272,7 +1334,7 @@ fn focus_change_changes_the_composition() {
 }
 
 #[test]
-fn the_focused_row_and_all_its_actions_form_one_focus_field() {
+fn the_focused_row_holds_the_ring_and_only_that_row() {
     let theme = Theme::dark();
     let mut sb = settled(&theme);
     focus_task_row(&mut sb, 0);
@@ -1283,22 +1345,14 @@ fn the_focused_row_and_all_its_actions_form_one_focus_field() {
         entry.row.state().focus.in_focus_field,
         "the focused row is a member of its own field"
     );
-    assert!(!entry.row.state().focus.focused, "the row takes no ring");
     assert!(
-        entry.action.state().focus.in_focus_field
-            && entry.group_button.state().focus.in_focus_field,
-        "every action of the focused row is a member"
-    );
-    assert!(
-        entry.action.state().focus.focused ^ entry.group_button.state().focus.focused,
-        "exactly one member holds the ring"
+        entry.row.state().focus.focused,
+        "a row carries no controls of its own, so it takes the ring itself"
     );
 
     let other = &sb.tasks.entries[focused + 1];
     assert!(
-        !other.row.state().focus.in_focus_field
-            && !other.action.state().focus.in_focus_field
-            && !other.group_button.state().focus.in_focus_field,
+        !other.row.state().focus.in_focus_field && !other.row.state().focus.focused,
         "an unfocused row is no part of the field"
     );
 }
@@ -1323,10 +1377,16 @@ fn leaving_the_content_region_clears_the_focus_field() {
         sb.tasks
             .entries
             .iter()
-            .all(|t| !t.row.state().focus.in_focus_field
-                && !t.action.state().focus.in_focus_field
-                && !t.group_button.state().focus.in_focus_field),
+            .all(|t| !t.row.state().focus.in_focus_field && !t.row.state().focus.focused),
         "no row glows once focus has left the list"
+    );
+    assert!(
+        sb.tasks
+            .rail
+            .items()
+            .iter()
+            .all(|item| !item.state().focus.in_focus_field),
+        "nor does any of the selected task's commands"
     );
 }
 

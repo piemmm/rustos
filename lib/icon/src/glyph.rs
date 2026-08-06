@@ -135,6 +135,21 @@ pub enum IconKind {
     /// screen's own sections (a Switchboard-style location breadcrumb's
     /// trailing list button).
     ListMenu,
+    /// An hourglass, for a unit of queued or background work.
+    Job,
+    /// An arrow entering a window body, for switching to a task's own window.
+    TaskSwitch,
+    /// A window frame with its title bar, for showing where a window is
+    /// without switching to it.
+    Reveal,
+    /// Two upright bars, for suspending a running task.
+    Pause,
+    /// A right-pointing triangle, for continuing a suspended task.
+    Resume,
+    /// A downward arrow, for lowering a task's scheduling priority.
+    Priority,
+    /// A cross, for ending a task outright.
+    Quit,
 }
 
 impl IconKind {
@@ -183,6 +198,13 @@ impl IconKind {
             "disk-solid-state" => Self::DiskSolidState,
             "disk-usb" => Self::DiskUsb,
             "list-menu" => Self::ListMenu,
+            "job" => Self::Job,
+            "task-switch" => Self::TaskSwitch,
+            "reveal" => Self::Reveal,
+            "pause" => Self::Pause,
+            "resume" => Self::Resume,
+            "priority" => Self::Priority,
+            "quit" => Self::Quit,
             _ => Self::Generic,
         }
     }
@@ -237,6 +259,13 @@ impl IconKind {
             Self::DiskSolidState => 37,
             Self::DiskUsb => 38,
             Self::ListMenu => 39,
+            Self::Job => 40,
+            Self::TaskSwitch => 41,
+            Self::Reveal => 42,
+            Self::Pause => 43,
+            Self::Resume => 44,
+            Self::Priority => 45,
+            Self::Quit => 46,
         }
     }
 
@@ -290,6 +319,13 @@ impl IconKind {
             Self::DiskSolidState => "disk-solid-state",
             Self::DiskUsb => "disk-usb",
             Self::ListMenu => "list-menu",
+            Self::Job => "job",
+            Self::TaskSwitch => "task-switch",
+            Self::Reveal => "reveal",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Priority => "priority",
+            Self::Quit => "quit",
         }
     }
 }
@@ -356,6 +392,13 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         }
         IconKind::Generic => generic(color),
         IconKind::ListMenu => list_menu(color),
+        IconKind::Job => job(color),
+        IconKind::TaskSwitch => task_switch(color),
+        IconKind::Reveal => reveal(color),
+        IconKind::Pause => pause(color),
+        IconKind::Resume => resume(color),
+        IconKind::Priority => priority(color),
+        IconKind::Quit => quit(color),
     };
     VectorIcon::new(DESIGN, layers)
 }
@@ -719,4 +762,90 @@ fn disk(color: Color) -> alloc::vec::Vec<IconLayer> {
 fn generic(color: Color) -> alloc::vec::Vec<IconLayer> {
     const DIAMOND: &[(i32, i32)] = &[(12, 4), (20, 12), (12, 20), (4, 12)];
     vec![IconLayer::from_points(color, DIAMOND)]
+}
+
+/// An hourglass: two triangles meeting at the waist, for work that is queued
+/// or running in the background rather than in front of the reader.
+fn job(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const UPPER: &[(i32, i32)] = &[(5, 3), (19, 3), (12, 11)];
+    const LOWER: &[(i32, i32)] = &[(12, 13), (19, 21), (5, 21)];
+    vec![
+        IconLayer::from_points(color, UPPER),
+        IconLayer::from_points(color, LOWER),
+    ]
+}
+
+/// An arrow entering a window body, for switching to a task's own window: the
+/// motion is *into* the window, unlike [`reveal`], which only shows where the
+/// window is.
+fn task_switch(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const ARROW: &[(i32, i32)] = &[
+        (2, 10),
+        (8, 10),
+        (8, 7),
+        (13, 12),
+        (8, 17),
+        (8, 14),
+        (2, 14),
+    ];
+    const BODY: &[(i32, i32)] = &[(14, 4), (21, 4), (21, 20), (14, 20)];
+    vec![
+        IconLayer::from_points(color, ARROW),
+        IconLayer::from_points(color, BODY),
+    ]
+}
+
+/// A window frame with its title bar: the window itself, for showing where it
+/// is. Drawn as a filled title band and three thin edge bars, because a single
+/// tint cannot punch a hole through a filled rectangle.
+fn reveal(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TITLE: &[(i32, i32)] = &[(3, 5), (21, 5), (21, 8), (3, 8)];
+    const LEFT: &[(i32, i32)] = &[(3, 8), (5, 8), (5, 19), (3, 19)];
+    const RIGHT: &[(i32, i32)] = &[(19, 8), (21, 8), (21, 19), (19, 19)];
+    const BOTTOM: &[(i32, i32)] = &[(3, 17), (21, 17), (21, 19), (3, 19)];
+    vec![
+        IconLayer::from_points(color, TITLE),
+        IconLayer::from_points(color, LEFT),
+        IconLayer::from_points(color, RIGHT),
+        IconLayer::from_points(color, BOTTOM),
+    ]
+}
+
+/// Two upright bars: the universal pause mark.
+fn pause(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LEFT: &[(i32, i32)] = &[(8, 4), (11, 4), (11, 20), (8, 20)];
+    const RIGHT: &[(i32, i32)] = &[(13, 4), (16, 4), (16, 20), (13, 20)];
+    vec![
+        IconLayer::from_points(color, LEFT),
+        IconLayer::from_points(color, RIGHT),
+    ]
+}
+
+/// A right-pointing triangle: the universal play/continue mark.
+fn resume(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const PLAY: &[(i32, i32)] = &[(8, 4), (19, 12), (8, 20)];
+    vec![IconLayer::from_points(color, PLAY)]
+}
+
+/// A downward arrow, for lowering a task's scheduling priority: the direction
+/// states which way the change goes.
+fn priority(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const SHAFT: &[(i32, i32)] = &[(10, 3), (14, 3), (14, 13), (10, 13)];
+    const HEAD: &[(i32, i32)] = &[(5, 13), (19, 13), (12, 21)];
+    vec![
+        IconLayer::from_points(color, SHAFT),
+        IconLayer::from_points(color, HEAD),
+    ]
+}
+
+/// A cross, for ending a task outright: two diagonal bars, distinct from the
+/// window-close furniture because it is drawn on the design grid at glyph
+/// weight.
+fn quit(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FALLING: &[(i32, i32)] = &[(5, 7), (7, 5), (19, 17), (17, 19)];
+    const RISING: &[(i32, i32)] = &[(17, 5), (19, 7), (7, 19), (5, 17)];
+    vec![
+        IconLayer::from_points(color, FALLING),
+        IconLayer::from_points(color, RISING),
+    ]
 }

@@ -518,6 +518,7 @@ impl SectionView for ActivitiesSection {
     /// row, where the group that owns them is unambiguous.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
+            band_summary: None,
             sidebar_width: 0,
             header_height: 0,
             detail_width: DETAIL_PANE_WIDTH,

@@ -382,6 +382,7 @@ impl SectionView for PressureSection {
     /// own card footer, where the card that offers them is unambiguous.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
+            band_summary: None,
             sidebar_width: 0,
             header_height: 0,
             detail_width: DETAIL_PANE_WIDTH,

@@ -66,6 +66,11 @@ it, or frame the content that does:
   commands anchored beside content, so plate, role, disabled, and denied
   rendering are not restated per surface. It lights the Edge Wake described
   below down its own leading edge while the content beside it is scrolled.
+  Every item it holds is re-seated `ContentAlign::Leading`, so the icons and
+  labels of the whole column line up and the rail reads as a list of commands
+  rather than a stack of centred captions; the rail imposes that on the items
+  it is given, so two rails cannot disagree. A standalone `Button` keeps the
+  centred default.
 - `TableHeader` gives the row family sortable column titles over the same
   column-width model `TableRow` lays its cells out with, and reports the sort
   its owner commits rather than reordering anything itself. A header and a row
