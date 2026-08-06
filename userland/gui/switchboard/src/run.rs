@@ -84,7 +84,7 @@ mod program {
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
         RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken,
-        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_WIDTH,
+        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{Desktop, WindowClient, WindowTransport};
@@ -340,16 +340,16 @@ mod program {
             let frames = allocate_frames(&mode).ok_or(Errno::OutOfMemory)?;
             let surface =
                 Surface::new(mode.width_px, mode.height_px).ok_or(Errno::LengthOutOfRange)?;
-            // Resizable: the window manager decorates and resizes the window
-            // server-side; the app draws no chrome and only re-maps its region
-            // when a `WindowEvent::Resized` arrives.
+            // The window manager decorates and resizes the window server-side;
+            // the app draws no chrome and only re-maps its region when a
+            // `WindowEvent::Resized` arrives.
             let created = self.client.create(
                 frames.grant,
                 self.event_endpoint,
                 FRAME_COUNT,
                 &mode,
                 PANEL_TITLE,
-                true,
+                WIN_RESIZABLE,
             );
             let (id, server) = match created {
                 Ok(pair) => pair,

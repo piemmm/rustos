@@ -209,6 +209,15 @@ pub const WIN_WIDTH: u32 = 480;
 /// further.
 pub const WIN_HEIGHT: u32 = 480;
 
+/// Whether a browser window asks the window manager to decorate it
+/// resizable, which widens the furniture band reserved around the client
+/// (see [`WIN_WIDTH`]).
+///
+/// The app's `Create` request and the QEMU vertical's host-side
+/// reconstruction of the window's on-screen footprint read this one value,
+/// so the drawn window and the pixels a test looks at cannot disagree.
+pub const WIN_RESIZABLE: bool = true;
+
 /// The deepest directory nesting any of the file manager's recursive
 /// component-path filesystem walks will descend, counted in root-first path
 /// components.

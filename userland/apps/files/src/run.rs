@@ -100,7 +100,7 @@ mod program {
         DoubleClickTracker, Entry, EntryKind, ManagerChrome, ManagerTool, ManagerToolModel,
         OwnerChange, PasteItem, PasteStrategy, Places, ProgressModel, ProgressOp, Properties,
         RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
-        MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        MANAGER_TOOLS, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
@@ -4050,7 +4050,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Files",
-            true,
+            WIN_RESIZABLE,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };

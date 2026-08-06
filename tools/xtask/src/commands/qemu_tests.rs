@@ -7117,9 +7117,9 @@ fn assert_files_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), 
 
 /// The served files window is on the desktop rendered with `theme`. The
 /// desktop's own wallpaper is still composited around the window, and the
-/// region where the session places the first served window — the cascade
-/// origin, sized by the files app's own window constants, inset to stay
-/// clear of the anti-aliased rounded corners and chrome — is
+/// footprint the session gives the first served window — the cascade
+/// origin, the files app's own client size grown by the furniture band,
+/// inset to stay clear of the anti-aliased rounded corners — is
 /// overwhelmingly *not* that wallpaper: a composited window frame covers
 /// it.
 fn assert_files_window_screendump(
@@ -7128,18 +7128,59 @@ fn assert_files_window_screendump(
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     let image = read_screendump(t, path)?;
-    let window = served_window_rect(0, tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT);
+    let window = served_window_layout(
+        0,
+        tairix_browse::WIN_WIDTH,
+        tairix_browse::WIN_HEIGHT,
+        tairix_browse::WIN_RESIZABLE,
+        theme,
+    )
+    .outer;
     assert_desktop_wallpaper(t, path, &image, theme, &[window])?;
     assert_window_region_covered(t, path, &image, window, "files")
 }
 
-/// Where the session places the `slot`-th window it opens, sized by its
-/// app's own window constants: the one shared cascade placement rule, so a
-/// host assertion and the guest compositor cannot disagree about where a
-/// window is.
-fn served_window_rect(slot: u64, width: u32, height: u32) -> tairix_geometry::Rect {
+/// Where the session composites the `slot`-th window it opens, laid out by
+/// the desktop's own rules: the shared cascade placement puts the window's
+/// **outer** top-left at that slot's origin, and the window manager reserves
+/// its furniture band — the border and title bar above, the resize band on
+/// the other three edges of a `resizable` window — around a client surface
+/// of `width`×`height`.
+///
+/// Both rectangles come back so a caller takes the one it means: `outer` is
+/// the window's footprint on the screen, which is what a screendump shows,
+/// and `client` is the application's own viewport, the only part a scripted
+/// click may aim at if it is to reach the app rather than the furniture.
+/// Neither is re-derived here — the band is the one the compositor itself
+/// decorates with — so a host assertion and the guest cannot disagree about
+/// where a window is.
+fn served_window_layout(
+    slot: u64,
+    width: u32,
+    height: u32,
+    resizable: bool,
+    theme: &tairix_theme::Theme,
+) -> tairix_controls::FrameLayout {
+    // Of the furniture state only `resizable` widens the band; activation,
+    // movability and the restored/maximized state never move an edge.
+    let frame = tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
+        resizable,
+        ..tairix_controls::WindowFurnitureState::default()
+    });
+    let scale = tairix_geometry::Scale::ONE;
+    let insets = frame.insets(scale, theme);
     let origin = tairix_desktop_session::windows::cascade_origin_for(slot);
-    tairix_geometry::Rect::new(origin.x, origin.y, width, height)
+    let outer = tairix_geometry::Rect::new(
+        origin.x,
+        origin.y,
+        width
+            .saturating_add(insets.left)
+            .saturating_add(insets.right),
+        height
+            .saturating_add(insets.top)
+            .saturating_add(insets.bottom),
+    );
+    frame.layout(outer, scale, theme)
 }
 
 /// The `window` region of the decoded `image` is composited: its inset body
@@ -7338,31 +7379,115 @@ fn assert_pinned_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
             path.display(),
         ));
     }
-    let panel = served_window_rect(
+    let panel = served_window_layout(
         0,
         tairix_switchboard::WIN_WIDTH,
         tairix_switchboard::WIN_HEIGHT,
-    );
+        tairix_switchboard::WIN_RESIZABLE,
+        &theme,
+    )
+    .outer;
     assert_window_region_covered(t, path, &image, panel, "Switchboard")?;
-    assert_desktop_beside_window(t, path, &image, panel)
+    assert_desktop_beside_window(
+        t,
+        path,
+        &image,
+        &theme,
+        panel,
+        &[tray_readout_band(&theme)?],
+    )
+}
+
+/// The band the taskbar's Switchboard readout opens into: the rows between
+/// the top of that popover and the bar it grows out of, across the screen.
+///
+/// The vertical's script clicks the tray capsule to open the Switchboard, so
+/// the readout stands open beside the served panel while the pointer rests
+/// on the capsule — composited desktop, not wallpaper. Its *height* is fixed
+/// by its shape (a state line, a value line, and the primary action), so the
+/// production layout reproduces it exactly here; its *width* follows the
+/// live figure it shows, which no host reconstruction can know. The band is
+/// therefore the rows the popover occupies at the full width: an assertion
+/// gives up those rows and no other pixel of the frame.
+fn tray_readout_band(theme: &tairix_theme::Theme) -> Result<tairix_geometry::Rect, String> {
+    use tairix_abi::switchboard_ipc::{TrayPermille, TraySummary};
+    use tairix_input::{InputEvent, PointerButton};
+    use tairix_taskbar::{Taskbar, TaskbarConfig, TaskbarInput};
+
+    let scale = tairix_geometry::Scale::ONE;
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let mut taskbar = Taskbar::new(
+        TaskbarConfig::bottom_bar(width, tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX),
+        theme,
+    );
+    // The shape a running Switchboard publishes: a measured CPU figure and
+    // no pressure, which is the readout the guest shows.
+    let cpu_busy_permille = TrayPermille::new(500)
+        .map_err(|e| format!("taskbar reconstruction: tray CPU figure refused: {e:?}"))?;
+    taskbar.set_tray_summary(Some(TraySummary {
+        jobs: 0,
+        recovery: 0,
+        cpu_busy_permille,
+        pressure: None,
+        top_task: None,
+        power_capable: false,
+    }));
+    let capsule = rect_centre(taskbar.layout(scale).switchboard, "Switchboard capsule")?;
+    let mut router = TaskbarInput::new();
+    for event in [
+        InputEvent::PointerMoved { to: capsule },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        router.handle(event, &mut taskbar, scale, 0);
+    }
+    let panel = taskbar
+        .tray_readout_layout(scale)
+        .ok_or_else(|| {
+            "taskbar reconstruction: the capsule click left the tray readout collapsed".to_string()
+        })?
+        .panel;
+    Ok(tairix_geometry::Rect::new(
+        0,
+        panel.top(),
+        width,
+        panel.height,
+    ))
 }
 
 /// The column between `window`'s right edge and the screen's is bare
 /// composited desktop — every pixel exactly the wallpaper the desktop's
-/// own pipeline draws there ([`expected_wallpaper`]).
+/// own pipeline draws there ([`expected_wallpaper`]), save where the
+/// desktop's own chrome covers it ([`desktop_chrome_regions`]: the taskbar,
+/// the icon column, the pointer).
 ///
 /// The precise complement of [`assert_window_region_covered`]: together
 /// they say the frame is the desktop with exactly that window on it, with
-/// no tolerance factor invented for either. The column is clear of the
-/// taskbar (which spans the screen's foot, below the window's band) and of
-/// the pointer, which the script leaves in the bar.
+/// no tolerance factor invented for either. A window tall enough to reach
+/// the taskbar has that bar drawn beside it, which is the composited
+/// desktop working correctly rather than a wallpaper mismatch — hence the
+/// chrome is skipped from the one definition of where the desktop draws it,
+/// and a floor on the pixels actually compared keeps the assertion from
+/// passing on an empty column. `covered` names any further surface the
+/// script left standing beside the window (see [`tray_readout_band`]).
 fn assert_desktop_beside_window(
     t: &QemuTest,
     path: &Path,
     image: &tairix_qemu::screendump::Image,
+    theme: &tairix_theme::Theme,
     window: tairix_geometry::Rect,
+    covered: &[tairix_geometry::Rect],
 ) -> Result<(), String> {
+    /// A column so nearly covered that fewer pixels remain is not one this
+    /// assertion can judge.
+    const MIN_COMPARED: usize = 1024;
     let wallpaper = expected_wallpaper()?;
+    let chrome = desktop_chrome_regions(theme, covered);
+    let mut compared = 0usize;
     #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
     let (left, top, bottom) = (
         window.right() as u32 + WINDOW_EDGE_CLEARANCE_PX,
@@ -7378,6 +7503,13 @@ fn assert_desktop_beside_window(
     }
     for y in top..bottom {
         for x in left..image.width {
+            let point = tairix_geometry::Point::new(
+                i32::try_from(x).unwrap_or(i32::MAX),
+                i32::try_from(y).unwrap_or(i32::MAX),
+            );
+            if chrome.iter().any(|rect| rect.contains(point)) {
+                continue;
+            }
             let pixel = image.pixel(x, y).map_err(|e| {
                 format!(
                     "test --qemu ({}): screendump {} lacks the column beside the served \
@@ -7403,7 +7535,16 @@ fn assert_desktop_beside_window(
                     path.display(),
                 ));
             }
+            compared += 1;
         }
+    }
+    if compared < MIN_COMPARED {
+        return Err(format!(
+            "test --qemu ({}): screendump {} leaves only {compared} comparable desktop pixels \
+             beside the served window (expected >= {MIN_COMPARED})",
+            t.package,
+            path.display(),
+        ));
     }
     Ok(())
 }
@@ -7711,7 +7852,6 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_desktop_session::windows::cascade_origin_for;
     use tairix_desktop_session::DesktopShell;
     use tairix_geometry::{Point, Scale};
     use tairix_log::DiscardSink;
@@ -7782,11 +7922,19 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             "desktop pointer script: the terminal entry is not visible in the popup".to_string()
         })?;
     let terminal_entry = rect_centre(terminal_entry, "terminal library entry")?;
-    // The centre of each served window: the session cascades them in
-    // open order through the one shared placement rule, each sized by
-    // its app's own constants — the same values the dump assertion
-    // measures.
-    let files_origin = cascade_origin_for(0);
+    // Each served window's own client viewport: the session cascades the
+    // windows in open order through the one shared placement rule and
+    // decorates them, each sized by its app's own constants — the same
+    // values the dump assertion measures. A click aims into the client, so
+    // it reaches the application rather than the furniture around it.
+    let files_client = served_window_layout(
+        0,
+        tairix_browse::WIN_WIDTH,
+        tairix_browse::WIN_HEIGHT,
+        tairix_browse::WIN_RESIZABLE,
+        shell.session().active_theme(),
+    )
+    .client;
     // The files-window "focus" clicks below aim at a column and row that hold
     // nothing actionable, so the click focuses the window (delivering `Focus` +
     // `Pressed` app-ward) without selecting a listing row or navigating. The
@@ -7795,22 +7943,22 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // independent of how many entries the root lists. (A click on a row would
     // select it and repaint — correct app behaviour, but it would add presents
     // the fixed count gate must not see.)
-    //
-    // The offset is measured from `cascade_origin_for`, which is the window's
-    // *outer* top-left, and the compositor insets the app's content below the
-    // border and title bar. The point therefore falls higher in the client than
-    // this row offset names. Correcting the whole script to a shared
-    // client-origin definition moves every click point and dump region at once
-    // and is staged in `plans/APPWIN.md` AW3.
     let path_bar_y =
         tairix_browse::render::toolbar_height(shell.session().active_theme()).saturating_add(4);
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
     let window = Point::new(
-        files_origin.x + (tairix_browse::WIN_WIDTH / 2) as i32,
-        files_origin.y + path_bar_y as i32,
+        files_client.left() + (tairix_browse::WIN_WIDTH / 2) as i32,
+        files_client.top() + path_bar_y as i32,
     );
     let terminal_window = rect_centre(
-        served_window_rect(1, tairix_terminal::WIN_WIDTH, tairix_terminal::WIN_HEIGHT),
+        served_window_layout(
+            1,
+            tairix_terminal::WIN_WIDTH,
+            tairix_terminal::WIN_HEIGHT,
+            tairix_terminal::WIN_RESIZABLE,
+            shell.session().active_theme(),
+        )
+        .client,
         "terminal window",
     )?;
 
@@ -8533,6 +8681,67 @@ mod tests {
         TESTS, UNLOCK_PASSPHRASE_LINE,
     };
     use std::time::Duration;
+
+    /// A served window's footprint is its app's client surface grown by the
+    /// furniture band the window manager reserves, anchored at the cascade
+    /// slot the session places it in — so the screendump assertion samples
+    /// the whole window, and a click measured from the client reaches the
+    /// application rather than the title bar above it.
+    ///
+    /// The regression this pins: pairing the *outer* origin with the *client*
+    /// size yields a rectangle that is neither, shifted a title bar's height
+    /// up into the furniture. It is caught here by round-tripping the client
+    /// back through the compositor's own inverse.
+    #[test]
+    fn served_window_layout_insets_the_client_inside_its_furniture() {
+        use super::served_window_layout;
+        use tairix_geometry::Scale;
+
+        let theme = tairix_theme::Theme::dark();
+        let layout = served_window_layout(
+            0,
+            tairix_browse::WIN_WIDTH,
+            tairix_browse::WIN_HEIGHT,
+            tairix_browse::WIN_RESIZABLE,
+            &theme,
+        );
+        assert_eq!(
+            layout.outer.origin,
+            tairix_desktop_session::windows::cascade_origin_for(0),
+        );
+        assert_eq!(
+            (layout.client.width, layout.client.height),
+            (tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT),
+        );
+        let frame = tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
+            resizable: tairix_browse::WIN_RESIZABLE,
+            ..tairix_controls::WindowFurnitureState::default()
+        });
+        assert_eq!(
+            layout.outer,
+            frame.outer_for_client(layout.client, Scale::ONE, &theme),
+        );
+        assert!(layout.client.left() > layout.outer.left());
+        assert!(layout.client.top() > layout.outer.top());
+        assert!(layout.client.right() <= layout.outer.right());
+        assert!(layout.client.bottom() <= layout.outer.bottom());
+
+        // The app's own resizability sizes that band, so passing it is not
+        // decorative: a fixed-size window keeps the thin rim and its
+        // footprint is smaller for the same client.
+        let fixed = served_window_layout(
+            0,
+            tairix_browse::WIN_WIDTH,
+            tairix_browse::WIN_HEIGHT,
+            false,
+            &theme,
+        );
+        assert_eq!(
+            (fixed.client.width, fixed.client.height),
+            (layout.client.width, layout.client.height),
+        );
+        assert!(fixed.outer.width < layout.outer.width);
+    }
 
     /// Every `memtest` takeover binary `finish_run` scores by reset is
     /// actually enrolled, and the per-loop marker the runner keys on matches

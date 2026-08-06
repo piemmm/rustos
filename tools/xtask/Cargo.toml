@@ -199,6 +199,12 @@ tairix-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
 tairix-browse = { path = "../../lib/browse", version = "=0.0.0" }
 tairix-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }
 tairix-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
+# The shared window furniture: a served window's screen footprint is its
+# client surface grown by the band the window manager reserves around it, so
+# the vertical asks the very `WindowFrame` the compositor decorates with
+# where that window's edges and client viewport are, rather than restating
+# the frame metrics (plans/APPWIN.md AW3).
+tairix-controls = { path = "../../lib/controls", version = "=0.0.0" }
 # The bitmap font the browser window renders with: the FM9-a file-manager
 # click-through reconstructs the browser's own row/toolbar layout (the same
 # code the guest runs) to compute the New Folder + navigation click

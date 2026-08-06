@@ -130,5 +130,12 @@ pub const WIN_WIDTH: u32 = tairix_font::atlas::CELL_WIDTH * COLS as u32;
 /// the same compiled-in console-atlas geometry [`WIN_WIDTH`] derives from.
 pub const WIN_HEIGHT: u32 = tairix_font::atlas::CELL_HEIGHT * ROWS as u32;
 
+/// Whether the terminal's window asks the window manager to decorate it
+/// resizable, which widens the furniture band reserved around the client.
+///
+/// The app's `Create` request and the QEMU vertical's host-side
+/// reconstruction of the window's on-screen footprint read this one value.
+pub const WIN_RESIZABLE: bool = true;
+
 #[cfg(test)]
 mod tests;

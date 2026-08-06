@@ -391,6 +391,11 @@ pub const WIN_WIDTH: u32 = 760;
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 560;
 
+/// Whether the overview window asks the window manager to decorate it
+/// resizable, which widens the furniture band reserved around the client
+/// (see [`WIN_WIDTH`]).
+pub const WIN_RESIZABLE: bool = true;
+
 /// The narrowest client width the panel is laid out for; a resize below it
 /// is clamped up rather than drawn into a box the sections cannot fit.
 ///

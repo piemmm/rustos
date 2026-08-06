@@ -183,22 +183,16 @@ Done. What now holds:
   loop wedge (above) and the virtio-input event queue's 8-descriptor
   ceiling silently dropping bursts under a saturated CPU (now the
   device's full 64, `lib/virtio_input`).
-- **Known defect, staged:** the vertical's files-window click points are
-  computed from `cascade_origin_for` — the window's **outer** top-left —
-  plus a *client*-relative offset, so the compositor's client inset
-  (`WindowFrame::insets`: the border + title bar above, the resize band
-  beside) is never added. At `Scale::ONE` that inset is 29 px vertically,
-  so the click that means to land in the breadcrumb path bar lands 19 px
-  into the client instead — inside the app's own 44 px command-toolbar
-  strip. `served_window_rect` has the same shape: it pairs the outer
-  origin with the *client* size, which is a region wholly inside the
-  window (so the "covered"/"bare beside" screendump assertions still
-  hold) but is neither the outer nor the client rectangle. The fix is one
-  shared client-origin definition beside `cascade_origin_for`, consumed by
-  the script instead of a hand-added offset; it moves every click point
-  and every dump region, so — like the AW5 picker stage below — it is
-  staged as its own increment with the vertical re-run, rather than landed
-  blind.
+- Every coordinate the vertical uses is the desktop's own: a served
+  window's footprint is the shared cascade origin — its **outer**
+  top-left — with the app's client surface grown by the furniture band
+  the window manager reserves (`WindowFrame::insets`, the same frame the
+  compositor decorates with), and each app declares its own resizability
+  once (`WIN_RESIZABLE`, beside its window size) because that flag sizes
+  the band. `served_window_layout` returns both rectangles, so a
+  screendump assertion measures the whole window while a click is
+  measured inside the *client* and therefore reaches the application
+  rather than the title bar above it.
 
 ### AW4 — the terminal goes live `[x]`
 

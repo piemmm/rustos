@@ -58,7 +58,7 @@ mod program {
     use tairix_terminal::render::render;
     use tairix_terminal::{
         shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, COLS,
-        ROWS, TERM, WIN_HEIGHT, WIN_WIDTH,
+        ROWS, TERM, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
     };
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
@@ -414,7 +414,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Terminal",
-            true,
+            WIN_RESIZABLE,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };

@@ -143,7 +143,7 @@ pub use model::{
 };
 pub use panel::{
     refusal_notice, Panel, PanelOutcome, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT,
-    WIN_WIDTH,
+    WIN_RESIZABLE, WIN_WIDTH,
 };
 pub use publish::Publisher;
 pub use sample::{
