@@ -29,19 +29,20 @@
 /// filesystem, and opens exactly one window with no prompt of its own.
 pub const PIN_APP_NAME: &str = "widgets";
 
-/// How many replies the reserved window endpoint must have served before
-/// the Switchboard's panel is both **created and painted**: the create
-/// round-trip, then the service's first present of the panel it drew into
-/// the frame that create mapped.
-///
-/// The count is closed and script-determined — this vertical opens exactly
-/// one window, and the client's own call order is create-then-present — so
-/// it is a sequence position, not an open-ended tally of somebody else's
-/// traffic.
-pub const SWITCHBOARD_WINDOW_CALLS: u32 = 2;
-
 /// Guest-emitted marker announcing that the Switchboard panel has been
-/// created and presented ([`SWITCHBOARD_WINDOW_CALLS`] replies served).
+/// created **and painted**: the guest saw the panel's own create reply,
+/// then the reply completing the present that first drew into the frame
+/// that create mapped.
+///
+/// It is anchored on the create reply, identified by its distinctive wire
+/// length, and never on a reply's position in the endpoint's traffic. The
+/// reserved window rendezvous serves every client, so an ordinal is not the
+/// panel's to own: when the Switchboard gained a start-up desktop query,
+/// that extra reply shifted the old two-reply count onto the *create*, and
+/// the screendump was captured a full round trip before the panel had been
+/// painted — an empty cascade slot on a passing guest. An anchored gate
+/// cannot be moved by a call some other client, or an earlier phase of this
+/// one, adds.
 ///
 /// It is the pin click's gate, and it is a **causal** one rather than a
 /// timed one: serving a window-endpoint call is a different wake of the

@@ -519,28 +519,18 @@ const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 /// keyboard's own arming — possibly the second — is never raced.
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
-/// Serial marker of an app-ward window-event delivery: the kernel/ipc
-/// `MessageDelivered` audit record, emitted when a message lands in a
-/// bound port's mailbox. In this vertical the desktop session's window
-/// engine is the only port sender (window events to a served app), so
-/// each occurrence is one delivered window event, kernel-attested —
-/// imported from the kernel/ipc vocabulary, never a literal.
-const AUTOLOAD_WINDOW_EVENT_MARKER: &str =
-    tairix_kernel_ipc::AuditEvent::MessageDelivered.message();
+/// Guest marker keying the second screendump (the served files window on
+/// the dark desktop): the activating click's `Focus` + `Pressed` both
+/// reached that window's own event port. The guest attributes the pair to
+/// the window itself, so no other app or service can key the dump.
+const AUTOLOAD_FILES_ACTIVATED_MARKER: &str =
+    tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_ACTIVATED_MARKER;
 
-/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences key the second
-/// screendump (the served files window on the dark desktop) — the
-/// vertical's shared interaction contract, defined once beside the guest
-/// PASS gate that also consumes it.
-const AUTOLOAD_WINDOW_DUMP_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::WINDOW_DUMP_DELIVERIES;
-
-/// How many [`AUTOLOAD_WINDOW_EVENT_MARKER`] occurrences gate the terminal
-/// stage's library-popup clicks: the handshake click's own delivery — the
-/// same shared contract (a wake boundary strictly past the verified second
-/// dump, see the contract crate's rationale).
-const AUTOLOAD_TERMINAL_STAGE_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::TERMINAL_STAGE_DELIVERIES;
+/// Guest marker gating the terminal stage's library-popup clicks: the
+/// handshake click's `Pressed` reached the still-focused files window — a
+/// wake boundary strictly past the verified second dump.
+const AUTOLOAD_FILES_HANDSHAKE_MARKER: &str =
+    tairix_test_autoload_input_qemu_aarch64::FILES_HANDSHAKE_MARKER;
 
 /// Serial marker of one shared-frame *map* operation: the kernel
 /// syscall-trace record for `shm_map`. A window's frame region is mapped
@@ -553,13 +543,20 @@ const AUTOLOAD_TERMINAL_STAGE_OCCURRENCES: u32 =
 /// already keys on, so both gates share one serial convention.
 const AUTOLOAD_WINDOW_MAP_MARKER: &str = "sc=shm_map";
 
+/// How many [`AUTOLOAD_WINDOW_MAP_MARKER`] occurrences gate the *files*
+/// window click (`plans/APPWIN.md` AW3): the boot framebuffer scan-out map,
+/// then that window's own create map. The shared contract, so the click can
+/// never race the window's existence — which a gate on any reply over the
+/// shared window rendezvous did, firing on the Switchboard's start-up
+/// desktop query while the desktop was still bare.
+const AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES: u32 =
+    tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS;
+
 /// How many [`AUTOLOAD_WINDOW_MAP_MARKER`] occurrences gate the
-/// terminal-window click (`plans/APPWIN.md` AW4): the boot framebuffer
-/// scan-out map, the files window's create map, then the terminal
-/// window's create map — after which the terminal window exists at its
-/// cascade slot and the click focuses it, no matter how many times any
-/// window repainted. The shared contract, so the click can never race
-/// the window's existence.
+/// terminal-window click (`plans/APPWIN.md` AW4): the two above, then the
+/// terminal window's create map — after which the terminal window exists at
+/// its cascade slot and the click focuses it, no matter how many times any
+/// window repainted.
 const AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES: u32 =
     tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS;
 
@@ -5416,8 +5413,8 @@ static TESTS: &[QemuTest] = &[
                 assert: assert_dark_desktop_screendump,
             },
             ScreendumpPlan {
-                marker: AUTOLOAD_WINDOW_EVENT_MARKER,
-                occurrences: AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+                marker: AUTOLOAD_FILES_ACTIVATED_MARKER,
+                occurrences: 1,
                 suffix: "window",
                 assert: assert_files_window_dark_screendump,
             },
@@ -7817,21 +7814,6 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         "terminal window",
     )?;
 
-    // The reserved window endpoint's first reply on serial: the create
-    // round-trip completed, so the served window exists in the compositor
-    // (and the wake that created it presented the frame carrying it).
-    // Built from the kernel/ipc vocabulary and the shared endpoint id +
-    // hex renderer, never a literal.
-    let mut endpoint_hex = [0u8; 16];
-    let created = format!(
-        "{} endpoint={}",
-        tairix_kernel_ipc::AuditEvent::CallReplied.message(),
-        tairix_util::fmt::format_hex_u64(
-            tairix_abi::window_ipc::WINDOW_ENDPOINT,
-            &mut endpoint_hex
-        ),
-    );
-
     // Relative-motion arithmetic: the pointer starts at an unknown
     // position (the session centres it), so the first move overshoots
     // both axes leftward/upward; the guest clamps at (0, 0), making every
@@ -7866,27 +7848,36 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ),
         step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
         step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
-        // The spawned app's window create has been replied: click the
-        // window body — the session delivers `Focus` + `Pressed` app-ward
-        // (`MessageDelivered` × 2, the second dump's key).
-        step(&created, 1, move_by(files_button, window)),
-        step(&created, 1, press),
-        step(&created, 1, release),
-        // The handshake click on the still-focused window (its `Pressed`
-        // is delivery 3): keyed on the first click's own deliveries and
-        // additionally held while the second dump is pending, so the dump
-        // captures the staged dark frame and the terminal stage below
-        // starts in a strictly later wake.
+        // The spawned app's window frame has been mapped — its window is
+        // created and sits at the first cascade slot — so click its body;
+        // the session delivers `Focus` + `Pressed` to that window, which is
+        // the second dump's key. Gating on the map, not on a reply over the
+        // shared window rendezvous, is what keeps this click behind the
+        // window's existence: every client of that rendezvous replies on it,
+        // and the Switchboard's start-up desktop query once fired this step
+        // against a bare desktop.
         step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
+            move_by(files_button, window),
+        ),
+        step(
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
             press,
         ),
         step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_WINDOW_DUMP_OCCURRENCES,
+            AUTOLOAD_WINDOW_MAP_MARKER,
+            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
             release,
         ),
+        // The handshake click on the still-focused window: keyed on the
+        // first click's own deliveries reaching that window and
+        // additionally held while the second dump is pending, so the dump
+        // captures the staged dark frame and the terminal stage below
+        // starts in a strictly later wake.
+        step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, press),
+        step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, release),
         // --- The AW4 terminal stage, keyed on the handshake click's own
         // delivery. Click the Library button — the program-library popup
         // opens (a session-owned surface: no app-ward delivery and no
@@ -7894,35 +7885,19 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // the popup's "Terminal" entry, spawning the terminal bundle from
         // the on-disk store through the planted catalog.
         step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
+            AUTOLOAD_FILES_HANDSHAKE_MARKER,
+            1,
             move_by(window, library_button),
         ),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, press),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, release),
         step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
-            release,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
+            AUTOLOAD_FILES_HANDSHAKE_MARKER,
+            1,
             move_by(library_button, terminal_entry),
         ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
-            press,
-        ),
-        step(
-            AUTOLOAD_WINDOW_EVENT_MARKER,
-            AUTOLOAD_TERMINAL_STAGE_OCCURRENCES,
-            release,
-        ),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, press),
+        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, release),
         // The terminal's window frame has been mapped — its window is
         // created and sits at the second cascade slot — so click its
         // body. This gate counts window-frame **maps** (one per window
@@ -8474,12 +8449,25 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     let run = Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package));
     let peer_verdict = peer.map(super::netpeer::NetPeer::stop_and_join);
     match run? {
-        Outcome::Pass => {
+        Outcome::Pass { serial } => {
+            // The guest passed, but the run is not verified until its dumps
+            // and its link peer agree. Either can still fail, so the
+            // transcript is persisted before they are consulted — a dump
+            // assertion that fires with no serial log to read is a diagnosis
+            // no one can start.
             for (path, assert) in &screendump_paths {
-                assert(t, path)?;
+                if let Err(e) = assert(t, path) {
+                    persist_failure_serial(t.package, &serial_log, &serial)?;
+                    return Err(format!("{e} (full serial: {})", serial_log.display()));
+                }
             }
             if let Some(Err(e)) = peer_verdict {
-                return Err(format!("test --qemu ({}): {e}", t.package));
+                persist_failure_serial(t.package, &serial_log, &serial)?;
+                return Err(format!(
+                    "test --qemu ({}): {e} (full serial: {})",
+                    t.package,
+                    serial_log.display()
+                ));
             }
             Ok(())
         }
@@ -8499,20 +8487,20 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
                 serial_log.display()
             ))
         }
-        Outcome::GateNeverTripped {
+        Outcome::RuntimeCeilingExceeded {
             ceiling,
             silent_for,
             serial,
         } => {
             persist_failure_serial(t.package, &serial_log, &serial)?;
             // The silence at the kill is the first thing a reader needs: near
-            // zero means the guest was alive and working but its round trip
-            // was never confirmed (look at the peer, the link, or host load),
-            // while a silence close to the ceiling means the guest went quiet
-            // early and stalled — the transcript's last line is then the
-            // stall point.
+            // zero means the guest was alive and working but never finished
+            // (a choreography waiting on a witness that never arrives, or a
+            // service retrying on a timer), while a silence close to the
+            // ceiling means the guest went quiet early and stalled — the
+            // transcript's last line is then the stall point.
             Err(format!(
-                "test --qemu ({}) UNCONFIRMED after {ceiling:?}: the link peer never confirmed the round trip; guest silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
@@ -8714,34 +8702,36 @@ mod tests {
     }
 
     #[test]
-    fn terminal_window_click_gates_on_window_creation_not_repaint_count() {
-        // Regression guard for the D10 flaky-repaint deadlock: the
-        // terminal-window focus click (the script's final move + press +
-        // release) must key on window *creation* — one shared-frame
-        // `shm_map` per window — never on the window-endpoint `CallReplied`
-        // count. A `CallReplied` gate counts window *presents* too, so a
-        // files-window click that happened to repaint would inflate the
-        // count and fire this click onto the empty desktop before the
-        // terminal window existed, wedging the session (guest goes idle,
-        // run times out). Counting creations is immune to repaints.
+    fn every_served_window_click_gates_on_that_window_being_created() {
+        // Regression guard for two defects with one cause: a click fired
+        // before its target window existed.
+        //
+        // D10 keyed the terminal click on the window endpoint's
+        // `CallReplied` count, which counts *presents* too, so a repaint
+        // inflated it and clicked the empty desktop. D31 keyed the files
+        // click on a reply over that same endpoint, which every client of
+        // the shared rendezvous produces — the Switchboard's start-up
+        // desktop query fired it half a second before the files window was
+        // created. Both clicks now gate on window **creation**: exactly one
+        // shared-frame `shm_map` per window, which no query, present or
+        // reply can advance.
         let script = super::autoload_desktop_pointer_script().expect("build the pointer script");
-        // The terminal-window click is the group of steps gated on the
-        // window-creation `shm_map` marker — located by that marker, not by
-        // position, since the FM9-a file-manager stage appends further clicks
-        // after it (`plans/NEW-FILEMANAGER.md` FM9-a).
-        let terminal_click: Vec<&tairix_qemu::PointerStep> = script
-            .iter()
-            .filter(|step| step.ready_marker == super::AUTOLOAD_WINDOW_MAP_MARKER)
-            .collect();
-        assert_eq!(
-            terminal_click.len(),
-            3,
-            "the terminal-window click is one move + press + release, all on the map marker"
-        );
+        // Located by marker and occurrence count, never by position, since
+        // the FM9-a file-manager stage appends further clicks after these
+        // (`plans/NEW-FILEMANAGER.md` FM9-a).
+        let click_on = |occurrences: u32| -> Vec<&tairix_qemu::PointerStep> {
+            script
+                .iter()
+                .filter(|step| {
+                    step.ready_marker == super::AUTOLOAD_WINDOW_MAP_MARKER
+                        && step.ready_occurrences == occurrences
+                })
+                .collect()
+        };
 
-        // The present-inclusive marker the fragile gate used, reconstructed
-        // exactly as the script builds it, so this test fails if the gate
-        // is ever reverted to a `CallReplied`/present count.
+        // The present-inclusive marker the fragile D10 gate used, and the
+        // shared-rendezvous reply the D31 one used, reconstructed exactly as
+        // the script builds them so this test fails if either is restored.
         let mut endpoint_hex = [0u8; 16];
         let call_replied = format!(
             "{} endpoint={}",
@@ -8752,34 +8742,45 @@ mod tests {
             ),
         );
 
-        for step in terminal_click {
+        for (window, occurrences) in [
+            ("files", super::AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES),
+            ("terminal", super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES),
+        ] {
+            let click = click_on(occurrences);
             assert_eq!(
-                step.ready_marker,
-                super::AUTOLOAD_WINDOW_MAP_MARKER,
-                "the terminal-window click must gate on the window-creation \
-                 (shm_map) marker, not {:?}",
-                step.ready_marker
+                click.len(),
+                3,
+                "the {window}-window click is one move + press + release, all on the map marker"
             );
-            assert_eq!(
-                step.ready_occurrences,
-                super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES
-            );
-            assert_ne!(
-                step.ready_marker, call_replied,
-                "the terminal-window click must not gate on the \
-                 present-inclusive CallReplied count"
-            );
+            for step in click {
+                assert_ne!(
+                    step.ready_marker, call_replied,
+                    "the {window}-window click must not gate on a reply over the shared \
+                     window rendezvous: it counts presents, and every client answers on it"
+                );
+            }
         }
 
         // The creation-based contract: the marker is the shared `sc=<name>`
-        // syscall trace, and exactly three frame maps precede the terminal
-        // window — the boot framebuffer scan-out, the files window, and the
-        // terminal window itself.
+        // syscall trace, and each window's own frame map is a distinct
+        // position in one monotonic sequence — the boot framebuffer
+        // scan-out, then the files window, then the terminal window.
         assert_eq!(super::AUTOLOAD_WINDOW_MAP_MARKER, "sc=shm_map");
+        assert_eq!(
+            super::AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
+            tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS
+        );
         assert_eq!(
             super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
             tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS
         );
+        const {
+            assert!(
+                tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS
+                    < tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
+                "the files window is created before the terminal window"
+            );
+        }
         assert_eq!(
             tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
             3

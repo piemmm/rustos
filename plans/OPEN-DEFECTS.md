@@ -1749,65 +1749,72 @@ drift apart again.
 
 ---
 
-## D30 — the Switchboard panel is not served at its cascade slot (OPEN)
+## D30 — the pinned-bar screendump was captured before the panel was painted — DONE
 
-**State:** open, **deterministic**, and **not** caused by D29 — reproduced both
-inside the full matrix and standalone (`cargo xtask test --qemu --only
-taskbar-pin`), on a tree whose only other changes are D29's, which that binary
-does not compile in (it carries no `watchdog-diagnostics` symbols, so its EL0
-entry state is byte-identical to before).
+`tairix-test-taskbar-pin-qemu-aarch64` now passes in ~22 s.
 
-**Symptom.** `tairix-test-taskbar-pin-qemu-aarch64` fails its second
-screendump:
+**Not a geometry defect.** Both sides already agreed: the Switchboard asks only
+for a *size* (`Desktop::window_size`), and the session alone places the window
+through the one shared `cascade_origin_for` rule the assertion also reads. The
+panel was destined for exactly the slot the checker sampled.
 
-```
-screendump …taskbar-pin-qemu-aarch64.pinned-bar.screendump.ppm shows no served
-Switchboard window at its cascade slot: only 0.000 of the window body differs
-from the desktop wallpaper behind it (expected >= 0.95)
-```
+**The real cause — the same shared-rendezvous ordinal D31 names.** The guest
+announced "panel created and painted" on the *second* reply served over
+`WINDOW_ENDPOINT`, a count whose doc claimed it was "a sequence position, not
+an open-ended tally of somebody else's traffic". That stopped being true when
+the Switchboard gained a start-up `QueryDesktop`: the sequence became
+query, create, present, so the marker fired on the **create** — one full round
+trip before the panel had drawn anything — and the screendump caught an empty
+cascade slot on an otherwise passing guest.
 
-**What the dumps show.** Comparing the vertical's own two dumps: 20 658 of
-786 432 pixels differ, and the change is **not** at the cascade slot the
-assertion samples — it is a flat, theme-background-coloured region low on the
-screen (rows ~576–703 gain ~11 700 background-coloured pixels between the two
-dumps, i.e. something *was* drawn there). So the panel is plausibly served but
-positioned somewhere other than the slot the checker reads, rather than never
-existing; the alternative (the click never raised it and the region is
-unrelated chrome) is not yet excluded. The first dump (bare pin slot) passes.
+**Fix.** The witness is anchored, not counted. The guest recognises the panel's
+own **create** reply by its distinctive wire length
+(`WINDOW_CREATE_REPLY_LEN`), and the reply after it completes the present that
+first drew the panel. No call added ahead of create — by this client or any
+other sharing the rendezvous — can move the gate.
 
-**Next step.** Capture the guest's serial for a standalone run and decide
-between the two: an `id=3040` window-endpoint create + first present for the
-Switchboard means the panel is served and the defect is geometry (the cascade
-slot the compositor chose vs. the one `plans/NEW-TASKBAR.md` T15 asserts); their
-absence means the trailing-capsule click never reached the service.
+**Diagnosability defect fixed alongside.** The register's own "next step" asked
+for a serial log the runner could not produce: `Outcome::Pass` discarded the
+transcript, so a *screendump* assertion failing after a passing guest reported
+a pixel ratio and nothing else. A pass now carries its transcript like every
+other outcome, and the matrix persists it whenever a dump assertion or a link
+peer's verdict fails.
 
 ---
 
-## D31 — a QEMU vertical whose guest stays chatty can run unbounded (OPEN)
+## D31 — a QEMU vertical whose guest stays chatty ran unbounded — DONE
 
-**State:** open, **not** caused by D29 (same symbol-level argument as D30).
-Observed twice: `tairix-test-autoload-input-qemu-aarch64` ran **54 minutes**
-(guest clock 3264 s) before being killed by hand, holding the whole `cargo
-xtask ci` pipeline — every other job had long finished.
+Two independent defects; both fixed. `tairix-test-autoload-input-qemu-aarch64`
+now passes in ~26 s.
 
-**Two distinct problems.**
+**1. The stalled choreography: a gate another component could satisfy.** The
+in-window click waited for "a reply over `WINDOW_ENDPOINT`", but every client
+of that shared rendezvous replies on it. The Switchboard's start-up
+`QueryDesktop` (`userland/gui/switchboard` asks the session to describe the
+desktop before it sizes anything) fires that gate ~0.5 s before the files
+window is created, so the click landed on bare desktop, no window event was
+ever delivered, and every later stage — which counted *system-wide*
+`MessageDelivered` records — could never advance.
 
-1. *The choreography stalls.* The run ends `pointer script incomplete: a step's
-   readiness marker was not seen (or a dump it waited on never verified)`. The
-   guest is healthy and idle-ish while it stalls (47 s of host CPU across 54
-   minutes), so nothing is wedged — a readiness marker the script waits on
-   simply never arrives. Given D30 fails in the same graphical world, a common
-   desktop cause is likely; the serial tail is left at
-   `target/aarch64-unknown-none/debug/tairix-test-autoload-input-qemu-aarch64.serial.log`.
-2. *The budget cannot bound it.* The 300 s budget is deliberately an
-   **inactivity** budget ("the longest the guest may fall silent"), so a guest
-   that keeps emitting serial output can never trip it. Here the desktop's own
-   periodic refresh (the switchboard service's ~1 Hz `ipc_call` burst to
-   `sysinfod`, visible to the last line) is enough to keep it alive forever, so
-   a stalled choreography degrades into an unbounded CI hang rather than a
-   failure. An inactivity budget alone cannot bound a run; a wall-clock cap
-   (generous, sized to the choreography, not to the host's load) is needed
-   alongside it so a stalled vertical fails loudly instead of hanging.
+The AW3 stage is now on the same footing D19/D20 put the terminal stage on:
+every gate names its own subject. The click waits on the files window's own
+**frame map** (`FILES_WINDOW_FRAME_MAPS`; only a window *create* maps a frame,
+so no query, present or reply can advance it), and the two former cumulative
+counts are guest markers the test kernel emits from the destination **port** of
+each delivery (`FILES_WINDOW_ACTIVATED_MARKER`, `FILES_HANDSHAKE_MARKER`), so
+another app's or service's traffic cannot move them. No cumulative
+`MessageDelivered` threshold remains in the vertical.
+
+**2. An inactivity budget cannot bound a run.** `Spec::timeout` is the longest
+a guest may fall *silent*; a guest that keeps printing resets it forever, so a
+stalled choreography degraded into an unbounded pipeline hang instead of a
+failure — here the desktop's own ~1 Hz refresh was enough. Every run now also
+carries an absolute wall-clock ceiling (`Spec::runtime_ceiling`, twice the
+declared budget, so each test still declares one number) and reports
+`Outcome::RuntimeCeilingExceeded` with the silence at the kill, which
+distinguishes a live-but-unfinished guest from one that stalled and went
+quiet. The parallel runner also prints every job's completion and duration, so
+an outstanding job is visible in the log rather than inferred from its absence.
 
 ---
 

@@ -29,15 +29,22 @@
 //! therefore:
 //!
 //! * Enforces an *inactivity* deadline supplied by the caller: a guest is
-//!   declared hung only once it produces no new serial output for the whole
-//!   budget. This is deliberately **not** a total-runtime deadline — every
-//!   line the guest prints resets it — so a guest that is merely slow (heavily
-//!   co-scheduled, or on a slow host core) is never killed while it keeps
-//!   making progress. That immunity to host load is what lets the matrix run
-//!   many guests at once without a slow one degrading into a flaky timeout. A
-//!   guest that genuinely falls silent for the budget is `Outcome::Timeout`,
-//!   which the runner converts into a failure — never into a retry.
-//! * Kills (`SIGKILL`) the QEMU child if the deadline is hit so a wedged VM
+//!   declared hung once it produces no new serial output for the whole
+//!   budget. Every line the guest prints resets it, so a guest that is merely
+//!   slow (heavily co-scheduled, or on a slow host core) is never killed while
+//!   it keeps making progress. That immunity to host load is what lets the
+//!   matrix run many guests at once without a slow one degrading into a flaky
+//!   timeout. A guest that genuinely falls silent for the budget is
+//!   `Outcome::Timeout`, which the runner converts into a failure — never
+//!   into a retry.
+//! * Enforces an absolute wall-clock ceiling too ([`Spec::runtime_ceiling`]),
+//!   because the heartbeat alone cannot bound a guest that keeps *talking*
+//!   while making no progress — a service retrying a failed request on a
+//!   timer resets the heartbeat forever, and one such guest would otherwise
+//!   stall the whole matrix behind it indefinitely. Exceeding it is
+//!   `Outcome::RuntimeCeilingExceeded`, reported apart from `Timeout` because
+//!   the two describe different faults.
+//! * Kills (`SIGKILL`) the QEMU child if either deadline is hit so a wedged VM
 //!   cannot block subsequent tests.
 //! * Inherits QEMU's stdout/stderr through capture so the failure report can
 //!   include the full serial log without interleaving with later tests.
@@ -101,7 +108,16 @@ pub const ISA_DEBUG_EXIT_IOSIZE: u8 = x86_64::ISA_DEBUG_EXIT_IOSIZE;
 #[derive(Debug)]
 pub enum Outcome {
     /// The kernel signalled `SUCCESS_EXIT_CODE` and QEMU exited cleanly.
-    Pass,
+    ///
+    /// A pass carries its transcript like every other outcome: the guest
+    /// exiting successfully is not the end of a run's verification — a
+    /// screendump the caller asserts afterwards can still fail, and
+    /// discarding the transcript on the way there leaves that failure with
+    /// no evidence to explain it.
+    Pass {
+        /// Captured QEMU stdout for the whole run.
+        serial: String,
+    },
     /// The kernel signalled a non-success value, or QEMU exited with an
     /// unexpected status. `serial` holds the captured QEMU stdout for the
     /// failure report.
@@ -120,23 +136,27 @@ pub enum Outcome {
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
     },
-    /// A [`Spec::completion_gate`] run reached its absolute ceiling: the
-    /// out-of-guest observer never confirmed the round trip, while the guest
-    /// was still alive and had not been silent long enough to be declared
-    /// hung.
+    /// The run reached its absolute wall-clock ceiling
+    /// ([`Spec::runtime_ceiling`]) while the guest was still alive and had
+    /// not been silent long enough to be declared hung.
+    ///
+    /// This is the bound that catches a guest which keeps *talking* but never
+    /// finishes — a service retrying a failed request on a timer, a
+    /// choreography waiting on a witness that will never arrive, or a gated
+    /// run whose out-of-guest observer never confirmed the round trip. The
+    /// inactivity heartbeat can never fire for such a guest, so without this
+    /// ceiling the run would never end.
     ///
     /// Reported separately from [`Self::Timeout`] because the two say
     /// different things about the guest, and conflating them costs a
     /// diagnosis: a hung guest stopped talking, whereas this guest was
-    /// running and simply never got its round trip confirmed.
-    /// `silent_for` is how long it had produced no serial output when it was
-    /// killed, which is the number that tells the two apart on sight — a
-    /// value near zero means a live guest that kept working and never
-    /// completed the exchange (a peer, network or campaign fault, or a guest
-    /// merely starved of host time), while a value approaching `ceiling`
-    /// means it went quiet early and stalled at a fixed point.
-    GateNeverTripped {
-        /// Absolute wall-clock ceiling the gated run was given.
+    /// running and simply never completed. `silent_for` is how long it had
+    /// produced no serial output when it was killed, which is the number that
+    /// tells the two apart on sight — a value near zero means a live guest
+    /// that kept working and never completed, while a value approaching
+    /// `ceiling` means it went quiet early and stalled at a fixed point.
+    RuntimeCeilingExceeded {
+        /// Absolute wall-clock ceiling the run was given.
         ceiling: Duration,
         /// How long the guest had produced no serial output at the kill.
         silent_for: Duration,
@@ -149,13 +169,13 @@ impl Outcome {
     /// Decode a QEMU exit status under the `isa-debug-exit` convention.
     ///
     /// Returns `Outcome::Pass` iff `status == (SUCCESS_EXIT_CODE << 1) | 1`.
-    /// Every other status is treated as `Outcome::Fail`. Callers attach a
-    /// serial log to failures via [`Outcome::Fail`].
+    /// Every other status is treated as `Outcome::Fail`. Both carry the
+    /// captured serial log.
     #[must_use]
     pub fn from_qemu_status(status: i32, serial: String) -> Self {
         let success_status = i32::from((SUCCESS_EXIT_CODE << 1) | 1);
         if status == success_status {
-            Outcome::Pass
+            Outcome::Pass { serial }
         } else {
             Outcome::Fail { status, serial }
         }
@@ -165,7 +185,7 @@ impl Outcome {
     /// turn the outcome into a process exit code.
     #[must_use]
     pub fn is_pass(&self) -> bool {
-        matches!(self, Outcome::Pass)
+        matches!(self, Outcome::Pass { .. })
     }
 }
 
@@ -520,6 +540,18 @@ impl Arch {
     }
 }
 
+/// Multiple of the inactivity budget that bounds a run's total wall clock.
+///
+/// The inactivity budget is already sized as the longest a *healthy* guest
+/// may legitimately fall silent, which is an upper bound on any single phase
+/// of its run; a healthy guest completes well inside one such budget. Two
+/// whole budgets of wall clock therefore leave ample margin for host
+/// co-scheduling — the matrix admits guests only up to a third of the host's
+/// logical CPUs, so contention stretches a run by far less than this — while
+/// still bounding a guest that has genuinely wedged. See
+/// [`Spec::runtime_ceiling`].
+const RUNTIME_CEILING_BUDGETS: u32 = 2;
+
 /// Architecture-neutral configuration for a single QEMU test invocation.
 ///
 /// Built by the caller (typically `cargo xtask test --qemu`) and consumed by
@@ -543,6 +575,10 @@ pub struct Spec {
     /// It is *not* a total-runtime deadline — every line the guest prints
     /// resets it — so a guest that is merely slow (co-scheduled, or on a slow
     /// host core) is never killed while it keeps making progress.
+    ///
+    /// It is also not the run's only bound: [`Spec::runtime_ceiling`] caps
+    /// total wall clock, because a guest that keeps printing while never
+    /// completing resets this heartbeat forever.
     pub timeout: Duration,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
@@ -696,6 +732,22 @@ impl Spec {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Absolute wall-clock ceiling for the whole run.
+    ///
+    /// The inactivity heartbeat ([`Spec::timeout`]) only catches a guest that
+    /// stops talking. A guest that keeps printing while making no progress —
+    /// a service retrying a failed request on a timer, a choreography waiting
+    /// on a witness that never arrives — resets that heartbeat forever, so
+    /// without this ceiling its run never ends and the whole matrix stalls
+    /// behind it. Exceeding it is [`Outcome::RuntimeCeilingExceeded`].
+    ///
+    /// Derived from the inactivity budget rather than declared separately, so
+    /// each test carries one budget and the two bounds cannot drift apart.
+    #[must_use]
+    pub fn runtime_ceiling(&self) -> Duration {
+        self.timeout * RUNTIME_CEILING_BUDGETS
     }
 
     /// Accept a guest-initiated machine **reset** (QEMU exit status `0` under
@@ -1188,35 +1240,27 @@ fn supervise(
     spec: &Spec,
     monitor: Option<&ReservedSocket>,
 ) -> io::Result<Outcome> {
-    // The guest is supervised on an *inactivity* deadline, not an absolute
-    // one: it is declared hung only once `spec.timeout` elapses with no new
-    // serial output. A guest that is merely running slowly — co-scheduled with
-    // the rest of the matrix, or landed on a slow host core — keeps emitting
-    // boot and progress output, so its heartbeat keeps resetting and it is
-    // never killed for being slow. That is what makes the budget immune to
-    // host load, and in turn lets the matrix run guests concurrently up to the
-    // host core count without a slow guest degrading into a flaky timeout. A
-    // genuinely stalled guest still produces nothing for `spec.timeout` and is
-    // killed, with no retry.
+    // The inactivity heartbeat: the guest is declared hung once `spec.timeout`
+    // elapses with no new serial output. A guest that is merely running slowly
+    // — co-scheduled with the rest of the matrix, or landed on a slow host core
+    // — keeps emitting boot and progress output, so its heartbeat keeps
+    // resetting and it is never killed for being slow. That is what makes this
+    // bound immune to host load, and in turn lets the matrix run guests
+    // concurrently without a slow guest degrading into a flaky timeout.
     let mut heartbeat = ProgressClock::new(Instant::now());
-    // Absolute run start, used only when a completion gate is configured: the
-    // gate's success (the out-of-guest observer's confirmation) is what ends
-    // such a run, because the guest deliberately does not self-exit in that
-    // mode. A gate that never trips must still fail loud rather than hang the
-    // pipeline, so `spec.timeout` doubles as an absolute ceiling for gated
-    // runs. It carries ample margin — a healthy run trips the gate within a
-    // few seconds of boot — so a slow-but-progressing guest is not killed
-    // prematurely.
+    // The absolute ceiling, which every run carries because the heartbeat
+    // cannot bound a guest that keeps talking while making no progress: a
+    // service retrying a failed request on a timer, or a choreography waiting
+    // on a witness that never arrives, resets the heartbeat forever. It also
+    // bounds a gated run whose out-of-guest observer never confirms the round
+    // trip — there the guest deliberately does not self-exit at all.
     //
-    // The gated guests park silently once they have done their part (they wait
-    // on their wait-set for the peer's traffic and narrate nothing), so the
-    // inactivity heartbeat bounds them too, and the two bounds diagnose
-    // different faults: the heartbeat catches a guest that stopped talking,
-    // the ceiling catches a run whose round trip was never confirmed. Which
-    // one fired, and how long the guest had been silent when it did, is
-    // reported rather than collapsed into one "timeout" — that distinction is
-    // the difference between hunting a guest-side stall and hunting a peer,
-    // link or host-load problem, and its absence once cost a long hunt.
+    // The two bounds diagnose different faults: the heartbeat catches a guest
+    // that stopped talking, the ceiling one that never finished. Which fired,
+    // and how long the guest had been silent when it did, is reported rather
+    // than collapsed into one "timeout" — that distinction is the difference
+    // between hunting a guest-side stall and hunting a live-but-stuck guest,
+    // and its absence once cost a long hunt.
     let run_start = Instant::now();
 
     let SerialDrain {
@@ -1325,7 +1369,7 @@ struct WaitLoop<'a> {
     serial_script: &'a mut SerialScriptState,
     /// The inactivity heartbeat.
     heartbeat: &'a mut ProgressClock,
-    /// Absolute run start, used only for the completion-gate absolute ceiling.
+    /// Absolute run start, against which the runtime ceiling is measured.
     run_start: Instant,
 }
 
@@ -1333,9 +1377,9 @@ struct WaitLoop<'a> {
 ///
 /// Split out of [`supervise`] so the spawn/validate path and the wait loop
 /// each stay within one screen. The deadline model is documented on
-/// [`supervise`] and [`ProgressClock`]: an inactivity heartbeat for a
-/// self-exiting guest, plus an absolute ceiling when a completion gate drives
-/// the run instead.
+/// [`supervise`] and [`ProgressClock`]: an inactivity heartbeat that catches a
+/// guest which stopped talking, plus an absolute runtime ceiling that catches
+/// one which never finishes.
 fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
     let WaitLoop {
         child,
@@ -1414,17 +1458,17 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len();
         heartbeat.observe(serial_len, Instant::now());
-        // A gate that never trips must fail loud instead of hanging the run,
+        // A run that never completes must fail loud instead of hanging,
         // whatever the guest is doing — including a guest that keeps talking,
         // which the inactivity heartbeat would never declare hung. The silence
         // at the kill rides along in the report, because it is what
-        // distinguishes a live guest that never completed the exchange from one
-        // that stalled and went quiet.
-        if spec.completion_gate.is_some() && run_start.elapsed() >= spec.timeout {
+        // distinguishes a live guest that never completed from one that
+        // stalled and went quiet.
+        if run_start.elapsed() >= spec.runtime_ceiling() {
             let silent_for = heartbeat.idle_for(Instant::now());
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(DoneReason::GateNeverTripped { silent_for });
+            return Ok(DoneReason::CeilingExceeded { silent_for });
         }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
             // Strict, no-retry kill. `wait` afterwards is best
@@ -1501,7 +1545,7 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             // per-arch debug-exit convention.
             if let Some(marker) = &spec.reset_success_marker {
                 if code == 0 && serial.contains(marker.as_str()) {
-                    return Outcome::Pass;
+                    return Outcome::Pass { serial };
                 }
                 return Outcome::Fail {
                     status: code,
@@ -1510,13 +1554,13 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             }
             spec.arch.outcome_from_status(code, serial)
         }
-        DoneReason::CompletedByGate => Outcome::Pass,
+        DoneReason::CompletedByGate => Outcome::Pass { serial },
         DoneReason::TimedOut => Outcome::Timeout {
             budget: spec.timeout,
             serial,
         },
-        DoneReason::GateNeverTripped { silent_for } => Outcome::GateNeverTripped {
-            ceiling: spec.timeout,
+        DoneReason::CeilingExceeded { silent_for } => Outcome::RuntimeCeilingExceeded {
+            ceiling: spec.runtime_ceiling(),
             silent_for,
             serial,
         },
@@ -1649,11 +1693,11 @@ enum DoneReason {
     /// The guest fell silent for the whole inactivity budget; the child was
     /// killed.
     TimedOut,
-    /// A gated run hit its absolute ceiling without the observer confirming
-    /// the round trip; the child was killed. Carries how long the guest had
-    /// been silent, which separates a live-but-unconfirmed guest from one
-    /// stalled at a fixed point.
-    GateNeverTripped {
+    /// The run hit its absolute wall-clock ceiling while still alive; the
+    /// child was killed. Carries how long the guest had been silent, which
+    /// separates a live-but-never-completing guest from one stalled at a
+    /// fixed point.
+    CeilingExceeded {
         /// How long the guest had produced no serial output at the kill.
         silent_for: Duration,
     },
@@ -2375,7 +2419,7 @@ mod tests {
         let s = i32::from((SUCCESS_EXIT_CODE << 1) | 1);
         assert!(matches!(
             Outcome::from_qemu_status(s, String::new()),
-            Outcome::Pass
+            Outcome::Pass { .. }
         ));
     }
 
@@ -2427,7 +2471,7 @@ mod tests {
         let serial = String::from("... memtest: PASSED \u{2014} 181 MiB tested. Resetting.");
         assert!(matches!(
             outcome_from_done(DoneReason::Exited(0), &spec, serial),
-            Outcome::Pass
+            Outcome::Pass { .. }
         ));
     }
 
@@ -2469,7 +2513,7 @@ mod tests {
         let ok = i32::from((SUCCESS_EXIT_CODE << 1) | 1);
         assert!(matches!(
             outcome_from_done(DoneReason::Exited(ok), &spec, String::new()),
-            Outcome::Pass
+            Outcome::Pass { .. }
         ));
     }
 
@@ -2500,68 +2544,148 @@ mod tests {
             .with_completion_gate(Arc::new(AtomicBool::new(true)));
         assert!(matches!(
             outcome_from_done(DoneReason::CompletedByGate, &spec, "campaign log".into()),
-            Outcome::Pass
+            Outcome::Pass { .. }
         ));
     }
 
     #[test]
-    fn an_unconfirmed_gated_run_reports_the_silence_that_diagnoses_it() {
-        // A gated run that reaches its ceiling is *not* the same failure as a
-        // guest that fell silent, and the report must not collapse them: the
-        // silence at the kill is what tells a reader which hunt to start. A
-        // guest that was still talking (silence far below the ceiling) points
-        // at the peer, the link, or host load; one that went quiet early
-        // points at a guest-side stall, with the transcript's last line as
-        // the stall point.
-        let ceiling = Duration::from_secs(360);
-        let spec = Spec::for_riscv64_kernel("/tmp/k")
-            .with_timeout(ceiling)
-            .with_completion_gate(Arc::new(AtomicBool::new(false)));
-        let live_but_unconfirmed = outcome_from_done(
-            DoneReason::GateNeverTripped {
+    fn an_unfinished_run_reports_the_ceiling_and_the_silence_that_diagnoses_it() {
+        // A run that reaches its ceiling is *not* the same failure as a guest
+        // that fell silent, and the report must not collapse them: the silence
+        // at the kill is what tells a reader which hunt to start. A guest that
+        // was still talking (silence far below the ceiling) never finished
+        // while alive; one that went quiet early stalled, with the
+        // transcript's last line as the stall point.
+        let budget = Duration::from_secs(360);
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(budget);
+        let live_but_unfinished = outcome_from_done(
+            DoneReason::CeilingExceeded {
                 silent_for: Duration::from_millis(20),
             },
             &spec,
             "campaign log".into(),
         );
-        match live_but_unconfirmed {
-            Outcome::GateNeverTripped {
-                ceiling: reported,
+        match live_but_unfinished {
+            Outcome::RuntimeCeilingExceeded {
+                ceiling,
                 silent_for,
                 serial,
             } => {
-                assert_eq!(reported, ceiling);
+                assert_eq!(ceiling, spec.runtime_ceiling());
                 assert_eq!(silent_for, Duration::from_millis(20));
                 assert_eq!(serial, "campaign log");
             }
-            other => panic!("an unconfirmed gated run must not be reported as {other:?}"),
+            other => panic!("an unfinished run must not be reported as {other:?}"),
         }
 
         // The stalled shape carries its own silence, so the two are
         // distinguishable from the report alone.
         let stalled = outcome_from_done(
-            DoneReason::GateNeverTripped {
+            DoneReason::CeilingExceeded {
                 silent_for: Duration::from_secs(355),
             },
             &spec,
             "boot log".into(),
         );
-        let Outcome::GateNeverTripped { silent_for, .. } = stalled else {
-            panic!("a stalled gated run must report the gate ceiling outcome");
+        let Outcome::RuntimeCeilingExceeded { silent_for, .. } = stalled else {
+            panic!("a run stopped at its ceiling must report the ceiling outcome");
         };
         assert_eq!(silent_for, Duration::from_secs(355));
     }
 
     #[test]
     fn a_silent_guest_is_still_reported_as_a_plain_timeout() {
-        // The inactivity budget keeps its own outcome: only the gated ceiling
-        // gained a separate verdict, so an ungated guest that stops talking
-        // reads exactly as before.
+        // The inactivity budget keeps its own outcome, so a guest that stops
+        // talking reads as a timeout rather than as an unfinished run.
         let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(60));
         assert!(matches!(
             outcome_from_done(DoneReason::TimedOut, &spec, "boot log".into()),
             Outcome::Timeout { budget, .. } if budget == Duration::from_secs(60)
         ));
+    }
+
+    #[test]
+    fn a_guest_that_keeps_talking_without_finishing_is_killed_at_the_ceiling() {
+        // The regression this ceiling exists for: a guest that never completes
+        // but keeps printing resets the inactivity heartbeat forever, so the
+        // heartbeat alone can never end its run — one such guest wedged the
+        // whole test matrix indefinitely. Stood up with an ordinary chattering
+        // child rather than a real guest, because the fault is in the
+        // supervision loop, not in any architecture's boot path.
+        //
+        // The child prints a hundred times more often than the silence budget
+        // allows, so the heartbeat cannot fire however loaded the host is: the
+        // ceiling is provably the bound under test, and the assertion is not a
+        // timing race.
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "while :; do echo tick; sleep 0.02; done"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("spawn the chattering child");
+
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(2));
+        let started = Instant::now();
+        let outcome = supervise(child, &spec, None).expect("supervision must not error");
+        let elapsed = started.elapsed();
+
+        match outcome {
+            Outcome::RuntimeCeilingExceeded {
+                ceiling,
+                silent_for,
+                ..
+            } => {
+                assert_eq!(ceiling, spec.runtime_ceiling());
+                assert!(
+                    silent_for < spec.timeout,
+                    "the child was still talking at the kill, so its reported silence \
+                     must be below the inactivity budget, got {silent_for:?}"
+                );
+            }
+            other => panic!("a live, never-finishing child must hit the ceiling, got {other:?}"),
+        }
+        assert!(
+            elapsed >= spec.runtime_ceiling(),
+            "the run must last its whole ceiling, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < spec.runtime_ceiling() * 4,
+            "the run must end promptly at its ceiling, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_pass_carries_the_transcript_a_later_assertion_needs() {
+        // A guest exiting successfully does not finish the verification: the
+        // caller still asserts its screendumps and its link peer's verdict.
+        // Dropping the transcript on the pass path left those failures with
+        // nothing to diagnose from, which is why the pass carries it too.
+        let spec = Spec::for_riscv64_kernel("/tmp/k");
+        let Outcome::Pass { serial } =
+            outcome_from_done(DoneReason::CompletedByGate, &spec, "boot log".into())
+        else {
+            panic!("a gated completion is a pass");
+        };
+        assert_eq!(serial, "boot log");
+
+        let Outcome::Pass { serial } =
+            Outcome::from_qemu_status(i32::from((SUCCESS_EXIT_CODE << 1) | 1), "boot log".into())
+        else {
+            panic!("the success status is a pass");
+        };
+        assert_eq!(serial, "boot log");
+    }
+
+    #[test]
+    fn the_runtime_ceiling_outlasts_the_inactivity_budget_it_is_derived_from() {
+        // One declared budget yields both bounds, so they cannot drift apart,
+        // and the ceiling is the looser of the two: a guest that merely falls
+        // silent must be diagnosed as a timeout, never mislabelled as an
+        // unfinished run.
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(60));
+        assert!(spec.runtime_ceiling() > spec.timeout);
+        assert_eq!(spec.runtime_ceiling(), Duration::from_secs(120));
     }
 
     #[test]

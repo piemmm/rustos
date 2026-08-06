@@ -34,12 +34,10 @@
 //!    pin store coming into existence on the volume, and nothing else in the
 //!    system creates it.
 //! 2. **The Switchboard panel was created and painted.** The reserved window
-//!    endpoint has served
-//!    [`SWITCHBOARD_WINDOW_CALLS`](tairix_test_taskbar_pin_qemu_aarch64::SWITCHBOARD_WINDOW_CALLS)
-//!    replies — the create round-trip, then the first present. This vertical
-//!    opens exactly one window, so the count is a position in one client's
-//!    own call order, not a tally of unrelated traffic. Reaching it also
-//!    emits
+//!    endpoint served the panel's own create reply — recognised by its
+//!    distinctive wire length, not by its position in the endpoint's traffic
+//!    — and then the reply completing the present that first drew into the
+//!    frame create mapped. Reaching it also emits
 //!    [`SWITCHBOARD_PANEL_MARKER`](tairix_test_taskbar_pin_qemu_aarch64::SWITCHBOARD_PANEL_MARKER),
 //!    which is what the host holds the pin click behind.
 //! 3. **The pin launched its application.** An `APP_LOADED` record naming
@@ -59,16 +57,14 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel_core::AuditEvent;
     use tairix_log::{Event, Sink};
-    use tairix_test_taskbar_pin_qemu_aarch64::{
-        PIN_APP_NAME, SWITCHBOARD_PANEL_MARKER, SWITCHBOARD_WINDOW_CALLS,
-    };
+    use tairix_test_taskbar_pin_qemu_aarch64::{PIN_APP_NAME, SWITCHBOARD_PANEL_MARKER};
     use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -96,8 +92,9 @@ mod kernel {
     struct TaskbarPinSink {
         /// The pin store's directory was created on the volume.
         pin_store_created: AtomicBool,
-        /// Replies the reserved window endpoint has served.
-        window_calls: AtomicU32,
+        /// The Switchboard panel's create reply has been served, so the next
+        /// reply on that endpoint completes its first present.
+        panel_created: AtomicBool,
         /// The Switchboard panel was created and painted, and the host was
         /// told so exactly once.
         panel_presented: AtomicBool,
@@ -110,7 +107,7 @@ mod kernel {
         const fn new() -> Self {
             Self {
                 pin_store_created: AtomicBool::new(false),
-                window_calls: AtomicU32::new(0),
+                panel_created: AtomicBool::new(false),
                 panel_presented: AtomicBool::new(false),
                 pin_launched: AtomicBool::new(false),
             }
@@ -140,30 +137,52 @@ mod kernel {
             }
         }
 
-        /// Count a reply served on the reserved window endpoint — compared
-        /// against the exact hex spelling the kernel/ipc audit fields render
-        /// (`format_hex_u64`), so the match can neither false-positive on
-        /// another endpoint nor drift from the emitter — and announce the
-        /// painted panel to the host on the reply that completes it.
+        /// Follow the Switchboard panel's own window lifecycle on the
+        /// reserved endpoint and announce the painted panel to the host.
+        ///
+        /// The endpoint is matched against the exact hex spelling the
+        /// kernel/ipc audit fields render (`format_hex_u64`), so the match can
+        /// neither false-positive on another endpoint nor drift from the
+        /// emitter. The *create* reply is then identified by its wire length,
+        /// which is unique among this endpoint's replies, and the reply after
+        /// it completes the present that first drew the panel. Anchoring on
+        /// create is what makes the gate the panel's own: the rendezvous is
+        /// shared, so a reply's ordinal belongs to no client in particular,
+        /// and a start-up query added ahead of create once shifted a
+        /// count-based gate onto create itself — announcing a panel that had
+        /// not yet been painted.
         fn note_call_replied(&self, event: &Event<'_>) {
-            let mut expected = [0u8; 16];
-            let expected = format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut expected);
+            let mut endpoint_hex = [0u8; 16];
+            let expected =
+                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
+            let mut on_window_endpoint = false;
+            let mut reply_len = 0usize;
             for field in event.fields {
-                if field.key != "endpoint" {
-                    continue;
-                }
                 let tairix_log::FieldValue::Str(value) = field.value else {
                     continue;
                 };
-                if value != expected {
-                    continue;
+                match field.key {
+                    "endpoint" => on_window_endpoint = value == expected,
+                    // An unparsable length stays zero, matching no reply
+                    // length and latching nothing (fail closed).
+                    "len" => {
+                        reply_len = usize::try_from(
+                            tairix_util::count::parse_decimal(value).unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                    }
+                    _ => {}
                 }
-                let served = self.window_calls.fetch_add(1, Ordering::AcqRel) + 1;
-                if served >= SWITCHBOARD_WINDOW_CALLS
-                    && !self.panel_presented.swap(true, Ordering::AcqRel)
-                {
-                    emit_marker(SWITCHBOARD_PANEL_MARKER);
-                }
+            }
+            if !on_window_endpoint {
+                return;
+            }
+            if reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN {
+                self.panel_created.store(true, Ordering::Release);
+            } else if self.panel_created.load(Ordering::Acquire)
+                && !self.panel_presented.swap(true, Ordering::AcqRel)
+            {
+                emit_marker(SWITCHBOARD_PANEL_MARKER);
             }
         }
 

@@ -1,35 +1,46 @@
 //! The autoload desktop vertical's **interaction contract**: the shared
-//! constants — the readiness markers each stage of the scripted
-//! click-through waits on, and the few remaining AW3 window-event
-//! delivery counts — that the freestanding test kernel's PASS gate
-//! (`src/main.rs`) and the host-side runner's screendump keys and step
-//! gates (`tools/xtask` `qemu_tests`) both import, so the script and its
-//! observers can never drift (`plans/APPWIN.md` AW3 + AW4).
+//! readiness markers each stage of the scripted click-through waits on,
+//! which the freestanding test kernel's PASS gate (`src/main.rs`) and the
+//! host-side runner's screendump keys and step gates (`tools/xtask`
+//! `qemu_tests`) both import, so the script and its observers can never
+//! drift (`plans/APPWIN.md` AW3 + AW4).
 //!
-//! The terminal + pty `Ctrl-C` recovery stage sequences on **guest-emitted
-//! readiness markers and uniquely-attributable witnesses** (a loaded
-//! bundle's own name), never on cumulative `MessageDelivered` counts: the
-//! FONT-SERVICE cadence change shifted those counts so the old absolute
-//! thresholds fired during the terminal stage and stalled the run
-//! (`plans/OPEN-DEFECTS.md` D20). Only the AW3 desktop stage still counts a
-//! handful of early deliveries. The file-manager stages (FM9/FM10/FM11) are
-//! deliberately not driven here — they are host-tested in `lib/browse`; this
-//! vertical proves driver autoload, unlock, display bind, and the
-//! keyboard → session → terminal → pty → shell round trip.
+//! **Every stage gates on a witness only its own subject can produce** — a
+//! guest-emitted readiness marker, a named bundle load, or a window's own
+//! frame map — never on a cumulative count of an event the whole system
+//! emits, and never on traffic to a rendezvous many clients share. Both
+//! rules are paid for: the FONT-SERVICE cadence change shifted the old
+//! cumulative `MessageDelivered` thresholds so they fired during the
+//! terminal stage and stalled the run (`plans/OPEN-DEFECTS.md` D20), and
+//! the desktop-info query the Switchboard issues at start-up later fired an
+//! "the files window was created" gate that had been keyed on *any* reply
+//! over the shared `WINDOW_ENDPOINT`, clicking empty desktop half a second
+//! before that window existed. A gate that another component can satisfy is
+//! the defect; a stage waits for its own subject or it does not wait at all.
+//!
+//! The file-manager stages (FM9/FM10/FM11) are deliberately not driven here
+//! — they are host-tested in `lib/browse`; this vertical proves driver
+//! autoload, unlock, display bind, and the keyboard → session → terminal →
+//! pty → shell round trip.
 //!
 //! The desktop session's window engine is the only port sender in this
 //! image, so each `MessageDelivered` is exactly one delivered
-//! `WindowEvent`:
+//! `WindowEvent`, and the record's `port` field names the window it went
+//! to — which is what makes a per-window delivery ordinal attributable
+//! where a system-wide total is not:
 //!
 //! 1. Clicking the served files window (spawned by the taskbar's permanent
 //!    Files button) delivers `Focus { focused: true }` (the window was
 //!    unfocused) …
-//! 2. … then the activating `Pressed` — the served window demonstrably
-//!    exists on the composited desktop, keying the second screendump.
-//! 3. A handshake click on the still-focused window (delivery 3) —
-//!    injected only after delivery 2 appeared on serial and held while the
-//!    second dump is pending — is the gate the terminal stage waits on
-//!    (the runner holds its library-popup clicks behind it).
+//! 2. … then the activating `Pressed`. Both landed on the files window's
+//!    own port, so the guest emits [`FILES_WINDOW_ACTIVATED_MARKER`]: the
+//!    served window demonstrably exists and is active on the composited
+//!    desktop, keying the second screendump.
+//! 3. A handshake click on the still-focused window — injected only after
+//!    that marker appeared and held while the second dump is pending —
+//!    delivers one further `Pressed` to the same port, on which the guest
+//!    emits [`FILES_HANDSHAKE_MARKER`]: the wake boundary the terminal
+//!    stage waits on (the runner holds its library-popup clicks behind it).
 //! 4. The terminal stage (`plans/APPWIN.md` AW4): the taskbar's Library
 //!    button opens the program-library popup (a session-owned surface —
 //!    no app-ward delivery), its `Terminal` entry spawns the terminal
@@ -62,17 +73,40 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-/// Deliveries after the first in-window click completed (`Focus` +
-/// `Pressed`): the second screendump's marker-occurrence key.
-pub const WINDOW_DUMP_DELIVERIES: u32 = 2;
+/// Guest marker: the files window received the `Focus` + `Pressed` pair of
+/// the first in-window click — it exists, is active, and the compositor has
+/// the frame the second screendump reads.
+///
+/// Counted **on that window's own port**, not system-wide, so no other
+/// app's, service's or session surface's traffic can advance it; test-only.
+pub const FILES_WINDOW_ACTIVATED_MARKER: &str = "AUTOLOAD files window activated";
 
-/// The window-event delivery count reached once the handshake click has
-/// run: deliveries 1 and 2 are the first in-window click's `Focus` +
-/// `Pressed`, and delivery 3 is the handshake click's `Pressed` on the
-/// still-focused window. The terminal stage's library-popup clicks gate on
-/// this count, so they fire in a wake strictly after the verified second
-/// dump's frame.
-pub const TERMINAL_STAGE_DELIVERIES: u32 = 3;
+/// Deliveries to the files window's own port that
+/// [`FILES_WINDOW_ACTIVATED_MARKER`] reports: the activating click's
+/// `Focus` then `Pressed`.
+pub const FILES_ACTIVATION_DELIVERIES: u32 = 2;
+
+/// Guest marker: the handshake click's `Pressed` reached the still-focused
+/// files window. The terminal stage's library-popup clicks gate on it, so
+/// they fire in a wake strictly after the verified second dump's frame.
+pub const FILES_HANDSHAKE_MARKER: &str = "AUTOLOAD files handshake delivered";
+
+/// Deliveries to the files window's own port that [`FILES_HANDSHAKE_MARKER`]
+/// reports: the activating click's two, then the handshake's `Pressed`.
+pub const FILES_HANDSHAKE_DELIVERIES: u32 = 3;
+
+/// Shared-frame **map** operations (`sc=shm_map`) that have occurred by the
+/// time the *files* window exists and can be clicked: the boot scan-out map,
+/// then that window's own create map.
+///
+/// This is the gate for the first in-window click, and it is attributable
+/// where a reply over the shared `WINDOW_ENDPOINT` is not — every client of
+/// that rendezvous replies on it (the Switchboard's start-up desktop query
+/// did so half a second before this window was created, which is what once
+/// clicked empty desktop), whereas only a window **create** maps a frame.
+/// See [`TERMINAL_WINDOW_FRAME_MAPS`] for why a map counts creations and
+/// never repaints.
+pub const FILES_WINDOW_FRAME_MAPS: u32 = 2;
 
 /// Shared-frame **map** operations (`sc=shm_map`) that have occurred by
 /// the time the terminal window exists and can be clicked — the robust,

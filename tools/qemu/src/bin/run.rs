@@ -124,7 +124,7 @@ fn main() -> ExitCode {
 /// the captured serial log on a non-pass outcome.
 fn report(result: std::io::Result<Outcome>) -> ExitCode {
     match result {
-        Ok(Outcome::Pass) => ExitCode::SUCCESS,
+        Ok(Outcome::Pass { .. }) => ExitCode::SUCCESS,
         Ok(Outcome::Fail { status, serial }) => {
             eprintln!("tairix-qemu-run: FAIL (qemu status {status})");
             eprint!("{serial}");
@@ -135,14 +135,14 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             eprint!("{serial}");
             ExitCode::from(2)
         }
-        Ok(Outcome::GateNeverTripped {
+        Ok(Outcome::RuntimeCeilingExceeded {
             ceiling,
             silent_for,
             serial,
         }) => {
             eprintln!(
-                "tairix-qemu-run: UNCONFIRMED after {ceiling:?} \
-                 (observer never confirmed the round trip; guest silent for {silent_for:?})"
+                "tairix-qemu-run: UNFINISHED at the {ceiling:?} runtime ceiling \
+                 (guest still alive, silent for {silent_for:?})"
             );
             eprint!("{serial}");
             ExitCode::from(2)

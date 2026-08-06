@@ -168,7 +168,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -230,6 +230,10 @@ mod kernel {
         /// First distinct window-event destination port (the files window);
         /// `0` until the first app-ward delivery.
         first_window_port: AtomicU64,
+        /// Deliveries made to [`Self::first_window_port`]. Counted per window
+        /// rather than system-wide so no other app, service or session
+        /// surface can advance the files window's readiness markers.
+        first_window_deliveries: AtomicU32,
         /// One-shot: [`TERMINAL_FOCUSED_MARKER`] emitted on the first delivery
         /// to the second distinct window port (the terminal gaining focus).
         terminal_focus_marked: AtomicBool,
@@ -245,6 +249,7 @@ mod kernel {
                 users_db_loaded: AtomicBool::new(false),
                 display_endpoint_bound: AtomicBool::new(false),
                 first_window_port: AtomicU64::new(0),
+                first_window_deliveries: AtomicU32::new(0),
                 terminal_focus_marked: AtomicBool::new(false),
                 shell_round_trip: AtomicBool::new(false),
                 ctrl_c_recovered: AtomicBool::new(false),
@@ -305,12 +310,7 @@ mod kernel {
             {
                 // Arm the runner's Ctrl-C injection: a parked foreground job
                 // (`sleep`) now exists to interrupt.
-                SerialSink::new().write_event(&Event {
-                    level: tairix_log::Level::Info,
-                    id: tairix_log::EventId(0),
-                    message: tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER,
-                    fields: &[],
-                });
+                emit_marker(tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER);
             } else if bundle == tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_BUNDLE
                 && self.shell_round_trip.load(Ordering::Acquire)
             {
@@ -342,12 +342,16 @@ mod kernel {
             }
         }
 
-        /// On the first app-ward window-event delivery to the *second*
-        /// distinct destination port, emit [`TERMINAL_FOCUSED_MARKER`] once —
-        /// the lone port sender serves the files window first and the terminal
-        /// second, so a delivery to any port other than the first-seen one is
-        /// the terminal gaining focus (the fact the typed command gates on,
-        /// not a count).
+        /// Report the scripted click-through's progress from the destination
+        /// **port** of each app-ward window-event delivery, so every marker
+        /// names the window it is about.
+        ///
+        /// The lone port sender serves the files window first and the terminal
+        /// second. Deliveries to the first-seen port are therefore the files
+        /// window's, and its running total keys the two AW3 markers; a
+        /// delivery to any *other* port is the terminal gaining focus. A
+        /// system-wide total would name no window at all, and the drift that
+        /// gave once stalled this run.
         fn note_window_delivery(&self, event: &Event<'_>) {
             for field in event.fields {
                 if field.key != "port" {
@@ -362,15 +366,29 @@ mod kernel {
                 let first = self.first_window_port.load(Ordering::Acquire);
                 if first == 0 {
                     self.first_window_port.store(port, Ordering::Release);
-                } else if port != first && !self.terminal_focus_marked.swap(true, Ordering::AcqRel)
-                {
-                    SerialSink::new().write_event(&Event {
-                        level: tairix_log::Level::Info,
-                        id: tairix_log::EventId(0),
-                        message: tairix_test_autoload_input_qemu_aarch64::TERMINAL_FOCUSED_MARKER,
-                        fields: &[],
-                    });
+                    self.note_files_window_delivery();
+                } else if port == first {
+                    self.note_files_window_delivery();
+                } else if !self.terminal_focus_marked.swap(true, Ordering::AcqRel) {
+                    emit_marker(tairix_test_autoload_input_qemu_aarch64::TERMINAL_FOCUSED_MARKER);
                 }
+            }
+        }
+
+        /// Count one delivery to the files window and emit whichever AW3
+        /// readiness marker that ordinal completes — the activating
+        /// `Focus` + `Pressed` pair, then the handshake `Pressed`.
+        fn note_files_window_delivery(&self) {
+            let delivered = self
+                .first_window_deliveries
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            if delivered == tairix_test_autoload_input_qemu_aarch64::FILES_ACTIVATION_DELIVERIES {
+                emit_marker(tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_ACTIVATED_MARKER);
+            } else if delivered
+                == tairix_test_autoload_input_qemu_aarch64::FILES_HANDSHAKE_DELIVERIES
+            {
+                emit_marker(tairix_test_autoload_input_qemu_aarch64::FILES_HANDSHAKE_MARKER);
             }
         }
     }
@@ -408,6 +426,17 @@ mod kernel {
                 qemu_exit::exit_success();
             }
         }
+    }
+
+    /// Print one readiness marker on serial for the host runner to gate a
+    /// scripted step on. Carries no fields: the marker *is* the fact.
+    fn emit_marker(message: &'static str) {
+        SerialSink::new().write_event(&Event {
+            level: tairix_log::Level::Info,
+            id: tairix_log::EventId(0),
+            message,
+            fields: &[],
+        });
     }
 
     static AUDIT_SINK: AutoloadInputSink = AutoloadInputSink::new();

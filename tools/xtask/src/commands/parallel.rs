@@ -25,22 +25,26 @@
 //! a QEMU guest is far heavier than its lone vCPU thread and each guest runs
 //! its own real-time watchdogs, so admitting one guest per logical CPU
 //! oversubscribes the host into missing those internal deadlines. Within that
-//! headroom a few uniprocessor guests overlap; the guest deadline
-//! ([`tairix_qemu::Runner::run`]) is itself an *inactivity* budget, not a
-//! total-runtime one, so a guest that merely runs a little slower keeps
-//! emitting output and is never falsely timed out — the no-flaky-tests /
-//! no-retry rules hold. (A single job heavier than the whole budget — a guest
-//! with more vCPUs than the budget — still runs, alone, when nothing else is
-//! in flight, rather than deadlocking.)
+//! headroom a few uniprocessor guests overlap; the guest's *inactivity*
+//! deadline ([`tairix_qemu::Runner::run`]) is reset by every line it prints,
+//! so a guest that merely runs a little slower is never falsely timed out —
+//! the no-flaky-tests / no-retry rules hold — while its absolute runtime
+//! ceiling still bounds a guest that keeps talking without finishing. (A
+//! single job heavier than the whole budget — a guest with more vCPUs than the
+//! budget — still runs, alone, when nothing else is in flight, rather than
+//! deadlocking.)
 //!
 //! # Output handling
 //!
 //! When more than one job can run at once, each job's output is serialised
 //! into an atomic block so concurrent jobs never interleave their lines: a
 //! [`Work::Command`] job has its stdio captured and printed on completion;
-//! a [`Work::Closure`] job prints a start/end marker around its own run (the
-//! QEMU closures keep their serial logs inside the returned error, so a
-//! failure's log is printed once, by [`aggregate`], with no interleaving).
+//! a [`Work::Closure`] job prints a start marker and, on completion, its
+//! verdict and wall-clock duration (the QEMU closures keep their serial logs
+//! inside the returned error, so a failure's log is printed once, by
+//! [`aggregate`], with no interleaving). Reporting every completion is what
+//! makes an outstanding job visible: without it a still-running job is
+//! indistinguishable from a finished one in the log.
 //! Each job is additionally announced at the moment it is *admitted*, with the
 //! resulting in-flight weight, so the log reflects real concurrency rather
 //! than a wall of near-simultaneous start lines that says nothing about
@@ -53,7 +57,7 @@
 use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{await_within, effective_timeout, spawn_in_own_group, DEFAULT_COMMAND_TIMEOUT};
 
@@ -74,8 +78,12 @@ pub struct Job {
     /// (see the module-level "Weighted admission"). Always at least one.
     weight: usize,
     /// Wall-clock budget for a [`Work::Command`] job, after which its process
-    /// group is killed and the job fails. Unused by a [`Work::Closure`] job,
-    /// which owns whatever deadline its own work needs.
+    /// group is killed and the job fails.
+    ///
+    /// Unused by a [`Work::Closure`] job: a running thread cannot be
+    /// cancelled from outside, so a closure **must** bound its own work (the
+    /// QEMU closure does so through its guest runtime ceiling). A closure that
+    /// can run forever would hang the whole runner.
     budget: Duration,
     work: Work,
 }
@@ -334,7 +342,17 @@ fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
             // The closure reports its own pass/fail; on failure it returns the
             // full detail (e.g. a guest's serial log), which `aggregate`
             // prints once at the end so nothing interleaves with a live job.
-            work()
+            let started = Instant::now();
+            let outcome = work();
+            {
+                let _guard = stdio_lock.lock().expect("stdio lock");
+                eprintln!(
+                    "xtask: [{label}] {} in {:?}",
+                    if outcome.is_ok() { "done" } else { "FAILED" },
+                    started.elapsed()
+                );
+            }
+            outcome
         }
     }
 }

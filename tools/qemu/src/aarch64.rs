@@ -63,12 +63,12 @@ pub const SUCCESS_EXIT_STATUS: i32 = 0;
 /// protocol.
 ///
 /// Returns [`Outcome::Pass`] iff `status == SUCCESS_EXIT_STATUS` (`0`).
-/// Every other status is treated as [`Outcome::Fail`] with the captured
-/// serial log attached.
+/// Every other status is treated as [`Outcome::Fail`]. Both carry the
+/// captured serial log.
 #[must_use]
 pub fn outcome_from_status(status: i32, serial: String) -> Outcome {
     if status == SUCCESS_EXIT_STATUS {
-        Outcome::Pass
+        Outcome::Pass { serial }
     } else {
         Outcome::Fail { status, serial }
     }
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(SUCCESS_EXIT_STATUS, 0);
         assert!(matches!(
             outcome_from_status(0, String::new()),
-            Outcome::Pass
+            Outcome::Pass { .. }
         ));
     }
 
