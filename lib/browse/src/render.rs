@@ -2151,12 +2151,10 @@ pub fn build_context_menu(model: ContextMenuModel) -> Menu {
 /// The bounds of the context `menu` anchored at window-local `anchor` (the
 /// right-click point), clamped so the whole menu stays inside `viewport`.
 ///
-/// The menu's top-left is placed at `anchor`; if it would overflow the right or
-/// bottom edge it is shifted left/up so it fits, and it never leaves the
-/// viewport origin. One definition so [`draw_context_menu`] and
-/// [`context_menu_command_at`] place and hit-test the same rectangle (§2.2). A
-/// degenerate viewport still yields a drawable — if clipped — rectangle rather
-/// than a panic (§2.9).
+/// Delegates to [`Menu::anchored_rect`], the one shared placement rule every
+/// popup-menu owner uses, so [`draw_context_menu`] and
+/// [`context_menu_command_at`] place and hit-test the same rectangle a
+/// terminal's own context menu would.
 #[must_use]
 pub fn context_menu_rect(
     menu: &Menu,
@@ -2165,19 +2163,7 @@ pub fn context_menu_rect(
     font: BitmapFont,
     theme: &Theme,
 ) -> Rect {
-    let width = menu
-        .preferred_width(Scale::ONE, theme, font)
-        .clamp(1, viewport.width.max(1));
-    let height = menu
-        .preferred_height(Scale::ONE, theme)
-        .clamp(1, viewport.height.max(1));
-    let origin_x = viewport.origin.x;
-    let origin_y = viewport.origin.y;
-    let max_x = origin_x.saturating_add(to_i32(viewport.width.saturating_sub(width)));
-    let max_y = origin_y.saturating_add(to_i32(viewport.height.saturating_sub(height)));
-    let x = anchor.x.clamp(origin_x, max_x.max(origin_x));
-    let y = anchor.y.clamp(origin_y, max_y.max(origin_y));
-    Rect::new(x, y, width, height)
+    menu.anchored_rect(anchor, viewport, Scale::ONE, theme, font)
 }
 
 /// Draw the context `menu` anchored at `anchor`, on top of the current view.

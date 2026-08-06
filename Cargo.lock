@@ -2399,14 +2399,17 @@ name = "tairix-terminal"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-input",
  "tairix-keymap",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
  "tairix-users",
+ "tairix-util",
  "tairix-vt",
  "tairix-window",
 ]

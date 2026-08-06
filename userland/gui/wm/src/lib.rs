@@ -18,6 +18,9 @@
 //! - **Anti-aliased rounded corners** ([`corner`]) via deterministic
 //!   supersampling, with a square-corner opt-out — the single
 //!   rounded-corner path the taskbar reuses.
+//! - **Backdrop blur** (`blur`): a window may ask for the already-composited
+//!   content behind its rectangle to be blurred before its own translucent
+//!   pixels are blended over it, so a panel reads like frosted glass.
 //! - **Damage tracking** ([`damage`]): only changed pixels are
 //!   recomposited.
 //! - **The [`Compositor`]**: a z-ordered [`Window`] stack composited
@@ -50,6 +53,7 @@
 
 extern crate alloc;
 
+pub(crate) mod blur;
 pub mod chrome;
 pub mod color;
 pub mod compositor;

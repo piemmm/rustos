@@ -379,14 +379,30 @@ fn send_propagates_a_write_error() {
     assert_eq!(term.send_str("x"), Err(Errno::PermissionDenied));
 }
 
+/// The colours a terminal on the system scheme paints with, fully opaque —
+/// what a test that is not about the profile expects to see.
+fn system_colors(theme: &Theme) -> crate::scheme::Painted {
+    crate::scheme::Painted::resolve(
+        crate::scheme::Scheme::System,
+        &crate::scheme::ColorScheme::from_theme(theme),
+        theme,
+        u8::MAX,
+    )
+}
+
 #[test]
 fn render_produces_a_surface_of_the_viewport_size() {
     let shell = QueueShell::with_output(&[b"hi"]);
     let mut term = Terminal::new(20, 3, shell).expect("valid size");
     term.pump().expect("read succeeds");
     let theme = Theme::dark();
-    let surface =
-        crate::render(&term, &theme, Rect::new(0, 0, 120, 40), test_font()).expect("surface");
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 120, 40),
+        test_font(),
+    )
+    .expect("surface");
     assert_eq!(surface.width(), 120);
     assert_eq!(surface.height(), 40);
 }
@@ -405,8 +421,14 @@ fn hebrew_glyphs_occupy_distinct_single_cells() {
 fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
     let mut term = Terminal::new(4, 1, QueueShell::default()).expect("valid size");
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30mאבם".as_bytes());
-    let surface = crate::render(&term, &Theme::dark(), Rect::new(0, 0, 60, 28), test_font())
-        .expect("surface");
+    let theme = Theme::dark();
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 60, 28),
+        test_font(),
+    )
+    .expect("surface");
     let background = Color::rgb(10, 20, 30);
     for column in 0..3 {
         let first_x = column * 15;
@@ -425,8 +447,14 @@ fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
 fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
     let mut term = Terminal::new(3, 1, QueueShell::default()).expect("valid size");
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());
-    let surface = crate::render(&term, &Theme::dark(), Rect::new(0, 0, 45, 28), test_font())
-        .expect("surface");
+    let theme = Theme::dark();
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 45, 28),
+        test_font(),
+    )
+    .expect("surface");
     let background = Color::rgb(10, 20, 30);
     assert!(
         (15..30).any(|x| {
@@ -443,8 +471,13 @@ fn render_highlights_the_cursor_cell() {
     let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     term.feed(b"\x1b[H");
     let theme = Theme::dark();
-    let surface =
-        crate::render(&term, &theme, Rect::new(0, 0, 120, 40), test_font()).expect("surface");
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 120, 40),
+        test_font(),
+    )
+    .expect("surface");
     let accent: Color = theme.palette().accent.into();
     let surface_bg: Color = theme.palette().surface.into();
     // The top-left pixel sits under the home cursor, so it carries the accent
@@ -459,8 +492,13 @@ fn render_handles_a_zero_sized_viewport_without_panicking() {
     let term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     let theme = Theme::dark();
     // A zero-width viewport is degenerate but allocatable: it paints nothing.
-    let surface =
-        crate::render(&term, &theme, Rect::new(0, 0, 0, 40), test_font()).expect("surface");
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 0, 40),
+        test_font(),
+    )
+    .expect("surface");
     assert_eq!(surface.width(), 0);
     assert!(surface.pixels().is_empty());
 }
@@ -559,8 +597,13 @@ fn hidden_cursor_is_not_painted() {
     let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     term.feed(b"\x1b[H\x1b[?25l");
     let theme = Theme::dark();
-    let surface =
-        crate::render(&term, &theme, Rect::new(0, 0, 120, 40), test_font()).expect("surface");
+    let surface = crate::render(
+        &term,
+        &system_colors(&theme),
+        Rect::new(0, 0, 120, 40),
+        test_font(),
+    )
+    .expect("surface");
     let surface_bg: Color = theme.palette().surface.into();
     // With the cursor hidden the home cell shows the plain surface, not accent.
     let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);

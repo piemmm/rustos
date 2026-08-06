@@ -1383,6 +1383,7 @@ You are not exempt from any rule above. In addition:
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
     | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |
+    | The graphical terminal (`terminal.app`): the size it opens at, the per-user profile store, the right-click menu, the settings sheet, the colour schemes, and the screen effects (translucency, backdrop blur, scan lines, fuzz, phosphor, wobble) | `plans/GUI-TERMINAL.md` |
     | Terminal / TUI stack (`lib/vt`, `lib/termcap`, `lib/curses`) | `plans/CURSES.md` |
     | Text rendering / fonts: the OS font service (`fontd`), the `/System/Fonts` store, the `FONT_ENDPOINT` glyph protocol, the thin `lib/font` client, and the kernel console-atlas subset | `plans/FONT-SERVICE.md` |
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |

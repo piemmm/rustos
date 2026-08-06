@@ -16,7 +16,10 @@ server and every app's client can never drift apart.
   `tairix_display::ShmMapper` seam, and hands each `Present` to the
   injected `WindowHost` (the session's compositor bridge) as a
   bounds-checked frame slice plus a validated damage rectangle — no
-  per-present mapping, allocation, or copy of its own. A `Present` or
+  per-present mapping, allocation, or copy of its own. A
+  `SetBackdropBlur` takes the same owner check and reaches the same
+  bridge (`WindowHost::backdrop_blur_set`), so an app frosts the backdrop
+  of its own window and of no other. A `Present`, `SetBackdropBlur`, or
   `Close` naming a window the caller does not own is refused `NotFound`
   (no existence oracle); a per-client window cap bounds how much pinned
   memory one app can reserve; a dead client's windows are torn down
@@ -28,8 +31,11 @@ server and every app's client can never drift apart.
   the injected `WindowTransport` seam (the `ipc_call` syscall in
   production). `create` validates and sends the window geometry, grant
   handle, event endpoint, and title, returning the session-minted window
-  id; `present` sends a frame index plus damage, never pixels; `close`
-  tears the window down. `WindowEvents` wraps the injected `EventSource`
+  id; `present` sends a frame index plus damage, never pixels;
+  `set_backdrop_blur` asks for the content behind the window to be
+  frosted, a radius in logical pixels with `0` off and anything above
+  `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the
+  window down. `WindowEvents` wraps the injected `EventSource`
   seam — a **parked** wait on the app's own event endpoint, never a
   poll — and decodes each delivered `WindowEvent` fail-closed. The
   endpoint's *name* (`event_endpoint_for`) and its *depth*

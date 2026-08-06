@@ -128,6 +128,7 @@ struct RecordingHost {
     pins: Vec<(ProcId, u64, String)>,
     drag_offers: Vec<(ProcId, u64, String)>,
     drag_withdraws: Vec<(ProcId, u64)>,
+    blur_sets: Vec<(u64, u16)>,
     refuse_open: bool,
     refuse_resize: Option<Errno>,
     refuse_pick: Option<Errno>,
@@ -151,6 +152,7 @@ impl Default for RecordingHost {
             pins: Vec::new(),
             drag_offers: Vec::new(),
             drag_withdraws: Vec::new(),
+            blur_sets: Vec::new(),
             refuse_open: false,
             refuse_resize: None,
             refuse_pick: None,
@@ -229,6 +231,10 @@ impl WindowHost for RecordingHost {
 
     fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
         self.drag_withdraws.push((owner, window));
+    }
+
+    fn backdrop_blur_set(&mut self, window: u64, radius_px: u16) {
+        self.blur_sets.push((window, radius_px));
     }
 
     fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
@@ -1148,6 +1154,30 @@ fn drag_offer_and_withdraw_are_owner_bound_and_reach_the_host() {
 }
 
 #[test]
+fn set_backdrop_blur_is_owner_bound_and_reaches_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // A window the caller does not own is refused, and the host is
+    // never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.set_backdrop_blur(window, 8), Err(Errno::NotFound));
+    assert!(loopback.borrow().host.blur_sets.is_empty());
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The owner's radius reaches the host exactly, and a later call
+    // replaces it rather than accumulating.
+    client.set_backdrop_blur(window, 12).expect("set");
+    assert_eq!(loopback.borrow().host.blur_sets, alloc::vec![(window, 12)]);
+    client.set_backdrop_blur(window, 0).expect("disabled");
+    assert_eq!(
+        loopback.borrow().host.blur_sets,
+        alloc::vec![(window, 12), (window, 0)]
+    );
+}
+
+#[test]
 fn a_refused_drag_offer_maps_to_permission_denied() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
@@ -1208,6 +1238,16 @@ fn pin_and_drag_default_to_fail_closed_refusal() {
     // to disarm: the default handler simply has nothing to do.
     let withdraw = WindowRequest::DragWithdraw { window }.to_le_bytes();
     let len = server.serve(&mut host, &mut identity, TICKET_A, &withdraw, &mut reply);
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
+
+    // Setting the backdrop blur is likewise infallible for an owned
+    // window: the default handler has no compositor to tell.
+    let blur = WindowRequest::SetBackdropBlur {
+        window_id: window,
+        radius_px: 8,
+    }
+    .to_le_bytes();
+    let len = server.serve(&mut host, &mut identity, TICKET_A, &blur, &mut reply);
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
 }
 

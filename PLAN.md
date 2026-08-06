@@ -3362,6 +3362,17 @@ Shipped (headless-testable, model + renderer over injected seams):
   pty-slave `stream_input_mode`/`terminal_size`/`console_foreground`, and the
   terminal rewritten onto one pty. The PTY4 QEMU vertical extension
   (echo/`ONLCR`/`Ctrl-C` witnesses) is the one remaining item.
+  The terminal is a first-class desktop program (`plans/GUI-TERMINAL.md`): it
+  sizes its window from the face it actually draws with (80×25 plus the shared
+  `WindowFrame` furniture, stepping the *text size* down rather than the grid
+  on a display too small — no compile-time window size), carries a per-user
+  profile at `~/Settings/Terminal/terminal.conf`, eight colour schemes
+  including a user-authored one, a right-click menu whose every advertised
+  shortcut is really honoured, an in-window settings sheet built from the
+  shared Reactive Alloy controls, and a typed screen-effect pipeline
+  (translucency, compositor backdrop blur, scan lines, fuzz, phosphor
+  persistence, wobble) animated off a one-shot frame deadline rather than a
+  poll loop.
 - `kernel/ipc::PortRegistry` named-port registry composed into `KernelState`;
   `ipc_send`/`ipc_recv` resolve endpoints against it. User space resolves a
   published `PortName` to its endpoint through the unprivileged
@@ -3775,9 +3786,14 @@ per-app recipes (§2.2).
   Minimize→hide+`Minimized`, PutToBack→restack, SizeToggle→`Resized`) — no new
   syscall, no ambient authority. Client-driven resizability is live: the create
   request carries a `resizable` flag, a resizable window gets the grabber + live
-  size toggle, and the file viewer (`userland/apps/viewer`) re-lays-out on
-  `WindowEvent::Resized` (re-mapping its region via `WindowRequest::Resize`);
-  Files and the terminal present fixed size. The trusted file picker stays
+  size toggle, and the file viewer (`userland/apps/viewer`) and the terminal
+  re-lay-out on `WindowEvent::Resized` (re-mapping their region via
+  `WindowRequest::Resize`); Files presents fixed size. A window may also ask
+  the compositor to frost what is behind it (`WindowRequest::SetBackdropBlur`,
+  a separable O(area) box blur under the window's own rounded-corner
+  coverage, with damage widened to the whole frosted window so a change behind
+  it cannot leave stale pixels, and the accelerated layer path falling back to
+  the software composite for such a frame). The trusted file picker stays
   undecorated session chrome. No app draws its own chrome.
 - **Typed control-state vocabulary — DONE.** `lib/controls::state` is the §5
   model as composed typed Rust: `ControlKind`/`ControlRole`, a `ControlState`

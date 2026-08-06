@@ -96,6 +96,22 @@ impl DamageRegion {
         self.rects.iter().any(|r| r.contains(point))
     }
 
+    /// `true` when one dirty rectangle already contains the whole of
+    /// `rect`, so marking it would add nothing.
+    ///
+    /// A *single* rectangle must contain it: recomposition is per
+    /// rectangle, so a region covered only by the union of two of them is
+    /// not covered for the purpose of an effect that needs its whole
+    /// rectangle recomposed at once. An empty `rect` covers no pixels and
+    /// is never contained.
+    #[must_use]
+    pub(crate) fn covers_rect(&self, rect: Rect) -> bool {
+        if rect.is_empty() {
+            return false;
+        }
+        self.rects.iter().any(|r| r.intersection(&rect) == rect)
+    }
+
     /// Forget all damage (called after a frame is presented).
     pub fn clear(&mut self) {
         self.rects.clear();

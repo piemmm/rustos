@@ -3,43 +3,43 @@
 //! [`render`] turns a [`Terminal`]'s [`Grid`] into a premultiplied-alpha
 //! [`Surface`] sized to the app's content viewport. Each
 //! [`Cell`](tairix_vt::Cell) is drawn with its own rendition: the
-//! [`Attributes`] the shared `lib/vt` parser folded onto
-//! it select the foreground and background, which are resolved against the
-//! active theme's [`Palette`] and the standard ANSI
-//! colour tables. The surface is the window manager's to place and round: the
-//! terminal paints a *rectangular* buffer and the compositor applies any corner
-//! radius through its single anti-aliased rounded-corner path. There is no rounding here.
+//! [`Attributes`](tairix_vt::Attributes) the shared `lib/vt` parser folded onto it choose the
+//! foreground and background, which are resolved through the profile's
+//! [`Painted`] colours — the one place a terminal colour comes from. The
+//! surface is the window manager's to place and round: the terminal paints a
+//! *rectangular* buffer and the compositor applies any corner radius through
+//! its single anti-aliased rounded-corner path.
 //!
-//! Colour is resolved one way: a cell's
-//! [`Color::Default`](tairix_vt::Color) foreground and background take the
-//! theme's `on_surface` / `surface` roles, the 16 [`BasicColor`]s and the
-//! 256-colour palette map through the standard ANSI tables, and truecolour is
-//! used directly; [`Attributes::reverse`] swaps the pair and
-//! [`Attributes::bold`] brightens a basic colour. The monospace face carries
-//! no separate bold/italic/underline glyphs, so those parsed attributes do
-//! not change the rendered shape — a renderer limitation, not a parsing gap.
-//! A wide glyph's continuation cell paints background only; the lead glyph
-//! covers it.
+//! The monospace face carries no separate bold/italic/underline glyphs, so
+//! those parsed attributes do not change the rendered shape — a renderer
+//! limitation, not a parsing gap. A wide glyph's continuation cell paints
+//! background only; the lead glyph covers it.
 //!
-//! Rows are drawn top to bottom and the cursor cell, when visible, is
-//! highlighted with the accent role. Every length saturates and every blit
-//! clips, so a viewport smaller than the grid paints what fits rather than
+//! Rows are drawn top to bottom and the cursor cell, when visible, is drawn
+//! as the scheme's cursor block. Every length saturates and every blit clips,
+//! so a viewport smaller than the grid paints what fits rather than
 //! panicking.
+//!
+//! Translucency is not a separate step: the default background is filled at
+//! the alpha the profile asks for, so the compositor's own premultiplied
+//! blend shows what is behind the window while a glyph drawn over it stays
+//! opaque. The screen effects ([`crate::effects`]) run afterwards, over the
+//! finished frame.
 
 use alloc::string::String;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::Rect;
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Palette, Theme};
-use tairix_vt::{char_width, Attributes, BasicColor, Color as VtColor, CONTINUATION};
+use tairix_vt::{char_width, CONTINUATION};
 
 use crate::grid::Grid;
+use crate::scheme::Painted;
 use crate::shell::ShellSource;
 use crate::terminal::Terminal;
 
-/// Paint `terminal`'s screen into a [`Surface`] the size of `viewport`, using
-/// `theme`'s palette.
+/// Paint `terminal`'s screen into a [`Surface`] the size of `viewport`, in
+/// `painted`'s colours.
 ///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
@@ -48,29 +48,20 @@ use crate::terminal::Terminal;
 #[must_use]
 pub fn render<S: ShellSource>(
     terminal: &Terminal<S>,
-    theme: &Theme,
+    painted: &Painted,
     viewport: Rect,
     font: BitmapFont,
 ) -> Option<Surface> {
     let mut surface = Surface::new(viewport.width, viewport.height)?;
-    let palette = theme.palette();
-    surface.fill(Color::from(palette.surface));
+    surface.fill(painted.background());
 
     let grid = terminal.grid();
     let cell_width = font.cell_width();
     let line_height = font.line_height();
 
-    draw_cells(&mut surface, font, grid, palette, cell_width, line_height);
+    draw_cells(&mut surface, font, grid, painted, cell_width, line_height);
     if grid.cursor_visible() {
-        draw_cursor(
-            &mut surface,
-            font,
-            grid,
-            cell_width,
-            line_height,
-            Color::from(palette.accent),
-            Color::from(palette.on_accent),
-        );
+        draw_cursor(&mut surface, font, grid, cell_width, line_height, painted);
     }
     Some(surface)
 }
@@ -80,11 +71,11 @@ fn draw_cells(
     surface: &mut Surface,
     font: BitmapFont,
     grid: &Grid,
-    palette: &Palette,
+    painted: &Painted,
     cell_width: u32,
     line_height: u32,
 ) {
-    let base = Color::from(palette.surface);
+    let base = painted.background();
     for row in 0..grid.rows() {
         let y = line_height.saturating_mul(u32::from(row));
         let mut col = 0;
@@ -98,7 +89,7 @@ fn draw_cells(
                 continue;
             }
             let x = cell_width.saturating_mul(u32::from(col));
-            let (fg, bg) = resolve_colors(cell.attrs, palette);
+            let (fg, bg) = painted.cell_colors(cell.attrs);
             let cells = char_width(cell.ch);
             if bg != base {
                 surface.fill_rect(
@@ -115,25 +106,41 @@ fn draw_cells(
     }
 }
 
-/// Highlight the cursor cell with `fill` and redraw its glyph in `text`.
+/// Draw the cursor cell as the scheme's cursor block with its glyph in the
+/// scheme's cursor-text colour.
+///
+/// Both are opaque whatever the window's translucency: a cursor that faded
+/// with the background would be the hardest thing on screen to find.
 fn draw_cursor(
     surface: &mut Surface,
     font: BitmapFont,
     grid: &Grid,
     cell_width: u32,
     line_height: u32,
-    fill: Color,
-    text: Color,
+    painted: &Painted,
 ) {
     let x = cell_width.saturating_mul(u32::from(grid.cursor_col()));
     let y = line_height.saturating_mul(u32::from(grid.cursor_row()));
-    surface.fill_rect(x, y, cell_width, line_height, fill);
+    surface.fill_rect(
+        x,
+        y,
+        cell_width,
+        line_height,
+        painted.scheme.cursor.opaque(),
+    );
     let ch = grid
         .cell(grid.cursor_col(), grid.cursor_row())
         .map_or(' ', |cell| cell.ch);
     // The cursor over a wide glyph's continuation cell shows covered space.
     let ch = if ch == CONTINUATION { ' ' } else { ch };
-    draw_glyph(surface, font, to_i32(x), to_i32(y), ch, text);
+    draw_glyph(
+        surface,
+        font,
+        to_i32(x),
+        to_i32(y),
+        ch,
+        painted.scheme.cursor_text.opaque(),
+    );
 }
 
 /// Draw a single glyph `ch` at `(x, y)` in `color`.
@@ -141,94 +148,6 @@ fn draw_glyph(surface: &mut Surface, font: BitmapFont, x: i32, y: i32, ch: char,
     let mut glyph = String::with_capacity(ch.len_utf8());
     glyph.push(ch);
     font.draw_text(surface, x, y, &glyph, color);
-}
-
-/// Resolve a cell's [`Attributes`] into concrete foreground and background
-/// [`Color`]s, applying reverse video last so it swaps the resolved pair.
-fn resolve_colors(attrs: Attributes, palette: &Palette) -> (Color, Color) {
-    let foreground = palette.on_surface;
-    let background = palette.surface;
-    let fg = resolve(attrs.foreground, attrs.bold, Color::from(foreground));
-    let bg = resolve(attrs.background, false, Color::from(background));
-    if attrs.reverse {
-        (bg, fg)
-    } else {
-        (fg, bg)
-    }
-}
-
-/// Resolve one [`VtColor`] to a concrete [`Color`], falling back to `default`
-/// for [`VtColor::Default`]. A `bold` basic colour is brightened, the common
-/// terminal convention.
-fn resolve(color: VtColor, bold: bool, default: Color) -> Color {
-    match color {
-        VtColor::Default => default,
-        VtColor::Basic(basic) => basic_color(if bold { brighten(basic) } else { basic }),
-        VtColor::Indexed(index) => indexed_color(index),
-        VtColor::Rgb(r, g, b) => Color::rgb(r, g, b),
-    }
-}
-
-/// The bright counterpart of a basic colour; an already-bright colour is left
-/// unchanged.
-fn brighten(basic: BasicColor) -> BasicColor {
-    if basic.is_bright() {
-        basic
-    } else {
-        BasicColor::from_index(basic.index() + 8).unwrap_or(basic)
-    }
-}
-
-/// The RGB of one of the sixteen ANSI [`BasicColor`]s (the standard xterm
-/// palette).
-fn basic_color(basic: BasicColor) -> Color {
-    const PALETTE: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (205, 0, 0),
-        (0, 205, 0),
-        (205, 205, 0),
-        (0, 0, 238),
-        (205, 0, 205),
-        (0, 205, 205),
-        (229, 229, 229),
-        (127, 127, 127),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (92, 92, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-    let (r, g, b) = PALETTE[usize::from(basic.index())];
-    Color::rgb(r, g, b)
-}
-
-/// The RGB of a 256-colour palette `index`: `0..=15` are the basic colours,
-/// `16..=231` the 6×6×6 colour cube, and `232..=255` the 24-step greyscale ramp.
-fn indexed_color(index: u8) -> Color {
-    if index < 16 {
-        return BasicColor::from_index(index).map_or(Color::rgb(0, 0, 0), basic_color);
-    }
-    if index < 232 {
-        let offset = u32::from(index - 16);
-        let r = cube_level(offset / 36);
-        let g = cube_level((offset / 6) % 6);
-        let b = cube_level(offset % 6);
-        return Color::rgb(r, g, b);
-    }
-    let level = u8::try_from(u32::from(index - 232) * 10 + 8).unwrap_or(u8::MAX);
-    Color::rgb(level, level, level)
-}
-
-/// One channel of the 6×6×6 colour cube: level `0` is black, the rest are
-/// `level * 40 + 55`.
-fn cube_level(level: u32) -> u8 {
-    if level == 0 {
-        0
-    } else {
-        u8::try_from(level * 40 + 55).unwrap_or(u8::MAX)
-    }
 }
 
 /// Saturating `u32` → `i32`.

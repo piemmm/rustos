@@ -1,38 +1,39 @@
-//! The `terminal.app` bundle's `Run` entry point (`plans/APPWIN.md` AW4):
-//! the windowed terminal emulator hosting the user's shell over the
-//! desktop session's window channel.
+//! The `terminal.app` bundle's `Run` entry point (`plans/APPWIN.md` AW4,
+//! `plans/GUI-TERMINAL.md`): the windowed terminal emulator hosting the
+//! user's shell over the desktop session's window channel.
 //!
 //! # What the program wires (and what stays in the libraries)
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
 //! the screen model and its `lib/vt`-consuming parser (`tairix_terminal`),
-//! the themed cell renderer (`tairix_terminal::render`), the spawned
-//! shell's pipe wiring (`tairix_terminal::spawned`), and the window
-//! channel's client half (`tairix_window`). This binary only composes
-//! them over the live syscalls:
+//! the themed cell renderer (`tairix_terminal::render`), the user's profile
+//! and its document, the screen-effect pipeline, the right-click menu, the
+//! settings sheet, the spawned shell's pipe wiring, and the window channel's
+//! client half (`tairix_window`). This binary only composes them over the
+//! live syscalls:
 //!
-//! * Two kernel pipes to a shell child spawned under this app's own
-//!   `CAP_PROC_SPAWN`: keystrokes flow to the shell's standard input, and
-//!   the shell's standard output *and* error flow back to the screen. The
-//!   child-side ends are closed here after the spawn, so the shell
-//!   observes end-of-file the moment this terminal exits, and the
-//!   terminal observes end-of-stream the moment the shell does.
+//! * Two ends of one kernel pseudo-terminal: keystrokes flow to the shell's
+//!   standard input and its cooked output flows back to the screen. The
+//!   child-side end is closed here after the spawn, so the shell observes
+//!   end-of-file the moment this terminal exits, and the terminal observes
+//!   end-of-stream the moment the shell does.
 //! * One `shm_create`d frame region, granted to the reserved window
 //!   endpoint (the zero-copy surface the session maps once at create).
 //! * One wait-set the program **parks** on — never a poll loop — with
 //!   three members: its `port_bind`-bound event mailbox (the desktop's
 //!   `Focus`/`Key`/`Pointer`/`CloseRequested` deliveries, each accepted
 //!   only from the session identity the squat-protected create reply
-//!   named), the shell-output pipe's read end (the `Stream` source this
-//!   stage added — ready on buffered bytes or end-of-stream), and the
-//!   shell child itself (ready when it exited and awaits reaping).
+//!   named), the shell-output stream, and the shell child itself. When an
+//!   animated screen effect is in force the park carries a one-shot frame
+//!   deadline, so the animation costs one timed wake per frame and nothing
+//!   at all when it is switched off.
+//! * The user's own profile document, read at start-up under this process's
+//!   own identity and rewritten whenever a setting changes.
 //!
-//! A key press is encoded through the one shared `lib/keymap` rule and
-//! written to the shell; the shell's bytes are pumped into the grid and
-//! the repainted frame presented. The shell exiting (end-of-stream or the
-//! child's exit) ends the session cleanly, as does a `CloseRequested`
-//! from the desktop. Every bring-up refusal exits fail-loud with a
-//! reserved code and a stated reason on `stderr`.
+//! A key press is either a terminal command (a menu accelerator, or input
+//! the open menu or settings sheet owns) or shell input encoded through the
+//! one shared `lib/keymap` rule. Every bring-up refusal exits fail-loud with
+//! a reserved code and a stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -46,23 +47,39 @@
 mod program {
     extern crate alloc;
 
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::fs::OpenFlags;
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
     use tairix_font::BitmapFont;
+    use tairix_geometry::{Point, Rect, Scale};
+    use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_rt::io::{Stderr, Write};
-    use tairix_terminal::grid::MAX_DIMENSION;
-    use tairix_terminal::render::render;
-    use tairix_terminal::{
-        shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, COLS,
-        ROWS, TERM, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
+    use tairix_terminal::effects::{Afterglow, Phase};
+    use tairix_terminal::layout::{fit_font_size, grid_dims, window_size};
+    use tairix_terminal::menu::{Command, ContextMenu, MenuOutcome};
+    use tairix_terminal::profile::{
+        parse as parse_profile, render as render_profile, user_profile_path, Profile,
+        MAX_PROFILE_LEN,
     };
+    use tairix_terminal::render::render;
+    use tairix_terminal::scheme::Painted;
+    use tairix_terminal::settings::{Settings, SheetOutcome};
+    use tairix_terminal::{
+        shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, TERM,
+        WIN_RESIZABLE,
+    };
+    use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
-        event_endpoint_for, Desktop, WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        event_endpoint_for, key_input_event, pointer_input_events, Desktop, WindowClient,
+        WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the shell could not be hosted (the pty or the spawn
@@ -108,9 +125,19 @@ mod program {
     /// is starved.
     const PRESSURE_TOKEN: u64 = 4;
 
+    /// How long the program parks between frames of an animated screen
+    /// effect: fifty milliseconds, twenty frames a second.
+    ///
+    /// Slow enough that an idle terminal with the effects on costs a
+    /// twentieth of a repaint's work per second rather than a core, and fast
+    /// enough that a travelling wobble and an analogue noise floor read as
+    /// motion rather than as a stutter. The park is a one-shot deadline, so
+    /// a terminal with no animated effect never wakes at all.
+    const FRAME_INTERVAL_NS: u64 = 50_000_000;
+
     /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
     /// tightly-packed four-bytes-per-pixel row. One definition so the initial
-    /// window and every resize build the surface identically (§2.2).
+    /// window and every resize build the surface identically.
     fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
         DisplayMode {
             width_px,
@@ -120,33 +147,13 @@ mod program {
         }
     }
 
-    /// The character grid `(cols, rows)` that fits a `width_px` × `height_px`
-    /// client, from the shared monospace face's advance and line height (the
-    /// same metrics [`WIN_WIDTH`]/[`WIN_HEIGHT`] and the renderer derive the
-    /// grid from, so window sizing and rendering can never disagree). Floored
-    /// so the grid never exceeds the surface (no clipped cell), at least
-    /// `1`×`1`, and capped at [`MAX_DIMENSION`] so a huge window never asks
-    /// for an unbounded grid (fail closed).
-    fn grid_dims(width_px: u32, height_px: u32, font: BitmapFont) -> (u16, u16) {
-        let advance = font.cell_width().max(1);
-        let line_height = font.line_height().max(1);
-        // The `clamp` upper bound is `MAX_DIMENSION` itself (a `u16`), so
-        // the clamped value always fits; `unwrap_or(MAX_DIMENSION)` names a
-        // fallback that is unreachable but still the correct value, rather
-        // than lying with an `as` truncation.
-        let cols = u16::try_from((width_px / advance).clamp(1, u32::from(MAX_DIMENSION)))
-            .unwrap_or(MAX_DIMENSION);
-        let rows = u16::try_from((height_px / line_height).clamp(1, u32::from(MAX_DIMENSION)))
-            .unwrap_or(MAX_DIMENSION);
-        (cols, rows)
-    }
-
     /// Re-map the window `window` onto a fresh frame region shaped as
     /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
-    /// success — the old region (`old_base` / `old_len`) already unmapped — or
-    /// `None` when the region could not be allocated or the session refused the
-    /// re-map, in which case the old region is left intact and still mapped so
-    /// the current surface stays valid (never a crash or a blank window, §5.4).
+    /// success — the old region (`old_base` / `old_len`) already unmapped —
+    /// or `None` when the region could not be allocated or the session
+    /// refused the re-map, in which case the old region is left intact and
+    /// still mapped so the current surface stays valid (never a crash or a
+    /// blank window).
     ///
     /// The fresh region is created and granted first and adopted only once
     /// [`WindowClient::resize`] succeeds; the old mapping is released only
@@ -204,6 +211,11 @@ mod program {
         code
     }
 
+    /// Report a non-fatal refusal on `stderr` and carry on.
+    fn report(reason: &str) {
+        let _ = writeln!(Stderr, "terminal: {reason}");
+    }
+
     /// Reap the exited hosted shell and, if it was admitted by `spawn` but
     /// then failed its own asynchronous image load, return the terse reason
     /// to report (fail loud); `None` for a clean or ordinary exit.
@@ -239,27 +251,234 @@ mod program {
         }
     }
 
-    /// Render the screen grid into `frame` (the shared window surface)
-    /// and present the whole window.
+    /// Read the whole file at `path` under this process's own identity,
+    /// stopping one chunk past `cap` so no document can make the terminal
+    /// slurp an arbitrary number of bytes.
+    fn read_file(path: &str, cap: usize) -> Result<Vec<u8>, Errno> {
+        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        if ret < 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `ret >= 0` checked above; it is a descriptor number.
+        let fd = ret as u32;
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let outcome = loop {
+            if bytes.len() > cap {
+                break Ok(bytes);
+            }
+            match tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk) {
+                Ok(0) => break Ok(bytes),
+                Ok(read) => match chunk.get(..read) {
+                    Some(slice) => bytes.extend_from_slice(slice),
+                    None => break Err(Errno::OutOfRange),
+                },
+                Err(err) => break Err(Errno::from_syscall(err)),
+            }
+        };
+        let _ = tairix_rt::fs_close(fd);
+        outcome
+    }
+
+    /// The user's own profile document path, or `None` when the session
+    /// inherited no home (in which case nothing is read and nothing is
+    /// stored: a terminal with no home runs on the defaults).
+    fn profile_path() -> Option<String> {
+        let home = tairix_rt::env_var(b"HOME")?;
+        let home = core::str::from_utf8(home).ok()?;
+        user_profile_path(home)
+    }
+
+    /// The profile in force for this user.
+    ///
+    /// An **absent** document is the ordinary state of a fresh account and
+    /// silently yields [`Profile::default`]. Anything else that stops the
+    /// document being used — no home, a refused read, bytes that are not
+    /// UTF-8, a document the shared parser refuses — also yields the
+    /// defaults, but says so on `stderr` rather than running on settings the
+    /// user cannot see the reason for.
+    fn load_profile(path: Option<&str>) -> Profile {
+        let Some(path) = path else {
+            return Profile::default();
+        };
+        let bytes = match read_file(path, MAX_PROFILE_LEN) {
+            Ok(bytes) => bytes,
+            Err(Errno::NotFound) => return Profile::default(),
+            Err(err) => {
+                report(&alloc::format!(
+                    "{path}: read refused ({err:?}); using the default profile"
+                ));
+                return Profile::default();
+            }
+        };
+        if bytes.len() > MAX_PROFILE_LEN {
+            report(&alloc::format!(
+                "{path}: longer than any valid profile document; using the default profile"
+            ));
+            return Profile::default();
+        }
+        let Ok(text) = core::str::from_utf8(&bytes) else {
+            report(&alloc::format!(
+                "{path}: not valid UTF-8; using the default profile"
+            ));
+            return Profile::default();
+        };
+        match parse_profile(text) {
+            Ok(mut profile) => {
+                profile.clamp();
+                profile
+            }
+            Err(err) => {
+                report(&alloc::format!("{path}: {err}; using the default profile"));
+                Profile::default()
+            }
+        }
+    }
+
+    /// Replace the user's profile document with `profile`.
+    ///
+    /// A refused write is reported and otherwise harmless: the terminal
+    /// keeps showing what the user just chose, and the next session simply
+    /// opens on what is still on disk. The parent directory is created
+    /// first — `~/Settings/Terminal` does not exist until the first change.
+    fn persist_profile(path: Option<&str>, profile: &Profile) {
+        let Some(path) = path else {
+            return;
+        };
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            if !parent.is_empty() {
+                let ret = tairix_rt::fs_mkdir(parent.as_bytes());
+                if ret < 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
+                    report(&alloc::format!(
+                        "{parent}: settings directory refused ({:?}); the profile was not saved",
+                        Errno::from_syscall(ret)
+                    ));
+                    return;
+                }
+            }
+        }
+        let document = render_profile(profile);
+        let file = match tairix_rt::create(path.as_bytes()) {
+            Ok(file) => file,
+            Err(err) => {
+                report(&alloc::format!(
+                    "{path}: refused ({:?}); the profile was not saved",
+                    Errno::from_syscall(err)
+                ));
+                return;
+            }
+        };
+        match file.write_at(0, document.as_bytes()) {
+            Ok(written) if written == document.len() => {}
+            Ok(_) => report(&alloc::format!(
+                "{path}: the volume stopped accepting bytes; the profile was not saved"
+            )),
+            Err(err) => report(&alloc::format!(
+                "{path}: write refused ({:?}); the profile was not saved",
+                Errno::from_syscall(err)
+            )),
+        }
+    }
+
+    /// What is drawn over the terminal screen, if anything.
+    ///
+    /// At most one overlay exists at a time and it is modal: while it is
+    /// open every pointer and key event routes to it, so a click meant for
+    /// the menu can never also reach the shell.
+    enum Overlay {
+        /// Nothing over the screen; input goes to the shell.
+        None,
+        /// The right-click context menu.
+        Menu(ContextMenu),
+        /// The settings sheet.
+        Sheet(Settings),
+    }
+
+    /// Everything the program holds about how the screen currently looks.
+    ///
+    /// Derived from the [`Profile`] and the desktop, and re-derived whenever
+    /// either changes, so the renderer, the window geometry, and the effect
+    /// pipeline can never disagree about what is in force.
+    struct Look {
+        /// The face the screen is drawn in.
+        font: BitmapFont,
+        /// The colours the screen is painted with.
+        painted: Painted,
+        /// The animation step the effects are drawn at.
+        phase: Phase,
+        /// The persistence state the phosphor effect carries between frames.
+        afterglow: Afterglow,
+    }
+
+    impl Look {
+        /// The look `profile` implies on `desktop` under `theme`.
+        fn resolve(profile: &Profile, theme: &Theme, desktop: &Desktop) -> Self {
+            let screen = (desktop.screen_width_px(), desktop.screen_height_px());
+            let size = fit_font_size(profile.font_size_px, screen, theme, desktop.scale());
+            Self {
+                font: BitmapFont::monospace(desktop.scale().scale_length(u32::from(size))),
+                painted: Painted::resolve(
+                    profile.scheme,
+                    &profile.custom,
+                    theme,
+                    profile.effects.background_alpha(),
+                ),
+                phase: Phase::default(),
+                afterglow: Afterglow::new(),
+            }
+        }
+
+        /// Adopt a changed profile or desktop, forgetting the afterglow so a
+        /// trail of the old screen cannot ghost over the new one.
+        fn refresh(&mut self, profile: &Profile, theme: &Theme, desktop: &Desktop) {
+            let phase = self.phase;
+            *self = Self::resolve(profile, theme, desktop);
+            self.phase = phase;
+        }
+    }
+
+    /// Render the screen (and any overlay) into `frame` and present the whole
+    /// window.
     ///
     /// The full-window damage is deliberate: a shell write can scroll the
     /// whole grid, and the surface is one window — not a screen — so the
     /// copy is small.
     fn present_frame<S, T>(
         terminal: &Terminal<S>,
-        theme: &tairix_theme::Theme,
+        profile: &Profile,
+        look: &mut Look,
+        overlay: &Overlay,
+        theme: &Theme,
+        scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
         mode: &DisplayMode,
-        font: BitmapFont,
     ) -> Result<(), Errno>
     where
         S: ShellSource,
         T: WindowTransport,
     {
-        let viewport = tairix_geometry::Rect::new(0, 0, mode.width_px, mode.height_px);
-        let surface = render(terminal, theme, viewport, font).ok_or(Errno::LengthOutOfRange)?;
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let mut surface =
+            render(terminal, &look.painted, viewport, look.font).ok_or(Errno::LengthOutOfRange)?;
+        profile.effects.apply(
+            &mut surface,
+            &mut look.afterglow,
+            look.phase,
+            scale.percent(),
+        );
+        // The overlay is drawn after the effects: a settings sheet that
+        // wobbled with the screen behind it would be unusable, and its
+        // controls must read exactly as they do everywhere else.
+        match overlay {
+            Overlay::None => {}
+            Overlay::Menu(menu) => menu.render(&mut surface, viewport, scale, theme, look.font),
+            Overlay::Sheet(sheet) => {
+                sheet.render(&mut surface, viewport, scale, theme, look.font);
+            }
+        }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -271,19 +490,64 @@ mod program {
         client.present(window, 0, DamageRect::full(mode))
     }
 
+    /// Tell the session how far to blur what is behind this window.
+    ///
+    /// A refusal is reported and otherwise harmless: the window simply keeps
+    /// the blur it already had, which is never worse than a sharp backdrop.
+    fn apply_blur<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        window: u64,
+        profile: &Profile,
+    ) {
+        if let Err(err) = client.set_backdrop_blur(window, profile.effects.blur_radius_px()) {
+            report(&alloc::format!("backdrop blur refused: {err}"));
+        }
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the teardown ordering.
     fn main() -> i32 {
+        // --- The user's own profile, before anything is sized or painted, so
+        // the first frame is what they chose rather than a default corrected
+        // once they have seen it.
+        let store = profile_path();
+        let mut profile = load_profile(store.as_deref());
+
+        // --- The desktop this window will be shown on: the screen, the
+        // density, and the appearance.
+        let mut client = WindowClient::new(RtWindowTransport);
+        let info = match client.desktop() {
+            Ok(info) => info,
+            Err(err) => {
+                let _ = writeln!(Stderr, "terminal: desktop query refused: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut desktop = match Desktop::new(info) {
+            Ok(desktop) => desktop,
+            Err(err) => {
+                let _ = writeln!(Stderr, "terminal: cannot draw this desktop: {err}");
+                return EXIT_NO_WINDOW;
+            }
+        };
+        let mut themes = ThemeRegistry::with_builtins();
+        themes.set_appearance(desktop.appearance());
+        let mut theme = themes.active();
+        let mut look = Look::resolve(&profile, theme, &desktop);
+        let screen = (desktop.screen_width_px(), desktop.screen_height_px());
+        let (w, h) = window_size(look.font, screen, theme, desktop.scale());
+        let (cols, rows) = grid_dims(w, h, look.font);
+
         // --- The hosted shell: one pseudo-terminal, then the spawn wiring
         // the child's standard streams onto the slave end. The terminal
         // holds the master; the shell's fd 0/1/2 are the slave, a
         // console-class tty, so the shell runs its full interactive editor
         // (local echo, line editing, `Ctrl-C`/`Ctrl-Z`, `ONLCR`) exactly as
         // on the hardware console (`plans/PTY.md`). The pty is created at the
-        // terminal's own grid geometry, so `terminal_size` reports it.
-        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(ROWS, COLS) else {
+        // grid the window will actually show, so `terminal_size` reports it.
+        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
             return fail(EXIT_NO_SHELL, "pty refused");
         };
         let attach = shell_wires(pty_slave);
@@ -296,9 +560,9 @@ mod program {
         // variable this terminal owns is TERM, naming the emulator it
         // presents, so its own value replaces any inherited TERM (the shared
         // `shell_env` rule, host-tested). The environment is data and carries
-        // no authority (§4, §5.4).
+        // no authority.
         let env_owned = shell_env(TERM, (0..tairix_rt::env_count()).filter_map(tairix_rt::env));
-        let env: alloc::vec::Vec<&[u8]> = env_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+        let env: Vec<&[u8]> = env_owned.iter().map(Vec::as_slice).collect();
         let shell_pid =
             tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
         if shell_pid < 0 {
@@ -317,31 +581,11 @@ mod program {
             |buf: &mut [u8]| tairix_rt::fs_read(pty_master, 0, buf).map_err(errno_from),
             |bytes: &[u8]| tairix_rt::fs_write(pty_master, 0, bytes).map_err(errno_from),
         );
-        let Some(mut terminal) = Terminal::new(COLS, ROWS, source) else {
+        let Some(mut terminal) = Terminal::new(cols, rows, source) else {
             return fail(EXIT_NO_SHELL, "screen grid refused");
         };
 
         // --- Open the window and paint the first frame.
-        let mut client = WindowClient::new(RtWindowTransport);
-        // The desktop this window will be shown on: the screen, the density,
-        // and the appearance, before anything is sized or painted, so the
-        // first frame is right rather than a guess corrected once the user
-        // has seen it.
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                let _ = writeln!(Stderr, "terminal: desktop query refused: {err}");
-                return EXIT_NO_WINDOW;
-            }
-        };
-        let mut desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "terminal: cannot draw this desktop: {err}");
-                return EXIT_NO_WINDOW;
-            }
-        };
-        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mut mode = mode_for(w, h);
         let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
         let total = frame_len * FRAME_COUNT as usize;
@@ -427,15 +671,22 @@ mod program {
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
-        let mut themes = tairix_theme::ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
-        let mut theme = themes.active();
-        let mut font = BitmapFont::monospace(
-            desktop
-                .scale()
-                .scale_length(tairix_font::atlas::CELL_HEIGHT),
-        );
-        if present_frame(&terminal, theme, &mut client, window, frames, &mode, font).is_err() {
+        apply_blur(&mut client, window, &profile);
+        let mut overlay = Overlay::None;
+        if present_frame(
+            &terminal,
+            &profile,
+            &mut look,
+            &overlay,
+            theme,
+            desktop.scale(),
+            &mut client,
+            window,
+            frames,
+            &mode,
+        )
+        .is_err()
+        {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
@@ -443,16 +694,104 @@ mod program {
         // woken member's token (never drain every source per wake — a
         // blocking receive on an idle source would wedge the loop). Each
         // member's readiness is a level peek, so work left undrained
-        // re-reports on the next wait.
+        // re-reports on the next wait. The park carries a frame deadline
+        // only while an animated effect is in force.
         loop {
+            let animated = profile.effects.is_animated(desktop.scale().percent());
+            let timeout = if animated {
+                FRAME_INTERVAL_NS
+            } else {
+                u64::MAX
+            };
             let mut token = 0u64;
-            if tairix_rt::waitset_wait(set, u64::MAX, &mut token) != 0 {
+            let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
+            if waited != 0 {
+                if errno_from(waited) == Errno::TimedOut {
+                    // The frame deadline elapsed: advance the animation and
+                    // repaint. Nothing else changed.
+                    look.phase = look.phase.advance();
+                    if present_frame(
+                        &terminal,
+                        &profile,
+                        &mut look,
+                        &overlay,
+                        theme,
+                        desktop.scale(),
+                        &mut client,
+                        window,
+                        frames,
+                        &mode,
+                    )
+                    .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
                 return fail(EXIT_CHANNEL_LOST, "wait-set lost");
             }
             match token {
                 EVENT_TOKEN => {
-                    match drain_events(&mut terminal, &mut desktop, event_endpoint, server) {
+                    let outcome = drain_events(
+                        &mut terminal,
+                        &mut profile,
+                        &mut overlay,
+                        &mut desktop,
+                        theme,
+                        look.font,
+                        Rect::new(0, 0, mode.width_px, mode.height_px),
+                        event_endpoint,
+                        server,
+                    );
+                    match outcome {
                         EventOutcome::Continue => {}
+                        EventOutcome::Repaint => {
+                            if present_frame(
+                                &terminal,
+                                &profile,
+                                &mut look,
+                                &overlay,
+                                theme,
+                                desktop.scale(),
+                                &mut client,
+                                window,
+                                frames,
+                                &mode,
+                            )
+                            .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        EventOutcome::ProfileChanged => {
+                            // The user changed a setting: re-derive the
+                            // colours and the face, tell the session how far
+                            // to blur behind the window, reshape the grid to
+                            // the new cell size (the pty follows), store the
+                            // change, and repaint.
+                            look.refresh(&profile, theme, &desktop);
+                            apply_blur(&mut client, window, &profile);
+                            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, look.font);
+                            let _ = terminal.resize(cols, rows);
+                            let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
+                            persist_profile(store.as_deref(), &profile);
+                            if present_frame(
+                                &terminal,
+                                &profile,
+                                &mut look,
+                                &overlay,
+                                theme,
+                                desktop.scale(),
+                                &mut client,
+                                window,
+                                frames,
+                                &mode,
+                            )
+                            .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
                         EventOutcome::Resized {
                             width_px,
                             height_px,
@@ -462,10 +801,10 @@ mod program {
                             // window size) so its prompt and any full-screen
                             // program re-lay-out. A refused or unallocatable
                             // re-map keeps the current window rather than
-                            // failing the app (fail closed): the grid and pty
-                            // size are only updated once the new region is
-                            // adopted, so the screen never claims a geometry
-                            // the surface cannot hold.
+                            // failing the app: the grid and pty size are only
+                            // updated once the new region is adopted, so the
+                            // screen never claims a geometry the surface cannot
+                            // hold.
                             let new_mode = mode_for(width_px, height_px);
                             if let Some((new_base, new_len)) = resize_frames(
                                 &mut client,
@@ -489,17 +828,23 @@ mod program {
                                         region_len,
                                     )
                                 };
-                                let (cols, rows) = grid_dims(width_px, height_px, font);
+                                let (cols, rows) = grid_dims(width_px, height_px, look.font);
                                 let _ = terminal.resize(cols, rows);
                                 let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
+                                // The afterglow is the shape of the old
+                                // screen; a resized one must not ghost it.
+                                look.afterglow.clear();
                                 if present_frame(
                                     &terminal,
+                                    &profile,
+                                    &mut look,
+                                    &overlay,
                                     theme,
+                                    desktop.scale(),
                                     &mut client,
                                     window,
                                     frames,
                                     &mode,
-                                    font,
                                 )
                                 .is_err()
                                 {
@@ -509,45 +854,27 @@ mod program {
                         }
                         EventOutcome::DesktopChanged => {
                             // The scale and/or appearance changed: re-apply
-                            // the theme, re-derive the monospace font from
-                            // the new scale, reshape the grid to match (the
-                            // pty follows), and repaint. `desktop` itself was
+                            // the theme, re-derive the look from the new
+                            // scale, reshape the grid to match (the pty
+                            // follows), and repaint. `desktop` itself was
                             // already updated inside `drain_events`.
                             themes.set_appearance(desktop.appearance());
                             theme = themes.active();
-                            font = BitmapFont::monospace(
-                                desktop
-                                    .scale()
-                                    .scale_length(tairix_font::atlas::CELL_HEIGHT),
-                            );
-                            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, font);
+                            look.refresh(&profile, theme, &desktop);
+                            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, look.font);
                             let _ = terminal.resize(cols, rows);
                             let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
                             if present_frame(
                                 &terminal,
+                                &profile,
+                                &mut look,
+                                &overlay,
                                 theme,
+                                desktop.scale(),
                                 &mut client,
                                 window,
                                 frames,
                                 &mode,
-                                font,
-                            )
-                            .is_err()
-                            {
-                                return fail(EXIT_CHANNEL_LOST, "present refused");
-                            }
-                        }
-                        EventOutcome::Redraw => {
-                            // The session reclaimed the retained pixels; the
-                            // grid is still live, so re-render it in full.
-                            if present_frame(
-                                &terminal,
-                                theme,
-                                &mut client,
-                                window,
-                                frames,
-                                &mode,
-                                font,
                             )
                             .is_err()
                             {
@@ -555,10 +882,10 @@ mod program {
                             }
                         }
                         EventOutcome::End => {
-                            // The desktop asked, or the shell's stdin is
-                            // gone: close the window and end cleanly. The
-                            // keystroke pipe drops with this process, so
-                            // the shell observes end-of-file and exits.
+                            // The desktop asked, the user chose Close, or the
+                            // shell's stdin is gone: close the window and end
+                            // cleanly. The pty master drops with this process,
+                            // so the shell observes end-of-file and exits.
                             let _ = client.close(window);
                             return 0;
                         }
@@ -569,8 +896,19 @@ mod program {
                 }
                 SHELL_TOKEN => match terminal.pump() {
                     Ok(_) => {
-                        if present_frame(&terminal, theme, &mut client, window, frames, &mode, font)
-                            .is_err()
+                        if present_frame(
+                            &terminal,
+                            &profile,
+                            &mut look,
+                            &overlay,
+                            theme,
+                            desktop.scale(),
+                            &mut client,
+                            window,
+                            frames,
+                            &mode,
+                        )
+                        .is_err()
                         {
                             return fail(EXIT_CHANNEL_LOST, "present refused");
                         }
@@ -606,8 +944,18 @@ mod program {
                     // purpose — rather than closing silently.
                     let reason = reap_shell(shell_pid);
                     while terminal.pump().is_ok() {}
-                    let _ =
-                        present_frame(&terminal, theme, &mut client, window, frames, &mode, font);
+                    let _ = present_frame(
+                        &terminal,
+                        &profile,
+                        &mut look,
+                        &overlay,
+                        theme,
+                        desktop.scale(),
+                        &mut client,
+                        window,
+                        frames,
+                        &mode,
+                    );
                     let _ = client.close(window);
                     if let Some(reason) = reason {
                         return fail(
@@ -619,6 +967,10 @@ mod program {
                 }
                 PRESSURE_TOKEN if tairix_procinfo::pressure::refresh() => {
                     tairix_font::trim_glyph_cache();
+                    // The phosphor trail is a whole screen of per-pixel state
+                    // that only matters while that effect is on, so it gives
+                    // first under pressure; the next frame starts a new trail.
+                    look.afterglow.clear();
                 }
                 // A band that did not move needs no trim, and a token outside
                 // the registered members cannot occur (the set holds exactly
@@ -631,8 +983,13 @@ mod program {
 
     /// What the event-mailbox drain concluded.
     enum EventOutcome {
-        /// Every pending event was applied; keep serving.
+        /// Every pending event was applied and nothing on screen changed.
         Continue,
+        /// Something on screen changed; repaint and present.
+        Repaint,
+        /// The user changed a setting: re-derive the look, re-apply the
+        /// backdrop blur, reshape the grid, store the profile, and repaint.
+        ProfileChanged,
         /// The window manager resized the window to this new client size (a
         /// drag-resize that settled, or a maximize/restore); the caller
         /// re-maps its frame region, reshapes the grid, and updates the pty
@@ -647,33 +1004,145 @@ mod program {
         /// The desktop changed (screen size, scale, or appearance); already
         /// adopted by [`Desktop::apply`] before this is returned.
         DesktopChanged,
-        /// The session released this window's retained pixels to reclaim
-        /// memory and needs them presented again. The terminal decodes its
-        /// mailbox itself, so no library re-present happens on its behalf:
-        /// it repaints the live screen in full. Nothing is lost — the screen
-        /// is rendered from the shell's grid, which the terminal still holds.
-        Redraw,
-        /// The session asked the window to close, or the shell can no
-        /// longer accept input: end the program cleanly.
+        /// The desktop asked the window to close, the user chose *Close*, or
+        /// the shell can no longer accept input: end the program cleanly.
         End,
         /// The mailbox itself failed: end fail-loud.
         ChannelLost,
     }
 
+    /// Carry out `command`, reporting what the caller must now do.
+    fn run_command<S: ShellSource>(
+        command: Command,
+        terminal: &mut Terminal<S>,
+        profile: &mut Profile,
+        overlay: &mut Overlay,
+    ) -> EventOutcome {
+        match command {
+            Command::Settings => {
+                *overlay = Overlay::Sheet(Settings::new(profile));
+                EventOutcome::Repaint
+            }
+            Command::Larger => {
+                profile.enlarge();
+                EventOutcome::ProfileChanged
+            }
+            Command::Smaller => {
+                profile.reduce();
+                EventOutcome::ProfileChanged
+            }
+            Command::ActualSize => {
+                profile.font_size_px = Profile::default().font_size_px;
+                EventOutcome::ProfileChanged
+            }
+            Command::Clear => {
+                terminal.clear();
+                EventOutcome::Repaint
+            }
+            Command::Close => EventOutcome::End,
+        }
+    }
+
+    /// Route one pointer event, which the open overlay owns if there is one.
+    ///
+    /// With no overlay open, a secondary press opens the context menu at the
+    /// pressed point and every other pointer event is a no-op: the screen is
+    /// shell-driven and the emulator keeps no scrollback for a wheel to move.
+    #[allow(clippy::too_many_arguments)] // The routing needs the whole drawing context to hit-test the overlay.
+    fn route_pointer(
+        overlay: &mut Overlay,
+        profile: &mut Profile,
+        action: PointerAction,
+        at: Point,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> PointerRouting {
+        match overlay {
+            Overlay::None => {
+                if action == PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Secondary)
+                {
+                    *overlay = Overlay::Menu(ContextMenu::open(at));
+                    return PointerRouting::Repaint;
+                }
+                PointerRouting::Nothing
+            }
+            Overlay::Menu(menu) => {
+                let mut routing = PointerRouting::Nothing;
+                for event in pointer_input_events(action, at) {
+                    match menu.on_pointer(&event, viewport, scale, theme, font) {
+                        MenuOutcome::Ignored => {}
+                        MenuOutcome::Changed => routing = PointerRouting::Repaint,
+                        MenuOutcome::Dismissed => {
+                            *overlay = Overlay::None;
+                            return PointerRouting::Repaint;
+                        }
+                        MenuOutcome::Chose(command) => {
+                            *overlay = Overlay::None;
+                            return PointerRouting::Chose(command);
+                        }
+                    }
+                }
+                routing
+            }
+            Overlay::Sheet(sheet) => {
+                let mut routing = PointerRouting::Nothing;
+                for event in pointer_input_events(action, at) {
+                    match sheet.on_pointer(&event, viewport, scale, theme, font) {
+                        SheetOutcome::Ignored => {}
+                        SheetOutcome::Changed => routing = PointerRouting::Repaint,
+                        SheetOutcome::Edited => {
+                            *profile = *sheet.profile();
+                            routing = PointerRouting::Edited;
+                        }
+                        SheetOutcome::Dismissed => {
+                            *profile = *sheet.profile();
+                            return PointerRouting::Close;
+                        }
+                    }
+                }
+                routing
+            }
+        }
+    }
+
+    /// What routing a pointer event concluded.
+    enum PointerRouting {
+        /// Nothing to do.
+        Nothing,
+        /// Repaint the window.
+        Repaint,
+        /// The settings sheet edited the profile.
+        Edited,
+        /// A menu row chose this command.
+        Chose(Command),
+        /// The settings sheet asked to close.
+        Close,
+    }
+
     /// Drain every queued window event (non-blocking — the wait-set wake
-    /// said at least one is pending), applying key presses to the shell.
+    /// said at least one is pending).
     ///
     /// A short frame or a sender other than the desktop session is
     /// dropped, never applied: the mailbox is open to any capable sender,
     /// so the kernel-attested origin is the authentication. A malformed
     /// frame from the authenticated session is likewise refused (never
     /// guessed at).
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One dispatch over the whole window vocabulary; splitting it would hide the routing order.
     fn drain_events<S: ShellSource>(
         terminal: &mut Terminal<S>,
+        profile: &mut Profile,
+        overlay: &mut Overlay,
         desktop: &mut Desktop,
+        theme: &Theme,
+        font: BitmapFont,
+        viewport: Rect,
         endpoint: u64,
         server: ProcId,
     ) -> EventOutcome {
+        let scale = desktop.scale();
+        let mut repaint = false;
         loop {
             let mut frame = [0u8; WindowEvent::WIRE_LEN];
             let mut sender = [0u8; ORIGIN_WIRE_LEN];
@@ -707,25 +1176,52 @@ mod program {
                     }
                     match event {
                         WindowEvent::Key { key, .. } => {
-                            // The one shared layout-to-tty rule; a release
-                            // encodes zero bytes and sends nothing.
-                            let mut bytes = [0u8; MAX_KEY_BYTES];
-                            let Ok(n) = encode_key_input(&key, &mut bytes) else {
-                                continue;
-                            };
-                            if n > 0 && terminal.send(&bytes[..n]).is_err() {
-                                // The shell can no longer accept input
-                                // (it exited): the session is over.
-                                return EventOutcome::End;
+                            match route_key(
+                                terminal, profile, overlay, key, scale, theme, font, viewport,
+                            ) {
+                                KeyRouting::Nothing => {}
+                                KeyRouting::Repaint => repaint = true,
+                                KeyRouting::Edited => return EventOutcome::ProfileChanged,
+                                KeyRouting::Command(command) => {
+                                    return finish(
+                                        run_command(command, terminal, profile, overlay),
+                                        repaint,
+                                    )
+                                }
+                                KeyRouting::CloseSheet => {
+                                    *overlay = Overlay::None;
+                                    return EventOutcome::ProfileChanged;
+                                }
+                                KeyRouting::ShellGone => return EventOutcome::End,
+                            }
+                        }
+                        WindowEvent::Pointer { x, y, action, .. } => {
+                            let at = Point::new(
+                                i32::try_from(x).unwrap_or(i32::MAX),
+                                i32::try_from(y).unwrap_or(i32::MAX),
+                            );
+                            match route_pointer(
+                                overlay, profile, action, at, viewport, scale, theme, font,
+                            ) {
+                                PointerRouting::Nothing => {}
+                                PointerRouting::Repaint => repaint = true,
+                                PointerRouting::Edited => return EventOutcome::ProfileChanged,
+                                PointerRouting::Chose(command) => {
+                                    return finish(
+                                        run_command(command, terminal, profile, overlay),
+                                        repaint,
+                                    )
+                                }
+                                PointerRouting::Close => {
+                                    *overlay = Overlay::None;
+                                    return EventOutcome::ProfileChanged;
+                                }
                             }
                         }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
                         // The session dropped the window's pixels under
-                        // memory pressure: repaint the whole screen. Returning
-                        // hands the present to the caller (which owns the
-                        // frame region and the window client); events queued
-                        // behind it re-report on the next wake.
-                        WindowEvent::RedrawRequested { .. } => return EventOutcome::Redraw,
+                        // memory pressure: repaint the whole screen.
+                        WindowEvent::RedrawRequested { .. } => return EventOutcome::Repaint,
                         // The window manager resized the window (a settled
                         // drag-resize, or a maximize/restore): hand the new
                         // client size back to the caller, which re-maps the
@@ -742,14 +1238,14 @@ mod program {
                                 height_px,
                             }
                         }
-                        // Focus changes and pointer events repaint nothing;
-                        // the screen is shell-driven. A wheel likewise has
-                        // nothing to move: the terminal renders the shell's
-                        // live screen and keeps no scrollback, so there is no
-                        // scrollable content a tick could reach. The terminal
-                        // never requests a pick, so a pick conclusion is a
-                        // session bug and is ignored (an unredeemed
-                        // delegation is reclaimed by the kernel at exit).
+                        // Focus changes repaint nothing; the screen is
+                        // shell-driven. A wheel likewise has nothing to move:
+                        // the terminal renders the shell's live screen and
+                        // keeps no scrollback, so there is no scrollable
+                        // content a tick could reach. The terminal never
+                        // requests a pick, so a pick conclusion is a session
+                        // bug and is ignored (an unredeemed delegation is
+                        // reclaimed by the kernel at exit).
                         //
                         // Minimized needs no action (the window is hidden and
                         // kept on the taskbar; the screen is redrawn from the
@@ -759,7 +1255,6 @@ mod program {
                         // nothing further to do with the event itself. These
                         // are honest no-ops, not deferred work.
                         WindowEvent::Focus { .. }
-                        | WindowEvent::Pointer { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
                         | WindowEvent::FilePicked { .. }
@@ -767,9 +1262,109 @@ mod program {
                         | WindowEvent::DesktopChanged { .. } => {}
                     }
                 }
-                Err(err) if errno_from(err) == Errno::WouldBlock => return EventOutcome::Continue,
+                Err(err) if errno_from(err) == Errno::WouldBlock => {
+                    return if repaint {
+                        EventOutcome::Repaint
+                    } else {
+                        EventOutcome::Continue
+                    };
+                }
                 Err(_) => return EventOutcome::ChannelLost,
             }
+        }
+    }
+
+    /// Fold a pending repaint into `outcome`: a command that concluded
+    /// nothing still repaints when an earlier event in the same drain
+    /// changed the screen.
+    fn finish(outcome: EventOutcome, repaint: bool) -> EventOutcome {
+        match outcome {
+            EventOutcome::Continue if repaint => EventOutcome::Repaint,
+            other => other,
+        }
+    }
+
+    /// What routing a key press concluded.
+    enum KeyRouting {
+        /// Nothing to do.
+        Nothing,
+        /// Repaint the window.
+        Repaint,
+        /// The settings sheet edited the profile.
+        Edited,
+        /// A menu accelerator or row named this command.
+        Command(Command),
+        /// The settings sheet asked to close.
+        CloseSheet,
+        /// The shell can no longer accept input.
+        ShellGone,
+    }
+
+    /// Route one key press: the open overlay owns it, else a terminal
+    /// accelerator claims it, else it is shell input.
+    #[allow(clippy::too_many_arguments)] // The routing needs the whole drawing context to hit-test the overlay.
+    fn route_key<S: ShellSource>(
+        terminal: &mut Terminal<S>,
+        profile: &mut Profile,
+        overlay: &mut Overlay,
+        key: tairix_abi::input::KeyInput,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        viewport: Rect,
+    ) -> KeyRouting {
+        let input = key_input_event(key);
+        if let Overlay::Menu(menu) = overlay {
+            let InputEvent::KeyPressed { key, .. } = input else {
+                return KeyRouting::Nothing;
+            };
+            return match menu.on_key(key) {
+                MenuOutcome::Ignored => KeyRouting::Nothing,
+                MenuOutcome::Changed => KeyRouting::Repaint,
+                MenuOutcome::Dismissed => {
+                    *overlay = Overlay::None;
+                    KeyRouting::Repaint
+                }
+                MenuOutcome::Chose(command) => {
+                    *overlay = Overlay::None;
+                    KeyRouting::Command(command)
+                }
+            };
+        }
+        if let Overlay::Sheet(sheet) = overlay {
+            let InputEvent::KeyPressed { key, modifiers } = input else {
+                return KeyRouting::Nothing;
+            };
+            let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, font);
+            if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
+                *profile = *sheet.profile();
+            }
+            return match outcome {
+                SheetOutcome::Ignored => KeyRouting::Nothing,
+                SheetOutcome::Changed => KeyRouting::Repaint,
+                SheetOutcome::Edited => KeyRouting::Edited,
+                SheetOutcome::Dismissed => KeyRouting::CloseSheet,
+            };
+        }
+        if let InputEvent::KeyPressed { key, modifiers } = input {
+            if let Some(command) = Command::accelerator(key, modifiers) {
+                return KeyRouting::Command(command);
+            }
+        }
+        // The one shared layout-to-tty rule; a release encodes zero bytes
+        // and sends nothing.
+        let mut bytes = [0u8; MAX_KEY_BYTES];
+        let Ok(n) = encode_key_input(&key, &mut bytes) else {
+            return KeyRouting::Nothing;
+        };
+        match bytes.get(..n) {
+            Some(slice) if n > 0 => {
+                if terminal.send(slice).is_err() {
+                    return KeyRouting::ShellGone;
+                }
+                KeyRouting::Nothing
+            }
+            _ => KeyRouting::Nothing,
         }
     }
 

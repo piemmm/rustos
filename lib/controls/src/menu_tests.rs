@@ -597,3 +597,81 @@ fn a_heavier_contrast_theme_thickens_the_divider() {
         "high contrast must widen the rule: {heavy_band} vs {band}"
     );
 }
+
+// --- Anchored popup placement -------------------------------------------
+
+#[test]
+fn anchored_rect_places_the_top_left_at_the_anchor_when_it_fits() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let viewport = Rect::new(0, 0, 800, 600);
+    let rect = menu.anchored_rect(Point::new(40, 30), viewport, Scale::ONE, &theme, font());
+    assert_eq!((rect.origin.x, rect.origin.y), (40, 30));
+    assert!(rect.width > 0 && rect.height > 0);
+}
+
+#[test]
+fn anchored_rect_shifts_left_near_the_right_edge() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let viewport = Rect::new(0, 0, 800, 600);
+    let anchor = Point::new(798, 30);
+    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    assert!(
+        rect.origin.x < anchor.x,
+        "an anchor near the right edge shifts the menu left off it"
+    );
+    assert!(rect.origin.x + xi(rect.width) <= xi(viewport.width));
+}
+
+#[test]
+fn anchored_rect_shifts_up_near_the_bottom_edge() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let viewport = Rect::new(0, 0, 800, 600);
+    let anchor = Point::new(30, 598);
+    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    assert!(
+        rect.origin.y < anchor.y,
+        "an anchor near the bottom edge shifts the menu up off it"
+    );
+    assert!(rect.origin.y + xi(rect.height) <= xi(viewport.height));
+}
+
+#[test]
+fn anchored_rect_shifts_both_ways_at_a_corner() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let viewport = Rect::new(0, 0, 800, 600);
+    let corner = menu.anchored_rect(Point::new(798, 598), viewport, Scale::ONE, &theme, font());
+    assert!(
+        corner.origin.x >= 0 && corner.origin.y >= 0,
+        "the menu never leaves the viewport origin"
+    );
+    assert!(corner.origin.x + xi(corner.width) <= xi(viewport.width));
+    assert!(corner.origin.y + xi(corner.height) <= xi(viewport.height));
+}
+
+#[test]
+fn anchored_rect_clamps_to_a_viewport_smaller_than_the_menu() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let tiny = Rect::new(0, 0, 10, 8);
+    let rect = menu.anchored_rect(Point::new(3, 3), tiny, Scale::ONE, &theme, font());
+    assert!(rect.width >= 1 && rect.width <= tiny.width);
+    assert!(rect.height >= 1 && rect.height <= tiny.height);
+    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
+}
+
+#[test]
+fn anchored_rect_grows_with_a_larger_scale() {
+    let theme = Theme::dark();
+    let menu = three_item_menu();
+    let viewport = Rect::new(0, 0, 1600, 1200);
+    let anchor = Point::new(10, 10);
+    let unscaled = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    let scale = Scale::from_percent(200).expect("valid scale");
+    let doubled = menu.anchored_rect(anchor, viewport, scale, &theme, font());
+    assert!(doubled.width > unscaled.width);
+    assert!(doubled.height > unscaled.height);
+}

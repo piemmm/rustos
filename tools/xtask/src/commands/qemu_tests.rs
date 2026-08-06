@@ -7161,12 +7161,7 @@ fn served_window_layout(
     resizable: bool,
     theme: &tairix_theme::Theme,
 ) -> tairix_controls::FrameLayout {
-    // Of the furniture state only `resizable` widens the band; activation,
-    // movability and the restored/maximized state never move an edge.
-    let frame = tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
-        resizable,
-        ..tairix_controls::WindowFurnitureState::default()
-    });
+    let frame = window_frame(resizable);
     let scale = tairix_geometry::Scale::ONE;
     let insets = frame.insets(scale, theme);
     let origin = tairix_desktop_session::windows::cascade_origin_for(slot);
@@ -7181,6 +7176,50 @@ fn served_window_layout(
             .saturating_add(insets.bottom),
     );
     frame.layout(outer, scale, theme)
+}
+
+/// The window manager's furniture for a window the session decorates.
+///
+/// Of the furniture state only `resizable` widens the band; activation,
+/// movability and the restored/maximized state never move an edge. One
+/// definition, so every host-side reconstruction of a window's edges reads
+/// the band the compositor itself decorates with.
+fn window_frame(resizable: bool) -> tairix_controls::WindowFrame {
+    tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
+        resizable,
+        ..tairix_controls::WindowFurnitureState::default()
+    })
+}
+
+/// How far inside its own top-left corner a "focus this window" click aims,
+/// in physical pixels.
+///
+/// Far enough in that anti-aliasing on the client's first pixel column and
+/// row cannot put the point on the furniture, and well inside the smallest
+/// client any app opens with.
+const CLIENT_AIM_INSET_PX: i32 = 8;
+
+/// A point inside the client of the `slot`-th window the session opens,
+/// without assuming how large that client is.
+///
+/// [`served_window_layout`] is the right answer for a window whose client
+/// size is a compiled-in constant, but the terminal's is not: it sizes
+/// itself to what its 80×25 screen measures in the face the guest's font
+/// service actually resolves, which no host reconstruction can know. The
+/// client's *top-left* needs no such knowledge — it is the cascade slot plus
+/// the same furniture band — so a click a short way in from there reaches
+/// the application whatever extent it chose.
+fn served_client_aim(
+    slot: u64,
+    resizable: bool,
+    theme: &tairix_theme::Theme,
+) -> tairix_geometry::Point {
+    let insets = window_frame(resizable).insets(tairix_geometry::Scale::ONE, theme);
+    let origin = tairix_desktop_session::windows::cascade_origin_for(slot);
+    tairix_geometry::Point::new(
+        origin.x + i32::try_from(insets.left).unwrap_or(0) + CLIENT_AIM_INSET_PX,
+        origin.y + i32::try_from(insets.top).unwrap_or(0) + CLIENT_AIM_INSET_PX,
+    )
 }
 
 /// The `window` region of the decoded `image` is composited: its inset body
@@ -7950,17 +7989,11 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         files_client.left() + (tairix_browse::WIN_WIDTH / 2) as i32,
         files_client.top() + path_bar_y as i32,
     );
-    let terminal_window = rect_centre(
-        served_window_layout(
-            1,
-            tairix_terminal::WIN_WIDTH,
-            tairix_terminal::WIN_HEIGHT,
-            tairix_terminal::WIN_RESIZABLE,
-            shell.session().active_theme(),
-        )
-        .client,
-        "terminal window",
-    )?;
+    let terminal_window = served_client_aim(
+        1,
+        tairix_terminal::WIN_RESIZABLE,
+        shell.session().active_theme(),
+    );
 
     // Relative-motion arithmetic: the pointer starts at an unknown
     // position (the session centres it), so the first move overshoots

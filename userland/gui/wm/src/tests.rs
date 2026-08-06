@@ -1894,6 +1894,250 @@ fn accelerated_present_falls_back_when_a_layer_is_too_large() {
     );
 }
 
+// ---- backdrop blur ---------------------------------------------------
+
+/// A fully transparent surface: a window made of it draws nothing of its
+/// own, so the composited pixels under it *are* its backdrop and a test can
+/// read the blur's own output rather than a blend of it.
+fn clear(w: u32, h: u32) -> Surface {
+    Surface::filled(w, h, Pixel::TRANSPARENT).expect("surface allocates")
+}
+
+/// A 12×6 screen holding a hard red/blue vertical edge at column 6 (an
+/// opaque window over the left half of a blue background) with a
+/// transparent `radius`-blurred window over the whole of it, composited
+/// from scratch.
+fn frosted_edge(radius: u16) -> Compositor {
+    let mut c = new_compositor(mode(12, 6), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    let glass = c.add_window(Point::ORIGIN, clear(12, 6));
+    assert!(c.set_backdrop_blur(glass, radius));
+    c.composite();
+    c
+}
+
+#[test]
+fn a_blurred_window_spreads_the_backdrop_behind_it() {
+    let plain = frosted_edge(0);
+    assert_eq!(frame_pixel(&plain, 5, 3), [255, 0, 0, 255], "hard edge");
+    assert_eq!(frame_pixel(&plain, 6, 3), [0, 0, 255, 255], "hard edge");
+
+    let frosted = frosted_edge(2);
+    for x in [5, 6] {
+        let [r, _, b, a] = frame_pixel(&frosted, x, 3);
+        assert!(
+            r > 0 && r < 255 && b > 0 && b < 255,
+            "column {x} mixes both sides of the edge, got {r},{b}"
+        );
+        assert_eq!(a, 255, "the screen stays opaque");
+    }
+    assert_eq!(
+        frame_pixel(&frosted, 0, 3),
+        [255, 0, 0, 255],
+        "a clamped edge keeps the far side of the window pure"
+    );
+    assert_eq!(frame_pixel(&frosted, 11, 3), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_zero_radius_blur_is_a_no_op() {
+    let mut unset = new_compositor(mode(12, 6), BLUE).expect("compositor");
+    unset.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    unset.add_window(Point::ORIGIN, clear(12, 6));
+    unset.composite();
+
+    assert_eq!(
+        frosted_edge(0).frame(),
+        unset.frame(),
+        "radius 0 composites exactly as a window that never asked to frost"
+    );
+}
+
+#[test]
+fn the_blur_is_confined_to_the_window_rectangle() {
+    let mut plain = new_compositor(mode(12, 6), BLUE).expect("compositor");
+    plain.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    plain.add_window(Point::new(4, 1), clear(4, 4));
+    plain.composite();
+
+    let mut frosted = new_compositor(mode(12, 6), BLUE).expect("compositor");
+    frosted.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    let glass = frosted.add_window(Point::new(4, 1), clear(4, 4));
+    assert!(frosted.set_backdrop_blur(glass, 2));
+    frosted.composite();
+
+    for y in 0..6 {
+        for x in 0..12 {
+            let inside = (4..8).contains(&x) && (1..5).contains(&y);
+            let plain_pixel = frame_pixel(&plain, x, y);
+            let frosted_pixel = frame_pixel(&frosted, x, y);
+            if !inside {
+                assert_eq!(
+                    frosted_pixel, plain_pixel,
+                    "({x},{y}) is outside the window and must be untouched"
+                );
+            }
+        }
+    }
+    let [r, _, b, _] = frame_pixel(&frosted, 5, 2);
+    assert!(r > 0 && b > 0, "inside the window the edge is spread");
+}
+
+/// Paint one green pixel into a window's content and report exactly that
+/// pixel as changed: the smallest damage an application can present.
+fn paint_dot(content: &mut Surface) -> (bool, Rect) {
+    content.set(1, 4, GREEN.premultiply());
+    (true, Rect::new(1, 4, 1, 1))
+}
+
+/// A 16×8 screen with a three-column opaque block at `x` behind a
+/// transparent blurred window covering columns 4..12, composited from
+/// scratch. The block is narrower than the blur's reach, so where it sits
+/// changes the frosted pixels right across the window.
+///
+/// `dot` paints [`paint_dot`] into the block *before* that first
+/// whole-screen composite, so a caller can compare an incremental repaint
+/// against a from-scratch one of the very same scene.
+fn frosted_block(x: i32, dot: bool) -> (Compositor, WindowId) {
+    let mut c = new_compositor(mode(16, 8), BLUE).expect("compositor");
+    let block = c.add_window(Point::new(x, 0), opaque(3, 8, RED));
+    let glass = c.add_window(Point::new(4, 0), clear(8, 8));
+    assert!(c.set_backdrop_blur(glass, 3));
+    if dot {
+        assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
+    }
+    c.composite();
+    (c, block)
+}
+
+#[test]
+fn a_change_behind_a_blurred_window_repaints_all_of_it() {
+    let (mut moved, block) = frosted_block(2, false);
+    // The move damages only the block's old and new rectangles — a strip
+    // narrower than the frosted window — so the frame can only match a
+    // from-scratch composite if the whole window was refrosted.
+    assert!(moved.move_window(block, Point::new(6, 0)));
+    assert!(!composite_checked(&mut moved).is_empty());
+
+    let (fresh, _) = frosted_block(6, false);
+    assert_eq!(
+        moved.frame(),
+        fresh.frame(),
+        "a partial repaint of a blurred window matches a whole-screen one"
+    );
+}
+
+#[test]
+fn a_frosted_window_repaints_whole_however_little_is_damaged() {
+    let (mut c, block) = frosted_block(6, false);
+    // A single presented pixel behind the frosting: the damage widens to
+    // the frosted window's whole rectangle, so every row of it is
+    // recomposited and the result matches a from-scratch composite.
+    assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
+    let repainted = composite_checked(&mut c);
+    for y in 0..8 {
+        assert!(
+            repainted.covers(Point::new(4, y)) && repainted.covers(Point::new(11, y)),
+            "row {y} of the frosted window was recomposited end to end"
+        );
+    }
+
+    let (fresh, _) = frosted_block(6, true);
+    assert_eq!(
+        c.frame(),
+        fresh.frame(),
+        "one damaged pixel refrosts the window exactly as a full composite"
+    );
+}
+
+#[test]
+fn the_blur_radius_is_a_logical_length() {
+    let mut coarse = new_compositor(mode(12, 6), BLUE).expect("compositor");
+    coarse.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    let glass = coarse.add_window(Point::ORIGIN, clear(12, 6));
+    assert!(coarse.set_backdrop_blur(glass, 1));
+    assert!(coarse.set_scale(Scale::from_percent(300).expect("scale")));
+    coarse.composite();
+
+    // At 100% a one-pixel radius cannot reach column 8; tripled by the
+    // output's density it does.
+    let [r, _, _, _] = frame_pixel(&coarse, 8, 3);
+    assert!(r > 0, "the physical radius follows the output scale");
+    assert_eq!(
+        frame_pixel(&frosted_edge(1), 8, 3),
+        [0, 0, 255, 255],
+        "at 100% the same logical radius stays clear of column 8"
+    );
+}
+
+#[test]
+fn a_rounded_frosted_window_leaves_its_corners_alone() {
+    let mut plain = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    plain.add_window(Point::ORIGIN, opaque(10, 20, RED));
+    plain.add_window(Point::ORIGIN, clear(20, 20));
+    plain.composite();
+
+    let mut frosted = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    frosted.add_window(Point::ORIGIN, opaque(10, 20, RED));
+    let glass = frosted.add_window(Point::ORIGIN, clear(20, 20));
+    assert!(frosted.set_corners(glass, Corners::Rounded { radius: 8 }));
+    assert!(frosted.set_backdrop_blur(glass, 3));
+    frosted.composite();
+
+    assert_eq!(
+        frame_pixel(&frosted, 0, 0),
+        frame_pixel(&plain, 0, 0),
+        "the corner the window does not cover keeps its unfrosted pixel"
+    );
+    let [r, _, b, _] = frame_pixel(&frosted, 10, 10);
+    assert!(r > 0 && b > 0, "the covered centre is frosted");
+}
+
+#[test]
+fn an_unknown_or_hidden_window_asks_for_no_blur() {
+    let mut c = new_compositor(mode(4, 4), BLUE).expect("compositor");
+    let id = c.add_window(Point::ORIGIN, opaque(2, 2, RED));
+    assert!(!c.has_backdrop_blur());
+    assert!(c.set_backdrop_blur(id, 4));
+    assert!(c.has_backdrop_blur());
+    assert!(c.set_visible(id, false));
+    assert!(
+        !c.has_backdrop_blur(),
+        "a hidden window frosts nothing, so the hardware path stays open"
+    );
+    assert!(c.remove(id));
+    assert!(
+        !c.set_backdrop_blur(id, 4),
+        "an unknown window fails closed"
+    );
+}
+
+#[test]
+fn accelerated_present_falls_back_for_a_backdrop_blur() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    assert!(c.set_backdrop_blur(id, 3));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+    assert!(
+        display.layers.is_empty(),
+        "a hardware layer cannot sample what is behind it"
+    );
+    assert_eq!(
+        display.software_frame.len(),
+        8 * 8 * 4,
+        "software frame sent"
+    );
+
+    // Dropping the blur puts the scene back within the engine's reach.
+    assert!(c.set_backdrop_blur(id, 0));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 2, "background + window");
+    assert!(display.software_frame.is_empty());
+}
+
 // ---- root-viewport scrollbars ----------------------------------------
 
 use crate::{RootViewport, ScrollModel, ScrollOrientation, ScrollPolicy, ScrollRange};

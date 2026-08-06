@@ -35,6 +35,13 @@ owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 
+`Menu::anchored_rect` is the one placement rule for a popup menu opened at a
+pointer: it sizes the menu from its own preferred width and height clamped to
+the viewport, then places its top-left at the anchor, shifting left or up only
+as far as needed to keep the whole menu inside the viewport. Every context
+menu — the file manager's right-click menu, a terminal's — reads this one
+method rather than each deriving its own placement arithmetic.
+
 ### Reporting a reading, and standing beside a list
 
 The families a monitoring surface is built from report state without acting on

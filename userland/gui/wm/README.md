@@ -17,20 +17,43 @@ router**:
 - Anti-aliased rounded corners (`corner`) via deterministic
   supersampling, with a square-corner opt-out — the single
   rounded-corner path the taskbar reuses (`AGENTS.md` §2.2).
+- Backdrop blur (`blur`): a window can ask for the already-composited
+  content behind its rectangle to be frosted before its own translucent
+  pixels blend over it. Composition is back-to-front, so the back buffer
+  already holds that backdrop: the compositor composes the layers below
+  the window, blurs the back buffer inside that window's rectangle only,
+  and resumes composing from the window itself. The filter is a separable
+  box blur carrying running sums — cost proportional to the rectangle's
+  area whatever the radius — over premultiplied channels including alpha,
+  with samples past an edge replicating it, so the effect can neither pull
+  a neighbour's pixels in nor write outside the rectangle and a uniform
+  backdrop comes out unchanged. The radius is a desktop length in logical
+  pixels resolved through the output's `Scale`, and the mix back into the
+  back buffer is weighted by the window's own rounded-corner coverage, so
+  a rounded window's frosting fades across exactly the arc its pixels do.
+  Both scratch buffers belong to the compositor and grow to the largest
+  frosted rectangle the session has needed, so a frosted window allocates
+  nothing after its first frame. Because those pixels are a function of
+  the whole backdrop beneath them, every damage rectangle touching a
+  visible frosted window grows to that window's full bounds, iterated
+  until nothing grows; and `present_accelerated` takes the software
+  fallback outright while any visible window is frosted, because a
+  hardware layer is composed from its own pixels and cannot sample what is
+  already behind it.
 - Damage tracking (`damage`): only changed pixels are recomposited.
   `Compositor::composite` returns the `DamageRegion` it actually
   recomposited (screen-clipped), and `has_damage` answers exactly what
   that next composite would produce, so a wake loop can skip a frame
   outright. An update that changes nothing marks nothing: a `move_window`
   to the origin the window already has, `set_corners`/`set_visible`/
-  `set_opacity` to the current value, still return `true` (only an unknown
-  id returns `false`) but repaint no pixel. A present reports its own
-  damage — `present_window_content` takes the presented frame's extent and
-  a conversion returning `(value, Rect)` in content-local pixels,
-  translated into the window's client rectangle and clipped to it —
-  because only the conversion, having compared the pixels it wrote against
-  the ones already there, knows what truly changed. A replaced *surface*
-  is always assumed changed.
+  `set_opacity`/`set_backdrop_blur` to the current value, still return
+  `true` (only an unknown id returns `false`) but repaint no pixel. A
+  present reports its own damage — `present_window_content` takes the
+  presented frame's extent and a conversion returning `(value, Rect)` in
+  content-local pixels, translated into the window's client rectangle and
+  clipped to it — because only the conversion, having compared the pixels
+  it wrote against the ones already there, knows what truly changed. A
+  replaced *surface* is always assumed changed.
 - The frame is the window manager's; the pixels are the client's. A
   window's content buffer is sized by the frame the **client** presents:
   `resize_window`/`resize_window_client` move the geometry the compositor
@@ -200,6 +223,13 @@ content damage (offset by a decoration band, clipped to the client, empty
 marking nothing), the desktop layer (drawing over the background and under
 every window, a smaller-than-screen layer leaving the background showing,
 and installing/replacing/clearing each damaging exactly its footprint),
+the backdrop blur (the box blur's own identities — a uniform field left
+unchanged, an impulse spread symmetrically, radius 0 and a one-pixel
+region identities — and the composited effect: a spread backdrop, a no-op
+at radius 0, confinement to the window rectangle, the logical radius
+following the output scale, rounded corners left alone, the accelerated
+path falling back to software, and a change behind a frosted window
+repainting it to exactly the pixels a whole-screen composite gives),
 and input routing (hit-testing, click-to-activate focus
 and raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position
 of its own and `DesktopKey` naming focus-on-desktop, programmatic

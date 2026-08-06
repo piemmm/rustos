@@ -108,4 +108,15 @@ impl<S: ShellSource> Terminal<S> {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.feed(&mut self.grid, bytes);
     }
+
+    /// Blank the screen and return the cursor home, leaving the shell
+    /// untouched.
+    ///
+    /// The *Clear screen* command: it clears what the emulator is showing, in
+    /// the same way a `clear` would, without writing anything to the shell —
+    /// so a half-typed command line is not disturbed and no program sees
+    /// input it did not receive from the user.
+    pub fn clear(&mut self) {
+        self.grid.clear();
+    }
 }

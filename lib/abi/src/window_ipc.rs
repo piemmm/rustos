@@ -89,6 +89,17 @@ pub const WINDOW_TITLE_MAX: usize = 64;
 /// refused by the bound.
 pub const WINDOW_BUNDLE_PATH_MAX: usize = 512;
 
+/// Widest backdrop-blur radius a window may request, in **logical** pixels
+/// ([`WindowRequest::SetBackdropBlur`]).
+///
+/// This is a validation bound on the compositor's per-frame work, not a
+/// growable capacity: the blur cost of a window is already proportional to
+/// its own area regardless of radius (a separable box blur with a running
+/// sum), but a larger radius still widens the initial window-sum build at
+/// each backdrop's edges and the physical radius after the desktop's UI
+/// scale is applied, so a client cannot ask for an unbounded one.
+pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
+
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
 /// The title crosses a trust boundary into the session's taskbar and
@@ -350,6 +361,20 @@ pub enum WindowRequest {
         /// The window whose offer is withdrawn.
         window: u64,
     },
+    /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
+    /// (at most [`WINDOW_BACKDROP_BLUR_MAX_PX`]): the compositor blurs
+    /// whatever is already composited behind the window's rectangle before
+    /// blending the window's own (typically translucent) pixels over it, so
+    /// a frosted-glass panel reads correctly instead of compositing flatly
+    /// over sharp content. A radius of `0` disables the effect — the
+    /// window's own opacity still applies, but nothing behind it is
+    /// blurred first.
+    SetBackdropBlur {
+        /// The window whose backdrop blur is being set.
+        window_id: u64,
+        /// The blur radius in logical pixels; `0` disables the effect.
+        radius_px: u16,
+    },
     /// Describe the desktop the caller's windows are displayed on: the
     /// screen extent, the UI scale, and the active appearance
     /// ([`DesktopInfo`]). The reply is the
@@ -388,6 +413,8 @@ const OP_DRAG_OFFER: u16 = 7;
 const OP_DRAG_WITHDRAW: u16 = 8;
 /// Wire operation discriminant of [`WindowRequest::QueryDesktop`].
 const OP_QUERY_DESKTOP: u16 = 9;
+/// Wire operation discriminant of [`WindowRequest::SetBackdropBlur`].
+const OP_SET_BACKDROP_BLUR: u16 = 10;
 
 /// Byte offset, within the fixed frame, of a bundle-path payload's
 /// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
@@ -483,6 +510,14 @@ impl WindowRequest {
                 put_u16(&mut out, 6, OP_DRAG_WITHDRAW);
                 put_u64(&mut out, 8, window);
             }
+            Self::SetBackdropBlur {
+                window_id,
+                radius_px,
+            } => {
+                put_u16(&mut out, 6, OP_SET_BACKDROP_BLUR);
+                put_u64(&mut out, 8, window_id);
+                put_u16(&mut out, 16, radius_px);
+            }
             Self::QueryDesktop => {
                 put_u16(&mut out, 6, OP_QUERY_DESKTOP);
             }
@@ -514,8 +549,9 @@ impl WindowRequest {
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
     ///   small for one scanline, an over-long title length, an empty
-    ///   damage rectangle, or a bundle-path length outside
-    ///   `1..=WINDOW_BUNDLE_PATH_MAX`.
+    ///   damage rectangle, a bundle-path length outside
+    ///   `1..=WINDOW_BUNDLE_PATH_MAX`, or a backdrop-blur radius above
+    ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -585,6 +621,18 @@ impl WindowRequest {
                 reserved_zero(bytes, 16)?;
                 let window = nonzero_window_id(read_u64(bytes, 8))?;
                 Ok(Self::DragWithdraw { window })
+            }
+            OP_SET_BACKDROP_BLUR => {
+                reserved_zero(bytes, 18)?;
+                let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+                let radius_px = read_u16(bytes, 16);
+                if radius_px > WINDOW_BACKDROP_BLUR_MAX_PX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                Ok(Self::SetBackdropBlur {
+                    window_id,
+                    radius_px,
+                })
             }
             OP_QUERY_DESKTOP => {
                 reserved_zero(bytes, 8)?;
@@ -1212,9 +1260,10 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
-        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_BUNDLE_PATH_MAX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
+        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN,
+        WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES,
+        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -1340,6 +1389,14 @@ mod tests {
                 path: widest_path,
             },
             WindowRequest::DragWithdraw { window: 5 },
+            WindowRequest::SetBackdropBlur {
+                window_id: 5,
+                radius_px: 0,
+            },
+            WindowRequest::SetBackdropBlur {
+                window_id: 5,
+                radius_px: WINDOW_BACKDROP_BLUR_MAX_PX,
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
@@ -1496,6 +1553,27 @@ mod tests {
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         let mut dirty = WindowRequest::DragWithdraw { window: 9 }.to_le_bytes();
         dirty[16] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn set_backdrop_blur_refuses_a_zero_id_an_over_large_radius_and_a_dirty_tail() {
+        let base = WindowRequest::SetBackdropBlur {
+            window_id: 9,
+            radius_px: 4,
+        };
+        let mut zero_id = base.to_le_bytes();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut over_radius = base.to_le_bytes();
+        let over = WINDOW_BACKDROP_BLUR_MAX_PX + 1;
+        over_radius[16..18].copy_from_slice(&over.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&over_radius),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut dirty = base.to_le_bytes();
+        dirty[18] = 1;
         assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 

@@ -202,6 +202,16 @@ pub trait WindowHost {
         let _ = (owner, window);
     }
 
+    /// A validated `SetBackdropBlur`: the attested owner of live `window`
+    /// set its backdrop-blur radius to `radius_px` logical pixels, already
+    /// bounded by the engine's ABI decode to `WINDOW_BACKDROP_BLUR_MAX_PX`.
+    /// Infallible: it only changes how the host recomposites the window's
+    /// own rectangle, never another principal's state, so there is nothing
+    /// for a host to refuse; the default does nothing.
+    fn backdrop_blur_set(&mut self, window: u64, radius_px: u16) {
+        let _ = (window, radius_px);
+    }
+
     /// Describe the desktop this host composites: the screen extent, the
     /// UI scale, and the active appearance.
     ///
@@ -416,6 +426,13 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::DragWithdraw { window } => {
                 status(reply, self.drag_withdraw(host, caller, window))
             }
+            WindowRequest::SetBackdropBlur {
+                window_id,
+                radius_px,
+            } => status(
+                reply,
+                self.set_backdrop_blur(host, caller, window_id, radius_px),
+            ),
             // Read-only and ungated: the reply describes the caller's own
             // seat, holding nothing another principal owns and granting
             // no authority, so every client on the desktop may ask.
@@ -628,6 +645,22 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
         host.drag_withdrawn(caller, window_id);
+        Ok(())
+    }
+
+    /// Set `caller`'s window `window_id`'s backdrop-blur radius. Always
+    /// succeeds for an owned window: the radius was already bounded by the
+    /// engine's ABI decode, so there is nothing left to fail once
+    /// ownership holds.
+    fn set_backdrop_blur(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        radius_px: u16,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        host.backdrop_blur_set(window_id, radius_px);
         Ok(())
     }
 

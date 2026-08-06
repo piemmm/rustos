@@ -1,0 +1,236 @@
+# GUI-TERMINAL — the first-class graphical terminal
+
+Binding under `AGENTS.md`. This plan owns everything about `terminal.app` as a
+*graphical* program: how large it opens, the user profile behind it, the
+right-click menu, the settings sheet, the colour schemes, and the screen
+effects. The emulator itself — the VT parser, the grid, the pty seam — belongs
+to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`; nothing here
+restates them.
+
+Read alongside: `plans/GUI-CONTROLS-DESIGN.md` (the Reactive Alloy control
+language every surface here is built from), `plans/APPWIN.md` (the window
+channel), `plans/FIX-DISPLAY-ACCELERATION.md` (the accelerated layer path the
+effect pipeline is shaped for).
+
+---
+
+## 1. Why the terminal opens at the size it does
+
+**Status: done.**
+
+A terminal's natural size is a character count, not a pixel count. The window
+is therefore whatever the conventional 80×25 screen measures in the face
+actually being drawn with, and the *text size* is what gives when a display
+cannot hold it — never the grid. A terminal that quietly dropped to 60 columns
+would break every program that lays itself out for 80.
+
+The rules live in `userland/apps/terminal/src/layout.rs`:
+
+| Rule | Definition |
+|---|---|
+| The grid it opens on | `COLS` × `ROWS` = 80 × 25 |
+| What a grid measures | `grid_size` — the face's own advance and line height |
+| What a client holds | `grid_dims` — floored, at least 1×1, capped at `MAX_DIMENSION` |
+| What the furniture costs | `chrome_extent` — the shared `WindowFrame::insets`, never a second copy of the frame arithmetic |
+| The size that fits | `fit_font_size` — the largest logical size ≤ the profile's whose grid plus furniture fits the screen, down to `MIN_FONT_SIZE_PX` |
+| The window it asks for | `window_size` — the grid, clamped to the screen less the furniture |
+
+The default text size is **13 logical pixels** (`profile::DEFAULT_FONT_SIZE_PX`).
+On a 640×480 display at 100% the shared monospace face advances 7 physical
+pixels per column at that height, so the grid is 560×325 and the framed window
+592×370 — inside the screen with room left for the taskbar. A denser display
+multiplies through the desktop scale; a smaller one steps the size down.
+
+There is deliberately **no compile-time window size**, and nothing may
+reintroduce one: the face's metrics come from the font service at runtime and
+can differ from the compiled-in console-atlas fallback, so only a runtime
+measurement is honest. Anything that needs to know where a terminal's client
+sits inside its decorated window — the desktop's own pointer vertical among
+them — reads `chrome_insets` rather than predicting an extent.
+
+---
+
+## 2. The user profile
+
+**Status: done.**
+
+One [`Profile`](../userland/apps/terminal/src/profile.rs) holds everything a
+user can change: the colour scheme, their own custom scheme's colours, the
+text size, and the strength of every screen effect. It is stored per user at
+`/Users/<u>/Settings/Terminal/terminal.conf` in the same `key value` / `#`
+comment grammar every line-oriented TAIRiX configuration store shares, so it
+can be read and edited with any text editor.
+
+- Closed key registry (`ProfileKey`), whole-document fail-closed parse,
+  `render`/`parse` exact inverses, every key always emitted.
+- An **absent** document is the ordinary state of a fresh account and means
+  the defaults, silently. Anything else unusable — no home, a refused read,
+  non-UTF-8, a document the parser refuses — also means the defaults, but says
+  so on `stderr`.
+- Written by the app under the launching user's own identity; no new
+  capability, and no other process writes it.
+- Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
+  would cut the line at the `#`.
+
+Defaults: system scheme, 13 px text, fully opaque, every effect off — a plain,
+fast terminal until the user asks for otherwise.
+
+---
+
+## 3. Colour schemes
+
+**Status: done.**
+
+`userland/apps/terminal/src/scheme.rs` is the one place a terminal colour comes
+from. A `ColorScheme` is the sixteen ANSI slots plus background, foreground,
+cursor, and cursor text. `Painted` resolves the scheme in force once per
+repaint (never per cell) and answers every cell's foreground/background.
+
+Shipped: **System** (follows the desktop theme, the default), **Midnight**,
+**Phosphor**, **Amber**, **Ember**, **Contrast**, **Paper**, and **Custom** —
+the user's own, editable in the settings sheet and persisted with the rest of
+the profile. Adding a scheme is a variant plus a palette; the compiler forces
+every consumer to state what it means.
+
+The hard-coded xterm ANSI table that used to live in the renderer is now the
+default scheme's palette — one definition.
+
+---
+
+## 4. Screen effects
+
+**Status: done.**
+
+`userland/apps/terminal/src/effects.rs` carries one strength per effect, each a
+permille `0..=1000` a slider sets directly, and turns them into the ordered
+`Pass` list a frame goes through. A zero-strength effect contributes no pass,
+so a terminal with the effects off pays nothing.
+
+| Effect | Where it happens | How |
+|---|---|---|
+| Translucency | While the cells are painted | The default background is filled at `background_alpha`, so the compositor's own premultiplied blend does the work and a glyph stays opaque over it. Never below `MIN_OPACITY`. |
+| Backdrop blur | The compositor | Only the compositor can see behind a window, so the strength becomes a logical radius (`blur_radius_px`, capped at `MAX_BLUR_RADIUS_PX`) and is handed to the window channel's `set_backdrop_blur`. Zero when the window is opaque — a blur nobody can see is wasted work. |
+| Scan lines | `Pass::ScanLines` | Dims alternate physical rows. Static. |
+| Fuzz | `Pass::Fuzz` | Per-pixel luminance jitter from a cheap reproducible mixer, moving each animation step. |
+| Phosphor | `Pass::Phosphor` | A decaying `Afterglow` of what was lit recently, added back in the pixel's own hue. |
+| Wobble | `Pass::Wobble` | Per-row horizontal displacement along a travelling integer sine. |
+
+**The pipeline is a description, not a pile of flags.** `Pass` carries the
+*resolved physical* parameters, so a display that can composite hardware layers
+can programme its own engine from the same list, with the software passes here
+staying the conformance oracle for what the result must look like. That is why
+the effects are a typed ordered list rather than code inlined into the
+renderer.
+
+**Animation is a clock, never a spin.** Every animated pass is a pure function
+of a monotonically increasing `Phase`. The program's wait-set park carries a
+one-shot frame deadline (`FRAME_INTERVAL_NS`, 20 fps) only while an animated
+effect is in force; otherwise it parks indefinitely. There is no poll loop and
+no periodic tick.
+
+The overlay surfaces (menu, settings sheet) are drawn **after** the effects: a
+settings sheet that wobbled with the screen behind it would be unusable, and
+its controls must read exactly as they do everywhere else on the desktop.
+
+---
+
+## 5. The right-click menu
+
+**Status: done.**
+
+`userland/apps/terminal/src/menu.rs`. Six typed commands built from one ordered
+`Command::ALL` list and read back through the same list, so a reordering cannot
+re-map a row:
+
+| Row | Shortcut |
+|---|---|
+| Settings… | `Ctrl ,` |
+| Larger text | `Ctrl +` |
+| Smaller text | `Ctrl -` |
+| Actual size | `Ctrl 0` |
+| Clear screen | `Ctrl Shift K` |
+| Close | `Ctrl Shift W` |
+
+Every advertised shortcut is really honoured by `Command::accelerator`; a row
+never shows a key combination that does nothing. Only combinations a shell
+would not otherwise receive as a control byte are claimed, so intercepting one
+never swallows input a program was waiting for.
+
+The popup is the shared `lib/controls` `Menu`, placed by that control's own
+`anchored_rect` rule — hoisted out of `lib/browse` in this change so the
+directory browser and the terminal share one definition. While it is open it is
+modal: a press away dismisses it without acting on what it landed on, and
+`Escape` dismisses from the keyboard.
+
+---
+
+## 6. The settings sheet
+
+**Status: done.**
+
+`userland/apps/terminal/src/settings.rs` — an in-window modal sheet composed
+from the shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`,
+`Button`) plus the app-local colour-well grid.
+
+- **Appearance**: the scheme chooser, the text-size slider, and the custom
+  scheme's editor — a `SwatchGrid` of the twenty editable colours with
+  red/green/blue sliders for the selected well.
+- **Effects**: one labelled slider per effect — opacity, backdrop blur, scan
+  lines, fuzz, phosphor, wobble.
+- Footer: *Restore defaults* and *Done*.
+
+Every edit clamps through `Profile::clamp`, so the sheet can never produce an
+invalid profile, and the program adopts the sheet's profile on every edit so
+exactly one copy of the settings is ever live. A change re-derives the colours
+and the face, re-applies the backdrop blur, reshapes the grid (the pty
+follows), and writes the document.
+
+The colour-well grid lives in the app rather than `lib/controls` because the
+control library takes a control only once two independent consumers need it
+(`plans/GUI-CONTROLS-DESIGN.md` §4). A second consumer moves it.
+
+---
+
+## 7. Compositor backdrop blur
+
+**Status: done.**
+
+Translucency alone composites a window straight over whatever is behind it.
+Backdrop blur makes a translucent terminal read as frosted glass, and only the
+compositor can do it.
+
+- `WindowRequest::SetBackdropBlur { window_id, radius_px }` in `lib/abi`, the
+  radius in logical pixels, `0` disabling, bounded by
+  `WINDOW_BACKDROP_BLUR_MAX_PX`. Validated and owner-checked server-side;
+  fails closed.
+- `WindowClient::set_backdrop_blur` on the app side.
+- The compositor blurs the back buffer inside the window's rectangle — which
+  already holds everything behind it, compositing being back-to-front —
+  weighted by the window's rounded-corner coverage, then blends the window
+  over it. A separable two-pass box blur with running sums, so the cost is
+  O(area) and not O(area × radius).
+- Damage touching a blurred window widens to that window's whole rectangle, to
+  a fixed point, so a change *behind* a blurred window cannot leave stale
+  pixels.
+- The hardware layer path cannot express a backdrop blur, so a frame
+  containing a blurred window falls back to the software composite rather than
+  presenting a wrong frame.
+
+---
+
+## 8. What remains
+
+Nothing in the sections above. Recognised later work, none of it blocking:
+
+- **Accelerated effects.** The `Pass` list is already the description an
+  accelerated display would programme from; wiring it to `AccelLayer`
+  (`plans/FIX-DISPLAY-ACCELERATION.md`) would move the per-pixel work off the
+  CPU. The software path stays the oracle.
+- **Scrollback.** The emulator keeps none, so the wheel has nothing to move —
+  a correct, complete answer today, but a scrollback buffer would give the
+  wheel and a scrollbar something to do.
+- **Selection and clipboard.** There is no system clipboard yet; when one
+  exists the terminal gains select/copy/paste and the menu gains its rows.
+- **A profile per window.** Today one document serves every terminal window.
+  Named profiles a user can switch between would be a registry of documents
+  under the same store directory.

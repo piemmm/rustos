@@ -59,6 +59,11 @@ pub struct Window {
     /// pixels still has a size, bounds, and furniture band.
     client_size: (u32, u32),
     opacity: u8,
+    /// Backdrop-blur radius in *logical* pixels, `0` for no blur. Logical,
+    /// because it is a desktop length the app asks for at the reference
+    /// density; the compositor resolves it to physical pixels through the
+    /// output's scale when it blurs.
+    blur_radius: u16,
     corners: Corners,
     visible: bool,
     cursor: CursorKind,
@@ -93,6 +98,7 @@ impl Window {
             client_size: (surface.width(), surface.height()),
             content: Some(surface),
             opacity: 255,
+            blur_radius: 0,
             corners: Corners::Square,
             visible: true,
             cursor: CursorKind::Arrow,
@@ -121,6 +127,14 @@ impl Window {
     #[must_use]
     pub const fn opacity(&self) -> u8 {
         self.opacity
+    }
+
+    /// Backdrop-blur radius in *logical* pixels (`0` for no blur): how far
+    /// the compositor spreads the already-composited content behind this
+    /// window's rectangle before blending the window's own pixels over it.
+    #[must_use]
+    pub const fn blur_radius(&self) -> u16 {
+        self.blur_radius
     }
 
     /// Corner style.
@@ -462,7 +476,13 @@ impl Window {
     /// `None` where every column is fully covered. A decorated window's
     /// rounding belongs to the frame rim and is baked into the decoration
     /// as partial alpha, so its rectangular client rounds nothing.
-    fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
+    ///
+    /// This is the single definition of the window's *shape*: both the
+    /// window's own pixels ([`Self::row`]) and any effect confined to the
+    /// window's rectangle (the compositor's backdrop blur) weight
+    /// themselves by it, so they can never disagree about where the
+    /// window's edge is.
+    pub(crate) fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
         match (self.band, self.corners) {
             (None, corners @ Corners::Rounded { .. }) => Some(RowRounding {
                 corners,
@@ -513,6 +533,20 @@ impl Window {
             return false;
         }
         self.opacity = opacity;
+        true
+    }
+
+    /// Set the window's backdrop-blur radius in logical pixels (`0`
+    /// disables the effect), returning whether it actually changed.
+    ///
+    /// The radius is not clipped to any window extent here: it is a
+    /// spread distance, not a coordinate, and a window that is resized
+    /// keeps the frosting the app asked for.
+    pub(crate) fn set_backdrop_blur(&mut self, radius_px: u16) -> bool {
+        if radius_px == self.blur_radius {
+            return false;
+        }
+        self.blur_radius = radius_px;
         true
     }
 
@@ -932,7 +966,7 @@ impl<'a> DecorationSpan<'a> {
 
 /// The rounded-corner coverage a plain window applies across one row.
 #[derive(Copy, Clone)]
-struct RowRounding {
+pub(crate) struct RowRounding {
     corners: Corners,
     ly: u32,
     width: u32,
@@ -941,7 +975,7 @@ struct RowRounding {
 
 impl RowRounding {
     /// Coverage in `0..=255` for content column `lx` of this row.
-    fn coverage(self, lx: u32) -> u8 {
+    pub(crate) fn coverage(self, lx: u32) -> u8 {
         self.corners.coverage(lx, self.ly, self.width, self.height)
     }
 }

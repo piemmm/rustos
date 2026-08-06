@@ -581,6 +581,43 @@ impl Menu {
         widest
     }
 
+    /// The bounds this menu occupies when opened at `anchor` (e.g. a
+    /// right-click point), clamped so the whole menu stays inside `viewport`.
+    ///
+    /// A popup menu is opened by more than one owner — the directory browser's
+    /// right-click menu and a terminal's are both plain [`Menu`]s — and every
+    /// one of them needs the same answer to "where does the menu go", so the
+    /// rule lives once, here, rather than being re-derived by each caller.
+    /// The size comes from [`preferred_width`](Self::preferred_width) and
+    /// [`preferred_height`](Self::preferred_height) clamped to the viewport;
+    /// the top-left starts at `anchor` and shifts left/up only as far as
+    /// needed to fit, never past the viewport's own origin. A degenerate
+    /// (zero-sized) viewport still yields a drawable, if clipped, rectangle
+    /// rather than panicking.
+    #[must_use]
+    pub fn anchored_rect(
+        &self,
+        anchor: Point,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Rect {
+        let width = self
+            .preferred_width(scale, theme, font)
+            .clamp(1, viewport.width.max(1));
+        let height = self
+            .preferred_height(scale, theme)
+            .clamp(1, viewport.height.max(1));
+        let origin_x = viewport.origin.x;
+        let origin_y = viewport.origin.y;
+        let max_x = origin_x.saturating_add(to_i32(viewport.width.saturating_sub(width)));
+        let max_y = origin_y.saturating_add(to_i32(viewport.height.saturating_sub(height)));
+        let x = anchor.x.clamp(origin_x, max_x.max(origin_x));
+        let y = anchor.y.clamp(origin_y, max_y.max(origin_y));
+        Rect::new(x, y, width, height)
+    }
+
     /// The inner content rectangle (inside the plate rim) as surface pixels.
     fn inner(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;

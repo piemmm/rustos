@@ -474,6 +474,27 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&request)
     }
 
+    /// Set window `window_id`'s backdrop-blur radius to `radius_px`
+    /// logical pixels: the session blurs whatever is already composited
+    /// behind the window's rectangle before blending the window's own
+    /// (typically translucent) pixels over it, so a frosted-glass panel
+    /// reads correctly. `0` disables the effect.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a radius above
+    /// [`tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX`],
+    /// [`Errno::NotFound`] if `window_id` is not one of the caller's own
+    /// windows, a transport failure, or a corrupt status frame.
+    pub fn set_backdrop_blur(&mut self, window_id: u64, radius_px: u16) -> Result<(), Errno> {
+        let request = WindowRequest::SetBackdropBlur {
+            window_id,
+            radius_px,
+        }
+        .to_le_bytes();
+        self.status_call(&request)
+    }
+
     /// Re-present window `window_id`'s last presented frame with
     /// full-window damage, answering a session redraw request.
     ///

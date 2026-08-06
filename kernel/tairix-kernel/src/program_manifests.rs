@@ -896,14 +896,18 @@ mod tests {
         CapabilityId::PROC_SPAWN,
     ];
 
-    // The windowed terminal `terminal` (plans/APPWIN.md AW4): console
-    // write for its fail-loud diagnostics, CAP_PROC_SPAWN to host the
-    // user's shell as its own child over pipes, and CAP_SHM to create
-    // and grant the zero-copy window frame region the desktop session
-    // maps. Not an embedded spawn-floor program, so the list lives
-    // only in this pin.
+    // The windowed terminal `terminal` (plans/APPWIN.md AW4,
+    // plans/GUI-TERMINAL.md): console write for its fail-loud diagnostics,
+    // CAP_PROC_SPAWN to host the user's shell as its own child over a pty,
+    // CAP_SHM to create and grant the zero-copy window frame region the
+    // desktop session maps, and CAP_FS_ACCESS to read and rewrite the
+    // launching user's own terminal profile under their home — an ordinary
+    // per-user store, reaching nothing that user could not already reach.
+    // Not an embedded spawn-floor program, so the list lives only in this
+    // pin.
     const TERMINAL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
         CapabilityId::PROC_SPAWN,
         CapabilityId::SHM,
     ];

@@ -81,7 +81,12 @@ The software path is always the fallback: if the scene exceeds the
 engine's reported `AccelCaps` — more layers than it has planes, or a
 layer larger than it can source — the compositor composites the whole
 frame in software and presents it instead, so a hardware frame is never
-partial (`AGENTS.md` §2.9). The first driver to implement the seam is the
+partial (`AGENTS.md` §2.9). A **backdrop blur** takes that same fallback
+unconditionally (`Compositor::has_backdrop_blur`): a hardware layer is
+composed from its own pixels alone and cannot sample what is already
+behind it, so a scene with any visible frosted window has no layer
+encoding at all and goes through software rather than presenting a frame
+the frosting is missing from. The first driver to implement the seam is the
 Raspberry Pi VideoCore HVS plane compositor (see
 [Display drivers](../drivers/display.md)).
 
@@ -113,6 +118,54 @@ on a corner arc receives anti-aliased partial coverage and the
 anti-aliasing is exactly reproducible in tests. The radius is clamped to
 half the shorter side. The taskbar's rounded edges reuse this same path
 rather than a second implementation (`AGENTS.md` §2.2).
+
+## Backdrop blur
+
+A window may ask for the already-composited content *behind* its
+rectangle to be blurred before its own — typically translucent — pixels
+are blended over it, so a terminal or panel reads like frosted glass.
+`Compositor::set_backdrop_blur(id, radius_px)` sets the radius in
+**logical** pixels; `0` disables the effect. An app asks for its own
+window's radius over the window channel
+(`WindowClient::set_backdrop_blur`, below), which the protocol bounds at
+`WINDOW_BACKDROP_BLUR_MAX_PX` — a validation limit on the compositor's
+per-frame work, not a capacity that grows.
+
+The radius is a desktop length, so it is authored once and converted to
+physical pixels through the output's own `Scale::scale_length`, exactly as
+every other desktop length is (see [Variable DPI](dpi.md)). The frosting
+looks the same at every display density.
+
+Composition is back-to-front, which is what makes the effect cheap: by the
+time the compositor reaches a blurred window, the back buffer already
+holds everything behind it. It therefore composes the layers *below* the
+window, blurs the back buffer inside the window's rectangle, and resumes
+composing from the blurred window itself over that frosted backdrop. Only
+the final segment encodes the scan-out frame, so the intermediate stages
+cost no wasted encoding, and several blurred windows in one stack simply
+segment it further.
+
+The blur itself is a **separable box blur** (`blur::box_blur`): a
+horizontal pass then a vertical one, each carrying a running sum so the
+window slides by one add and one subtract per output. The cost is
+proportional to the rectangle's *area* whatever the radius, never to area
+× radius. Both scratch buffers belong to the compositor and grow to the
+largest frosted rectangle the session has needed, so a frosted window
+allocates nothing after its first frame.
+
+Every channel is averaged, alpha included: on premultiplied data that is
+the same convex combination of the contributing colours that compositing
+them would give, so the `colour <= alpha` invariant survives and no halo
+appears at a translucent edge. Samples past an edge replicate that edge,
+which confines the effect to the window's own rectangle — it can neither
+pull a neighbour's pixels in nor write outside its bounds — and keeps the
+divisor constant, so a uniform backdrop comes out exactly unchanged.
+
+The mix back into the back buffer is weighted by the window's own
+rounded-corner coverage (the single `Window::row_rounding` shape
+definition its *pixels* are weighted by), so a rounded window's frosting
+fades out across exactly the arc its own pixels fade out across and no
+square edge shows outside it.
 
 ## Input routing
 
@@ -167,12 +220,26 @@ to recomposite.
 
 **An update that changes nothing marks nothing.** `move_window` to the
 origin a window already has, and `set_corners` / `set_visible` /
-`set_opacity` to the value already in effect, repaint no pixel; they
-still return `true`, because `false` means only "unknown window". This
-matters because a presenter re-issues exactly those calls every frame,
-and each spurious mark would recomposite a whole window for nothing. A
-replaced *surface* (`set_surface`) is always assumed changed: comparing
-two whole buffers costs more than recompositing the window.
+`set_opacity` / `set_backdrop_blur` to the value already in effect,
+repaint no pixel; they still return `true`, because `false` means only
+"unknown window". This matters because a presenter re-issues exactly
+those calls every frame, and each spurious mark would recomposite a whole
+window for nothing. A replaced *surface* (`set_surface`) is always
+assumed changed: comparing two whole buffers costs more than
+recompositing the window.
+
+**A blurred window is always repainted whole.** A frosted window's pixels
+are a function of the *entire* backdrop under its rectangle, so
+recomposing a strip of it would spread a neighbourhood clipped to that
+strip and leave a seam. Every damage rectangle that touches a visible
+blurred window's on-screen bounds therefore grows to cover all of them,
+repeated until nothing grows — widening one window can bring the damage
+into contact with a second. A change *behind* a frosted window (a window
+moving past it, one presented pixel of the app underneath) consequently
+refrosts the whole window, and an incremental repaint produces exactly the
+pixels a whole-screen composite would. The sweep matches and adds only
+screen-clipped rectangles, so damage that lies wholly off screen still
+composites nothing and `has_damage` keeps its promise.
 
 **A present reports its own damage.** `present_window_content` takes the
 presented frame's extent and a conversion returning `(value, Rect)`, where
@@ -499,6 +566,16 @@ released this window's retained content to reclaim memory and needs it
 presented again) — delivered to that endpoint, where the app **parks**
 until one arrives; it never polls.
 
+An app also sets its own window's **backdrop-blur** radius over the
+channel: `WindowClient::set_backdrop_blur(window_id, radius_px)` sends
+`WindowRequest::SetBackdropBlur`, whose decode refuses a radius above
+`WINDOW_BACKDROP_BLUR_MAX_PX` and a non-zero reserved tail. The engine
+keys it to the attested window owner exactly as it does a present — a
+radius set on another client's window answers `NotFound` — and hands the
+validated pair to `WindowHost::backdrop_blur_set`, which the session
+forwards to `Compositor::set_backdrop_blur` for that window and no other
+(see [Backdrop blur](#backdrop-blur)).
+
 `lib/window` hosts both halves of the behaviour so they cannot drift:
 
 - `WindowServer` — the engine the session composes. Every request is
@@ -562,8 +639,15 @@ channel-order encoding, the `Display` present seam, the desktop layer
 layer leaving the background showing, and installing/replacing/clearing
 each damaging exactly its footprint), the accelerated
 layer-encoding present path (background + desktop + window layers,
-hidden-window omission, and the over-budget / over-size software
-fallbacks), and input routing (hit-testing, click-to-activate focus and
-raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position of
-its own and `DesktopKey` reporting focus-on-desktop, move-grab drag, and
-the fail-closed grab edge cases).
+hidden-window omission, and the over-budget / over-size / backdrop-blur
+software fallbacks), the backdrop blur (the box blur's own identities — a
+uniform field unchanged, an impulse spread symmetrically, radius 0 and a
+one-pixel region identities — plus the composited effect: a spread
+backdrop, a no-op at radius 0, confinement to the window rectangle, the
+logical radius following the output scale, rounded corners left alone, and
+a change behind a frosted window repainting it to exactly the pixels a
+whole-screen composite gives), and input routing (hit-testing,
+click-to-activate focus and raise, desktop-clears-focus,
+`DesktopPointerMoved` carrying no position of its own and `DesktopKey`
+reporting focus-on-desktop, move-grab drag, and the fail-closed grab edge
+cases).

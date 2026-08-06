@@ -30,9 +30,19 @@
 //!   on the terminal's behalf — echo is the pty slave's line discipline, the
 //!   shell's tty, exactly as on the hardware console.
 //! * [`render()`] paints the grid into a `lib/raster`
-//!   [`Surface`](tairix_raster::Surface) using the active theme's palette and
-//!   the shared `lib/font` monospace face — the same surface the compositor
-//!   places and rounds.
+//!   [`Surface`](tairix_raster::Surface) using the user's own colour
+//!   [`Scheme`] and the shared `lib/font` monospace face — the same surface
+//!   the compositor places and rounds. The screen [`Effects`] pipeline then
+//!   runs over the finished frame.
+//!
+//! # The user's profile
+//!
+//! Everything a user can change about their terminal — the colour scheme
+//! (including one of their own), the text size, translucency, backdrop blur,
+//! and the scan-line / fuzz / phosphor / wobble effects — is one
+//! [`Profile`], stored as a plain text document under their own home and
+//! edited through the right-click [`ContextMenu`] and the [`Settings`]
+//! sheet. The staged design is `plans/GUI-TERMINAL.md`.
 //!
 //! # The shell seam
 //!
@@ -64,7 +74,14 @@
 //! * [`shell`] — the [`ShellSource`] seam.
 //! * [`spawned`] — the production seam: the spawned shell's pty wiring.
 //! * [`terminal`] — the [`Terminal`] model gluing the grid to the shell.
+//! * [`scheme`] — the colour schemes a screen is painted with.
+//! * [`profile`] — the per-user settings document and its store.
+//! * [`layout`] — the screen grid, the text size that fits it, and the window.
+//! * [`effects`] — the ordered screen-effect pipeline a frame passes through.
 //! * [`render`](mod@render) — painting the grid into a `Surface`.
+//! * [`menu`] — the right-click context menu and its keyboard shortcuts.
+//! * [`settings`] — the in-window settings sheet.
+//! * [`swatch`] — the colour-well grid the custom scheme is edited with.
 //!
 //! # Layering & safety
 //!
@@ -79,16 +96,29 @@
 
 extern crate alloc;
 
+pub mod effects;
 pub mod grid;
+pub mod layout;
+pub mod menu;
 pub mod parser;
+pub mod profile;
 pub mod render;
+pub mod scheme;
+pub mod settings;
 pub mod shell;
 pub mod spawned;
+pub mod swatch;
 pub mod terminal;
 
+pub use effects::{Afterglow, Effects, Phase};
 pub use grid::Grid;
+pub use layout::{COLS, ROWS};
+pub use menu::{Command, ContextMenu};
 pub use parser::Parser;
+pub use profile::{user_profile_path, Profile};
 pub use render::render;
+pub use scheme::{ColorScheme, Painted, Scheme};
+pub use settings::{Settings, SheetOutcome};
 pub use shell::ShellSource;
 pub use spawned::{shell_env, shell_load_failure, shell_wires, StreamShellSource};
 pub use terminal::Terminal;
@@ -106,35 +136,16 @@ pub use tairix_vt::{Attributes, Cell, Color};
 /// `plans/CURSES.md`.
 pub const TERM: &str = "xterm-256color";
 
-/// Columns of the terminal's fixed screen grid — the conventional 80×24
-/// text screen.
-pub const COLS: u16 = 80;
-
-/// Rows of the terminal's fixed screen grid.
-pub const ROWS: u16 = 24;
-
-/// Width in pixels of the terminal's window: the grid rendered with the
-/// shared monospace face, one advance per column. [`BitmapFont::console`]'s
-/// cell width and line height are fetched from the font service at runtime,
-/// so they cannot appear in a `const` initialiser; this is computed instead
-/// from the compiled-in console-atlas geometry
-/// ([`tairix_font::atlas::CELL_WIDTH`]) that font falls back to and, absent a
-/// running service, actually renders at — the same single source of truth,
-/// evaluated at compile time. The QEMU vertical's runner imports it for its
-/// click coordinates exactly as it imports the file browser's.
-///
-/// [`BitmapFont::console`]: tairix_font::BitmapFont::console
-pub const WIN_WIDTH: u32 = tairix_font::atlas::CELL_WIDTH * COLS as u32;
-
-/// Height in pixels of the terminal's window: one line height per row, from
-/// the same compiled-in console-atlas geometry [`WIN_WIDTH`] derives from.
-pub const WIN_HEIGHT: u32 = tairix_font::atlas::CELL_HEIGHT * ROWS as u32;
-
 /// Whether the terminal's window asks the window manager to decorate it
 /// resizable, which widens the furniture band reserved around the client.
 ///
 /// The app's `Create` request and the QEMU vertical's host-side
 /// reconstruction of the window's on-screen footprint read this one value.
+///
+/// There is deliberately no companion width or height: the terminal's window
+/// is whatever its [`COLS`]×[`ROWS`] screen measures in the face it is
+/// actually drawing with, which only the running font service can answer
+/// ([`layout::window_size`]).
 pub const WIN_RESIZABLE: bool = true;
 
 #[cfg(test)]

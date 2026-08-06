@@ -225,7 +225,9 @@ and opens a `lib/controls` `Menu` painted from the `ContextMenuModel`:
 entry (its `ContextCommand::label()` and keyboard-`shortcut()` caption,
 rendered disabled when the model reports it inapplicable),
 `render::context_menu_rect` anchors it at the click and clamps it inside the
-window, `render::draw_context_menu` paints it topmost, and
+window (delegating to the shared `lib/controls` `Menu::anchored_rect`, so a
+second context-menu owner elsewhere in the desktop places its popup the same
+way), `render::draw_context_menu` paints it topmost, and
 `render::context_menu_command_at` mirrors that placement to return **only an
 enabled command** (a press on a disabled row or off the menu resolves to
 nothing, failing closed). The `files.app` `Run` binary routes a chosen
@@ -1500,10 +1502,30 @@ directions, `Ctrl-C`/`Ctrl-Z` job control), reusing the same discipline the
 hardware console runs — never a second copy (`AGENTS.md` §2.2). That pty is
 staged in `plans/PTY.md`; the environment-forwarding half (below) has landed.
 
+### The size it opens at
+
+A terminal's natural size is a character count, not a pixel count, so the
+window is whatever the conventional 80×25 screen (`layout::COLS` ×
+`layout::ROWS`) measures in the face actually being drawn with — the face's
+own advance and line height, resolved from the font service at runtime, never
+a compile-time constant. The window furniture is allowed for through the one
+shared `WindowFrame::insets` definition the compositor decorates with
+(`layout::chrome_insets`), so the app and the window manager cannot disagree
+about how much room a decorated window needs.
+
+When a display cannot hold that grid, the **text size** gives, never the grid:
+`layout::fit_font_size` steps the profile's size down a logical pixel at a
+time until the 80×25 screen plus its furniture fits, stopping at
+`MIN_FONT_SIZE_PX`. A terminal that quietly dropped to 60 columns would break
+every program that lays itself out for 80. The default 13-logical-pixel size
+puts the framed window inside a 640×480 display with room left for the
+taskbar, and a denser display multiplies it through the desktop scale. The
+staged design is `plans/GUI-TERMINAL.md`.
+
 ### Rendering
 
-`render(terminal, theme, viewport)` paints the grid into a `tairix-raster`
-`Surface` sized to the viewport, using the theme's palette and the shared
+`render(terminal, painted, viewport, font)` paints the grid into a
+`tairix-raster` `Surface` sized to the viewport, using the shared
 `tairix-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese,
 D2Coding Korean, and Noto Sans Hebrew companions). Hebrew and Yiddish letters,
 final forms, punctuation, and marks occupy individual terminal cells;
@@ -1512,18 +1534,68 @@ continuation cells as one unit, so a continuation-cell background cannot erase
 half a glyph.
 Each cell is drawn with its own rendition: its
 `lib/vt` `Attributes` select the foreground and background, resolved one way
-(`AGENTS.md` §2.2) — a `Default` colour takes the theme's `on_surface` /
-`surface` roles, the 16 basic colours and the 256-colour palette map through
-the standard ANSI tables, truecolour is used directly, `reverse` swaps the
-pair, and `bold` brightens a basic colour. The visible cursor cell is
-highlighted with the accent role. The surface is rectangular; the compositor
-places and rounds it through its single anti-aliased rounded-corner path, so
-there is no rounding in the app. Every length saturates so a viewport smaller
-than the grid paints what fits rather than panicking (`AGENTS.md` §2.9).
+through the user's colour scheme — a `Default` colour takes the scheme's own
+foreground / background, the 16 basic colours and the low 16 palette entries
+take the scheme's ANSI slots, the 6×6×6 cube and greyscale ramp above them are
+the fixed xterm arithmetic no scheme reinterprets, truecolour is used
+directly, `reverse` swaps the pair, and `bold` brightens a basic colour. The
+visible cursor cell is drawn as the scheme's cursor block. The surface is
+rectangular; the compositor places and rounds it through its single
+anti-aliased rounded-corner path, so there is no rounding in the app. Every
+length saturates so a viewport smaller than the grid paints what fits rather
+than panicking.
+
+### Colour schemes, the profile, and screen effects
+
+`scheme.rs` is the one place a terminal colour comes from: a `ColorScheme` is
+the sixteen ANSI slots plus background, foreground, cursor, and cursor text,
+and `Painted` resolves the scheme in force once per repaint rather than once
+per cell. **System** follows the desktop's own dark/light appearance and is
+the default; **Midnight**, **Phosphor**, **Amber**, **Ember**, **Contrast**,
+and **Paper** carry fixed palettes; **Custom** is the user's own, editable in
+the settings sheet.
+
+Everything a user can change is one `Profile`, stored per user at
+`/Users/<u>/Settings/Terminal/terminal.conf` in the same `key value` / `#`
+comment grammar every line-oriented TAIRiX configuration store shares. An
+absent document means the documented defaults (a fresh account has never saved
+one); an unreadable or malformed one also means the defaults, and says why on
+`stderr`. Colours are written as bare `rrggbb` because the grammar's comment
+marker would cut a `#`-prefixed value away.
+
+The screen effects are an ordered, typed pipeline (`effects::Pass`) rather
+than code inlined into the renderer, so a display that can composite hardware
+layers can programme its own engine from the same description with the
+software passes staying the conformance oracle. Translucency is not a pass at
+all: the default background is filled at the profile's alpha, so the
+compositor's own premultiplied blend shows the desktop through while a glyph
+stays opaque. Backdrop blur is the compositor's (`set_backdrop_blur`), since
+only it can see behind a window. Scan lines, fuzz, phosphor persistence, and
+wobble run over the finished frame. An animated effect is a pure function of a
+monotonically increasing `Phase` that the program advances on a one-shot frame
+deadline in its wait-set park — there is no poll loop, and a terminal with the
+effects off never wakes for them at all.
+
+### The menu and the settings sheet
+
+A secondary (right) press opens the terminal's context menu: *Settings…*,
+*Larger text*, *Smaller text*, *Actual size*, *Clear screen*, and *Close*,
+each with a keyboard shortcut that really works whether or not the menu is
+open. The popup is the shared `lib/controls` `Menu`, placed by that control's
+own `anchored_rect` rule — the same placement the file manager's context menu
+uses.
+
+*Settings…* opens an in-window modal sheet built from the shared Reactive
+Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
+slider, and the custom scheme's twenty colour wells with red/green/blue
+sliders) and an **Effects** tab (one slider per effect). Every edit clamps
+through `Profile::clamp`, re-derives the colours and the face, reshapes the
+grid — the pty window size follows, so the shell re-lays-out — and writes the
+document.
 
 ### The `Run` bundle
 
-`terminal.app`'s entry point creates the two pipes, spawns the user's default
+`terminal.app`'s entry point reads the user's profile, creates the pty, spawns the user's default
 shell (`tairix_users::policy::DEFAULT_SHELL`) forwarding its own **inherited
 environment** to the shell (`USER`, `HOME`, `LOGNAME`, `PATH`, `LANG`, …, with
 the emulator's own `TERM` replacing any inherited one — the shared,
@@ -1536,10 +1608,13 @@ grants the zero-copy window frame
 region, and **parks** on one wait-set with three members — its window-event
 mailbox (`Port`), the shell-output pipe's read end (`Stream`, the AW4 kernel
 addition: ready on buffered bytes or end-of-stream), and the shell child
-(`Child`) — dispatching on the woken member's token, never a poll loop. Key
-presses are encoded through the one shared `lib/keymap` rule and written to
-the shell (releases send nothing); shell output is pumped into the grid and
-the repainted frame presented. The shell exiting, or a `CloseRequested` from
+(`Child`) — dispatching on the woken member's token, never a poll loop. The
+park carries a one-shot frame deadline only while an animated screen effect is
+in force. A key press is claimed by an open menu or settings sheet, else by a
+terminal accelerator, else encoded through the one shared `lib/keymap` rule
+and written to the shell (releases send nothing); shell output is pumped into
+the grid and the repainted frame presented. The shell exiting, the user
+choosing *Close*, or a `CloseRequested` from
 the desktop, ends the session cleanly; every bring-up refusal exits
 fail-loud with a reserved code and its reason on `stderr`. The desktop's
 program-library popup lists the terminal's catalog entry, which spawns the

@@ -357,6 +357,18 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.pins.drag_withdrawn(window);
     }
 
+    fn backdrop_blur_set(&mut self, window_id: u64, radius_px: u16) {
+        // The engine attested the caller and validated that the window is
+        // one of its own, and bounded the radius on decode; the effect
+        // reaches only the window's own rectangle, so the compositor needs
+        // no further authority to apply it. A window the session no longer
+        // has a record for frosts nothing rather than guessing which
+        // window was meant.
+        if let Some(record) = self.windows.records.get(&window_id) {
+            self.compositor.set_backdrop_blur(record.wm, radius_px);
+        }
+    }
+
     fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
         desktop_info(self.compositor)
     }
@@ -1337,6 +1349,47 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A validated backdrop-blur request frosts exactly the window it
+    /// names, and a window the session has no record of frosts nothing.
+    #[test]
+    fn backdrop_blur_reaches_the_named_window_only() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            pins: &mut RefusingPins,
+        };
+        let first = open_one(&mut host, 7);
+        let second = open_one(&mut host, 8);
+
+        host.backdrop_blur_set(7, 12);
+        // No record: the id names no window of this session's, so nothing
+        // is frosted rather than guessing which window was meant.
+        host.backdrop_blur_set(99, 24);
+
+        assert_eq!(
+            host.compositor.window(first).expect("live").blur_radius(),
+            12
+        );
+        assert_eq!(
+            host.compositor.window(second).expect("live").blur_radius(),
+            0,
+            "the sibling window is untouched"
+        );
+        assert!(host.compositor.has_backdrop_blur());
+
+        host.backdrop_blur_set(7, 0);
+        assert_eq!(
+            host.compositor.window(first).expect("live").blur_radius(),
+            0
+        );
+        assert!(!host.compositor.has_backdrop_blur());
     }
 
     #[test]

@@ -29,8 +29,9 @@ use tairix_input::{InputEvent, Key};
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
 
+use crate::blur;
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{Color, Pixel};
+use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::cursor::CursorLayer;
 use crate::damage::DamageRegion;
@@ -118,6 +119,13 @@ pub struct Compositor {
     cursor_replaced: bool,
     back: Surface,
     frame: Vec<u8>,
+    /// Scratch for a backdrop blur: the copy of the backdrop that
+    /// [`blur::box_blur`] blurs, and the intermediate buffer its two
+    /// passes hand over through. Both are owned by the compositor and
+    /// grown to the largest blurred rectangle a frame has needed, so a
+    /// frosted window costs no allocation once it has been drawn once.
+    blur_pixels: Vec<Pixel>,
+    blur_aux: Vec<Pixel>,
     damage: DamageRegion,
     next_id: u64,
 }
@@ -180,6 +188,8 @@ impl Compositor {
             cursor_replaced: false,
             back,
             frame,
+            blur_pixels: Vec::new(),
+            blur_aux: Vec::new(),
             damage: DamageRegion::new(),
             next_id: 1,
         };
@@ -656,6 +666,35 @@ impl Compositor {
     /// returns `true` (only an unknown `id` returns `false`).
     pub fn set_opacity(&mut self, id: WindowId, opacity: u8) -> bool {
         self.mutate(id, |w| w.set_opacity(opacity))
+    }
+
+    /// Set a window's backdrop-blur radius in *logical* pixels (`0`
+    /// disables it); its bounds are marked dirty. Setting the radius it
+    /// already has marks no damage and still returns `true` (only an
+    /// unknown `id` returns `false`).
+    ///
+    /// A blurred window's pixels blend over a blurred copy of everything
+    /// composited behind its rectangle, so a translucent window reads like
+    /// frosted glass. The radius is a desktop length: the compositor
+    /// resolves it to physical pixels through this output's
+    /// [`scale`](Self::scale), so the frosting looks the same at every
+    /// display density.
+    pub fn set_backdrop_blur(&mut self, id: WindowId, radius_px: u16) -> bool {
+        self.mutate(id, |w| w.set_backdrop_blur(radius_px))
+    }
+
+    /// Whether any visible window asks for a backdrop blur.
+    ///
+    /// The effect reads the pixels already composited behind a window, so
+    /// it exists only in the software composite path: a hardware layer is
+    /// composed from its own pixels alone and cannot sample what is behind
+    /// it. [`present_accelerated`](Self::present_accelerated) therefore
+    /// takes the software path whenever this is `true`.
+    #[must_use]
+    pub fn has_backdrop_blur(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|w| w.is_visible() && w.blur_radius() > 0)
     }
 
     /// Set a window's corner style; its bounds are marked dirty. Setting
@@ -1240,7 +1279,8 @@ impl Compositor {
         self.cursor_on_screen = current_cursor;
         self.cursor_replaced = false;
 
-        let damage = core::mem::take(&mut self.damage);
+        let mut damage = core::mem::take(&mut self.damage);
+        self.widen_blurred_damage(&mut damage, screen);
         let mut composited = DamageRegion::new();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
@@ -1281,6 +1321,53 @@ impl Compositor {
             self.recompose_rect(area, base, &hits, &fallback);
         }
         composited
+    }
+
+    /// Grow every rectangle of `damage` that touches a blurred window's
+    /// on-screen rectangle to cover the whole of it.
+    ///
+    /// A blurred window's pixels are a function of the *whole* backdrop
+    /// under its rectangle, not just the part a caller happened to damage:
+    /// recomposing a strip of it would spread a neighbourhood clipped to
+    /// that strip and leave a seam against the pixels around it. Widening
+    /// to the full rectangle makes every repaint of a blurred window
+    /// produce exactly the same pixels, so a change *behind* the window —
+    /// a moving window, a repainted desktop — refrosts all of it.
+    ///
+    /// Widening one window can bring the damage into contact with a second
+    /// blurred window, so the sweep repeats. Each pass that grows covers at
+    /// least one more window's rectangle for good, so `windows.len()`
+    /// passes are enough to reach the fixed point, and the common case (no
+    /// blurred window is touched) settles in the first.
+    ///
+    /// The rectangles are matched against `screen`-clipped bounds and only
+    /// such bounds are added, so damage that lies wholly off screen still
+    /// composites nothing — which is what
+    /// [`has_damage`](Self::has_damage) promises.
+    fn widen_blurred_damage(&self, damage: &mut DamageRegion, screen: Rect) {
+        for _ in 0..self.windows.len() {
+            let mut grown = false;
+            for window in &self.windows {
+                if !window.is_visible() || window.blur_radius() == 0 {
+                    continue;
+                }
+                let bounds = window.bounds().intersection(&screen);
+                if bounds.is_empty() || damage.covers_rect(bounds) {
+                    continue;
+                }
+                if damage
+                    .rects()
+                    .iter()
+                    .any(|dirty| !dirty.intersection(&bounds).is_empty())
+                {
+                    damage.add(bounds);
+                    grown = true;
+                }
+            }
+            if !grown {
+                break;
+            }
+        }
     }
 
     /// Make the rendered furniture of every window `wanted` selects
@@ -1407,10 +1494,19 @@ impl Compositor {
         display: &mut dyn AcceleratedDisplay,
     ) -> Result<(), DriverError> {
         let caps = display.accel_caps()?;
-        // Every visible window becomes its own layer here, so every one of
-        // them needs its furniture available before the immutable encode.
-        let fallback = self.ensure_chrome(|_| true);
-        if let Some(buffers) = self.encode_layers(&caps, &fallback) {
+        // A hardware layer is composed from its own pixels alone and cannot
+        // sample what is already behind it, so a backdrop blur has no layer
+        // encoding at all and the whole frame goes through software.
+        let layers = if self.has_backdrop_blur() {
+            None
+        } else {
+            // Every visible window becomes its own layer here, so every one
+            // of them needs its furniture available before the immutable
+            // encode.
+            let fallback = self.ensure_chrome(|_| true);
+            self.encode_layers(&caps, &fallback)
+        };
+        if let Some(buffers) = layers {
             let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
             display.present_layers(&layers)
         } else {
@@ -1545,6 +1641,53 @@ impl Compositor {
     /// whose bounds overlap `area` — the only windows that can contribute
     /// a pixel here.
     ///
+    /// With no backdrop blur in play this is one [`compose_span`] over the
+    /// whole layer stack. A blurred window needs the pixels behind it
+    /// *before* its own are blended, so the stack is composed in segments
+    /// instead: everything below the blurred window is composed first, its
+    /// rectangle in the back buffer is then blurred, and the composition
+    /// resumes from the blurred window itself over that frosted backdrop.
+    /// Only the last segment encodes the scan-out frame, so the
+    /// intermediate stages cost no wasted encoding.
+    ///
+    /// [`compose_span`]: Self::compose_span
+    fn recompose_rect(
+        &mut self,
+        area: Rect,
+        base: Pixel,
+        hits: &[usize],
+        fallback: &ChromeFallback,
+    ) {
+        let mut start = 0;
+        let mut under = Some(base);
+        for split in 0..hits.len() {
+            let Some(index) = hits.get(split).copied() else {
+                continue;
+            };
+            if self.windows.get(index).is_none_or(|w| w.blur_radius() == 0) {
+                continue;
+            }
+            self.compose_span(area, under, hits.get(start..split), fallback, false);
+            self.blur_backdrop(index);
+            start = split;
+            under = None;
+        }
+        self.compose_span(area, under, hits.get(start..), fallback, true);
+    }
+
+    /// Compose the layers `span` names over screen rectangle `area`,
+    /// writing the result to the back buffer and — when `encode` — to the
+    /// encoded scan-out frame.
+    ///
+    /// `under` is what the layers are composed over: `Some(base)` starts
+    /// from the root fill with the desktop layer beneath the windows, while
+    /// `None` starts from whatever the back buffer already holds, which is
+    /// how a later segment of the same rectangle continues over an earlier
+    /// one's (possibly blurred) result. `span` is a sub-slice of the
+    /// rectangle's covering-window indices, or `None` for a range that does
+    /// not exist, which composes no window at all. The cursor is drawn only
+    /// by the encoding segment, so it always lands on top.
+    ///
     /// Everything that is constant across a row is resolved before the
     /// column loop: each covering layer's source row ([`Window::row`]),
     /// the destination row of the back buffer, and the destination row of
@@ -1555,12 +1698,13 @@ impl Compositor {
     /// arithmetic it actually needed. The one allocation is the row-view
     /// list, made once per damaged rectangle and refilled per row, never
     /// per pixel.
-    fn recompose_rect(
+    fn compose_span(
         &mut self,
         area: Rect,
-        base: Pixel,
-        hits: &[usize],
+        under: Option<Pixel>,
+        span: Option<&[usize]>,
         fallback: &ChromeFallback,
+        encode: bool,
     ) {
         let epoch = self.chrome_epoch();
         let Self {
@@ -1577,8 +1721,14 @@ impl Compositor {
         let stride = mode.stride_bytes as usize;
         let order = *order;
         let windows: &[Window] = windows;
-        let cursor = cursor.as_ref();
-        let desktop = desktop.as_ref();
+        // The cursor is the top-most layer, so only the segment that
+        // finishes the rectangle draws it.
+        let cursor = if encode { cursor.as_ref() } else { None };
+        // The desktop sits directly under the windows, so it belongs to
+        // the segment that starts from the root fill; a continuing segment
+        // finds it already in the back buffer.
+        let desktop = under.and(desktop.as_ref());
+        let span = span.unwrap_or(&[]);
         let (Ok(first_col), Ok(cols)) = (usize::try_from(area.left()), usize::try_from(area.width))
         else {
             return;
@@ -1593,15 +1743,15 @@ impl Compositor {
         // Which window draws here and which furniture it draws from are
         // both fixed for the whole rectangle, so the cache lookups happen
         // once here rather than once per scanline.
-        let mut sources: Vec<(&Window, Option<&WindowChrome>)> = Vec::with_capacity(hits.len());
-        sources.extend(hits.iter().filter_map(|&index| {
+        let mut sources: Vec<(&Window, Option<&WindowChrome>)> = Vec::with_capacity(span.len());
+        sources.extend(span.iter().filter_map(|&index| {
             let window = windows.get(index)?;
             Some((
                 window,
                 resolve_chrome(chrome, &epoch, window.id(), fallback),
             ))
         }));
-        let mut rows: Vec<WindowRow<'_>> = Vec::with_capacity(hits.len());
+        let mut rows: Vec<WindowRow<'_>> = Vec::with_capacity(span.len());
         for y in area.top()..area.bottom() {
             let Ok(py) = u32::try_from(y) else { continue };
             rows.clear();
@@ -1610,11 +1760,14 @@ impl Compositor {
                     .iter()
                     .filter_map(|(window, chrome)| window.row(y, *chrome)),
             );
-            let cursor_row = cursor.and_then(|c| c.local_row(y));
+            let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
             let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
             let Some((_, back_row)) = back.row_span_mut(py, left, area.width) else {
                 continue;
             };
+            // Resolved even when this segment does not encode, so every
+            // segment over one rectangle keeps or skips exactly the same
+            // rows and the back buffer can never drift from the frame.
             let Some(frame_row) = (py as usize)
                 .checked_mul(stride)
                 .and_then(|row_start| row_start.checked_add(first_byte))
@@ -1622,31 +1775,153 @@ impl Compositor {
             else {
                 continue;
             };
-            let (frame_pixels, _) = frame_row.as_chunks_mut::<4>();
-            for ((dst, bytes), x) in back_row
-                .iter_mut()
-                .zip(frame_pixels)
-                .zip(area.left()..area.right())
-            {
-                let mut acc = base;
-                if let Some(src) = desktop_pixel(desktop_row, x) {
-                    acc = src.over(acc);
+            if encode {
+                let (frame_pixels, _) = frame_row.as_chunks_mut::<4>();
+                for ((dst, bytes), x) in back_row
+                    .iter_mut()
+                    .zip(frame_pixels)
+                    .zip(area.left()..area.right())
+                {
+                    let acc =
+                        compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
+                    *dst = acc;
+                    *bytes = encode_pixel(order, acc);
                 }
-                for row in &rows {
-                    if let Some(src) = row.sample(x) {
-                        acc = src.over(acc);
-                    }
+            } else {
+                for (dst, x) in back_row.iter_mut().zip(area.left()..area.right()) {
+                    *dst = compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
                 }
-                if let Some(ly) = cursor_row {
-                    if let Some(src) = cursor.and_then(|c| c.sample_row(x, ly)) {
-                        acc = src.over(acc);
-                    }
-                }
-                *dst = acc;
-                *bytes = encode_pixel(order, acc);
             }
         }
     }
+
+    /// Blur the back buffer inside the rectangle of the window at `index`,
+    /// weighted by that window's own shape coverage, leaving a frosted
+    /// backdrop for the window's pixels to be blended over.
+    ///
+    /// The rectangle is the window's whole on-screen bounds every time —
+    /// damage widening guarantees the caller is recomposing all of it — so
+    /// the frosting a given backdrop produces never depends on which part
+    /// of the window a repaint started from. Coverage weights the mix
+    /// rather than clipping it, so a rounded corner fades from frosted to
+    /// untouched across exactly the arc the window's own pixels fade over
+    /// and no square edge shows outside a rounded window.
+    ///
+    /// The blur is confined to the window's rectangle and reads nothing
+    /// beyond it: samples past an edge replicate that edge, so the effect
+    /// can never pull a neighbour's pixels into a window nor write outside
+    /// its own bounds.
+    fn blur_backdrop(&mut self, index: usize) {
+        let screen = self.screen_rect();
+        let scale = self.scale;
+        let Self {
+            windows,
+            back,
+            blur_pixels,
+            blur_aux,
+            ..
+        } = self;
+        let Some(window) = windows.get(index) else {
+            return;
+        };
+        let bounds = window.bounds();
+        let region = bounds.intersection(&screen);
+        let radius = scale.scale_length(u32::from(window.blur_radius()));
+        let (Ok(width), Ok(height), Ok(radius)) = (
+            usize::try_from(region.width),
+            usize::try_from(region.height),
+            usize::try_from(radius),
+        ) else {
+            return;
+        };
+        let (Some(count), Ok(left)) = (width.checked_mul(height), u32::try_from(region.left()))
+        else {
+            return;
+        };
+        if count == 0 || radius == 0 {
+            return;
+        }
+        grow_scratch(blur_pixels, count);
+        grow_scratch(blur_aux, count);
+        let (Some(pixels), Some(aux)) = (blur_pixels.get_mut(..count), blur_aux.get_mut(..count))
+        else {
+            return;
+        };
+        for (row, y) in (region.top()..region.bottom()).enumerate() {
+            let Ok(py) = u32::try_from(y) else { continue };
+            let Some(dst) = row
+                .checked_mul(width)
+                .and_then(|start| pixels.get_mut(start..start.checked_add(width)?))
+            else {
+                continue;
+            };
+            let source = crate::surface::row(back, py);
+            let Some(src) = usize::try_from(left)
+                .ok()
+                .and_then(|first| source.get(first..first.checked_add(width)?))
+            else {
+                continue;
+            };
+            dst.copy_from_slice(src);
+        }
+        blur::box_blur(pixels, width, height, radius, aux);
+        // The region's top-left in the window's own coordinates: a window
+        // that starts off screen is frosted from the row and column the
+        // screen begins at, and its shape is still read from its own
+        // top-left.
+        let top = u32::try_from(region.top().saturating_sub(bounds.top())).unwrap_or(0);
+        let inset = u32::try_from(region.left().saturating_sub(bounds.left())).unwrap_or(0);
+        for (row, y) in (region.top()..region.bottom()).enumerate() {
+            let (Ok(py), Ok(row_offset)) = (u32::try_from(y), u32::try_from(row)) else {
+                continue;
+            };
+            let rounding = window.row_rounding(top.saturating_add(row_offset));
+            let Some(blurred) = row
+                .checked_mul(width)
+                .and_then(|start| pixels.get(start..start.checked_add(width)?))
+            else {
+                continue;
+            };
+            let Some((_, span)) = back.row_span_mut(py, left, region.width) else {
+                continue;
+            };
+            for ((dst, src), lx) in span.iter_mut().zip(blurred).zip(inset..) {
+                let coverage = rounding.map_or(255, |rounding| rounding.coverage(lx));
+                *dst = mix(*dst, *src, coverage);
+            }
+        }
+    }
+}
+
+/// The composited pixel at screen column `x` of an already-resolved
+/// scanline: the desktop layer, then each window row back-to-front, then
+/// the cursor, each blended *over* `under`.
+///
+/// `cursor` carries the overlay and the image-local row this scanline is,
+/// already resolved by the caller, or `None` where the cursor draws nothing
+/// on this row.
+fn compose_pixel(
+    under: Pixel,
+    x: i32,
+    desktop_row: Option<&[Pixel]>,
+    rows: &[WindowRow<'_>],
+    cursor: Option<(&CursorLayer, u32)>,
+) -> Pixel {
+    let mut acc = under;
+    if let Some(src) = desktop_pixel(desktop_row, x) {
+        acc = src.over(acc);
+    }
+    for row in rows {
+        if let Some(src) = row.sample(x) {
+            acc = src.over(acc);
+        }
+    }
+    if let Some((cursor, ly)) = cursor {
+        if let Some(src) = cursor.sample_row(x, ly) {
+            acc = src.over(acc);
+        }
+    }
+    acc
 }
 
 /// The desktop layer's pixel at screen column `x` on an already-resolved
@@ -1656,6 +1931,38 @@ impl Compositor {
 fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
     let column = usize::try_from(x).ok()?;
     row?.get(column).copied()
+}
+
+/// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
+///
+/// Every channel is weighted identically, so a colour channel can never
+/// come out above the alpha it is premultiplied by, and the two extremes
+/// return their end exactly.
+fn mix(from: Pixel, to: Pixel, weight: u8) -> Pixel {
+    if weight == 255 {
+        return to;
+    }
+    if weight == 0 {
+        return from;
+    }
+    let keep = u32::from(255 - weight);
+    let take = u32::from(weight);
+    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
+    Pixel {
+        r: channel(from.r, to.r),
+        g: channel(from.g, to.g),
+        b: channel(from.b, to.b),
+        a: channel(from.a, to.a),
+    }
+}
+
+/// Make sure `scratch` holds at least `count` pixels, growing it in place
+/// and never shrinking it, so a scratch buffer settles at the largest size
+/// the session has needed and later frames reuse it without allocating.
+fn grow_scratch(scratch: &mut Vec<Pixel>, count: usize) {
+    if scratch.len() < count {
+        scratch.resize(count, Pixel::TRANSPARENT);
+    }
 }
 
 /// Whether `window` can contribute a pixel inside `area`: it is visible
