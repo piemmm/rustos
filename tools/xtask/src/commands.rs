@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tairix_itest_harness::pie::PieArch;
 
-use crate::Context;
+use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 mod abi_check;
 mod c_header;
@@ -1506,9 +1506,12 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     cmd.args(["-p", "tairix-kernel", "--target", "aarch64-unknown-none"]);
     cmd.args(kernel_diag_feature_args(profile));
     cmd.env("CARGO_ENCODED_RUSTFLAGS", floor.encoded_rustflags());
-    ctx.run(
+    // A bare-metal kernel build from a clean `target/` can legitimately
+    // outrun an incremental host compile pass; see `LONG_BUILD_COMMAND_TIMEOUT`.
+    ctx.run_with_timeout(
         &format!("image: kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
+        LONG_BUILD_COMMAND_TIMEOUT,
     )?;
 
     // 2. Resolve the pinned firmware inputs — an operator-staged directory
@@ -1668,9 +1671,11 @@ fn build_virt_run_kernel(
     cmd.args(kernel_diag_feature_args(profile));
     cmd.env("TAIRIX_KERNEL_BOARD", "virt");
     cmd.env("CARGO_ENCODED_RUSTFLAGS", floor.encoded_rustflags());
-    ctx.run(
+    // Same clean-rebuild cost as the flashable image's kernel build above.
+    ctx.run_with_timeout(
         &format!("run: virt kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
         cmd,
+        LONG_BUILD_COMMAND_TIMEOUT,
     )?;
     let elf_path = target_dir
         .join("aarch64-unknown-none")

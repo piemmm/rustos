@@ -139,7 +139,12 @@ fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
         FlakeUnit::new("host cargo test", budget, move |_| {
             let mut cmd = ctx.cargo();
             cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
-            Job::new("host cargo test", cmd)
+            // This one job compiles *and* runs every host-testable crate in
+            // the workspace, so from a cold `target/` it legitimately runs far
+            // longer than an ordinary step. It gets the long budget so a slow
+            // machine is never mistaken for a hung one, while a genuine hang
+            // is still stopped rather than left for an operator to notice.
+            Job::new("host cargo test", cmd).with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
         }),
         // The constant-time comparison guarantee can be broken by the
         // optimiser, so this runs the secret-handling tests at `-C

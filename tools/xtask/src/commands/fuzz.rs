@@ -673,7 +673,7 @@ pub(crate) fn job_for(
         None => "1 iteration".to_string(),
     };
     let label = format!("fuzz {} ({budget_desc}, seed {job_seed})", target.test);
-    Job::new(label, cmd)
+    Job::new(label, cmd).with_soak_budget(budget)
 }
 
 #[cfg(test)]

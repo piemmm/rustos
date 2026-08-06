@@ -33,7 +33,7 @@ use std::process::Command;
 use tairix_itest_harness::pie::PieArch;
 use tairix_mkimage::ImageProfile;
 
-use crate::Context;
+use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 /// Compile `package`'s binary `bin` position-independent for the
 /// freestanding target `arch` against the one shared
@@ -126,12 +126,16 @@ pub fn cross_compile_pie_elf(
         .args(profile.cargo_build_args())
         .args(["--target-dir"])
         .arg(&target_dir);
-    ctx.run(
+    // `-Z build-std` recompiles `core`/`compiler_builtins`/`alloc` from
+    // source for the first program in a given (group, triple); that clean
+    // rebuild can legitimately outrun an incremental host compile pass.
+    ctx.run_with_timeout(
         &format!(
             "image: program build ({package}, {triple}, {})",
             profile.cargo_profile_dir()
         ),
         cmd,
+        LONG_BUILD_COMMAND_TIMEOUT,
     )?;
 
     let elf_path = target_dir

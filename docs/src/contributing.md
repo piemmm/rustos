@@ -63,6 +63,30 @@ ask — never wave the failure through as transient, load, or environment.
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 
+## Every step is time-limited
+
+No pipeline step can run forever. Every external command `xtask` spawns is
+given a wall-clock budget; when a step overruns it, its whole process group is
+signalled — `SIGTERM`, a short grace period, then `SIGKILL` — and the step
+fails, naming itself and its budget.
+
+Killing the *group* rather than the direct child is the point: a `cargo` step
+is really the rustc, test-binary and QEMU processes it spawns, and killing only
+the child would leave those running, holding the build lock and the terminal.
+
+An overrun is a hard failure. It is never retried and never folds into a
+passing result, because a step that hangs is a defect in exactly the way the
+previous section describes — an unbounded wait, a missing completion signal, a
+budget sized to an idle host — not a nuisance to paper over.
+
+Ordinary steps share one default budget; a step known in advance to need
+longer (the image gate, the QEMU matrix build) asks for a larger one
+explicitly. A slow machine can raise every budget at once with
+`TAIRIX_XTASK_TIMEOUT_SECS=<seconds>`; the override only ever *raises* a
+budget, so it cannot silently shorten one, and a malformed value is rejected
+rather than quietly ignored. The QEMU verticals keep their own per-guest
+budgets — this is an outer backstop, not a replacement for them.
+
 Other subcommands (`build`, `clean`, `prune`, `coverage`) exist for
 development and release flows; they are documented by `cargo xtask --help`.
 

@@ -267,6 +267,21 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 
+[target.'cfg(unix)'.dependencies]
+# The pipeline's step timeout must be able to kill a hung step's whole
+# process group, because `cargo` runs the work it spawns (rustc, test
+# binaries, QEMU) as grandchildren that survive killing the direct child.
+# `std` can put the child in its own process group but offers no way to
+# signal one, and shelling out to `kill(1)` is not a working substitute:
+# measured on a stock Linux host, procps-ng `kill -s TERM -<pgid>` silently
+# ignores the negated-pid group form and still exits 0, so the runaway
+# processes would live on while the pipeline reported them killed. One
+# `killpg` call is the honest way to reach that group. Not a new supply-chain
+# entry: `libc` is already pinned, licence-checked and advisory-audited in
+# this workspace's lockfile and already sits in this crate's own dependency
+# graph. Host-only build glue, never product code.
+libc = "0.2"
+
 [dev-dependencies]
 # The `image_drivers` autoload-decision tests drive the real production match
 # over the bundles the pipeline signs: the drvhost store scanner decodes each

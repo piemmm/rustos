@@ -31,7 +31,7 @@ use tairix_qemu::{Outcome, ReservedSocket, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
-use crate::Context;
+use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 /// One enrolled QEMU integration test.
 struct QemuTest {
@@ -6144,7 +6144,10 @@ pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {
             cmd.args(["-p", pkg]);
         }
         let label = format!("test --qemu (build {target}: {} pkg)", packages.len());
-        ctx.run(&label, cmd)?;
+        // One `cargo build` links every enrolled package for this target at
+        // once; that can legitimately outrun an incremental host compile
+        // pass, so it gets the longer budget rather than the default.
+        ctx.run_with_timeout(&label, cmd, LONG_BUILD_COMMAND_TIMEOUT)?;
     }
     // Pre-warm each selected enrolment's per-arch `/System`-store bundle set
     // (`stores_for` composes only what the enrolment's `fs_disk` plants, for

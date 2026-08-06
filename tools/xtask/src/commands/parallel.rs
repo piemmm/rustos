@@ -53,6 +53,9 @@
 use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
+
+use crate::{await_within, effective_timeout, spawn_in_own_group, DEFAULT_COMMAND_TIMEOUT};
 
 /// What a [`Job`] actually does when run.
 enum Work {
@@ -70,6 +73,10 @@ pub struct Job {
     /// In-flight cost charged against the runner's budget while this job runs
     /// (see the module-level "Weighted admission"). Always at least one.
     weight: usize,
+    /// Wall-clock budget for a [`Work::Command`] job, after which its process
+    /// group is killed and the job fails. Unused by a [`Work::Closure`] job,
+    /// which owns whatever deadline its own work needs.
+    budget: Duration,
     work: Work,
 }
 
@@ -81,7 +88,39 @@ impl Job {
         Self {
             label: label.into(),
             weight: 1,
+            budget: DEFAULT_COMMAND_TIMEOUT,
             work: Work::Command(command),
+        }
+    }
+
+    /// Give this job a wall-clock budget other than the default.
+    ///
+    /// For a job that is legitimately slower than an ordinary step — a
+    /// cross-compile that rebuilds the standard library from source, say — so
+    /// that a correct-but-slow job is not mistaken for a hung one. It is the
+    /// parallel counterpart of the sequential runner's per-step budget, and
+    /// the same operator override raises it.
+    #[must_use]
+    pub fn with_budget(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Budget this job to outlast an inner soak of `harness`.
+    ///
+    /// A soaking fuzz harness or property model is *supposed* to run for its
+    /// whole budget, so the job must outlast it or the runner would kill work
+    /// doing exactly what it was asked to — a nightly 24-hour soak most of
+    /// all. The allowance added on top is an ordinary step's entire budget,
+    /// far more than compiling and starting one test binary needs, so only a
+    /// harness that has genuinely stopped making progress is ever cut short.
+    /// `None` — a single smoke iteration rather than a soak — simply keeps
+    /// the ordinary budget.
+    #[must_use]
+    pub fn with_soak_budget(self, harness: Option<Duration>) -> Self {
+        match harness {
+            Some(soak) => self.with_budget(soak.saturating_add(DEFAULT_COMMAND_TIMEOUT)),
+            None => self,
         }
     }
 
@@ -96,6 +135,7 @@ impl Job {
         Self {
             label: label.into(),
             weight: weight.max(1),
+            budget: DEFAULT_COMMAND_TIMEOUT,
             work: Work::Closure(Box::new(work)),
         }
     }
@@ -204,14 +244,28 @@ pub fn run(jobs: Vec<Job>, budget: usize) -> Result<(), String> {
 /// the failure message when the job fails, or `None` on success. Only used on
 /// the budget-one streaming path, where every job is run one at a time.
 fn run_streaming(job: Job) -> Option<String> {
-    let Job { label, work, .. } = job;
+    let Job {
+        label,
+        work,
+        budget,
+        ..
+    } = job;
     match work {
         Work::Command(mut command) => {
-            eprintln!("xtask: [{label}] {command:?}");
-            match command.status() {
+            let budget = match effective_timeout(budget) {
+                Ok(budget) => budget,
+                Err(err) => return Some(err),
+            };
+            eprintln!("xtask: [{label}] {command:?} (timeout {budget:?})");
+            let mut child = match spawn_in_own_group(&mut command) {
+                Ok(child) => child,
+                Err(err) => return Some(format!("{label} could not be spawned: {err}")),
+            };
+            let pid = child.id();
+            match await_within(&label, pid, budget, move || child.wait()) {
                 Ok(status) if status.success() => None,
                 Ok(status) => Some(format!("{label} failed with {status}")),
-                Err(err) => Some(format!("{label} could not be spawned: {err}")),
+                Err(err) => Some(err),
             }
         }
         Work::Closure(work) => {
@@ -224,18 +278,33 @@ fn run_streaming(job: Job) -> Option<String> {
 /// Run one job with its output serialised into a single atomic block so
 /// concurrent jobs never interleave their lines.
 fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
-    let Job { label, work, .. } = job;
+    let Job {
+        label,
+        work,
+        budget,
+        ..
+    } = job;
     match work {
         Work::Command(mut command) => {
+            let budget = effective_timeout(budget)?;
             {
                 let _guard = stdio_lock.lock().expect("stdio lock");
-                eprintln!("xtask: [{label}] starting: {command:?}");
+                eprintln!("xtask: [{label}] starting: {command:?} (timeout {budget:?})");
             }
-            command.stdin(Stdio::null());
-            let output = match command.output() {
-                Ok(output) => output,
+            // Piped explicitly because the job is spawned directly rather
+            // than through `Command::output`, which would set these itself —
+            // spawning it here is what puts it in its own process group, so a
+            // job that hangs can be killed along with everything it forked.
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = match spawn_in_own_group(&mut command) {
+                Ok(child) => child,
                 Err(err) => return Err(format!("{label} could not be spawned: {err}")),
             };
+            let pid = child.id();
+            let output = await_within(&label, pid, budget, move || child.wait_with_output())?;
 
             {
                 let _guard = stdio_lock.lock().expect("stdio lock");
@@ -285,6 +354,7 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn ok_job(label: &str) -> Job {
         let mut cmd = Command::new("sh");
@@ -298,9 +368,71 @@ mod tests {
         Job::new(label, cmd)
     }
 
+    /// A command job that would never finish on its own, budgeted so tightly
+    /// that only a working kill can end it.
+    ///
+    /// The sleep is minutes long against a sub-second budget, so the margin is
+    /// enormous in both directions: a busy host cannot make it pass by
+    /// accident, and it can only complete quickly if the job was really
+    /// killed.
+    fn hung_job(label: &str) -> Job {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 600"]);
+        Job::new(label, cmd).with_budget(Duration::from_millis(200))
+    }
+
     #[test]
     fn host_parallelism_is_at_least_one() {
         assert!(host_parallelism() >= 1);
+    }
+
+    #[test]
+    fn a_hung_job_is_killed_and_fails_when_jobs_run_concurrently() {
+        let started = std::time::Instant::now();
+        let err = run(vec![hung_job("stuck"), ok_job("fine")], 2)
+            .expect_err("a job that outlives its budget must fail the run");
+        assert!(err.contains("stuck"), "error should name the job: {err}");
+        assert!(err.contains("timeout"), "error should say why: {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the runner must not wait out a hung job, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_hung_job_is_killed_and_fails_when_jobs_run_one_at_a_time() {
+        // A budget of one takes the streaming path, which is a separate
+        // implementation from the captured one above and so needs its own
+        // proof that it is bounded.
+        let started = std::time::Instant::now();
+        let err = run(vec![hung_job("stuck")], 1)
+            .expect_err("a job that outlives its budget must fail the run");
+        assert!(err.contains("stuck"), "error should name the job: {err}");
+        assert!(err.contains("timeout"), "error should say why: {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the runner must not wait out a hung job, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_soaking_job_outlasts_the_soak_it_is_running() {
+        // A nightly soak runs for its whole budget by design; budgeting the
+        // job at or below that would kill work doing exactly what was asked.
+        let soak = Duration::from_hours(24);
+        let job = ok_job("soaker").with_soak_budget(Some(soak));
+        assert!(
+            job.budget > soak,
+            "a soaking job must outlast its own soak, got {:?} for {soak:?}",
+            job.budget
+        );
+        // No soak means no reason to depart from the ordinary budget.
+        assert_eq!(
+            ok_job("smoke").with_soak_budget(None).budget,
+            ok_job("d").budget
+        );
     }
 
     #[test]
