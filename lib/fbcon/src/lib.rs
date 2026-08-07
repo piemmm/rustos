@@ -20,6 +20,16 @@
 //! allocates and a freestanding boot console with no global allocator links
 //! it directly. An allocator-having caller leaks a heap buffer sized to the
 //! discovered geometry; an allocator-free caller supplies a `static`.
+//!
+//! # Sharing the surface with a graphical session
+//!
+//! One scan-out surface has one presenter. A console whose seat is held by a
+//! display client is [`TextConsole::hide`]den: it keeps interpreting output
+//! into the retained grid and touches no pixel, so a diagnostic written while
+//! a desktop is up is neither drawn over the composited frame nor lost.
+//! [`TextConsole::show`] takes the surface back and repaints the whole screen
+//! from that grid, so the text a user left — plus everything that arrived
+//! meanwhile — is what returns.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -512,11 +522,9 @@ impl<'a> Screen<'a> {
     /// dirtied (or `None` for a pure cursor/state change), to be repainted
     /// by one [`Self::flush`] per batch.
     ///
-    /// `pixels` is touched immediately only by the whole-surface clears
-    /// (`EnterAltScreen`; see [`Self::clear`]), which must also blank the
-    /// pixel margins outside the cell grid — every other operation defers
-    /// its pixel work to the flush.
-    fn apply(&mut self, pixels: &mut [u32], op: &Op) -> Option<CellRect> {
+    /// Pure model: no operation touches a pixel, which is what lets a hidden
+    /// console interpret a whole batch with no surface at all.
+    fn apply(&mut self, op: &Op) -> Option<CellRect> {
         match *op {
             Op::Print(ch) => Some(self.print(ch)),
             Op::Backspace => {
@@ -601,7 +609,7 @@ impl<'a> Screen<'a> {
                 }
                 None
             }
-            Op::EnterAltScreen => self.enter_alt_screen(pixels),
+            Op::EnterAltScreen => self.enter_alt_screen(),
             Op::LeaveAltScreen => self.leave_alt_screen(),
             Op::ShowCursor => {
                 self.cursor_visible = true;
@@ -731,31 +739,28 @@ impl<'a> Screen<'a> {
         }
     }
 
-    /// Clear the whole surface to the default background, blank the active
-    /// grid, and home the cursor. The wipe removes any drawn cursor overlay
-    /// with the rest of the pixels.
+    /// Blank the active grid and home the cursor, returning the full-screen
+    /// rect so the batch's flush repaints it.
     ///
-    /// This is the one grid operation that also touches the pixels
-    /// immediately: the whole-slice fill blanks the margins outside the
-    /// cell grid (the right/bottom remainders and the stride slack), which
-    /// a grid flush never covers. The returned full-screen rect makes the
-    /// batch's flush report the full band; repainting the blank grid over
-    /// the fill writes the same background values.
-    fn clear(&mut self, pixels: &mut [u32]) -> CellRect {
-        for pixel in pixels.iter_mut() {
-            *pixel = DEFAULT_BACKGROUND;
-        }
+    /// Dropping the overlay record is what makes this safe to call while
+    /// hidden: no cursor is painted, so none has to be repaired later.
+    fn clear(&mut self) -> CellRect {
         self.active_cells().fill(Cell::BLANK);
         self.column = 0;
         self.row = 0;
         self.overlay = None;
+        self.full_rect()
+    }
+
+    /// The rect covering the whole grid.
+    fn full_rect(&self) -> CellRect {
         CellRect::rows(self.cols(), 0, self.rows())
     }
 
     /// Enter the alternate screen (`CSI ? 1049 h`): save the primary-screen
     /// cursor, switch to the alternate grid, and show it cleared. A second
     /// request while already on the alternate screen is a no-op.
-    fn enter_alt_screen(&mut self, pixels: &mut [u32]) -> Option<CellRect> {
+    fn enter_alt_screen(&mut self) -> Option<CellRect> {
         if self.on_alt {
             return None;
         }
@@ -765,7 +770,7 @@ impl<'a> Screen<'a> {
             pen: self.pen,
         });
         self.on_alt = true;
-        Some(self.clear(pixels))
+        Some(self.clear())
     }
 
     /// Leave the alternate screen (`CSI ? 1049 l`): switch back to the primary
@@ -783,7 +788,7 @@ impl<'a> Screen<'a> {
             self.row = saved.row.min(self.rows().saturating_sub(1));
             self.pen = saved.pen;
         }
-        Some(CellRect::rows(self.cols(), 0, self.rows()))
+        Some(self.full_rect())
     }
 
     /// Erase part of the display relative to the cursor, filling the grid
@@ -1022,6 +1027,22 @@ impl<'a> Screen<'a> {
 pub struct TextConsole<'a> {
     parser: Parser,
     screen: Screen<'a>,
+    /// Whether this console currently owns the scan-out surface. A console
+    /// sharing its surface with a graphical session is hidden while that
+    /// session holds it: the grid still advances, no pixel is touched.
+    visible: bool,
+}
+
+/// Fill every pixel of the surface with the default background.
+///
+/// A grid flush covers only whole cells, so this is the only thing that blanks
+/// the margins outside the grid — the right/bottom remainders and the stride
+/// slack — and the only thing that can erase pixels a previous presenter left
+/// there. The full-grid flush that follows repaints the cells over it.
+fn fill_surface(pixels: &mut [u32]) {
+    for pixel in pixels.iter_mut() {
+        *pixel = DEFAULT_BACKGROUND;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1039,6 +1060,7 @@ impl<'a> TextConsole<'a> {
         Self {
             parser: Parser::new(),
             screen: Screen::new(geometry, main, alt),
+            visible: true,
         }
     }
 
@@ -1048,11 +1070,48 @@ impl<'a> TextConsole<'a> {
         self.screen.geometry()
     }
 
+    /// Whether this console currently owns the scan-out surface.
+    #[must_use]
+    pub const fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Give the scan-out surface up to another presenter.
+    ///
+    /// Output that arrives while hidden still advances the retained grid and
+    /// touches no pixel, so it neither corrupts the new presenter's frame nor
+    /// is lost: [`Self::show`] paints it. Idempotent.
+    pub const fn hide(&mut self) {
+        self.visible = false;
+    }
+
+    /// Take the scan-out surface back and repaint the whole screen from the
+    /// retained grid, returning the dirty band (the full surface height).
+    ///
+    /// Every pixel is written — the surface fill covers the margins outside
+    /// the cell grid, the flush covers every cell — so no pixel of whatever
+    /// held the surface before can survive. Idempotent, which is what lets
+    /// the panic path reclaim the screen without knowing who had it.
+    pub fn show(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        self.visible = true;
+        fill_surface(pixels);
+        let rect = self.screen.full_rect();
+        let band = self.screen.flush(pixels, rect);
+        merge_bands(Some(band), self.screen.draw_cursor(pixels))
+    }
+
     /// Clear the whole surface to the background and home the cursor, returning
     /// the dirty band (the full surface height). The cursor overlay is redrawn
     /// at the home position.
+    ///
+    /// A hidden console clears its retained grid and paints nothing, so the
+    /// clear is what [`Self::show`] later reveals.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
-        let rect = self.screen.clear(pixels);
+        let rect = self.screen.clear();
+        if !self.visible {
+            return None;
+        }
+        fill_surface(pixels);
         let band = self.screen.flush(pixels, rect);
         merge_bands(Some(band), self.screen.draw_cursor(pixels))
     }
@@ -1089,11 +1148,15 @@ impl<'a> TextConsole<'a> {
         bytes: &[u8],
         line_feed_mode: LineFeedMode,
     ) -> Option<DirtyBand> {
-        let Self { parser, screen } = self;
+        let Self {
+            parser,
+            screen,
+            visible,
+        } = self;
         let mut dirty = screen.undraw_cursor();
         let mut feed = |chunk: &[u8]| {
             parser.feed(chunk, |op| {
-                dirty = merge_rects(dirty, screen.apply(pixels, &op));
+                dirty = merge_rects(dirty, screen.apply(&op));
             });
         };
         match line_feed_mode {
@@ -1109,6 +1172,9 @@ impl<'a> TextConsole<'a> {
                 }
                 feed(&bytes[start..]);
             }
+        }
+        if !*visible {
+            return None;
         }
         let band = dirty.map(|rect| screen.flush(pixels, rect));
         merge_bands(band, screen.draw_cursor(pixels))

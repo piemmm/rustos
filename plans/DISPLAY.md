@@ -76,6 +76,8 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | Seat multiplexing (VT switch) | `chvt`/`VT_ACTIVATE`, `logind` seats | single text-vs-desktop boolean | `CAP_SEAT_ADMIN` foreground switch across sessions |
 | Controlling terminal / foreground | session leader + fg pgroup + `SIGTTIN/TTOU` | inherited fd table + `CAP_CONSOLE_READ` gate | per-console controlling-owner + fg handoff, capability-gated |
 | Multi-head / multi-seat | DRM connectors + `logind` seats | `consoles[0]` == "the display" | N independent seat objects, one owner each |
+| Text console vs. graphics on one surface | `KD_GRAPHICS` + fbcon `CON_IS_VISIBLE`; `printk` dropped, not retained | kernel fbcon paints the scan-out unconditionally | surface handover derived from the same lease; text **retained** and replayed |
+| Owner dies without releasing | master drops when the `fd` closes | nothing — the seat stays held by a dead task | task-exit reclaim of the lease, the surface, and the queued input |
 
 ## 2. Design — "better than Linux"
 
@@ -662,6 +664,107 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 protocol's damage + direct-scanout shape is designed so those extend it
 in place); a network display service (same protocol, later plan); the
 input-device→seat topology policy (CU6 / `plans/PI.md` P11).
+
+### Stage D8 — the surface handover: who paints the seat's pixels
+
+**Status: done.**
+
+D4 derived the *display client's* present right from the live lease, but the
+kernel's own framebuffer text console was not under the same rule: it painted
+the scan-out surface whenever `stream_write` reached it, gated only by "was a
+video console discovered at boot". Two presenters wrote one surface with no
+arbitration, and three defects followed.
+
+1. **Text lands on the composited frame.** A diagnostic the desktop (or any
+   program holding the launching terminal's inherited `stderr`) writes is
+   parsed by the kernel console and blitted straight over the desktop's
+   pixels. The desktop owns the seat; the text console must not draw on it.
+2. **A dead owner keeps the seat forever.** `reclaim_task_resources` releases a
+   dying task's IRQ lines, endpoints, ports, shared memory, wait-sets and
+   console foreground ownership, but **not** its seat lease. A killed,
+   faulted, or force-quit desktop leaves the seat `Held` by a task that no
+   longer exists: input keeps routing to a dead channel, every later
+   `display_acquire` is refused `SeatBusy`, and the last composited frame is
+   frozen on screen with no way back to text. The user is never returned to
+   the terminal they started from.
+3. **A lease end leaves the outgoing owner's keystrokes in the channel.**
+   `SeatRegistry::release` / `revoke` zero only the records a consumer
+   *drains*; undrained ones survive the lease. The next acquirer's first
+   `keyboard_read` therefore returns keys typed into the previous session — a
+   cross-principal input leak, and exactly the material (a passphrase typed at
+   a lock screen before the desktop was killed) the zero-on-free rule exists
+   for.
+
+**The rule.** A seat's lease already answers *both* halves of the foreground
+question, and `tairix_seat::Route` is that one answer: `Text(idx)` means the
+seat's input drains to console `idx` **and** console `idx` owns the seat's
+display surface; `Desktop(owner)` means the owner takes both. Nothing is added
+to the seat model — the output side simply starts reading the decision that was
+always there. The kernel's framebuffer console belongs to the **boot seat**
+(`SEAT_PRIMARY`), because the surface it paints is the one the arch port brought
+up at boot; a hotplug seat's display carries no kernel text console, so a
+desktop that takes a second head leaves the primary console painting its own
+screen — the right multi-head answer, for free.
+
+**Retained, not discarded — better than Linux.** Linux drops `printk` output
+that arrives while a VT is in `KD_GRAPHICS`; the bytes are gone from the screen
+for good. TAIRiX keeps interpreting them into the console's retained cell grid
+and paints nothing, so taking the surface back repaints the whole screen
+*including everything written while it was away*. The user comes back to their
+shell exactly as they left it, with the desktop's diagnostics printed beneath —
+which is precisely what the reporter asked for, and what `stdout`/`stderr`
+being descriptors rather than devices (§20) already promises.
+
+- **`lib/fbcon`** — the engine owns whether it paints, since it is the thing
+  that paints, and every port then shares one definition (§2.21).
+  `TextConsole` carries `visible`; `hide()` gives the surface up, `show(pixels)`
+  takes it back and repaints (surface fill → full-grid flush → cursor) and is
+  **idempotent**, so it serves the lease-end transition and the panic
+  break-through alike. While hidden, a write updates the grid and performs
+  **zero** pixel accesses. The model/pixel split this needs is a correctness
+  fix in its own right: `Screen::apply` loses its `pixels` argument (its only
+  pixel user was the alternate-screen clear), and the whole-surface fill that
+  blanks the margins outside the cell grid becomes `Screen::fill_surface`,
+  called by `clear` and `show` — the two moments a margin can be stale (a free
+  function, since it touches only pixels).
+- **`kernel/core/src/console.rs`** — `ConsoleWrite` gains two defaulted
+  methods: `set_visible(visible)` for the lease handover and
+  `reclaim_surface()` for the panic path. They differ *only* in what they do
+  when the surface is contended — the handover **waits**, because a skipped
+  hide would leave the console painting over the session's frame; the panic
+  **gives up**, because the panicking CPU may itself be inside the renderer.
+  A byte-stream console shares no surface with anything, so both defaults do
+  nothing and serial output is never suppressed.
+- **`kernel/core/src/seat.rs`** — the registry drives the transition, so it
+  cannot be forgotten at a call site. It gains the installed console list
+  (`with_consoles`, defaulting to the existing `NO_CONSOLES`, so no non-boot
+  construction changes) and applies the boot seat's `Route` to those consoles
+  **under the seat's state lock**, so two concurrent transitions cannot apply a
+  stale decision. The port's render lock is a leaf — nothing it guards takes
+  another lock — so the nesting cannot deadlock.
+- **Task-exit reclaim** — `release_owned_by(owner, audit)` releases every lease
+  the dying task holds, clears a stale `Revoked { evicted }` marker naming it
+  (so a later task cannot inherit its eviction), purges the seat's input
+  channels, hands the surface back to the text console, wakes the `SeatInput`
+  waiters, and emits one `SEAT_LEASE_RECLAIMED` record per seat.
+  `reclaim_task_resources` calls it beside the console-foreground release it
+  already performs, so *every* death — clean `exit`, fault kill, signal kill —
+  returns the screen and the keyboard through one path.
+- **Channel purge** — `InputChannel::purge` zeroes the whole ring. It runs at
+  every lease **end** (the zero-on-free obligation for memory that held a
+  keystroke) *and* at every **acquire** (fail-closed: an incoming owner can
+  never read a record it did not produce, whatever path ended the last lease).
+- **Panic break-through** — on a port whose log sink renders to the framebuffer
+  (the aarch64 `SerialSink` does, on a release build with a live surface) a
+  kernel oops would otherwise land in a hidden console's retained screen while
+  the user stares at a frozen frame. `PanicContext` carries the console list
+  (`with_consoles`, defaulting to `NO_CONSOLES`) and `panic_dump` reclaims the
+  surface before it emits anything, ahead of the re-entrancy guard so a nested
+  panic's terse record is visible too.
+
+**Not in D8:** a user-facing VT switch key (the `CAP_SEAT_ADMIN` `seat_switch`
+mechanism is already D3's; binding a chord to it is a seat-manager policy
+question), and console scrollback.
 
 ## 6. Tests, docs, and gate (binding)
 

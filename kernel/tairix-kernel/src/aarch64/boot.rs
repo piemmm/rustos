@@ -74,9 +74,7 @@ use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
 use tairix_arch_aarch64::irqmask::DaifIrqControl;
 use tairix_util::fmt::format_hex_u64;
 
-use crate::aarch64::arch_wrapper::{
-    Aarch64BinArch, SEAT_REGISTRY, UART_ONLY_CONSOLES, VIDEO_ONLY_CONSOLES,
-};
+use crate::aarch64::arch_wrapper::{console_layout, Aarch64BinArch};
 use crate::aarch64::dispatch::{
     production_dispatch, production_user_fault, production_user_fault_terminate, DISPATCH_SLOT,
 };
@@ -1369,6 +1367,10 @@ fn enter_kernel_core(
     unsafe {
         crate::aarch64::panic_ctx::publish_arch(Arc::as_ptr(&arch));
     }
+    // One decision for the console list and the seat registry, so the seat's
+    // text sink, the console whose display surface its lease hands over, and
+    // the console a descriptor's index names cannot disagree.
+    let (consoles, seat_registry) = console_layout();
     let boot_info = BootInfo::new(
         BOOT_CPU,
         cpu_count,
@@ -1387,20 +1389,18 @@ fn enter_kernel_core(
     // the debug log alone, with no session that would draw over it; with
     // no display, the discovered UART is the only console. Each entry is
     // a `stream_write`/`stream_read` backing pair.
-    .with_consoles(if video::is_active() {
-        &VIDEO_ONLY_CONSOLES
-    } else {
-        &UART_ONLY_CONSOLES
-    })
+    .with_consoles(consoles)
     // Record the firmware-discovered installed-RAM total so the core mints
     // the `boot_facts_get` machine summary from it.
     .with_installed_memory(installed_memory_bytes)
     // Install the kernel seat registry (`plans/DISPLAY.md` D2 — input
-    // follows the surface owner): its text sink is the video console's
-    // keyboard queue, so an injected key press reaches the video login by
+    // follows the surface owner): its text sink is that same console's
+    // keyboard queue, so an injected key press reaches the login by
     // default, and the window manager's owner-checked `display_acquire`
     // later routes whole records to the desktop keyboard channel instead.
-    .with_seat_registry(&SEAT_REGISTRY)
+    // Acquiring the seat also hands the console's display surface to the
+    // session, and every way the lease can end gives it back (D8).
+    .with_seat_registry(seat_registry)
     // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s EL0 image and drop into user mode.

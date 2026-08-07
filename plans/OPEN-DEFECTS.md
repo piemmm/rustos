@@ -397,6 +397,25 @@ The open items, in priority order:
   (OPEN).** The session's delivery is one non-blocking send with no
   hold-back, so a state edge (`Resized`, `FilePicked`, …) can be lost.
   Needs a "destination has space" wait-set member kind first.
+- **D36 — a panic *inside* the framebuffer console's renderer hangs its own
+  report (OPEN).** Noticed while wiring the D8 surface handover
+  (`plans/DISPLAY.md`), not caused by it. On a release build with a live
+  framebuffer, `SerialSink::write_event` renders the record through
+  `video::render_bytes`, which takes `RENDER_LOCK` **blocking**. A panic
+  raised while that lock is already held by this CPU — an index or arithmetic
+  fault inside `lib/fbcon`, or inside `render_bytes` itself — therefore
+  deadlocks on the report it is trying to emit: no oops on the screen, no
+  oops on serial, a silent hang. The re-entrancy guard does not help (it does
+  not release the lock). D8's panic reclaim deliberately steps around this
+  (`video::reclaim_surface` uses `try_lock` precisely so it cannot add a
+  second hang site) but does **not** fix the underlying write path. The real
+  fix is Linux's `bust_spinlocks` shape: on entry to the panic path, mark the
+  console locks broken so every later console write proceeds unlocked — the
+  machine is going down and a torn frame beats silence. Needs a `lib/sync`
+  primitive for "abandon this lock", so it is a `lib/sync` + per-port change,
+  not a one-liner. **Regression cover owed with the fix** (§7): a host test
+  that panics with the render lock held and asserts the record still reaches
+  the sink.
 - **D25 — `boot_audit_ring`'s scripted test clock was process-wide, making its
   exact-instant assertions order-dependent — DONE.** Noticed while running the
   `kernel/core` suite for D24: `records_are_retained_and_read_non_destructively`
@@ -424,10 +443,11 @@ reported — D22 is a load-dependent QEMU-harness timeout whose mechanism is
 not yet named, D23 was an observer-perturbs-the-observed defect the debug
 watchdog's own non-maskable sample exposed (fixed), D24 was a missing
 in-kernel preemption boundary — a fairness defect, not a wedge — that let a
-burst of never-waiting device operations withhold a core (fixed), and D25 was a
+burst of never-waiting device operations withhold a core (fixed), D25 was a
 process-wide test clock that made a host suite's exact-instant assertions
-order-dependent (fixed). Do not collapse the open items into one change; land
-each on its own whole-project-green gate (§7).
+order-dependent (fixed), and D36 is a panic-path self-deadlock in the console
+write path (open, needs a lock-abandon primitive). Do not collapse the open
+items into one change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 

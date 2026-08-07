@@ -205,8 +205,8 @@ pub struct DiscoveredVideo {
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use metal::{
-    active_framebuffer_extent, attach_console, configure_from_fdt, text_cell_count, text_grid,
-    write_bytes, write_output_bytes,
+    active_framebuffer_extent, attach_console, configure_from_fdt, reclaim_surface, set_visible,
+    text_cell_count, text_grid, write_bytes, write_output_bytes,
 };
 
 /// Host stand-in for the freestanding writer: rendering needs the
@@ -252,6 +252,17 @@ pub fn attach_console(
     _alt: &'static mut [tairix_fbcon::Cell],
 ) {
 }
+
+/// Host stand-in for the freestanding `set_visible`: no surface exists on the
+/// host, so there is nothing to hand over (the handover itself is host-tested
+/// through [`tairix_fbcon::TextConsole`] and the kernel seat registry).
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn set_visible(_visible: bool) {}
+
+/// Host stand-in for the freestanding `reclaim_surface`: no surface exists on
+/// the host, so a panic has nothing to take back.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn reclaim_surface() {}
 
 /// The freestanding half: the firmware exchange, the identity-mapped
 /// surface, and the cache maintenance. Target-only — every routine here
@@ -621,6 +632,71 @@ mod metal {
         render_bytes(bytes, WriteMode::ProgramOutput);
     }
 
+    /// Hand the scan-out surface between the text console and the graphical
+    /// session holding the boot seat: `visible == false` gives it up (the
+    /// console keeps interpreting output into its retained screen and paints
+    /// nothing), `visible == true` takes it back and repaints the whole
+    /// screen from that screen — including everything written while it was
+    /// away.
+    ///
+    /// Waits for a concurrent write to finish, because the handover must
+    /// *happen*: a skipped hide would leave the console painting over the
+    /// session's frame. The wait is bounded by one console write.
+    ///
+    /// Idempotent in both directions, and a call with no configured console
+    /// (a UART-only board) does nothing. Post-MMU only, like every other
+    /// render entry point.
+    pub fn set_visible(visible: bool) {
+        let _guard = RENDER_LOCK.lock();
+        apply_visibility(visible);
+    }
+
+    /// Take the surface back for a panic report, giving up if it is
+    /// contended.
+    ///
+    /// Best-effort because the panicking CPU may itself hold the render lock
+    /// — it panicked inside the console — and blocking there would hang the
+    /// machine with no report at all, including on a debug build whose report
+    /// would otherwise have reached the serial console untouched. Losing the
+    /// repaint is the lesser failure.
+    pub fn reclaim_surface() {
+        let Some(_guard) = RENDER_LOCK.try_lock() else {
+            return;
+        };
+        apply_visibility(true);
+    }
+
+    /// Apply a visibility change, repainting the screen when the surface is
+    /// being taken back. The render lock **must** be held.
+    fn apply_visibility(visible: bool) {
+        // SAFETY: post-MMU, render lock held by the caller; `VIDEO` was
+        // written pre-MMU by the single-threaded boot CPU (visible in program
+        // order) and the held lock serialises this mutable access (see
+        // `VideoSlot`).
+        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
+            return;
+        };
+        let (fb_base, pixel_count) = (state.fb_base, state.pixel_count);
+        let Some(console) = state.console.as_mut() else {
+            return;
+        };
+        if !visible {
+            console.hide();
+            return;
+        }
+        // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
+        // validated at configure time, identity-mapped RAM; the render lock
+        // makes this the only live reference.
+        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
+        if let Some((row_start, row_end)) = console.show(pixels) {
+            let stride_bytes = console.geometry().stride_px as usize * 4;
+            clean_dcache_range(
+                fb_base + row_start as usize * stride_bytes,
+                (row_end - row_start) as usize * stride_bytes,
+            );
+        }
+    }
+
     fn render_bytes(bytes: &[u8], mode: WriteMode) {
         if !super::is_active() {
             return;
@@ -637,10 +713,18 @@ mod metal {
         let Some(console) = state.console.as_mut() else {
             return;
         };
-        // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
-        // validated at configure time, identity-mapped RAM; the render
-        // lock makes this the only live reference.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
+        // A hidden console paints nothing, so no reference into the surface
+        // is formed while a graphical session is writing it; the engine
+        // still advances its retained screen, and `set_visible` paints the
+        // result when the surface comes back.
+        let pixels: &mut [u32] = if console.is_visible() {
+            // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
+            // validated at configure time, identity-mapped RAM; the render
+            // lock makes this the only live reference.
+            unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
+        } else {
+            &mut []
+        };
         let dirty = match mode {
             WriteMode::Verbatim => console.write_bytes(pixels, bytes),
             WriteMode::ProgramOutput => console.write_output_bytes(pixels, bytes),

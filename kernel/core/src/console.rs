@@ -102,6 +102,48 @@ pub trait ConsoleWrite: Sync {
     fn geometry(&self) -> Option<TerminalSize> {
         None
     }
+
+    /// Take this console's display surface back and repaint it from the
+    /// retained screen (`visible == true`), or give the surface up to the
+    /// graphical session that now holds the seat (`visible == false`).
+    ///
+    /// A framebuffer text console and a display client share one scan-out
+    /// surface, and a surface has one presenter. While the surface is given
+    /// up the console still interprets everything written to it into its
+    /// retained screen but paints nothing, so a diagnostic written under a
+    /// desktop neither scribbles over the composited frame nor is lost:
+    /// taking the surface back repaints the whole screen, including what
+    /// arrived while it was away. Both directions are idempotent, and taking
+    /// it back overwrites every pixel, so no fragment of the previous
+    /// presenter's frame survives.
+    ///
+    /// The seat registry ([`crate::seat`]) drives this from the one
+    /// `tairix_seat::Route` decision that also routes the seat's input, so
+    /// the keyboard and the pixels can never disagree about who is
+    /// foreground. The default does nothing: a byte-stream console (a UART)
+    /// shares no surface with anything, and suppressing its output would
+    /// lose it outright.
+    ///
+    /// The handover must *happen* — a skipped hide would leave the console
+    /// painting over the session's frame — so an implementation waits for a
+    /// concurrent write rather than giving up. A panic uses
+    /// [`Self::reclaim_surface`] instead, which may not wait.
+    fn set_visible(&self, visible: bool) {
+        let _ = visible;
+    }
+
+    /// Take the display surface back for a **panic report**, best-effort.
+    ///
+    /// Separate from [`Self::set_visible`] only in what it does when the
+    /// surface is contended: the panicking CPU may itself be inside this
+    /// console's renderer, so waiting could hang the machine with no report
+    /// at all — including on a build whose report would otherwise have
+    /// reached a serial console untouched. Losing the repaint is the lesser
+    /// failure, and the record still reaches its log sink.
+    ///
+    /// The default does nothing, for the same reason as
+    /// [`Self::set_visible`]'s.
+    fn reclaim_surface(&self) {}
 }
 
 /// The console sink installed before any real device exists.
@@ -773,6 +815,19 @@ impl ConsoleDevice {
     /// byte (an inert [`NullConsole`] returns [`Errno::NotImplemented`]).
     pub fn write_output(&self, bytes: &[u8]) -> Result<usize, Errno> {
         self.write.write_output(bytes)
+    }
+
+    /// Take this console's display surface back and repaint it, or give it up
+    /// to the graphical session holding its seat — see
+    /// [`ConsoleWrite::set_visible`] for the contract.
+    pub fn set_visible(&self, visible: bool) {
+        self.write.set_visible(visible);
+    }
+
+    /// Take this console's display surface back for a panic report — see
+    /// [`ConsoleWrite::reclaim_surface`] for the contract.
+    pub fn reclaim_surface(&self) {
+        self.write.reclaim_surface();
     }
 }
 

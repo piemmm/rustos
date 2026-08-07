@@ -699,6 +699,113 @@ fn program_output_keeps_parser_state_across_writes() {
     assert_eq!(cooked_pixels, explicit_pixels);
 }
 
+// --- Sharing the surface with another presenter ------------------------
+
+#[test]
+fn a_console_starts_owning_its_surface() {
+    let (console, _) = small_console();
+    assert!(console.is_visible());
+}
+
+/// The whole point of hiding: a graphical session's pixels must survive
+/// every kind of console output written while it holds the surface.
+#[test]
+fn a_hidden_console_touches_no_pixel() {
+    // Stands in for a composited frame: a colour no console write produces —
+    // neither the default background nor any glyph colour.
+    const FRAME: u32 = 0xFF12_3456;
+    let (mut console, mut pixels) = cursor_console_of(4, 2);
+    pixels.fill(FRAME);
+
+    console.hide();
+    assert!(!console.is_visible());
+    // Printing, cooked output, a scroll, an erase, a cursor move, the
+    // alternate screen, and an explicit clear — every path that paints.
+    assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?25h"), None);
+    assert_eq!(
+        console.write_output_bytes(&mut pixels, b"a\nb\nc\nd\n"),
+        None
+    );
+    assert_eq!(console.write_bytes(&mut pixels, b"\x1b[2J\x1b[1;1Hx"), None);
+    assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?1049h"), None);
+    assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?1049l"), None);
+    assert_eq!(console.clear(&mut pixels), None);
+
+    assert!(
+        pixels.iter().all(|&p| p == FRAME),
+        "the other presenter's pixels are untouched"
+    );
+}
+
+/// Retained, not discarded: what arrives while hidden is on screen the
+/// moment the surface comes back, pixel-identical to a console that was
+/// never hidden. This is the "return to the terminal you started from"
+/// guarantee.
+#[test]
+fn showing_replays_everything_written_while_hidden() {
+    let stream: &[u8] = b"\x1b[31mone\r\ntwo\r\nthree\r\n\x1b[0mlast";
+    let (mut hidden, mut hidden_px) = cursor_console_of(5, 3);
+    hidden.hide();
+    hidden.write_bytes(&mut hidden_px, stream);
+    hidden_px.fill(0xFFAB_CDEF);
+    let band = hidden.show(&mut hidden_px);
+
+    let (mut plain, mut plain_px) = cursor_console_of(5, 3);
+    plain.write_bytes(&mut plain_px, stream);
+
+    assert!(hidden.is_visible());
+    assert_eq!(
+        band,
+        Some((0, 3 * CELL_HEIGHT)),
+        "the whole surface repaints"
+    );
+    assert_eq!(hidden_px, plain_px);
+}
+
+/// The repaint covers the pixel margins outside the cell grid and the
+/// stride slack too, so no sliver of the previous presenter's frame is
+/// left in the gaps a cell flush never reaches.
+#[test]
+fn showing_blanks_the_margins_and_the_stride_slack() {
+    // A surface one pixel taller than a whole number of cell rows, so
+    // there is a bottom margin as well as the helper's stride slack.
+    let geometry = Geometry {
+        width_px: 2 * CELL_WIDTH,
+        height_px: CELL_HEIGHT + 1,
+        stride_px: 2 * CELL_WIDTH + 3,
+        scale: 1,
+    };
+    let mut pixels = vec![0xFFAB_CDEFu32; geometry.pixel_count()];
+    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let mut console = TextConsole::new(geometry, main, alt);
+
+    console.show(&mut pixels);
+
+    assert!(pixels.iter().all(|&p| p != 0xFFAB_CDEF));
+}
+
+/// Idempotent in both directions, which is what lets the panic path
+/// reclaim the surface without knowing who held it.
+#[test]
+fn hide_and_show_are_idempotent() {
+    let (mut console, mut pixels) = cursor_console_of(2, 1);
+    console.write_bytes(&mut pixels, b"a");
+    let shown = pixels.clone();
+
+    console.hide();
+    console.hide();
+    assert!(!console.is_visible());
+
+    console.show(&mut pixels);
+    let once = pixels.clone();
+    console.show(&mut pixels);
+
+    assert!(console.is_visible());
+    assert_eq!(pixels, once);
+    assert_eq!(pixels, shown);
+}
+
 /// Adjacent blank runs with different backgrounds each keep their own
 /// colour: the flush's span-fill fast path must break a run at a
 /// background change, never bleed one background across it.

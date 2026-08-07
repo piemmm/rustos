@@ -24,6 +24,10 @@ format) discovered at runtime. Verbatim streams use `TextConsole::write_bytes`;
 program output uses `TextConsole::write_output_bytes`, which applies terminal
 `LF` → `CR LF` processing while retaining the same one-repaint batch.
 
+One surface has one presenter, so a console sharing its scan-out with a
+graphical session is `hide()`den while that session holds the seat and `show()`n
+when it ends — see "Sharing the surface" below.
+
 ## Design
 
 - **Retained cell grid, one repaint per write.** The engine keeps the visible
@@ -46,6 +50,27 @@ program output uses `TextConsole::write_output_bytes`, which applies terminal
 - **Fail closed.** Firmware-supplied geometry is validated at construction
   (`Geometry::for_display`), and a glyph the atlas cannot draw renders `?`
   rather than being dropped.
+
+## Sharing the surface
+
+A framebuffer text console and a compositing display client want the same
+scan-out memory, and a surface can only have one presenter. `TextConsole`
+therefore carries a visibility state that the kernel's seat lease drives
+(`kernel/core/src/seat.rs`): the console owns the surface while the seat is
+unowned, and gives it up while a session holds it.
+
+- `hide()` — give the surface up. Writes keep being parsed into the retained
+  grid and touch **no** pixel, so output produced under a desktop is neither
+  drawn over the composited frame nor lost.
+- `show(pixels)` — take the surface back and repaint the whole screen from the
+  retained grid: the surface fill blanks the margins outside the cell grid, the
+  full-grid flush paints every cell, so no pixel of the previous presenter can
+  survive. What arrived while hidden is on screen too, which is why a user who
+  leaves a graphical session returns to their shell exactly as they left it
+  with the session's diagnostics printed beneath.
+
+Both directions are idempotent, so the kernel panic path can reclaim the
+surface without knowing who held it.
 
 ## Surface format
 

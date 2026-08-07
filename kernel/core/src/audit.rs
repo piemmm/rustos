@@ -270,6 +270,17 @@ pub enum AuditEvent {
     /// eviction is attributable; the evicted owner's next owner-gated call
     /// fails closed with the distinct `SeatRevoked` refusal.
     SeatLeaseRevoked,
+    /// A seat's lease was reclaimed because its holder is gone
+    /// (`plans/DISPLAY.md` D8).
+    ///
+    /// Emitted per reclaimed seat by the task-exit reclaim
+    /// ([`crate::seat::SeatRegistry::release_owned_by`]) for a graphical
+    /// session that ended without releasing — a clean exit that never
+    /// reached its `display_release`, a fault kill, a signal kill, a
+    /// force-quit. Carries the seat id and the dead owner's task id: the
+    /// display surface and the keyboard returning to the text console is an
+    /// ownership change, and it is attributable.
+    SeatLeaseReclaimed,
     /// A display-class hardware-tree node was published into the live tree
     /// and the kernel minted an independent seat for it
     /// (`plans/DISPLAY.md` D6 — multi-seat / hotplug).
@@ -592,6 +603,7 @@ impl AuditEvent {
             Self::SeatLeaseRevoked => 4052,
             Self::SeatCreated => 4053,
             Self::SeatDestroyed => 4054,
+            Self::SeatLeaseReclaimed => 4055,
             Self::EntropyReserveSeeded => 4060,
             Self::EntropyReserveUnseeded => 4061,
             Self::BootIdMinted => 4062,
@@ -656,6 +668,7 @@ impl AuditEvent {
             Self::SeatLeaseRevoked => "seat lease revoked",
             Self::SeatCreated => "seat created for display node",
             Self::SeatDestroyed => "seat destroyed with display node",
+            Self::SeatLeaseReclaimed => "seat lease reclaimed from dead owner",
             Self::EntropyReserveSeeded => "entropy reserve seeded",
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
             Self::BootIdMinted => "per-boot id minted",
@@ -735,6 +748,7 @@ mod tests {
             AuditEvent::SeatLeaseRevoked,
             AuditEvent::SeatCreated,
             AuditEvent::SeatDestroyed,
+            AuditEvent::SeatLeaseReclaimed,
             AuditEvent::EntropyReserveSeeded,
             AuditEvent::EntropyReserveUnseeded,
             AuditEvent::BootIdMinted,
@@ -802,6 +816,7 @@ mod tests {
             AuditEvent::SeatLeaseRevoked.id().0,
             AuditEvent::SeatCreated.id().0,
             AuditEvent::SeatDestroyed.id().0,
+            AuditEvent::SeatLeaseReclaimed.id().0,
             AuditEvent::EntropyReserveSeeded.id().0,
             AuditEvent::EntropyReserveUnseeded.id().0,
             AuditEvent::BootIdMinted.id().0,

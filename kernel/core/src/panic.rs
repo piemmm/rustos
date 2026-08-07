@@ -99,6 +99,23 @@ pub struct PanicContext<'a, A: KernelArch + 'static> {
     /// window before it is available) the dump carries only the base
     /// `cpu`/`file`/`line`/`column` fields — never a faked backtrace.
     pub backtrace: Option<&'a dyn CpuStateCapture>,
+
+    /// The installed system consoles, so the dump takes the display surface
+    /// back before it writes
+    /// ([`crate::console::ConsoleWrite::reclaim_surface`]).
+    ///
+    /// A graphical session that holds a seat owns the scan-out surface, and
+    /// the text console hands it over rather than scribbling on the
+    /// composited frame. That must never hide a kernel panic: on a port whose
+    /// log sink renders to the framebuffer, the report would otherwise land
+    /// in a hidden console's retained screen while the user stares at a
+    /// frozen frame. Reclaiming first is the `console_unblank` a fatal fault
+    /// has always deserved.
+    ///
+    /// Defaults to [`crate::console::NO_CONSOLES`]: a port that wires no
+    /// console has no surface to reclaim, and the report reaches its log sink
+    /// exactly as before.
+    pub consoles: &'a [crate::console::ConsoleDevice],
 }
 
 impl<'a, A: KernelArch> PanicContext<'a, A> {
@@ -113,6 +130,7 @@ impl<'a, A: KernelArch> PanicContext<'a, A> {
             arch,
             audit_sink,
             backtrace: None,
+            consoles: &crate::console::NO_CONSOLES,
         }
     }
 
@@ -121,6 +139,14 @@ impl<'a, A: KernelArch> PanicContext<'a, A> {
     #[must_use]
     pub fn with_backtrace(mut self, backtrace: &'a dyn CpuStateCapture) -> Self {
         self.backtrace = Some(backtrace);
+        self
+    }
+
+    /// Attach the installed console list, so the dump reclaims the display
+    /// surface before it writes (see [`Self::consoles`]).
+    #[must_use]
+    pub fn with_consoles(mut self, consoles: &'a [crate::console::ConsoleDevice]) -> Self {
+        self.consoles = consoles;
         self
     }
 }
@@ -246,6 +272,16 @@ pub fn panic_dump<A: KernelArch>(
     ctx: &PanicContext<'_, A>,
 ) -> ! {
     let cpu = ctx.arch.current_cpu();
+
+    // Take the display surface back before anything is written. A graphical
+    // session holding a seat owns the scan-out, and the text console hands it
+    // over rather than drawing on the composited frame — but a panic must
+    // never be invisible, so the report gets the screen whatever was on it.
+    // Best-effort and idempotent, and ahead of the re-entrancy guard so a
+    // nested panic's terse record is visible too.
+    for device in ctx.consoles {
+        device.reclaim_surface();
+    }
 
     // Re-entrancy guard: a panic taken *inside* this handler (e.g. the
     // sink or a register read faulting) must not recurse into the walk.
@@ -679,6 +715,82 @@ mod tests {
         // The chain terminated (no fourth frame).
         assert_eq!(field("frame_3"), None);
         assert_eq!(arch.halt_count(), 1);
+    }
+
+    /// A hidden console is shown again before the report is written, and a
+    /// nested panic reclaims too: on a port whose log sink renders to the
+    /// framebuffer, an oops raised under a graphical session would otherwise
+    /// land in the retained screen while the user stares at a frozen frame.
+    #[test]
+    fn panic_dump_reclaims_the_display_surface_first() {
+        /// What the dump did, and in which order. Shared by the console and
+        /// the sink so the test can prove the reclaim came first.
+        #[derive(Default)]
+        struct Surface {
+            reclaimed: AtomicBool,
+            reported: AtomicBool,
+            reclaimed_before_report: AtomicBool,
+        }
+
+        struct SurfaceConsole(&'static Surface);
+
+        impl crate::console::ConsoleWrite for SurfaceConsole {
+            fn write(&self, bytes: &[u8]) -> Result<usize, tairix_abi::Errno> {
+                Ok(bytes.len())
+            }
+
+            fn reclaim_surface(&self) {
+                self.0.reclaimed.store(true, Ordering::SeqCst);
+            }
+        }
+
+        /// Stands in for a port whose log sink renders to the framebuffer
+        /// (the aarch64 `SerialSink` does, on a release build with a live
+        /// surface): the report only reaches the screen if the surface was
+        /// reclaimed before it was written.
+        struct SurfaceSink(&'static Surface);
+
+        impl Sink for SurfaceSink {
+            fn write_event(&self, _event: &Event<'_>) {
+                if self.0.reclaimed.load(Ordering::SeqCst) {
+                    self.0.reclaimed_before_report.store(true, Ordering::SeqCst);
+                }
+                self.0.reported.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for nested in [false, true] {
+            let _serial = TEST_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            reset_panic_guard();
+            PANICKING.store(nested, Ordering::Release);
+
+            let surface: &'static Surface = Box::leak(Box::new(Surface::default()));
+            let console: &'static SurfaceConsole = Box::leak(Box::new(SurfaceConsole(surface)));
+            let consoles: &'static [crate::console::ConsoleDevice] =
+                Box::leak(Box::new([crate::console::ConsoleDevice::new(
+                    console,
+                    &crate::console::NULL_CONSOLE_READ,
+                )]));
+            let sink: &'static SurfaceSink = Box::leak(Box::new(SurfaceSink(surface)));
+            let arch = TestArch::with_cpus(1);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let ctx = PanicContext::new(&arch, sink).with_consoles(consoles);
+                panic_dump(None, &ctx);
+            }));
+            assert!(result.is_err());
+
+            assert!(
+                surface.reported.load(Ordering::SeqCst),
+                "a record is always emitted (nested: {nested})"
+            );
+            assert!(
+                surface.reclaimed_before_report.load(Ordering::SeqCst),
+                "the surface is reclaimed before the report (nested: {nested})"
+            );
+            reset_panic_guard();
+        }
     }
 
     #[test]

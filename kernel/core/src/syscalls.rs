@@ -2381,6 +2381,16 @@ where
         for device in self.consoles {
             device.clear_dead_foreground(task);
         }
+        // Reclaim every seat the dead task held (`plans/DISPLAY.md` D8):
+        // the display surface returns to the text console, the seat
+        // becomes acquirable again, and the session's undrained keystrokes
+        // are wiped. Without this a killed, faulted, or force-quit desktop
+        // would leave the screen frozen on its last frame and the seat
+        // permanently `SeatBusy` — the user would never get their terminal
+        // back. The keyboard half above and this pixel half are the two
+        // sides of one handover, so they sit together.
+        self.seat_registry
+            .release_owned_by(SeatOwner(task.0), self.audit);
         // Tear down the process-bookkeeping subset — signal gates,
         // parent/child wait rows, capability record, and address-space
         // registry entry — through the one helper the deferred-launch
@@ -5335,18 +5345,12 @@ where
         seat_id: u64,
         console: u32,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_SEAT_ADMIN`. Validate the
-        // seat and the target console against the live topology *before*
-        // any state changes: the seat id must name a live seat (the
-        // registry resolves it, so a hot-removed seat is gone the moment
-        // its node is) and the console index must name an installed
-        // console — an unknown seat or console fails closed with
-        // `NotFound`, so a typo can never strand input on a console that
-        // does not exist.
-        let index = usize::try_from(console).map_err(|_| Errno::NotFound)?;
-        if self.consoles.get(index).is_none() {
-            return Err(Errno::NotFound);
-        }
+        // The dispatcher already checked `CAP_SEAT_ADMIN`. The registry
+        // validates the seat and the target console against the live
+        // topology *before* any state changes — it holds the console list,
+        // so "is this a live console" has one definition — and an unknown
+        // seat or console fails closed with `NotFound`, so a typo can never
+        // strand a seat's input or pixels on a console that does not exist.
         self.seat_registry
             .switch_foreground(seat_id, ConsoleIndex(console))?;
         // Retargeting the foreground redirects every subsequent keystroke
@@ -19102,9 +19106,6 @@ mod tests {
             caps: &caps,
         };
 
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
-            &crate::console::NULL_CONSOLE_INPUT,
-        )));
         let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
             ConsoleDevice::new(
                 &crate::console::NULL_CONSOLE,
@@ -19115,6 +19116,13 @@ mod tests {
                 &crate::console::NULL_CONSOLE_READ,
             ),
         ]));
+        // The registry carries the *same* list the handlers install, as the
+        // boot path's paired selection does: the registry owns the topology
+        // check, because it also hands the seat's display surface to the
+        // foreground console it names.
+        let seat: &'static SeatRegistry = Box::leak(Box::new(
+            SeatRegistry::new(&crate::console::NULL_CONSOLE_INPUT).with_consoles(consoles),
+        ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )

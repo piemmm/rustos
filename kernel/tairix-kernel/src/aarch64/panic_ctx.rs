@@ -36,7 +36,7 @@ use tairix_arch_aarch64::serial::{flush_serial_blocking, ConsoleWriter};
 use tairix_arch_aarch64::{halt_current_cpu, SERIAL_SINK};
 use tairix_kernel_core::{handle_panic, PanicContext};
 
-use crate::aarch64::arch_wrapper::Aarch64BinArch;
+use crate::aarch64::arch_wrapper::{console_layout, Aarch64BinArch};
 
 /// The aarch64 post-mortem CPU-state handle the bridge attaches.
 static BACKTRACER: Backtracer = Backtracer::new();
@@ -92,7 +92,13 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
         // therefore outlives every panic that can observe a non-null
         // pointer.
         let arch: &Aarch64BinArch = unsafe { &*raw };
-        let ctx = PanicContext::new(arch, &SERIAL_SINK).with_backtrace(&BACKTRACER);
+        // The console list lets the dump take the framebuffer surface back
+        // from a graphical session first: a panic behind a desktop's last
+        // frame would otherwise be invisible on the screen.
+        let (consoles, _) = console_layout();
+        let ctx = PanicContext::new(arch, &SERIAL_SINK)
+            .with_backtrace(&BACKTRACER)
+            .with_consoles(consoles);
         handle_panic(info, &ctx)
     }
 }

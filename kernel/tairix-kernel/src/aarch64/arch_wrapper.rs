@@ -636,6 +636,19 @@ impl ConsoleWrite for VideoConsole {
         // UART keeps the trait default (`None`).
         tairix_arch_aarch64::video::text_grid()
     }
+
+    fn set_visible(&self, visible: bool) {
+        // The scan-out surface this console paints is the one a display
+        // client presents into, so the seat's lease decides which of them
+        // owns it. Unlike the write paths there is no `is_active` guard: a
+        // board with no framebuffer console has nothing to hand over and
+        // the port call is inert.
+        tairix_arch_aarch64::video::set_visible(visible);
+    }
+
+    fn reclaim_surface(&self) {
+        tairix_arch_aarch64::video::reclaim_surface();
+    }
 }
 
 /// The single `'static` [`VideoConsole`] the boot path lists first when
@@ -678,7 +691,26 @@ pub static VIDEO_KEYBOARD: tairix_kernel_core::ConsoleInputQueue =
 /// is shared by the in-kernel keyboard driver's `ArbiterConsoleSink` (which
 /// injects key edges) and the `key_inject` / `display_acquire` /
 /// `display_release` / `keyboard_read` syscall handlers.
-pub static SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&VIDEO_ONLY_CONSOLES[0]);
+///
+/// It also carries the console list, so a lease transition hands the boot
+/// seat's **display surface** between that console and the session holding
+/// the seat — the pixel half of the handover the keyboard already followed
+/// (`plans/DISPLAY.md` D8).
+///
+/// There is one registry per console layout, and [`console_layout`] chooses
+/// the registry and the installed console list *together*, so a seat's text
+/// sink, the console whose surface it hands over, and the console a
+/// descriptor's index names are always the same device.
+pub static VIDEO_SEAT_REGISTRY: SeatRegistry =
+    SeatRegistry::new(&VIDEO_ONLY_CONSOLES[0]).with_consoles(&VIDEO_ONLY_CONSOLES);
+
+/// The seat registry for the serial-only layout (QEMU `virt` with no ramfb, a
+/// headless Pi): the UART *is* the console, so it is the boot seat's text
+/// sink and a directly attached keyboard's injected presses reach the login
+/// reading that console. It has no display surface, so the D8 handover is
+/// inert for it — and suppressing a UART's output would lose it outright.
+pub static UART_SEAT_REGISTRY: SeatRegistry =
+    SeatRegistry::new(&UART_ONLY_CONSOLES[0]).with_consoles(&UART_ONLY_CONSOLES);
 
 /// The console-0 read half of the video console, gated on the in-kernel
 /// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item
@@ -747,6 +779,26 @@ pub static UART_ONLY_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
 #[must_use]
 pub fn uart_console_device() -> &'static tairix_kernel_core::ConsoleDevice {
     &UART_ONLY_CONSOLES[0]
+}
+
+/// The console list and the seat registry for the console layout the boot
+/// path discovered: the framebuffer console when the P7b boot console came
+/// up, else the discovered UART.
+///
+/// One decision for both, because the two must agree: the registry's text
+/// sink is the same device the list installs at index 0, so an injected key
+/// press always reaches the session reading that console, and the seat's
+/// `ConsoleIndex` always names the console a descriptor's index names.
+#[must_use]
+pub fn console_layout() -> (
+    &'static [tairix_kernel_core::ConsoleDevice],
+    &'static SeatRegistry,
+) {
+    if tairix_arch_aarch64::video::is_active() {
+        (&VIDEO_ONLY_CONSOLES, &VIDEO_SEAT_REGISTRY)
+    } else {
+        (&UART_ONLY_CONSOLES, &UART_SEAT_REGISTRY)
+    }
 }
 
 #[cfg(test)]

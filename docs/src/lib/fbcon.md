@@ -65,6 +65,13 @@ continuation cell stays blank. It is a full terminal:
 - **Fail closed.** Firmware-supplied geometry is validated at construction
   (`Geometry::for_display`); a glyph the atlas cannot draw renders `?` rather
   than being dropped.
+- **One surface, one presenter.** A console sharing its scan-out with a
+  graphical session is hidden while that session holds the seat. The retained
+  grid is what makes this lossless: a hidden console still parses everything
+  written to it and touches no pixel, and taking the surface back repaints the
+  whole screen from the grid — so output produced under a desktop is neither
+  drawn over the composited frame nor discarded. See [Seat
+  ownership](../desktop/seat.md) for the lease that drives it.
 
 ## API
 
@@ -81,6 +88,12 @@ continuation cell stays blank. It is a full terminal:
   live insertion point on the framebuffer console.
 - `Cell` — the character cell (`tairix_vt::Cell`), re-exported so a caller can
   size and blank the grid buffers.
+- `hide()` / `show(pixels)` / `is_visible()` — give the scan-out surface up to
+  another presenter and take it back. `show` fills the surface (blanking the
+  margins outside the cell grid, which a cell flush never covers) and then
+  flushes every cell and the cursor, so no pixel of the previous presenter can
+  survive. Both are idempotent, which is what lets the kernel panic path
+  reclaim the screen without knowing who held it.
 - `DirtyBand` / `merge_bands` — the `(start_y, end_y)` band a render touched, so
   a freestanding consumer can clean exactly those scanlines to coherency.
 

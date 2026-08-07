@@ -43,11 +43,12 @@ use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::{DriverError, Errno};
 use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+use tairix_log::Field;
 use tairix_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
 use tairix_sync::SpinLock;
 use zeroize::Zeroize;
 
-use crate::console::{ConsoleInput, NULL_CONSOLE_INPUT};
+use crate::console::{ConsoleDevice, ConsoleInput, NULL_CONSOLE_INPUT};
 
 /// Capacity, in [`KeyInput`] records, of the desktop keyboard channel's ring.
 ///
@@ -158,6 +159,21 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
         self.ring.lock().len > 0
     }
 
+    /// Discard every queued record, zeroing the whole backing store.
+    ///
+    /// Run at both ends of a lease. At the **end**, because an undrained
+    /// record may hold a typed character — a passphrase keystroke transits
+    /// this ring — and memory that held a credential is zeroed once it is no
+    /// longer the holder's (zero-on-free). At the **acquire**, because an
+    /// incoming owner must never be able to read a record it did not
+    /// produce, whatever path ended the previous lease.
+    fn purge(&self) {
+        let mut ring = self.ring.lock();
+        ring.buf.zeroize();
+        ring.head = 0;
+        ring.len = 0;
+    }
+
     /// Drain one record into `out`, zeroing the drained slot, and return the
     /// number of bytes written (`REC`, or `0` when empty).
     ///
@@ -223,6 +239,15 @@ impl SeatSlot {
             channel: KeyboardChannel::new(),
             pointer: PointerChannel::new(),
         }
+    }
+
+    /// Discard both desktop input channels' queued records, zeroing them.
+    ///
+    /// One call for the pair, so no lease transition can remember to purge
+    /// the keystrokes and forget the pointer trail.
+    fn purge_channels(&self) {
+        self.channel.purge();
+        self.pointer.purge();
     }
 
     /// One wire-encodable snapshot of this seat, taken under its state lock
@@ -291,6 +316,14 @@ pub struct SeatRegistry {
     /// The boot seat (id [`SEAT_PRIMARY`]), inline so the registry is
     /// `const`-constructible for the boot path's `'static`.
     primary: SeatSlot,
+    /// The installed system consoles, so a lease transition can hand the
+    /// boot seat's display surface between its text console and the
+    /// graphical session that holds it.
+    ///
+    /// Defaults to [`crate::console::NO_CONSOLES`]: a build with no console
+    /// wiring (and every host test that constructs a bare registry) simply
+    /// has no surface to hand over.
+    consoles: &'static [ConsoleDevice],
     /// The discovery-created seats, in creation order.
     hotplug: SpinLock<Vec<HotplugSeat>>,
     /// The next seat id to mint; starts past [`SEAT_PRIMARY`] and only
@@ -341,10 +374,52 @@ impl SeatRegistry {
     pub const fn new(text_sink: &'static (dyn ConsoleInput + 'static)) -> Self {
         Self {
             primary: SeatSlot::new(text_sink),
+            consoles: &crate::console::NO_CONSOLES,
             hotplug: SpinLock::new(Vec::new()),
             next_seat_id: AtomicU64::new(SEAT_PRIMARY + 1),
             first_key_delivery: AtomicBool::new(false),
             first_pointer_delivery: AtomicBool::new(false),
+        }
+    }
+
+    /// Install the system console list whose display surface the boot seat's
+    /// lease hands over.
+    ///
+    /// `const` so the boot path can chain it in the registry's `'static`
+    /// initialiser, and the boot path passes the *same* list it installs on
+    /// the syscall handlers, so the seat's `ConsoleIndex` and a descriptor's
+    /// console index mean the same thing.
+    #[must_use]
+    pub const fn with_consoles(mut self, consoles: &'static [ConsoleDevice]) -> Self {
+        self.consoles = consoles;
+        self
+    }
+
+    /// Hand the boot seat's display surface to whoever its lease says holds
+    /// it: the foreground text console while the seat is unowned, the
+    /// graphical owner while it is held.
+    ///
+    /// The kernel's framebuffer text console paints the surface the
+    /// architecture port brought up at boot, which is the **boot seat's**; a
+    /// discovery-created seat's display carries no kernel text console, so a
+    /// desktop that takes a second head leaves the boot console painting its
+    /// own screen. A non-boot seat therefore hands nothing over, and
+    /// `seat_id` is checked rather than assumed.
+    ///
+    /// `state` is the caller's **live guard** on the boot seat, so the
+    /// decision and its application are one critical section: two CPUs
+    /// transitioning the same seat cannot interleave and leave the surface
+    /// with the loser's answer. The console's own render lock is a leaf
+    /// (nothing it guards takes another lock), so the nesting cannot
+    /// deadlock.
+    fn apply_boot_surface(&self, seat_id: u64, state: &SeatState) {
+        if seat_id != SEAT_PRIMARY {
+            return;
+        }
+        let route = state.route();
+        for (index, device) in self.consoles.iter().enumerate() {
+            let shown = matches!(route, Route::Text(console) if console.0 as usize == index);
+            device.set_visible(shown);
         }
     }
 
@@ -381,7 +456,13 @@ impl SeatRegistry {
     ///   acquire is a caller bug, surfaced rather than silently succeeding.
     pub fn acquire(&self, seat_id: u64, owner: SeatOwner) -> Result<Lease, Errno> {
         let slot = self.resolve(seat_id)?;
-        let lease = slot.state.lock().acquire(owner).map_err(seat_errno)?;
+        let mut state = slot.state.lock();
+        let lease = state.acquire(owner).map_err(seat_errno)?;
+        // Under the same guard as the grant: the incoming owner can never
+        // read a record it did not produce, and the text console gives the
+        // display surface up before the new owner presents its first frame.
+        slot.purge_channels();
+        self.apply_boot_surface(seat_id, &state);
         Ok(lease)
     }
 
@@ -397,8 +478,19 @@ impl SeatRegistry {
     ///   refusal acknowledges the pending revocation.
     pub fn release(&self, seat_id: u64, owner: SeatOwner) -> Result<(), Errno> {
         let slot = self.resolve(seat_id)?;
-        let outcome = slot.state.lock().release(owner);
-        let released = outcome.map_err(seat_errno);
+        let released = {
+            let mut state = slot.state.lock();
+            let outcome = state.release(owner);
+            // A `SeatRevoked` release *did* end the lease (it acknowledges a
+            // pending eviction and returns the seat to unowned), so the
+            // surface and the channels follow it exactly as a plain release;
+            // only a `NotOwner` refusal changed nothing.
+            if !matches!(outcome, Err(SeatError::NotOwner)) {
+                slot.purge_channels();
+                self.apply_boot_surface(seat_id, &state);
+            }
+            outcome.map_err(seat_errno)
+        };
         if released.is_ok() {
             // A lease ending is a `SeatInput` readiness edge: wake any
             // parked observer so losing the seat is observable rather than
@@ -430,16 +522,26 @@ impl SeatRegistry {
     ///   be enqueued there but the sink refuses it.
     pub fn inject(&self, seat_id: u64, record: KeyInput) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        let route = slot.state.lock().route();
+        let state = slot.state.lock();
+        let route = state.route();
         match route {
             Route::Desktop(_) => {
                 let bytes = record.to_le_bytes();
+                // Decide and deliver under one guard: a record routed to
+                // the *outgoing* owner must never land in the channel after
+                // the next owner has acquired it, which is the one way a
+                // keystroke could cross principals despite the purge.
                 slot.channel.push(&bytes);
+                drop(state);
                 // Wake the seat owner parked on a `SeatInput` wait-set
                 // member; it drains the channel and parks again when empty.
                 crate::waitq::seat_input_wake();
             }
             Route::Text(_) => {
+                // The text sink is a console input queue an interrupt
+                // handler also pushes to, so the seat guard is dropped
+                // first and only the queue's own lock is taken here.
+                drop(state);
                 let mut out = [0u8; MAX_KEY_BYTES];
                 // The shared map; an over-long sequence cannot occur for a
                 // `MAX_KEY_BYTES` buffer, so a `BufferTooSmall` here would be
@@ -472,10 +574,13 @@ impl SeatRegistry {
     /// - [`Errno::NotFound`] — no live seat has that id.
     pub fn inject_pointer(&self, seat_id: u64, record: PointerInput) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        let route = slot.state.lock().route();
-        if let Route::Desktop(_) = route {
+        let state = slot.state.lock();
+        if let Route::Desktop(_) = state.route() {
             let bytes = record.to_le_bytes();
+            // Decided and delivered under one guard, exactly as for a key
+            // edge: a pointer trail never crosses a lease boundary.
             slot.pointer.push(&bytes);
+            drop(state);
             // Wake the seat owner parked on a `SeatInput` wait-set member.
             crate::waitq::seat_input_wake();
         }
@@ -665,17 +770,27 @@ impl SeatRegistry {
     /// Retarget seat `seat_id`'s foreground text console (`seat_switch`,
     /// `plans/DISPLAY.md` D3).
     ///
-    /// Takes effect immediately for an unowned seat; a held seat keeps
-    /// routing to its owner until the lease ends. The syscall handler
-    /// validates the console index against the installed console list and
+    /// Takes effect immediately for an unowned seat — including its display
+    /// surface, which moves to the new foreground console — while a held seat
+    /// keeps routing to its owner until the lease ends. The syscall handler
     /// checks `CAP_SEAT_ADMIN` *before* calling this.
     ///
     /// # Errors
     ///
-    /// - [`Errno::NotFound`] — no live seat has that id.
+    /// - [`Errno::NotFound`] — no live seat has that id, or `console` does
+    ///   not name an installed console; a typo can never strand a seat's
+    ///   input or pixels on a console that does not exist.
     pub fn switch_foreground(&self, seat_id: u64, console: ConsoleIndex) -> Result<(), Errno> {
+        // The registry owns the console list, so it owns the one definition
+        // of "is this a live console" — validated before any state changes.
+        let index = usize::try_from(console.0).map_err(|_| Errno::NotFound)?;
+        if self.consoles.get(index).is_none() {
+            return Err(Errno::NotFound);
+        }
         let slot = self.resolve(seat_id)?;
-        slot.state.lock().set_foreground_console(console);
+        let mut state = slot.state.lock();
+        state.set_foreground_console(console);
+        self.apply_boot_surface(seat_id, &state);
         Ok(())
     }
 
@@ -694,8 +809,19 @@ impl SeatRegistry {
     ///   to revoke.
     pub fn revoke(&self, seat_id: u64) -> Result<SeatOwner, Errno> {
         let slot = self.resolve(seat_id)?;
-        let outcome = slot.state.lock().revoke();
-        let evicted = outcome.map_err(seat_errno);
+        let evicted = {
+            let mut state = slot.state.lock();
+            let outcome = state.revoke();
+            if outcome.is_ok() {
+                // The lease ended, so the display surface returns to the
+                // text console and the evicted owner's undrained records
+                // are wiped — an eviction must not hand its keystrokes to
+                // whoever takes the seat next.
+                slot.purge_channels();
+                self.apply_boot_surface(seat_id, &state);
+            }
+            outcome.map_err(seat_errno)
+        };
         if evicted.is_ok() {
             // Wake the evicted owner parked on a `SeatInput` wait-set
             // member: its next drain fails closed `SeatRevoked`, so the
@@ -703,6 +829,72 @@ impl SeatRegistry {
             crate::waitq::seat_input_wake();
         }
         evicted
+    }
+
+    /// Reclaim every seat held by the **gone** task `owner`, returning the
+    /// screen and the keyboard to the text console (`plans/DISPLAY.md` D8).
+    ///
+    /// Driven from the task-exit reclaim, so it covers every way a graphical
+    /// session can end: a clean `exit` that forgot (or never reached) its
+    /// `display_release`, a fault kill, a signal kill, a force-quit. Without
+    /// it a dead task's lease is immortal — its input keeps routing to a
+    /// channel nobody drains, every later `display_acquire` is refused
+    /// `SeatBusy`, and the last composited frame is frozen on the display
+    /// with no way back to text.
+    ///
+    /// Per seat it releases the lease, wipes both input channels (undrained
+    /// keystrokes never outlive their session), and hands the display surface
+    /// back — all under the seat's state guard, so a task racing to acquire
+    /// the freed seat either sees it still held or gets it fully reset. A
+    /// pending revocation naming the dead task is cleared too: an eviction
+    /// record must not outlive its subject and be inherited by a later task
+    /// that reuses the id.
+    ///
+    /// One `SeatLeaseReclaimed` record per reclaimed seat: a lease ending
+    /// because its holder died is an ownership change, and it is attributable.
+    pub fn release_owned_by(&self, owner: SeatOwner, audit: &(dyn tairix_log::Sink + Sync)) {
+        let mut reclaimed = false;
+        let mut reclaim = |slot: &SeatSlot, seat_id: u64| {
+            let mut state = slot.state.lock();
+            // `release` returns `SeatRevoked` when it clears a pending
+            // eviction naming this task: the lease still ended, which is
+            // exactly what has to be cleaned up.
+            if matches!(state.release(owner), Err(SeatError::NotOwner)) {
+                return;
+            }
+            slot.purge_channels();
+            self.apply_boot_surface(seat_id, &state);
+            drop(state);
+            reclaimed = true;
+            crate::audit::emit(
+                audit,
+                tairix_log::Level::Warn,
+                crate::audit::AuditEvent::SeatLeaseReclaimed,
+                &[
+                    Field {
+                        key: "seat",
+                        value: tairix_log::FieldValue::UnsignedInt(seat_id),
+                    },
+                    Field {
+                        key: "owner",
+                        value: tairix_log::FieldValue::UnsignedInt(owner.0),
+                    },
+                ],
+            );
+        };
+        reclaim(&self.primary, SEAT_PRIMARY);
+        {
+            let hotplug = self.hotplug.lock();
+            for seat in hotplug.iter() {
+                reclaim(&seat.slot, seat.seat_id);
+            }
+        }
+        if reclaimed {
+            // The lease ended, so wake anything parked on a `SeatInput`
+            // member of a seat this task held — a sibling observer learns
+            // the session is over instead of parking forever.
+            crate::waitq::seat_input_wake();
+        }
     }
 
     /// The live lease `owner` currently holds on seat `seat_id`
@@ -826,8 +1018,10 @@ pub static NULL_SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&NULL_CONSOLE_IN
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::console::{ConsoleInputQueue, ConsoleRead};
+    use crate::console::{ConsoleInputQueue, ConsoleRead, ConsoleWrite, NULL_CONSOLE_READ};
+    use crate::test_sink::TestSink;
     use alloc::boxed::Box;
+    use core::sync::atomic::AtomicBool;
     use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
 
     const WM: SeatOwner = SeatOwner(7);
@@ -842,6 +1036,240 @@ mod tests {
 
     fn text_queue() -> &'static ConsoleInputQueue {
         Box::leak(Box::new(ConsoleInputQueue::new()))
+    }
+
+    /// A console whose write half records only whether it currently owns
+    /// its display surface — the observable half of the D8 handover.
+    struct SurfaceConsole {
+        visible: AtomicBool,
+    }
+
+    impl ConsoleWrite for SurfaceConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+
+        fn set_visible(&self, visible: bool) {
+            self.visible.store(visible, Ordering::SeqCst);
+        }
+    }
+
+    /// A registry over one surface-bearing console, plus the handle the
+    /// test reads the surface state back through.
+    fn registry_with_surface() -> (SeatRegistry, &'static SurfaceConsole) {
+        let console: &'static SurfaceConsole = Box::leak(Box::new(SurfaceConsole {
+            // A fresh system is a text login, so the console starts shown.
+            visible: AtomicBool::new(true),
+        }));
+        let devices: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::new(console, &NULL_CONSOLE_READ)]));
+        (
+            SeatRegistry::new(&NULL_CONSOLE_INPUT).with_consoles(devices),
+            console,
+        )
+    }
+
+    fn shown(console: &SurfaceConsole) -> bool {
+        console.visible.load(Ordering::SeqCst)
+    }
+
+    fn reclaimed_count(audit: &TestSink) -> usize {
+        let id = crate::audit::AuditEvent::SeatLeaseReclaimed.id().0;
+        audit.event_ids().iter().filter(|&&got| got == id).count()
+    }
+
+    /// The text console and a display client share one scan-out surface,
+    /// so the lease decides which of them paints it: acquiring takes it,
+    /// and every way the lease can end gives it back.
+    #[test]
+    fn the_lease_hands_the_display_surface_over_and_back() {
+        let (seat, console) = registry_with_surface();
+        assert!(shown(console), "a text login owns the screen at boot");
+
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert!(!shown(console), "the session owns the screen while held");
+
+        seat.release(SEAT_PRIMARY, WM).expect("seat released");
+        assert!(shown(console), "a clean exit returns the screen");
+
+        // A revoked lease ends the same way.
+        seat.acquire(SEAT_PRIMARY, WM).expect("reacquired");
+        assert!(!shown(console));
+        assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+        assert!(shown(console), "an eviction returns the screen");
+
+        // The evicted owner's acknowledging release is refused but must
+        // not disturb the surface it no longer owns.
+        assert_eq!(
+            seat.release(SEAT_PRIMARY, WM),
+            Err(Errno::SeatRevoked),
+            "the eviction is acknowledged"
+        );
+        assert!(shown(console));
+    }
+
+    /// A refused acquire changes nothing: the text console keeps the
+    /// screen, so a second desktop failing to start cannot blank the one
+    /// that is running (fail closed).
+    #[test]
+    fn a_refused_acquire_leaves_the_surface_where_it_was() {
+        let (seat, console) = registry_with_surface();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert_eq!(seat.acquire(SEAT_PRIMARY, INTRUDER), Err(Errno::SeatBusy));
+        assert!(!shown(console), "the live owner still holds the screen");
+
+        seat.release(SEAT_PRIMARY, WM).expect("seat released");
+        assert_eq!(
+            seat.release(SEAT_PRIMARY, INTRUDER),
+            Err(Errno::SeatNotOwner)
+        );
+        assert!(
+            shown(console),
+            "a non-owner's refused release changes nothing"
+        );
+    }
+
+    /// The dead-owner reclaim is what returns the user to the terminal
+    /// they started the desktop from: a session killed, faulted, or
+    /// force-quit never runs its own release, so task exit must free the
+    /// seat and repaint the text screen.
+    #[test]
+    fn a_dead_owner_loses_the_seat_and_the_screen() {
+        let (seat, console) = registry_with_surface();
+        let audit = TestSink::new();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert!(!shown(console));
+
+        seat.release_owned_by(WM, &audit);
+
+        assert!(shown(console), "the terminal's screen comes back");
+        assert!(
+            seat.acquire(SEAT_PRIMARY, INTRUDER).is_ok(),
+            "the seat is acquirable again, not wedged SeatBusy"
+        );
+        assert_eq!(reclaimed_count(&audit), 1);
+    }
+
+    /// Reclaiming a task that holds nothing is inert — task exit runs it
+    /// for every dying task, so it must not disturb a live session's
+    /// screen or emit a record.
+    #[test]
+    fn reclaiming_a_task_that_holds_nothing_is_inert() {
+        let (seat, console) = registry_with_surface();
+        let audit = TestSink::new();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+
+        seat.release_owned_by(INTRUDER, &audit);
+
+        assert!(!shown(console), "the live owner keeps the screen");
+        assert_eq!(reclaimed_count(&audit), 0);
+        assert_eq!(seat.acquire(SEAT_PRIMARY, INTRUDER), Err(Errno::SeatBusy));
+    }
+
+    /// A pending eviction naming the dead task is cleared with it, so a
+    /// later task that reuses the id cannot inherit a refusal it never
+    /// earned.
+    #[test]
+    fn the_reclaim_clears_a_pending_eviction_naming_the_dead_task() {
+        let (seat, _console) = registry_with_surface();
+        let audit = TestSink::new();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+
+        seat.release_owned_by(WM, &audit);
+
+        // The same task id acquires cleanly rather than meeting the stale
+        // `SeatRevoked` marker its predecessor left, and the reclaim of a
+        // revoked-but-unacknowledged lease is still recorded.
+        assert_eq!(reclaimed_count(&audit), 1);
+        assert!(seat.acquire(SEAT_PRIMARY, WM).is_ok());
+    }
+
+    /// Undrained records never outlive their lease: a keystroke typed at
+    /// one session (a passphrase at a lock screen) must be unreadable by
+    /// whoever takes the seat next, however the lease ended.
+    #[test]
+    fn a_lease_boundary_purges_the_input_channels() {
+        let ends: [&dyn Fn(&SeatRegistry); 3] = [
+            &|seat| {
+                seat.release(SEAT_PRIMARY, WM).expect("released");
+            },
+            &|seat| {
+                assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+            },
+            &|seat| {
+                seat.release_owned_by(WM, &TestSink::new());
+            },
+        ];
+        for end_lease in ends {
+            let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+            seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+            seat.inject(SEAT_PRIMARY, press_char('s')).expect("keyed");
+            seat.inject_pointer(SEAT_PRIMARY, PointerInput::MovedBy { dx: 3, dy: 4 })
+                .expect("moved");
+
+            end_lease(&seat);
+            seat.acquire(SEAT_PRIMARY, INTRUDER).expect("reacquired");
+
+            let mut key = [0u8; KeyInput::WIRE_LEN];
+            assert_eq!(
+                seat.read_key(SEAT_PRIMARY, INTRUDER, &mut key),
+                Ok(0),
+                "the previous session's keystroke is gone"
+            );
+            let mut ptr = [0u8; PointerInput::WIRE_LEN];
+            assert_eq!(
+                seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut ptr),
+                Ok(0),
+                "the previous session's pointer trail is gone"
+            );
+            assert!(!seat.input_ready(SEAT_PRIMARY, INTRUDER));
+        }
+    }
+
+    /// The foreground switch validates its target against the installed
+    /// console list and moves the surface with the input, so a typo can
+    /// never strand a seat's pixels on a console that does not exist.
+    #[test]
+    fn switching_the_foreground_validates_and_moves_the_surface() {
+        let (seat, console) = registry_with_surface();
+        assert_eq!(
+            seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(1)),
+            Err(Errno::NotFound),
+            "an unknown console fails closed"
+        );
+        assert!(shown(console));
+
+        assert_eq!(
+            seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(0)),
+            Ok(())
+        );
+        assert!(shown(console));
+
+        // A held seat keeps routing to its owner, so a switch underneath
+        // it must not take the screen back from the live session.
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert_eq!(
+            seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(0)),
+            Ok(())
+        );
+        assert!(!shown(console), "the owner keeps the screen");
+    }
+
+    /// The kernel's text console paints the **boot** seat's surface, so a
+    /// session that takes a discovery-created second head leaves the boot
+    /// console painting its own screen.
+    #[test]
+    fn a_hotplug_seats_lease_leaves_the_boot_console_alone() {
+        let (seat, console) = registry_with_surface();
+        let second = seat.attach_display(42);
+        assert_ne!(second, SEAT_PRIMARY);
+
+        seat.acquire(second, WM).expect("second head acquired");
+        assert!(shown(console), "the boot console keeps its own screen");
+
+        seat.release(second, WM).expect("released");
+        assert!(shown(console));
     }
 
     /// The `SeatInput` readiness probe: only "the lease is live and both
@@ -1263,10 +1691,25 @@ mod tests {
 
     #[test]
     fn switch_foreground_retargets_the_text_sink_route() {
-        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        // Three installed consoles, because the registry validates the
+        // target against the list whose surface it hands over.
+        let devices: &'static [ConsoleDevice] =
+            Box::leak(Box::new([(); 3].map(|()| {
+                ConsoleDevice::new(&crate::console::NULL_CONSOLE, &NULL_CONSOLE_READ)
+            })));
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT).with_consoles(devices);
         assert_eq!(
             seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(2)),
             Ok(())
+        );
+        let record = seat.record(SEAT_PRIMARY).expect("boot seat exists");
+        assert_eq!(record.foreground_console, 2);
+
+        // Past the end of the list fails closed and leaves the foreground
+        // where it was — never a seat routed at a console that is not there.
+        assert_eq!(
+            seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(3)),
+            Err(Errno::NotFound)
         );
         let record = seat.record(SEAT_PRIMARY).expect("boot seat exists");
         assert_eq!(record.foreground_console, 2);

@@ -362,6 +362,85 @@ session's first present — witnessed by the service's one-shot
 dominated by the theme's desktop colour, so the composited frame
 demonstrably reached the scan-out surface.
 
+## The display surface follows the live lease (Stage D8)
+
+A seat's lease decides *two* things, not one: where the seat's input goes
+**and** who paints the seat's display surface. `tairix_seat::Route` is that
+single decision — `Text(idx)` means the seat's keyboard drains to console
+`idx` *and* console `idx` owns the surface; `Desktop(owner)` means the owner
+takes both.
+
+This matters because the kernel's framebuffer text console
+(`lib/fbcon`, driven by `kernel/arch/<target>`) and the user-space display
+service present into the *same* physical scan-out memory. Without arbitration
+two presenters write one surface: a diagnostic any program writes to an
+inherited console `stderr` is parsed by the kernel console and blitted
+straight over the desktop's composited pixels.
+
+**Retained, not discarded.** A hidden console keeps interpreting everything
+written to it into its retained cell grid and touches no pixel; taking the
+surface back repaints the whole screen from that grid. So text that arrived
+while a graphical session held the screen is not thrown away as Linux
+discards `printk` under `KD_GRAPHICS` — it is on screen the moment the
+session ends. A user who runs `desktop` from a shell and later leaves it
+returns to that shell exactly as they left it, with whatever the session
+reported printed beneath.
+
+The transition is driven by the seat registry itself, under the seat's own
+state lock, so it cannot be forgotten at a call site and two CPUs racing to
+change ownership cannot leave the surface with the loser's answer:
+
+| Lease event | Surface | Input channels |
+| --- | --- | --- |
+| `display_acquire` | handed to the session | purged before the new owner can read |
+| `display_release` | repainted from the retained grid | purged |
+| `seat_revoke` | repainted | purged |
+| owner task exits, faults, or is killed | repainted | purged |
+| `seat_switch` on an unowned seat | moves to the new foreground console | — |
+| refused acquire / release, a non-owner | unchanged | unchanged |
+
+The kernel's text console belongs to the **boot** seat (`SEAT_PRIMARY`),
+because the surface it paints is the one the architecture port brought up at
+boot. A discovery-created seat carries no kernel text console, so a session
+that takes a second head leaves the boot console painting its own screen.
+
+**A dead owner never keeps the seat.** `SeatRegistry::release_owned_by` runs
+from the shared task-exit reclaim — the same path that releases a dying task's
+IRQ lines, endpoints, shared memory, wait-sets, and console foreground
+ownership — so a session that is killed, faults, or is force-quit and never
+runs its own `display_release` still gives the screen and the keyboard back.
+It also clears a pending revocation naming the dead task, so a later task
+cannot inherit an eviction it never earned, and emits one
+`SEAT_LEASE_RECLAIMED` audit record per reclaimed seat. Without it such a seat
+would stay `Held` by a task that no longer exists: input routed to a channel
+nobody drains, every later `display_acquire` refused `SeatBusy`, and the last
+composited frame frozen on the display with no way back to text.
+
+**Undrained input never outlives its lease.** Both desktop input channels are
+zeroed at every lease **end** — a keystroke that transited the ring may be a
+passphrase typed at a lock screen, and memory that held a credential is zeroed
+once it is no longer the holder's — *and* at every **acquire**, so an incoming
+owner can never read a record it did not produce whatever path ended the
+previous lease. The routing decision and the delivery are taken under one
+guard, so a record decided for the outgoing owner cannot land in the channel
+after the next owner has acquired it.
+
+**A panic always gets the screen.** On a port whose log sink renders to the
+framebuffer, a kernel oops raised while a session holds the seat would
+otherwise land in a hidden console's retained screen while the user stares at a
+frozen frame, so `panic_dump` reclaims the surface before it writes anything —
+the `console_unblank` a fatal fault deserves.
+
+The reclaim is a *separate* operation from the lease handover
+(`ConsoleWrite::reclaim_surface` rather than `set_visible`), and the difference
+is only what each does when the surface is contended. A lease transition
+**waits**, because a skipped hide would leave the console painting over the
+session's frame. A panic **gives up**, because the panicking CPU may itself be
+inside the console's renderer, and waiting there would hang the machine with no
+report at all — including on a build whose report would otherwise have reached
+a serial console untouched. Losing a repaint is the lesser failure; the record
+still reaches its log sink.
+
 ## Observing seats
 
 The seat inventory is exposed through the System Information API — never
