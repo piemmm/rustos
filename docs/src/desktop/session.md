@@ -584,6 +584,49 @@ confused for one another. Two commands travel it:
   sees an honest count alongside the ids it can act on rather than a
   silently truncated one.
 
+## The app-ward hold-back
+
+A refused send is **owed**, not lost. Back-pressure says the app is behind,
+not gone, so the session keeps the event and delivers it when the app
+catches up (`holdback::HoldBack`). Dropping it would cost the app something
+it cannot re-derive: a `Resized` it never sees leaves it laying out and
+hit-testing at a size the compositor no longer uses, and a lost
+`FilePicked`/`PickCancelled` strands that window's one pending pick for the
+rest of its life, because the engine clears the pick only once the
+conclusion is *accepted*.
+
+- **Parked, never polled.** The first debt to a destination arms a
+  `WaitSourceKind::PortRoom` member on the app's own event port — the
+  send-side twin of the `Port` member, admitted by the send authority
+  `ipc_send` itself checks. The app's own drain frees a slot and the kernel
+  wakes the session, which sends what it owes; the member is dropped the
+  moment the destination owes nothing. The desktop never spins on capacity
+  and never blocks on an app (`AGENTS.md` §2.23, §4).
+- **Order is the app's, not the mailbox's.** A destination already owed
+  something takes the next event unsent, so nothing overtakes what is
+  queued. Queues are per `(destination, window)` and a flush serves an
+  owner's windows round-robin, so one window's backlog cannot starve a
+  sibling's resize.
+- **Folding by what the quantity means.** A state edge (`Focus`, `Resized`,
+  `RedrawRequested`, `CloseRequested`, `Minimized`, `DesktopChanged`) is a
+  value the app converges on, so a later one replaces the held one where it
+  stands and a window owes at most one of each. A position is
+  level-triggered (newest wins) and a wheel run is additive (a reversal ends
+  it) — the same rule `pump` applies live, from the one shared predicate.
+  Everything else — keys, buttons, the pick conclusion — is owed in full.
+- **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
+  per window) is what stops an app that never drains from making the desktop
+  hold memory on its behalf: a security bound, not a capacity to scale
+  (`AGENTS.md` §24.4). Overflow evicts the oldest *input* event, which is
+  total rather than a preference — folding leaves at most six state edges
+  and one pick conclusion, so an evictable input event always exists.
+  Oldest-first is also the safe direction for a button: a press is shed
+  before its release, so an app can be left with an unmatched release,
+  never an unmatched press it would hold as a latched grab.
+- **A dead owner owes nothing.** A send that answers `NotFound` discards
+  everything held for that owner and tears its windows down, exactly as a
+  refused direct send does; a reap does the same.
+
 ## Presenting the taskbar through the window manager
 
 The taskbar paints a *rectangular* `tairix_raster::Surface` and the window

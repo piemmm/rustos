@@ -2311,6 +2311,11 @@ where
         // on or a sender to fill (racing senders observe the closed port
         // and fail typed).
         self.ipc.write().teardown_owned_by(task.0, self.audit);
+        // A sender parked for room in one of those mailboxes must learn its
+        // destination is gone rather than wait for a drain that can never
+        // come. The destroyed port took its own record of who was waiting
+        // with it, so this is the one place the broadcast is right.
+        crate::waitq::port_room_wake();
         // Release every shared-memory mapping this task held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
@@ -2429,6 +2434,22 @@ where
             // the waiter runs correctly reports nothing to do.
             WaitSourceKind::MemoryPressure => {
                 u64::from(crate::memstats::MEM_STATS.published_band().depth()) != m.observed
+            }
+            // A send to this port would not be refused *for want of room*.
+            // A vanished port and a caller that no longer holds the send
+            // authority both report ready rather than parking a sender on a
+            // destination it can never reach: the woken sender's own send
+            // fails closed and it acts on that. Reporting ready
+            // unconditionally in the unauthorised case also means a caller
+            // that may not send learns nothing about the mailbox. The room
+            // itself is a non-consuming peek — `ipc_send` takes the slot.
+            WaitSourceKind::PortRoom => {
+                self.ipc.read().lookup(EndpointId(m.id)).is_none_or(|port| {
+                    !port
+                        .required_send_caps()
+                        .is_subset_of(caller.caps.effective())
+                        || port.has_room()
+                })
             }
         }
     }
@@ -4080,6 +4101,23 @@ where
                     .map_err(copy_fault_errno)
             })
         });
+
+        // A committed dequeue is exactly the slot a sender parked on this
+        // port's room is waiting for. Collect the recorded waiters while the
+        // registry guard still resolves the port, then wake them once it is
+        // dropped — waking takes scheduler locks and must not nest inside
+        // the registry. Named, never broadcast, so a busy mailbox disturbs
+        // no unrelated waiter; empty and allocation-free when none waits.
+        let freed_a_slot = matches!(copied, Some(Some(Ok(_))));
+        let woken = if freed_a_slot {
+            port.room_waiters()
+        } else {
+            alloc::vec::Vec::new()
+        };
+        drop(ipc);
+        for task in woken {
+            crate::waitq::port_room_wake_task(task);
+        }
 
         match copied {
             // No registered address space — fail closed with the same
@@ -8089,6 +8127,22 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::PortRoom => {
+                        // A wait-set may observe a port's *room* for a task
+                        // entitled to **send** to it — the same capability
+                        // subset `ipc_send` enforces (the caller here is the
+                        // sender, not the binder, so the owner check the
+                        // `Port` kind applies does not fit). Unknown ports
+                        // and callers lacking the send authority collapse to
+                        // the same oracle-free `NotFound`.
+                        let may_send = self.ipc.read().lookup(EndpointId(id)).is_some_and(|port| {
+                            port.required_send_caps()
+                                .is_subset_of(caller.caps.effective())
+                        });
+                        if !may_send {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                     WaitSourceKind::Stream => {
                         // A wait-set may observe a readable stream only
                         // through the caller's **own** open table: `id` must
@@ -8284,6 +8338,11 @@ where
         let observes_pressure = members
             .iter()
             .any(|m| m.kind == WaitSourceKind::MemoryPressure);
+        // `PORT_ROOM_WAITQ` is joined only by a set holding a `PortRoom`
+        // member: a drained mailbox wakes the senders that port recorded,
+        // and a torn-down port wakes them all, so ordinary mailbox traffic
+        // never disturbs a waiter that did not ask about room.
+        let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -8298,6 +8357,21 @@ where
         }
         if observes_pressure {
             crate::waitq::PRESSURE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_room {
+            crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+            // Have each observed port record this task, so the drain that
+            // frees a slot wakes exactly the senders waiting for one.
+            // Recorded *before* the first scan so a drain in the
+            // register/park window is not lost.
+            let ipc = self.ipc.read();
+            for m in &members {
+                if m.kind == WaitSourceKind::PortRoom {
+                    if let Some(port) = ipc.lookup(EndpointId(m.id)) {
+                        port.watch_room(sched_task);
+                    }
+                }
+            }
         }
         if observes_callreply {
             let claimant = caller.caps.task().0;
@@ -8422,6 +8496,17 @@ where
         }
         if observes_callreply {
             crate::waitq::CALL_WAITQ.deregister(sched_task);
+        }
+        if observes_room {
+            crate::waitq::PORT_ROOM_WAITQ.deregister(sched_task);
+            let ipc = self.ipc.read();
+            for m in &members {
+                if m.kind == WaitSourceKind::PortRoom {
+                    if let Some(port) = ipc.lookup(EndpointId(m.id)) {
+                        port.unwatch_room(sched_task);
+                    }
+                }
+            }
         }
         for m in &members {
             if m.kind == WaitSourceKind::File {
@@ -28808,6 +28893,7 @@ mod tests {
     const WS_KIND_STREAM: u32 = tairix_abi::WaitSourceKind::Stream as u32;
     const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
     const WS_KIND_PRESSURE: u32 = tairix_abi::WaitSourceKind::MemoryPressure as u32;
+    const WS_KIND_PORT_ROOM: u32 = tairix_abi::WaitSourceKind::PortRoom as u32;
 
     use tairix_reclaim::PressureBand;
 
@@ -28929,10 +29015,10 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
-        // Kind 10 is past the last defined `WaitSourceKind`
-        // (`MemoryPressure` = 9).
+        // Kind 11 is past the last defined `WaitSourceKind`
+        // (`PortRoom` = 10).
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 10, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 11, line, 0),
             Err(Errno::OutOfRange)
         );
 
@@ -29727,6 +29813,192 @@ mod tests {
         ipc.write().teardown_owned_by(0x5707, sink);
         ipc.write().teardown_owned_by(0xF0F0, sink);
         assert_eq!(crate::waitset::release_owned_by(0x5707), 1);
+    }
+
+    /// A `PortRoom` member is the send side of the same mailbox: quiet while
+    /// it is full, reporting the moment a drain frees a slot — so a sender
+    /// holding a message the receiver must not lose parks for room instead of
+    /// dropping it.
+    #[test]
+    fn waitset_wait_reports_port_room_once_a_drain_frees_a_slot() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5710), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5710, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5710),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Another task's mailbox, capacity 4, open to any sender.
+        let id = 0x5EAD_0021u64;
+        register_port_for(&ipc, id, 0xF0F2, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, id, 0x43)
+            .expect("send authority admits the member");
+
+        // Room to spare reports at once; a mailbox at capacity reports
+        // nothing, which is what lets the sender park.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        for _ in 0..4 {
+            enqueue(&ipc, id, &[0xEE; 4], sink);
+        }
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        // A finished wait leaves no record of itself on the port, so a later
+        // drain never wakes a sender that is no longer waiting.
+        assert!(ipc
+            .read()
+            .lookup(EndpointId(id))
+            .expect("bound")
+            .room_waiters()
+            .is_empty());
+
+        // One drain frees one slot and the member reports its token. The
+        // peek does not consume the room — only a send does — so the next
+        // wait reports again.
+        assert!(ipc
+            .read()
+            .lookup(EndpointId(id))
+            .expect("bound")
+            .recv()
+            .is_some());
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(SecTaskId(0x5710))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x43
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+
+        ipc.write().teardown_owned_by(0xF0F2, sink);
+        assert_eq!(crate::waitset::release_owned_by(0x5710), 1);
+    }
+
+    /// Observing a port's room is admitted by the caller's *send* authority
+    /// — the check `ipc_send` itself applies — not the owner check the read
+    /// side uses, because the caller here is the sender rather than the
+    /// binder.
+    ///
+    /// The member also reports ready where a send would fail for a reason
+    /// other than room — the destination is gone, or the caller no longer
+    /// holds the send authority — because a sender parked on either would
+    /// wait forever, and an unconditionally-ready member tells an
+    /// unauthorised caller nothing about the mailbox.
+    #[test]
+    fn waitset_port_room_member_requires_the_callers_send_authority() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(0x5712), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5712, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5712),
+            caps: &caps,
+        };
+        // The same task holding the capability the port demands of its
+        // senders, so the add is authorised and the wait after it is not,
+        // without changing the wait-set's owner.
+        let raw_caps = make_caps_record(0x5712, &[CapabilityId::NET_RAW], sink);
+        let raw = CallerContext {
+            task_id: SecTaskId(0x5712),
+            caps: &raw_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A mailbox only a holder of `NET_RAW` may post to.
+        let restricted = 0x5EAD_0023u64;
+        let mut required = CapabilitySet::empty();
+        required.insert(CapabilityId::NET_RAW);
+        let binder = make_caps_record(
+            0xF0F3,
+            &[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW],
+            sink,
+        );
+        let port = Port::create(
+            EndpointId(restricted),
+            &binder,
+            required,
+            CapabilitySet::empty(),
+            64,
+            4,
+            sink,
+        )
+        .expect("a privileged binder may restrict its senders");
+        assert!(ipc.write().register(port, sink).is_ok());
+
+        // A mailbox the caller may not post to, and one that does not exist,
+        // give the same oracle-free refusal.
+        let set = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, restricted, 0x41),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PORT_ROOM, 0xDEAD_0000, 0x42),
+            Err(Errno::NotFound)
+        );
+        h.waitset_ctl(&raw, set, WS_OP_ADD, WS_KIND_PORT_ROOM, restricted, 0x44)
+            .expect("the capability admits the member");
+
+        // Filled by an authorised sender, so only the caller's authority
+        // separates the two waits below.
+        for _ in 0..4 {
+            let sender = make_caps_record(0xB2, &[CapabilityId::NET_RAW], sink);
+            ipc.read()
+                .lookup(EndpointId(restricted))
+                .expect("bound")
+                .send(&sender, &[0x11; 2], sink)
+                .expect("an authorised sender fills it");
+        }
+        assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Ok(0),
+            "a caller that may not send is never parked on room it cannot use"
+        );
+
+        // A destination that is gone reports ready too: the woken sender
+        // fails its send closed rather than waiting on a mailbox that can
+        // never drain again.
+        ipc.write().teardown_owned_by(0xF0F3, sink);
+        assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Ok(0));
+
+        assert_eq!(crate::waitset::release_owned_by(0x5712), 1);
     }
 
     /// Adding a `Stream` wait-set member is owner- and descriptor-checked

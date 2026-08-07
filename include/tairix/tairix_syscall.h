@@ -278,6 +278,7 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_WAIT_SOURCE_FILE 7u
 #define TAIRIX_WAIT_SOURCE_CALL_REPLY 8u
 #define TAIRIX_WAIT_SOURCE_MEMORY_PRESSURE 9u
+#define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void tairix_sys_yield(void);

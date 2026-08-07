@@ -2274,7 +2274,9 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// (`SyscallNumber::PORT_BIND`) — the receive half of
 /// [`ipc_send`]/[`ipc_recv`]: an app binds its window-event mailbox here,
 /// then parks on it through a wait-set member of kind
-/// [`tairix_abi::WaitSourceKind::Port`].
+/// [`tairix_abi::WaitSourceKind::Port`]. A sender whose message the bounded
+/// mailbox refused parks on the other side of the same port, through
+/// [`tairix_abi::WaitSourceKind::PortRoom`].
 ///
 /// The kernel bounds `max_payload` and `capacity` (fail-closed memory
 /// bounds), requires `CAP_IPC_BIND_PRIVILEGED` for a reserved well-known
@@ -3539,14 +3541,19 @@ pub fn waitset_create() -> i64 {
 /// keyboard/pointer input *and* on losing the lease, so a revocation is
 /// observed rather than parked through), a message port the caller bound
 /// via [`port_bind`] ([`WaitSourceKind::Port`], ready on a delivered
-/// message awaiting [`ipc_recv`]), or a pipe read end of the caller's own
-/// open table ([`WaitSourceKind::Stream`] — the descriptor from
-/// [`pipe_create`], ready on buffered bytes or end-of-stream, drained by
-/// [`fs_read`]); `token` is the caller's opaque
+/// message awaiting [`ipc_recv`]), room in a port the caller may *send* to
+/// ([`WaitSourceKind::PortRoom`], ready when an [`ipc_send`] would not be
+/// refused for want of room, so a sender holding a message the receiver
+/// must not lose parks instead of dropping it), or a pipe read end of the
+/// caller's own open table ([`WaitSourceKind::Stream`] — the descriptor
+/// from [`pipe_create`], ready on buffered bytes or end-of-stream, drained
+/// by [`fs_read`]); `token` is the caller's opaque
 /// value reported by [`waitset_wait`] when this member is ready. On `Add`
 /// the kernel resolves and **owner-checks** the named resource against the
-/// calling task before recording it, so the set can never observe authority
-/// the caller lacks.
+/// calling task before recording it — for [`WaitSourceKind::PortRoom`] the
+/// *send*-authority check `ipc_send` applies, its caller being the sender
+/// rather than the binder — so the set can never observe authority the
+/// caller lacks.
 ///
 /// Returns `0` on success, or the raw negative kernel result (`-errno`): an
 /// unowned/unknown resource or wrong `(kind, id)` (`NotFound`), a duplicate

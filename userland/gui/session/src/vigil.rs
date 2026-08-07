@@ -14,6 +14,13 @@
 //! [`UNRESPONSIVE_AFTER_NS`] is *unresponsive*; one accepted delivery clears
 //! it, because acceptance proves the mailbox drained.
 //!
+//! An event the session's hold-back ([`crate::holdback`]) takes rather than
+//! sends counts as one of those refusals: it is undeliverable for exactly
+//! the same reason, and only a delivery the owner accepts ends the debt. Not
+//! counting it would mean a wedged app — which never drains, so never frees
+//! the room that would prompt another send — produced evidence only once and
+//! was never flagged, which is the case this detector exists for.
+//!
 //! The tracker is pure bookkeeping: time is supplied by the caller as
 //! monotonic nanoseconds (the session stamps `clock_get` only on the
 //! delivery paths, so an idle desktop takes no clock reads), and nothing
@@ -70,7 +77,9 @@ impl HangTracker {
     /// Record one refused delivery to `owner`'s event mailbox at `now_ns`.
     ///
     /// Only the kernel's transient `WouldBlock` refusal (the documented
-    /// mailbox-full back-pressure signal of the port send) is hang evidence:
+    /// mailbox-full back-pressure signal of the port send, whether this send
+    /// met it or the hold-back is still carrying an earlier one) is hang
+    /// evidence:
     /// it proves the mailbox exists and the owner is not draining it. A send
     /// to a torn-down port (`NotFound`) means the owner is gone — that is the
     /// reap path's business, and any standing suspicion is dropped here so a

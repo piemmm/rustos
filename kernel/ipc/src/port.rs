@@ -102,6 +102,13 @@ pub struct Port {
     // because IPC sends never block on I/O and contention is bounded
     // by the mailbox capacity.
     mailbox: tairix_sync::SpinLock<VecDeque<Message>>,
+    /// Scheduler ids of the tasks parked on a wait-set member observing
+    /// this port's *room* — the senders a [`Self::recv`] must wake once it
+    /// frees a slot, so a sender holding an undeliverable message parks
+    /// instead of polling for capacity. Kept beside the mailbox rather
+    /// than in a registry keyed by endpoint so occupancy and the parties
+    /// waiting on it cannot drift apart.
+    room_waiters: tairix_sync::SpinLock<Vec<u64>>,
 }
 
 impl Port {
@@ -180,6 +187,7 @@ impl Port {
             mailbox_capacity,
             state: AtomicU32::new(state::OPEN),
             mailbox: tairix_sync::SpinLock::new(VecDeque::new()),
+            room_waiters: tairix_sync::SpinLock::new(Vec::new()),
         })
     }
 
@@ -202,6 +210,53 @@ impl Port {
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.mailbox.lock().is_empty()
+    }
+
+    /// `true` when the mailbox is below capacity, so a send would not be
+    /// refused for want of room — the non-consuming readiness peek a
+    /// wait-set member observing this port's room uses; the woken sender's
+    /// own [`Self::send`] takes the slot.
+    #[must_use]
+    pub fn has_room(&self) -> bool {
+        self.mailbox.lock().len() < self.mailbox_capacity
+    }
+
+    /// Record `task` as parked for room in this mailbox, so the next
+    /// [`Self::recv`] that frees a slot names it. Idempotent: a task that
+    /// re-enters its wait registers once.
+    pub fn watch_room(&self, task: u64) {
+        let mut waiters = self.room_waiters.lock();
+        if !waiters.contains(&task) {
+            waiters.push(task);
+        }
+    }
+
+    /// Forget `task`'s room registration — its wait ended, so a later
+    /// drain must not wake it for a port it is no longer watching.
+    pub fn unwatch_room(&self, task: u64) {
+        self.room_waiters.lock().retain(|parked| *parked != task);
+    }
+
+    /// The tasks currently parked for room, for the caller to wake outside
+    /// the mailbox's lock (waking takes scheduler locks, so it must never
+    /// nest inside this one). Empty — and allocation-free — in the common
+    /// case that no sender is waiting.
+    ///
+    /// A freed slot wakes *all* of them, and that is not a thundering herd:
+    /// the set is not everyone waiting on anything, it is exactly the
+    /// senders this drain may have unblocked, and each is a distinct task
+    /// that already holds the authority to post here. Waking fewer would
+    /// risk a lost wakeup, since the kernel cannot know which of them will
+    /// take the slot; a sender that loses the race simply re-parks on a
+    /// member that is level-triggered, so nothing is missed.
+    #[must_use]
+    pub fn room_waiters(&self) -> Vec<u64> {
+        let waiters = self.room_waiters.lock();
+        if waiters.is_empty() {
+            Vec::new()
+        } else {
+            waiters.clone()
+        }
     }
 
     /// Maximum payload (bytes) this port will accept.
@@ -632,6 +687,43 @@ mod tests {
         assert_eq!(port.send(&sender, b"x", &sink), Err(Errno::WouldBlock));
         assert!(sink.ids().contains(&AuditEvent::MailboxFull.id().0));
         assert_eq!(port.len(), 4);
+    }
+
+    /// Room is the send-side peek a parked sender is woken on, so it must
+    /// track the very condition `send` refuses on: full means no room, and
+    /// a single drain means room again.
+    #[test]
+    fn room_tracks_the_capacity_send_refuses_on() {
+        let (sink, port) = open_port();
+        let sender = task_with(7, &[CapabilityId::NET_RAW]);
+        assert!(port.has_room(), "an empty mailbox has room");
+        for _ in 0..4 {
+            port.send(&sender, b"x", &sink).expect("fits");
+        }
+        assert!(!port.has_room(), "a full mailbox has none");
+        assert_eq!(port.send(&sender, b"x", &sink), Err(Errno::WouldBlock));
+        let _ = port.recv().expect("drains one");
+        assert!(port.has_room(), "one drain frees one slot");
+        port.send(&sender, b"x", &sink).expect("the freed slot");
+    }
+
+    /// A sender parks once however often its wait re-enters, and a wait
+    /// that ended must not be woken for a port it no longer watches.
+    #[test]
+    fn room_waiters_are_recorded_once_and_forgotten_on_request() {
+        let (_sink, port) = open_port();
+        assert!(port.room_waiters().is_empty(), "nobody waits at rest");
+        port.watch_room(11);
+        port.watch_room(11);
+        port.watch_room(22);
+        assert_eq!(port.room_waiters(), alloc::vec![11, 22]);
+        port.unwatch_room(11);
+        assert_eq!(port.room_waiters(), alloc::vec![22]);
+        port.unwatch_room(22);
+        assert!(port.room_waiters().is_empty());
+        // Forgetting a task that never parked changes nothing.
+        port.unwatch_room(33);
+        assert!(port.room_waiters().is_empty());
     }
 
     #[test]

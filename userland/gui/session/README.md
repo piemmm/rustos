@@ -515,13 +515,46 @@ mailbox is reported on `stderr` and dropped, never retried (`AGENTS.md`
   back refused as the kernel's transient `WouldBlock` backpressure signal
   continuously for `UNRESPONSIVE_AFTER_NS` is flagged *not responding*, one
   accepted delivery clears it, and a reap forgets it. No heartbeat is
-  fabricated and no kernel query pretends to know.
+  fabricated and no kernel query pretends to know. The refused event itself
+  is **held**, not dropped — see the hold-back below.
   The report is sent **only when the tracked set actually changes** (the
   tracker's change latch, drained once per wake), never per frame and never
   polled, and it carries the truthful `total` even when more owners are hung
   than one frame can name — the id list is bounded by
   `SEAT_REPORT_OWNERS_MAX`, so the monitor sees an honest count alongside the
   ids it can act on rather than a silently truncated one.
+
+## The app-ward hold-back (`holdback`)
+
+An app's event mailbox is bounded, so a merely slow app fills it and a send
+comes back `WouldBlock`. That means the app is behind, not gone, so the
+event is **owed** rather than dropped: dropping a `Resized` leaves the app
+laying out at a size the compositor no longer uses, and dropping a
+`FilePicked`/`PickCancelled` strands that window's one pending pick for the
+rest of its life (the engine clears the pick only once the conclusion is
+*accepted*).
+
+- **Parked, never polled.** The first debt to a destination arms a
+  `WaitSourceKind::PortRoom` member on the app's own event port — the
+  send-side twin of the `Port` member. The app's drain frees a slot, the
+  kernel wakes the session, and it sends what it owes; the member goes once
+  the destination owes nothing. No capacity poll, and the desktop still
+  never blocks on an app (`AGENTS.md` §2.23).
+- **Ordered.** A destination already owed something takes the next event
+  unsent, so nothing overtakes what is queued. Queues are per
+  `(destination, window)` and a flush serves an owner's windows
+  round-robin, so one window's backlog starves no sibling.
+- **Folded by meaning.** A state edge (`Focus`, `Resized`,
+  `RedrawRequested`, `CloseRequested`, `Minimized`, `DesktopChanged`) is a
+  value the app converges on, so a later one replaces the held one in
+  place. A position is latest-wins and a wheel run sums — the same rule
+  `pump` applies live, from one shared predicate. Keys, buttons, and the
+  pick conclusion are owed in full.
+- **Bounded.** `HOLD_BACK_CAPACITY` (64 per window) caps what an app that
+  never drains can make the desktop hold: a security bound, not a scalable
+  capacity (`AGENTS.md` §24.4). Overflow sheds the oldest *input* event —
+  total, because folding leaves at most six state edges and one conclusion,
+  and safe, because a press is shed before its release.
 
 ## The `Run` binary — the live desktop session (`plans/DISPLAY.md` D7c)
 
@@ -556,6 +589,10 @@ the real seams end to end:
   the instance's `command_endpoint_for` mailbox — the same one bring-up path
   revives a dead service on demand, and a refused send is reported and
   dropped rather than retried.
+- App-ward window events go through `RtEventSink`, which owns the hold-back
+  above: a refused event is held and its destination watched for room, and
+  the loop's room-wake arm sends what is owed and tears down any owner a
+  send proves gone.
 - The binary branches into the **worker-role** at the very start of `main`:
   if re-entered with the reserved role argument it serves as the parser-sandbox
   icon-rasterisation service and nothing else, using its own image as the

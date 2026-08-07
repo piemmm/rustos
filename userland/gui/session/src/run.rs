@@ -77,6 +77,7 @@
 #[cfg(freestanding)]
 mod program {
     use alloc::collections::BTreeMap;
+    use alloc::vec::Vec;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
@@ -103,15 +104,15 @@ mod program {
         build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
         open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
         serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
-        CliError, Command, ConcludedPick, ConfirmPrompt, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, IconRasteriser,
-        InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion,
-        PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
-        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Unlocker,
-        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
-        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction,
+        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin,
+        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable,
+        LockedDrain, OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu,
+        PinboardMenuOutcome, PinboardStore, PinboardStoreError, ResolvedPin, ScreenLock,
+        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
+        SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, Unlocker, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_help::{own_short_help, BundleHelp};
@@ -238,6 +239,13 @@ mod program {
     /// pinboard settings wakes the loop to apply them.
     const PINBOARD_TOKEN: u64 = 7;
 
+    /// The wait-set token every held-back destination's room member carries:
+    /// an app draining its full event mailbox wakes the loop to send it what
+    /// it is owed. One token for all of them — the flush offers every
+    /// destination its events anyway, so which one drained is not worth
+    /// distinguishing.
+    const HOLDBACK_TOKEN: u64 = 8;
+
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
     /// covers several concurrent clients.
@@ -338,6 +346,22 @@ mod program {
             self.peers.remove(&pid)
         }
 
+        /// Resolve (and forget) the client whose event mailbox is
+        /// `endpoint` — the owner a held-back send has just proved gone.
+        ///
+        /// Matched *forward*, by deriving each attested peer's mailbox and
+        /// comparing, never by inverting the endpoint value back into a pid:
+        /// the answer rests on the kernel-attested pid, exactly as the seat
+        /// report's owner naming does.
+        fn take_by_event_endpoint(&mut self, endpoint: u64) -> Option<ProcId> {
+            let pid = self
+                .peers
+                .keys()
+                .copied()
+                .find(|pid| event_endpoint_for(*pid) == endpoint)?;
+            self.take_by_pid(pid)
+        }
+
         /// The kernel task id the attested client `id` called as, if it
         /// has called this session. The delegation target of a concluded
         /// pick: the pid came from `call_peer_origin`, never a wire claim,
@@ -370,6 +394,14 @@ mod program {
     /// mailbox or a dead port is a typed refusal), so a wedged app can
     /// never wedge the desktop.
     ///
+    /// A refused send is **held**, not dropped ([`HoldBack`]): the mailbox
+    /// is a bounded resource and a merely slow app fills it, so dropping
+    /// would cost the app a resize it cannot re-derive or a picker
+    /// conclusion it is owed exactly once. The sink arms a room member on
+    /// the destination's port, and the loop's [`Self::flush`] sends what is
+    /// owed the moment the app drains — it never polls for capacity and
+    /// never blocks on the app.
+    ///
     /// Every send outcome doubles as responsiveness evidence: the wrapped
     /// [`HangTracker`] folds each `WouldBlock` back-pressure refusal and
     /// each accepted delivery into per-owner "not responding" verdicts
@@ -380,15 +412,88 @@ mod program {
     struct RtEventSink {
         vigil: HangTracker,
         changed: bool,
+        /// The wait-set the room members are armed on.
+        set: u64,
+        held: HoldBack,
     }
 
     impl RtEventSink {
-        /// A sink with no delivery evidence yet.
-        const fn new() -> Self {
+        /// A sink with no delivery evidence yet, arming its room members on
+        /// `set`.
+        const fn new(set: u64) -> Self {
             Self {
                 vigil: HangTracker::new(),
                 changed: false,
+                set,
+                held: HoldBack::new(),
             }
+        }
+
+        /// Watch `endpoint` for room, so the app draining its mailbox wakes
+        /// the loop to send what it is owed.
+        fn arm(&self, endpoint: u64) -> Result<(), Errno> {
+            let ret = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::PortRoom,
+                endpoint,
+                HOLDBACK_TOKEN,
+            );
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Errno::from_syscall(ret))
+            }
+        }
+
+        /// Stop watching `endpoint` for room — it is owed nothing, or its
+        /// owner is gone.
+        fn disarm(&self, endpoint: u64) {
+            let _ = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Del,
+                WaitSourceKind::PortRoom,
+                endpoint,
+                HOLDBACK_TOKEN,
+            );
+        }
+
+        /// One non-blocking app-ward send, folding its outcome into the
+        /// responsiveness evidence.
+        ///
+        /// Free of `self` so the hold-back can be borrowed across it: both
+        /// the first attempt and every later flush go through this one
+        /// definition, so an event's send and its evidence can never differ
+        /// by which path carried it.
+        fn post(
+            vigil: &mut HangTracker,
+            changed: &mut bool,
+            endpoint: u64,
+            event: &WindowEvent,
+        ) -> Result<(), Errno> {
+            let ret = tairix_rt::ipc_send(endpoint, &event.to_le_bytes());
+            if ret == 0 {
+                *changed |= vigil.note_delivered(endpoint);
+                return Ok(());
+            }
+            let error = Errno::from_syscall(ret);
+            *changed |= vigil.note_refused(endpoint, error, tairix_rt::clock_get());
+            Err(error)
+        }
+
+        /// Send what each destination is owed, as far as its mailbox now
+        /// allows, and report the owners the sends proved gone so the loop
+        /// can tear their windows down.
+        fn flush(&mut self) -> Vec<u64> {
+            let vigil = &mut self.vigil;
+            let changed = &mut self.changed;
+            let report = self
+                .held
+                .flush(|endpoint, event| Self::post(vigil, changed, endpoint, event));
+            for endpoint in report.settled.iter().chain(&report.gone) {
+                self.disarm(*endpoint);
+            }
+            report.gone
         }
 
         /// Whether the unresponsive set changed since the last drain,
@@ -408,31 +513,54 @@ mod program {
             self.vigil.unresponsive_owners()
         }
 
-        /// Drop every verdict held against a reaped child's event mailbox
-        /// — a dead app is not a hung app, and a recycled task id must
-        /// start clean.
+        /// Drop every verdict held against a reaped child's event mailbox,
+        /// and everything still owed to it — a dead app is not a hung app,
+        /// a recycled task id must start clean, and events owed to a corpse
+        /// have nowhere to land.
         fn forget_owner(&mut self, pid: u64) {
-            self.changed |= self.vigil.forget(event_endpoint_for(pid));
+            let endpoint = event_endpoint_for(pid);
+            self.changed |= self.vigil.forget(endpoint);
+            if self.held.forget(endpoint) {
+                self.disarm(endpoint);
+            }
         }
     }
 
     impl EventSink for RtEventSink {
-        fn deliver(
-            &mut self,
-            endpoint: u64,
-            event: &[u8; WindowEvent::WIRE_LEN],
-        ) -> Result<(), Errno> {
-            let ret = tairix_rt::ipc_send(endpoint, event);
-            if ret == 0 {
-                self.changed |= self.vigil.note_delivered(endpoint);
-                Ok(())
-            } else {
-                let error = Errno::from_syscall(ret);
-                self.changed |= self
-                    .vigil
-                    .note_refused(endpoint, error, tairix_rt::clock_get());
-                Err(error)
+        fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno> {
+            let vigil = &mut self.vigil;
+            let changed = &mut self.changed;
+            // Back-pressure means the app is behind, not gone: the event is
+            // held rather than dropped, and the destination watched for room.
+            let outcome = self.held.deliver(endpoint, event, |event| {
+                Self::post(vigil, changed, endpoint, event)
+            })?;
+            let Delivery::Owed { watch } = outcome else {
+                return Ok(());
+            };
+            // The event could not be delivered, so the responsiveness
+            // evidence stands whether the refusal came from this send or
+            // from the debt this one joined: only a delivery the owner
+            // accepts clears it.
+            self.changed |=
+                self.vigil
+                    .note_refused(endpoint, Errno::WouldBlock, tairix_rt::clock_get());
+            if watch {
+                if let Err(error) = self.arm(endpoint) {
+                    // Nothing held for a destination that cannot be watched
+                    // could ever go out. Restore the invariant the flush
+                    // relies on — a destination is watched exactly while it
+                    // is owed something — and say so rather than stranding
+                    // the events in silence. `NotFound` here is the owner's
+                    // port already reclaimed, and answering with it is what
+                    // tears its windows down.
+                    let _ = self.held.forget(endpoint);
+                    self.disarm(endpoint);
+                    io::write_stderr_line("desktop: cannot watch an app's mailbox for room");
+                    return Err(error);
+                }
             }
+            Ok(())
         }
     }
 
@@ -1090,7 +1218,7 @@ mod program {
         let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
         let mut windows = SessionWindows::new();
         let mut identity = RtWindowIdentity::new();
-        let mut sink = RtEventSink::new();
+        let mut sink = RtEventSink::new(set);
         let mut focused: Option<u64> = None;
         // Every app launched from the desktop is admitted immediately and
         // loads on its own task (asynchronous launch); a load refusal now
@@ -1318,6 +1446,30 @@ mod program {
                     );
                     let reply = encode_status_reply(result);
                     let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, ticket, &reply);
+                }
+            } else if token == HOLDBACK_TOKEN {
+                // An app drained its full event mailbox, so what the session
+                // owes it can go out. The room member is armed exactly while
+                // a destination is owed something, so this never runs on a
+                // wake nobody asked for, and it is the only path that sends
+                // a held event — the desktop never polls for capacity.
+                for endpoint in sink.flush() {
+                    // The send proved this owner gone before its exit was
+                    // reaped. Its windows go with it, exactly as a refused
+                    // direct send tears them down.
+                    if let Some(client) = identity.take_by_event_endpoint(endpoint) {
+                        let mut bridge = ShellWindowHost {
+                            shell: &mut shell,
+                            compositor: &mut compositor,
+                            windows: &mut windows,
+                            picker: &mut picker,
+                            pins: &mut pins.service,
+                        };
+                        server.client_exited(&mut bridge, client);
+                        if focused.is_some_and(|id| server.owner_of(id).is_none()) {
+                            focused = None;
+                        }
+                    }
                 }
             } else if token == PRESSURE_TOKEN {
                 // The machine's memory-pressure band moved. Read it and, if
@@ -3375,9 +3527,9 @@ mod program {
         if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
             // `owner_of` proved the window exists, so the `NotFound` is
             // the sink's: the owner's event port is gone — the kernel
-            // reclaimed it at exit — and its windows go with it. Any
-            // other refusal (the `WouldBlock` back-pressure signal) drops
-            // the event only.
+            // reclaimed it at exit — and its windows go with it. A merely
+            // full mailbox never reaches here: the sink holds that event
+            // and answers for it.
             let mut bridge = ShellWindowHost {
                 shell,
                 compositor,

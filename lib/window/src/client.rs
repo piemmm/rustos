@@ -158,6 +158,11 @@ const fn key_modifiers(modifiers: WireModifiers) -> Modifiers {
 /// per app. Sized against a drained-every-wake consumer, with the session
 /// coalescing an adjacent run of pointer motion over one window into its
 /// newest sample before it ever reaches this queue.
+///
+/// A full mailbox costs the app nothing it cannot recover: the session
+/// *holds* the refused event and delivers it once the app drains, parked on
+/// the room the drain frees rather than polling for it. So this depth
+/// governs how much the kernel buffers, not what an app may miss.
 pub const EVENT_MAILBOX_CAPACITY: usize = 32;
 
 /// The event-mailbox endpoint id an app binds for its window events: the

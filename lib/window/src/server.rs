@@ -233,14 +233,20 @@ pub trait WindowHost {
 /// the owning app's event endpoint in production) behind a trait, so
 /// event routing is host-testable.
 pub trait EventSink {
-    /// Deliver one encoded [`WindowEvent`] to `endpoint`.
+    /// Deliver one [`WindowEvent`] to `endpoint`, encoding it on the way.
+    ///
+    /// The sink takes the typed event rather than its wire form because
+    /// only the sink knows whether the event goes out now: one that holds
+    /// an event back against a full mailbox folds it into what it already
+    /// holds by *kind*, and encodes once, when it finally goes.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the delivery surfaces (a full queue, a dead
-    /// receiver); events are advisory, so the caller may drop the event
-    /// but must never block the session on it.
-    fn deliver(&mut self, endpoint: u64, event: &[u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno>;
+    /// receiver). The sink must never block the session on a slow
+    /// receiver: it either accepts responsibility for the event or
+    /// refuses it.
+    fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno>;
 }
 
 /// Everything one validated `Create` asks for, in one place, so the
@@ -713,7 +719,8 @@ impl<M: ShmMapper> WindowServer<M> {
     ///   bug, refused rather than delivered).
     /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
     ///   pending pick pending (the session decides whether to retry or
-    ///   tear the client down).
+    ///   tear the client down). A sink that *accepts* the conclusion is
+    ///   answering for it, whether it goes out now or from a hold-back.
     pub fn deliver_event(
         &mut self,
         sink: &mut dyn EventSink,
@@ -735,7 +742,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
-        sink.deliver(record.event_endpoint, &event.to_le_bytes())?;
+        sink.deliver(record.event_endpoint, event)?;
         if concludes_pick {
             record.pick_pending = false;
         }

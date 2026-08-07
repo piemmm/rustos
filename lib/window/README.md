@@ -25,8 +25,12 @@ server and every app's client can never drift apart.
   memory one app can reserve; a dead client's windows are torn down
   fail-closed via `client_exited`. Routed input is pushed the other way
   with `deliver_event`, which validates the event against the addressed
-  window (owner's endpoint, window-local pointer bounds) before it is
-  encoded.
+  window (owner's endpoint, window-local pointer bounds) before handing it
+  to the sink. The sink takes the *typed* event, not its wire bytes,
+  because only the sink knows whether it goes out now: one that holds an
+  event back against a full mailbox folds it by kind and encodes once,
+  when it finally goes. A sink that accepts a pick conclusion is answering
+  for it either way, which is what clears the pending pick.
 - **Client** (`WindowClient` / `WindowEvents`): the app-side half over
   the injected `WindowTransport` seam (the `ipc_call` syscall in
   production). `create` validates and sends the window geometry, grant

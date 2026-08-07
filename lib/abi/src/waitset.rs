@@ -203,6 +203,36 @@ pub enum WaitSourceKind {
     /// sample; the band changes rarely, so an edge is exactly the right
     /// shape.
     MemoryPressure = 9,
+    /// Room in an asynchronous IPC message port's mailbox (its `id` is the
+    /// port's endpoint id) — the send-side twin of [`Port`](Self::Port).
+    /// Adding the member is authorised by the caller's *send* authority to
+    /// the port — the same capability subset
+    /// [`crate::SyscallNumber::IPC_SEND`] checks, never the port *owner*
+    /// check the [`Port`](Self::Port) kind applies (the caller here is the
+    /// sender, not the binder); an unknown port and one the caller may not
+    /// send to both refuse with the same oracle-free `NotFound` the other
+    /// kinds use.
+    ///
+    /// Ready when a send would **not** be refused for want of room: the
+    /// mailbox is below capacity, the port is gone (the sender must learn
+    /// that rather than park on a destination that can never drain), or the
+    /// caller no longer holds the send authority (its send now fails on the
+    /// capability, so parking for room would be waiting on the wrong thing —
+    /// and a member that is unconditionally ready tells an unauthorised
+    /// caller nothing about the mailbox). Readiness is a non-consuming,
+    /// level-triggered peek: the woken sender's own
+    /// [`IPC_SEND`](crate::SyscallNumber::IPC_SEND) consumes the room, so a
+    /// mailbox with room to spare reports again on the next wait.
+    ///
+    /// Level-triggered, not an edge on the occupancy falling, because the
+    /// member is armed *after* a send was refused: an edge seeded at that
+    /// moment would already have passed if the receiver drained in between,
+    /// and the sender would park forever on a mailbox that is empty. It
+    /// exists so a sender holding an event the receiver must not lose — a
+    /// window resize, a file-picker conclusion — can park until the
+    /// destination drains instead of dropping the event or polling for room
+    /// (`plans/APPWIN.md`; the desktop's app-ward hold-back).
+    PortRoom = 10,
 }
 
 impl WaitSourceKind {
@@ -230,6 +260,7 @@ impl WaitSourceKind {
             7 => Ok(Self::File),
             8 => Ok(Self::CallReply),
             9 => Ok(Self::MemoryPressure),
+            10 => Ok(Self::PortRoom),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -261,10 +292,11 @@ mod tests {
             WaitSourceKind::File,
             WaitSourceKind::CallReply,
             WaitSourceKind::MemoryPressure,
+            WaitSourceKind::PortRoom,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(10), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(11), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -282,6 +314,7 @@ mod tests {
         assert_eq!(WaitSourceKind::File.as_u32(), 7);
         assert_eq!(WaitSourceKind::CallReply.as_u32(), 8);
         assert_eq!(WaitSourceKind::MemoryPressure.as_u32(), 9);
+        assert_eq!(WaitSourceKind::PortRoom.as_u32(), 10);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
     }
 }

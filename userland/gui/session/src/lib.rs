@@ -160,6 +160,7 @@ pub mod config;
 pub mod confirm;
 pub mod desktop;
 pub mod device;
+pub mod holdback;
 pub mod input;
 pub mod keyboard;
 pub mod launch;
@@ -181,6 +182,8 @@ pub mod windows;
 #[cfg(test)]
 mod desktop_tests;
 #[cfg(test)]
+mod holdback_tests;
+#[cfg(test)]
 mod tests;
 
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
@@ -195,6 +198,7 @@ pub use desktop::{
     RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
+pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{launch_failure_report, reap_launched, LaunchTable, LaunchedApp};

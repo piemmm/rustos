@@ -2454,6 +2454,7 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::File => "FILE",
         WaitSourceKind::CallReply => "CALL_REPLY",
         WaitSourceKind::MemoryPressure => "MEMORY_PRESSURE",
+        WaitSourceKind::PortRoom => "PORT_ROOM",
     }
 }
 

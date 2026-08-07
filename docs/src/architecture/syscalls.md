@@ -871,6 +871,29 @@ windowed terminal's "the shell wrote output" wake: it parks on one set
 holding its window-event port, its shell-output pipe, and its shell
 child, and dispatches on the woken member's token.
 
+It accepts a `PortRoom` member (`plans/APPWIN.md` AW4), the **send**-side
+twin of the `Port` member: `id` names a message port the caller may post
+to, and the add applies the *send*-authority check `ipc_send` itself
+applies — the caller here is the sender, not the binder, so the `Port`
+kind's owner check does not fit. An unknown port and one the caller may
+not send to refuse with the same oracle-free `NotFound`. The member is
+ready when a send would **not** be refused for want of room: the mailbox
+is below capacity, the port is gone, or the caller no longer holds the
+send authority — the last two because a sender parked on either would wait
+forever, and an unconditionally-ready member tells an unauthorised caller
+nothing about the mailbox. Readiness is a non-consuming, **level-triggered**
+peek; the woken sender's own `ipc_send` takes the slot. Level rather than
+an edge on the occupancy falling, because the member is armed *after* a
+send was refused: an edge seeded at that moment would already have passed
+if the receiver drained in between. The wake is **targeted** — a port
+records the tasks parked for its room, and a committed `ipc_recv` names
+exactly them, so a busy mailbox never disturbs an unrelated waiter — with
+one broadcast on port teardown, when the record dies with the port. Only
+sets that contain a `PortRoom` member join the room wake queue. This is
+what lets the desktop hold an app-ward event a full mailbox refused (a
+window resize, a file-picker conclusion) and deliver it when the app
+drains, instead of dropping it or polling for capacity.
+
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*
 it is servicing, `self_origin` lets a task read its *own*. The kernel builds

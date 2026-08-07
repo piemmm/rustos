@@ -290,9 +290,19 @@ struct QueueSink {
 }
 
 impl EventSink for QueueSink {
-    fn deliver(&mut self, endpoint: u64, event: &[u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
-        self.delivered.push_back((endpoint, *event));
+    fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno> {
+        self.delivered.push_back((endpoint, event.to_le_bytes()));
         Ok(())
+    }
+}
+
+/// A sink that refuses everything with the owner's mailbox-full signal — the
+/// back-pressure a session takes responsibility for.
+struct FullSink;
+
+impl EventSink for FullSink {
+    fn deliver(&mut self, _endpoint: u64, _event: &WindowEvent) -> Result<(), Errno> {
+        Err(Errno::WouldBlock)
     }
 }
 
@@ -1047,6 +1057,47 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
         .server
         .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window })
         .expect("the cancel conclusion delivers");
+}
+
+/// A conclusion the sink refuses leaves the pick pending, so the window can
+/// still be told later.
+///
+/// This is what makes a session's hold-back the fix rather than a
+/// convenience: a sink that drops a refused conclusion would leave this
+/// window's pick pending for the rest of its life — every later `pick_file`
+/// refused `AlreadyExists`, with no conclusion that can ever clear it — while
+/// a sink that *accepts* it (because it will deliver it from a hold-back)
+/// concludes the pick exactly once, as the protocol says.
+#[test]
+fn a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client.pick_file(window).expect("pick accepted");
+
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
+            &mut FullSink,
+            &WindowEvent::PickCancelled { window_id: window }
+        ),
+        Err(Errno::WouldBlock),
+        "a full mailbox is relayed, not swallowed"
+    );
+    assert_eq!(
+        client.pick_file(window),
+        Err(Errno::AlreadyExists),
+        "the pick is still pending, so no second one starts"
+    );
+
+    // The session takes responsibility for the conclusion and the pick ends.
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window })
+        .expect("an accepted conclusion concludes it");
+    assert_eq!(sink.delivered.len(), 1);
+    client.pick_file(window).expect("the window may pick again");
 }
 
 #[test]

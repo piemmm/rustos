@@ -1204,7 +1204,11 @@ fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutc
 /// Whether `next` continues a run of `so_far` on one axis: a zero on either
 /// side adds nothing to decide, and two ticks of the same sign are one
 /// gesture. Opposite signs are not.
-const fn continues(so_far: i32, next: i32) -> bool {
+///
+/// The one definition both wheel folds share — this drain's, and the
+/// [`crate::holdback`] queue's, which folds again across drains when a
+/// destination is behind.
+pub(crate) const fn continues(so_far: i32, next: i32) -> bool {
     so_far == 0 || next == 0 || (so_far < 0) == (next < 0)
 }
 

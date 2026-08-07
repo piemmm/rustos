@@ -48,6 +48,23 @@ exception.
   members, plus `PipeEnd::readable` / registry-peek unit tests (the peek
   borrows in place — a clone/drop of a pipe end would spuriously wake
   every pipe waiter).
+- **The mailbox-room wait source (AW4).** `WaitSourceKind::PortRoom` (wire
+  value 10, added in place in the stage that consumed it) is the **send**
+  side of the same discipline: `id` names a port the caller may post to,
+  admitted by the *send*-authority check `ipc_send` applies (the caller is
+  a sender, not the binder, so the `Port` kind's owner check does not
+  fit), refusing the same oracle-free `NotFound`. It is ready when a send
+  would not be refused for want of room — below capacity, port gone, or
+  send authority lost — as a non-consuming, **level-triggered** peek: the
+  member is armed *after* a send was refused, so an edge on the occupancy
+  falling would already have passed if the receiver drained in between and
+  the sender would park forever. The wake is targeted (a port records the
+  tasks parked for its room; a committed `ipc_recv` names exactly them),
+  with one broadcast on teardown, and only sets holding a `PortRoom`
+  member join the queue. It is what lets a sender hold an event the
+  receiver must not lose — a window resize, a picker conclusion — instead
+  of dropping it or polling for capacity (the desktop's app-ward
+  hold-back, `plans/OPEN-DEFECTS.md` D35).
 - **Fail closed, no ambient authority** (§5.4, §4): the session accepts a
   window request only from the task the shm grant and the protocol
   identify; a refused or malformed request is a typed reply, never a

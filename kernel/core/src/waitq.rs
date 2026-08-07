@@ -738,6 +738,46 @@ pub fn call_wake_task(task: TaskId) {
     }
 }
 
+/// The wait-queue holding senders parked on a `PortRoom` wait-set member —
+/// a task that has a message a full mailbox refused and waits for the
+/// receiver to free a slot rather than dropping the message or polling for
+/// capacity. Room carries no deadline of its own, so every waiter registers
+/// with [`NO_DEADLINE`] and is released only by an explicit wake (the
+/// wait-set's own timeout still bounds the wait through `IRQ_WAITQ`).
+///
+/// Joined only by a wait-set that actually holds a `PortRoom` member, so
+/// ordinary mailbox traffic never disturbs a waiter that did not ask about
+/// room.
+pub static PORT_ROOM_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parked sender because a port whose room they may be waiting
+/// on was torn down; each re-scans and observes that its destination has
+/// gone (the peek reports a vanished port ready, so the woken sender fails
+/// its send closed instead of parking on a mailbox that can never drain).
+/// A fail-safe no-op before the arch hook is installed.
+///
+/// A broadcast, because a destroyed port takes its own record of who was
+/// waiting with it; the blast radius is the small set of senders currently
+/// holding an undeliverable message. Every ordinary drain uses the targeted
+/// [`port_room_wake_task`] instead, so a busy mailbox never wakes an
+/// unrelated waiter.
+pub fn port_room_wake() {
+    if let Some(arch) = wait_arch() {
+        PORT_ROOM_WAITQ.wake_all(arch);
+    }
+}
+
+/// Wake exactly the sender `task` parked on [`PORT_ROOM_WAITQ`] because the
+/// mailbox *it* is waiting on freed a slot (the port records its room
+/// waiters, so the drain names them). A sender that is not parked is
+/// running and will retry on its own, so the miss is benign. A fail-safe
+/// no-op before the arch hook is installed.
+pub fn port_room_wake_task(task: TaskId) {
+    if let Some(arch) = wait_arch() {
+        let _ = PORT_ROOM_WAITQ.wake_task(arch, task);
+    }
+}
+
 /// Lock-free "the timed-wake one-shot fired and a deadline sweep is owed"
 /// flag, set by [`timed_wake_sweep`] in the timer ISR and consumed by
 /// [`drain_pending_wakes`] in dispatcher context (the

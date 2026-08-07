@@ -2047,39 +2047,72 @@ consecutive refused periods, then delivery on the first accepted one) and
 `back_pressure_does_not_clear_the_give_up_budget` (a real fault after a
 `WouldBlock` still trips it).
 
-## D35 — an app-ward window event is silently dropped when its mailbox is full (OPEN)
-
-**Symptom.** None currently reproducible — D33/D34 removed the condition
-that made the 32-slot mailbox fill routinely. Recorded because the lossy
-channel itself is unfixed.
+## D35 — an app-ward window event was silently dropped when its mailbox was full — DONE
 
 **The defect.** `RtEventSink::deliver` (`userland/gui/session/src/run.rs`)
-is one non-blocking `ipc_send`; on `WouldBlock` the session drops the event
-and never retries. That is right for a pure delta (a wheel tick, a motion
-sample) and wrong for everything else: `Resized` leaves the client
-hit-testing and rendering at a size the compositor no longer uses, with no
-second chance until the next resize; `CloseRequested`, `Focus`,
-`Minimized` and `DesktopChanged` are state edges with no re-derivation
-path; `FilePicked`/`PickCancelled` are one-shot conclusions whose loss
-leaves `WindowServer::pick_pending` set for the life of the window, so that
-window can never open another picker. An app is not required to be hung for
-this: 32 slots is a bounded resource and a slow drain is enough.
+was one non-blocking `ipc_send`; on `WouldBlock` the session dropped the
+event and never retried. That is right for a pure delta (a wheel tick, a
+motion sample) and wrong for everything else: `Resized` left the client
+hit-testing and rendering at a size the compositor no longer used, with no
+second chance until the next resize; `CloseRequested`, `Focus`, `Minimized`
+and `DesktopChanged` are state edges with no re-derivation path;
+`FilePicked`/`PickCancelled` are one-shot conclusions whose loss left
+`WindowServer::pick_pending` set for the life of the window, so that window
+could never open another picker. An app did not have to be hung for this:
+32 slots is a bounded resource and a slow drain is enough.
 
-**Why it is not fixed here.** The correct shape is a per-window hold-back
-with per-kind coalescing, flushed when the destination drains — and the
-wait-set has no "destination has space" member kind, so there is nothing to
-park on. The kernel surface today exposes readability for every kind and
-writability for none; a hold-back without it would either poll or rely on
-the session's incidental wakes, and neither is a fix. Closing this means
-adding that member kind (edge-triggered on a port's occupancy falling,
-authorised by the same send-authority check `ipc_send` applies), then the
-session-side hold-back. Explicitly **not** to be "fixed" by enlarging
-`EVENT_MAILBOX_CAPACITY`.
+**Kernel — `WaitSourceKind::PortRoom` (wire value 10).** The send-side twin
+of the `Port` member, so a sender can park on a full destination instead of
+dropping or polling. Added by the *send*-authority check `ipc_send` applies
+(the caller is the sender, not the binder); an unknown port and one the
+caller may not post to give the same oracle-free `NotFound`.
 
-**Regression cover to land with the fix.** A session-level test that fills
-a window's mailbox, delivers a `Resized` and a `PickCancelled`, and asserts
-both arrive once the mailbox drains; a kernel test that the new member
-reports exactly on the full→not-full edge and consumes it.
+- **Level-triggered, not the edge the original entry proposed.** The member
+  is armed *after* a send was refused, so an edge seeded at that moment
+  would already have passed if the receiver drained in between — the sender
+  would then park forever on an empty mailbox, which is the freeze this
+  defect is about. Ready means "a send would not be refused for want of
+  room": below capacity, port gone, or send authority lost. The last two
+  keep a sender from waiting on something waiting cannot fix, and answering
+  ready unconditionally to an unauthorised caller leaks no occupancy.
+- **The wake is targeted.** A `Port` records the tasks parked for its room
+  (`watch_room`/`unwatch_room`, registered before the first readiness scan
+  so a drain in the arming window is not lost), and a *committed*
+  `ipc_recv` wakes exactly them. Port teardown broadcasts once, because the
+  record dies with the port — the `call_wake`/`call_wake_task` pattern.
+  Only a set holding a `PortRoom` member joins the queue.
+
+**Session — the hold-back (`userland/gui/session/src/holdback.rs`).** One
+ordered queue per `(destination mailbox, window)`; a destination already
+owed something takes the next event unsent, so nothing overtakes what is
+queued, and a flush serves an owner's windows round-robin so one window's
+backlog starves no sibling. Folding is by what each quantity means: a state
+edge replaces the held one in place (at most one of each per window), a
+position is latest-wins, a wheel run sums until it reverses (the same
+`shell::continues` predicate the live drain uses), and keys, buttons and the
+pick conclusion are owed in full. `HOLD_BACK_CAPACITY` (64/window) is a
+security bound, not a scalable capacity: overflow sheds the oldest *input*
+event, which is total because folding leaves at most six edges and one
+conclusion, and safe because a press is shed before its release. Not fixed
+by enlarging `EVENT_MAILBOX_CAPACITY`.
+
+`EventSink::deliver` now takes the typed `WindowEvent` rather than its wire
+bytes, because only the sink knows whether an event goes out now, and a
+held one must fold by kind and encode once when it finally goes.
+
+**Regression cover.** `a_resize_and_a_pick_conclusion_survive_a_full_mailbox`
+and `a_later_event_never_overtakes_one_already_owed`
+(`userland/gui/session/src/holdback_tests.rs`) both fail before the fix, on
+the dropped event and on the reordering respectively; 14 further tests cover
+the folding, the bound, the shed order, and the flush outcomes.
+`a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted`
+(`lib/window/src/tests.rs`) pins the `pick_pending` protocol the drop
+stranded. `waitset_wait_reports_port_room_once_a_drain_frees_a_slot`
+(`kernel/core/src/syscalls.rs`) covers the authority gate, quiet-while-full,
+ready-on-drain, no waiter record left behind, and the two always-ready
+cases; `room_tracks_the_capacity_send_refuses_on` and
+`room_waiters_are_recorded_once_and_forgotten_on_request`
+(`kernel/ipc/src/port.rs`) cover the port itself.
 
 ## D36 — the shared stroke path never converged, so a graph reading wedged its own process — DONE
 
