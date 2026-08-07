@@ -6,7 +6,7 @@
 //! inherited standard input — there is no polling loop; the editor only
 //! runs when a key arrives.
 
-use tairix_curses::{Pos, Screen, Tty, Window};
+use tairix_curses::{Event, Pos, Screen, Tty, Window};
 
 use crate::command::Start;
 use crate::editor::Editor;
@@ -57,6 +57,14 @@ pub fn run<T: Tty>(
         let Some(event) = screen.getch().map_err(|_| VimError::Terminal)? else {
             continue;
         };
+        // The window outlives each frame, so it is the one piece of layout
+        // that does not re-derive itself; resize it and redraw. The
+        // renderer recomputes the scroll view from the window it is given,
+        // so the cursor stays visible at the new geometry.
+        if let Event::Resize(size) = event {
+            window.resize(size);
+            continue;
+        }
         editor.handle_event(&event, io);
         if let Some(code) = editor.quit {
             return Ok(code);

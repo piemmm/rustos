@@ -270,6 +270,13 @@ impl Model {
     /// React to one input event, loading and saving through `fs` where the
     /// user asks for it.
     pub fn handle_event(&mut self, event: &Event, fs: &dyn Fs) -> Action {
+        // A resize is the terminal talking, not the user: it must not
+        // dismiss the overlay or reach a mode handler. The renderer
+        // re-derives the viewport from the live screen size each pass, so
+        // the next draw re-lays-out and re-clamps the scroll by itself.
+        if matches!(event, Event::Resize(_)) {
+            return Action::Continue;
+        }
         // Any key dismisses the key-summary overlay; the key itself is
         // consumed, so a stray character never edits the buffer unseen.
         if self.help_visible {

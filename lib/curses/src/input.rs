@@ -16,6 +16,8 @@ use alloc::string::String;
 
 use tairix_vt::{control, Key, MouseReport, Op, Parser};
 
+use crate::geom::Size;
+
 /// A decoded input event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
@@ -66,6 +68,15 @@ pub enum Event {
     /// A completed bracketed paste: the text pasted between the start and end
     /// markers, free of escape interpretation.
     Paste(String),
+    /// The terminal's character grid changed size. The screen has already
+    /// been resized to match and its diff base invalidated, so the
+    /// application resizes its own [`Window`](crate::Window)s and repaints.
+    ///
+    /// There is no signal for this: the change is noticed only when the
+    /// application next reads input or repaints, so a [`getch`](crate::Screen::getch)
+    /// blocked indefinitely with no timeout learns of it only on the next
+    /// keypress.
+    Resize(Size),
 }
 
 /// A streaming decoder from terminal bytes to [`Event`]s.

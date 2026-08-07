@@ -183,13 +183,132 @@ fn a_wide_glyph_wraps_whole_when_one_column_remains() {
 fn a_wide_glyph_on_a_one_column_grid_never_leaks_into_the_next_row() {
     // One column can never hold a two-column glyph: the wrap-whole rule
     // blanks the cell and wraps first, and the continuation is dropped
-    // rather than aliasing the next row's first cell. The trailing eager
-    // wrap then scrolls the blanked first line off the top, leaving the
-    // lead and the following narrow glyph on the first two rows.
+    // rather than aliasing the next row's first cell. Each glyph then fills
+    // its row and owes a wrap the next one pays, so the three rows are the
+    // blanked first cell, the lead, and the following narrow glyph.
     let grid = render_bytes(1, 3, "世x".as_bytes());
-    assert_eq!(glyph(&grid, 0, 0), '世');
-    assert_eq!(glyph(&grid, 0, 1), 'x');
-    assert_eq!(glyph(&grid, 0, 2), ' ');
+    assert_eq!(glyph(&grid, 0, 0), ' ');
+    assert_eq!(glyph(&grid, 0, 1), '世');
+    assert_eq!(glyph(&grid, 0, 2), 'x');
+}
+
+// --- The owed wrap at the right edge -------------------------------------
+
+#[test]
+fn filling_the_last_column_leaves_the_cursor_resting_on_it() {
+    let grid = render_bytes(4, 2, b"abcd");
+    assert_eq!(row_text(&grid, 0), "abcd");
+    assert_eq!(row_text(&grid, 1), "");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
+}
+
+#[test]
+fn the_glyph_after_a_full_row_pays_the_owed_wrap() {
+    let grid = render_bytes(4, 2, b"abcde");
+    assert_eq!(row_text(&grid, 0), "abcd");
+    assert_eq!(row_text(&grid, 1), "e");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (1, 1));
+}
+
+#[test]
+fn a_full_width_bottom_row_does_not_scroll_the_screen() {
+    // The reported defect: a full-screen monitor paints a status bar across
+    // the whole bottom row. Taking the wrap eagerly turned that bar's last
+    // glyph into a line feed on the bottom margin, scrolling every row up
+    // one — after which the tool's next partial repaint landed a row out.
+    let grid = render_bytes(4, 3, b"top\x1b[3;1Habcd");
+    assert_eq!(row_text(&grid, 0), "top");
+    assert_eq!(row_text(&grid, 1), "");
+    assert_eq!(row_text(&grid, 2), "abcd");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 2));
+}
+
+#[test]
+fn the_glyph_after_a_full_bottom_row_scrolls_exactly_one_line() {
+    let grid = render_bytes(4, 3, b"top\x1b[3;1Habcde");
+    assert_eq!(row_text(&grid, 0), "");
+    assert_eq!(row_text(&grid, 1), "abcd");
+    assert_eq!(row_text(&grid, 2), "e");
+}
+
+#[test]
+fn an_absolute_move_cancels_the_owed_wrap() {
+    let grid = render_bytes(4, 2, b"abcd\x1b[1;1HZ");
+    assert_eq!(row_text(&grid, 0), "Zbcd");
+    assert_eq!(row_text(&grid, 1), "");
+}
+
+#[test]
+fn a_carriage_return_cancels_the_owed_wrap() {
+    let grid = render_bytes(4, 2, b"abcd\rY");
+    assert_eq!(row_text(&grid, 0), "Ybcd");
+    assert_eq!(row_text(&grid, 1), "");
+}
+
+#[test]
+fn a_rubout_at_the_right_edge_erases_the_glyph_that_filled_the_row() {
+    // A rubout is backspace, space, backspace: with the wrap owed the cursor
+    // already rests on the last column, so it erases the row's final glyph
+    // rather than the one before it.
+    let grid = render_bytes(4, 2, b"abcd\x08 \x08");
+    assert_eq!(row_text(&grid, 0), "abc");
+    assert_eq!(glyph(&grid, 3, 0), ' ');
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (3, 0));
+}
+
+#[test]
+fn erase_to_end_of_line_from_the_owed_wrap_clears_the_last_cell() {
+    let grid = render_bytes(4, 2, b"abcd\x1b[K");
+    assert_eq!(row_text(&grid, 0), "abc");
+    assert_eq!(glyph(&grid, 3, 0), ' ');
+}
+
+#[test]
+fn setting_the_scroll_region_homes_the_cursor_into_the_region() {
+    // `DECSTBM` homes to the top-left of the region, not of the screen, so a
+    // program that reserves a header row starts drawing below it.
+    let grid = render_bytes(4, 4, b"\x1b[2;4r");
+    assert_eq!((grid.cursor_col(), grid.cursor_row()), (0, 1));
+}
+
+/// The shared conformance script's view of this screen model.
+struct ConformanceGrid {
+    grid: Grid,
+}
+
+impl tairix_vt::conformance::ScreenModel for ConformanceGrid {
+    fn cols(&self) -> u16 {
+        self.grid.cols()
+    }
+
+    fn rows(&self) -> u16 {
+        self.grid.rows()
+    }
+
+    fn apply(&mut self, op: &Op) {
+        crate::parser::apply(&mut self.grid, op);
+    }
+
+    fn glyph(&self, col: u16, row: u16) -> char {
+        glyph(&self.grid, col, row)
+    }
+
+    fn cursor(&self) -> (u16, u16) {
+        (self.grid.cursor_col(), self.grid.cursor_row())
+    }
+}
+
+#[test]
+fn the_screen_model_passes_the_shared_conformance_script() {
+    // The framebuffer console runs this same script, so the two screens a
+    // program can be drawn on cannot disagree about where its output lands.
+    let mut screen = ConformanceGrid {
+        grid: Grid::new(tairix_vt::conformance::COLS, tairix_vt::conformance::ROWS)
+            .expect("valid conformance size"),
+    };
+    if let Err(divergence) = tairix_vt::conformance::check(&mut screen) {
+        panic!("screen conformance: {divergence:?}");
+    }
 }
 
 #[test]

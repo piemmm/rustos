@@ -174,6 +174,10 @@ impl<'a> Session<'a> {
         if self.cursor > self.scroll + avail {
             self.scroll = self.cursor - avail;
         }
+        // Never hold the window further right than the line needs: a
+        // widened terminal must show the head again rather than keep the
+        // offset the narrow one required.
+        self.scroll = self.scroll.min(self.line.len().saturating_sub(avail));
         let end = (self.scroll + avail).min(self.line.len());
         let mut ops = Vec::new();
         ops.push(Op::CarriageReturn);
@@ -269,6 +273,14 @@ impl<'a> Session<'a> {
                 self.handle_alt(c);
                 None
             }
+            // The viewport is the only geometry the editor keeps, and the
+            // caller re-renders after a `None`: the re-flow at the new
+            // width falls out of that redraw, leaving the line untouched
+            // and unsubmitted.
+            Event::Resize(size) => {
+                self.set_width(size.cols);
+                None
+            }
             // Bare Escape, the named function keys, mouse reports: nothing
             // for a line editor to do.
             Event::Esc
@@ -278,6 +290,12 @@ impl<'a> Session<'a> {
             | Event::PageDown
             | Event::Mouse(_) => None,
         }
+    }
+
+    /// Adopt the terminal's new column count, floored at the two columns
+    /// the banner-plus-cursor arithmetic needs.
+    fn set_width(&mut self, cols: u16) {
+        self.width = usize::from(cols).max(2);
     }
 
     /// The control-chorded keys (the readline set).
@@ -399,6 +417,12 @@ impl<'a> Session<'a> {
             Event::Enter => {
                 self.search = None;
                 Some(self.submit())
+            }
+            // A resize is the terminal talking, not the user accepting the
+            // match: take the new width and keep searching.
+            Event::Resize(size) => {
+                self.set_width(size.cols);
+                None
             }
             other => {
                 self.search = None;
@@ -611,7 +635,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec;
     use alloc::vec::Vec;
-    use tairix_curses::Event;
+    use tairix_curses::{Event, Size};
 
     /// A scripted completer: returns a fixed span and candidate list.
     struct FixedCompleter {
@@ -828,6 +852,75 @@ mod tests {
         events.extend([Event::Ctrl('g'), Event::Enter]);
         let (outcome, _) = drive(&mut editor, events, &FixedCompleter::none());
         assert_eq!(outcome, Some(ReadOutcome::Line("keep".to_string())));
+    }
+
+    #[test]
+    fn a_resize_reflows_the_line_without_losing_or_submitting_it() {
+        const TYPED: &str = "echo the quick brown fox jumps over the lazy dog";
+        let mut editor = Editor::new();
+        let console = RecordingConsole::new();
+        let completer = FixedCompleter::none();
+        let mut session = Session::new(&mut editor, String::from("% "), Some(20));
+        for event in chars(TYPED) {
+            session.handle(event, &console, &completer);
+        }
+        // The narrow terminal shows only the window under the cursor.
+        console.clear();
+        session.render(&console);
+        assert!(!console.stdout().contains(TYPED));
+
+        // The resize does not end the read, so nothing is submitted.
+        assert_eq!(
+            session.handle(Event::Resize(Size::new(24, 100)), &console, &completer),
+            None
+        );
+        assert_eq!(session.width, 100);
+        assert_eq!(session.line.iter().collect::<String>(), TYPED);
+
+        // The next frame draws the whole line at the new width, once.
+        console.clear();
+        session.render(&console);
+        assert_eq!(console.stdout().matches(TYPED).count(), 1);
+    }
+
+    #[test]
+    fn a_resize_during_reverse_search_keeps_the_search_active() {
+        let mut editor = Editor::new();
+        editor.remember("echo alpha");
+        let console = RecordingConsole::new();
+        let completer = FixedCompleter::none();
+        let mut session = Session::new(&mut editor, String::from("% "), Some(40));
+        session.handle(Event::Ctrl('r'), &console, &completer);
+        for event in chars("echo") {
+            session.handle(event, &console, &completer);
+        }
+
+        assert_eq!(
+            session.handle(Event::Resize(Size::new(24, 72)), &console, &completer),
+            None
+        );
+        assert_eq!(session.width, 72);
+        // The banner still renders, so the search was not accepted away.
+        console.clear();
+        session.render(&console);
+        assert!(console.stdout().contains("(reverse-i-search)`echo'"));
+        // And the match is still live: Enter submits it as the search's.
+        assert_eq!(
+            session.handle(Event::Enter, &console, &completer),
+            Some(ReadOutcome::Line("echo alpha".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_resize_floors_the_width_at_two_columns() {
+        let mut editor = Editor::new();
+        let console = RecordingConsole::new();
+        let completer = FixedCompleter::none();
+        let mut session = Session::new(&mut editor, String::from("% "), Some(40));
+        session.handle(Event::Resize(Size::new(1, 0)), &console, &completer);
+        assert_eq!(session.width, 2);
+        // A degenerate width still renders rather than failing.
+        session.render(&console);
     }
 
     #[test]

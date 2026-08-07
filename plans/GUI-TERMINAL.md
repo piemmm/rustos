@@ -284,7 +284,34 @@ cannot reach the parent's pty, so no authority is widened.
 
 ---
 
-## 11. What remains
+## 11. Screen semantics
+
+**Status: done.**
+
+Two screens in the tree apply the one `tairix_vt::Op` vocabulary to a
+character grid — the emulator's `Grid` and the framebuffer boot console
+(`lib/fbcon`) — and a program must land in the same cells on both. The
+agreement is written once, as the shared `tairix_vt::conformance` script, and
+each screen implements its `ScreenModel` in its own tests and runs `check`, so
+altering one screen's semantics fails the other's test too. What it guarantees:
+
+- **The wrap is owed, not taken.** Filling the last column leaves the cursor
+  resting on that column with the wrap owed; the next printable glyph pays it,
+  and anything that moves the cursor or erases first cancels it. Taking the
+  wrap eagerly would line-feed — and on the bottom margin scroll the whole
+  screen — the moment a full-screen program painted a full-width status bar,
+  after which its incremental repaints land a row out. The cursor column
+  therefore always addresses a real cell.
+- **`DECSTBM` homes into the region**, not to the screen's top-left, so a
+  program that reserves a header above its scrolling body starts inside the
+  body.
+- The script also pins the rubout at the right edge, erase-to-end-of-line from
+  the owed wrap, tab stops, wide-glyph wrap-whole, scroll-region confinement,
+  cursor clamping, the alternate screen, and save/restore.
+
+---
+
+## 12. What remains
 
 Nothing in the sections above. Recognised later work, none of it blocking:
 
@@ -300,3 +327,4 @@ Nothing in the sections above. Recognised later work, none of it blocking:
 - **A profile per window.** Today one document serves every terminal window.
   Named profiles a user can switch between would be a registry of documents
   under the same store directory.
+

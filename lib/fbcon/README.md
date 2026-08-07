@@ -30,6 +30,14 @@ when it ends — see "Sharing the surface" below.
 
 ## Design
 
+- **Pending wrap, not eager wrap.** Filling the last column does not wrap the
+  cursor: it rests on that column with the wrap *owed*, paid by the next
+  printable glyph and cancelled by anything that moves or erases first, so the
+  recorded column is always a real cell. This engine and the desktop terminal
+  emulator (`userland/apps/terminal`) are the two consumers of the shared
+  `tairix_vt::Op` stream, and each runs the shared
+  `tairix_vt::conformance::check` script over its own screen model in its
+  tests, pinning the one screen-semantics contract both must honour.
 - **Retained cell grid, one repaint per write.** The engine keeps the visible
   screen as two borrowed `tairix_vt::Cell` grids (primary + alternate). Every
   operation mutates only the active grid, and the cell rect a write dirtied is

@@ -27,6 +27,10 @@ The menus: `File` (`New`, `Open...`, `Save`, `Save As...`, `Exit`) and
 `Search` (`Find...`, `Repeat Last Find`). An action that would discard
 unsaved changes asks first (`y` save, `n` discard, `c`/`F10` cancel).
 
+A terminal resize is not a keystroke: the text area and status line are
+re-laid-out at the new size and the view re-clamped over the cursor, while
+an open menu, prompt, or key-summary overlay stays exactly as it was.
+
 The available key set is the one the shared terminal vocabulary can
 deliver (`lib/vt` drops bare `Esc` and C0 control combinations), so the
 bindings are function-key-driven — `F10` where the DOS editor used `Alt`,

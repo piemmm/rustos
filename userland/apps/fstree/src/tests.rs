@@ -3535,3 +3535,84 @@ fn a_scripted_session_tags_copies_and_visits_the_new_surfaces() {
     assert!(!m.settings.confirm_delete);
     assert_eq!(m.overlay, Overlay::None);
 }
+
+// --- Session loop: the terminal changes size ----------------------------
+
+/// A tty whose reported geometry changes as the session reads it, so
+/// `Screen`'s own detection raises the resize the loop must handle.
+struct ResizingTty {
+    /// One `(bytes, geometry after this read)` step per read, in order.
+    steps: Vec<(Vec<u8>, Size)>,
+    size: Size,
+    output: Vec<u8>,
+}
+
+impl ResizingTty {
+    fn new(size: Size, steps: &[(&[u8], Size)]) -> ResizingTty {
+        ResizingTty {
+            steps: steps
+                .iter()
+                .rev()
+                .map(|(bytes, size)| (bytes.to_vec(), *size))
+                .collect(),
+            size,
+            output: Vec::new(),
+        }
+    }
+}
+
+impl tairix_curses::Tty for ResizingTty {
+    fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
+        self.output.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
+        match self.steps.pop() {
+            Some((bytes, size)) => {
+                self.size = size;
+                Ok(bytes)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn size(&mut self) -> tairix_curses::Result<Option<Size>> {
+        Ok(Some(self.size))
+    }
+}
+
+#[test]
+fn the_session_resizes_its_window_and_repaints_at_the_new_size() {
+    let entries: Vec<FsEntry> = (1..=12)
+        .map(|i| file(&format!("row{i:03}"), 1, 1_000))
+        .collect();
+    let mut fs = FakeFs::new().dir("/", entries);
+    let mut m = model(&mut fs);
+
+    // An eight-row terminal shows a couple of file rows per pane, so
+    // `row012` is off-screen. The first read grows the terminal; the
+    // second quits.
+    let small = Size::new(8, 40);
+    let large = Size::new(44, 40);
+    let tty = ResizingTty::new(small, &[(b"", large), (b"q", large)]);
+    let mut screen =
+        tairix_curses::Screen::new(tty, tairix_termcap::TermType::Xterm256Color, small);
+    let code = crate::app::run(
+        &mut m,
+        &mut fs,
+        &mut decode(),
+        &mut screen,
+        &mut crate::info::NullInfo,
+    )
+    .expect("session ends");
+    assert_eq!(code, 0);
+
+    let output = screen.into_tty().output;
+    // `row012` only fits once the window has grown to match the screen;
+    // a stale eight-row window could never have painted it.
+    assert!(
+        output.windows(6).any(|w| w == b"row012"),
+        "the grown window repainted the whole listing"
+    );
+}

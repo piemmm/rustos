@@ -230,7 +230,11 @@ kill/yank set is `Ctrl-K`/`Ctrl-U`/`Ctrl-W`/`Alt-D`/`Ctrl-Y` with `Ctrl-T`
 transpose; `Ctrl-C` cancels the line under edit (acknowledged as `^C`, `$?`
 untouched); `Ctrl-D` deletes under the cursor or, on an empty line, ends the
 session; `Ctrl-L` clears and repaints; bracketed paste inserts literally and
-never auto-runs. Delivering `Ctrl-C`/`Ctrl-Z` to a *running foreground job*
+never auto-runs. A terminal resize adopts the new width and repaints the
+line under edit, clamped so a widened terminal shows its head rather than
+the narrow window's offset — the text is never lost, duplicated, or
+submitted, and a live reverse search stays live. Delivering
+`Ctrl-C`/`Ctrl-Z` to a *running foreground job*
 is the staged kernel work in `.junie/plan-session-shell.md` (part 3).
 
 Tab completion (`src/complete.rs`) locates the word under the cursor with

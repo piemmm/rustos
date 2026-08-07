@@ -15,6 +15,7 @@ use core::time::Duration;
 use tairix_rt::io::{Read, Stdin, Stdout, Write};
 
 use crate::error::{CursesError, Result};
+use crate::geom::Size;
 use crate::screen::Tty;
 
 /// The maximum input bytes drained from standard input in one read. A key
@@ -36,6 +37,10 @@ const INPUT_CHUNK: usize = 64;
 /// * [`Tty::read`] honestly reports "nothing available right now": the
 ///   standard-input backing owns blocking and offers no peek/poll, so a
 ///   non-blocking read cannot know what is pending and never lies about it.
+/// * [`Tty::size`] asks the kernel's `TerminalSize` for standard input —
+///   the seam [`Screen`](crate::Screen) polls for a resize in place of the
+///   `SIGWINCH` TAIRiX does not have. A console that cannot attest a size
+///   answers `Ok(None)`, never an error.
 pub struct StreamTty;
 
 impl Tty for StreamTty {
@@ -87,5 +92,16 @@ impl Tty for StreamTty {
                 }
             }
         }
+    }
+
+    fn size(&mut self) -> Result<Option<Size>> {
+        // No `SIGWINCH`: a resize is picked up by asking the kernel's
+        // shared `TerminalSize` for standard input, the descriptor this
+        // channel reads. A query the console cannot answer (a byte-stream
+        // console with no attested remote size) is `Ok(None)`, never an
+        // error — the caller simply never sees a resize.
+        Ok(tairix_rt::terminal_size(tairix_abi::STDIN)
+            .ok()
+            .map(|size| Size::new(size.rows(), size.cols())))
     }
 }

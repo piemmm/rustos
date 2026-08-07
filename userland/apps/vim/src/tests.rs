@@ -965,3 +965,79 @@ fn renderer_expands_tabs_to_the_fixed_stops() {
     let window = rendered(&mut editor, 4, 20);
     assert_eq!(row_text(&window, 0), "        x");
 }
+
+// ---- Session loop ------------------------------------------------------------
+
+/// A tty whose reported geometry changes as the session reads it, so
+/// `Screen`'s own detection raises the resize the loop must handle.
+struct ResizingTty {
+    /// One `(bytes, geometry after this read)` step per read, in order.
+    steps: Vec<(Vec<u8>, Size)>,
+    size: Size,
+    output: Vec<u8>,
+}
+
+impl ResizingTty {
+    fn new(size: Size, steps: &[(&[u8], Size)]) -> ResizingTty {
+        ResizingTty {
+            steps: steps
+                .iter()
+                .rev()
+                .map(|(bytes, size)| (bytes.to_vec(), *size))
+                .collect(),
+            size,
+            output: Vec::new(),
+        }
+    }
+}
+
+impl tairix_curses::Tty for ResizingTty {
+    fn write(&mut self, bytes: &[u8]) -> tairix_curses::Result<()> {
+        self.output.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
+        match self.steps.pop() {
+            Some((bytes, size)) => {
+                self.size = size;
+                Ok(bytes)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn size(&mut self) -> tairix_curses::Result<Option<Size>> {
+        Ok(Some(self.size))
+    }
+}
+
+#[test]
+fn the_session_resizes_its_window_and_repaints_at_the_new_size() {
+    use tairix_curses::Screen;
+    use tairix_termcap::TermType;
+
+    let fs = MemFs::new();
+    let mut lines = String::new();
+    for i in 1..=12 {
+        let _ = writeln!(lines, "line{i}");
+    }
+    let mut editor = editor_with(&lines);
+
+    // A six-row terminal shows four text rows, so `line12` is off-screen.
+    // The first read grows the terminal; the second quits.
+    let small = Size::new(6, 20);
+    let large = Size::new(20, 20);
+    let tty = ResizingTty::new(small, &[(b"", large), (b":q\r", large)]);
+    let mut screen = Screen::new(tty, TermType::Xterm256Color, small);
+    let code = crate::app::run(&mut editor, &fs, &mut screen, None).expect("session ends");
+    assert_eq!(code, 0);
+
+    let output = screen.into_tty().output;
+    // `line12` only fits once the window has grown to match the screen; a
+    // stale six-row window could never have painted it.
+    assert!(
+        output.windows(6).any(|w| w == b"line12"),
+        "the grown window repainted the whole buffer"
+    );
+}

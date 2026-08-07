@@ -77,6 +77,22 @@ pub trait Tty {
     fn read_timeout(&mut self, _timeout: Duration) -> Result<Vec<u8>> {
         self.read()
     }
+
+    /// Report the channel's current character-cell geometry, or [`None`]
+    /// when the channel cannot answer — the honest default for a channel
+    /// (such as a fixed test queue) with no terminal behind it.
+    ///
+    /// Neither `Ok(None)` nor an [`Err`] is fatal to the caller: both, and a
+    /// degenerate (zero-dimension) size, are treated identically as "no
+    /// resize noticed this time" by [`Screen`]'s detection — the safe
+    /// direction when a channel cannot, or momentarily fails to, answer.
+    ///
+    /// # Errors
+    ///
+    /// [`CursesError::Io`](crate::CursesError::Io) if the channel is present but the query itself fails.
+    fn size(&mut self) -> Result<Option<Size>> {
+        Ok(None)
+    }
 }
 
 /// How [`Screen::getch`] waits for input (curses `nodelay` / `timeout`).
@@ -102,6 +118,7 @@ pub struct Screen<T: Tty> {
     staged: Buffer,
     physical: Buffer,
     cursor: CursorState,
+    pending_resize: Option<Size>,
 }
 
 impl<T: Tty> Screen<T> {
@@ -124,6 +141,7 @@ impl<T: Tty> Screen<T> {
                 visible: true,
                 pos: Pos::ORIGIN,
             },
+            pending_resize: None,
         }
     }
 
@@ -237,10 +255,16 @@ impl<T: Tty> Screen<T> {
     /// `doupdate`): diff it against the physical screen, write the minimal byte
     /// sequence, and adopt the virtual screen as the new physical screen.
     ///
+    /// A terminal resize noticed here is applied before the diff, so the
+    /// repaint is already sized correctly; the [`Event::Resize`] itself
+    /// still reaches the application through [`Screen::getch`] /
+    /// [`Screen::read_events`] on their next call.
+    ///
     /// # Errors
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the tty write fails.
     pub fn doupdate(&mut self) -> Result<()> {
+        self.poll_resize();
         let ops = render(&self.caps, &self.physical, &self.staged, self.cursor);
         self.write_ops(&ops)?;
         self.physical.clone_from(&self.staged);
@@ -257,12 +281,16 @@ impl<T: Tty> Screen<T> {
         self.doupdate()
     }
 
-    /// Resize the screen to `size` (curses `resizeterm`), preserving the cells
-    /// that remain in range. The application's windows are resized separately
-    /// with [`Window::resize`].
+    /// Resize the screen to `size` (curses `resizeterm`): the virtual screen
+    /// preserves the cells that remain in range, but the physical diff base
+    /// is reset to blank — after a terminal resize the terminal's actual
+    /// on-screen contents can no longer be trusted — so the next
+    /// [`Screen::doupdate`] re-emits every cell, the same reset
+    /// [`Screen::enter_full_screen`] performs. The application's windows are
+    /// resized separately with [`Window::resize`].
     pub fn resize(&mut self, size: Size) {
         self.staged.resize(size);
-        self.physical.resize(size);
+        self.physical = Buffer::new(size);
         let max = Pos::new(size.rows.saturating_sub(1), size.cols.saturating_sub(1));
         self.cursor.pos = Pos::new(
             self.cursor.pos.row.min(max.row),
@@ -387,10 +415,12 @@ impl<T: Tty> Screen<T> {
     /// Read the next input [`Event`] (curses `getch`), waiting according to
     /// the current [`InputMode`].
     ///
-    /// A buffered event from an earlier decode is returned first. Otherwise
-    /// input is read — blocking, polling, or waiting up to a timeout per the
-    /// mode — and decoded; the first decoded event is returned and any
-    /// further events are buffered for the next call.
+    /// A resize the tty has noticed since the last call is queued ahead of
+    /// everything else, so a buffered event from an earlier decode, or a
+    /// freshly decoded one, is returned only after it. Otherwise input is
+    /// read — blocking, polling, or waiting up to a timeout per the mode —
+    /// and decoded; the first decoded event is returned and any further
+    /// events are buffered for the next call.
     ///
     /// In the blocking mode, a read whose bytes decode to no event (an
     /// unmodelled escape sequence the decoder consumed and dropped) is not
@@ -403,6 +433,7 @@ impl<T: Tty> Screen<T> {
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the tty read fails.
     pub fn getch(&mut self) -> Result<Option<Event>> {
+        self.queue_pending_resize();
         loop {
             if let Some(event) = self.pending.pop_front() {
                 return Ok(Some(event));
@@ -425,13 +456,15 @@ impl<T: Tty> Screen<T> {
     /// Read all currently pending input and decode it into [`Event`]s (a
     /// batched, non-blocking `getch`).
     ///
-    /// Any events buffered by an earlier [`Screen::getch`] are returned ahead
-    /// of freshly read ones, so the two readers share one stream.
+    /// A resize the tty has noticed since the last call leads the result,
+    /// ahead of any event buffered by an earlier [`Screen::getch`] and of
+    /// anything freshly read here, so the two readers share one stream.
     ///
     /// # Errors
     ///
     /// [`CursesError::Io`](crate::CursesError::Io) if the tty read fails.
     pub fn read_events(&mut self) -> Result<Vec<Event>> {
+        self.queue_pending_resize();
         let bytes = self.tty.read()?;
         let mut events: Vec<Event> = self.pending.drain(..).collect();
         self.input.feed(&bytes, |event| events.push(event));
@@ -444,6 +477,39 @@ impl<T: Tty> Screen<T> {
     #[cfg(test)]
     pub(crate) fn tty_ref(&self) -> &T {
         &self.tty
+    }
+
+    /// Ask the tty for its current size and, if it has genuinely changed,
+    /// resize the screen to match and latch the change as a pending
+    /// [`Event::Resize`] — the one detection point [`Screen::doupdate`],
+    /// [`Screen::getch`], and [`Screen::read_events`] all call.
+    ///
+    /// `Ok(None)`, an [`Err`], a degenerate (zero-dimension) size, and a
+    /// size equal to the screen's current one are all "nothing changed": a
+    /// channel that cannot report, or momentarily fails to, never
+    /// manufactures a resize.
+    fn poll_resize(&mut self) {
+        let reported = match self.tty.size() {
+            Ok(Some(size)) if !size.is_empty() => size,
+            _ => return,
+        };
+        if reported == self.size() {
+            return;
+        }
+        self.resize(reported);
+        self.pending_resize = Some(reported);
+    }
+
+    /// Poll for a resize, then move any pending one to the front of the
+    /// input queue, ahead of everything else — the one funnel
+    /// [`Screen::getch`] and [`Screen::read_events`] share, so a resize
+    /// noticed by either (or latched earlier by [`Screen::doupdate`]) is
+    /// never missed and never delivered twice.
+    fn queue_pending_resize(&mut self) {
+        self.poll_resize();
+        if let Some(size) = self.pending_resize.take() {
+            self.pending.push_front(Event::Resize(size));
+        }
     }
 
     /// Encode `ops` and write them to the tty, writing nothing when `ops` is

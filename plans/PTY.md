@@ -305,8 +305,12 @@ recovery = 40, `FM9_TYPING_DONE` = 41); `qkeycode_for` gains `\u{3}` →
 
 `done`. The graphical terminal is a resizable window: dragging its frame (or a
 maximize/restore) reshapes the character grid and updates the shell's window
-size, so `elsh`'s prompt sizing and any full-screen program track the real
-window. What it guarantees:
+size, so the shared kernel geometry both pty ends observe tracks the window
+and `elsh`'s prompt sizing follows it immediately. There is no `SIGWINCH`, so
+a curses application already running does not track the window directly —
+it learns of the change through the `lib/curses` `Event::Resize` (`Tty::size`
+polled by `getch`/`read_events`/`doupdate`, `plans/CURSES.md` Stage C5) the
+next time it reads input or repaints. What it guarantees:
 
 - **The `pty_set_size` syscall (number 98).** The tty `TIOCSWINSZ` analogue:
   the **master**-end holder sets the pty's `TerminalSize` after create, so the

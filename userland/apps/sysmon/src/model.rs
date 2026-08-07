@@ -633,6 +633,10 @@ impl Model {
                 self.show_help = !self.show_help;
                 Action::Redraw
             }
+            // Composing a frame re-derives the viewport from the live screen
+            // size and re-clamps the detail scroll, so the redraw alone
+            // re-lays-out the panels at the new geometry.
+            Event::Resize(_) => Action::Redraw,
             _ => Action::Ignore,
         }
     }

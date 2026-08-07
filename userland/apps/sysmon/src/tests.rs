@@ -773,6 +773,29 @@ fn scrolling_clamps_at_zero_and_against_the_panel_length() {
 }
 
 #[test]
+fn a_resize_redraws_and_the_next_frame_clamps_the_scroll() {
+    let lines = RECLAIM_CLASS_COUNT + 1;
+    let (_service, mut model) = refreshed();
+    // A short screen scrolled to the bottom of the caches panel.
+    let short = Size::new(11, 40);
+    model.set_viewport(detail_capacity(short));
+    model.handle_event(&Event::End);
+    model.clamp_scroll(lines);
+    let short_scroll = model.scroll();
+    assert_eq!(short_scroll, lines - detail_capacity(short));
+
+    // Growing the screen shows more rows at once, so the offset that
+    // fitted the short screen now runs off the end. Composing the next
+    // frame re-derives the viewport and re-clamps it.
+    let tall = Size::new(24, 80);
+    assert_eq!(model.handle_event(&Event::Resize(tall)), Action::Redraw);
+    model.set_viewport(detail_capacity(tall));
+    model.clamp_scroll(lines);
+    assert!(model.scroll() < short_scroll);
+    assert_eq!(model.scroll(), lines.saturating_sub(detail_capacity(tall)));
+}
+
+#[test]
 fn the_help_key_toggles_the_overlay() {
     let (_service, mut model) = refreshed();
     assert!(!model.help_visible());

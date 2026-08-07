@@ -97,7 +97,10 @@ An I/O-free model (`src/model.rs`) over two injected seams — the `Fs`
 filesystem seam and the curses `Tty` — drawn by a pure renderer and
 driven by an event loop whose every wait parks in the kernel: blocking
 normally, and bounded by a short timeout only while a walk is live so an
-elapsed wait advances the walk one bounded tick (never a busy poll).
+elapsed wait advances the walk one bounded tick (never a busy poll). A
+terminal resize is handled by the loop itself, never as a key: the window
+takes the new geometry and the pane split, page height, and scroll are
+re-derived from it.
 The operations planner/executor (`src/ops.rs`) validates before any I/O
 and drives a resumable work stack that reads directories incrementally
 and pauses on each overwrite conflict, so the per-file question runs

@@ -35,7 +35,11 @@ scrolling, the alternate screen (which saves and restores the main screen),
 cursor visibility, the saved cursor, the window title, and clear. Every
 operation is total and saturating, so an out-of-range coordinate clamps and a
 full region scrolls rather than growing: a hostile or buggy byte stream can
-never index out of bounds or panic (`AGENTS.md` §2.9).
+never index out of bounds or panic (`AGENTS.md` §2.9). Its semantics — the
+owed wrap at the right edge above all — are pinned by the shared
+`tairix_vt::conformance` script the framebuffer boot console runs too, so the
+two screens a program can be drawn on cannot disagree about where its output
+lands.
 
 ## Control parser (`Parser`)
 

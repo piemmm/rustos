@@ -61,6 +61,13 @@ pub struct Grid {
     rows: u16,
     cursor_col: u16,
     cursor_row: u16,
+    /// Whether the last glyph filled the row and the wrap is owed.
+    ///
+    /// The cursor still rests on the last column; the wrap is paid by the
+    /// next glyph and cancelled by anything that moves or erases first. The
+    /// column itself therefore stays inside the grid, so every reader — the
+    /// erase operations, the renderer's cursor block — addresses a real cell.
+    pending_wrap: bool,
     cells: Vec<Cell>,
     /// The rendition new glyphs are written with (the folded SGR state).
     pen: Attributes,
@@ -97,6 +104,7 @@ impl Grid {
             rows,
             cursor_col: 0,
             cursor_row: 0,
+            pending_wrap: false,
             cells: vec![Cell::BLANK; count],
             pen: Attributes::PLAIN,
             cursor_visible: true,
@@ -138,6 +146,7 @@ impl Grid {
         self.rows = rows;
         self.cursor_col = self.cursor_col.min(cols - 1);
         self.cursor_row = self.cursor_row.min(rows - 1);
+        self.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         if let Some(saved) = self.saved_cursor.as_mut() {
@@ -246,8 +255,14 @@ impl Grid {
     }
 
     /// Write `ch` at the cursor with the current pen and advance one column
-    /// (two for a double-width glyph), wrapping to the next line (scrolling
-    /// if at the bottom margin) at the right edge.
+    /// (two for a double-width glyph).
+    ///
+    /// Filling the last column does not wrap: the cursor rests on that column
+    /// and the wrap is *owed*, paid by the next glyph and cancelled by
+    /// anything that moves or erases first — the rule every terminal follows
+    /// and the shared [`conformance`](tairix_vt::conformance) script pins.
+    /// Wrapping eagerly would line-feed, and at the bottom margin scroll the
+    /// whole screen, the moment a program painted a full-width row.
     ///
     /// A double-width glyph (see [`char_width`]) occupies two cells: the lead
     /// cell and a [`CONTINUATION`] cell to its right — the same layout the
@@ -256,7 +271,7 @@ impl Grid {
     /// remains the wide glyph wraps whole, blanking the leftover column.
     pub fn write_char(&mut self, ch: char) {
         let width = char_width(ch);
-        if self.cursor_col >= self.cols {
+        if self.pending_wrap {
             self.carriage_return();
             self.line_feed();
         }
@@ -286,16 +301,30 @@ impl Grid {
                 *cell = Cell::styled(CONTINUATION, pen);
             }
         }
-        self.cursor_col = self.cursor_col.saturating_add(width);
-        if self.cursor_col >= self.cols {
-            self.carriage_return();
-            self.line_feed();
+        let next = self.cursor_col.saturating_add(width);
+        if next < self.cols {
+            self.cursor_col = next;
+        } else {
+            self.cursor_col = self.cols.saturating_sub(1);
+            self.pending_wrap = true;
         }
+    }
+
+    /// Place the cursor at `(col, row)`, clamped into the grid.
+    ///
+    /// Every explicit cursor movement goes through here, so none of them can
+    /// forget that moving cancels an owed wrap or leave the column outside
+    /// the grid.
+    fn place(&mut self, col: u16, row: u16) {
+        self.cursor_col = col.min(self.cols.saturating_sub(1));
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     /// Move the cursor down one row, scrolling the region up when it is already
     /// on the bottom margin.
     pub fn line_feed(&mut self) {
+        self.pending_wrap = false;
         if self.cursor_row == self.scroll_bottom {
             self.scroll_region_up(1);
         } else if self.cursor_row.saturating_add(1) < self.rows {
@@ -305,12 +334,21 @@ impl Grid {
 
     /// Move the cursor to the start of the current row.
     pub fn carriage_return(&mut self) {
-        self.cursor_col = 0;
+        self.place(0, self.cursor_row);
     }
 
     /// Move the cursor one column left, stopping at the left edge.
+    ///
+    /// With a wrap owed the cursor already rests on the last column, so the
+    /// backspace only cancels the wrap: a rubout (backspace, space,
+    /// backspace) then erases the glyph that filled the row rather than the
+    /// one before it.
     pub fn backspace(&mut self) {
-        self.cursor_col = self.cursor_col.saturating_sub(1);
+        if self.pending_wrap {
+            self.pending_wrap = false;
+            return;
+        }
+        self.place(self.cursor_col.saturating_sub(1), self.cursor_row);
     }
 
     /// Advance the cursor to the next tab stop, clamped to the last column.
@@ -318,53 +356,48 @@ impl Grid {
         let next = (self.cursor_col / TAB_WIDTH)
             .saturating_add(1)
             .saturating_mul(TAB_WIDTH);
-        self.cursor_col = next.min(self.cols.saturating_sub(1));
+        self.place(next, self.cursor_row);
     }
 
     /// Move the cursor to `(col, row)`, clamping each coordinate into the
     /// grid.
     pub fn move_to(&mut self, col: u16, row: u16) {
-        self.cursor_col = col.min(self.cols.saturating_sub(1));
-        self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.place(col, row);
     }
 
     /// Move the cursor to 0-based `col` on the current row, clamped.
     pub fn move_to_column(&mut self, col: u16) {
-        self.cursor_col = col.min(self.cols.saturating_sub(1));
+        self.place(col, self.cursor_row);
     }
 
     /// Move the cursor up `n` rows, stopping at the top.
     pub fn move_up(&mut self, n: u16) {
-        self.cursor_row = self.cursor_row.saturating_sub(n);
+        self.place(self.cursor_col, self.cursor_row.saturating_sub(n));
     }
 
     /// Move the cursor down `n` rows, stopping at the bottom.
     pub fn move_down(&mut self, n: u16) {
-        let target = self.cursor_row.saturating_add(n);
-        self.cursor_row = target.min(self.rows.saturating_sub(1));
+        self.place(self.cursor_col, self.cursor_row.saturating_add(n));
     }
 
     /// Move the cursor left `n` columns, stopping at the left edge.
     pub fn move_left(&mut self, n: u16) {
-        self.cursor_col = self.cursor_col.saturating_sub(n);
+        self.place(self.cursor_col.saturating_sub(n), self.cursor_row);
     }
 
     /// Move the cursor right `n` columns, stopping at the right edge.
     pub fn move_right(&mut self, n: u16) {
-        let target = self.cursor_col.saturating_add(n);
-        self.cursor_col = target.min(self.cols.saturating_sub(1));
+        self.place(self.cursor_col.saturating_add(n), self.cursor_row);
     }
 
     /// Move the cursor `n` rows down to the start of that row (`CNL`).
     pub fn next_line(&mut self, n: u16) {
-        self.move_down(n);
-        self.cursor_col = 0;
+        self.place(0, self.cursor_row.saturating_add(n));
     }
 
     /// Move the cursor `n` rows up to the start of that row (`CPL`).
     pub fn prev_line(&mut self, n: u16) {
-        self.move_up(n);
-        self.cursor_col = 0;
+        self.place(0, self.cursor_row.saturating_sub(n));
     }
 
     /// Erase part of the current row relative to the cursor.
@@ -374,6 +407,7 @@ impl Grid {
     /// cursor (inclusive), and [`EraseMode::All`] the whole row. The cursor
     /// does not move.
     pub fn erase_in_line(&mut self, mode: EraseMode) {
+        self.pending_wrap = false;
         let row_start = self.index(0, self.cursor_row);
         let row_end = row_start + usize::from(self.cols);
         let cursor = self.index(self.cursor_col, self.cursor_row);
@@ -391,6 +425,7 @@ impl Grid {
     /// the cursor (inclusive), and [`EraseMode::All`] the whole screen. The
     /// cursor does not move.
     pub fn erase_in_display(&mut self, mode: EraseMode) {
+        self.pending_wrap = false;
         let cursor = self.index(self.cursor_col, self.cursor_row);
         let len = self.cells.len();
         match mode {
@@ -402,8 +437,11 @@ impl Grid {
 
     /// Set the scroll region to the 1-based rows `top..=bottom`, clamped into
     /// the grid; a degenerate or inverted request falls back to the whole
-    /// screen (fail closed). The cursor moves to the home
-    /// position, as on a real terminal.
+    /// screen (fail closed).
+    ///
+    /// `DECSTBM` homes the cursor to the top-left *of the region*, not of the
+    /// screen, so a program that reserves a header above its scrolling body
+    /// starts drawing inside the body.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
         let last = self.rows.saturating_sub(1);
         let top = top.saturating_sub(1).min(last);
@@ -414,8 +452,7 @@ impl Grid {
         } else {
             self.reset_scroll_region();
         }
-        self.cursor_col = 0;
-        self.cursor_row = 0;
+        self.place(0, self.scroll_top);
     }
 
     /// Reset the scroll region to the whole screen.
@@ -479,12 +516,10 @@ impl Grid {
     /// the cursor homes and the pen resets — the conventional fallback.
     pub fn restore_cursor(&mut self) {
         if let Some(saved) = self.saved_cursor {
-            self.cursor_col = saved.col.min(self.cols.saturating_sub(1));
-            self.cursor_row = saved.row.min(self.rows.saturating_sub(1));
+            self.place(saved.col, saved.row);
             self.pen = saved.pen;
         } else {
-            self.cursor_col = 0;
-            self.cursor_row = 0;
+            self.place(0, 0);
             self.pen = Attributes::PLAIN;
         }
     }
@@ -492,8 +527,7 @@ impl Grid {
     /// Blank every cell and move the cursor home. The pen is left unchanged.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::BLANK);
-        self.cursor_col = 0;
-        self.cursor_row = 0;
+        self.place(0, 0);
     }
 
     /// The flat-buffer index of `(col, row)`. Callers guarantee the
@@ -584,11 +618,10 @@ impl Grid {
 
     /// Restore a previously captured screen state.
     fn restore(&mut self, screen: Screen) {
-        self.cursor_col = screen.cursor_col;
-        self.cursor_row = screen.cursor_row;
         self.pen = screen.pen;
         self.scroll_top = screen.scroll_top;
         self.scroll_bottom = screen.scroll_bottom;
         self.cells = screen.cells;
+        self.place(screen.cursor_col, screen.cursor_row);
     }
 }

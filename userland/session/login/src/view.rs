@@ -427,6 +427,10 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     /// once the idle window after the most recent keystroke elapses. An
     /// empty timed read additionally re-queries the status source and
     /// repaints. A channel error is the dead console and fails closed.
+    ///
+    /// A terminal resize is never a keystroke: it re-lays the page out and
+    /// re-centres the box on the new screen size, leaving the field under
+    /// edit whole and unsubmitted.
     fn read_field(
         &self,
         label: &str,
@@ -478,6 +482,13 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                     break;
                 }
                 let _ = indicator.tick(deadline);
+            }
+            // The terminal changed size, not the credential. Back to the
+            // loop head, whose `draw` re-lays the page out and re-centres
+            // the box on the live screen size; the typed field is
+            // untouched, so nothing is lost and nothing is submitted.
+            if let Ok(Some(Event::Resize(_))) = event {
+                continue;
             }
             match event {
                 Ok(Some(Event::Enter)) => return Ok(len),
@@ -598,6 +609,10 @@ mod tests {
     struct ScriptTty {
         input: RefCell<VecDeque<Vec<u8>>>,
         written: alloc::rc::Rc<RefCell<Vec<u8>>>,
+        /// Scripted geometries, one popped per read so a script can
+        /// resize the terminal between keystrokes; the last is sticky,
+        /// and an empty script reports no size at all.
+        sizes: RefCell<VecDeque<Size>>,
     }
 
     impl Tty for ScriptTty {
@@ -606,7 +621,15 @@ mod tests {
             Ok(())
         }
         fn read(&mut self) -> tairix_curses::Result<Vec<u8>> {
+            let mut sizes = self.sizes.borrow_mut();
+            if sizes.len() > 1 {
+                sizes.pop_front();
+            }
+            drop(sizes);
             self.input.borrow_mut().pop_front().ok_or(CursesError::Io)
+        }
+        fn size(&mut self) -> tairix_curses::Result<Option<Size>> {
+            Ok(self.sizes.borrow().front().copied())
         }
     }
 
@@ -707,6 +730,7 @@ mod tests {
         let tty = ScriptTty {
             input: RefCell::new(script.iter().map(|c| c.to_vec()).collect()),
             written: written.clone(),
+            sizes: RefCell::new(VecDeque::new()),
         };
         let screen = Screen::new(tty, TermType::Xterm256Color, Size::new(24, 80));
         let source = FixtureSource {
@@ -961,6 +985,7 @@ mod tests {
         let tty = ScriptTty {
             input: RefCell::new([b"".to_vec(), b"\r".to_vec()].into_iter().collect()),
             written,
+            sizes: RefCell::new(VecDeque::new()),
         };
         let screen = Screen::new(tty, TermType::Xterm256Color, Size::new(24, 80));
         let calls = alloc::rc::Rc::new(Cell::new(0));
@@ -1009,6 +1034,39 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_re_lays_out_the_form_and_keeps_the_typed_field() {
+        // The terminal grows from 24x80 to 30x100 after the first read, so
+        // `Screen`'s own detection raises the resize mid-field.
+        let written = alloc::rc::Rc::new(RefCell::new(Vec::new()));
+        let tty = ScriptTty {
+            input: RefCell::new([b"zq".to_vec(), b"\r".to_vec()].into_iter().collect()),
+            written: written.clone(),
+            sizes: RefCell::new(
+                [Size::new(24, 80), Size::new(30, 100)]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        let screen = Screen::new(tty, TermType::Xterm256Color, Size::new(24, 80));
+        let source = FixtureSource {
+            status: status(),
+            now: Some(Time64::from_secs(1_783_100_640)),
+            monotonic: RefCell::new(VecDeque::new()),
+        };
+        let view = CursesView::new(screen, source, alloc::rc::Rc::new(RecordingMode::default()));
+        let mut buf = [0u8; 32];
+        // Reaching the scripted Enter at all proves the resize neither
+        // ended the read nor counted as a keystroke, and the typed name
+        // survives it whole.
+        let len = view.read_username(&mut buf).expect("username read");
+        assert_eq!(&buf[..len], b"zq");
+        let text = transcript(&written);
+        // The bottom bar sits on the last row, so addressing row 30 could
+        // only have come from a repaint at the grown geometry.
+        assert!(text.contains("\u{1b}[30;"), "{text}");
+    }
+
+    #[test]
     fn a_stuck_echo_refuses_the_password_read() {
         // If the raw (echo-off) discipline cannot be selected, typing the
         // secret would render it: the read fails closed instead.
@@ -1016,6 +1074,7 @@ mod tests {
         let tty = ScriptTty {
             input: RefCell::new(VecDeque::new()),
             written,
+            sizes: RefCell::new(VecDeque::new()),
         };
         let screen = Screen::new(tty, TermType::Xterm256Color, Size::new(24, 80));
         let source = FixtureSource {

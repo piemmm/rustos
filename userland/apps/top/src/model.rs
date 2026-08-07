@@ -435,6 +435,10 @@ impl Model {
                 self.show_help = !self.show_help;
                 Action::Redraw
             }
+            // The loop calls `set_viewport` from the live screen size before
+            // every frame, which re-clamps the scroll, so the redraw alone
+            // re-lays-out the list at the new geometry.
+            Event::Resize(_) => Action::Redraw,
             _ => Action::Ignore,
         }
     }

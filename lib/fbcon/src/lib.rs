@@ -21,6 +21,15 @@
 //! it directly. An allocator-having caller leaks a heap buffer sized to the
 //! discovered geometry; an allocator-free caller supplies a `static`.
 //!
+//! Filling the last column does not wrap the cursor eagerly: it rests on
+//! that column with the wrap *owed*, paid by the next printable glyph and
+//! cancelled by anything that moves or erases first — so the recorded column
+//! is always a real cell. This console and the desktop terminal emulator
+//! (`userland/apps/terminal`) are the two consumers of the shared
+//! `tairix_vt::Op` stream, and each runs the shared
+//! `tairix_vt::conformance::check` script over its own screen model in its
+//! tests, pinning the one screen-semantics contract both must honour.
+//!
 //! # Sharing the surface with a graphical session
 //!
 //! One scan-out surface has one presenter. A console whose seat is held by a
@@ -372,6 +381,15 @@ struct Screen<'a> {
     geometry: Geometry,
     column: u32,
     row: u32,
+    /// Whether the last glyph filled the row and the wrap is owed.
+    ///
+    /// The cursor still rests on the last column; the wrap is paid by the
+    /// next glyph and cancelled by anything that moves or erases first — so
+    /// `column` always stays `< cols()` and every reader (the erase
+    /// operations, the cursor overlay) addresses a real cell. This is the
+    /// same rule the shared `tairix_vt::conformance` script pins and the
+    /// terminal emulator's `Grid` implements.
+    pending_wrap: bool,
     pen: Attributes,
     region_top: u32,
     region_bottom: u32,
@@ -404,6 +422,7 @@ impl<'a> Screen<'a> {
             geometry,
             column: 0,
             row: 0,
+            pending_wrap: false,
             pen: Attributes::PLAIN,
             region_top: 0,
             region_bottom: bottom,
@@ -415,6 +434,17 @@ impl<'a> Screen<'a> {
             on_alt: false,
             alt_saved: None,
         }
+    }
+
+    /// Move the cursor to `(col, row)`, clamped into the grid, cancelling any
+    /// wrap owed.
+    ///
+    /// Every explicit cursor movement goes through here, so none of them can
+    /// forget to clear a pending wrap or leave the cursor outside the grid.
+    fn place(&mut self, col: u32, row: u32) {
+        self.column = col.min(self.cols().saturating_sub(1));
+        self.row = row.min(self.rows().saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     /// The validated geometry this screen renders into.
@@ -525,68 +555,22 @@ impl<'a> Screen<'a> {
     /// Pure model: no operation touches a pixel, which is what lets a hidden
     /// console interpret a whole batch with no surface at all.
     fn apply(&mut self, op: &Op) -> Option<CellRect> {
+        if self.move_cursor(op) {
+            return None;
+        }
         match *op {
             Op::Print(ch) => Some(self.print(ch)),
-            Op::Backspace => {
-                self.column = self.column.saturating_sub(1);
-                None
-            }
-            Op::Tab => {
-                let next = (self.column / 8 + 1) * 8;
-                self.column = next.min(self.cols().saturating_sub(1));
-                None
-            }
             Op::LineFeed => self.line_feed(),
-            Op::CarriageReturn => {
-                self.column = 0;
-                None
-            }
-            Op::CursorUp(n) => {
-                self.row = self.row.saturating_sub(u32::from(n));
-                None
-            }
-            Op::CursorDown(n) => {
-                self.row = (self.row + u32::from(n)).min(self.rows().saturating_sub(1));
-                None
-            }
-            Op::CursorForward(n) => {
-                self.column = (self.column + u32::from(n)).min(self.cols().saturating_sub(1));
-                None
-            }
-            Op::CursorBack(n) => {
-                self.column = self.column.saturating_sub(u32::from(n));
-                None
-            }
-            Op::CursorNextLine(n) => {
-                self.row = (self.row + u32::from(n)).min(self.rows().saturating_sub(1));
-                self.column = 0;
-                None
-            }
-            Op::CursorPrevLine(n) => {
-                self.row = self.row.saturating_sub(u32::from(n));
-                self.column = 0;
-                None
-            }
-            Op::CursorColumn(col) => {
-                self.column = u32::from(col - 1).min(self.cols().saturating_sub(1));
-                None
-            }
-            Op::CursorPosition { row, col } => {
-                self.row = u32::from(row - 1).min(self.rows().saturating_sub(1));
-                self.column = u32::from(col - 1).min(self.cols().saturating_sub(1));
-                None
-            }
             Op::EraseInDisplay(mode) => Some(self.erase_display(mode)),
             Op::EraseInLine(mode) => Some(self.erase_line(mode)),
             Op::ScrollUp(n) => Some(self.scroll_region_up(u32::from(n))),
             Op::ScrollDown(n) => Some(self.scroll_region_down(u32::from(n))),
             Op::SetScrollRegion { top, bottom } => {
-                self.set_scroll_region(u32::from(top - 1), u32::from(bottom - 1));
+                self.set_scroll_region(top, bottom);
                 None
             }
             Op::ResetScrollRegion => {
-                self.region_top = 0;
-                self.region_bottom = self.rows().saturating_sub(1);
+                self.reset_scroll_region();
                 None
             }
             Op::Sgr(sgr) => {
@@ -602,10 +586,15 @@ impl<'a> Screen<'a> {
                 None
             }
             Op::RestoreCursor => {
+                // With nothing saved, `DECRC` conventionally homes the
+                // cursor and resets the pen — the terminal emulator's `Grid`
+                // does the same.
                 if let Some(saved) = self.saved {
-                    self.column = saved.column.min(self.cols().saturating_sub(1));
-                    self.row = saved.row.min(self.rows().saturating_sub(1));
+                    self.place(saved.column, saved.row);
                     self.pen = saved.pen;
+                } else {
+                    self.place(0, 0);
+                    self.pen = Attributes::PLAIN;
                 }
                 None
             }
@@ -624,6 +613,36 @@ impl<'a> Screen<'a> {
             // (keys, meta chords, mouse, paste markers, mode toggles).
             _ => None,
         }
+    }
+
+    /// Apply `op` if it moves the cursor, reporting whether it did.
+    ///
+    /// A cursor move dirties no cell, and every one routes through
+    /// [`Self::place`], so none can forget that a move cancels an owed wrap.
+    fn move_cursor(&mut self, op: &Op) -> bool {
+        match *op {
+            // With a wrap owed the cursor already rests on the last column:
+            // cancel the wrap rather than stepping past it, so a rubout
+            // (backspace, space, backspace) erases the glyph that filled the
+            // row.
+            Op::Backspace if self.pending_wrap => self.pending_wrap = false,
+            Op::Backspace => self.place(self.column.saturating_sub(1), self.row),
+            Op::Tab => self.place((self.column / 8 + 1) * 8, self.row),
+            Op::CarriageReturn => self.place(0, self.row),
+            Op::CursorUp(n) => self.place(self.column, self.row.saturating_sub(u32::from(n))),
+            Op::CursorDown(n) => self.place(self.column, self.row + u32::from(n)),
+            Op::CursorForward(n) => self.place(self.column + u32::from(n), self.row),
+            Op::CursorBack(n) => self.place(self.column.saturating_sub(u32::from(n)), self.row),
+            Op::CursorNextLine(n) => self.place(0, self.row + u32::from(n)),
+            Op::CursorPrevLine(n) => self.place(0, self.row.saturating_sub(u32::from(n))),
+            Op::CursorColumn(col) => self.place(u32::from(col.saturating_sub(1)), self.row),
+            Op::CursorPosition { row, col } => self.place(
+                u32::from(col.saturating_sub(1)),
+                u32::from(row.saturating_sub(1)),
+            ),
+            _ => return false,
+        }
+        true
     }
 
     /// The recorded cell at `(col, row)` of the active grid, or a blank for
@@ -651,14 +670,12 @@ impl<'a> Screen<'a> {
     }
 
     /// Paint the cursor overlay — the cell at the cursor in reverse video —
-    /// when the cursor is visible. A cursor resting past the last column (the
-    /// pending-wrap position after printing there) is shown clamped onto it,
-    /// as hardware text cursors are.
+    /// when the cursor is visible.
     fn draw_cursor(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         if !self.cursor_visible {
             return None;
         }
-        let col = self.column.min(self.cols().saturating_sub(1));
+        let col = self.column;
         let row = self.row.min(self.rows().saturating_sub(1));
         let cell = self.cell_at(col, row);
         let mut attrs = cell.attrs;
@@ -678,6 +695,14 @@ impl<'a> Screen<'a> {
     /// in the active grid, advancing the cursor and wrapping (scrolling at
     /// the bottom margin) at the right edge.
     ///
+    /// Filling the last column does not wrap: the cursor rests on that column
+    /// with the wrap owed, paid by the next glyph and cancelled by anything
+    /// that moves or erases first (`pending_wrap`) — the same rule the shared
+    /// `tairix_vt::conformance` script pins and the terminal emulator's
+    /// `Grid` implements. Wrapping eagerly would line-feed, and at the bottom
+    /// margin scroll the whole screen, the moment a program painted a
+    /// full-width row.
+    ///
     /// A double-width glyph (see [`char_width`]) occupies two cells: the lead
     /// cell and a [`CONTINUATION`] cell to its right, exactly the layout the
     /// `lib/curses` window writer produces, so a TUI's column arithmetic and
@@ -686,14 +711,16 @@ impl<'a> Screen<'a> {
     fn print(&mut self, ch: char) -> CellRect {
         let width = u32::from(char_width(ch));
         let mut dirty = None;
-        if self.column + width > self.cols() {
+        if self.pending_wrap {
+            self.column = 0;
+            dirty = merge_rects(dirty, self.line_feed());
+        }
+        if width == 2 && self.column.saturating_add(1) >= self.cols() {
             let (col, row) = (self.column, self.row);
-            if col < self.cols() {
-                // A wide glyph with one column left: blank the leftover cell.
-                dirty = merge_rects(dirty, self.clear_wide_at(col, row));
-                self.grid_set(col, row, self.blank_cell());
-                dirty = merge_rects(dirty, Some(CellRect::cell(col, row)));
-            }
+            // A wide glyph with one column left: blank the leftover cell.
+            dirty = merge_rects(dirty, self.clear_wide_at(col, row));
+            self.grid_set(col, row, self.blank_cell());
+            dirty = merge_rects(dirty, Some(CellRect::cell(col, row)));
             self.column = 0;
             dirty = merge_rects(dirty, self.line_feed());
         }
@@ -710,12 +737,22 @@ impl<'a> Screen<'a> {
             self.grid_set(col + 1, row, Cell::styled(CONTINUATION, pen));
             rect = merge_rects(Some(rect), Some(CellRect::cell(col + 1, row))).unwrap_or(rect);
         }
-        self.column += width;
+        let next = col + width;
+        if next < self.cols() {
+            self.column = next;
+        } else {
+            self.column = self.cols().saturating_sub(1);
+            self.pending_wrap = true;
+        }
         merge_rects(dirty, Some(rect)).unwrap_or(rect)
     }
 
     /// Advance one line, scrolling the region up when at its bottom margin.
+    ///
+    /// Cancels an owed wrap: a line feed moves the cursor, so nothing is
+    /// still owed at the new position.
     fn line_feed(&mut self) -> Option<CellRect> {
+        self.pending_wrap = false;
         if self.row == self.region_bottom {
             Some(self.scroll_region_up(1))
         } else if self.row + 1 < self.rows() {
@@ -726,17 +763,26 @@ impl<'a> Screen<'a> {
         }
     }
 
-    /// Set the 1-based-decoded scroll region to `top..=bottom` (0-based),
-    /// ignoring a degenerate or out-of-range request, and home the cursor.
-    fn set_scroll_region(&mut self, top: u32, bottom: u32) {
+    /// Set the scroll region to the 1-based rows `top..=bottom`, clamped into
+    /// the grid; a degenerate or inverted request falls back to the whole
+    /// screen (fail closed). Homes the cursor to the region's top row.
+    fn set_scroll_region(&mut self, top: u16, bottom: u16) {
         let last = self.rows().saturating_sub(1);
-        let bottom = bottom.min(last);
+        let top = u32::from(top.saturating_sub(1)).min(last);
+        let bottom = u32::from(bottom.saturating_sub(1)).min(last);
         if top < bottom {
             self.region_top = top;
             self.region_bottom = bottom;
-            self.column = 0;
-            self.row = top;
+        } else {
+            self.reset_scroll_region();
         }
+        self.place(0, self.region_top);
+    }
+
+    /// Reset the scroll region to the whole screen.
+    fn reset_scroll_region(&mut self) {
+        self.region_top = 0;
+        self.region_bottom = self.rows().saturating_sub(1);
     }
 
     /// Blank the active grid and home the cursor, returning the full-screen
@@ -746,8 +792,7 @@ impl<'a> Screen<'a> {
     /// hidden: no cursor is painted, so none has to be repaired later.
     fn clear(&mut self) -> CellRect {
         self.active_cells().fill(Cell::BLANK);
-        self.column = 0;
-        self.row = 0;
+        self.place(0, 0);
         self.overlay = None;
         self.full_rect()
     }
@@ -784,8 +829,7 @@ impl<'a> Screen<'a> {
         }
         self.on_alt = false;
         if let Some(saved) = self.alt_saved.take() {
-            self.column = saved.column.min(self.cols().saturating_sub(1));
-            self.row = saved.row.min(self.rows().saturating_sub(1));
+            self.place(saved.column, saved.row);
             self.pen = saved.pen;
         }
         Some(self.full_rect())
@@ -793,7 +837,11 @@ impl<'a> Screen<'a> {
 
     /// Erase part of the display relative to the cursor, filling the grid
     /// with the current background, and return the dirtied cell rect.
+    ///
+    /// Cancels an owed wrap: an erase does not otherwise move the cursor, so
+    /// nothing is still owed once it has run.
     fn erase_display(&mut self, mode: EraseMode) -> CellRect {
+        self.pending_wrap = false;
         let blank = self.blank_cell();
         let (col, row, cols, rows) = (self.column, self.row, self.cols(), self.rows());
         match mode {
@@ -837,7 +885,11 @@ impl<'a> Screen<'a> {
 
     /// Erase part of the current line relative to the cursor, filling the
     /// grid with the current background, and return the dirtied cell rect.
+    ///
+    /// Cancels an owed wrap: an erase does not otherwise move the cursor, so
+    /// nothing is still owed once it has run.
     fn erase_line(&mut self, mode: EraseMode) -> CellRect {
+        self.pending_wrap = false;
         let blank = self.blank_cell();
         let (col, row) = (self.column, self.row);
         let (start, end) = match mode {

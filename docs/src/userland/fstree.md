@@ -254,11 +254,13 @@ grammar (`src/app.rs`) mutates, over two injected seams —
 
 Every wait parks in the kernel: `Screen::getch` blocks normally, and while
 a walk or a viewer scan is live the wait carries a short timeout so an
-elapsed read advances it one bounded tick — there is
-no polling loop. A refused listing fails closed: the error is surfaced on
-the message line, and the cursor, listing, and expansion state are left
-untouched — a denied directory is never shown as empty. The session runs
-inside the terminal's alternate screen and restores it (and cooked input)
+elapsed read advances it one bounded tick — there is no polling loop. A
+terminal resize is taken by that loop rather than the key grammar: the
+window adopts the new geometry, and the pane split, page height, and
+scroll are re-derived from it. A refused listing fails closed: the error
+is surfaced on the message line, and the cursor, listing, and expansion
+state are left untouched — a denied directory is never shown as empty.
+The session runs inside the terminal's alternate screen and restores it (and cooked input)
 on every exit path, stating any abnormal reason on standard error after
 the restore.
 

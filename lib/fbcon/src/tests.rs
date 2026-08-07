@@ -827,3 +827,63 @@ fn adjacent_blank_runs_keep_their_own_backgrounds() {
         );
     }
 }
+
+// --- Shared conformance script -----------------------------------------
+
+/// The shared conformance script's view of this screen model: a console
+/// built at the script's `COLS`×`ROWS`, driving the grid through the same
+/// per-operation entry point [`TextConsole::write_bytes`] batches use.
+///
+/// No surface is needed: the screen is a pure model, so the script checks
+/// exactly what a hidden console would record.
+struct ConformanceConsole {
+    console: TextConsole<'static>,
+}
+
+impl ConformanceConsole {
+    fn new() -> Self {
+        let (console, _pixels) = console_of(
+            u32::from(tairix_vt::conformance::COLS),
+            u32::from(tairix_vt::conformance::ROWS),
+        );
+        Self { console }
+    }
+}
+
+impl tairix_vt::conformance::ScreenModel for ConformanceConsole {
+    fn cols(&self) -> u16 {
+        u16::try_from(self.console.screen.cols()).unwrap_or(u16::MAX)
+    }
+
+    fn rows(&self) -> u16 {
+        u16::try_from(self.console.screen.rows()).unwrap_or(u16::MAX)
+    }
+
+    fn apply(&mut self, op: &Op) {
+        self.console.screen.apply(op);
+    }
+
+    fn glyph(&self, col: u16, row: u16) -> char {
+        self.console
+            .screen
+            .cell_at(u32::from(col), u32::from(row))
+            .ch
+    }
+
+    fn cursor(&self) -> (u16, u16) {
+        let col = u16::try_from(self.console.screen.column).unwrap_or(u16::MAX);
+        let row = u16::try_from(self.console.screen.row).unwrap_or(u16::MAX);
+        (col, row)
+    }
+}
+
+#[test]
+fn the_screen_model_passes_the_shared_conformance_script() {
+    // The desktop terminal emulator runs this same script over its own
+    // `Grid`, so the two screens a program can be drawn on cannot disagree
+    // about where its output lands.
+    let mut screen = ConformanceConsole::new();
+    if let Err(divergence) = tairix_vt::conformance::check(&mut screen) {
+        panic!("screen conformance: {divergence:?}");
+    }
+}

@@ -57,6 +57,7 @@ extern crate alloc;
 pub mod attr;
 pub mod cell;
 pub mod color;
+pub mod conformance;
 pub mod control;
 pub mod emit;
 pub mod key;

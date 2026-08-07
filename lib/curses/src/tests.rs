@@ -8,9 +8,11 @@
 //! kernel.
 
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use tairix_termcap::TermType;
 use tairix_vt::{
@@ -961,4 +963,189 @@ impl Screen<ModeTty> {
     fn tty_last_read(&self) -> Option<ReadKind> {
         self.tty_ref().last
     }
+}
+
+// ---- Resize detection -------------------------------------------------
+
+/// A [`Tty::size`] answer a test can change after the [`Screen`] under test
+/// has already taken ownership of the channel, so it can simulate a live
+/// terminal resize mid-session.
+type SizeReport = Rc<RefCell<crate::Result<Option<Size>>>>;
+
+/// A fresh [`SizeReport`] starting at `Ok(None)` (cannot report).
+fn size_report() -> SizeReport {
+    Rc::new(RefCell::new(Ok(None)))
+}
+
+/// An in-memory [`Tty`] like [`FakeTty`], whose [`Tty::size`] answers from a
+/// shared [`SizeReport`] a test can mutate at any point.
+struct ResizeTty {
+    input: VecDeque<u8>,
+    output: Vec<u8>,
+    report: SizeReport,
+}
+
+impl ResizeTty {
+    fn with_input(bytes: &[u8], report: SizeReport) -> ResizeTty {
+        ResizeTty {
+            input: bytes.iter().copied().collect(),
+            output: Vec::new(),
+            report,
+        }
+    }
+}
+
+impl Tty for ResizeTty {
+    fn write(&mut self, bytes: &[u8]) -> crate::Result<()> {
+        self.output.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn read(&mut self) -> crate::Result<Vec<u8>> {
+        Ok(self.input.drain(..).collect())
+    }
+
+    fn size(&mut self) -> crate::Result<Option<Size>> {
+        *self.report.borrow()
+    }
+}
+
+#[test]
+fn no_resize_event_when_the_size_is_unchanged() {
+    let size = Size::new(2, 3);
+    let report = size_report();
+    *report.borrow_mut() = Ok(Some(size));
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"a", report),
+        TermType::Xterm256Color,
+        size,
+    );
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+}
+
+#[test]
+fn a_resize_is_delivered_before_input_queued_in_the_same_call() {
+    let report = size_report();
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"a", report.clone()),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    *report.borrow_mut() = Ok(Some(Size::new(4, 8)));
+    assert_eq!(screen.getch(), Ok(Some(Event::Resize(Size::new(4, 8)))));
+    assert_eq!(screen.size(), Size::new(4, 8));
+    // The byte already queued ahead of the resize is delivered only next.
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+}
+
+#[test]
+fn a_resize_is_delivered_before_input_queued_by_read_events() {
+    let report = size_report();
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"a", report.clone()),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    *report.borrow_mut() = Ok(Some(Size::new(4, 8)));
+    assert_eq!(
+        screen.read_events(),
+        Ok(vec![Event::Resize(Size::new(4, 8)), Event::Char('a')])
+    );
+}
+
+#[test]
+fn a_resize_invalidates_the_diff_base_so_the_next_update_repaints() {
+    // Draw a frame, resize, and redraw the same frame: the driver must
+    // repaint it rather than diffing against stale knowledge of the
+    // pre-resize screen.
+    let report = size_report();
+    let size = Size::new(1, 4);
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"", report.clone()),
+        TermType::Xterm256Color,
+        size,
+    );
+    let mut win = Window::new(Pos::ORIGIN, size);
+    win.add_str("hi");
+    assert_eq!(screen.refresh(&win), Ok(()));
+    *report.borrow_mut() = Ok(Some(Size::new(1, 6)));
+    assert_eq!(screen.refresh(&win), Ok(()));
+    assert_eq!(screen.size(), Size::new(1, 6));
+    let output = screen.into_tty().output;
+    let painted = output.windows(2).filter(|pair| pair == b"hi").count();
+    assert_eq!(painted, 2);
+}
+
+#[test]
+fn doupdate_detects_a_resize_the_next_getch_then_delivers() {
+    let report = size_report();
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"a", report.clone()),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    *report.borrow_mut() = Ok(Some(Size::new(3, 5)));
+    assert_eq!(screen.doupdate(), Ok(()));
+    // The repaint is already correctly sized; the event itself waits for
+    // the next input read.
+    assert_eq!(screen.size(), Size::new(3, 5));
+    assert_eq!(screen.getch(), Ok(Some(Event::Resize(Size::new(3, 5)))));
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+}
+
+#[test]
+fn several_resizes_before_a_read_coalesce_into_one_event() {
+    let report = size_report();
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"", report.clone()),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    *report.borrow_mut() = Ok(Some(Size::new(3, 3)));
+    assert_eq!(screen.doupdate(), Ok(()));
+    *report.borrow_mut() = Ok(Some(Size::new(5, 5)));
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.getch(), Ok(Some(Event::Resize(Size::new(5, 5)))));
+    // The closed channel (empty blocking read) is end of input, not a
+    // second resize.
+    assert_eq!(screen.getch(), Ok(None));
+}
+
+#[test]
+fn ok_none_err_and_zero_dimension_all_leave_the_size_untouched() {
+    let size = Size::new(2, 2);
+    let report = size_report();
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"", report.clone()),
+        TermType::Xterm256Color,
+        size,
+    );
+
+    *report.borrow_mut() = Ok(None);
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.size(), size);
+
+    *report.borrow_mut() = Err(CursesError::Io);
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.size(), size);
+
+    *report.borrow_mut() = Ok(Some(Size::new(0, 5)));
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.size(), size);
+
+    *report.borrow_mut() = Ok(Some(Size::new(5, 0)));
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.size(), size);
+}
+
+#[test]
+fn a_tty_that_cannot_report_size_never_produces_a_resize_event() {
+    let mut screen = Screen::new(
+        FakeTty::with_input(b"a"),
+        TermType::Xterm256Color,
+        Size::new(2, 2),
+    );
+    assert_eq!(screen.doupdate(), Ok(()));
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+    assert_eq!(screen.size(), Size::new(2, 2));
 }

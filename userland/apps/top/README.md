@@ -47,6 +47,11 @@ model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
 | `?` / `h`      | toggle the help overlay                  |
 | `q`            | quit                                     |
 
+A terminal resize is an event of its own, never a keystroke: the next frame
+re-derives the summary block and list layout from the new screen size and
+re-clamps the viewport, so a selection that no longer fits is scrolled back
+into view rather than left dangling.
+
 The system-wide view (`a`) issues `GLOBAL_PROCESS_LIST`, which `sysinfod`
 gates on `CAP_SYSINFO_GLOBAL`; without it the toggle surfaces
 `TopError::PermissionDenied` rather than a partial listing (fail closed,

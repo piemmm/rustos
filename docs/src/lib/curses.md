@@ -92,6 +92,32 @@ colour depth, allocates (or reuses) the pair, and returns ready-to-apply
 caller falls back to a monochrome rendition (reverse video, bold, plain)
 instead of mis-colouring. `top` and `edit` colour through it.
 
+## Screen-semantics conformance
+
+Two screens consume the one `tairix_vt::Op` vocabulary — the framebuffer boot
+console (`lib/fbcon`) and the desktop terminal emulator (`terminal.app`) — and
+their agreement is written once, as the shared `tairix_vt::conformance` script
+each implements a `ScreenModel` for and runs. The load-bearing rule for a
+full-screen program is the **owed wrap**: filling the last column leaves the
+cursor on it with the wrap owed, paid by the next glyph and cancelled by any
+move or erase, so painting a full-width bottom bar never scrolls the display.
+
+## Resize detection
+
+TAIRiX has no `SIGWINCH`. `Tty::size` is the seam a channel uses to report its
+current character-cell geometry (`Ok(None)` when it cannot — the default, and
+the honest answer for a fixed test queue); `StreamTty` implements it from the
+kernel's `TerminalSize` for standard input. `Screen` polls that seam — once at
+the start of `getch` / `read_events`, ahead of any input decoded in the same
+call, and once at the start of `doupdate` so a repaint after a resize is
+already sized correctly — and, on a genuine change, resizes itself (resetting
+the physical diff base so the next `doupdate` re-emits every cell) and queues
+one `Event::Resize`, the curses-native analogue of ncurses' `KEY_RESIZE`.
+Several changes noticed before the application next reads coalesce into one
+event carrying the latest size. Because there is no signal, a resize surfaces
+only when the application next asks for input or repaints; a `getch` blocked
+indefinitely with no timeout learns of it only on the next keypress.
+
 ## One vocabulary, fail closed
 
 Every byte this crate emits or parses is a `tairix_vt::Op`. It is `no_std` +

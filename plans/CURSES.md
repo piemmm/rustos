@@ -124,6 +124,14 @@ emulator parses exactly what `lib/vt`'s emitter produces.
 
 **Docs** — terminal docs page updated in the same commit (§13).
 
+The screen semantics both `lib/fbcon` and the terminal emulator use to apply
+the `Op` stream (pending wrap, erase, scroll region, alt-screen,
+save/restore) are pinned by one shared script, `lib/vt`'s
+`conformance::check`, run against a `ScreenModel` each screen implements
+over its own state in its own tests — so a change to one screen's semantics
+that the other does not match fails a test rather than shipping a silent
+divergence.
+
 ### Stage C3 — `lib/termcap`: the compiled-in capability database
 
 **Status: done** (see `PLAN.md`, "CURSES Stage C3").
@@ -190,6 +198,15 @@ through ordered `wnoutrefresh`.
   existing userland tool, or porting one), dynamically linking `lib/curses`
   as the OS-provided Terminal/TUI library (§16.4; an ordinary cargo path
   dependency in-tree).
+- **Resize event** (TAIRiX has no `SIGWINCH`): `Tty::size` is the optional
+  seam a channel reports its geometry through (`StreamTty` from the kernel's
+  `TerminalSize`); `Screen` polls it at the start of `getch`/`read_events`
+  (ahead of any input decoded in the same call) and of `doupdate`, and on a
+  genuine change resizes itself — invalidating the physical diff base so the
+  next `doupdate` repaints every cell — and queues one coalesced
+  `Event::Resize`, the curses-native analogue of ncurses' `KEY_RESIZE`. An
+  application blocked indefinitely in `getch` with no timeout learns of a
+  resize only on its next keypress.
 
 **Tests** — the consumer's behaviour tests; coverage ≥ 75% (userland) and the
 §7 lib bar for the three new `lib/*` crates.

@@ -90,7 +90,9 @@ The operations that touch the outside world are injected, mirroring
 - `LoginView` — presents the login screen and reads the username and the
   (never-rendered) password; the machine drives
   it through semantic calls (`round_begin`, `note_failure`,
-  `session_handoff`), never raw terminal writes.
+  `session_handoff`), never raw terminal writes. A terminal resize is
+  never taken for a keystroke: the page is re-laid-out and the box
+  re-centred on the new size, and the field under edit is kept whole.
 - `Authenticator::authenticate(&Credentials) -> Result<AuthenticatedUser, Errno>`
   — verifies credentials against `kernel/sec` and the credential store.
 - `SessionLauncher::launch(&AuthenticatedUser, SessionKind) -> Result<SessionOutcome, Errno>`

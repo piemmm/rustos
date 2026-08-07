@@ -657,6 +657,40 @@ fn f1_shows_the_key_summary_and_any_key_dismisses_it_unread() {
 }
 
 #[test]
+fn a_resize_leaves_the_key_summary_up_and_reaches_no_mode_handler() {
+    let fs = MapFs::with("f", b"hello\n");
+    let mut model = Model::new();
+    model.open_initial(&fs, "f").expect("loads");
+    feed(&mut model, &fs, &[Event::Function(1)]);
+    assert!(model.help_visible());
+
+    // The terminal changed size; the user did not press a key, so the
+    // overlay stays up and nothing is typed or moved.
+    feed(&mut model, &fs, &[Event::Resize(Size::new(30, 100))]);
+    assert!(model.help_visible());
+    assert_eq!(model.buffer().line(0), "hello");
+    assert_eq!((model.cursor_row(), model.cursor_col()), (0, 0));
+}
+
+#[test]
+fn a_resize_re_clamps_the_view_over_the_cursor() {
+    let fs = MapFs::with("f", b"a\nb\nc\nd\ne\nf\ng\nh\n");
+    let mut model = Model::new();
+    model.open_initial(&fs, "f").expect("loads");
+    model.set_viewport(8, 40);
+    feed(&mut model, &fs, &[Event::End, Event::PageDown]);
+    let tall_top = model.scroll_top();
+
+    // The renderer sizes the view from the live screen before each frame,
+    // so a shorter terminal pulls the window back over the cursor.
+    feed(&mut model, &fs, &[Event::Resize(Size::new(6, 40))]);
+    model.set_viewport(2, 40);
+    assert!(model.scroll_top() > tall_top);
+    assert!(model.cursor_row() >= model.scroll_top());
+    assert!(model.cursor_row() < model.scroll_top() + 2);
+}
+
+#[test]
 fn the_next_keystroke_clears_a_notice() {
     let fs = MapFs::new();
     let mut model = Model::new();

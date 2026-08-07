@@ -138,6 +138,15 @@ pub fn run<T: Tty>(
             }
             continue;
         };
+        // The window outlives each frame, so it is the one piece of layout
+        // that does not re-derive itself; resize it and redraw. The top of
+        // the loop re-clamps the scroll and re-wraps the viewer to the new
+        // geometry, and holding the event here keeps it from dismissing an
+        // open overlay.
+        if let Event::Resize(size) = event {
+            window.resize(size);
+            continue;
+        }
         handle_event(model, fs, decode, &event);
         if model.quit {
             return Ok(0);

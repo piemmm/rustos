@@ -26,6 +26,7 @@ Stability tier: **experimental** (the surface grows stage by stage under
 | `scheme` | The standard semantic colour scheme: `Role` (heading, emphasis, literal, directory, executable, match, error, warning, success, metadata, selection, border) and `Style` (a foreground `Color` plus bold/dim/italic/underline). `Role::style` is the one role → SGR palette every colour-capable tool names roles from (`AGENTS.md` §2.2), and `Style::open` yields the ordered `Sgr` ops that turn it on. It holds the ideal colours only — degrading them to a terminal's depth is `lib/curses`'s one `downgrade`. |
 | `emit` | `encode` / `encode_into` / `encode_all` — render an `Op` to bytes. |
 | `parse` | `Parser` — the streaming byte → `Op` state machine. |
+| `conformance` | The shared screen-semantics conformance script: `ScreenModel` (the trait a character-cell grid implements over its own state) and `check` (the script that drives it through `Op`s and returns the first `Divergence`). It pins the rules every consumer of the `Op` stream must agree on — in particular the *pending wrap* (filling the last column owes a wrap, paid by the next glyph and cancelled by anything that moves or erases first) — so `lib/fbcon` and the terminal emulator's `Grid` each implement `ScreenModel` over a `COLS`×`ROWS` grid in their own tests and run `check`; a change to one screen's semantics fails the other's test too. |
 
 ## Emitter and parser agree by construction
 

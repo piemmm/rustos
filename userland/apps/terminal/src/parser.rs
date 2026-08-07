@@ -53,7 +53,7 @@ impl Parser {
 /// The cursor counts and positions `lib/vt` carries are the 1-based values
 /// ANSI uses on the wire; positions are converted to the [`Grid`]'s 0-based
 /// coordinates here.
-fn apply(grid: &mut Grid, op: &Op) {
+pub(crate) fn apply(grid: &mut Grid, op: &Op) {
     match *op {
         Op::Print(ch) => grid.write_char(ch),
         Op::Backspace => grid.backspace(),

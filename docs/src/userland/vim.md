@@ -47,6 +47,9 @@ whole editor is host-testable:
   patterns rather than stalling the session.
 - The session loop blocks in the kernel for each keystroke; there is no
   polling loop anywhere.
+- A terminal resize is handled by that loop, never by the key grammar:
+  the session window takes the new geometry and repaints, and the
+  renderer re-derives the view scroll so the cursor stays on screen.
 
 The editor drives the terminal through the shared `lib/curses` screen
 model. Modal editing required two input events the decoder did not carry

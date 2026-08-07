@@ -598,7 +598,7 @@ pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 /// **input** half is not this type but the shared [`VIDEO_KEYBOARD`]
 /// queue: the display's session reads a directly attached keyboard
 /// (USB HID / PS-2 — the P10 input wiring), whose decoded key edges the
-/// keyboard-input driver hands to the [`SEAT_REGISTRY`], which (while
+/// keyboard-input driver hands to the [`VIDEO_SEAT_REGISTRY`], which (while
 /// the seat is unowned) encodes a press and enqueues it here, never on
 /// the UART, which is the session-free debug log line while a display is
 /// active (`plans/PI.md` P11). Until a keyboard driver injects anything
@@ -661,7 +661,7 @@ pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
 ///
 /// It is both the video console's [`tairix_kernel_core::ConsoleRead`]
 /// half (drained by a `stream_read` from the video login) and its
-/// [`tairix_kernel_core::ConsoleInput`] half — the [`SEAT_REGISTRY`]'s
+/// [`tairix_kernel_core::ConsoleInput`] half — the [`VIDEO_SEAT_REGISTRY`]'s
 /// *text sink*, into which an injected key press is encoded
 /// while the seat is unowned. The same `'static` backs both
 /// halves, so the registry's push wakes the reader parked in kernel-core's

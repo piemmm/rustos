@@ -55,7 +55,10 @@ between three seams:
 The buffer records span-based inverse edits into grouped undo steps; the
 pattern engine is a compiled node list under a fixed backtracking budget
 that fails closed on pathological patterns; the session loop blocks in the
-kernel for every keystroke — there is no polling.
+kernel for every keystroke — there is no polling. A terminal resize is not
+a keystroke: the session window is resized to the new geometry and
+repainted, and the renderer re-derives the view scroll so the cursor stays
+on screen.
 
 The modal editor needs two input events the OS input layer did not carry
 before this crate: the bare Escape key and control-chorded letters. Both

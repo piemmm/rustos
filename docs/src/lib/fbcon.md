@@ -39,6 +39,16 @@ continuation cell stays blank. It is a full terminal:
 
 ## Design
 
+- **Pending wrap, not eager wrap.** Filling the last column does not wrap the
+  cursor: it rests on that column with the wrap *owed*, paid by the next
+  printable glyph and cancelled by anything that moves or erases first, so
+  the recorded column is always a real cell — the erase operations and the
+  cursor overlay never need to special-case an out-of-range column. This
+  engine and the desktop terminal emulator's `Grid` are the two consumers of
+  the shared `tairix_vt::Op` stream; each implements
+  `tairix_vt::conformance::ScreenModel` over its own `COLS`×`ROWS` grid in its
+  tests and runs the shared `conformance::check` script, so a change to one
+  screen's semantics fails the other's test too.
 - **Retained cell grid, one repaint per write.** The engine keeps the visible
   screen as a grid of `tairix_vt::Cell` (one glyph + its rendition per
   position). Every operation mutates only the active grid, and the cell rect a

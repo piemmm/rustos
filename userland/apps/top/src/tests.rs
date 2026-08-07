@@ -267,6 +267,29 @@ fn the_selection_scrolls_to_stay_visible() {
 }
 
 #[test]
+fn a_resize_redraws_and_the_next_frame_clamps_the_scroll() {
+    let service = FakeService::new(records(20));
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let tall = Size::new(24, 80);
+    model.set_viewport(list_capacity(tall));
+    model.handle_event(&Event::End);
+    let tall_top = model.scroll_top();
+
+    // The loop hands the model the live screen size before every frame, so
+    // the resize's own answer is the redraw and the clamp lands on that
+    // frame: the offset that fitted the tall screen is out of range here.
+    let short = Size::new(10, 40);
+    assert_eq!(model.handle_event(&Event::Resize(short)), Action::Redraw);
+    model.set_viewport(list_capacity(short));
+
+    let selected = model.selected().expect("rows");
+    assert!(model.scroll_top() > tall_top);
+    assert!(selected >= model.scroll_top());
+    assert!(selected < model.scroll_top() + list_capacity(short));
+}
+
+#[test]
 fn page_keys_move_a_viewport_at_a_time() {
     let service = FakeService::new(records(20));
     let mut model = Model::new(Scope::Own);

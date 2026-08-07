@@ -36,7 +36,14 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   its dots cycling on a one-second cadence for at least three seconds after
   the most recent keystroke and then freezing (a later keystroke restarts
   it), replaced in place with `[input complete]` on Enter, with one-shot
-  deadline timing — a pure state machine its kernel host renders.
+  deadline timing — a pure state machine its kernel host renders,
+- the shared screen-semantics conformance script (`conformance::check`): the
+  one specification of how a character-cell grid applies the `Op` stream —
+  pending wrap, erase, scroll region, alternate screen, save/restore — that
+  every consumer (the framebuffer boot console's `lib/fbcon`, the desktop
+  terminal emulator) implements `conformance::ScreenModel` over and runs in
+  its own tests, so a change to one screen's semantics fails the other's test
+  too.
 
 It ships **both** an emitter (`Op` → bytes) and a streaming parser (bytes →
 `Op` events) built over the *same* tables, so the two provably agree: every

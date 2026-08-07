@@ -236,6 +236,10 @@ carries the bar key above). The `-d, --delay` option is GNU `top`'s
 spelling, parsed by the shared full-screen-viewer delay grammar in
 `lib/curses`.
 
+A terminal resize is an event of its own, not a key: the next frame
+re-derives the summary block and the focused panel from the new screen
+size and re-clamps the panel scroll into it.
+
 ## Shape and testing
 
 The crate mirrors `top`'s host-testable seams: an I/O-free `Model`

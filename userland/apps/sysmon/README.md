@@ -23,7 +23,9 @@ entry-point binary of the `sysmon.app` bundle:
   refresh interval, the pin state, and the key handling.
 - `src/app.rs` — the renderer (summary block + focused detail panel +
   help overlay) and the event-driven loop: one bounded input wait per
-  refresh interval, never a poll loop.
+  refresh interval, never a poll loop. A terminal resize repaints at the
+  new geometry — the windows and the panel viewport are re-derived from
+  the live screen size and the scroll re-clamped into it.
 - `src/run.rs` — the freestanding program: parses options, pins its own
   memory (`mem_pin`; a refusal is reported on the title line and the
   session continues unpinned), enters the alternate screen, and runs

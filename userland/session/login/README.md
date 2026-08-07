@@ -29,7 +29,9 @@ design:
   version, and clock in the top bar; the bordered login box; the red
   running failed-attempt count; memory/tasks/users/load in the bottom
   bar) and reads the username (echoed in the box) and password (never
-  rendered).
+  rendered). A terminal resize is never taken for a keystroke: the page
+  is re-laid-out and the box re-centred on the new screen size, and the
+  field under edit survives untouched.
 - `Authenticator` — verifies a `Credentials` pair against `kernel/sec`
   and the credential store, returning the user's identity and capability
   ceiling on success. Failures come back as the stable `Errno`, so login
