@@ -32,8 +32,11 @@ to the world only through object-safe seams:
   `mount`, `reboot`, `poweroff`).
 
 `run_supervisor` drives the `*` REPL to a `SupervisorExit` (`ContinueBoot` or
-`Mounted`) the boot path acts on. Nothing allocates and nothing panics on any
-input.
+`Mounted`) the boot path acts on. `ContinueBoot` carries the
+`tairix_abi::BootSession` the operator chose with `continue [text|gui]` —
+`Unset` when they chose nothing — which the boot path installs once into the
+kernel cell `boot_session_get` reports from. Nothing allocates and nothing
+panics on any input.
 
 ## Stability
 

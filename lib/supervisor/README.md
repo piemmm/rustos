@@ -32,6 +32,12 @@ world only through object-safe seams:
   `uptime`, `date`, the interruptible `memtest`/`test disk`, plus the audited
   control actions `mount`, `reboot`, `poweroff`.
 
+`run_supervisor` drives the `*` REPL to a `SupervisorExit` the boot path acts
+on: `Mounted`, or `ContinueBoot` carrying the `tairix_abi::BootSession` the
+operator chose with `continue [text|gui]` — `Unset` when they chose nothing,
+leaving the administrator's stored login default in charge. An unreadable
+operand keeps the REPL open rather than resuming the boot on a guess.
+
 Nothing here allocates — the bootstrap floor cannot assume a heap — and
 nothing panics on any input (`AGENTS.md` §2.9).
 

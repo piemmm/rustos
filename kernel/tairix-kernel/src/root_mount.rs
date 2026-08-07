@@ -73,6 +73,7 @@ use tairix_drv_fs_arxfs::{
     UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
 };
 use tairix_drv_fs_fat32::Fat32;
+use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
 use tairix_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
     GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, SleepLock,
@@ -1138,6 +1139,7 @@ fn esc_boot_window(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
     supervisor: &mut dyn SupervisorHost,
+    boot_session: &LateBootSession,
 ) -> EscWindow {
     write_all(console, SUPERVISOR_ANNOUNCE);
     let mut byte = [0u8; 1];
@@ -1147,12 +1149,14 @@ fn esc_boot_window(
     if got == 1 && byte[0] == 0x1b {
         if esc_is_lone_escape(input) {
             // Lone ESC: enter the REPL.
-            return match enter_supervisor(console, input, supervisor) {
+            return match enter_supervisor(console, input, supervisor, boot_session) {
                 // The operator unlocked and mounted the root from the REPL.
                 SupervisorExit::Mounted => EscWindow::Mounted,
                 // The operator asked to resume boot: the REPL redrew the
-                // screen, so the normal unlock draws a fresh prompt.
-                SupervisorExit::ContinueBoot => EscWindow::Continue {
+                // screen, so the normal unlock draws a fresh prompt. Any
+                // session choice the operator made was already recorded by
+                // `enter_supervisor`.
+                SupervisorExit::ContinueBoot(_) => EscWindow::Continue {
                     prompt_drawn: false,
                     initial: None,
                 },
@@ -1184,15 +1188,26 @@ fn esc_boot_window(
 /// `plans/NEW-SUPERVISOR.md` §2 step 5). Shared by both entry points — the
 /// ESC boot-screen window and a lone `ESC` at the live passphrase prompt — so
 /// the banner and the REPL invocation have one definition.
+///
+/// A `continue text` / `continue gui` choice is recorded in `boot_session`
+/// here, at the one point both entry paths funnel through, so neither can
+/// forget it. The cell is set-once and a bare `continue` chooses nothing, so
+/// the first real choice of the boot is the one `boot_session_get` reports
+/// (`plans/NEW-DESKTOP-LOGIN.md` G1).
 fn enter_supervisor(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
     supervisor: &mut dyn SupervisorHost,
+    boot_session: &LateBootSession,
 ) -> SupervisorExit {
     write_all(console, SUPERVISOR_ENTER_BANNER);
     let mut report = ConsoleReport { console };
     let mut sup_input = ConsoleInput { input };
-    run_supervisor(&mut report, &mut sup_input, supervisor)
+    let exit = run_supervisor(&mut report, &mut sup_input, supervisor);
+    if let SupervisorExit::ContinueBoot(session) = exit {
+        boot_session.install(session);
+    }
+    exit
 }
 
 /// Unlock the root disk and publish the loaded database into `late_db`,
@@ -1348,8 +1363,11 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // both entry points: the boot-screen window here and a lone `ESC` at the
     // live passphrase prompt in the loop below.
     let mut supervisor = supervisor;
+    // The production cell the operator's one-boot login choice is recorded in;
+    // `enter_supervisor` installs into it from either entry point.
+    let boot_session = &LATE_BOOT_SESSION;
     if let Some(host) = supervisor.as_deref_mut() {
-        match esc_boot_window(console, input, host) {
+        match esc_boot_window(console, input, host, boot_session) {
             EscWindow::Mounted => return UnlockOutcome::Installed,
             EscWindow::Continue {
                 prompt_drawn: drawn,
@@ -1433,9 +1451,11 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // host (host tests) an `ESC` is a no-op that simply
                 // re-prompts.
                 if let Some(host) = supervisor.as_deref_mut() {
-                    match enter_supervisor(console, input, host) {
+                    match enter_supervisor(console, input, host, boot_session) {
                         SupervisorExit::Mounted => return UnlockOutcome::Installed,
-                        SupervisorExit::ContinueBoot => {}
+                        // Any session choice was recorded by
+                        // `enter_supervisor`; re-prompt for the passphrase.
+                        SupervisorExit::ContinueBoot(_) => {}
                     }
                 }
                 continue;
@@ -1781,10 +1801,12 @@ mod tests {
 
     use tairix_abi::driver::block::BlockGeometry;
     use tairix_abi::driver::filesystem::FilesystemWrite;
+    use tairix_abi::BootSession;
     use tairix_drv_fs_arxfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
     use tairix_kernel_core::UsersDbSource;
     use tairix_log::{Event as LogEvent, Sink as LogSink};
     use tairix_partition::{mbr, Partition};
+    use tairix_supervisor::{MountOutcome, SupervisorEvent, TestOutcome};
     use tairix_test_arxfs_image as image;
     use tairix_test_encrypted_root_image as disk_image;
     use tairix_users::UsersDb;
@@ -3045,5 +3067,110 @@ mod tests {
         assert_eq!(ran, None);
         assert!(sink.ids().contains(&4141), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
+    }
+
+    /// A [`SupervisorHost`] that renders nothing and performs nothing.
+    ///
+    /// The boot-session tests drive only the REPL's `continue` command, so
+    /// every data and control method is a no-op; a real host is exercised by
+    /// the `lib/supervisor` and `supervisor_host` tests.
+    struct SilentSupervisor;
+
+    impl SupervisorHost for SilentSupervisor {
+        fn version(&mut self, _out: &mut dyn SupReport) {}
+        fn memory(&mut self, _out: &mut dyn SupReport) {}
+        fn memory_map(&mut self, _out: &mut dyn SupReport) {}
+        fn cpu(&mut self, _out: &mut dyn SupReport) {}
+        fn hardware(&mut self, _out: &mut dyn SupReport) {}
+        fn disks(&mut self, _out: &mut dyn SupReport) {}
+        fn partitions(&mut self, _device: &str, _out: &mut dyn SupReport) {}
+        fn arxfs_status(&mut self, _out: &mut dyn SupReport) {}
+        fn list(&mut self, _path: Option<&str>, _out: &mut dyn SupReport) {}
+        fn log_tail(&mut self, _count: Option<usize>, _out: &mut dyn SupReport) {}
+        fn panic_log(&mut self, _out: &mut dyn SupReport) {}
+        fn uptime(&mut self, _out: &mut dyn SupReport) {}
+        fn date(&mut self, _out: &mut dyn SupReport) {}
+        fn scan_disk(
+            &mut self,
+            _device: &str,
+            _out: &mut dyn SupReport,
+            _abort: &mut dyn FnMut() -> bool,
+        ) -> TestOutcome {
+            TestOutcome::Passed
+        }
+        fn mount(&mut self, _passphrase: &[u8], _out: &mut dyn SupReport) -> MountOutcome {
+            MountOutcome::Failed
+        }
+        fn reboot(&mut self) {}
+        fn poweroff(&mut self) {}
+        fn takeover_memtest(&mut self, _out: &mut dyn SupReport) {}
+        fn audit(&mut self, _event: SupervisorEvent) {}
+    }
+
+    /// One REPL command line, terminated as the console would deliver it.
+    fn repl_script(line: &[u8]) -> Vec<u8> {
+        let mut bytes = line.to_vec();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    /// Console bytes that enter the Supervisor from the boot screen and then
+    /// type `line`.
+    ///
+    /// The first `ESC` opens the window; the second is what the
+    /// lone-`ESC`-versus-CSI re-poll consumes (the scripted reader answers it
+    /// immediately, so the window resolves without waiting), leaving the line
+    /// for the REPL to read.
+    fn boot_screen_script(line: &[u8]) -> Vec<u8> {
+        let mut bytes = alloc::vec![0x1b, 0x1b];
+        bytes.extend_from_slice(&repl_script(line));
+        bytes
+    }
+
+    #[test]
+    fn a_supervisor_continue_gui_records_the_graphical_session() {
+        // The operator's `continue gui` must reach the cell `boot_session_get`
+        // reports from, so `login` starts the desktop for this one boot.
+        let cell = LateBootSession::new();
+        let input = ScriptInput::new(boot_screen_script(b"continue gui"));
+
+        let window = esc_boot_window(&AcceptConsole, &input, &mut SilentSupervisor, &cell);
+
+        assert!(matches!(
+            window,
+            EscWindow::Continue {
+                prompt_drawn: false,
+                initial: None
+            }
+        ));
+        assert_eq!(cell.get(), BootSession::Graphical);
+    }
+
+    #[test]
+    fn a_bare_supervisor_continue_records_no_session() {
+        // No operand is no choice: the cell stays unset so the stored
+        // `os.loginType` default decides, exactly as a boot that never
+        // entered the Supervisor.
+        let cell = LateBootSession::new();
+        let input = ScriptInput::new(boot_screen_script(b"continue"));
+
+        esc_boot_window(&AcceptConsole, &input, &mut SilentSupervisor, &cell);
+
+        assert_eq!(cell.get(), BootSession::Unset);
+    }
+
+    #[test]
+    fn a_second_supervisor_entry_does_not_overwrite_the_first_choice() {
+        // Set-once: the lone-`ESC`-at-the-passphrase-prompt entry records a
+        // choice through the same funnel, and a later entry cannot rewrite
+        // one already made.
+        let cell = LateBootSession::new();
+        let first = ScriptInput::new(repl_script(b"continue text"));
+        enter_supervisor(&AcceptConsole, &first, &mut SilentSupervisor, &cell);
+        assert_eq!(cell.get(), BootSession::Text);
+
+        let second = ScriptInput::new(repl_script(b"continue gui"));
+        enter_supervisor(&AcceptConsole, &second, &mut SilentSupervisor, &cell);
+        assert_eq!(cell.get(), BootSession::Text);
     }
 }

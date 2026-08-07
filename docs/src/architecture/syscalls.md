@@ -150,6 +150,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 104 | `sched_set_priority` | `i32 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
 | 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
 | 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
+| 107 | `boot_session_get` | —                                   | `u64` (session) | —           | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -721,6 +722,23 @@ installed total) fails closed with `NotImplemented` rather than fabricate a
 machine shape. PID 1 renders its startup banner from this record. The
 first-party Rust wrapper is `tairix_rt::boot_facts`; the C stub is
 `tairix_sys_boot_facts_get`.
+
+`boot_session_get` (no. 107) returns the login the operator chose for this
+one boot in the pre-boot Supervisor — the `tairix_abi::BootSession`
+discriminant: `Unset` (0) when no choice was made, `Text` (1) from
+`continue text`, `Graphical` (2) from `continue gui`. The Supervisor's
+`continue` command carries the choice out of the REPL and `root_mount`
+installs it **once** into the kernel's set-once cell; a second entry cannot
+rewrite a choice already recorded, and a boot that never entered the
+Supervisor leaves the cell `Unset`, so the stored `os.loginType` default
+decides. Like `boot_id_get` and `boot_facts_get` the call is **ungated** and
+unaudited: the answer is boot-static public state that names no principal,
+carries no authority, and cannot be written through the ABI at all — the
+only writer is the boot path, before any user program runs. A value the
+caller does not recognise is read as `Unset` rather than guessing an intent
+nobody expressed. `login` reads it to pick the session for this boot without
+touching the persisted default. The first-party Rust wrapper is
+`tairix_rt::boot_session`; the C stub is `tairix_sys_boot_session_get`.
 
 `call_peer_seat` (no. 83) is the seat-holding twin of `call_peer_origin`
 (`plans/DISPLAY.md` D7a): while a call is in service (between `call_recv`

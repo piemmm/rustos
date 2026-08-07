@@ -15,6 +15,11 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+# The `BootSession` the `continue text|gui` choice is expressed in: the same
+# ABI value the kernel records and `boot_session_get` reports, so the engine
+# and its consumers share one vocabulary.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 
 [dev-dependencies]

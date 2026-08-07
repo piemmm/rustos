@@ -82,10 +82,10 @@ mod program {
     use tairix_login::elevate::ElevateLauncher;
 
     use tairix_login::{
-        events, handle_elevate_request, session_environment, session_program, supervise,
-        AuthenticatedUser, Authenticator, ConsoleMode, CursesView, DbLoad, Login, LoginConfig,
-        LoginError, LoginStatus, LoginView, SessionKind, SessionLauncher, SessionOutcome,
-        StatusSource, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH,
+        effective_session_kind, events, handle_elevate_request, session_environment,
+        session_program, supervise, AuthenticatedUser, Authenticator, ConsoleMode, CursesView,
+        DbLoad, Login, LoginConfig, LoginError, LoginStatus, LoginView, SessionKind,
+        SessionLauncher, SessionOutcome, StatusSource, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::LogSink;
@@ -585,11 +585,24 @@ mod program {
         state
     }
 
+    /// The session type this round runs by default: the operator's one-boot
+    /// Supervisor choice (`continue text` / `continue gui`) where they made
+    /// one, otherwise the administrator-configured `os.loginType` store
+    /// value. The precedence itself lives in the library beside
+    /// [`SessionKind`], so the rule has one definition.
+    ///
+    /// Both inputs are re-read each round: a `configure os.loginType`
+    /// change takes effect at the next prompt, and the kernel's record of
+    /// the boot choice is immutable, so re-reading it costs a register
+    /// read and can never go stale.
+    fn session_default() -> SessionKind {
+        effective_session_kind(tairix_rt::boot_session(), configured_session_default())
+    }
+
     /// The administrator-configured boot-default session type
-    /// (`os.loginType`), re-read from the system-configuration store each
-    /// round through the one shared `lib/sysconfig` engine — the same
-    /// engine the `configure` command writes with, so the two can never
-    /// diverge.
+    /// (`os.loginType`), read from the system-configuration store through
+    /// the one shared `lib/sysconfig` engine — the same engine the
+    /// `configure` command writes with, so the two can never diverge.
     ///
     /// Fail closed to the documented default ([`SessionKind::Text`]): an
     /// absent store (a fresh installation, or a round before the root
@@ -700,10 +713,9 @@ mod program {
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
             graphical_available,
-            // Re-read each round: a `configure os.loginType` change takes
-            // effect at the next prompt, exactly like the availability
-            // probe above.
-            session_default: configured_session_default(),
+            // Re-read each round, exactly like the availability probe
+            // above.
+            session_default: session_default(),
             view,
             authenticator,
             launcher: &launcher,

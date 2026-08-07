@@ -62,6 +62,7 @@
   - [`tairix-drvrt`](./lib/drvrt.md)
   - [`tairix-fbcon`](./lib/fbcon.md)
   - [`tairix-font`](./lib/font.md)
+  - [`tairix-greeter`](./lib/greeter.md)
   - [`tairix-help`](./lib/help.md)
   - [`tairix-hid`](./lib/hid.md)
   - [`tairix-icon`](./lib/icon.md)

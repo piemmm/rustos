@@ -45,6 +45,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use tairix_abi::BootSession;
+
 // The engine is allocation-free: lines land in a fixed on-stack buffer,
 // tokens are borrowed slices, and numbers format through a fixed inline
 // buffer. `alloc` is pulled in only by the unit tests, which build `Vec`s of
@@ -84,7 +86,12 @@ pub const MAX_TOKENS: usize = 16;
 pub enum SupervisorExit {
     /// Resume the normal boot: redraw the passphrase prompt and carry on as
     /// though the Supervisor had never been entered.
-    ContinueBoot,
+    ///
+    /// The payload is the operator's one-boot login choice from
+    /// `continue text` / `continue gui`; a bare `continue` (and a closed
+    /// console) carries [`BootSession::Unset`], leaving the stored default in
+    /// charge. The boot path records it for the `boot_session_get` syscall.
+    ContinueBoot(BootSession),
     /// The operator mounted the root from inside the Supervisor (a real,
     /// passphrase-checked unlock). The boot path continues **without** a
     /// second passphrase prompt.

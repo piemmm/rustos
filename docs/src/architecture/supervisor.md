@@ -41,6 +41,17 @@ Leaving the REPL with `continue` resumes the normal boot (the passphrase
 prompt is redrawn); `mount` performs the real unlock now and continues
 without a second prompt.
 
+`continue` takes an optional session operand — `continue text` (alias
+`console`) or `continue gui` (aliases `graphical`, `desktop`), matched
+case-insensitively — choosing the login this one boot starts. The choice
+rides out of the REPL on `SupervisorExit::ContinueBoot` and the boot path
+installs it once into the kernel cell `boot_session_get` reports from, so
+`login` honours it without touching the administrator's stored
+`os.loginType` default. A bare `continue` chooses nothing and leaves that
+default in charge. An unknown word, or more than one operand, prints the
+usage line and keeps the REPL open — an instruction the Supervisor could not
+read never resumes the boot.
+
 ## Where the code lives
 
 The arch-neutral engine — the REPL, the command dispatcher, and every
@@ -192,8 +203,8 @@ wiring that never disturbs a test's audit interception.
 
 ## Command set
 
-Control: `help`, `continue` (alias `boot`), `mount`, `reboot`, `poweroff`
-(alias `halt`). Information: `version`, `mem` / `mem map`, `cpu`, `hw` (alias
+Control: `help`, `continue [text|gui]` (alias `boot`), `mount`, `reboot`,
+`poweroff` (alias `halt`). Information: `version`, `mem` / `mem map`, `cpu`, `hw` (alias
 `lsdev`), `disk`, `partitions`, `arxfs`, `ls`, `uptime`, `date`, `echo`,
 `clear`. Diagnostics: `log`, `panic-log` (alias `last`), the one-way
 whole-RAM `memtest`, and the read-only `test disk`.

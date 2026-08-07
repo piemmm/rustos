@@ -130,6 +130,7 @@ extern "C" {
 #define TAIRIX_SYS_SCHED_SET_PRIORITY 104u
 #define TAIRIX_SYS_SYSTEM_POWER 105u
 #define TAIRIX_SYS_CALL_GRANT 106u
+#define TAIRIX_SYS_BOOT_SESSION_GET 107u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -388,6 +389,7 @@ uint64_t tairix_sys_hw_self_node(void);
 int32_t tairix_sys_sched_set_priority(int32_t a0, uint32_t a1);
 int32_t tairix_sys_system_power(uint32_t a0);
 uint64_t tairix_sys_call_grant(uint64_t a0, uint64_t a1);
+uint64_t tairix_sys_boot_session_get(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

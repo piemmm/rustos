@@ -4,6 +4,9 @@
 //! acting and fails closed. `mount` performs the *real* passphrase unlock —
 //! there is no command that bypasses the passphrase or reveals key material.
 
+use tairix_abi::BootSession;
+
+use crate::commands::arg_str;
 use crate::dispatch::{Flow, Session};
 use crate::repl::{read_line, LineOutcome};
 use crate::{MountOutcome, SupervisorEvent, SupervisorExit};
@@ -15,10 +18,56 @@ use crate::{MountOutcome, SupervisorEvent, SupervisorExit};
 /// zeroed the instant the attempt resolves, so the secret never lingers.
 const MOUNT_PASSPHRASE_MAX: usize = 256;
 
-/// `continue` / `boot` — leave the Supervisor and resume the normal boot.
-pub fn cmd_continue(_args: &[&[u8]], session: &mut Session<'_>) -> Flow {
+/// The one-line spelling of `continue` shown when an operand is refused.
+const CONTINUE_USAGE: &str = "usage: continue [text|gui]";
+
+/// `continue` / `boot` — leave the Supervisor and resume the normal boot,
+/// optionally choosing which login session this one boot starts.
+///
+/// A bare `continue` makes no choice ([`BootSession::Unset`]) and the stored
+/// default decides. `text` (or `console`) and `gui` (or `graphical` /
+/// `desktop`) override it for this boot only, matched case-insensitively.
+///
+/// An unrecognised operand, or more than one, is refused with the usage line
+/// and the REPL stays open: an ambiguous instruction must never resume the
+/// boot into a session the operator did not ask for.
+pub fn cmd_continue(args: &[&[u8]], session: &mut Session<'_>) -> Flow {
+    let choice = match args.get(1..).unwrap_or(&[]) {
+        [] => BootSession::Unset,
+        [word] => {
+            let Some(choice) = parse_session(word) else {
+                session.out.write_str("continue: unknown session: ");
+                session.out.write_bytes(word);
+                session.out.newline();
+                session.out.line(CONTINUE_USAGE);
+                return Flow::Stay;
+            };
+            choice
+        }
+        _ => {
+            session.out.line("continue: one session at most.");
+            session.out.line(CONTINUE_USAGE);
+            return Flow::Stay;
+        }
+    };
     session.host.audit(SupervisorEvent::ContinueBoot);
-    Flow::Exit(SupervisorExit::ContinueBoot)
+    Flow::Exit(SupervisorExit::ContinueBoot(choice))
+}
+
+/// Map a `continue` operand to the session it names, or [`None`] if it names
+/// no session. Compared ASCII case-insensitively, like the command words.
+fn parse_session(word: &[u8]) -> Option<BootSession> {
+    let word = arg_str(word)?;
+    if word.eq_ignore_ascii_case("text") || word.eq_ignore_ascii_case("console") {
+        Some(BootSession::Text)
+    } else if word.eq_ignore_ascii_case("gui")
+        || word.eq_ignore_ascii_case("graphical")
+        || word.eq_ignore_ascii_case("desktop")
+    {
+        Some(BootSession::Graphical)
+    } else {
+        None
+    }
 }
 
 /// `mount` — prompt for the ARXFS passphrase and perform the real root
@@ -97,25 +146,99 @@ pub fn cmd_poweroff(_args: &[&[u8]], session: &mut Session<'_>) -> Flow {
 
 #[cfg(test)]
 mod tests {
+    use tairix_abi::BootSession;
+
     use crate::commands::test_support::MockSession;
     use crate::dispatch::{dispatch, Flow};
     use crate::{MountOutcome, SupervisorEvent, SupervisorExit};
 
-    #[test]
-    fn continue_exits_the_repl_and_is_audited() {
+    /// Run one `continue` line and return the flow it produced.
+    fn continue_flow(line: &[u8]) -> (Flow, MockSession) {
         let mut s = MockSession::new(&[]);
-        let flow = dispatch(b"continue", &mut s.session());
-        assert_eq!(flow, Flow::Exit(SupervisorExit::ContinueBoot));
+        let flow = dispatch(line, &mut s.session());
+        (flow, s)
+    }
+
+    #[test]
+    fn a_bare_continue_exits_with_no_choice_and_is_audited() {
+        let (flow, s) = continue_flow(b"continue");
+        assert_eq!(
+            flow,
+            Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Unset))
+        );
         assert!(s.audited(SupervisorEvent::ContinueBoot));
     }
 
     #[test]
     fn boot_is_an_alias_for_continue() {
-        let mut s = MockSession::new(&[]);
+        let (flow, _) = continue_flow(b"boot");
         assert_eq!(
-            dispatch(b"boot", &mut s.session()),
-            Flow::Exit(SupervisorExit::ContinueBoot)
+            flow,
+            Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Unset))
         );
+    }
+
+    #[test]
+    fn continue_text_and_its_alias_choose_the_text_session() {
+        for line in [b"continue text".as_slice(), b"continue console".as_slice()] {
+            let (flow, _) = continue_flow(line);
+            assert_eq!(
+                flow,
+                Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Text)),
+                "line: {}",
+                core::str::from_utf8(line).unwrap_or("?")
+            );
+        }
+    }
+
+    #[test]
+    fn the_session_operand_is_matched_case_insensitively() {
+        let (flow, _) = continue_flow(b"continue TEXT");
+        assert_eq!(
+            flow,
+            Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Text))
+        );
+        let (flow, _) = continue_flow(b"continue Gui");
+        assert_eq!(
+            flow,
+            Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Graphical))
+        );
+    }
+
+    #[test]
+    fn continue_gui_and_its_aliases_choose_the_graphical_session() {
+        for line in [
+            b"continue gui".as_slice(),
+            b"continue graphical".as_slice(),
+            b"continue desktop".as_slice(),
+        ] {
+            let (flow, _) = continue_flow(line);
+            assert_eq!(
+                flow,
+                Flow::Exit(SupervisorExit::ContinueBoot(BootSession::Graphical)),
+                "line: {}",
+                core::str::from_utf8(line).unwrap_or("?")
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_session_is_refused_and_the_boot_does_not_resume() {
+        let (flow, s) = continue_flow(b"continue bogus");
+        assert_eq!(flow, Flow::Stay);
+        assert!(s.output_contains("unknown session: bogus"));
+        assert!(s.output_contains("usage: continue [text|gui]"));
+        // Nothing was decided, so nothing is audited as decided.
+        assert!(!s.audited(SupervisorEvent::ContinueBoot));
+    }
+
+    #[test]
+    fn two_operands_are_refused_rather_than_guessed_between() {
+        let (flow, s) = continue_flow(b"continue text gui");
+        assert_eq!(flow, Flow::Stay);
+        assert!(s.output_contains("one session at most"));
+        assert!(s.output_contains("usage: continue [text|gui]"));
+        assert!(!s.audited(SupervisorEvent::ContinueBoot));
     }
 
     #[test]

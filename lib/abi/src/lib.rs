@@ -80,8 +80,8 @@ pub use appinfo::{
     SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
 };
 pub use boot::{
-    Arch, BootFacts, BootId, CpuName, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN,
-    CPU_NAME_LEN,
+    Arch, BootFacts, BootId, BootSession, CpuName, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN,
+    BOOT_ID_LEN, CPU_NAME_LEN,
 };
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::filesystem::NodeTimes;

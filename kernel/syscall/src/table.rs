@@ -2459,6 +2459,20 @@ pub trait SyscallHandlers {
     fn system_power(&self, _caller: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Read the operator's one-boot login choice
+    /// ([`tairix_abi::BootSession`]), recorded once by the boot path from the
+    /// pre-boot Supervisor's `continue text` / `continue gui`.
+    ///
+    /// No arguments and no capability (the choice is public boot-static
+    /// state: it names no account, grants no authority, and reveals no
+    /// secret). The implementation returns the recorded discriminant.
+    ///
+    /// Required rather than defaulted, like [`Self::clock_get`]: there is
+    /// always an answer — a boot that never entered the Supervisor reports
+    /// [`tairix_abi::BootSession::Unset`] — so there is no unwired state to
+    /// fail closed from.
+    fn boot_session_get(&self, caller: &CallerContext<'_>) -> SyscallResult;
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2700,6 +2714,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let action = PowerAction::from_u32(decode_u32(args.0[0]))?;
                 self.handlers.system_power(caller, action)
             }
+            SyscallNumber::BOOT_SESSION_GET => self.handlers.boot_session_get(caller),
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[0] is a sign-extended
                 // `i32`; recover it by truncating the low 32 bits (the
@@ -3656,6 +3671,10 @@ mod tests {
         fn clock_get(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("clock_get");
             Ok(42)
+        }
+        fn boot_session_get(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("boot_session_get");
+            Ok(tairix_abi::BootSession::Graphical.as_u64())
         }
         fn irq_bind(&self, _c: &CallerContext<'_>, line: u32) -> SyscallResult {
             self.record("irq_bind");

@@ -2642,6 +2642,21 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::IPC_ENDPOINT),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::BOOT_SESSION_GET,
+        name: "boot_session_get",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `U64` carries the `BootSession` discriminant; the value is small
+        // and closed, so it needs no out-buffer.
+        ret: AbiType::U64,
+        // The `boot_facts_get` shape: boot-static, public machine state
+        // that names no principal and carries no authority, so no
+        // capability gates it and a read is not a security decision worth
+        // a record.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

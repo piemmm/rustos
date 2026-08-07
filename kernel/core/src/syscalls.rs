@@ -4377,6 +4377,15 @@ where
         }
     }
 
+    fn boot_session_get(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        // No capability gate and no audit record: the operator's one-boot
+        // login choice is public boot-static state, so there is nothing to
+        // authorise and no security decision to record. A boot that never
+        // entered the Supervisor reads the empty cell as `Unset` and the
+        // stored `os.loginType` default decides.
+        Ok(crate::boot_session::LATE_BOOT_SESSION.get().as_u64())
+    }
+
     fn terminal_size(
         &self,
         caller: &CallerContext<'_>,

@@ -169,6 +169,7 @@ const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
+const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -1052,6 +1053,23 @@ pub extern "C" fn sys_system_power(action: u32) -> i32 {
             [u64::from(action), 0, 0, 0, 0, 0],
         ))
     }
+}
+
+/// `boot_session_get`: read the login the operator chose in the pre-boot
+/// Supervisor (`SyscallNumber::BOOT_SESSION_GET`). Returns the
+/// `tairix_abi::BootSession` discriminant — `0` unset, `1` text, `2`
+/// graphical.
+///
+/// Unprivileged, like `tairix_sys_clock_get` — the choice is boot-static
+/// public state that names no principal and carries no authority. A boot the
+/// operator never diverted reads `0`, leaving the stored login default in
+/// charge; a caller that does not recognise the value treats it as `0` rather
+/// than guess an intent nobody expressed.
+#[must_use]
+#[export_name = "tairix_sys_boot_session_get"]
+pub extern "C" fn sys_boot_session_get() -> u64 {
+    // SAFETY: see `sys_yield`.
+    unsafe { raw_syscall(NUM_BOOT_SESSION_GET, NO_ARGS) }
 }
 
 /// `file_map`: map `len` bytes of the open, readable, filesystem-backed
@@ -2737,6 +2755,7 @@ mod tests {
         (NUM_SCHED_SET_REALTIME, "sched_set_realtime", 1),
         (NUM_SCHED_SET_PRIORITY, "sched_set_priority", 2),
         (NUM_SYSTEM_POWER, "system_power", 1),
+        (NUM_BOOT_SESSION_GET, "boot_session_get", 0),
     ];
 
     #[test]
@@ -2830,6 +2849,18 @@ mod tests {
             assert_eq!(args[0], u64::from(action.as_u32()));
             assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
         }
+    }
+
+    #[test]
+    fn boot_session_get_marshals_number_and_returns_the_discriminant() {
+        let (number, args) = capture(tairix_abi::BootSession::Graphical.as_u64(), || {
+            assert_eq!(
+                sys_boot_session_get(),
+                tairix_abi::BootSession::Graphical.as_u64()
+            );
+        });
+        assert_eq!(number, NUM_BOOT_SESSION_GET);
+        assert_eq!(args, NO_ARGS);
     }
 
     #[test]

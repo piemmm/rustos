@@ -5950,6 +5950,45 @@ desktop session work (CU6).
 
 ---
 
+## NEW-DESKTOP-LOGIN — the graphical login screen and session switching (`plans/NEW-DESKTOP-LOGIN.md`)
+
+**Status: in progress.** How a machine reaches a *logged-in* state: the
+boot-time text-vs-graphical decision, the first-class graphical login
+screen (the *greeter*), the session authority that owns authentication and
+session lifetime, and macOS-style fast user switching between concurrently
+live desktop sessions on one seat. The plan is binding and carries the
+design; only status lives here.
+
+- **G1 — the boot session decision.** `lib/supervisor`'s `continue`
+  takes an optional `text` | `gui` operand (`console` / `graphical` /
+  `desktop` accepted, case-insensitive; anything else refused with the
+  usage line and the REPL held open). The choice rides
+  `SupervisorExit::ContinueBoot(BootSession)` into the root-unlock path,
+  which installs it once into a set-once kernel cell; the ungated,
+  unaudited `boot_session_get` syscall (no. 107, the `boot_facts_get`
+  boot-static-public-value shape) reports it, with
+  `tairix_rt::boot_session()` failing closed to `BootSession::Unset`.
+  `login` combines it with the stored `os.loginType` through the one
+  `effective_session_kind` precedence — the operator's one-boot choice
+  wins, else the store, else text — and still degrades to text when no
+  graphical session is available.
+- **G2/G6 — one authentication surface.** **`lib/greeter`** (new `lib/*`
+  crate, registered in `AGENTS.md` §3) owns the full-screen "prove who you
+  are, at the screen" surface: the `AuthSurface` state machine, the one
+  `panel_rect`/`field_rect` geometry both paint and hit-test read, the
+  wording, the bounded secret and its wipe on every terminal transition,
+  and the render over a caller-supplied `Backdrop`. Authentication itself
+  stays with the embedder through the `Verifier`/`Verdict` seam, so the
+  engine takes no ABI or IPC dependency. The desktop session's screen lock
+  composes it and keeps only its embedder duties (the compositor window,
+  `keep_topmost`, `LockedDrain`, the elevation-broker `Verifier`).
+- **Remaining: G3** (the `greeter.app` service bundle and its service
+  account), **G4** (the `session-v1` broker in `login` and the graphical
+  round), **G5** (fast user switching: session table, wake port, switch
+  away/back), **G7** (docs, README matrix, QEMU verticals).
+
+---
+
 ## SMARTRAM — reclaimable memory services (`plans/SMARTRAM.md`)
 
 Opportunistic, bounded, owner-accounted caches over spare RAM;

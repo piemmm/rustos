@@ -18,6 +18,7 @@ use tairix_abi::{
 };
 use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
+use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_icon::{
     artwork_cache, icon_artwork_path, ArtworkCache, IconArtworkSource, IconKind, IconSet,
     NoArtwork, MAX_ARTWORK_BYTES,
@@ -48,7 +49,7 @@ use crate::{
     PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
     SessionInputResponse, SessionInputRouter, SessionPins, SessionWindows, ShellOutcome,
     ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
-    TaskBridge, TaskbarPresenter, Unlocker, SWITCHBOARD_RUN_PATH, UNNAMED_ACCOUNT,
+    TaskBridge, TaskbarPresenter, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -5095,19 +5096,19 @@ fn setting_an_appearance_switches_the_theme_and_re_themes_the_bar() {
 
 // ---- screen lock ----
 
-/// A fake [`Unlocker`] that answers from a scripted list of verdicts, oldest
+/// A fake [`Verifier`] that answers from a scripted list of verdicts, oldest
 /// first, and records every password it was ever offered — so a test can
 /// assert both what was typed and what came back for it.
 #[derive(Default)]
 struct ScriptedUnlocker {
-    answers: Vec<Result<bool, Errno>>,
+    answers: Vec<Verdict>,
     offered: Vec<String>,
 }
 
 impl ScriptedUnlocker {
     /// Answers `answers` in order as it is offered passwords, one verdict
     /// per offer. Offered past the end of the script, it refuses.
-    fn scripted(mut answers: Vec<Result<bool, Errno>>) -> Self {
+    fn scripted(mut answers: Vec<Verdict>) -> Self {
         answers.reverse();
         Self {
             answers,
@@ -5121,10 +5122,10 @@ impl ScriptedUnlocker {
     }
 }
 
-impl Unlocker for ScriptedUnlocker {
-    fn verify(&mut self, password: &str) -> Result<bool, Errno> {
+impl Verifier for ScriptedUnlocker {
+    fn verify(&mut self, password: &str) -> Verdict {
         self.offered.push(String::from(password));
-        self.answers.pop().unwrap_or(Ok(false))
+        self.answers.pop().unwrap_or(Verdict::Refused)
     }
 }
 
@@ -5141,7 +5142,7 @@ fn key_press(key: Key) -> InputEvent {
 fn submit(
     lock: &mut ScreenLock,
     password: &str,
-    unlocker: &mut dyn Unlocker,
+    unlocker: &mut dyn Verifier,
     shell: &DesktopShell,
     comp: &mut Compositor,
 ) -> LockOutcome {
@@ -5243,7 +5244,7 @@ fn a_wrong_password_leaves_the_screen_locked() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(false)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused]);
 
     let outcome = submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
 
@@ -5263,7 +5264,7 @@ fn an_unreachable_broker_leaves_the_screen_locked() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Err(Errno::NotFound)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Unreachable]);
 
     let outcome = submit(&mut lock, "whatever", &mut unlocker, &shell, &mut comp);
 
@@ -5285,7 +5286,7 @@ fn a_correct_password_unlocks_the_screen_and_removes_the_lock_window() {
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
     let id = locked_window(&comp);
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
     let outcome = submit(
         &mut lock,
@@ -5309,7 +5310,7 @@ fn the_typed_password_is_offered_to_the_verifier_exactly_as_typed() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
     submit(&mut lock, "Hunter2!", &mut unlocker, &shell, &mut comp);
 
@@ -5325,7 +5326,7 @@ fn the_password_is_erased_after_every_attempt() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(false), Ok(true)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused, Verdict::Verified]);
 
     submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
     submit(&mut lock, "right", &mut unlocker, &shell, &mut comp);
@@ -5474,7 +5475,7 @@ fn repaint_while_locked_keeps_exactly_one_lock_window_and_stays_locked() {
 fn drain(
     events: &[InputEvent],
     lock: &mut ScreenLock,
-    unlocker: &mut dyn Unlocker,
+    unlocker: &mut dyn Verifier,
     shell: &DesktopShell,
     comp: &mut Compositor,
 ) -> LockedDrain {
@@ -5533,7 +5534,7 @@ fn a_mid_batch_unlock_discards_the_rest_of_the_drain() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
     // A keystroke and a submitting Enter behind the unlock: were they
     // routed on, this second Enter would offer "s" as a password.
     let tail = [
@@ -5576,7 +5577,7 @@ fn a_pointer_sample_behind_the_unlock_never_moves_the_desktop_cursor() {
     let resting = comp.cursor_bounds().expect("the pointer is shown");
     let mut lock = ScreenLock::new();
     assert!(lock.engage("ann", &shell, &mut comp));
-    let mut unlocker = ScriptedUnlocker::scripted(vec![Ok(true)]);
+    let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
     let drained = drain(
         &unlocking_batch("correct", &[moved(1500, 900)]),

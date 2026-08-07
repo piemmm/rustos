@@ -8,6 +8,7 @@
 //! read parks on the keyboard through the [`SupInput`] seam (never a
 //! busy-spin), and nothing here allocates.
 
+use tairix_abi::BootSession;
 use tairix_vt::line::{LineEditor, LineFeed};
 
 use crate::dispatch::{dispatch, Flow, Session};
@@ -128,7 +129,9 @@ pub fn run_supervisor(
             }
             LineOutcome::Eof => {
                 buf.fill(0);
-                return SupervisorExit::ContinueBoot;
+                // A closed console made no session choice, so the stored
+                // default stands.
+                return SupervisorExit::ContinueBoot(BootSession::Unset);
             }
         }
     }
@@ -136,6 +139,8 @@ pub fn run_supervisor(
 
 #[cfg(test)]
 mod tests {
+    use tairix_abi::BootSession;
+
     use super::run_supervisor;
     use crate::commands::test_support::{MockHost, MockInput, VecReport};
     use crate::{SupervisorEvent, SupervisorExit};
@@ -151,7 +156,7 @@ mod tests {
         let mut input = MockInput::new(b"continue\n");
         let mut host = MockHost::default();
         let exit = run_supervisor(&mut out, &mut input, &mut host);
-        assert_eq!(exit, SupervisorExit::ContinueBoot);
+        assert_eq!(exit, SupervisorExit::ContinueBoot(BootSession::Unset));
         assert!(host.audits.contains(&SupervisorEvent::Entered));
         assert!(out.contains("*"));
     }
@@ -163,8 +168,22 @@ mod tests {
         let mut host = MockHost::default();
         assert_eq!(
             run_supervisor(&mut out, &mut input, &mut host),
-            SupervisorExit::ContinueBoot
+            SupervisorExit::ContinueBoot(BootSession::Unset)
         );
+    }
+
+    #[test]
+    fn a_refused_session_operand_keeps_the_repl_open() {
+        // The bad line must not resume the boot: the REPL reads on, and only
+        // the following `continue gui` exits — carrying that choice.
+        let mut out = VecReport::default();
+        let mut input = MockInput::new(b"continue sideways\ncontinue gui\n");
+        let mut host = MockHost::default();
+        assert_eq!(
+            run_supervisor(&mut out, &mut input, &mut host),
+            SupervisorExit::ContinueBoot(BootSession::Graphical)
+        );
+        assert!(out.contains("unknown session: sideways"));
     }
 
     #[test]

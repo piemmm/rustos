@@ -2107,6 +2107,19 @@ impl SyscallNumber {
     /// `CAP_SHM` — and audited on every mint.
     pub const CALL_GRANT: Self = Self(106);
 
+    /// Read the operator's one-boot login choice
+    /// ([`crate::BootSession`]), as made in the pre-boot Supervisor with
+    /// `continue text` / `continue gui`.
+    ///
+    /// No arguments. Returns the [`crate::BootSession`] discriminant; a
+    /// boot the operator never diverted reports
+    /// [`crate::BootSession::Unset`] and the stored `os.loginType` default
+    /// decides. Recorded once by the boot path and immutable thereafter,
+    /// so — like [`Self::BOOT_FACTS_GET`] — the value is public boot state
+    /// rather than live state: it grants no authority, names no account,
+    /// and reveals no secret, hence unprivileged and not audited.
+    pub const BOOT_SESSION_GET: Self = Self(107);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

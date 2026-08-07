@@ -27,6 +27,10 @@
 //! any task through the ungated `boot_facts_get` syscall. Unlike the live
 //! `sysinfo` figures it never changes after boot, carries no per-process or
 //! usage detail, and grants no authority.
+//!
+//! [`BootSession`] is the third: the operator's one-boot choice of a text
+//! or graphical login, made in the pre-boot Supervisor and read back by
+//! the ungated `boot_session_get` syscall.
 
 use crate::le::{read_u16, read_u32, read_u64};
 
@@ -266,6 +270,59 @@ impl Arch {
     }
 }
 
+/// The login the boot should end at, as chosen by the operator in the
+/// pre-boot Supervisor (`continue text` / `continue gui`) and reported by
+/// the ungated `boot_session_get` syscall.
+///
+/// A one-boot override, never persisted: [`Unset`](Self::Unset) — the
+/// state of a boot the operator never diverted — leaves the stored
+/// `os.loginType` default in charge. The value is public boot state and
+/// grants no authority: knowing that the operator asked for a desktop
+/// reveals nothing about any account.
+#[repr(u64)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum BootSession {
+    /// No choice was made this boot; the stored default decides.
+    #[default]
+    Unset = 0,
+    /// A text login, whatever the stored default says.
+    Text = 1,
+    /// A graphical login, when one is available this boot. A machine that
+    /// cannot start one degrades to the text login rather than erroring.
+    Graphical = 2,
+}
+
+impl BootSession {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self as u64
+    }
+
+    /// Decode a wire discriminant; `None` for a value outside the closed
+    /// set. Readers fail closed to [`Unset`](Self::Unset) on `None` rather
+    /// than guess an intent the operator never expressed.
+    #[must_use]
+    pub const fn from_u64(raw: u64) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Unset),
+            1 => Some(Self::Text),
+            2 => Some(Self::Graphical),
+            _ => None,
+        }
+    }
+
+    /// The stable lowercase label used in audit records and diagnostics.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unset => "unset",
+            Self::Text => "text",
+            Self::Graphical => "graphical",
+        }
+    }
+}
+
 /// The kernel-attested, boot-static machine summary the ungated
 /// `boot_facts_get` syscall reports.
 ///
@@ -346,6 +403,7 @@ impl BootFacts {
 
 #[cfg(test)]
 mod tests {
+    use super::BootSession;
     use super::{
         Arch, BootFacts, BootId, CpuName, BOOT_FACTS_WIRE_LEN, BOOT_ID_HEX_LEN, BOOT_ID_LEN,
         CPU_NAME_LEN,
@@ -515,5 +573,30 @@ mod tests {
         let mut bad = good;
         bad[BOOT_FACTS_WIRE_LEN - 1] = b'!';
         assert_eq!(BootFacts::from_bytes(&bad), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn boot_session_discriminants_round_trip_and_reject_the_unknown() {
+        for kind in [
+            BootSession::Unset,
+            BootSession::Text,
+            BootSession::Graphical,
+        ] {
+            assert_eq!(BootSession::from_u64(kind.as_u64()), Some(kind));
+        }
+        assert_eq!(BootSession::Unset.as_u64(), 0);
+        assert_eq!(BootSession::Text.as_u64(), 1);
+        assert_eq!(BootSession::Graphical.as_u64(), 2);
+        // Outside the closed set: readers fail closed rather than guess.
+        assert_eq!(BootSession::from_u64(3), None);
+        assert_eq!(BootSession::from_u64(u64::MAX), None);
+    }
+
+    #[test]
+    fn boot_session_defaults_to_unset_with_stable_labels() {
+        assert_eq!(BootSession::default(), BootSession::Unset);
+        assert_eq!(BootSession::Unset.name(), "unset");
+        assert_eq!(BootSession::Text.name(), "text");
+        assert_eq!(BootSession::Graphical.name(), "graphical");
     }
 }

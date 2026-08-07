@@ -62,11 +62,11 @@ use tairix_abi::elevate::{
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    BootFacts, BootId, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags, InputMode, LimitKind,
-    MapFlags, OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit, SchedPriority, Signal,
-    SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN,
-    TERMINAL_SIZE_WIRE_LEN,
+    BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
+    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PowerAction, RandomFlags, ResourceLimit,
+    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
+    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
+    SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -226,6 +226,9 @@ const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
 /// `clock_get` syscall number (as above).
 const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
+
+/// `boot_session_get` syscall number (as above).
+const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
 /// `self_origin` syscall number (as above).
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
@@ -974,6 +977,29 @@ pub fn clock_get() -> u64 {
     // takes no arguments and no memory operand, so all six argument registers
     // are zero; its result is the `U64` nanosecond reading.
     unsafe { raw_syscall(NUM_CLOCK_GET, [0, 0, 0, 0, 0, 0]) }
+}
+
+/// Read the operator's one-boot login choice
+/// (`SyscallNumber::BOOT_SESSION_GET`).
+///
+/// Reports what the operator asked for at the pre-boot Supervisor's
+/// `continue text` / `continue gui`, or [`BootSession::Unset`] when this boot
+/// made no choice — in which case the stored login-type default decides. It
+/// requires no capability: the choice names no account, grants no authority,
+/// and reveals no secret.
+///
+/// Fails closed: a value the kernel returns that is not a known session (an
+/// error, or a discriminant this ABI does not define) reads as
+/// [`BootSession::Unset`], so an unreadable answer defers to the stored
+/// default rather than forcing a session.
+#[must_use]
+pub fn boot_session() -> BootSession {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `boot_session_get` takes no
+    // arguments and no memory operand, so all six argument registers are
+    // zero; its result is the `U64` session discriminant.
+    let raw = unsafe { raw_syscall(NUM_BOOT_SESSION_GET, [0, 0, 0, 0, 0, 0]) };
+    BootSession::from_u64(raw).unwrap_or_default()
 }
 
 /// Yield-loop until `now()` reaches `deadline_ns` — the **degraded
@@ -5694,6 +5720,25 @@ mod tests {
         assert_eq!(number, NUM_CLOCK_GET);
         // `clock_get` takes no arguments and no memory operand.
         assert_eq!(args, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn boot_session_issues_a_zero_arg_trap_and_maps_the_reading() {
+        let (number, args) = capture(BootSession::Graphical.as_u64(), || {
+            assert_eq!(boot_session(), BootSession::Graphical);
+        });
+        assert_eq!(number, NUM_BOOT_SESSION_GET);
+        // `boot_session_get` takes no arguments and no memory operand.
+        assert_eq!(args, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn boot_session_fails_closed_on_an_unknown_or_error_reading() {
+        // A discriminant this ABI does not define, and a negative (error)
+        // return, both read as "no choice" so the stored default decides —
+        // never a fabricated session.
+        capture(9, || assert_eq!(boot_session(), BootSession::Unset));
+        capture(u64::MAX, || assert_eq!(boot_session(), BootSession::Unset));
     }
 
     #[test]

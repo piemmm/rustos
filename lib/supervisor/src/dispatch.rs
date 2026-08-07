@@ -84,8 +84,8 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "continue",
         aliases: &["boot"],
-        summary: "leave the Supervisor and resume the normal boot",
-        help: "continue (alias: boot)\n\n  Leave the Supervisor and resume the normal boot: the passphrase\n  prompt is redrawn and boot carries on as though the Supervisor had\n  never been entered.",
+        summary: "resume the normal boot (continue [text|gui])",
+        help: "continue [text|gui] (alias: boot)\n\n  Leave the Supervisor and resume the normal boot: the passphrase\n  prompt is redrawn and boot carries on as though the Supervisor had\n  never been entered.\n\n  An optional operand chooses which login session THIS boot starts,\n  overriding the stored default for one boot only and changing no\n  setting: `text` (or `console`) for the text login, `gui` (or\n  `graphical` / `desktop`) for the desktop login. With no operand the\n  stored default decides. An unrecognised or extra operand is refused\n  and the boot does not resume.",
         handler: commands::control::cmd_continue,
     },
     Command {

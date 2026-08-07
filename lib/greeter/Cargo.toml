@@ -1,0 +1,34 @@
+[package]
+name = "tairix-greeter"
+description = "TAIRiX shared authentication-surface engine: the one panel, masked field, wording, geometry, and verdict state machine behind every place TAIRiX asks a user to prove who they are at the screen (plans/NEW-DESKTOP-LOGIN.md G2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Shared logical geometry (`Rect`/`Scale`): the panel and the field are
+# authored in logical pixels and converted through the one shared scale.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The shared design tokens: every colour, metric, and text size the surface
+# draws is resolved from the active theme, never hard-coded.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The single premultiplied-alpha rasteriser the frame is painted into.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The panel and the masked text field. The bead rendering that leaks no
+# length and the volatile wipe on discard are that crate's one
+# implementation; this engine adds no second copy of either.
+tairix-controls = { path = "../controls", version = "=0.0.0" }
+# The shared pointer/keyboard vocabulary the embedder drains into the
+# surface; the same events the window manager routes.
+tairix-input = { path = "../input", version = "=0.0.0" }
+
+# The surface's host tests draw text, so they inject the shared solid test
+# transport (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

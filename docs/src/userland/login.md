@@ -3,14 +3,22 @@
 `tairix-login` authenticates a user against `kernel/sec` and launches a
 session on their behalf. Which session runs is **system policy, never a
 per-login prompt**: the authenticated account's text shell by default,
-or the graphical desktop when the administrator configured
-`os.loginType graphical` **and** the desktop bundle is installed
-**and** a display service is live (both re-probed each round, see the
-`Run` binary below). When they are not, the configured graphical
-default degrades to text — never crashed, never errored (`AGENTS.md`
-§10) — and a shell user starts the desktop on demand with the `desktop`
-command. The installed binary lives at
+or the graphical desktop when the effective session type is graphical
+**and** the desktop bundle is installed **and** a display service is
+live (both re-probed each round, see the `Run` binary below). When they
+are not, a graphical choice degrades to text — never crashed, never
+errored (`AGENTS.md` §10) — and a shell user starts the desktop on
+demand with the `desktop` command. The installed binary lives at
 `/System/Services/login.app/Run`.
+
+The **effective session type** comes from `effective_session_kind`, the
+one definition of the precedence (`plans/NEW-DESKTOP-LOGIN.md` G1):
+
+| Input | Effect |
+| --- | --- |
+| the operator's Supervisor choice (`continue text` / `continue gui`), read from the kernel through the ungated `boot_session_get` syscall | wins for this boot only; never persisted |
+| the administrator's stored `os.loginType` (`text` \| `graphical`) | decides when the operator made no choice |
+| neither | `text` |
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-log`,
@@ -40,13 +48,13 @@ the stored hash.
    means a stuck or hostile console can never spin forever.
 3. On success, **decide the session** — pure policy, no prompt — and
    hand the authenticated identity to the `SessionLauncher`. When the
-   administrator configured `os.loginType graphical` (the `configure`
-   command's system-configuration store, read through the shared
-   `lib/sysconfig` engine each round) and a graphical session is
-   available (`graphical_available`, `AGENTS.md` §10), the desktop
-   starts directly; every other combination starts the account's text
-   shell — a graphical default on a system with no desktop degrades to
-   text, never an error.
+   effective session type (the table above: the operator's one-boot
+   Supervisor choice, else the `configure` command's `os.loginType`
+   store value, both re-read each round) is graphical and a graphical
+   session is available (`graphical_available`, `AGENTS.md` §10), the
+   desktop starts directly; every other combination starts the
+   account's text shell — a graphical choice on a system with no
+   desktop degrades to text, never an error.
 
 If the attempt budget is exhausted, login launches nothing and returns
 `LoginError::TooManyAttempts`. A terminal that cannot be read aborts with

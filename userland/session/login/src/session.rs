@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{BootSession, Errno};
 use tairix_caps::CapabilitySet;
 
 pub use tairix_users::{Gid, Uid};
@@ -164,9 +164,9 @@ pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
 /// Which kind of session to launch after a successful authentication.
 ///
 /// There is no per-login prompt: the kind is system policy, decided by
-/// the administrator-configured `os.loginType` setting (the
-/// [`LoginConfig::session_default`](crate::LoginConfig) the binary reads
-/// through `lib/sysconfig`), and a graphical default takes effect only
+/// the operator's one-boot Supervisor choice where they made one and
+/// otherwise by the administrator-configured `os.loginType` setting (see
+/// [`effective_session_kind`]), and a graphical result takes effect only
 /// when a graphical session is actually available (see
 /// [`LoginConfig::graphical_available`](crate::LoginConfig)) — otherwise
 /// the text shell runs. A shell user starts the desktop on demand with
@@ -187,6 +187,27 @@ impl SessionKind {
             Self::Text => "text",
             Self::Graphical => "graphical",
         }
+    }
+}
+
+/// The login this round runs, from the operator's one-boot Supervisor
+/// choice and the administrator's stored `os.loginType` default.
+///
+/// The operator is at the machine and their `continue text` / `continue
+/// gui` is the more recent instruction, so it wins for this boot only;
+/// [`BootSession::Unset`] — a boot the operator never diverted — leaves
+/// the stored default in charge. Neither input can force a desktop onto a
+/// machine that cannot start one: the caller still intersects the result
+/// with what is available this round, which degrades to
+/// [`SessionKind::Text`] rather than erroring.
+///
+/// One definition, so the binary and every test agree on the precedence.
+#[must_use]
+pub fn effective_session_kind(boot: BootSession, configured: SessionKind) -> SessionKind {
+    match boot {
+        BootSession::Text => SessionKind::Text,
+        BootSession::Graphical => SessionKind::Graphical,
+        BootSession::Unset => configured,
     }
 }
 
@@ -314,11 +335,12 @@ pub trait SessionLauncher {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_environment, AuthenticatedUser, Gid, SessionKind, Uid, DEFAULT_LANG, DEFAULT_PATH,
-        DEFAULT_TERM,
+        effective_session_kind, session_environment, AuthenticatedUser, Gid, SessionKind, Uid,
+        DEFAULT_LANG, DEFAULT_PATH, DEFAULT_TERM,
     };
     use alloc::string::ToString;
     use alloc::vec::Vec;
+    use tairix_abi::BootSession;
     use tairix_caps::CapabilitySet;
 
     #[test]
@@ -386,5 +408,29 @@ mod tests {
     fn labels_are_stable() {
         assert_eq!(SessionKind::Text.label(), "text");
         assert_eq!(SessionKind::Graphical.label(), "graphical");
+    }
+
+    #[test]
+    fn a_supervisor_choice_overrides_the_stored_default_both_ways() {
+        for configured in [SessionKind::Text, SessionKind::Graphical] {
+            assert_eq!(
+                effective_session_kind(BootSession::Text, configured),
+                SessionKind::Text
+            );
+            assert_eq!(
+                effective_session_kind(BootSession::Graphical, configured),
+                SessionKind::Graphical
+            );
+        }
+    }
+
+    #[test]
+    fn a_boot_the_operator_never_diverted_keeps_the_stored_default() {
+        for configured in [SessionKind::Text, SessionKind::Graphical] {
+            assert_eq!(
+                effective_session_kind(BootSession::Unset, configured),
+                configured
+            );
+        }
     }
 }

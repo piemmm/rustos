@@ -75,6 +75,7 @@ pub mod audit;
 pub mod blockwait;
 pub mod boot_audit_ring;
 pub mod boot_id;
+pub mod boot_session;
 pub mod bootinfo;
 pub mod cache_control;
 pub mod callreg;

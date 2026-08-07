@@ -870,6 +870,7 @@ dependencies = [
  "tairix-display",
  "tairix-font",
  "tairix-geometry",
+ "tairix-greeter",
  "tairix-help",
  "tairix-icon",
  "tairix-log",
@@ -1449,6 +1450,18 @@ name = "tairix-glob"
 version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-greeter"
+version = "0.0.0"
+dependencies = [
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-theme",
 ]
 
 [[package]]
@@ -2253,6 +2266,7 @@ dependencies = [
 name = "tairix-supervisor"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-fuzzseed",
  "tairix-vt",
 ]

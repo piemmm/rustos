@@ -575,6 +575,7 @@ tairix/
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
 │   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
 │   ├── glob/            # Shared filename-glob matcher.
+│   ├── greeter/         # Shared screen-authentication surface (login/lock).
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
 │   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
@@ -1389,6 +1390,7 @@ You are not exempt from any rule above. In addition:
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Reaching a logged-in state: the boot-time text-vs-graphical decision (`continue text\|gui`), the graphical login screen (greeter), the login service's session broker, and macOS-style fast user switching between concurrent desktop sessions | `plans/NEW-DESKTOP-LOGIN.md` |
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |

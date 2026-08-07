@@ -111,10 +111,11 @@ mod program {
         PinboardMenuOutcome, PinboardStore, PinboardStoreError, ResolvedPin, ScreenLock,
         SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
         SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, Unlocker, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+        USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
+    use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
@@ -564,7 +565,7 @@ mod program {
         }
     }
 
-    /// The [`Unlocker`] the running desktop uses: the per-console elevation
+    /// The [`Verifier`] the running desktop uses: the per-console elevation
     /// broker served by the login supervisor that started this session.
     ///
     /// The request goes through the shared runtime client, which derives
@@ -574,15 +575,15 @@ mod program {
     /// no caller can ask it to check a password against another account.
     struct BrokerUnlocker;
 
-    impl Unlocker for BrokerUnlocker {
-        fn verify(&mut self, password: &str) -> Result<bool, Errno> {
-            match tairix_rt::elevate(&ElevateRequest::Verify { password })? {
-                ElevateReply::Verified => Ok(true),
-                ElevateReply::Refused(_) => Ok(false),
+    impl Verifier for BrokerUnlocker {
+        fn verify(&mut self, password: &str) -> Verdict {
+            match tairix_rt::elevate(&ElevateRequest::Verify { password }) {
+                Ok(ElevateReply::Verified) => Verdict::Verified,
+                Ok(ElevateReply::Refused(_)) => Verdict::Refused,
                 // `Completed` answers a `Run` request, never a `Verify`. A
                 // broker that sent it is not speaking this protocol, and a
                 // lock does not open on a reply it did not understand.
-                ElevateReply::Completed { .. } => Err(Errno::NotSupported),
+                Ok(ElevateReply::Completed { .. }) | Err(_) => Verdict::Unreachable,
             }
         }
     }
@@ -612,7 +613,7 @@ mod program {
         lock: &mut ScreenLock,
         pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
         keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
-        unlocker: &mut dyn Unlocker,
+        unlocker: &mut dyn Verifier,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Drained {
