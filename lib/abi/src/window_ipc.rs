@@ -276,6 +276,57 @@ pub enum WindowRequest {
         /// size change.
         resizable: bool,
     },
+    /// Open an **undecorated, app-positioned popup surface** stacked
+    /// directly above the caller's own window `parent_window_id`: a
+    /// context menu or a settings sheet that must not be clipped by the
+    /// bounds of the window that owns it (`plans/APPWIN.md`).
+    ///
+    /// A popup differs from a top-level [`Self::Create`] in kind, not
+    /// degree, so it is its own operation rather than extra `Create`
+    /// fields: it carries no title (a popup is never a taskbar entry) and
+    /// no resizability (a popup is a fixed-size transient), and it is
+    /// positioned by an offset **relative to the parent window's client
+    /// origin** — an app is never told its own window's screen position,
+    /// so the session resolves the absolute point and clamps the whole
+    /// popup onto the screen. The popup is undecorated: the window manager
+    /// draws it no frame furniture, exactly like the session's own trusted
+    /// modal surfaces.
+    ///
+    /// It counts against the same per-client window budget as
+    /// [`Self::Create`], so "popup" cannot be used to exceed the cap. It
+    /// answers with the same [`WINDOW_CREATE_REPLY_LEN`]-byte reply as
+    /// `Create` (the assigned window id and the serving session identity),
+    /// and thereafter [`Self::Present`] and [`Self::Close`] act on the
+    /// popup's own id unchanged. Closing the parent window closes its
+    /// popups with it.
+    CreatePopup {
+        /// The caller's own window the popup is anchored above and owned
+        /// by (from that window's `Create` reply); never zero.
+        parent_window_id: u64,
+        /// The `shm_grant` handle minted to the session's serving task,
+        /// naming the region that holds the popup's frames back-to-back.
+        shm_handle: u64,
+        /// The caller's own endpoint the session delivers this popup's
+        /// [`WindowEvent`]s to. Never a reserved endpoint.
+        event_endpoint: u64,
+        /// Frames laid out back-to-back in the region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// Popup width in pixels; never zero.
+        width_px: u32,
+        /// Popup height in pixels; never zero.
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the frames.
+        format: DisplayFormat,
+        /// Horizontal offset of the popup's top-left from the parent
+        /// window's client origin, in physical pixels; may be negative.
+        offset_x: i32,
+        /// Vertical offset of the popup's top-left from the parent
+        /// window's client origin, in physical pixels; may be negative.
+        offset_y: i32,
+    },
     /// Show frame `frame_index` of window `window_id`, of which only
     /// `damage` changed since the previously presented frame.
     Present {
@@ -415,6 +466,21 @@ const OP_DRAG_WITHDRAW: u16 = 8;
 const OP_QUERY_DESKTOP: u16 = 9;
 /// Wire operation discriminant of [`WindowRequest::SetBackdropBlur`].
 const OP_SET_BACKDROP_BLUR: u16 = 10;
+/// Wire operation discriminant of [`WindowRequest::CreatePopup`].
+const OP_CREATE_POPUP: u16 = 11;
+
+/// Byte offset, within the fixed frame, of a [`WindowRequest::CreatePopup`]
+/// operand tail that follows the shared frame-layout block: the parent
+/// window id (8), then the two signed placement offsets (4 each). The
+/// popup reuses [`read_frame_layout`]'s offsets 24..=40 verbatim, so only
+/// this tail is popup-specific.
+const POPUP_PARENT_OFFSET: usize = 41;
+/// Byte offset of [`WindowRequest::CreatePopup::offset_x`].
+const POPUP_OFFSET_X: usize = POPUP_PARENT_OFFSET + 8;
+/// Byte offset of [`WindowRequest::CreatePopup::offset_y`].
+const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
+/// First reserved byte after a [`WindowRequest::CreatePopup`] operand block.
+const POPUP_RESERVED_FROM: usize = POPUP_OFFSET_Y + 4;
 
 /// Byte offset, within the fixed frame, of a bundle-path payload's
 /// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
@@ -435,6 +501,32 @@ impl WindowRequest {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, WINDOW_REQUEST_MAGIC);
         put_u16(&mut out, 4, WINDOW_VERSION_V1);
+        put_u16(&mut out, 6, self.op());
+        self.write_operands(&mut out);
+        out
+    }
+
+    /// The wire operation discriminant of `self`, which
+    /// [`from_bytes`](Self::from_bytes) dispatches on.
+    const fn op(&self) -> u16 {
+        match *self {
+            Self::Create { .. } => OP_CREATE,
+            Self::CreatePopup { .. } => OP_CREATE_POPUP,
+            Self::Present { .. } => OP_PRESENT,
+            Self::Close { .. } => OP_CLOSE,
+            Self::PickFile { .. } => OP_PICK_FILE,
+            Self::Resize { .. } => OP_RESIZE,
+            Self::PinBundle { .. } => OP_PIN_BUNDLE,
+            Self::DragOffer { .. } => OP_DRAG_OFFER,
+            Self::DragWithdraw { .. } => OP_DRAG_WITHDRAW,
+            Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
+            Self::QueryDesktop => OP_QUERY_DESKTOP,
+        }
+    }
+
+    /// Write `self`'s operand block into the already-headed frame `out`,
+    /// leaving the reserved tail zero.
+    fn write_operands(&self, out: &mut [u8; Self::WIRE_LEN]) {
         match *self {
             Self::Create {
                 shm_handle,
@@ -447,38 +539,60 @@ impl WindowRequest {
                 title,
                 resizable,
             } => {
-                put_u16(&mut out, 6, OP_CREATE);
-                put_u64(&mut out, 8, shm_handle);
-                put_u64(&mut out, 16, event_endpoint);
-                put_u32(&mut out, 24, frame_count);
-                put_u32(&mut out, 28, width_px);
-                put_u32(&mut out, 32, height_px);
-                put_u32(&mut out, 36, stride_bytes);
-                out[40] = format.as_u8();
+                put_u64(out, 8, shm_handle);
+                put_u64(out, 16, event_endpoint);
+                FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                }
+                .write_to(out);
                 out[41] = title.len;
                 out[42..42 + WINDOW_TITLE_MAX].copy_from_slice(&title.bytes);
                 out[42 + WINDOW_TITLE_MAX] = u8::from(resizable);
+            }
+            Self::CreatePopup {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                offset_x,
+                offset_y,
+            } => {
+                put_u64(out, 8, shm_handle);
+                put_u64(out, 16, event_endpoint);
+                FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                }
+                .write_to(out);
+                put_u64(out, POPUP_PARENT_OFFSET, parent_window_id);
+                put_i32(out, POPUP_OFFSET_X, offset_x);
+                put_i32(out, POPUP_OFFSET_Y, offset_y);
             }
             Self::Present {
                 window_id,
                 frame_index,
                 damage,
             } => {
-                put_u16(&mut out, 6, OP_PRESENT);
-                put_u64(&mut out, 8, window_id);
-                put_u32(&mut out, 16, frame_index);
-                put_u32(&mut out, 20, damage.x);
-                put_u32(&mut out, 24, damage.y);
-                put_u32(&mut out, 28, damage.width_px);
-                put_u32(&mut out, 32, damage.height_px);
+                put_u64(out, 8, window_id);
+                put_u32(out, 16, frame_index);
+                put_u32(out, 20, damage.x);
+                put_u32(out, 24, damage.y);
+                put_u32(out, 28, damage.width_px);
+                put_u32(out, 32, damage.height_px);
             }
-            Self::Close { window_id } => {
-                put_u16(&mut out, 6, OP_CLOSE);
-                put_u64(&mut out, 8, window_id);
-            }
-            Self::PickFile { window_id } => {
-                put_u16(&mut out, 6, OP_PICK_FILE);
-                put_u64(&mut out, 8, window_id);
+            Self::Close { window_id } | Self::PickFile { window_id } => {
+                put_u64(out, 8, window_id);
             }
             Self::Resize {
                 window_id,
@@ -489,40 +603,30 @@ impl WindowRequest {
                 stride_bytes,
                 format,
             } => {
-                put_u16(&mut out, 6, OP_RESIZE);
-                put_u64(&mut out, 8, window_id);
-                put_u64(&mut out, 16, shm_handle);
-                put_u32(&mut out, 24, frame_count);
-                put_u32(&mut out, 28, width_px);
-                put_u32(&mut out, 32, height_px);
-                put_u32(&mut out, 36, stride_bytes);
-                out[40] = format.as_u8();
+                put_u64(out, 8, window_id);
+                put_u64(out, 16, shm_handle);
+                FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                }
+                .write_to(out);
             }
-            Self::PinBundle { window, path } => {
-                put_u16(&mut out, 6, OP_PIN_BUNDLE);
-                encode_bundle_path(&mut out, window, &path);
+            Self::PinBundle { window, path } | Self::DragOffer { window, path } => {
+                encode_bundle_path(out, window, &path);
             }
-            Self::DragOffer { window, path } => {
-                put_u16(&mut out, 6, OP_DRAG_OFFER);
-                encode_bundle_path(&mut out, window, &path);
-            }
-            Self::DragWithdraw { window } => {
-                put_u16(&mut out, 6, OP_DRAG_WITHDRAW);
-                put_u64(&mut out, 8, window);
-            }
+            Self::DragWithdraw { window } => put_u64(out, 8, window),
             Self::SetBackdropBlur {
                 window_id,
                 radius_px,
             } => {
-                put_u16(&mut out, 6, OP_SET_BACKDROP_BLUR);
-                put_u64(&mut out, 8, window_id);
-                put_u16(&mut out, 16, radius_px);
+                put_u64(out, 8, window_id);
+                put_u16(out, 16, radius_px);
             }
-            Self::QueryDesktop => {
-                put_u16(&mut out, 6, OP_QUERY_DESKTOP);
-            }
+            Self::QueryDesktop => {}
         }
-        out
     }
 
     /// Decode from `bytes`, failing closed on any malformed input.
@@ -565,6 +669,7 @@ impl WindowRequest {
         let op = read_u16(bytes, 6);
         match op {
             OP_CREATE => read_create(bytes),
+            OP_CREATE_POPUP => read_create_popup(bytes),
             OP_PRESENT => {
                 reserved_zero(bytes, 36)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
@@ -704,8 +809,44 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     })
 }
 
-/// The frame-layout fields `Create` and `Resize` share verbatim at the same
-/// wire offsets: the frame count, geometry, stride, and pixel format.
+/// Decode the operands of a [`WindowRequest::CreatePopup`]: the granted
+/// region and event route and the frame layout (the same offsets a
+/// `Create` carries, reusing [`read_frame_layout`]), then the popup's own
+/// tail — the parent window id it is anchored above and the signed
+/// placement offsets from the parent's client origin.
+///
+/// Fails closed exactly as `Create`: a reserved endpoint, a bad geometry,
+/// a zero parent window id, or a dirty reserved tail is refused. The
+/// offsets are unconstrained signed values — the session clamps the popup
+/// onto the screen, so any offset is a legitimate request.
+fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    reserved_zero(bytes, POPUP_RESERVED_FROM)?;
+    let shm_handle = read_u64(bytes, 8);
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let layout = read_frame_layout(bytes)?;
+    let parent_window_id = nonzero_window_id(read_u64(bytes, POPUP_PARENT_OFFSET))?;
+    let offset_x = read_i32(bytes, POPUP_OFFSET_X);
+    let offset_y = read_i32(bytes, POPUP_OFFSET_Y);
+    Ok(WindowRequest::CreatePopup {
+        parent_window_id,
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+        offset_x,
+        offset_y,
+    })
+}
+
+/// The frame-layout fields `Create`, `CreatePopup`, and `Resize` share
+/// verbatim at the same wire offsets: the frame count, geometry, stride, and
+/// pixel format.
 struct FrameLayout {
     frame_count: u32,
     width_px: u32,
@@ -714,11 +855,23 @@ struct FrameLayout {
     format: DisplayFormat,
 }
 
-/// Decode and validate the frame layout `Create` and `Resize` both carry at
-/// bytes 24..=40 — the frame count within `1..=WINDOW_MAX_FRAMES`, a non-zero
+impl FrameLayout {
+    /// Write the block at the offsets [`read_frame_layout`] reads it from, so
+    /// encoding and decoding can never disagree about where it sits.
+    fn write_to(&self, out: &mut [u8; WindowRequest::WIRE_LEN]) {
+        put_u32(out, 24, self.frame_count);
+        put_u32(out, 28, self.width_px);
+        put_u32(out, 32, self.height_px);
+        put_u32(out, 36, self.stride_bytes);
+        out[40] = self.format.as_u8();
+    }
+}
+
+/// Decode and validate the frame layout those requests carry at bytes
+/// 24..=40 — the frame count within `1..=WINDOW_MAX_FRAMES`, a non-zero
 /// geometry, a known pixel format, and a stride that holds at least one
-/// scanline. The one definition both request arms share, so the geometry
-/// bounds can never diverge between opening and resizing a window.
+/// scanline. The one definition every such arm shares, so the geometry bounds
+/// can never diverge between opening, popping up, and resizing a window.
 fn read_frame_layout(bytes: &[u8]) -> Result<FrameLayout, Errno> {
     let frame_count = read_u32(bytes, 24);
     if frame_count == 0 || frame_count > WINDOW_MAX_FRAMES {
@@ -1299,6 +1452,21 @@ mod tests {
         }
     }
 
+    fn sample_create_popup() -> WindowRequest {
+        WindowRequest::CreatePopup {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 2,
+            width_px: 160,
+            height_px: 96,
+            stride_bytes: 640,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -12,
+            offset_y: 24,
+        }
+    }
+
     #[test]
     fn magic_and_endpoint_are_frozen() {
         assert_eq!(WINDOW_REQUEST_MAGIC, u32::from_le_bytes(*b"WIN1"));
@@ -1360,6 +1528,7 @@ mod tests {
         let widest_path = BundleRef::new(&"p".repeat(WINDOW_BUNDLE_PATH_MAX)).expect("max path");
         for request in [
             sample_create(),
+            sample_create_popup(),
             sample_present(),
             WindowRequest::Close { window_id: 9 },
             WindowRequest::PickFile { window_id: 9 },
@@ -1669,6 +1838,68 @@ mod tests {
         let mut own = sample_create().to_le_bytes();
         own[16..24].copy_from_slice(&WINDOW_ENDPOINT.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&own), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn create_popup_enforces_bounds_a_parent_id_an_endpoint_and_a_clean_tail() {
+        let base = sample_create_popup();
+        // A reserved event endpoint is refused, exactly as `Create`.
+        let mut reserved_endpoint = base.to_le_bytes();
+        reserved_endpoint[16..24].copy_from_slice(&SEATMGR_ENDPOINT.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&reserved_endpoint),
+            Err(Errno::OutOfRange)
+        );
+        // The shared frame-layout bounds still hold: a zero/over-large
+        // frame count, a zero extent, a stride too small for one scanline.
+        let mut zero_frames = base.to_le_bytes();
+        zero_frames[24..28].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_frames),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut zero_w = base.to_le_bytes();
+        zero_w[28..32].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_w),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut short_stride = base.to_le_bytes();
+        short_stride[36..40].copy_from_slice(&639u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&short_stride),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A zero parent window id is refused: a popup must name a real
+        // window it is anchored above.
+        let mut zero_parent = base.to_le_bytes();
+        zero_parent[super::POPUP_PARENT_OFFSET..super::POPUP_PARENT_OFFSET + 8]
+            .copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_parent),
+            Err(Errno::OutOfRange)
+        );
+        // The reserved tail past the last operand byte is dirty-checked.
+        let mut dirty = base.to_le_bytes();
+        dirty[super::POPUP_RESERVED_FROM] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn create_popup_carries_signed_offsets_including_negatives() {
+        let request = sample_create_popup();
+        let bytes = request.to_le_bytes();
+        // The offsets sit just past the parent id and round-trip signed.
+        assert_eq!(
+            i32::from_le_bytes([
+                bytes[super::POPUP_OFFSET_X],
+                bytes[super::POPUP_OFFSET_X + 1],
+                bytes[super::POPUP_OFFSET_X + 2],
+                bytes[super::POPUP_OFFSET_X + 3],
+            ]),
+            -12
+        );
+        assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
     }
 
     /// The desktop the query tests round-trip.

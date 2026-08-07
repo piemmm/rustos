@@ -1153,6 +1153,22 @@ impl Settings {
     }
 }
 
+/// The physical size the sheet wants, at `scale`.
+///
+/// A caller that owns the surface the sheet is drawn into — the terminal,
+/// which gives each overlay its own popup window — asks for this and makes a
+/// surface that large, so the sheet opens at its full size however small the
+/// terminal window behind it happens to be. Drawing into a smaller surface
+/// still works (the sheet takes whatever room there is and its body scrolls),
+/// but the sheet is then cramped for no reason.
+#[must_use]
+pub fn preferred_extent(scale: Scale) -> (u32, u32) {
+    (
+        scale.scale_length(MAX_PANEL_WIDTH_PX),
+        scale.scale_length(MAX_PANEL_HEIGHT_PX),
+    )
+}
+
 /// The panel's own bounds within `viewport`: centred, grown up to
 /// [`MAX_PANEL_WIDTH_PX`]/[`MAX_PANEL_HEIGHT_PX`], and never larger than the
 /// viewport itself — so a small window simply gives the sheet the whole of it

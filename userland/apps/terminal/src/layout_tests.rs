@@ -7,7 +7,9 @@ use tairix_theme::Theme;
 use crate::grid::MAX_DIMENSION;
 use crate::profile::{DEFAULT_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 
-use super::{chrome_extent, fit_font_size, grid_dims, grid_size, window_size, COLS, ROWS};
+use super::{
+    chrome_extent, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size, COLS, ROWS,
+};
 
 /// The font a terminal opens with at the profile's default text size, on an
 /// unscaled (100%) display.
@@ -106,17 +108,73 @@ fn grid_dims_clamps_to_at_most_the_maximum_dimension() {
     assert_eq!(rows, MAX_DIMENSION);
 }
 
+// --- snap_to_cells -------------------------------------------------------------
+
+#[test]
+fn snapping_leaves_no_partial_cell() {
+    let font = default_font();
+    let (advance, line_height) = (font.cell_width().max(1), font.line_height().max(1));
+    // A client one pixel short of the next whole cell on both axes: the
+    // remainder is background the grid could never draw in.
+    let ragged_w = advance * 40 + advance - 1;
+    let ragged_h = line_height * 12 + line_height - 1;
+    let (w, h) = snap_to_cells(ragged_w, ragged_h, font);
+    assert_eq!(w % advance, 0);
+    assert_eq!(h % line_height, 0);
+    assert!(w <= ragged_w && h <= ragged_h);
+    assert_eq!(grid_dims(w, h, font), (40, 12));
+}
+
+#[test]
+fn snapping_an_exact_grid_changes_nothing() {
+    let font = default_font();
+    let exact = grid_size(COLS, ROWS, font);
+    assert_eq!(snap_to_cells(exact.0, exact.1, font), exact);
+}
+
+#[test]
+fn snapping_is_idempotent_so_a_remap_cannot_oscillate() {
+    let font = default_font();
+    let once = snap_to_cells(613, 447, font);
+    assert_eq!(snap_to_cells(once.0, once.1, font), once);
+}
+
+#[test]
+fn snapping_never_yields_an_empty_client() {
+    let font = default_font();
+    let (w, h) = snap_to_cells(0, 0, font);
+    assert_eq!((w, h), grid_size(1, 1, font));
+    assert!(w > 0 && h > 0);
+}
+
 // --- chrome_extent -------------------------------------------------------------
 
 #[test]
-fn chrome_extent_is_larger_for_a_resizable_window_than_a_fixed_one() {
+fn a_resizable_window_reserves_no_more_furniture_than_a_fixed_one() {
+    // A resizable window's grab edges are an invisible hit zone over the
+    // client's outer pixels, not a reserved band, so being resizable costs a
+    // terminal no screen space at all.
     let theme = Theme::dark();
     let scale = Scale::ONE;
-    let (resizable_w, resizable_h) = chrome_extent(&theme, scale, true);
-    let (fixed_w, fixed_h) = chrome_extent(&theme, scale, false);
-    assert!(resizable_w >= fixed_w);
-    assert!(resizable_h >= fixed_h);
-    assert!(resizable_w > fixed_w || resizable_h > fixed_h);
+    assert_eq!(
+        chrome_extent(&theme, scale, true),
+        chrome_extent(&theme, scale, false)
+    );
+}
+
+#[test]
+fn the_furniture_band_is_only_the_rim_and_the_title_bar() {
+    // Nothing but the frame rim on the sides and bottom: a wider allowance
+    // would show as dead space around the screen.
+    let theme = Theme::dark();
+    let metrics = theme.metrics();
+    let scale = Scale::ONE;
+    let (horizontal, vertical) = chrome_extent(&theme, scale, true);
+    let rim = scale.scale_length(metrics.border_thickness).max(1);
+    let inset = scale.scale_length(metrics.frame_inset).max(rim);
+    let title = scale.scale_length(metrics.title_bar_height);
+    assert_eq!(horizontal, inset * 2);
+    assert_eq!(vertical, rim + title + inset);
 }
 
 #[test]

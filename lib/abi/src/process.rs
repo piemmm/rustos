@@ -687,14 +687,22 @@ pub const DOCUMENT_ROLE_ARG: &[u8] = b"--document";
 /// selector names: the parent's own descriptor table
 /// ([`CONSOLE_INHERIT`]) or the standard shape on an installed console
 /// index — exactly the two shapes `spawn` always offered.
+///
+/// Inheriting the parent's table inherits whatever *backs* each of its
+/// descriptors, which for a standard stream a spawn wired to a pipe or pty
+/// end is that open entry (cloned into the child), not a console slot: a
+/// command a pty-hosted shell runs writes to the same terminal its shell
+/// does. An explicitly selected console index is the whole base, so the
+/// parent's own entries stay out of that child's reach.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FdWire {
-    /// The base table's own slot for this descriptor (the default: the
-    /// child sees exactly what an unwired spawn would give it).
+    /// Whatever backs the base table's own slot for this descriptor (the
+    /// default: the child sees exactly what an unwired spawn would give
+    /// it).
     Inherit,
-    /// The base table's slot `n` (`0..STD_STREAM_COUNT`) — how `2>&1`
-    /// against an inherited console is spelled: the child's fd 2 becomes
-    /// whatever backs the base table's fd 1.
+    /// Whatever backs the base table's slot `n` (`0..STD_STREAM_COUNT`) —
+    /// how `2>&1` is spelled: the child's fd 2 becomes whatever backs the
+    /// base table's fd 1.
     InheritSlot(u32),
     /// No backing: every access through this descriptor denies (fail
     /// closed), exactly like a [`DescriptorTable::closed`] slot.

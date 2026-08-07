@@ -6544,3 +6544,231 @@ fn desktop_info_reports_compositor_state() {
     // later.
     assert_eq!(WindowHost::desktop(&mut host), Ok(info));
 }
+
+// --- App-owned popup surfaces ---------------------------------------------
+
+/// A frame geometry of `width`×`height` in the compositor's own format —
+/// what the window engine hands the host for a create or a popup.
+fn served_mode(width: u32, height: u32) -> DisplayMode {
+    DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Rgba8888,
+    }
+}
+
+/// Run `body` against a [`ShellWindowHost`] built over `shell`, `comp` and
+/// `windows`, so a test drives the very bridge the serve loop drives.
+fn with_window_host<R>(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    windows: &mut SessionWindows,
+    body: impl FnOnce(&mut ShellWindowHost<'_>) -> R,
+) -> R {
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut pins = PinService::new(
+        MemoryAssets::default(),
+        MemoryWriter::default(),
+        SessionPins::default(),
+    );
+    let mut host = ShellWindowHost {
+        shell,
+        compositor: comp,
+        windows,
+        picker: &mut picker,
+        pins: &mut pins,
+    };
+    body(&mut host)
+}
+
+/// A served parent window (channel id 1) plus a popup (channel id 2) at
+/// `offset` from the parent's client origin, opened exactly as the serve
+/// loop opens them.
+fn open_parent_and_popup(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    windows: &mut SessionWindows,
+    offset: (i32, i32),
+    popup: (u32, u32),
+) -> (WindowId, WindowId) {
+    with_window_host(shell, comp, windows, |host| {
+        assert_eq!(
+            host.window_opened(1, &served_mode(320, 240), "Terminal", true),
+            Ok(())
+        );
+        assert_eq!(
+            host.popup_opened(2, 1, offset.0, offset.1, &served_mode(popup.0, popup.1)),
+            Ok(())
+        );
+    });
+    let parent = windows.wm_id(1).expect("the parent window is live");
+    let popup = windows.wm_id(2).expect("the popup window is live");
+    (parent, popup)
+}
+
+#[test]
+fn a_popup_opens_undecorated_over_its_parent_and_off_the_taskbar() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+
+    let (parent, popup) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+
+    // Placed against the parent's *client* origin, which is what the app's
+    // own coordinates are relative to — never the decorated outer bounds.
+    let client = comp.window_client_rect(parent).expect("parent client");
+    let bounds = comp.window(popup).expect("popup is live").bounds();
+    assert_eq!(
+        (bounds.left(), bounds.top()),
+        (client.left() + 10, client.top() + 20)
+    );
+    assert_eq!((bounds.width, bounds.height), (100, 80));
+
+    // Undecorated: no frame furniture at all, so the whole window is client.
+    assert!(comp.window_frame(popup).is_none(), "a popup wears no frame");
+    assert_eq!(
+        comp.window_client_rect(popup),
+        Some(bounds),
+        "an undecorated popup reserves no band around its content"
+    );
+
+    // Not a task: the bar lists the parent alone.
+    assert_eq!(shell.session().taskbar().tasks().len(), 1);
+    assert!(shell.tasks().task_for(popup).is_none());
+
+    // Above its parent, and routed back to the app under its own id.
+    assert_eq!(
+        comp.window_at(Point::new(bounds.left() + 1, bounds.top() + 1)),
+        Some(popup)
+    );
+    assert_eq!(windows.ipc_id(popup), Some(2));
+}
+
+#[test]
+fn a_popup_is_clamped_wholly_onto_the_screen() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut windows = SessionWindows::new();
+    let screen = comp.screen_rect();
+
+    // An offset that would hang the popup off the bottom-right corner.
+    let (_, popup) = open_parent_and_popup(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        (screen.width.cast_signed(), screen.height.cast_signed()),
+        (200, 100),
+    );
+
+    let bounds = comp.window(popup).expect("popup is live").bounds();
+    assert_eq!(
+        (bounds.left(), bounds.top()),
+        (screen.right() - 200, screen.bottom() - 100),
+        "the whole popup is pulled back onto the screen"
+    );
+}
+
+#[test]
+fn a_popup_for_an_unknown_parent_is_refused() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+
+    let before = comp.window_count();
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.popup_opened(2, 99, 0, 0, &served_mode(100, 80)),
+            Err(Errno::NotFound),
+            "a parent the session has no window for places nothing"
+        );
+    });
+
+    assert!(windows.wm_id(2).is_none(), "no record was committed");
+    assert_eq!(comp.window_count(), before, "no window was opened");
+}
+
+#[test]
+fn closing_a_popup_leaves_its_parent_and_its_task_alone() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, popup) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        host.window_closed(2);
+    });
+
+    assert!(comp.window(popup).is_none(), "the popup surface is gone");
+    assert!(windows.wm_id(2).is_none());
+    assert!(comp.window(parent).is_some(), "the parent stands");
+    assert_eq!(
+        shell.session().taskbar().tasks().len(),
+        1,
+        "the parent's task is untouched"
+    );
+
+    // And the parent then leaves through the task path, taking its entry.
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        host.window_closed(1);
+    });
+    assert!(comp.window(parent).is_none());
+    assert!(shell.session().taskbar().tasks().is_empty());
+}
+
+#[test]
+fn keep_popups_stacked_reglues_a_popup_onto_its_parent() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, popup) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (200, 160));
+    let bounds = comp.window(popup).expect("popup is live").bounds();
+    let over_popup = Point::new(bounds.left() + 1, bounds.top() + 1);
+
+    // A third window opened over the pair covers the popup: the parent is
+    // no longer at the top and the popup is buried with it.
+    let intruder = shell
+        .open_window(&mut comp, bounds.origin, app_surface(), "Intruder")
+        .expect("opens");
+    assert_eq!(comp.window_at(over_popup), Some(intruder));
+
+    windows.keep_popups_stacked(&mut comp);
+
+    assert_eq!(
+        comp.window_at(over_popup),
+        Some(popup),
+        "the pair is raised as a unit, popup on top"
+    );
+    // Directly above: a point the parent covers but the popup does not is
+    // the parent's, so nothing landed between them.
+    let client = comp.window_client_rect(parent).expect("parent client");
+    assert_eq!(comp.window_at(client.origin), Some(parent));
+}
+
+#[test]
+fn keep_popups_stacked_is_idle_with_no_popup_open() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.window_opened(1, &served_mode(320, 240), "Terminal", true),
+            Ok(())
+        );
+    });
+    let parent = windows.wm_id(1).expect("live");
+    let intruder = shell
+        .open_window(&mut comp, Point::new(0, 0), app_surface(), "Intruder")
+        .expect("opens");
+
+    windows.keep_popups_stacked(&mut comp);
+
+    assert_eq!(
+        comp.window_at(Point::new(1, 1)),
+        Some(intruder),
+        "with no popup open the stack is left exactly as it was"
+    );
+    assert!(comp.window(parent).is_some());
+}

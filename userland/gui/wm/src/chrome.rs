@@ -35,7 +35,7 @@
 //! declared sensitivity makes [`CachedBytes::wipe`] a real obligation:
 //! every released strip is overwritten before its heap becomes reusable.
 
-use tairix_controls::{ResizeGrabber, WindowActivationState, WindowFrame};
+use tairix_controls::WindowFrame;
 use tairix_font::BitmapFont;
 use tairix_log::Sink;
 use tairix_reclaim::{window_chrome_cache, CachedBytes, PressureGauge, ReclaimCache};
@@ -172,25 +172,9 @@ impl WindowChrome {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::WindowTitle, scale);
         frame.render(&mut transient, outer, scale, theme, font);
 
-        let furniture = frame.furniture();
-        if furniture.resizable {
-            let extent = scale
-                .scale_length(theme.metrics().resize_grabber_extent)
-                .max(1)
-                .min(ow)
-                .min(oh);
-            let mut grabber = ResizeGrabber::new();
-            grabber.set_active_frame(furniture.activation != WindowActivationState::Inactive);
-            let gx = i32::try_from(ow.saturating_sub(extent)).unwrap_or(0);
-            let gy = i32::try_from(oh.saturating_sub(extent)).unwrap_or(0);
-            grabber.render(
-                &mut transient,
-                Rect::new(gx, gy, extent, extent),
-                scale,
-                theme,
-            );
-        }
-
+        // No corner grip: a resizable window's band is the plain frame inset,
+        // too thin to hold one without painting into the client. The grab zone
+        // is invisible, carried by `WindowFrame::hit`'s client overlap alone.
         let [top, bottom, left, right] = bands;
         Some(Self {
             top: extract(&transient, top),

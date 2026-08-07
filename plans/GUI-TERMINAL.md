@@ -218,7 +218,73 @@ compositor can do it.
 
 ---
 
-## 8. What remains
+## 8. The window fills its frame
+
+**Status: done.**
+
+Two separate things used to leave dead space around the screen, and both are
+gone.
+
+- **The window manager's grab band.** A resizable window used to reserve the
+  theme's `resize_grabber_extent` — 16 physical pixels at 100% — on its left,
+  right and bottom, and inset the client inside it, so every resizable app
+  showed a visible border of frame plate. The band is now the thin frame rim,
+  the same as a fixed-size window, and the resize *hit* zone overlaps the
+  client's outer `hit_slop` pixels instead: an invisible resize edge, as every
+  mainstream desktop uses. Being resizable now costs an app no screen space.
+  The trade-off is deliberate and documented: a press in that outer sliver
+  resizes rather than reaching the app.
+- **The partial cell.** A character grid can only show whole cells, so a
+  freely-dragged client left up to one cell of background along the right and
+  bottom that the terminal could never draw in. On a settled resize the
+  terminal now snaps its client to a whole number of cells
+  (`layout::snap_to_cells`) and re-maps at that size, so the frame shrinks to
+  fit the grid exactly. Snapping is idempotent, so the re-map converges in one
+  step and cannot oscillate.
+
+---
+
+## 9. The overlays are their own surfaces
+
+**Status: done.**
+
+The context menu and the settings sheet are **popup windows**, not pixels drawn
+inside the terminal's own surface, so shrinking the terminal no longer clips
+them: each opens at its own preferred size.
+
+`WindowRequest::CreatePopup` is the protocol addition — an undecorated,
+parent-anchored, app-positioned surface any app may open (offsets are relative
+to the parent's client origin, because an app is never told its own window's
+screen position; the session resolves and clamps the absolute placement).
+A popup counts against the same per-client window budget as any other window,
+is never listed on the taskbar, is kept directly above its parent every frame,
+and is torn down with its parent. A refused popup is reported on `stderr` and
+simply not shown — never a crash, and never a fallback to a clipped in-window
+draw.
+
+---
+
+## 10. Why command output used to be invisible
+
+**Status: fixed (kernel).**
+
+Worth recording because the symptom pointed away from the cause: the terminal
+opened, the prompt appeared and typing echoed, but a command's output never
+arrived. Nothing was wrong with the terminal, the pty readiness, or the wake
+path — the shell's *children* were being handed a closed stdout.
+
+`apply_attach_wires` resolved an inherited standard descriptor only from the
+parent's console descriptor table, never from the parent's open entries. A
+pty-hosted shell's fd 0/1/2 are pty-slave *entries* and its console slots are
+closed, so a spawned command inherited three closed slots: `ls` ran and every
+write failed. The prompt and the echo still worked because those are the
+shell's own, correctly-wired streams. An inherited base now clones the
+parent's open entry behind the slot; an explicitly selected console still
+cannot reach the parent's pty, so no authority is widened.
+
+---
+
+## 11. What remains
 
 Nothing in the sections above. Recognised later work, none of it blocking:
 

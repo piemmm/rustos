@@ -1769,6 +1769,11 @@ mod program {
                     &launched,
                 );
             }
+            // Glue each open popup back onto the window that owns it, so
+            // nothing raised anywhere else this wake can land between a
+            // parent and its menu or sheet. Idle when no popup is open, and
+            // before the lock so the lock still ends up above everything.
+            windows.keep_popups_stacked(&mut compositor);
             // Nothing an application does may surface over a locked
             // screen: whatever opened, raised, or resized behind the lock
             // this wake, the lock goes back on top before the frame is

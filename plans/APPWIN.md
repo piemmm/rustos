@@ -318,6 +318,63 @@ Done (code + host coverage). What now holds:
   AW3/AW4 interaction contract shifts, so it is staged as its own
   increment rather than landed blind.
 
+### AW6 — app-owned popup surfaces `[x]`
+
+Done. What now holds:
+
+- **Protocol**: `WindowRequest::CreatePopup { parent_window_id,
+  shm_handle, event_endpoint, frame_count, width_px, height_px,
+  stride_bytes, format, offset_x, offset_y }` (op 11) — an undecorated,
+  parent-anchored surface any app opens for an overlay its own window
+  would otherwise clip. Its own variant, not extra `Create` fields,
+  because a popup carries no title (never a taskbar entry) and no
+  `resizable` flag. The frame-layout block is shared verbatim with
+  `Create`/`Resize`, so one definition validates the geometry of all
+  three. The reply is the `Create` reply shape (minted id + the serving
+  session's `ProcId`).
+- **Placement is parent-relative; the session resolves and clamps it.**
+  An app is never told its own window's screen position, so the offsets
+  are physical pixels from the **parent's client origin** and any signed
+  value is legitimate. `ShellWindowHost::popup_opened` adds them to the
+  parent's live client origin and clamps the whole popup on screen with
+  the shared `tairix_geometry::Rect::clamped_onto` — hoisted out of the
+  taskbar's `BarMenu::layout`, which now calls it, so there is one
+  placement clamp.
+- **Engine rules** (`lib/window`): no kernel caller; the parent must be a
+  live window the attested caller owns (foreign *and* unknown parents both
+  answer `NotFound`); the geometry is validated exactly as `Create`; the
+  popup counts against the same `WINDOWS_PER_CLIENT_MAX` budget; the host
+  is told before anything is committed, so a refusal leaves no record, no
+  id consumed, and the mapping dropped. One shared `PopupSpec` describes
+  the request on both halves (`WindowClient::create_popup`).
+- **Undecorated by construction**: the session opens it through
+  `DesktopShell::open_popup_window` (compositor `add_window` + `raise` +
+  focus), which never decorates and never opens a taskbar entry — the path
+  the trusted picker already used. No protocol "undecorated" bit exists.
+- **Stacking**: the session holds the parent→popup link on its own
+  `WindowRecord` and re-asserts `raise(parent)` then `raise(popup)` once
+  per wake immediately before `present`
+  (`SessionWindows::keep_popups_stacked`, beside `LockOverlay::
+  keep_topmost`), so nothing raised earlier in the frame lands between
+  them. No new compositor primitive.
+- **Lifetime**: closing the parent (channel close, frame control, or
+  `client_exited`) tears down every popup keyed to it; closing a popup's
+  own id tears down only the popup. The session clears the link on both
+  paths.
+- **Consumer**: the terminal's context menu and settings sheet are each a
+  popup, sized from the overlay's own preferred extent rather than the
+  window's, with popup-local event coordinates demultiplexed on
+  `WindowEvent::window_id` (`plans/GUI-TERMINAL.md` §9).
+- Coverage: `lib/abi` round-trip + fail-closed decode tests (reserved
+  tail, zero ids, reserved endpoint, signed/negative offsets),
+  `lib/window` loopback popup suite (round trip, present/close on the
+  popup id, foreign/unknown parent, the shared cap, kernel refusal, a
+  refused host committing nothing, parent-close cascade, dead-client
+  teardown), the session suite (undecorated + off-taskbar placement at the
+  parent's client origin, screen clamp, unknown parent, popup close
+  leaving the parent's task, re-glued stacking after an intruder raise),
+  and `lib/geometry`'s `clamped_onto` tests.
+
 ## 2. Documentation
 
 `docs/src/desktop/apps.md` carries the app-side design as each stage

@@ -44,6 +44,43 @@ own seat, names no other principal's data, and grants no authority. See
 [Variable DPI and UI scale](./dpi.md) and
 [Desktop session glue](./session.md).
 
+## An overlay is a popup surface, never pixels in the app's own window
+
+A menu, a settings sheet, a tooltip, or any other transient overlay drawn
+*inside* an app's window surface is clipped the moment the user shrinks that
+window, and cannot be larger than its owner. So an app opens each overlay as
+its own **popup surface** — undecorated, positioned by the app, stacked
+directly above the window that owns it (`plans/APPWIN.md` AW6; the protocol
+side is [Window manager](./wm.md#app-owned-popup-surfaces)).
+
+Uniformly, for every app:
+
+- `WindowClient::create_popup(&PopupSpec { .. })` names the app's own parent
+  window, the popup's granted frame region and event endpoint, its geometry,
+  and an offset in physical pixels **from the parent's client origin** — an
+  app is never told its own window's screen position, so it never computes a
+  screen point. The session resolves the parent's live origin and clamps the
+  whole popup onto the screen, which is why an overlay *larger* than its
+  owner's window (a settings sheet over a tiny window) opens whole: the app
+  asks for the offset that would centre it and lets the clamp do the rest.
+- The popup is sized from the **overlay's** own preferred extent, measured
+  against the screen rather than the window — so shrinking the window can no
+  longer shrink the menu or the sheet.
+- The overlay's events arrive under the popup's own window id with
+  **popup-local** coordinates, so one event mailbox serves both windows and
+  the app demultiplexes on `WindowEvent::window_id`, hit-testing the overlay
+  against the popup's own viewport. The app's own window keeps drawing
+  nothing of the overlay.
+- Dismissing the overlay closes the popup and unmaps its region; closing the
+  app's window takes any popup with it, and a popup counts against the same
+  per-client window budget as an ordinary window.
+- Showing an overlay is an incidental, refusable action: a refused popup is
+  stated on `stderr` and simply not shown — never a crash, and never a
+  fallback to a clipped in-window draw (`AGENTS.md` §2.24, §5.4).
+
+The graphical terminal is the first consumer: its right-click menu and its
+settings sheet are each a popup (`plans/GUI-TERMINAL.md` §9).
+
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the

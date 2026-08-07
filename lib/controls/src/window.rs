@@ -1004,7 +1004,11 @@ pub enum ResizeEdge {
 /// This is the frame's furniture hit map: it classifies every point as either
 /// the client viewport or a specific furniture part, so an application-drawn
 /// lookalike inside the client area can never receive input meant for the
-/// frame, and the client can never receive furniture input (spec §11.17).
+/// frame, and the client can never receive furniture input (spec §11.17). On a
+/// resizable window the client's own outermost pixels double as part of this
+/// map: [`ResizeEdge`] deliberately overlaps them (see [`WindowFrame::hit`]),
+/// so the app still draws every client pixel but no longer receives presses
+/// on the few it traded away for a grabbable edge.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FurniturePart {
     /// Outside the whole window.
@@ -1058,8 +1062,12 @@ pub struct FrameInsets {
 /// It draws the Frame Rim — one quiet neutral at every activation, with a
 /// bounded attention dot on an attention request and never an indefinite
 /// pulse — owns the [`TitleBar`], and exposes the client rectangle the
-/// compositor clips the application into and the furniture hit map that keeps
-/// the client and the furniture strictly separate. Focus is the title bar's to
+/// compositor clips the application into. Drawing stays strictly separate:
+/// the frame never paints a client pixel and the app never paints a furniture
+/// one. The **hit** map is deliberately looser on a resizable window — its
+/// resize edges reach into the client's outer pixels rather than reserving a
+/// visible band for them, so grabbing an edge costs no space the content
+/// could otherwise fill (see [`Self::hit`]). Focus is the title bar's to
 /// show (its text brightens), joined under heavy contrast by a doubled inner
 /// rim line so the distinction is a difference in shape too. Activation,
 /// theme, and hover never change the client origin or the outer dimensions.
@@ -1116,35 +1124,44 @@ impl WindowFrame {
 
     /// The left/right/bottom furniture-band thickness around the client.
     ///
-    /// A **resizable** window reserves a real grab border here — the theme's
-    /// resize-grabber extent — so the resize edges are a usable pointer target
-    /// and the corner grabber has furniture to live in (it never overlaps the
-    /// client). A fixed-size window keeps the thin frame inset, so it is not
-    /// widened by a border it can never use. Never thinner than the frame
-    /// border, so a rim always draws.
-    fn band_inset(&self, scale: Scale, theme: &Theme) -> u32 {
+    /// This is the plain frame inset for every window, resizable or not: a
+    /// visible band wide enough to grab would waste space an app's content
+    /// could otherwise fill (the resize hit zone overlaps the client's outer
+    /// pixels instead — see [`Self::grab_overlap`]). Never thinner than the
+    /// frame border, so a rim always draws.
+    fn band_inset(scale: Scale, theme: &Theme) -> u32 {
         let (_, _, inset_amt) = Self::edges(scale, theme);
-        if self.furniture.resizable {
-            scale
-                .scale_length(theme.metrics().resize_grabber_extent)
-                .max(inset_amt)
-        } else {
-            inset_amt
-        }
+        inset_amt
+    }
+
+    /// How far a resizable window's resize-edge hit zone reaches past the
+    /// (thin) furniture band, into the client's own outer pixels.
+    ///
+    /// The band shrank to the plain frame inset on every window, so a
+    /// resizable window's furniture alone is too thin to grab reliably. The
+    /// theme's `hit_slop` — invisible padding around a hit target — is the
+    /// natural fit: unlike `resize_grabber_extent` (the corner grabber's
+    /// *visible* affordance size, unrelated to hit-testing) it exists solely
+    /// to widen a hit region without changing anything drawn, exactly the
+    /// trade-off macOS, GNOME, and Windows make for an invisible resize
+    /// border.
+    fn grab_overlap(scale: Scale, theme: &Theme) -> u32 {
+        scale.scale_length(theme.metrics().hit_slop)
     }
 
     /// The per-edge furniture-band thickness around the client, at the active
     /// scale and theme.
     ///
-    /// The top band carries the frame border and the title bar; the other three
-    /// carry the resize band (the theme's resize-grabber extent on a resizable
-    /// window, the thin frame inset otherwise). This is the one definition
-    /// [`Self::layout`] and [`Self::outer_for_client`] share (they never
-    /// restate the metric math).
+    /// The top band carries the frame border and the title bar; the other
+    /// three carry the plain frame inset, the same for a resizable and a
+    /// fixed-size window — a resizable window's extra grab room lives in the
+    /// hit map ([`Self::hit`]), never in this drawn geometry. This is the one
+    /// definition [`Self::layout`] and [`Self::outer_for_client`] share (they
+    /// never restate the metric math).
     #[must_use]
     pub fn insets(&self, scale: Scale, theme: &Theme) -> FrameInsets {
         let (border, title_h, _) = Self::edges(scale, theme);
-        let band = self.band_inset(scale, theme);
+        let band = Self::band_inset(scale, theme);
         FrameInsets {
             top: border.saturating_add(title_h),
             left: band,
@@ -1184,7 +1201,7 @@ impl WindowFrame {
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> FrameLayout {
         let (b, title_h, _) = Self::edges(scale, theme);
-        let band = self.band_inset(scale, theme);
+        let band = Self::band_inset(scale, theme);
 
         let title_bar = Rect::new(
             bounds.left() + to_i32(b),
@@ -1211,6 +1228,16 @@ impl WindowFrame {
     }
 
     /// Classify a point (surface coordinates) against the frame's hit map.
+    ///
+    /// The client *viewport* stays exactly [`Self::layout`]'s `client` rect —
+    /// an app's content is never inset further than the plain frame band. The
+    /// resize **hit** zone is deliberately wider: on a resizable window it
+    /// overlaps the client's outermost pixels — the theme's invisible hit
+    /// slop — so a grabbable edge costs no visible space. A press landing
+    /// there is reported as [`FurniturePart::ResizeEdge`], not
+    /// [`FurniturePart::Client`] — those outermost app pixels are still drawn
+    /// by the app but no longer deliver pointer input to it, the accepted
+    /// trade-off for an invisible border.
     #[must_use]
     pub fn hit(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> FurniturePart {
         if !bounds.contains(point) {
@@ -1223,22 +1250,40 @@ impl WindowFrame {
                 TitleHit::Drag => FurniturePart::TitleBar,
             };
         }
-        if layout.client.contains(point) {
-            return FurniturePart::Client;
-        }
         if !self.furniture.resizable {
-            return FurniturePart::Frame;
+            return if layout.client.contains(point) {
+                FurniturePart::Client
+            } else {
+                FurniturePart::Frame
+            };
+        }
+        if layout.client.contains(point) {
+            let grab = to_i32(Self::grab_overlap(scale, theme));
+            let left = point.x < layout.client.left().saturating_add(grab);
+            let right = point.x >= layout.client.right().saturating_sub(grab);
+            let bottom = point.y >= layout.client.bottom().saturating_sub(grab);
+            return Self::resize_edge(left, right, bottom)
+                .map_or(FurniturePart::Client, FurniturePart::ResizeEdge);
         }
         let left = point.x < layout.client.left();
         let right = point.x >= layout.client.right();
         let bottom = point.y >= layout.client.bottom();
+        Self::resize_edge(left, right, bottom)
+            .map_or(FurniturePart::Frame, FurniturePart::ResizeEdge)
+    }
+
+    /// The resize edge (or corner) `left`/`right`/`bottom` proximity flags
+    /// select, or `None` when none of them are set. Shared by the thin
+    /// furniture band and the client-overlap zone in [`Self::hit`], so the
+    /// edge-vs-corner priority is defined once.
+    fn resize_edge(left: bool, right: bool, bottom: bool) -> Option<ResizeEdge> {
         match (left, right, bottom) {
-            (true, _, true) => FurniturePart::ResizeEdge(ResizeEdge::BottomLeft),
-            (_, true, true) => FurniturePart::ResizeEdge(ResizeEdge::BottomRight),
-            (true, _, false) => FurniturePart::ResizeEdge(ResizeEdge::Left),
-            (_, true, false) => FurniturePart::ResizeEdge(ResizeEdge::Right),
-            (false, false, true) => FurniturePart::ResizeEdge(ResizeEdge::Bottom),
-            _ => FurniturePart::Frame,
+            (true, _, true) => Some(ResizeEdge::BottomLeft),
+            (_, true, true) => Some(ResizeEdge::BottomRight),
+            (true, _, false) => Some(ResizeEdge::Left),
+            (_, true, false) => Some(ResizeEdge::Right),
+            (false, false, true) => Some(ResizeEdge::Bottom),
+            _ => None,
         }
     }
 
@@ -1341,16 +1386,19 @@ pub enum ResizeEvent {
     Cancel,
 }
 
-/// The explicit corner resize affordance for resizable windows (spec §11.23).
+/// The corner resize drag gesture for resizable windows (spec §11.23).
 ///
-/// It draws Grip Teeth — a shape mark that reads without colour — and captures
-/// a pointer drag from its hit region. The visible affordance and the hit
-/// region are supplied separately by the window manager, so the hit region can
-/// extend into the frame without ever overlapping another control or a
-/// scrollbar thumb (the caller keeps it clear of them). A non-resizable or
-/// maximized window disables the grabber; a disabled grabber ignores input
-/// (fail closed). Geometry follows the pointer with no easing, so it is
-/// reduced-motion correct.
+/// It captures a pointer drag from its hit region and can paint Grip Teeth —
+/// a shape mark that reads without colour — into a caller-supplied affordance
+/// rectangle. A resizable window's furniture band is now the plain frame
+/// inset, too thin to hold that mark without painting into the client, so the
+/// window manager's own chrome no longer calls [`Self::render`]: the corner's
+/// grab zone is invisible, carried entirely by [`WindowFrame::hit`]'s client
+/// overlap. A host with room for a visible affordance may still call
+/// [`Self::render`]. A non-resizable or maximized window
+/// disables the grabber; a disabled grabber ignores input (fail closed).
+/// Geometry follows the pointer with no easing, so it is reduced-motion
+/// correct.
 ///
 /// Equal grabbers draw the same pixels, so a host may use `==` as its repaint
 /// gate: the visible state, whether the frame is active, and — unlike the

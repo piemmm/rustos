@@ -2311,6 +2311,39 @@ mod tests {
     }
 
     #[test]
+    fn stream_readable_peeks_a_pty_master_against_its_slaves_output() {
+        let mut reg = AddressSpaceRegistry::new();
+        let size = tairix_abi::TerminalSize::new(24, 80).expect("valid grid");
+        let (master_fd, slave_fd) = reg.open_pty(TaskId(2), size).expect("pty minted");
+        // Both ends are wait-set stream members (each is opened readable);
+        // a foreign task's number and an unopened one are not.
+        assert!(reg.stream_read_member(TaskId(2), master_fd));
+        assert!(reg.stream_read_member(TaskId(2), slave_fd));
+        assert!(!reg.stream_read_member(TaskId(3), master_fd));
+        assert!(!reg.stream_read_member(TaskId(2), 999));
+        // Nothing written yet: a master read would park, so the terminal's
+        // `Stream` member is not ready.
+        assert!(!reg.stream_readable(TaskId(2), master_fd));
+        // The slave's program output makes the master ready, and the peek
+        // consumes nothing.
+        let slave = reg
+            .open_file_entry(TaskId(2), slave_fd)
+            .and_then(|entry| entry.pty_slave().cloned())
+            .expect("slave end resolves");
+        assert_eq!(slave.write(b"out"), crate::pty::PtyWriteStep::Wrote(3));
+        assert!(reg.stream_readable(TaskId(2), master_fd));
+        assert!(reg.stream_readable(TaskId(2), master_fd));
+        // The slave side stays unready: cooked output is the master's to
+        // read, never its own.
+        assert!(!reg.stream_readable(TaskId(2), slave_fd));
+        // Every slave end closed leaves the master ready for its EOF read
+        // (drop the local clone too — each holds a live end).
+        drop(slave);
+        assert!(reg.close_file(TaskId(2), slave_fd));
+        assert!(reg.stream_readable(TaskId(2), master_fd));
+    }
+
+    #[test]
     fn unset_cwd_resolves_to_the_root() {
         let reg = AddressSpaceRegistry::new();
         // A task whose working directory was never established resolves to

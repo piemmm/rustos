@@ -29,6 +29,8 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::Point;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
+use crate::server::PopupSpec;
+
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
 const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
@@ -288,6 +290,53 @@ impl<T: WindowTransport> WindowClient<T> {
         let len = self.transport.call(&request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.note_extent(window_id, surface.width_px, surface.height_px);
+        Ok((window_id, server))
+    }
+
+    /// Open an undecorated popup surface stacked directly above this app's
+    /// own window `spec.parent_window_id`, as `spec` describes it.
+    ///
+    /// A popup is how an app draws a context menu or a settings sheet that
+    /// must not be clipped by the bounds of the window that owns it: the
+    /// session resolves the parent's current screen position, adds
+    /// `spec.offset_x`/`spec.offset_y`, and clamps the whole popup onto the
+    /// screen (an app is never told its own window's screen position). The
+    /// popup is undecorated — no title bar, no frame furniture — and is
+    /// never listed on the taskbar. It counts against the same per-client
+    /// window budget as [`Self::create`], so a popup cannot be used to
+    /// exceed the cap.
+    ///
+    /// The reply is the same shape as [`Self::create`] — the session-minted
+    /// window id and the serving session's [`ProcId`] — and thereafter
+    /// [`Self::present`] and [`Self::close`] act on the popup's id exactly
+    /// as they do for a top-level window.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry
+    ///   or a reserved event endpoint the protocol refuses, caught before
+    ///   any call.
+    /// * The session's typed refusal (a foreign or unknown parent, the
+    ///   per-client window budget reached), a transport failure, or a
+    ///   corrupt reply (fail closed, never a guessed id).
+    pub fn create_popup(&mut self, spec: &PopupSpec) -> Result<(u64, ProcId), Errno> {
+        let request = WindowRequest::CreatePopup {
+            parent_window_id: spec.parent_window_id,
+            shm_handle: spec.shm_handle,
+            event_endpoint: spec.event_endpoint,
+            frame_count: spec.frame_count,
+            width_px: spec.surface.width_px,
+            height_px: spec.surface.height_px,
+            stride_bytes: spec.surface.stride_bytes,
+            format: spec.surface.format,
+            offset_x: spec.offset_x,
+            offset_y: spec.offset_y,
+        }
+        .to_le_bytes();
+        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+        let len = self.transport.call(&request, &mut reply)?;
+        let (window_id, server) = decode_create_reply(&reply[..len])?;
+        self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
         Ok((window_id, server))
     }
 

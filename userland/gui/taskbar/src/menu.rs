@@ -199,10 +199,14 @@ impl BarMenu {
                 self.anchor.top(),
             ),
         };
-        let x = clamp_axis(x, width, screen_width);
-        let y = clamp_axis(y, height, screen_height);
+        let panel = Rect::new(x, y, width, height).clamped_onto(Rect::new(
+            0,
+            0,
+            screen_width,
+            screen_height,
+        ));
         Some(MenuLayout {
-            panel: Rect::new(x, y, width, height),
+            panel,
             corner_radius: scale.scale_length(theme.metrics().popup_corner_radius),
         })
     }
@@ -331,13 +335,6 @@ fn rows_for(subject: &MenuSubject) -> alloc::vec::Vec<MenuItem> {
         MenuSubject::System { permits } => return system::rows(*permits),
     };
     alloc::vec![MenuItem::new("Open"), pin_row]
-}
-
-/// Clamp a menu origin so `[origin, origin + extent)` stays on a screen of
-/// `total` pixels (an oversize menu pins to the leading edge).
-fn clamp_axis(origin: i32, extent: u32, total: u32) -> i32 {
-    let max = to_i32(total).saturating_sub(to_i32(extent));
-    origin.min(max).max(0)
 }
 
 /// Saturating `u32` → `i32`, clamping rather than wrapping.

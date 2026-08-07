@@ -996,10 +996,12 @@ connects `cmd | cmd`. Binding design decisions:
   fixed-length `tairix_abi::SpawnAttach` block carrying `target_uid`
   (`SPAWN_UID_INHERIT` sentinel), the console selector (`CONSOLE_INHERIT`
   or an installed index — the base table exactly as before), and four typed
-  per-fd wires (`tairix_abi::FdWire`): `Inherit` (the base table's own
-  slot), `InheritSlot(n)` (the base table's slot *n* — how `2>&1` onto an
-  inherited console is spelled), `Closed`, and `Handle(fd)` (a descriptor
-  of the **parent's own** open table: a file, resource, or pipe end).
+  per-fd wires (`tairix_abi::FdWire`): `Inherit` (whatever backs the
+  parent's own descriptor — the base table's slot, or a clone of the
+  parent's open entry where one is wired behind it), `InheritSlot(n)` (the
+  same, taken from slot *n* — how `2>&1` is spelled), `Closed`, and
+  `Handle(fd)` (a descriptor of the **parent's own** open table: a file,
+  resource, or pipe/pty end).
   `attach == 0` means full inherit — exactly today's
   `CONSOLE_INHERIT`/`SPAWN_UID_INHERIT` semantics, so every pre-existing
   caller keeps its behaviour. The block is copied through the validated
@@ -1011,7 +1013,13 @@ connects `cmd | cmd`. Binding design decisions:
   child's `OpenFileTable` at the standard fd number itself (the entries
   share the open-file description: one `Arc`'d offset cursor, so two dup'd
   sinks append interleaved output POSIX-correctly, and a cloned pipe end
-  counts as one more reader/writer). The child's console
+  counts as one more reader/writer). An **inheriting** wire clones the
+  parent's entry the same way when the base is the parent's own table: the
+  console table records console-backed slots only and a wired slot's is
+  `Closed`, so reading the table alone would hand a child of a pty-hosted
+  shell a denied stdout and lose every byte it writes. An explicitly
+  selected console index is the whole base, so the parent's entries stay
+  out of that child's reach. The child's console
   `DescriptorTable` slot for a wired fd is `Closed`, so exactly one
   authority backs each descriptor. `stream_read`/`stream_write` resolve
   the caller's open table **first** (a wired standard stream routes to its

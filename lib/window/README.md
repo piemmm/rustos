@@ -47,6 +47,27 @@ server and every app's client can never drift apart.
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
+- **Popup surfaces** (`WindowRequest::CreatePopup`, `PopupSpec`): an app
+  opens an undecorated child surface above one of its own windows, so a
+  context menu or a settings sheet is never clipped by the window that owns
+  it. `WindowClient::create_popup` takes one `PopupSpec` — the parent
+  window, the grant handle, the event endpoint, the frame count and
+  geometry, and an offset in physical pixels from the *parent's client
+  origin*, since an app is never told its own window's screen position. The
+  server validates it exactly as a `Create` and additionally requires that
+  the parent is a live window the caller owns (a foreign or unknown parent
+  answers `NotFound`, no existence oracle), then hands it to
+  `WindowHost::popup_opened` — the session resolves the parent's screen
+  position, adds the offset, and clamps the whole popup onto the screen. A
+  popup counts against the **same** per-client window cap, so "popup"
+  cannot be used to pin more memory than `Create` may. It carries no title
+  and no resizable flag: it is never decorated and never listed on the
+  taskbar. `present`, `set_backdrop_blur`, and `close` act on a popup's id
+  exactly as on a top-level id; closing the **parent** tears down every
+  popup keyed to it (as does `client_exited`), while closing the popup's
+  own id tears down only the popup. One `PopupSpec` definition serves both
+  halves, so the app's request and the engine's validated view cannot
+  drift.
 - **The seat's desktop is asked for here, and kept current here.** An app
   cannot draw honestly without knowing the screen it is on, the desktop's
   UI scale, and whether the theme runs light or dark — and the compositor

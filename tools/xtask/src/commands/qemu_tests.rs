@@ -7143,9 +7143,10 @@ fn assert_files_window_screendump(
 /// Where the session composites the `slot`-th window it opens, laid out by
 /// the desktop's own rules: the shared cascade placement puts the window's
 /// **outer** top-left at that slot's origin, and the window manager reserves
-/// its furniture band — the border and title bar above, the resize band on
-/// the other three edges of a `resizable` window — around a client surface
-/// of `width`×`height`.
+/// its furniture band — the border and title bar above, the thin frame rim on
+/// the other three edges — around a client surface of `width`×`height`. A
+/// resizable window reserves no more than a fixed one: its grab zone is
+/// invisible, overlapping the client's own outer pixels.
 ///
 /// Both rectangles come back so a caller takes the one it means: `outer` is
 /// the window's footprint on the screen, which is what a screendump shows,
@@ -7180,8 +7181,9 @@ fn served_window_layout(
 
 /// The window manager's furniture for a window the session decorates.
 ///
-/// Of the furniture state only `resizable` widens the band; activation,
-/// movability and the restored/maximized state never move an edge. One
+/// No furniture state moves an edge: `resizable` selects the hit map alone
+/// (its resize edges overlap the client rather than widening the band), and
+/// activation, movability and the restored/maximized state never did. One
 /// definition, so every host-side reconstruction of a window's edges reads
 /// the band the compositor itself decorates with.
 fn window_frame(resizable: bool) -> tairix_controls::WindowFrame {
@@ -7195,8 +7197,11 @@ fn window_frame(resizable: bool) -> tairix_controls::WindowFrame {
 /// in physical pixels.
 ///
 /// Far enough in that anti-aliasing on the client's first pixel column and
-/// row cannot put the point on the furniture, and well inside the smallest
-/// client any app opens with.
+/// row cannot put the point on the furniture, that it clears the invisible
+/// resize zone over a resizable client's outer pixels, and well inside the
+/// smallest client any app opens with. The frame's own hit map pins that
+/// clearance in this module's tests, so a deeper grab zone fails the build
+/// rather than turning a scripted click into a resize.
 const CLIENT_AIM_INSET_PX: i32 = 8;
 
 /// A point inside the client of the `slot`-th window the session opens,
@@ -8727,7 +8732,7 @@ mod tests {
     /// back through the compositor's own inverse.
     #[test]
     fn served_window_layout_insets_the_client_inside_its_furniture() {
-        use super::served_window_layout;
+        use super::{served_client_aim, served_window_layout};
         use tairix_geometry::Scale;
 
         let theme = tairix_theme::Theme::dark();
@@ -8759,9 +8764,8 @@ mod tests {
         assert!(layout.client.right() <= layout.outer.right());
         assert!(layout.client.bottom() <= layout.outer.bottom());
 
-        // The app's own resizability sizes that band, so passing it is not
-        // decorative: a fixed-size window keeps the thin rim and its
-        // footprint is smaller for the same client.
+        // Resizability no longer moves an edge: the grab zone is invisible, so
+        // a resizable window's footprint is a fixed-size one's exactly.
         let fixed = served_window_layout(
             0,
             tairix_browse::WIN_WIDTH,
@@ -8769,11 +8773,19 @@ mod tests {
             false,
             &theme,
         );
+        assert_eq!(fixed.outer, layout.outer);
+        assert_eq!(fixed.client, layout.client);
+
+        // It does change the hit map, so the scripted "focus this window" aim
+        // must clear the resize zone that overlaps the client's outer pixels.
+        // The frame's own hit map is the oracle here: deepening the theme's hit
+        // slop past the aim inset fails this test rather than silently
+        // resizing a window in a QEMU vertical.
+        let aim = served_client_aim(0, tairix_browse::WIN_RESIZABLE, &theme);
         assert_eq!(
-            (fixed.client.width, fixed.client.height),
-            (layout.client.width, layout.client.height),
+            frame.hit(layout.outer, Scale::ONE, &theme, aim),
+            tairix_controls::FurniturePart::Client,
         );
-        assert!(fixed.outer.width < layout.outer.width);
     }
 
     /// Every `memtest` takeover binary `finish_run` scores by reset is

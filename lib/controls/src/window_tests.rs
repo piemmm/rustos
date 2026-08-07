@@ -5,10 +5,11 @@
 //! reflecting its *next* action), the shared window-control state model
 //! (pointer/keyboard activation, disabled/denied), the title bar (control
 //! layout on either edge, title sanitisation, activate/drag/control routing,
-//! keyboard focus), the window frame's furniture hit map (client vs furniture
-//! isolation, resize edges, activation not changing geometry), the resize
-//! grabber (drag capture and Escape-cancel, non-overlap with scrollbars), and
-//! the neutral scroll corner, across dark/light/high-contrast and scale.
+//! keyboard focus), the window frame's furniture hit map (the client interior
+//! against furniture, the resize edges that overlap the client's outermost
+//! pixels, activation not changing geometry), the resize grabber (drag capture
+//! and Escape-cancel, non-overlap with scrollbars), and the neutral scroll
+//! corner, across dark/light/high-contrast and scale.
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -67,6 +68,13 @@ fn furniture() -> WindowFurnitureState {
         size: WindowSizeState::Restored,
         movable: true,
         resizable: true,
+    }
+}
+
+fn fixed_size_furniture() -> WindowFurnitureState {
+    WindowFurnitureState {
+        resizable: false,
+        ..furniture()
     }
 }
 
@@ -575,11 +583,13 @@ fn frame_client_sits_below_title_bar() {
 }
 
 #[test]
-fn hit_map_isolates_client_from_furniture() {
+fn hit_map_separates_the_client_interior_from_furniture() {
     let theme = Theme::dark();
     let frame = WindowFrame::new(furniture());
     let bounds = frame_bounds();
     let client = frame.layout(bounds, Scale::ONE, &theme).client;
+    // The centre, clear of the resize zone that overlaps the client's own
+    // outer pixels.
     let inside = Point::new(
         client.left() + half(client.width),
         client.top() + half(client.height),
@@ -637,25 +647,176 @@ fn activation_does_not_move_client() {
 fn resize_edges_only_when_resizable() {
     let theme = Theme::dark();
     let bounds = frame_bounds();
-    let frame = WindowFrame::new(furniture());
-    let client = frame.layout(bounds, Scale::ONE, &theme).client;
-    let edge = Point::new(client.left() + 10, client.bottom());
+    let resizable = WindowFrame::new(furniture());
+    let fixed = WindowFrame::new(fixed_size_furniture());
+    // Both lay the client out identically, so a single point tells the two hit
+    // maps apart: it resizes one window and is inert furniture on the other.
+    let client = resizable.layout(bounds, Scale::ONE, &theme).client;
+    assert_eq!(client, fixed.layout(bounds, Scale::ONE, &theme).client);
+    let below = Point::new(client.left() + 10, client.bottom());
     assert_eq!(
-        frame.hit(bounds, Scale::ONE, &theme, edge),
+        resizable.hit(bounds, Scale::ONE, &theme, below),
         FurniturePart::ResizeEdge(ResizeEdge::Bottom)
     );
-    // A fixed-size window has no resize band (its client keeps the thin frame
-    // inset), so the point just below *its own* client is inert frame, never a
-    // resize edge.
-    let mut fixed = furniture();
-    fixed.resizable = false;
-    let frame = WindowFrame::new(fixed);
-    let fixed_client = frame.layout(bounds, Scale::ONE, &theme).client;
-    let fixed_edge = Point::new(fixed_client.left() + 10, fixed_client.bottom());
     assert_eq!(
-        frame.hit(bounds, Scale::ONE, &theme, fixed_edge),
+        fixed.hit(bounds, Scale::ONE, &theme, below),
         FurniturePart::Frame
     );
+}
+
+#[test]
+fn a_resizable_window_gives_up_no_client_space() {
+    // The complaint this answered: a resizable window widened its left, right,
+    // and bottom furniture to the grabber extent, so its content sat visibly
+    // inside a fixed-size window's. Both now pay the plain frame inset.
+    let bounds = frame_bounds();
+    let resizable = WindowFrame::new(furniture());
+    let fixed = WindowFrame::new(fixed_size_furniture());
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+            let insets = resizable.insets(scale, &theme);
+            assert_eq!(
+                insets,
+                fixed.insets(scale, &theme),
+                "a resize affordance must cost no drawn space"
+            );
+            assert_eq!(
+                resizable.layout(bounds, scale, &theme).client,
+                fixed.layout(bounds, scale, &theme).client
+            );
+            let metrics = theme.metrics();
+            let border = scale.scale_length(metrics.border_thickness).max(1);
+            let rim = scale.scale_length(metrics.frame_inset).max(border);
+            assert_eq!(insets.left, rim);
+            assert_eq!(insets.right, rim);
+            assert_eq!(insets.bottom, rim);
+            assert!(
+                rim < scale.scale_length(metrics.resize_grabber_extent),
+                "the band must be the thin rim, never the grabber extent"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_resize_zone_overlaps_the_clients_outer_pixels() {
+    // The invisible border: the outermost `hit_slop` columns of the client
+    // resize the window, and the very next column inward reaches the app.
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let client = frame.layout(bounds, Scale::ONE, &theme).client;
+    let grab = i32::try_from(Scale::ONE.scale_length(theme.metrics().hit_slop)).expect("slop");
+    assert!(grab > 0, "an invisible border needs some depth");
+    let y = client.top() + half(client.height);
+    for step in 0..grab {
+        assert_eq!(
+            frame.hit(
+                bounds,
+                Scale::ONE,
+                &theme,
+                Point::new(client.left() + step, y)
+            ),
+            FurniturePart::ResizeEdge(ResizeEdge::Left),
+            "client column {step} in from the left must still resize"
+        );
+    }
+    assert_eq!(
+        frame.hit(
+            bounds,
+            Scale::ONE,
+            &theme,
+            Point::new(client.left() + grab, y)
+        ),
+        FurniturePart::Client,
+        "one column further in belongs to the app"
+    );
+}
+
+#[test]
+fn every_resize_edge_resolves_from_the_band_and_the_client_overlap() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let client = frame.layout(bounds, Scale::ONE, &theme).client;
+    let mid_x = client.left() + half(client.width);
+    let mid_y = client.top() + half(client.height);
+    let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
+
+    // Inside the client, on its outermost pixel of each edge and corner.
+    assert_eq!(
+        hit(client.left(), mid_y),
+        FurniturePart::ResizeEdge(ResizeEdge::Left)
+    );
+    assert_eq!(
+        hit(client.right() - 1, mid_y),
+        FurniturePart::ResizeEdge(ResizeEdge::Right)
+    );
+    assert_eq!(
+        hit(mid_x, client.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::Bottom)
+    );
+    assert_eq!(
+        hit(client.left(), client.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomLeft)
+    );
+    assert_eq!(
+        hit(client.right() - 1, client.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
+    );
+
+    // The thin band just outside the client answers the same way, so the two
+    // branches of the hit map cannot disagree about an edge.
+    assert_eq!(
+        hit(bounds.left(), mid_y),
+        FurniturePart::ResizeEdge(ResizeEdge::Left)
+    );
+    assert_eq!(
+        hit(bounds.right() - 1, mid_y),
+        FurniturePart::ResizeEdge(ResizeEdge::Right)
+    );
+    assert_eq!(
+        hit(mid_x, bounds.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::Bottom)
+    );
+    assert_eq!(
+        hit(bounds.left(), bounds.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomLeft)
+    );
+    assert_eq!(
+        hit(bounds.right() - 1, bounds.bottom() - 1),
+        FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
+    );
+
+    // The top edge is never a resize edge: a window is sized from its three
+    // free edges, and the row below the rim is the title bar's to drag.
+    let border = i32::try_from(
+        Scale::ONE
+            .scale_length(theme.metrics().border_thickness)
+            .max(1),
+    )
+    .expect("border");
+    assert_eq!(hit(mid_x, bounds.top()), FurniturePart::Frame);
+    assert_eq!(
+        hit(bounds.left() + 50, bounds.top() + border),
+        FurniturePart::TitleBar
+    );
+}
+
+#[test]
+fn a_fixed_size_window_reports_no_resize_edge_anywhere() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(fixed_size_furniture());
+    for y in bounds.top()..bounds.bottom() {
+        for x in bounds.left()..bounds.right() {
+            let part = frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
+            assert!(
+                !matches!(part, FurniturePart::ResizeEdge(_)),
+                "({x}, {y}) offered a resize edge on a fixed-size window"
+            );
+        }
+    }
 }
 
 #[test]
@@ -701,6 +862,48 @@ fn attention_request_changes_rendering() {
     let mut attention = Surface::new(300, 240).expect("surface");
     frame.render(&mut attention, bounds, Scale::ONE, &theme, font());
     assert_ne!(plain.pixels(), attention.pixels());
+}
+
+#[test]
+fn the_frame_paints_no_furniture_mark_inside_the_client() {
+    // The rim tone and the body plate run under the client and the app paints
+    // over them, but a furniture *mark* never lands there: the resize zone is
+    // invisible, so a resizable window's client pixels are a fixed-size
+    // window's exactly — no grip teeth in the corner, no title ink.
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let paint = |furn| {
+        let mut frame = WindowFrame::new(furn);
+        frame.title_bar_mut().set_title("Documents");
+        let mut surface = Surface::new(300, 240).expect("surface");
+        frame.render(&mut surface, bounds, Scale::ONE, &theme, font());
+        surface
+    };
+    let resizable = paint(furniture());
+    let fixed = paint(fixed_size_furniture());
+    let client = WindowFrame::new(furniture())
+        .layout(bounds, Scale::ONE, &theme)
+        .client;
+    let palette = theme.palette();
+    for y in client.top()..client.bottom() {
+        for x in client.left()..client.right() {
+            let (px, py) = (u32::try_from(x).expect("x"), u32::try_from(y).expect("y"));
+            let pixel = resizable.get(px, py).expect("inside the surface");
+            assert_eq!(
+                Some(pixel),
+                fixed.get(px, py),
+                "({x}, {y}) differs from a fixed-size window's client"
+            );
+            for mark in [
+                palette.on_surface,
+                palette.on_surface_muted,
+                palette.accent,
+                palette.rim_active,
+            ] {
+                assert_ne!(pixel, premul(mark), "a furniture mark landed at ({x}, {y})");
+            }
+        }
+    }
 }
 
 // --- ResizeGrabber --------------------------------------------------------

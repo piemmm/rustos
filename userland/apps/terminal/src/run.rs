@@ -60,9 +60,10 @@ mod program {
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_terminal::effects::{Afterglow, Phase};
-    use tairix_terminal::layout::{fit_font_size, grid_dims, window_size};
+    use tairix_terminal::layout::{fit_font_size, grid_dims, snap_to_cells, window_size};
     use tairix_terminal::menu::{Command, ContextMenu, MenuOutcome};
     use tairix_terminal::profile::{
         parse as parse_profile, render as render_profile, user_profile_path, Profile,
@@ -70,7 +71,7 @@ mod program {
     };
     use tairix_terminal::render::render;
     use tairix_terminal::scheme::Painted;
-    use tairix_terminal::settings::{Settings, SheetOutcome};
+    use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
     use tairix_terminal::{
         shell_env, shell_load_failure, shell_wires, ShellSource, StreamShellSource, Terminal, TERM,
         WIN_RESIZABLE,
@@ -78,8 +79,8 @@ mod program {
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
-        event_endpoint_for, key_input_event, pointer_input_events, Desktop, WindowClient,
-        WindowTransport, EVENT_MAILBOX_CAPACITY,
+        event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
+        WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the shell could not be hosted (the pty or the spawn
@@ -381,18 +382,246 @@ mod program {
         }
     }
 
-    /// What is drawn over the terminal screen, if anything.
-    ///
-    /// At most one overlay exists at a time and it is modal: while it is
-    /// open every pointer and key event routes to it, so a click meant for
-    /// the menu can never also reach the shell.
-    enum Overlay {
-        /// Nothing over the screen; input goes to the shell.
-        None,
+    /// Which overlay is open.
+    enum Content {
         /// The right-click context menu.
         Menu(ContextMenu),
         /// The settings sheet.
         Sheet(Settings),
+    }
+
+    /// The one open overlay and the popup window it is drawn in.
+    ///
+    /// An overlay is never drawn into the terminal's own window: it lives in
+    /// its own undecorated popup surface stacked directly above it, so
+    /// shrinking the terminal cannot clip a menu or the settings sheet. At
+    /// most one overlay exists at a time and it is modal — every event
+    /// delivered for the popup's own window id routes to it, and a press that
+    /// lands on the terminal instead dismisses it without reaching the shell.
+    struct Overlay {
+        /// The overlay's own state.
+        content: Content,
+        /// The popup's window-channel id, which its events arrive under.
+        window: u64,
+        /// Base address of the popup's own shared frame region.
+        base: usize,
+        /// Length of that region in bytes.
+        len: usize,
+        /// The geometry the region is shaped as; also the popup-local
+        /// viewport the overlay is laid out and hit-tested in.
+        mode: DisplayMode,
+        /// Set once the overlay has asked to go. The loop closes the popup
+        /// and releases the region; the routing itself holds no window
+        /// client.
+        dismissed: bool,
+    }
+
+    impl Overlay {
+        /// The popup-local viewport the overlay occupies.
+        fn viewport(&self) -> Rect {
+            Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
+        }
+    }
+
+    /// Open a popup window of `mode` at `offset` from `parent`'s client
+    /// origin, with its own shared frame region granted to the window
+    /// endpoint.
+    ///
+    /// Returns `None` — stating why on `stderr` — when the region could not be
+    /// created or granted, when the session refused the popup, or when the
+    /// reply names a server other than the one that opened the parent window
+    /// (an imposter reply is refused rather than trusted). The caller then
+    /// simply shows no overlay; nothing is left mapped and the terminal keeps
+    /// running.
+    fn open_popup(
+        client: &mut WindowClient<RtWindowTransport>,
+        parent: u64,
+        server: ProcId,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        offset: (i32, i32),
+    ) -> Option<(u64, usize, usize)> {
+        let Some(len) = (mode.stride_bytes as usize)
+            .checked_mul(mode.height_px as usize)
+            .and_then(|frame| frame.checked_mul(FRAME_COUNT as usize))
+        else {
+            report("popup frame region larger than the address width");
+            return None;
+        };
+        let mut region_id: u64 = 0;
+        let base = tairix_rt::shm_create(len, &mut region_id);
+        if base < 0 {
+            report("popup frame region refused");
+            return None;
+        }
+        let Ok(base) = usize::try_from(base) else {
+            report("popup frame region base outside the address width");
+            return None;
+        };
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        if grant < 1 {
+            let _ = tairix_rt::shm_unmap(base as u64, len);
+            report("popup frame region grant refused");
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        let created = client.create_popup(&PopupSpec {
+            parent_window_id: parent,
+            shm_handle: grant as u64,
+            event_endpoint,
+            frame_count: FRAME_COUNT,
+            surface: *mode,
+            offset_x: offset.0,
+            offset_y: offset.1,
+        });
+        match created {
+            Ok((window, replied)) if replied == server => Some((window, base, len)),
+            Ok((window, _)) => {
+                let _ = client.close(window);
+                let _ = tairix_rt::shm_unmap(base as u64, len);
+                report("popup reply came from another sender; not shown");
+                None
+            }
+            Err(err) => {
+                let _ = tairix_rt::shm_unmap(base as u64, len);
+                report(&alloc::format!("popup refused ({err}); not shown"));
+                None
+            }
+        }
+    }
+
+    /// Which overlay to open, and where.
+    enum OverlayRequest {
+        /// The context menu, anchored at this client-local point.
+        Menu {
+            /// Where the press that asked for it landed.
+            at: Point,
+        },
+        /// The settings sheet, at its own preferred size.
+        Sheet(Settings),
+    }
+
+    /// The offset that centres an `inner` extent within an `outer` one,
+    /// negative when the inner extent is the larger of the two.
+    fn centre_offset(outer: u32, inner: u32) -> i32 {
+        // Display extents halved stay far inside `i32`; a mode that says
+        // otherwise centres at the origin rather than wrapping.
+        i32::try_from((i64::from(outer) - i64::from(inner)) / 2).unwrap_or(0)
+    }
+
+    /// Open `request` in its own popup window above `parent`, drawn once.
+    ///
+    /// Each popup is exactly the size the overlay wants, measured against the
+    /// screen rather than the parent window, so neither is ever shrunk by its
+    /// owner: the menu's popup is its own plate at the pressed point, and the
+    /// sheet's is its full preferred panel centred over the parent's client.
+    /// A window smaller than the sheet therefore yields a negative offset,
+    /// which is a legitimate request — the session resolves it against the
+    /// parent's screen position and clamps the whole popup on screen, so the
+    /// entire sheet stays visible however small the terminal is.
+    ///
+    /// `None` — with the reason already on `stderr` — leaves no overlay open:
+    /// a refusal shows nothing and the terminal carries on.
+    #[allow(clippy::too_many_arguments)] // Sizing a popup needs the whole drawing context.
+    fn open_overlay(
+        client: &mut WindowClient<RtWindowTransport>,
+        parent: u64,
+        server: ProcId,
+        event_endpoint: u64,
+        request: OverlayRequest,
+        parent_mode: &DisplayMode,
+        theme: &Theme,
+        desktop: &Desktop,
+        font: BitmapFont,
+    ) -> Option<Overlay> {
+        let scale = desktop.scale();
+        let (content, offset, extent) = match request {
+            OverlayRequest::Menu { at } => {
+                let menu = ContextMenu::open(Point::new(0, 0));
+                let plate = menu.bounds(desktop.screen(), scale, theme, font);
+                (
+                    Content::Menu(menu),
+                    (at.x, at.y),
+                    (plate.width, plate.height),
+                )
+            }
+            OverlayRequest::Sheet(sheet) => {
+                let screen = desktop.screen();
+                let (want_w, want_h) = preferred_extent(scale);
+                // Its own preferred size, capped only by the screen it must
+                // fit on; the sheet's panel fills whatever the popup is.
+                let extent = (want_w.min(screen.width), want_h.min(screen.height));
+                let offset = (
+                    centre_offset(parent_mode.width_px, extent.0),
+                    centre_offset(parent_mode.height_px, extent.1),
+                );
+                (Content::Sheet(sheet), offset, extent)
+            }
+        };
+        if extent.0 == 0 || extent.1 == 0 {
+            report("overlay has no drawable extent; not shown");
+            return None;
+        }
+        let mode = mode_for(extent.0, extent.1);
+        let (window, base, len) =
+            open_popup(client, parent, server, event_endpoint, &mode, offset)?;
+        let overlay = Overlay {
+            content,
+            window,
+            base,
+            len,
+            mode,
+            dismissed: false,
+        };
+        if present_overlay(&overlay, theme, scale, font, client).is_err() {
+            report("overlay present refused; not shown");
+            close_popup(client, overlay);
+            return None;
+        }
+        Some(overlay)
+    }
+
+    /// Close `overlay`'s popup and release its frame region.
+    fn close_popup(client: &mut WindowClient<RtWindowTransport>, overlay: Overlay) {
+        let _ = client.close(overlay.window);
+        let _ = tairix_rt::shm_unmap(overlay.base as u64, overlay.len);
+    }
+
+    /// Draw `overlay` into its popup's frame and present the whole popup.
+    ///
+    /// The surface starts fully transparent, so an overlay that does not fill
+    /// its popup (the settings sheet's centred panel) lets the terminal show
+    /// through around it exactly as it did when the sheet was drawn in-window.
+    fn present_overlay(
+        overlay: &Overlay,
+        theme: &Theme,
+        scale: Scale,
+        font: BitmapFont,
+        client: &mut WindowClient<RtWindowTransport>,
+    ) -> Result<(), Errno> {
+        let viewport = overlay.viewport();
+        let mut surface =
+            Surface::new(viewport.width, viewport.height).ok_or(Errno::LengthOutOfRange)?;
+        match &overlay.content {
+            Content::Menu(menu) => menu.render(&mut surface, viewport, scale, theme, font),
+            Content::Sheet(sheet) => sheet.render(&mut surface, viewport, scale, theme, font),
+        }
+        // SAFETY: `open_popup` mapped `overlay.len` zeroed read/write bytes
+        // at `overlay.base` and nothing has unmapped or aliased them since —
+        // the region is released only by `close_popup`, which consumes the
+        // overlay. The protocol serialises access: this app is parked in the
+        // present call below while the session reads the same frame.
+        let frame =
+            unsafe { core::slice::from_raw_parts_mut(overlay.base as *mut u8, overlay.len) };
+        for (i, pixel) in surface.pixels().iter().enumerate() {
+            let color = pixel.unpremultiply();
+            let at = i * 4;
+            let Some(slot) = frame.get_mut(at..at + 4) else {
+                return Err(Errno::LengthOutOfRange);
+            };
+            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+        client.present(overlay.window, 0, DamageRect::full(&overlay.mode))
     }
 
     /// Everything the program holds about how the screen currently looks.
@@ -438,8 +667,11 @@ mod program {
         }
     }
 
-    /// Render the screen (and any overlay) into `frame` and present the whole
-    /// window.
+    /// Render the terminal screen into `frame` and present the whole window.
+    ///
+    /// An open overlay is *not* drawn here: it lives in its own popup window
+    /// above this one, so the screen effects below can never wobble a menu or
+    /// a settings control, and shrinking this window cannot clip one.
     ///
     /// The full-window damage is deliberate: a shell write can scroll the
     /// whole grid, and the surface is one window — not a screen — so the
@@ -448,8 +680,6 @@ mod program {
         terminal: &Terminal<S>,
         profile: &Profile,
         look: &mut Look,
-        overlay: &Overlay,
-        theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
@@ -469,16 +699,6 @@ mod program {
             look.phase,
             scale.percent(),
         );
-        // The overlay is drawn after the effects: a settings sheet that
-        // wobbled with the screen behind it would be unusable, and its
-        // controls must read exactly as they do everywhere else.
-        match overlay {
-            Overlay::None => {}
-            Overlay::Menu(menu) => menu.render(&mut surface, viewport, scale, theme, look.font),
-            Overlay::Sheet(sheet) => {
-                sheet.render(&mut surface, viewport, scale, theme, look.font);
-            }
-        }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -672,13 +892,11 @@ mod program {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
         apply_blur(&mut client, window, &profile);
-        let mut overlay = Overlay::None;
+        let mut overlay: Option<Overlay> = None;
         if present_frame(
             &terminal,
             &profile,
             &mut look,
-            &overlay,
-            theme,
             desktop.scale(),
             &mut client,
             window,
@@ -714,8 +932,6 @@ mod program {
                         &terminal,
                         &profile,
                         &mut look,
-                        &overlay,
-                        theme,
                         desktop.scale(),
                         &mut client,
                         window,
@@ -739,19 +955,69 @@ mod program {
                         &mut desktop,
                         theme,
                         look.font,
-                        Rect::new(0, 0, mode.width_px, mode.height_px),
+                        window,
                         event_endpoint,
                         server,
                     );
+                    // An overlay that has asked to go leaves before anything
+                    // this same outcome opens, so a menu row that chose
+                    // *Settings* replaces its popup rather than stacking a
+                    // second one over it.
+                    if overlay.as_ref().is_some_and(|open| open.dismissed) {
+                        if let Some(open) = overlay.take() {
+                            close_popup(&mut client, open);
+                        }
+                    }
                     match outcome {
                         EventOutcome::Continue => {}
+                        EventOutcome::OpenMenu { at } => {
+                            overlay = open_overlay(
+                                &mut client,
+                                window,
+                                server,
+                                event_endpoint,
+                                OverlayRequest::Menu { at },
+                                &mode,
+                                theme,
+                                &desktop,
+                                look.font,
+                            );
+                        }
+                        EventOutcome::OpenSheet => {
+                            overlay = open_overlay(
+                                &mut client,
+                                window,
+                                server,
+                                event_endpoint,
+                                OverlayRequest::Sheet(Settings::new(&profile)),
+                                &mode,
+                                theme,
+                                &desktop,
+                                look.font,
+                            );
+                        }
+                        EventOutcome::OverlayChanged => {
+                            // Only the overlay's own pixels moved, so the
+                            // terminal's window is left exactly as it is.
+                            if let Some(open) = overlay.as_ref() {
+                                if present_overlay(
+                                    open,
+                                    theme,
+                                    desktop.scale(),
+                                    look.font,
+                                    &mut client,
+                                )
+                                .is_err()
+                                {
+                                    return fail(EXIT_CHANNEL_LOST, "overlay present refused");
+                                }
+                            }
+                        }
                         EventOutcome::Repaint => {
                             if present_frame(
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                &overlay,
-                                theme,
                                 desktop.scale(),
                                 &mut client,
                                 window,
@@ -779,8 +1045,6 @@ mod program {
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                &overlay,
-                                theme,
                                 desktop.scale(),
                                 &mut client,
                                 window,
@@ -790,6 +1054,22 @@ mod program {
                             .is_err()
                             {
                                 return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                            // The sheet that made the change is still open and
+                            // shows it (a moved slider, a chosen swatch), so
+                            // its popup is re-presented too.
+                            if let Some(open) = overlay.as_ref() {
+                                if present_overlay(
+                                    open,
+                                    theme,
+                                    desktop.scale(),
+                                    look.font,
+                                    &mut client,
+                                )
+                                .is_err()
+                                {
+                                    return fail(EXIT_CHANNEL_LOST, "overlay present refused");
+                                }
                             }
                         }
                         EventOutcome::Resized {
@@ -805,7 +1085,21 @@ mod program {
                             // updated once the new region is adopted, so the
                             // screen never claims a geometry the surface cannot
                             // hold.
-                            let new_mode = mode_for(width_px, height_px);
+                            //
+                            // The granted client is first snapped down to a
+                            // whole number of cells, so no partial-cell strip
+                            // of dead background is left at the right or bottom
+                            // edge. Snapping is idempotent, so the size this
+                            // re-maps to is already snapped and the `Resized`
+                            // it draws back snaps to itself: one step, and it
+                            // cannot oscillate. Re-mapping is skipped entirely
+                            // when the snapped size is the one already in force.
+                            let (snapped_w, snapped_h) =
+                                snap_to_cells(width_px, height_px, look.font);
+                            if (snapped_w, snapped_h) == (mode.width_px, mode.height_px) {
+                                continue;
+                            }
+                            let new_mode = mode_for(snapped_w, snapped_h);
                             if let Some((new_base, new_len)) = resize_frames(
                                 &mut client,
                                 window,
@@ -828,7 +1122,7 @@ mod program {
                                         region_len,
                                     )
                                 };
-                                let (cols, rows) = grid_dims(width_px, height_px, look.font);
+                                let (cols, rows) = grid_dims(snapped_w, snapped_h, look.font);
                                 let _ = terminal.resize(cols, rows);
                                 let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
                                 // The afterglow is the shape of the old
@@ -838,8 +1132,6 @@ mod program {
                                     &terminal,
                                     &profile,
                                     &mut look,
-                                    &overlay,
-                                    theme,
                                     desktop.scale(),
                                     &mut client,
                                     window,
@@ -868,8 +1160,6 @@ mod program {
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                &overlay,
-                                theme,
                                 desktop.scale(),
                                 &mut client,
                                 window,
@@ -884,8 +1174,14 @@ mod program {
                         EventOutcome::End => {
                             // The desktop asked, the user chose Close, or the
                             // shell's stdin is gone: close the window and end
-                            // cleanly. The pty master drops with this process,
+                            // cleanly. An open overlay's popup goes with it
+                            // (the session would tear it down with its parent
+                            // anyway; closing it here also releases its
+                            // region). The pty master drops with this process,
                             // so the shell observes end-of-file and exits.
+                            if let Some(open) = overlay.take() {
+                                close_popup(&mut client, open);
+                            }
                             let _ = client.close(window);
                             return 0;
                         }
@@ -900,8 +1196,6 @@ mod program {
                             &terminal,
                             &profile,
                             &mut look,
-                            &overlay,
-                            theme,
                             desktop.scale(),
                             &mut client,
                             window,
@@ -948,8 +1242,6 @@ mod program {
                         &terminal,
                         &profile,
                         &mut look,
-                        &overlay,
-                        theme,
                         desktop.scale(),
                         &mut client,
                         window,
@@ -985,8 +1277,21 @@ mod program {
     enum EventOutcome {
         /// Every pending event was applied and nothing on screen changed.
         Continue,
-        /// Something on screen changed; repaint and present.
+        /// Something on the terminal's own screen changed; repaint and
+        /// present its window.
         Repaint,
+        /// Only the open overlay's own pixels changed; re-present its popup
+        /// and leave the terminal's window alone.
+        OverlayChanged,
+        /// A secondary press asked for the context menu at this client-local
+        /// point; the caller opens its popup there.
+        OpenMenu {
+            /// Where the press landed, relative to the client origin.
+            at: Point,
+        },
+        /// The *Settings* command asked for the settings sheet; the caller
+        /// opens its popup over the client.
+        OpenSheet,
         /// The user changed a setting: re-derive the look, re-apply the
         /// backdrop blur, reshape the grid, store the profile, and repaint.
         ProfileChanged,
@@ -1016,13 +1321,9 @@ mod program {
         command: Command,
         terminal: &mut Terminal<S>,
         profile: &mut Profile,
-        overlay: &mut Overlay,
     ) -> EventOutcome {
         match command {
-            Command::Settings => {
-                *overlay = Overlay::Sheet(Settings::new(profile));
-                EventOutcome::Repaint
-            }
+            Command::Settings => EventOutcome::OpenSheet,
             Command::Larger => {
                 profile.enlarge();
                 EventOutcome::ProfileChanged
@@ -1043,82 +1344,111 @@ mod program {
         }
     }
 
-    /// Route one pointer event, which the open overlay owns if there is one.
+    /// Route one pointer event delivered for the open overlay's own popup
+    /// window into that overlay.
     ///
-    /// With no overlay open, a secondary press opens the context menu at the
-    /// pressed point and every other pointer event is a no-op: the screen is
-    /// shell-driven and the emulator keeps no scrollback for a wheel to move.
-    #[allow(clippy::too_many_arguments)] // The routing needs the whole drawing context to hit-test the overlay.
-    fn route_pointer(
+    /// The coordinates in a popup's events are popup-local, so the overlay is
+    /// hit-tested against the popup's own viewport — the extent it was opened
+    /// at — and never against the terminal window's.
+    fn route_overlay_pointer(
         overlay: &mut Overlay,
         profile: &mut Profile,
         action: PointerAction,
         at: Point,
-        viewport: Rect,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-    ) -> PointerRouting {
-        match overlay {
-            Overlay::None => {
-                if action == PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Secondary)
-                {
-                    *overlay = Overlay::Menu(ContextMenu::open(at));
-                    return PointerRouting::Repaint;
-                }
-                PointerRouting::Nothing
-            }
-            Overlay::Menu(menu) => {
-                let mut routing = PointerRouting::Nothing;
+    ) -> OverlayRouting {
+        let viewport = overlay.viewport();
+        let mut routing = OverlayRouting::Nothing;
+        match &mut overlay.content {
+            Content::Menu(menu) => {
                 for event in pointer_input_events(action, at) {
                     match menu.on_pointer(&event, viewport, scale, theme, font) {
                         MenuOutcome::Ignored => {}
-                        MenuOutcome::Changed => routing = PointerRouting::Repaint,
-                        MenuOutcome::Dismissed => {
-                            *overlay = Overlay::None;
-                            return PointerRouting::Repaint;
-                        }
-                        MenuOutcome::Chose(command) => {
-                            *overlay = Overlay::None;
-                            return PointerRouting::Chose(command);
-                        }
+                        MenuOutcome::Changed => routing = OverlayRouting::Redraw,
+                        MenuOutcome::Dismissed => return OverlayRouting::Dismissed,
+                        MenuOutcome::Chose(command) => return OverlayRouting::Chose(command),
                     }
                 }
-                routing
             }
-            Overlay::Sheet(sheet) => {
-                let mut routing = PointerRouting::Nothing;
+            Content::Sheet(sheet) => {
                 for event in pointer_input_events(action, at) {
                     match sheet.on_pointer(&event, viewport, scale, theme, font) {
                         SheetOutcome::Ignored => {}
-                        SheetOutcome::Changed => routing = PointerRouting::Repaint,
+                        SheetOutcome::Changed => routing = OverlayRouting::Redraw,
                         SheetOutcome::Edited => {
                             *profile = *sheet.profile();
-                            routing = PointerRouting::Edited;
+                            routing = OverlayRouting::Edited;
                         }
                         SheetOutcome::Dismissed => {
                             *profile = *sheet.profile();
-                            return PointerRouting::Close;
+                            return OverlayRouting::Closed;
                         }
                     }
                 }
-                routing
+            }
+        }
+        routing
+    }
+
+    /// Route one key press delivered for the open overlay's own popup window
+    /// into that overlay.
+    fn route_overlay_key(
+        overlay: &mut Overlay,
+        profile: &mut Profile,
+        key: tairix_abi::input::KeyInput,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> OverlayRouting {
+        let input = key_input_event(key);
+        let viewport = overlay.viewport();
+        match &mut overlay.content {
+            Content::Menu(menu) => {
+                let InputEvent::KeyPressed { key, .. } = input else {
+                    return OverlayRouting::Nothing;
+                };
+                match menu.on_key(key) {
+                    MenuOutcome::Ignored => OverlayRouting::Nothing,
+                    MenuOutcome::Changed => OverlayRouting::Redraw,
+                    MenuOutcome::Dismissed => OverlayRouting::Dismissed,
+                    MenuOutcome::Chose(command) => OverlayRouting::Chose(command),
+                }
+            }
+            Content::Sheet(sheet) => {
+                let InputEvent::KeyPressed { key, modifiers } = input else {
+                    return OverlayRouting::Nothing;
+                };
+                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, font);
+                if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
+                    *profile = *sheet.profile();
+                }
+                match outcome {
+                    SheetOutcome::Ignored => OverlayRouting::Nothing,
+                    SheetOutcome::Changed => OverlayRouting::Redraw,
+                    SheetOutcome::Edited => OverlayRouting::Edited,
+                    SheetOutcome::Dismissed => OverlayRouting::Closed,
+                }
             }
         }
     }
 
-    /// What routing a pointer event concluded.
-    enum PointerRouting {
+    /// What routing an event into the open overlay concluded.
+    enum OverlayRouting {
         /// Nothing to do.
         Nothing,
-        /// Repaint the window.
-        Repaint,
+        /// The overlay's own pixels changed; re-present its popup.
+        Redraw,
         /// The settings sheet edited the profile.
         Edited,
-        /// A menu row chose this command.
+        /// A menu row or accelerator named this command; the overlay is done.
         Chose(Command),
-        /// The settings sheet asked to close.
-        Close,
+        /// The overlay asked to go.
+        Dismissed,
+        /// The settings sheet asked to close, having possibly edited the
+        /// profile.
+        Closed,
     }
 
     /// Drain every queued window event (non-blocking — the wait-set wake
@@ -1133,16 +1463,16 @@ mod program {
     fn drain_events<S: ShellSource>(
         terminal: &mut Terminal<S>,
         profile: &mut Profile,
-        overlay: &mut Overlay,
+        overlay: &mut Option<Overlay>,
         desktop: &mut Desktop,
         theme: &Theme,
         font: BitmapFont,
-        viewport: Rect,
+        window: u64,
         endpoint: u64,
         server: ProcId,
     ) -> EventOutcome {
         let scale = desktop.scale();
-        let mut repaint = false;
+        let mut redraw = false;
         loop {
             let mut frame = [0u8; WindowEvent::WIRE_LEN];
             let mut sender = [0u8; ORIGIN_WIRE_LEN];
@@ -1174,53 +1504,104 @@ mod program {
                                 writeln!(Stderr, "terminal: could not apply desktop change: {err}");
                         }
                     }
+                    // Both windows this app owns — its own and, while one is
+                    // open, its overlay's popup — report through this one
+                    // mailbox, so every event is demuxed on the id it carries.
+                    let popup = overlay.as_ref().map(|open| open.window);
+                    let for_popup = popup == Some(event.window_id());
                     match event {
-                        WindowEvent::Key { key, .. } => {
-                            match route_key(
-                                terminal, profile, overlay, key, scale, theme, font, viewport,
-                            ) {
-                                KeyRouting::Nothing => {}
-                                KeyRouting::Repaint => repaint = true,
-                                KeyRouting::Edited => return EventOutcome::ProfileChanged,
-                                KeyRouting::Command(command) => {
-                                    return finish(
-                                        run_command(command, terminal, profile, overlay),
-                                        repaint,
-                                    )
+                        WindowEvent::Key { key, .. } if for_popup => {
+                            let Some(open) = overlay.as_mut() else {
+                                continue;
+                            };
+                            match route_overlay_key(open, profile, key, scale, theme, font) {
+                                OverlayRouting::Nothing => {}
+                                OverlayRouting::Redraw => redraw = true,
+                                OverlayRouting::Edited => return EventOutcome::ProfileChanged,
+                                OverlayRouting::Chose(command) => {
+                                    open.dismissed = true;
+                                    return finish(run_command(command, terminal, profile), redraw);
                                 }
-                                KeyRouting::CloseSheet => {
-                                    *overlay = Overlay::None;
+                                OverlayRouting::Dismissed => {
+                                    open.dismissed = true;
+                                    return EventOutcome::Continue;
+                                }
+                                OverlayRouting::Closed => {
+                                    open.dismissed = true;
                                     return EventOutcome::ProfileChanged;
                                 }
-                                KeyRouting::ShellGone => return EventOutcome::End,
+                            }
+                        }
+                        WindowEvent::Key { key, .. } => match route_key(terminal, key) {
+                            KeyRouting::Nothing => {}
+                            KeyRouting::Command(command) => {
+                                return finish(run_command(command, terminal, profile), redraw)
+                            }
+                            KeyRouting::ShellGone => return EventOutcome::End,
+                        },
+                        WindowEvent::Pointer { x, y, action, .. } if for_popup => {
+                            let Some(open) = overlay.as_mut() else {
+                                continue;
+                            };
+                            let at = client_point(x, y);
+                            match route_overlay_pointer(
+                                open, profile, action, at, scale, theme, font,
+                            ) {
+                                OverlayRouting::Nothing => {}
+                                OverlayRouting::Redraw => redraw = true,
+                                OverlayRouting::Edited => return EventOutcome::ProfileChanged,
+                                OverlayRouting::Chose(command) => {
+                                    open.dismissed = true;
+                                    return finish(run_command(command, terminal, profile), redraw);
+                                }
+                                OverlayRouting::Dismissed => {
+                                    open.dismissed = true;
+                                    return EventOutcome::Continue;
+                                }
+                                OverlayRouting::Closed => {
+                                    open.dismissed = true;
+                                    return EventOutcome::ProfileChanged;
+                                }
                             }
                         }
                         WindowEvent::Pointer { x, y, action, .. } => {
-                            let at = Point::new(
-                                i32::try_from(x).unwrap_or(i32::MAX),
-                                i32::try_from(y).unwrap_or(i32::MAX),
-                            );
-                            match route_pointer(
-                                overlay, profile, action, at, viewport, scale, theme, font,
-                            ) {
-                                PointerRouting::Nothing => {}
-                                PointerRouting::Repaint => repaint = true,
-                                PointerRouting::Edited => return EventOutcome::ProfileChanged,
-                                PointerRouting::Chose(command) => {
-                                    return finish(
-                                        run_command(command, terminal, profile, overlay),
-                                        repaint,
-                                    )
+                            // An overlay is modal, so a press that lands on
+                            // the terminal instead dismisses it and reaches
+                            // nothing else. Otherwise a secondary press asks
+                            // for the context menu at that point, and every
+                            // other pointer event is a no-op: the screen is
+                            // shell-driven and the emulator keeps no
+                            // scrollback for a wheel to move.
+                            if let Some(open) = overlay.as_mut() {
+                                if matches!(action, PointerAction::Pressed(_)) {
+                                    open.dismissed = true;
+                                    return EventOutcome::Continue;
                                 }
-                                PointerRouting::Close => {
-                                    *overlay = Overlay::None;
-                                    return EventOutcome::ProfileChanged;
-                                }
+                            } else if action
+                                == PointerAction::Pressed(
+                                    tairix_abi::input::PointerButtonCode::Secondary,
+                                )
+                            {
+                                return EventOutcome::OpenMenu {
+                                    at: client_point(x, y),
+                                };
                             }
                         }
+                        // A popup wears no close control, so a close asked of
+                        // one can only be the session tearing it down: let the
+                        // overlay go rather than ending the program.
+                        WindowEvent::CloseRequested { .. } if for_popup => {
+                            if let Some(open) = overlay.as_mut() {
+                                open.dismissed = true;
+                            }
+                            return EventOutcome::Continue;
+                        }
                         WindowEvent::CloseRequested { .. } => return EventOutcome::End,
-                        // The session dropped the window's pixels under
-                        // memory pressure: repaint the whole screen.
+                        // The session dropped a window's pixels under memory
+                        // pressure: repaint whichever window lost them.
+                        WindowEvent::RedrawRequested { .. } if for_popup => {
+                            return EventOutcome::OverlayChanged
+                        }
                         WindowEvent::RedrawRequested { .. } => return EventOutcome::Repaint,
                         // The window manager resized the window (a settled
                         // drag-resize, or a maximize/restore): hand the new
@@ -1229,10 +1610,11 @@ mod program {
                         // window size. Returning here leaves any events queued
                         // behind it for the next wake (level-triggered peek).
                         WindowEvent::Resized {
+                            window_id,
                             width_px,
                             height_px,
                             ..
-                        } => {
+                        } if window_id == window => {
                             return EventOutcome::Resized {
                                 width_px,
                                 height_px,
@@ -1254,17 +1636,23 @@ mod program {
                         // last good state standing); either way there is
                         // nothing further to do with the event itself. These
                         // are honest no-ops, not deferred work.
+                        //
+                        // A `Resized` for anything but the terminal's own
+                        // window is likewise nothing: a popup is neither
+                        // decorated nor resizable, so it has no size of its
+                        // own for the session to change.
                         WindowEvent::Focus { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
+                        | WindowEvent::Resized { .. }
                         | WindowEvent::FilePicked { .. }
                         | WindowEvent::PickCancelled { .. }
                         | WindowEvent::DesktopChanged { .. } => {}
                     }
                 }
                 Err(err) if errno_from(err) == Errno::WouldBlock => {
-                    return if repaint {
-                        EventOutcome::Repaint
+                    return if redraw {
+                        EventOutcome::OverlayChanged
                     } else {
                         EventOutcome::Continue
                     };
@@ -1274,78 +1662,45 @@ mod program {
         }
     }
 
-    /// Fold a pending repaint into `outcome`: a command that concluded
-    /// nothing still repaints when an earlier event in the same drain
-    /// changed the screen.
-    fn finish(outcome: EventOutcome, repaint: bool) -> EventOutcome {
+    /// Fold a pending overlay redraw into `outcome`: a command that concluded
+    /// nothing still re-presents the popup when an earlier event in the same
+    /// drain changed the overlay's own pixels.
+    fn finish(outcome: EventOutcome, redraw: bool) -> EventOutcome {
         match outcome {
-            EventOutcome::Continue if repaint => EventOutcome::Repaint,
+            EventOutcome::Continue if redraw => EventOutcome::OverlayChanged,
             other => other,
         }
     }
 
-    /// What routing a key press concluded.
+    /// The client-local point a wire pointer position names.
+    fn client_point(x: u32, y: u32) -> Point {
+        Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        )
+    }
+
+    /// What routing a key press delivered for the terminal's own window
+    /// concluded.
     enum KeyRouting {
         /// Nothing to do.
         Nothing,
-        /// Repaint the window.
-        Repaint,
-        /// The settings sheet edited the profile.
-        Edited,
-        /// A menu accelerator or row named this command.
+        /// A terminal accelerator named this command.
         Command(Command),
-        /// The settings sheet asked to close.
-        CloseSheet,
         /// The shell can no longer accept input.
         ShellGone,
     }
 
-    /// Route one key press: the open overlay owns it, else a terminal
-    /// accelerator claims it, else it is shell input.
-    #[allow(clippy::too_many_arguments)] // The routing needs the whole drawing context to hit-test the overlay.
+    /// Route one key press delivered for the terminal's own window: a
+    /// terminal accelerator claims it, else it is shell input.
+    ///
+    /// A key for the open overlay's popup never reaches here — it arrives
+    /// under the popup's own window id and is routed there.
     fn route_key<S: ShellSource>(
         terminal: &mut Terminal<S>,
-        profile: &mut Profile,
-        overlay: &mut Overlay,
         key: tairix_abi::input::KeyInput,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        viewport: Rect,
     ) -> KeyRouting {
         let input = key_input_event(key);
-        if let Overlay::Menu(menu) = overlay {
-            let InputEvent::KeyPressed { key, .. } = input else {
-                return KeyRouting::Nothing;
-            };
-            return match menu.on_key(key) {
-                MenuOutcome::Ignored => KeyRouting::Nothing,
-                MenuOutcome::Changed => KeyRouting::Repaint,
-                MenuOutcome::Dismissed => {
-                    *overlay = Overlay::None;
-                    KeyRouting::Repaint
-                }
-                MenuOutcome::Chose(command) => {
-                    *overlay = Overlay::None;
-                    KeyRouting::Command(command)
-                }
-            };
-        }
-        if let Overlay::Sheet(sheet) = overlay {
-            let InputEvent::KeyPressed { key, modifiers } = input else {
-                return KeyRouting::Nothing;
-            };
-            let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, font);
-            if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
-                *profile = *sheet.profile();
-            }
-            return match outcome {
-                SheetOutcome::Ignored => KeyRouting::Nothing,
-                SheetOutcome::Changed => KeyRouting::Repaint,
-                SheetOutcome::Edited => KeyRouting::Edited,
-                SheetOutcome::Dismissed => KeyRouting::CloseSheet,
-            };
-        }
         if let InputEvent::KeyPressed { key, modifiers } = input {
             if let Some(command) = Command::accelerator(key, modifiers) {
                 return KeyRouting::Command(command);

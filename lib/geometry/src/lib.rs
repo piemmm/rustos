@@ -152,6 +152,30 @@ impl Rect {
             && point.y >= self.top()
             && point.y < self.bottom()
     }
+
+    /// This rectangle's size, translated so it lies wholly inside `screen`.
+    ///
+    /// The size is preserved; only the origin moves — pulled back along each
+    /// axis just far enough that the far edge stops at `screen`'s far edge,
+    /// then pushed forward so the near edge does not cross `screen`'s near
+    /// edge. A rectangle larger than `screen` on an axis pins to `screen`'s
+    /// leading edge on that axis rather than centring or overflowing the far
+    /// side. This is the one placement rule the taskbar's menus and an app's
+    /// popup surface both clamp with, so a surface anchored near a screen
+    /// edge is never drawn partly off-screen.
+    #[must_use]
+    pub fn clamped_onto(&self, screen: Rect) -> Self {
+        let x = clamp_axis(self.origin.x, self.width, screen.left(), screen.right());
+        let y = clamp_axis(self.origin.y, self.height, screen.top(), screen.bottom());
+        Self::new(x, y, self.width, self.height)
+    }
+}
+
+/// Shift `origin` so `[origin, origin + extent)` stays within `[low, high)`,
+/// pinning to `low` when the extent does not fit.
+fn clamp_axis(origin: i32, extent: u32, low: i32, high: i32) -> i32 {
+    let max = high.saturating_sub(to_i32(extent));
+    origin.min(max).max(low)
 }
 
 /// The unsigned distance `high - low`, clamped at zero, as `u32`.

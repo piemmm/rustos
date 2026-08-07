@@ -41,8 +41,8 @@ pub use client::{
 };
 pub use desktop::Desktop;
 pub use server::{
-    CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
-    WINDOW_REPLY_MAX,
+    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer,
+    WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

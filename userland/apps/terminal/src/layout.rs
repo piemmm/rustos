@@ -113,6 +113,24 @@ pub fn fit_font_size(preferred: u16, screen: (u32, u32), theme: &Theme, scale: S
     size
 }
 
+/// The largest client size no larger than `width_px` × `height_px` that holds
+/// a whole number of `font` cells.
+///
+/// A character grid can only show whole cells, so any remainder is background
+/// the terminal can never draw in — a border of dead pixels along the right
+/// and bottom edges. Snapping the *window* to the grid instead removes it: the
+/// window manager sizes the frame from the client it is given, so a client
+/// that is an exact multiple of the cell leaves nothing over.
+///
+/// Snapping is idempotent — an already-snapped size is returned unchanged —
+/// and never returns zero, so re-mapping cannot oscillate and a window dragged
+/// smaller than one cell still holds one.
+#[must_use]
+pub fn snap_to_cells(width_px: u32, height_px: u32, font: BitmapFont) -> (u32, u32) {
+    let (cols, rows) = grid_dims(width_px, height_px, font);
+    grid_size(cols, rows, font)
+}
+
 /// The client size, in physical pixels, a terminal drawn in `font` opens at
 /// on `screen`.
 ///

@@ -311,9 +311,9 @@ number of bytes:
 ## Server-side window decorations
 
 Window decorations — a title bar with the four command controls (close,
-minimize, put-to-back, size-toggle), the frame rim, and a corner resize
-grabber — are drawn by the **window manager**, never by an
-app (`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
+minimize, put-to-back, size-toggle) and the frame rim — are drawn by the
+**window manager**, never by an app (`AGENTS.md` §10,
+`plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
 `plans/COMPOSITOR-WORK.md`). An app supplies only its content surface and
 typed window metadata; it can neither paint over nor receive input from
 the chrome. The furniture family itself lives once in
@@ -326,28 +326,33 @@ the chrome. The furniture family itself lives once in
   frame's `FrameInsets` at the active `Scale` and `Theme`: the window's
   outer `bounds` grow to hold the decoration and the content surface is
   presented inset at `window_client_rect`, so the client never overlaps the
-  furniture. `clear_window_frame` collapses the band back to the bare
-  surface. A DPI (`set_scale`) or theme (`set_theme`) change re-resolves the
-  band for every decorated window.
+  furniture. That band is the border plus the title bar above and the **thin
+  frame rim** on the other three edges — the same for a resizable window as
+  for a fixed one, because a band wide enough to grab would show as dead
+  space around every app's content. A resizable window's extra grab room
+  lives in the hit map instead (below), never in this geometry.
+  `clear_window_frame` collapses the band back to the bare surface. A DPI
+  (`set_scale`) or theme (`set_theme`) change re-resolves the band for every
+  decorated window.
 - **Rendering.** A decorated window's furniture is a `WindowChrome`: the
   four strips the frame actually draws into — the top (title) band, the
   bottom band, and the two side borders — painted through
   `WindowFrame::render` / `TitleBar::render` (rim, body, the sanitised title
-  text via `lib/font`, and the four command controls) plus a corner
-  `ResizeGrabber`, using the one `lib/raster` fill and the shared
-  rounded-corner path — so the rim's rounded corners stay transparent and
-  the desktop shows through. Only the strips are kept: the region between
-  them is never sampled (the compositor draws the window's own content
-  there), so retained bytes follow the band thickness and not the window
-  area — a 1920×1080 window's furniture costs roughly a seventeenth of what
-  one outer-sized surface did. The compositor samples those strips in the
-  reserved band and the client content inside them (`Window::row` /
+  text via `lib/font`, and the four command controls), using the one
+  `lib/raster` fill and the shared rounded-corner path — so the rim's
+  rounded corners stay transparent and the desktop shows through. Only the
+  strips are kept: the region between them is never sampled (the compositor
+  draws the window's own content there), so retained bytes follow the band
+  thickness and not the window area — a 1920×1080 window's furniture costs
+  roughly a thirty-fifth of what one outer-sized surface did. The compositor
+  samples those strips in the reserved band and the client content inside
+  them (`Window::row` /
   `Window::sample_local`), for both the software and the
   hardware-accelerated present paths; a screen row needs at most two of
   them, since a row is either in the title/bottom band or crosses the client
   between the two side borders. The furniture is animation-free, so it is
   reduced-motion correct by construction, and high contrast thickens the
-  command-glyph and grip strokes.
+  command-glyph strokes.
 - **Retention (bounded and reclaimable).** The strips are *derived* pixels,
   so the compositor holds them in one shared, pressure-governed
   `ReclaimCache` keyed by `WindowId` rather than each window pinning its own
@@ -392,9 +397,18 @@ the chrome. The furniture family itself lives once in
   can never impersonate a real frame control (`plans/GUI-CONTROLS-DESIGN.md`
   §1, §11.17–§11.18). A non-resizable window classifies its border as inert
   `Frame`, never a resize edge, so a fixed-size window cannot be dragged
-  larger. The client-press position the app receives is reported relative to
-  the inset **client** rectangle, so decorating a window never shifts its
-  content coordinates.
+  larger and every pixel of its client reaches it. The client-press position
+  the app receives is reported relative to the inset **client** rectangle, so
+  decorating a window never shifts its content coordinates.
+- **The resize zone is invisible (it overlaps the client).** Because the band
+  is only the thin rim, a resizable window's resize edges reach *inward* over
+  the client's outermost `hit_slop` pixels — the invisible resize border
+  macOS, GNOME, and Windows use. A press there is `ResizeEdge`, not `Client`:
+  the app still draws those pixels but does not receive presses on them, the
+  accepted trade for a border that costs no visible space. Since the router
+  consults the frame first, that outer strip also wins over a window's
+  root-viewport scrollbar furniture. Drawing stays strictly separated even
+  so — the frame paints no furniture mark inside the client.
 - **Pointer and keyboard routing.** A title-bar press begins the cooperative
   move-grab; a command-control press captures the frame, feeds the click to
   `TitleBar::on_pointer`, and emits `WindowControl { window, control }` on the
@@ -489,18 +503,18 @@ dressed is the window manager.
 
 Whether the frame is **resizable** is the opening app's own choice, carried on
 its window `Create` (`WindowRequest::Create { resizable, .. }` → `WindowClient::create`'s
-`resizable` argument → `WindowHost::window_opened`). A resizable window is drawn
-with a resize grabber and a live maximize/restore size toggle; the app
+`resizable` argument → `WindowHost::window_opened`). A resizable window gets a
+live maximize/restore size toggle and the invisible resize edges above; the app
 re-lays-out to each new client size the window manager reports
 (`WindowEvent::Resized`), re-mapping its frame region with `WindowRequest::Resize`
 so the resize keeps the window identity. A fixed-size app passes `resizable:
-false` — no grabber is drawn and the size-toggle is inert — so an app that
-renders at one size is never handed a size it did not ask to handle. The file
-**viewer** (`userland/apps/viewer`) is the shipping resizable app: it re-wraps
+false` — every client pixel reaches it and the size-toggle is inert — so an
+app that renders at one size is never handed a size it did not ask to handle.
+The file **viewer** (`userland/apps/viewer`) is a resizable app: it re-wraps
 its text to the new width, preserves the reader's scroll position across the
 resize, and fails closed (keeping the current surface) if a new frame region
 cannot be allocated or the session refuses the re-map. Files and the terminal
-present fixed-size windows.
+open resizable too.
 
 `DesktopShell::sync_active_frame` keeps exactly one window showing its active
 frame: on every focus change — a click-to-activate press, a taskbar activation,
@@ -510,6 +524,67 @@ undecorated focus, so the session's own **trusted file picker** — session
 chrome dismissed by its own keys, not an app the window manager dresses — opens
 undecorated and never gains an inert title bar, while still correctly
 deactivating whatever app window it drew focus away from.
+
+## App-owned popup surfaces
+
+A context menu or a settings sheet drawn *inside* its app's own window is
+clipped the moment the user shrinks that window. The fix is a **popup
+surface**: an undecorated, app-positioned window stacked directly above its
+parent, which any app can open for any transient overlay
+(`plans/APPWIN.md` AW6).
+
+- **One new request.** `WindowRequest::CreatePopup { parent_window_id,
+  shm_handle, event_endpoint, frame_count, width_px, height_px,
+  stride_bytes, format, offset_x, offset_y }`, reached from
+  `WindowClient::create_popup` with one `tairix_window::PopupSpec`. It
+  carries no title (a popup is not a taskbar entry) and no `resizable`
+  flag (the app sizes it, the user does not drag it). A popup's semantics
+  differ from a top-level window's, so it is its own variant rather than
+  extra `Create` fields.
+- **The offset is parent-relative, and the session clamps it.** An app is
+  never told its own window's screen position, so it asks in physical
+  pixels from its **parent's client origin**; the session resolves the
+  parent's current origin, adds the offset, and clamps the whole popup onto
+  the screen with the one shared `tairix_geometry::Rect::clamped_onto`
+  rule the taskbar's menus already use (`AGENTS.md` §2.2). A negative or
+  over-large offset is therefore a legitimate request — an overlay bigger
+  than its owner's window (the terminal's settings sheet over a tiny
+  window) still opens whole and on screen.
+- **Owner-validated, and on the same budget.** The engine refuses a kernel
+  caller, requires that `parent_window_id` is a live window the
+  **kernel-attested** caller owns (a foreign or unknown parent answers
+  `NotFound` — no existence oracle), and validates the geometry exactly as
+  a `Create` does. A popup counts against the same
+  `WINDOWS_PER_CLIENT_MAX` cap, so "popup" cannot be used to pin more
+  shared memory than `Create` may (`AGENTS.md` §5.4).
+- **Undecorated by construction, not by a flag.**
+  `ShellWindowHost::popup_opened` opens it through
+  `DesktopShell::open_popup_window`, which adds the window to the
+  compositor and raises it but never calls `decorate_window` and never
+  opens a taskbar entry — the same path the session's own trusted file
+  picker already takes. No protocol "undecorated" bit exists to be
+  forged.
+- **Stacked directly above its parent.** The compositor's z-order is one
+  flat stack, so the session re-asserts the coupling once per wake,
+  immediately before `present`
+  (`SessionWindows::keep_popups_stacked` → `raise(parent)` then
+  `raise(popup)`), exactly as the lock overlay keeps itself topmost.
+  Nothing raised earlier in that frame can land between a parent and its
+  popup, and the compositor gains no popup concept of its own.
+- **Parent death takes the popup with it.** Closing the parent — over the
+  channel, from the frame's close control, or by the owning client dying
+  (`client_exited`) — tears down every popup keyed to it; a `Close` naming
+  the popup's own id tears down only the popup. The session drops the
+  parent→popup link on either path, so no stale link can outlive a window.
+- **Presenting is unchanged.** `Present`, `SetBackdropBlur`, and `Close`
+  act on a popup's id exactly as on a top-level id, and the popup's own
+  events (pointer, key) arrive under its own window id with
+  **popup-local** coordinates, so an app hit-tests its overlay against the
+  popup's own viewport. One event mailbox serves both windows; the app
+  demultiplexes on `WindowEvent::window_id`.
+
+The first consumer is the graphical terminal, whose context menu and
+settings sheet are each a popup (`plans/GUI-TERMINAL.md` §9).
 
 ## Failing closed
 

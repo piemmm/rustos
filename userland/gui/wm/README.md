@@ -76,6 +76,14 @@ router**:
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
   slice index and a blend.
+- Popup surfaces need no compositor primitive of their own. An app-owned
+  popup (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an
+  ordinary undecorated window in that same flat z-order, placed by the
+  session at its clamped screen origin; "directly above its parent" is
+  re-asserted with `raise(parent)` then `raise(popup)` once per wake, just
+  before `present`, so nothing raised earlier in the frame can land between
+  them. The compositor gains no popup concept, no second stacking rule, and
+  no parent link.
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
@@ -243,8 +251,9 @@ re-rendering on scale and cursor-set changes, and reuse of a cached kind
 when it recurs).
 
 The window-furniture tests pin both halves of the reclaim contract: the
-exact composited pixels of every band, the rounded rim corners and the
-resize grabber; retained bytes that scale with the frame band and not the
+exact composited pixels of every band and the rounded rim corners — the
+resize zone is invisible, so the corner carries client content, not a grip;
+retained bytes that scale with the frame band and not the
 window area, and never past the one-screenful ceiling however many windows
 are open; a scale or theme change dropping every entry at once (including a
 theme variant that keeps its `ThemeId`) against a title, focus, or resize

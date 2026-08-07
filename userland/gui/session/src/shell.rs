@@ -452,6 +452,50 @@ impl DesktopShell {
         Some(window)
     }
 
+    /// Open `surface` as an undecorated window at `origin`, raise it above
+    /// everything, and focus it — *without* listing it on the taskbar.
+    ///
+    /// This is how an app-owned popup surface (a context menu, a settings
+    /// sheet) is placed. A popup belongs to the window that opened it, so it is
+    /// not a running task of its own: it carries no taskbar entry, no title
+    /// bar, and no window controls, and the owning app dismisses it. Focus
+    /// moves to it so the keys the popup exists to collect arrive there, which
+    /// deactivates the parent's frame exactly as the session's own trusted
+    /// modal surfaces do.
+    ///
+    /// Returns the new [`WindowId`]. It cannot fail: no task id is minted, so
+    /// there is no id space to exhaust.
+    pub fn open_popup_window(
+        &mut self,
+        compositor: &mut Compositor,
+        origin: Point,
+        surface: Surface,
+    ) -> WindowId {
+        let window = compositor.add_window(origin, surface);
+        compositor.raise(window);
+        self.router.focus(window, compositor);
+        self.sync_active_frame(compositor);
+        window
+    }
+
+    /// Close the popup window `window` opened by
+    /// [`open_popup_window`](Self::open_popup_window): remove it from the
+    /// compositor and drop focus if it held it.
+    ///
+    /// Returns `false`, changing nothing, for a window the compositor does not
+    /// know. The taskbar is untouched — a popup never had an entry there —
+    /// so the bar needs no re-present.
+    pub fn close_popup_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !compositor.remove(window) {
+            return false;
+        }
+        if self.router.focused() == Some(window) {
+            self.router.unfocus();
+        }
+        self.sync_active_frame(compositor);
+        true
+    }
+
     /// Decorate the already-open window `window` with the window-manager frame
     /// furniture — the title bar (with the Close / Minimize / `PutToBack` /
     /// `SizeToggle` command controls), the frame rim, and the resize edges —
@@ -468,11 +512,13 @@ impl DesktopShell {
     /// bar.
     ///
     /// `resizable` is the opening app's own request (carried on its window
-    /// create): when set, the window manager draws a resize grabber and a live
-    /// maximize/restore size toggle, and the app re-lays-out to each new client
-    /// size it reports. A fixed-size app passes `false` — no grabber is drawn
-    /// and the size-toggle is inert — so the mechanism is per-app opt-in, never
-    /// forced on an app that renders at one size.
+    /// create): when set, the window manager offers a live maximize/restore
+    /// size toggle and the invisible resize edges — a grab zone over the
+    /// client's own outer pixels, so an edge costs no visible space — and the
+    /// app re-lays-out to each new client size it reports. A fixed-size app
+    /// passes `false` — every client pixel reaches it and the size toggle is
+    /// inert — so the mechanism is per-app opt-in, never forced on an app that
+    /// renders at one size.
     pub fn decorate_window(
         &mut self,
         compositor: &mut Compositor,

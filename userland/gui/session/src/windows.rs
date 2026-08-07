@@ -55,6 +55,11 @@ struct WindowRecord {
     /// (`Compositor::present_window_content`), so the session keeps no
     /// second copy to convert into and clone from.
     wm: WindowId,
+    /// For a popup surface, the compositor window of the parent it is glued
+    /// above; `None` for a top-level window. Held as the compositor id
+    /// because that is what the stacking coupling needs, and a window's
+    /// compositor id never changes while it lives.
+    parent: Option<WindowId>,
 }
 
 /// The session's bookkeeping for every live served window.
@@ -67,6 +72,10 @@ pub struct SessionWindows {
     by_wm: BTreeMap<WindowId, u64>,
     /// Monotonic count of opens, driving the cascade placement.
     opened: u64,
+    /// How many live records are popups. Kept beside the map so the
+    /// per-wake stacking pass costs one integer test on the overwhelmingly
+    /// common wake with no popup open, instead of walking every record.
+    popups: usize,
 }
 
 impl SessionWindows {
@@ -112,6 +121,46 @@ impl SessionWindows {
     /// The cascade origin for the next opened window.
     fn next_origin(&self) -> Point {
         cascade_origin_for(self.opened)
+    }
+
+    /// Re-assert every live popup's stacking: each popup is restacked
+    /// directly above the parent that owns it.
+    ///
+    /// The embedder calls this immediately before each composite. A popup is
+    /// its parent's transient — a menu, a sheet — so the pair is raised as a
+    /// unit, which is what guarantees nothing raised elsewhere during the
+    /// same wake can land between a parent and its popup. Idle (one integer
+    /// test) while no popup is open.
+    pub fn keep_popups_stacked(&self, compositor: &mut Compositor) {
+        if self.popups == 0 {
+            return;
+        }
+        for record in self.records.values() {
+            if let Some(parent) = record.parent {
+                compositor.raise(parent);
+                compositor.raise(record.wm);
+            }
+        }
+    }
+
+    /// Record the freshly opened window `ipc`, shown as `wm` and owned by
+    /// `parent` when it is a popup.
+    fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>) {
+        if parent.is_some() {
+            self.popups += 1;
+        }
+        self.records.insert(ipc, WindowRecord { wm, parent });
+        self.by_wm.insert(wm, ipc);
+    }
+
+    /// Forget the window `ipc`, returning its record when it was live.
+    fn take(&mut self, ipc: u64) -> Option<WindowRecord> {
+        let record = self.records.remove(&ipc)?;
+        self.by_wm.remove(&record.wm);
+        if record.parent.is_some() {
+            self.popups = self.popups.saturating_sub(1);
+        }
+        Some(record)
     }
 }
 
@@ -238,12 +287,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         };
         // A served application window is decorated by the window manager: the
         // title bar (with the Close / Minimize / PutToBack / SizeToggle
-        // controls), the frame rim, and — when the app asked to be resizable —
-        // the resize grabber are composed around the app's content. The app
-        // never draws its own chrome; it reacts to the typed lifecycle events
-        // the controls raise over the window path. The app's own `resizable`
-        // request decides whether the grabber and a live size toggle are
-        // offered.
+        // controls) and the frame rim are composed around the app's content.
+        // The app never draws its own chrome; it reacts to the typed lifecycle
+        // events the controls raise over the window path. The app's own
+        // `resizable` request decides whether a live size toggle and the
+        // invisible resize edges — which overlap the client's outer pixels
+        // rather than reserving a visible band — are offered.
         self.shell
             .decorate_window(self.compositor, wm, title, resizable);
         // A served window's pixels come from the app, which the session can
@@ -253,8 +302,49 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // and so are never released: there would be no client to ask.
         self.compositor.set_app_presented(wm, true);
         self.windows.opened += 1;
-        self.windows.records.insert(window_id, WindowRecord { wm });
-        self.windows.by_wm.insert(wm, window_id);
+        self.windows.insert(window_id, wm, None);
+        Ok(())
+    }
+
+    fn popup_opened(
+        &mut self,
+        window_id: u64,
+        parent_window_id: u64,
+        offset_x: i32,
+        offset_y: i32,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        // An app is never told where its own window sits, so the offset it
+        // asked for is relative to its parent's client origin and the
+        // absolute point is the session's to resolve. A parent the session
+        // has no window for refuses the popup rather than placing it
+        // somewhere invented.
+        let Some(parent) = self.windows.wm_id(parent_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(client) = self.compositor.window_client_rect(parent) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(content) =
+            Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
+        else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        let placed = Rect::new(
+            client.left().saturating_add(offset_x),
+            client.top().saturating_add(offset_y),
+            surface.width_px,
+            surface.height_px,
+        )
+        .clamped_onto(self.compositor.screen_rect());
+        // Undecorated on purpose: a popup is a transient its parent owns, so
+        // it wears no title bar, no controls, and no taskbar entry, and the
+        // app that opened it is what dismisses it.
+        let wm = self
+            .shell
+            .open_popup_window(self.compositor, placed.origin, content);
+        self.compositor.set_app_presented(wm, true);
+        self.windows.insert(window_id, wm, Some(parent));
         Ok(())
     }
 
@@ -328,9 +418,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // conclusion is (or could be) delivered.
         self.picker
             .abort_for(window_id, self.shell, self.compositor);
-        if let Some(record) = self.windows.records.remove(&window_id) {
-            self.windows.by_wm.remove(&record.wm);
-            let _ = self.shell.close_window(self.compositor, record.wm);
+        if let Some(record) = self.windows.take(window_id) {
+            // A popup was never a task, so it leaves through the taskbar-less
+            // path; the engine tears a parent's popups down with it, so each
+            // arrives here in its own turn.
+            let _ = if record.parent.is_some() {
+                self.shell.close_popup_window(self.compositor, record.wm)
+            } else {
+                self.shell.close_window(self.compositor, record.wm)
+            };
         }
     }
 
@@ -1070,8 +1166,8 @@ mod tests {
             open_one_sized(&mut host, 3, true)
         };
         // The app asked to be resizable, so the window manager decorates it
-        // with a resizable frame — its grabber and a live size toggle. A
-        // fixed-size open (asserted separately) gets neither.
+        // with a resizable frame — its invisible resize edges and a live size
+        // toggle. A fixed-size open (asserted separately) gets neither.
         let frame = compositor
             .window_frame(wm)
             .expect("the served window is decorated");

@@ -2,7 +2,7 @@
 
 This is the staged build plan for giving every windowed app real window
 decorations — a title bar with Close / Minimize / PutToBack / SizeToggle
-controls, the frame rim, and a resize grabber — by rendering
+controls, the frame rim, and invisible resize edges — by rendering
 them in the **window manager**, not in any app. It is **binding under
 `AGENTS.md`** — read `AGENTS.md`, `PLAN.md` Stage 7, `plans/GUI-CONTROLS-DESIGN.md`
 (the control/furniture design this consumes), `plans/APPWIN.md` (the window
@@ -135,9 +135,9 @@ guarantees:
   four strips the frame actually draws into — the top (title) band, the bottom
   band, and the two side borders — rendered by `Window::render_chrome` through
   `WindowFrame::render`/`TitleBar::render` (rim, body, the sanitised title via
-  `lib/font`, the four `WindowControl` buttons) plus a corner `ResizeGrabber`,
-  using the one `lib/raster` fill and the shared rounded-corner path (no second
-  recipe). The rim's rounded corners stay transparent so the desktop shows
+  `lib/font`, the four `WindowControl` buttons), using the one `lib/raster`
+  fill and the shared rounded-corner path (no second recipe). The rim's
+  rounded corners stay transparent so the desktop shows
   through. The strips are cut from one transient outer-sized render because
   the drawing primitives refuse a negative-origin destination; only the strips
   are kept, so retained bytes scale with the band and never with the window
@@ -373,13 +373,17 @@ it guarantees:
 
 Two gaps that made resizable windows only nominally resizable are closed:
 
-- **A resizable window reserves a real grab border.** `WindowFrame`'s
-  left/right/bottom band is the theme's `resize_grabber_extent` for a
-  **resizable** window (`band_inset`, consumed by `insets`/`layout`), instead
-  of the 1-pixel `frame_inset` a fixed window keeps. The corner `ResizeGrabber`
-  and the frame resize edges now sit in furniture the pointer can actually hit,
-  and the client insets out from under the grabber (it never overlaps content).
-  A fixed-size window is unchanged.
+- **A resizable window's grab border is invisible.** `WindowFrame`'s
+  left/right/bottom band is the 1-pixel `frame_inset` for every window,
+  resizable or not (`band_inset`, consumed by `insets`/`layout`): a band wide
+  enough to grab showed as dead space around every resizable app's content.
+  The grab room lives in the hit map instead — `WindowFrame::hit` reports
+  `ResizeEdge` for the client's outermost `hit_slop` pixels, so an edge is
+  grabbable while the client stays as large as a fixed window's. The app
+  still draws those pixels but does not receive presses on them, the accepted
+  trade macOS, GNOME, and Windows make. The frame therefore draws no corner
+  grip (there is no band to hold one), and a fixed-size window trades
+  nothing: every client pixel reaches it.
 - **Client-area pointer motion and release reach the app.** The window manager
   gives a client press an implicit pointer grab (`client_grab`), so the
   subsequent motion (clamped into the client) and the release are delivered to
@@ -393,8 +397,8 @@ Two gaps that made resizable windows only nominally resizable are closed:
 ## 3. Definition of done
 
 - Files — and every other windowed app — is drawn with a title bar
-  (title + Close/Minimize/PutToBack/SizeToggle), the frame rim, and a resize
-  grabber, **without any app drawing its own chrome**. An app crate
+  (title + Close/Minimize/PutToBack/SizeToggle), the frame rim, and grabbable
+  resize edges, **without any app drawing its own chrome**. An app crate
   may be changed only to *react* to the WM's typed lifecycle events over the
   existing window path (a minimize notice, a new client size on resize/maximize)
   — never to paint or intercept furniture.

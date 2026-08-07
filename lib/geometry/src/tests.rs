@@ -40,6 +40,43 @@ fn rect_contains_is_half_open() {
 }
 
 #[test]
+fn clamped_onto_leaves_a_wholly_contained_rect_where_it_is() {
+    let screen = Rect::new(0, 0, 100, 100);
+    let r = Rect::new(10, 20, 30, 40);
+    assert_eq!(r.clamped_onto(screen), r);
+}
+
+#[test]
+fn clamped_onto_pulls_back_a_rect_past_the_far_edge() {
+    let screen = Rect::new(0, 0, 100, 100);
+    // Right/bottom edges would fall at 130/150; pull back so the far edge
+    // stops at the screen far edge (origin 70/60).
+    let r = Rect::new(90, 80, 40, 70);
+    assert_eq!(r.clamped_onto(screen), Rect::new(60, 30, 40, 70));
+}
+
+#[test]
+fn clamped_onto_pushes_a_rect_past_the_near_edge_forward() {
+    let screen = Rect::new(0, 0, 100, 100);
+    let r = Rect::new(-20, -5, 30, 30);
+    assert_eq!(r.clamped_onto(screen), Rect::new(0, 0, 30, 30));
+}
+
+#[test]
+fn clamped_onto_pins_an_oversize_rect_to_the_leading_edge() {
+    let screen = Rect::new(0, 0, 50, 50);
+    let r = Rect::new(20, 20, 80, 80);
+    assert_eq!(r.clamped_onto(screen), Rect::new(0, 0, 80, 80));
+}
+
+#[test]
+fn clamped_onto_respects_a_non_origin_screen() {
+    let screen = Rect::new(100, 100, 200, 200);
+    let r = Rect::new(0, 0, 40, 40);
+    assert_eq!(r.clamped_onto(screen), Rect::new(100, 100, 40, 40));
+}
+
+#[test]
 fn empty_rect_is_empty() {
     assert!(Rect::EMPTY.is_empty());
     assert!(Rect::new(0, 0, 0, 5).is_empty());

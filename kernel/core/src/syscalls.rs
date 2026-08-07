@@ -1402,9 +1402,24 @@ where
         SpawnAttach::parse(&block)
     }
 
-    /// Apply an attach block's per-descriptor wires onto the child's base
-    /// stream table (`plans/SPAWN.md` SP10), returning the reshaped table
-    /// plus the wired open entries to install at the child's fd 0–3.
+    /// Resolve the child's standard descriptors from an attach block
+    /// (`plans/SPAWN.md` SP10), returning the reshaped console table plus
+    /// the open entries to install at the child's fd 0–3.
+    ///
+    /// The *base* table is the block's console selector: [`CONSOLE_INHERIT`]
+    /// takes the caller's own table (the child stays on its parent's
+    /// console), an explicit value must name an installed console index —
+    /// anything else fails closed with [`Errno::NotFound`], never attaching
+    /// the child to a device that does not exist (`plans/PI.md` P11).
+    ///
+    /// A parent standard stream backed by an **open entry** (the pipe or pty
+    /// end a spawn wired behind it) is inherited by cloning that entry into
+    /// the child: the console table records console-backed slots only, and
+    /// wiring an entry closes the slot, so a child of a pty-hosted shell that
+    /// read the table alone would inherit a denied descriptor and lose every
+    /// byte it writes. Only an *inherited* base reaches those entries; an
+    /// explicitly selected console is the whole base, so the parent's own
+    /// streams stay out of the child's reach.
     ///
     /// Every named handle is resolved owner-checked against the
     /// kernel-trusted caller identity: a forged or foreign descriptor
@@ -1421,8 +1436,25 @@ where
         &self,
         caller: &CallerContext<'_>,
         attach: &SpawnAttach,
-        base_streams: DescriptorTable,
     ) -> Result<(DescriptorTable, Vec<(u32, crate::aspace::OpenFile)>), Errno> {
+        let inherits_parent = attach.console == CONSOLE_INHERIT;
+        let base_streams = if inherits_parent {
+            self.aspaces.read().streams(caller.task_id)
+        } else {
+            let index = match u8::try_from(attach.console) {
+                Ok(index) if usize::from(index) < self.consoles.len() => index,
+                _ => return Err(Errno::NotFound),
+            };
+            DescriptorTable::standard_on(index)
+        };
+        // The parent's own open entry behind standard slot `slot`, and only
+        // an inherited base and a standard slot ever resolve one.
+        let inherited_entry = |slot: u32| {
+            if !inherits_parent || slot as usize >= tairix_abi::STD_STREAM_COUNT {
+                return None;
+            }
+            self.aspaces.read().open_file_entry(caller.task_id, slot)
+        };
         let mut child_streams = base_streams;
         let mut wired: Vec<(u32, crate::aspace::OpenFile)> = Vec::new();
         for (slot, wire) in attach.wires.iter().enumerate() {
@@ -1430,16 +1462,26 @@ where
             // conversion cannot fail; keep the residual fail-closed rather
             // than casting.
             let fd = u32::try_from(slot).map_err(|_| Errno::OutOfRange)?;
-            match *wire {
-                FdWire::Inherit => {}
+            // The open entry that ends up behind the child's `fd`, if any;
+            // the table-only wires apply their own console-slot effect and
+            // resolve to `None`.
+            let entry = match *wire {
+                FdWire::Inherit => inherited_entry(fd),
                 FdWire::InheritSlot(source) => {
-                    child_streams.set_slot(
-                        fd,
-                        base_streams.mode(source),
-                        base_streams.console(source),
-                    );
+                    let duplicate = inherited_entry(source);
+                    if duplicate.is_none() {
+                        child_streams.set_slot(
+                            fd,
+                            base_streams.mode(source),
+                            base_streams.console(source),
+                        );
+                    }
+                    duplicate
                 }
-                FdWire::Closed => child_streams.close_slot(fd),
+                FdWire::Closed => {
+                    child_streams.close_slot(fd);
+                    None
+                }
                 FdWire::Handle(handle) => {
                     let entry = self
                         .aspaces
@@ -1454,9 +1496,12 @@ where
                     if !direction_ok {
                         return Err(Errno::PermissionDenied);
                     }
-                    child_streams.close_slot(fd);
-                    wired.push((fd, entry));
+                    Some(entry)
                 }
+            };
+            if let Some(entry) = entry {
+                child_streams.close_slot(fd);
+                wired.push((fd, entry));
             }
         }
         Ok((child_streams, wired))
@@ -4804,26 +4849,11 @@ where
         let attach = self.stage_spawn_attach(caller, attach, attach_len)?;
         let strings_buf = self.stage_spawn_strings(caller, strings, strings_len)?;
 
-        // Resolve the child's *base* standard-stream table:
-        // `CONSOLE_INHERIT` copies the caller's own descriptor table (the
-        // child stays on its parent's console), while an explicit value
-        // must name an installed console index — anything else fails
-        // closed with `NotFound`, never attaching the child to a device
-        // that does not exist (`plans/PI.md` P11).
-        let base_streams = if attach.console == CONSOLE_INHERIT {
-            self.aspaces.read().streams(caller.task_id)
-        } else {
-            let index = match u8::try_from(attach.console) {
-                Ok(index) if usize::from(index) < self.consoles.len() => index,
-                _ => return Err(Errno::NotFound),
-            };
-            DescriptorTable::standard_on(index)
-        };
-
-        // Apply the per-descriptor wires onto the base table — the
-        // owner-checked, fail-closed resolution below, run *now*, before
-        // any child state exists.
-        let (child_streams, wired) = self.apply_attach_wires(caller, &attach, base_streams)?;
+        // Resolve the child's standard descriptors — the console table the
+        // block selects, the parent's own entry-backed streams it inherits,
+        // and every explicitly wired handle — through the owner-checked,
+        // fail-closed resolution, run *now*, before any child state exists.
+        let (child_streams, wired) = self.apply_attach_wires(caller, &attach)?;
 
         // The spawn subsystem must be fully wired before any state is
         // touched: a build with no frame allocator threaded fails closed
@@ -14510,6 +14540,28 @@ mod tests {
         FrameAllocator::new(&map).expect("frame allocator builds")
     }
 
+    /// Wire `task` the way the graphical terminal wires the shell it hosts:
+    /// fd 0/1/2 behind one pty slave, with those console slots closed so
+    /// exactly one authority backs each descriptor. Returns the master and
+    /// slave descriptors plus the console table the parent is left with.
+    fn host_shell_on_a_pty(
+        aspaces: &RwLock<AddressSpaceRegistry>,
+        task: SecTaskId,
+    ) -> (u32, u32, DescriptorTable) {
+        let size = TerminalSize::new(24, 80).expect("valid grid");
+        let (master_fd, slave_fd) = aspaces.write().open_pty(task, size).expect("pty minted");
+        let mut streams = DescriptorTable::standard();
+        let mut reg = aspaces.write();
+        let slave = reg.open_file_entry(task, slave_fd).expect("slave end");
+        for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
+            reg.install_std_entry(task, fd, slave.clone())
+                .expect("parent stream wired");
+            streams.close_slot(fd);
+        }
+        reg.set_streams(task, streams);
+        (master_fd, slave_fd, streams)
+    }
+
     /// Absolute program path the spawn tests register and look up.
     static SPAWN_PATH: &[u8] = b"/Apps/Child.app/Run";
     /// A syntactically well-formed path that is neither a registered
@@ -17181,6 +17233,197 @@ mod tests {
             child_entry.pipe().expect("pipe end").try_write(b"x"),
             crate::pipe::WriteStep::Wrote(1)
         );
+    }
+
+    /// An **inheriting** attach block hands the child the parent's own
+    /// entry-backed standard streams: a shell hosted on a pty (its fd 0–2
+    /// wired to the slave, so those console slots are closed) spawns a
+    /// command, and the command's output reaches the very same pty — the
+    /// terminal reads its bytes off the master (`plans/PTY.md`,
+    /// `plans/SPAWN.md` SP10). Both inheriting forms are covered: the plain
+    /// `Inherit` an unredirected command carries, and the `InheritSlot` that
+    /// spells `2>&1`. Inheriting the console table alone would leave every
+    /// stream denied and lose the command's output.
+    #[test]
+    fn spawn_inherit_hands_a_child_the_parents_pty_backed_streams() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // What a shell spawns `command 2>&1` with: no console selected, the
+        // unredirected slots inheriting, stderr duplicating stdout.
+        let attach = SpawnAttach {
+            wires: [
+                FdWire::Inherit,
+                FdWire::Inherit,
+                FdWire::InheritSlot(tairix_abi::STDOUT),
+                FdWire::Inherit,
+            ],
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let (master_fd, slave_fd, parent_streams) = host_shell_on_a_pty(&aspaces, SecTaskId(2));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("inheriting spawn succeeds");
+
+        // Each inherited standard stream is a counted clone of the parent's
+        // slave end, and its console slot stays closed — stdin and stdout
+        // through `Inherit`, stderr through the `2>&1` duplication.
+        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        let parent_slave = aspaces
+            .read()
+            .open_file_entry(SecTaskId(2), slave_fd)
+            .expect("parent slave entry");
+        for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
+            let child_entry = aspaces
+                .read()
+                .open_file_entry(SecTaskId(pid), fd)
+                .expect("inherited child entry");
+            assert!(child_entry
+                .pty_slave()
+                .expect("slave end")
+                .same_pty(parent_slave.pty_slave().expect("slave end")));
+            assert_eq!(child_streams.mode(fd), StreamMode::Closed);
+        }
+        // The parent held no entry at fd 3, so that slot inherits the
+        // console table as before.
+        assert!(aspaces
+            .read()
+            .open_file_entry(SecTaskId(pid), tairix_abi::STDINFO)
+            .is_none());
+        assert_eq!(
+            child_streams.mode(tairix_abi::STDINFO),
+            parent_streams.mode(tairix_abi::STDINFO)
+        );
+        // End to end: what the child writes to its stdout is what the
+        // terminal reads off the master.
+        let child_stdout = aspaces
+            .read()
+            .open_file_entry(SecTaskId(pid), tairix_abi::STDOUT)
+            .expect("inherited stdout");
+        assert_eq!(
+            child_stdout.pty_slave().expect("slave end").write(b"out"),
+            crate::pty::PtyWriteStep::Wrote(3)
+        );
+        let master = aspaces
+            .read()
+            .open_file_entry(SecTaskId(2), master_fd)
+            .expect("master entry");
+        let mut seen = [0u8; 8];
+        assert_eq!(
+            master.pty_master().expect("master end").read(&mut seen),
+            crate::pty::PtyReadStep::Read(3)
+        );
+        assert_eq!(&seen[..3], b"out");
+    }
+
+    /// An attach block that names an **installed console** puts the child on
+    /// that console alone: the selected table is the whole base, so a
+    /// pty-hosted parent's own slave end stays out of the child's reach
+    /// (authority is the descriptor table — an inheriting wire never widens
+    /// it past the base the block chose).
+    #[test]
+    fn spawn_onto_a_named_console_never_inherits_the_parents_pty() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Every wire inheriting, but console 0 explicitly selected.
+        let attach = SpawnAttach {
+            console: 0,
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let (_master_fd, _slave_fd, _) = host_shell_on_a_pty(&aspaces, SecTaskId(2));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        )
+        .with_consoles(single_write_console(console));
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("console-selected spawn succeeds");
+
+        // The child holds no open entry at all: its standard streams are
+        // the selected console's, never the parent's pty.
+        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
+            assert!(aspaces.read().open_file_entry(SecTaskId(pid), fd).is_none());
+            assert_eq!(child_streams.console(fd), 0);
+        }
+        assert_eq!(child_streams, DescriptorTable::standard_on(0));
     }
 
     /// A `SPAWN_FLAG_SANDBOX` attach block admits a **parser sandbox**

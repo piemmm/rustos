@@ -120,6 +120,9 @@ pub struct Metrics {
     /// logical pixels.
     pub resize_grabber_extent: u32,
     /// The invisible slop added around a furniture hit target so it stays
-    /// grabbable, in logical pixels. Never extends over another control.
+    /// grabbable, in logical pixels. Never extends over another control. On a
+    /// resizable window's frame this is also how far the resize-edge hit zone
+    /// reaches into the client's own outer pixels, trading a few unclickable
+    /// app pixels for a border that costs no visible space.
     pub hit_slop: u32,
 }

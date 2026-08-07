@@ -36,7 +36,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
@@ -120,6 +120,33 @@ pub trait WindowHost {
         title: &str,
         resizable: bool,
     ) -> Result<(), Errno>;
+
+    /// A validated `CreatePopup` opened undecorated popup `window_id` of
+    /// `surface` geometry, owned by and stacked directly above the
+    /// caller's own window `parent_window_id`, at `offset_x`/`offset_y`
+    /// physical pixels from that parent's client origin. The host resolves
+    /// the parent's current screen position, adds the offset, clamps the
+    /// whole popup onto the screen, opens it **undecorated** (no title
+    /// bar, no frame furniture — the popup is a transient, not a taskbar
+    /// entry), and records the parent→popup link so the popup stays glued
+    /// above its parent and is torn down with it.
+    ///
+    /// An error refuses the popup: the engine unmaps the region and
+    /// replies the refusal, keeping engine and host in lockstep exactly as
+    /// [`window_opened`](Self::window_opened) does. The default is an
+    /// infallible no-op: a host with no compositor to stack a popup on
+    /// (a test double) accepts it without drawing anything.
+    fn popup_opened(
+        &mut self,
+        window_id: u64,
+        parent_window_id: u64,
+        offset_x: i32,
+        offset_y: i32,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, parent_window_id, offset_x, offset_y, surface);
+        Ok(())
+    }
 
     /// A validated `Present`: `frame` is exactly one frame of
     /// `window_id`'s region shaped as `surface`, of which `damage`
@@ -249,6 +276,22 @@ pub trait EventSink {
     fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno>;
 }
 
+/// The four geometry fields a `Create`, `CreatePopup`, or `Resize` carries
+/// on the wire, as the one surface value every spec holds.
+const fn surface_of(
+    width_px: u32,
+    height_px: u32,
+    stride_bytes: u32,
+    format: DisplayFormat,
+) -> DisplayMode {
+    DisplayMode {
+        width_px,
+        height_px,
+        stride_bytes,
+        format,
+    }
+}
+
 /// Everything one validated `Create` asks for, in one place, so the
 /// engine's create path takes the request as a unit.
 #[derive(Copy, Clone)]
@@ -271,6 +314,31 @@ struct ResizeSpec {
     surface: DisplayMode,
 }
 
+/// Everything one `CreatePopup` asks for, in one place: the app half
+/// fills it in for [`WindowClient::create_popup`], the engine's popup
+/// path receives the decoded request as the same unit, so both halves
+/// describe a popup once.
+///
+/// [`WindowClient::create_popup`]: crate::client::WindowClient::create_popup
+#[derive(Copy, Clone)]
+pub struct PopupSpec {
+    /// The caller's own top-level window the popup is anchored to and
+    /// stacked above; a foreign or unknown parent is refused.
+    pub parent_window_id: u64,
+    /// The `shm_grant`ed region holding the popup's frames, mapped once.
+    pub shm_handle: u64,
+    /// The endpoint the popup's own events are delivered to.
+    pub event_endpoint: u64,
+    /// How many frames the region holds, back to back.
+    pub frame_count: u32,
+    /// The geometry of one frame, which must hold for every frame.
+    pub surface: DisplayMode,
+    /// Physical pixels right of the parent window's client origin.
+    pub offset_x: i32,
+    /// Physical pixels below the parent window's client origin.
+    pub offset_y: i32,
+}
+
 /// One live window: its attested owner, its event route, its
 /// once-mapped frame region, and whether a trusted-picker request is
 /// awaiting its conclusion.
@@ -287,6 +355,10 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
+    /// The parent top-level window this record is a popup of, or `None`
+    /// for an ordinary top-level window. A popup is closed when its
+    /// parent closes, so the link lives beside the window it binds.
+    parent: Option<u64>,
 }
 
 /// The window-channel engine: one instance serves one desktop session.
@@ -355,12 +427,28 @@ impl<M: ShmMapper> WindowServer<M> {
             Ok(caller) => caller,
             Err(err) => {
                 return match decoded {
-                    WindowRequest::Create { .. } => create_reply(reply, Err(err), self.server),
+                    // Both create requests answer with the create-reply
+                    // frame, so an attestation failure must too.
+                    WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
+                        create_reply(reply, Err(err), self.server)
+                    }
                     _ => status(reply, Err(err)),
-                }
+                };
             }
         };
-        match decoded {
+        self.dispatch(host, caller, &decoded, reply)
+    }
+
+    /// Act on one decoded request from the attested `caller`, writing the
+    /// encoded outcome into `reply` and returning its length.
+    fn dispatch(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        decoded: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        match *decoded {
             WindowRequest::Create {
                 shm_handle,
                 event_endpoint,
@@ -376,16 +464,34 @@ impl<M: ShmMapper> WindowServer<M> {
                     shm_handle,
                     event_endpoint,
                     frame_count,
-                    surface: DisplayMode {
-                        width_px,
-                        height_px,
-                        stride_bytes,
-                        format,
-                    },
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
                     title,
                     resizable,
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
+            }
+            WindowRequest::CreatePopup {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                offset_x,
+                offset_y,
+            } => {
+                let spec = PopupSpec {
+                    parent_window_id,
+                    shm_handle,
+                    event_endpoint,
+                    frame_count,
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
+                    offset_x,
+                    offset_y,
+                };
+                create_reply(reply, self.create_popup(host, caller, spec), self.server)
             }
             WindowRequest::Present {
                 window_id,
@@ -414,12 +520,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     window_id,
                     shm_handle,
                     frame_count,
-                    surface: DisplayMode {
-                        width_px,
-                        height_px,
-                        stride_bytes,
-                        format,
-                    },
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
                 };
                 status(reply, self.resize(host, caller, spec))
             }
@@ -509,6 +610,74 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region,
                 pick_pending: false,
+                parent: None,
+            },
+        );
+        Ok(window_id)
+    }
+
+    /// Open an undecorated popup for `caller`, stacked directly above the
+    /// caller's own window `spec.parent_window_id`.
+    ///
+    /// A popup is validated exactly like a top-level [`Self::create`] —
+    /// no kernel caller, the geometry holds every frame — and additionally
+    /// requires that the parent window is one the caller owns (a foreign
+    /// or unknown parent answers `NotFound`, leaking nothing). It counts
+    /// against the **same** per-client budget as a top-level window, so a
+    /// popup can never be used to exceed [`WINDOWS_PER_CLIENT_MAX`]. The
+    /// host is told before committing, so a refused popup leaves no record
+    /// and drops the mapping (fail closed).
+    fn create_popup(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: PopupSpec,
+    ) -> Result<u64, Errno> {
+        if caller.is_kernel() {
+            return Err(Errno::PermissionDenied);
+        }
+        // The parent must be a live window the caller owns; a foreign or
+        // unknown parent is refused before anything is mapped.
+        owned_window(&self.windows, caller, spec.parent_window_id)?;
+        // A popup counts against the same per-client budget as a top-level
+        // window (the parent it needs is itself one of those windows), so
+        // "popup" cannot be used to hold open more than the cap allows.
+        let owned = self
+            .windows
+            .values()
+            .filter(|record| record.owner == caller)
+            .count();
+        if owned >= WINDOWS_PER_CLIENT_MAX {
+            return Err(Errno::NoSpace);
+        }
+        let frame_len = frame_bytes(&spec.surface)?;
+        let total = frame_len
+            .checked_mul(spec.frame_count as usize)
+            .ok_or(Errno::LengthOutOfRange)?;
+        let region = self.mapper.map(spec.shm_handle, total)?;
+        let window_id = self.next_id;
+        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        // Tell the host before committing: a refused popup leaves no record
+        // and drops the mapping (the mapper's cue to unmap).
+        host.popup_opened(
+            window_id,
+            spec.parent_window_id,
+            spec.offset_x,
+            spec.offset_y,
+            &spec.surface,
+        )?;
+        self.next_id = next;
+        self.windows.insert(
+            window_id,
+            WindowRecord {
+                owner: caller,
+                event_endpoint: spec.event_endpoint,
+                surface: spec.surface,
+                frame_count: spec.frame_count,
+                frame_len,
+                region,
+                pick_pending: false,
+                parent: Some(spec.parent_window_id),
             },
         );
         Ok(window_id)
@@ -671,6 +840,11 @@ impl<M: ShmMapper> WindowServer<M> {
     }
 
     /// Close `caller`'s window `window_id`, dropping its region mapping.
+    ///
+    /// Closing a top-level window also closes every popup anchored to it,
+    /// so a menu or sheet can never outlive the window it belongs to.
+    /// Closing a popup's own id tears down only that popup — a popup has
+    /// no popups of its own.
     fn close(
         &mut self,
         host: &mut dyn WindowHost,
@@ -678,9 +852,26 @@ impl<M: ShmMapper> WindowServer<M> {
         window_id: u64,
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
+        self.remove_with_popups(host, window_id);
+        Ok(())
+    }
+
+    /// Remove `window_id` and every popup keyed to it, telling the host of
+    /// each teardown. The parent is dropped first, then its popups; a
+    /// popup (which owns no popups) drops alone.
+    fn remove_with_popups(&mut self, host: &mut dyn WindowHost, window_id: u64) {
+        let popups: alloc::vec::Vec<u64> = self
+            .windows
+            .iter()
+            .filter(|(_, record)| record.parent == Some(window_id))
+            .map(|(&id, _)| id)
+            .collect();
         self.windows.remove(&window_id);
         host.window_closed(window_id);
-        Ok(())
+        for popup in popups {
+            self.windows.remove(&popup);
+            host.window_closed(popup);
+        }
     }
 
     /// Tear down every window `client` owns: the session calls this when

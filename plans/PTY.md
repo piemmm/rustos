@@ -330,15 +330,40 @@ window. What it guarantees:
   line height, `Terminal::resize`s the screen, `pty_set_size`s the pty, and
   repaints. Files was already resizable; the terminal now joins it.
 
+## PTY7 — a command the shell runs writes to the terminal
+
+`done`. A command `elsh` runs inside the graphical terminal shows its output.
+What it guarantees:
+
+- **An inheriting spawn wire inherits the *backing*, not just the console
+  slot.** A pty-hosted shell's fd 0/1/2 are open pty-slave entries and its
+  console slots are therefore closed, so resolving an `FdWire::Inherit` /
+  `InheritSlot` from the console table alone handed every child a *denied*
+  stdout: the command ran, its writes failed `NotFound`, and the terminal
+  never saw a byte. `apply_attach_wires` now clones the parent's own open
+  entry behind an inherited standard slot into the child (one more live pty
+  end, counted), exactly as a `Handle` wire does — the single resolution both
+  forms share (`plans/SPAWN.md` SP10).
+- **Only an inherited base reaches the parent's entries.** An explicitly
+  selected console index is the whole base, so a child placed on a named
+  console never sees its parent's pipe/pty ends; a slot the parent has no
+  entry for still inherits the console table as before.
+- Covered by `spawn_inherit_hands_a_child_the_parents_pty_backed_streams`
+  (a pty-hosted parent spawning `command 2>&1`: both inheriting forms land on
+  the same pty, the write reaches the master, fd 3 keeps the console
+  fallback) and `stream_readable_peeks_a_pty_master_against_its_slaves_output`
+  (the wait-set readiness peek over a pty master/slave pair).
+
 ## Status
 
-`done` — **PTY0–PTY6 landed**: env inheritance, the shared `lib/tty` line
+`done` — **PTY0–PTY7 landed**: env inheritance, the shared `lib/tty` line
 discipline, the kernel `Pty` object + shared `ForegroundOwnership`, the
 `pty_create` ABI with its backing wiring / stream+wait-set dispatch /
 pty-slave `stream_input_mode`/`terminal_size`/`console_foreground`
-recognition, the graphical terminal rewritten onto one pty, and the
+recognition, the graphical terminal rewritten onto one pty, the
 `autoload_input` aarch64 QEMU vertical extended with the end-to-end `Ctrl-C`
-job-control witness. `elsh` runs its full interactive editor over a
+job-control witness, and an inheriting spawn wire carrying the parent's own
+pty backing into the command it runs. `elsh` runs its full interactive editor over a
 console-like slave; echo and `ONLCR` are covered by the `lib/tty` +
 `kernel/core/pty.rs` host tests, and `Ctrl-C` job control by both the kernel
 host tests and the graphical vertical.

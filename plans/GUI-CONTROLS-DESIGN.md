@@ -570,7 +570,7 @@ WindowFrame
 - The title text truncates before it displaces a window control or removes the minimum drag region.
 - Visible glyph size and pointer hit-target size are separate theme metrics; compact glyphs still receive a usable target.
 - Hover, active, inactive, maximized, and attention states do not change the client origin or measured frame extents.
-- A ResizeGrabber never overlaps a scrollbar thumb or client content. At a two-scrollbar junction, the corner cell belongs to the grabber or a neutral ScrollCorner.
+- A drawn ResizeGrabber's affordance never overlaps a scrollbar thumb. At a two-scrollbar junction, the corner cell belongs to the grabber or a neutral ScrollCorner. The window frame's resize *hit* zone is a separate thing and deliberately overlaps the client's outermost pixels (§11.17).
 - Vertical and horizontal scrollbars are one behavioral component parameterized by orientation. Their separate names exist for layout, accessibility, and testing, not as duplicated implementations.
 - Root-viewport scrollbar visibility follows one declared policy: reserved gutter or overlay. The policy must not switch while the pointer is captured or while doing so would move content under an active interaction.
 
@@ -795,6 +795,9 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 - Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
 - Frame activation, theme change, and hover do not change the client origin or outer dimensions.
 - Maximized geometry uses the session work area and therefore respects taskbars, reserved screen edges, and the current logical scale.
+- The furniture band on the left, right, and bottom edges is the thin frame rim, whether or not the window is resizable. A band wide enough to grab is not reserved: it would show as dead space around the content on every resizable window.
+- A resizable window's resize *hit* zone therefore reaches inward over the client's own outermost pixels, by the theme's invisible hit slop — the invisible resize border macOS, GNOME, and Windows use. The application still draws every client pixel; it does not receive presses on the few it trades for a grabbable edge, and where it declares root-viewport furniture the frame's zone takes that outer strip first. A non-resizable window trades nothing: every client pixel reaches it.
+- Drawing stays strictly separated even so: the frame paints no furniture mark inside the client, and the client paints no furniture.
 - The frame owns the hit map for move, resize, command buttons, and any root-viewport scrollbars.
 
 ### 11.18 TitleBar
@@ -867,10 +870,10 @@ The size-toggle button represents `WindowControlKind::SizeToggle`.
 
 ### 11.23 ResizeGrabber
 
-The resize grabber is an explicit, visible corner affordance for resizable windows.
+The resize grabber is the corner resize gesture. A window frame's resize zone is invisible — it overlaps the client's outermost pixels rather than reserving a visible band (§11.17) — so the window frame draws no corner affordance; a host that has room for one, such as a scrollbar junction, may still draw its Grip Teeth.
 
-- It appears at the logical bottom-trailing corner by default and uses Grip Teeth or another shape mark that remains visible without color.
-- Its visible size and pointer hit region are separate. The hit region may extend invisibly into the frame but never into another control or scrollbar thumb.
+- Where one is drawn it appears at the logical bottom-trailing corner and uses Grip Teeth or another shape mark that remains visible without color.
+- Its visible size and pointer hit region are separate. The hit region may extend invisibly into the frame and, on a window frame, into the client's own outer pixels, but never into another control or scrollbar thumb.
 - Press and drag capture the pointer until release or cancel. Geometry follows the pointer on the next frame with no easing.
 - The window manager enforces typed minimum, maximum, aspect, and work-area constraints before presenting each new rectangle.
 - When both root scrollbars are visible, the grabber owns their junction cell. A non-resizable window uses a neutral `ScrollCorner` there instead.
@@ -1325,7 +1328,7 @@ Reactive Alloy must be usable without color, without motion, and with keyboard i
 - Active and inactive windows remain distinguishable without color.
 - Window move, close, minimize, put-to-back, size toggle, and keyboard resize are reachable without a pointer through the established window or system menu path.
 - Scrollbars expose orientation, current value, minimum, maximum, and page extent, and support keyboard line, page, and bound navigation.
-- Resize grabbers use a visible shape mark and an enlarged target in comfortable density.
+- A drawn resize grabber uses a visible shape mark and an enlarged target in comfortable density. A window frame's resize zone is invisible by design, so keyboard resize (above) is its accessible path rather than a mark to find.
 
 ### Shape fallbacks
 
@@ -1339,7 +1342,7 @@ Reactive Alloy must be usable without color, without motion, and with keyboard i
 | Success | check bead |
 | Denied | lock bead |
 | Active window | double Frame Rim, title-weight change, or another non-color frame distinction |
-| Resize affordance | Grip Teeth in the corner |
+| Resize affordance | Grip Teeth in the corner where one is drawn; a window frame's zone is invisible |
 | Scroll position | proportional thumb with accessible numeric range |
 
 ---

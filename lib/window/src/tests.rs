@@ -24,8 +24,8 @@ use tairix_geometry::{Rect, Scale};
 use crate::client::{EventSource, WindowClient, WindowEvents, WindowTransport};
 use crate::desktop::Desktop;
 use crate::server::{
-    CallerIdentity, EventSink, PinDecision, WindowHost, WindowServer, WINDOWS_PER_CLIENT_MAX,
-    WINDOW_REPLY_MAX,
+    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer,
+    WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -121,6 +121,7 @@ impl CallerIdentity for MockIdentity {
 /// requests, pins, and drag offers.
 struct RecordingHost {
     opened: Vec<(u64, DisplayMode, String, bool)>,
+    popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
@@ -130,6 +131,7 @@ struct RecordingHost {
     drag_withdraws: Vec<(ProcId, u64)>,
     blur_sets: Vec<(u64, u16)>,
     refuse_open: bool,
+    refuse_popup: bool,
     refuse_resize: Option<Errno>,
     refuse_pick: Option<Errno>,
     /// The outcome the next `PinBundle` receives.
@@ -145,6 +147,7 @@ impl Default for RecordingHost {
     fn default() -> Self {
         Self {
             opened: Vec::new(),
+            popups: Vec::new(),
             presented: Vec::new(),
             resized: Vec::new(),
             closed: Vec::new(),
@@ -154,6 +157,7 @@ impl Default for RecordingHost {
             drag_withdraws: Vec::new(),
             blur_sets: Vec::new(),
             refuse_open: false,
+            refuse_popup: false,
             refuse_resize: None,
             refuse_pick: None,
             pin_decision: PinDecision::Pinned,
@@ -185,6 +189,22 @@ impl WindowHost for RecordingHost {
         }
         self.opened
             .push((window_id, *surface, String::from(title), resizable));
+        Ok(())
+    }
+
+    fn popup_opened(
+        &mut self,
+        window_id: u64,
+        parent_window_id: u64,
+        offset_x: i32,
+        offset_y: i32,
+        surface: &DisplayMode,
+    ) -> Result<(), Errno> {
+        if self.refuse_popup {
+            return Err(Errno::WouldBlock);
+        }
+        self.popups
+            .push((window_id, parent_window_id, offset_x, offset_y, *surface));
         Ok(())
     }
 
@@ -376,6 +396,27 @@ fn create_id(
     client
         .create(shm, events, frames, &SURFACE, title, false)
         .map(|(id, _)| id)
+}
+
+/// A one-frame SURFACE-shaped popup of `parent`, granted as `shm`, its
+/// events routed to `events`, offset `(offset_x, offset_y)` from the
+/// parent's client origin.
+fn popup_spec(
+    parent_window_id: u64,
+    shm: u64,
+    events: u64,
+    offset_x: i32,
+    offset_y: i32,
+) -> PopupSpec {
+    PopupSpec {
+        parent_window_id,
+        shm_handle: shm,
+        event_endpoint: events,
+        frame_count: 1,
+        surface: SURFACE,
+        offset_x,
+        offset_y,
+    }
 }
 
 #[test]
@@ -800,6 +841,173 @@ fn a_dead_clients_windows_are_torn_down_and_others_survive() {
     }
     // B's window still presents.
     client.present(b1, 0, full_damage()).expect("b1 lives");
+}
+
+#[test]
+fn create_popup_round_trips_and_present_and_close_act_on_its_own_id() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("parent opens");
+    let (popup, server) = client
+        .create_popup(&popup_spec(parent, 8, EVENTS_A, 5, -7))
+        .expect("popup opens");
+    assert_eq!(popup, parent + 1);
+    assert_eq!(
+        server, SERVER,
+        "a popup is stamped with the same session identity as a top-level create"
+    );
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.server.window_count(), 2);
+        // The popup went through the undecorated popup path, carrying its
+        // parent and placement offsets — never the top-level `window_opened`
+        // path, so it is never dressed with chrome or listed on the taskbar.
+        assert_eq!(
+            inner.host.popups,
+            alloc::vec![(popup, parent, 5, -7, SURFACE)]
+        );
+        assert_eq!(
+            inner.host.opened,
+            alloc::vec![(parent, SURFACE, String::from("Files"), false)]
+        );
+    }
+
+    // Present acts on the popup's own id exactly like a top-level window.
+    client
+        .present(popup, 0, full_damage())
+        .expect("present into the popup");
+    assert_eq!(loopback.borrow().host.presented[0].0, popup);
+
+    // Closing the popup's own id tears down only the popup; the parent
+    // survives.
+    client.close(popup).expect("close the popup alone");
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.server.window_count(), 1);
+        assert_eq!(inner.host.closed, alloc::vec![popup]);
+    }
+    client
+        .present(parent, 0, full_damage())
+        .expect("parent lives");
+}
+
+#[test]
+fn a_popup_over_a_foreign_or_unknown_parent_is_refused() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let a_window = create_id(&mut client, 7, EVENTS_A, 1, "A").expect("A's window");
+
+    // A parent the caller does not own answers exactly like one that never
+    // existed, leaking nothing about another client's windows.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.create_popup(&popup_spec(a_window, 8, EVENTS_B, 0, 0)),
+        Err(Errno::NotFound)
+    );
+    // An unknown parent id is refused the same way.
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        client.create_popup(&popup_spec(9999, 8, EVENTS_A, 0, 0)),
+        Err(Errno::NotFound)
+    );
+    let inner = loopback.borrow();
+    assert_eq!(inner.server.window_count(), 1);
+    assert!(inner.host.popups.is_empty());
+}
+
+#[test]
+fn a_popup_counts_against_the_same_per_client_cap() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
+    for _ in 1..WINDOWS_PER_CLIENT_MAX {
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("in cap");
+    }
+    // The client now holds exactly the cap; a popup cannot be used to
+    // exceed it.
+    assert_eq!(
+        client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+        Err(Errno::NoSpace)
+    );
+    assert!(loopback.borrow().host.popups.is_empty());
+}
+
+#[test]
+fn a_kernel_caller_cannot_open_a_popup() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("parent");
+
+    loopback.borrow_mut().ticket = TICKET_KERNEL;
+    assert_eq!(
+        client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn a_refused_host_popup_commits_nothing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let parent = {
+        let mut client = WindowClient::new(Rc::clone(&loopback));
+        let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("parent");
+        loopback.borrow_mut().host.refuse_popup = true;
+        assert_eq!(
+            client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+            Err(Errno::WouldBlock)
+        );
+        parent
+    };
+    // The refused popup consumed no id: the next window is the id the
+    // popup would have taken.
+    loopback.borrow_mut().host.refuse_popup = false;
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let next = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("retry");
+    assert_eq!(next, parent + 1);
+    assert_eq!(loopback.borrow().server.window_count(), 2);
+}
+
+#[test]
+fn closing_a_parent_tears_down_its_popups() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "parent").expect("parent");
+    let (menu, _) = client
+        .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
+        .expect("menu popup");
+    let (sheet, _) = client
+        .create_popup(&popup_spec(parent, 9, EVENTS_A, 0, 0))
+        .expect("sheet popup");
+    assert_eq!(loopback.borrow().server.window_count(), 3);
+
+    // Closing the parent closes both popups keyed to it.
+    client.close(parent).expect("close parent");
+    let inner = loopback.borrow();
+    assert_eq!(inner.server.window_count(), 0);
+    assert!(inner.host.closed.contains(&parent));
+    assert!(inner.host.closed.contains(&menu));
+    assert!(inner.host.closed.contains(&sheet));
+}
+
+#[test]
+fn a_dead_clients_parent_and_popups_are_all_torn_down() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "parent").expect("parent");
+    let (popup, _) = client
+        .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
+        .expect("popup");
+
+    let inner = &mut *loopback.borrow_mut();
+    inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+    assert_eq!(inner.server.window_count(), 0);
+    assert!(inner.host.closed.contains(&parent));
+    assert!(inner.host.closed.contains(&popup));
 }
 
 #[test]

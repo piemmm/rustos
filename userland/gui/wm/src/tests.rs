@@ -3021,35 +3021,29 @@ fn a_client_press_returns_the_keyboard_to_the_client() {
 }
 
 #[test]
-fn the_resize_corner_never_overlaps_a_scrollbar_thumb() {
-    // A resizable window reserves its client's bottom-right corner for the
-    // resize grabber, sized to hold it, so the scrollbar tracks (and the
-    // thumbs that live inside them) stop short of the corner and the grabber
-    // can never cover a thumb.
-    let (c, id) = decorated_compositor();
-    let bounds = c.window(id).unwrap().bounds();
-    let client = c.window_client_rect(id).unwrap();
-    let extent = c.theme().metrics().resize_grabber_extent;
+fn a_resizable_windows_client_matches_a_fixed_windows_client() {
+    // The furniture band no longer widens for a resizable window: its client
+    // is exactly the size a fixed-size window's would be for the same outer
+    // bounds, so a resizable app's content is never shrunk to make room for a
+    // grab border it does not visibly draw.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let resizable = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    assert!(c.set_window_frame(resizable, WindowFrame::new(decorated())));
 
-    // Both scrollbars present, their reserved corner sized to the grabber.
-    let viewport = RootViewport::new(ScrollPolicy::ReservedGutter, extent, 12)
-        .with_vertical(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100))
-        .with_horizontal(ScrollModel::new(ScrollRange::new(1000, 100, 0), 10, 100));
-    let layout = viewport.layout(client);
-    let vtrack = layout.vertical_track.expect("vertical track");
-    let htrack = layout.horizontal_track.expect("horizontal track");
+    let mut fixed_furniture = decorated();
+    fixed_furniture.resizable = false;
+    let fixed = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    assert!(c.set_window_frame(fixed, WindowFrame::new(fixed_furniture)));
 
-    // The grabber occupies the outer frame's bottom-right extent square.
-    let e = i32::try_from(extent).unwrap();
-    let grabber = Rect::new(bounds.right() - e, bounds.bottom() - e, extent, extent);
-
-    assert!(
-        grabber.intersection(&vtrack).is_empty(),
-        "the resize corner never intrudes into the vertical scrollbar track"
+    assert_eq!(
+        c.window(resizable).unwrap().bounds(),
+        c.window(fixed).unwrap().bounds(),
+        "same outer geometry in, same outer geometry out"
     );
-    assert!(
-        grabber.intersection(&htrack).is_empty(),
-        "the resize corner never intrudes into the horizontal scrollbar track"
+    assert_eq!(
+        c.window_client_rect(resizable),
+        c.window_client_rect(fixed),
+        "a resizable window wastes no extra client space on a grab border"
     );
 }
 
@@ -3210,14 +3204,17 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     // through, not the rim colour.
     assert_eq!(frame_pixel(&c, left_x, top_y), desktop);
 
-    // The bottom-right corner (carried by the bottom strip) holds the resize
-    // grabber's grip teeth, which paint a diagonal stroke a quarter of the
-    // affordance's extent in from the very corner (the corner pixel itself
-    // falls in the gap between teeth, so it is not a useful probe here).
-    let inset = i32::try_from((c.theme().metrics().resize_grabber_extent / 4).max(1)).unwrap();
-    let grabber_x = u32::try_from(bounds.right() - inset).unwrap();
-    let grabber_y = u32::try_from(bounds.bottom() - inset).unwrap();
-    assert_ne!(frame_pixel(&c, grabber_x, grabber_y), desktop);
+    // The bottom-right corner draws no grip now the band is the plain frame
+    // inset. Probing one corner radius in lands inside the client and clear of
+    // the rounded mask, and finds the application's own content there.
+    let radius = i32::try_from(
+        c.scale()
+            .scale_length(c.theme().metrics().window_corner_radius),
+    )
+    .unwrap_or(i32::MAX);
+    let corner_x = u32::try_from(client.right() - radius).unwrap();
+    let corner_y = u32::try_from(client.bottom() - radius).unwrap();
+    assert_eq!(frame_pixel(&c, corner_x, corner_y), [255, 0, 0, 255]);
 }
 
 #[test]
