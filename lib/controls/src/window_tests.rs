@@ -11,7 +11,6 @@
 //! and Escape-cancel, non-overlap with scrollbars), and the neutral scroll
 //! corner, across dark/light/high-contrast and scale.
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -27,10 +26,6 @@ use crate::window::{
     ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
     WindowFrame,
 };
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -562,8 +557,8 @@ fn inactive_title_bar_reads_quieter() {
     inactive.set_title("Report");
     let mut a = Surface::new(300, 28).expect("surface");
     let mut b = Surface::new(300, 28).expect("surface");
-    active.render(&mut a, title_bounds(), Scale::ONE, &theme, font());
-    inactive.render(&mut b, title_bounds(), Scale::ONE, &theme, font());
+    active.render(&mut a, title_bounds(), Scale::ONE, &theme);
+    inactive.render(&mut b, title_bounds(), Scale::ONE, &theme);
     assert_ne!(a.pixels(), b.pixels());
 }
 
@@ -826,13 +821,13 @@ fn the_rim_is_one_quiet_tone_and_the_title_carries_focus() {
     let mut frame = WindowFrame::new(furniture());
     frame.title_bar_mut().set_title("Documents");
     let mut active = Surface::new(300, 240).expect("surface");
-    frame.render(&mut active, bounds, Scale::ONE, &theme, font());
+    frame.render(&mut active, bounds, Scale::ONE, &theme);
 
     let mut inactive_furn = furniture();
     inactive_furn.activation = WindowActivationState::Inactive;
     frame.set_furniture(inactive_furn);
     let mut inactive = Surface::new(300, 240).expect("surface");
-    frame.render(&mut inactive, bounds, Scale::ONE, &theme, font());
+    frame.render(&mut inactive, bounds, Scale::ONE, &theme);
 
     // The rim is the same quiet neutral at either activation: the line the eye
     // reads a window's shape by does not change when focus moves elsewhere.
@@ -854,13 +849,13 @@ fn attention_request_changes_rendering() {
     let bounds = frame_bounds();
     let mut frame = WindowFrame::new(furniture());
     let mut plain = Surface::new(300, 240).expect("surface");
-    frame.render(&mut plain, bounds, Scale::ONE, &theme, font());
+    frame.render(&mut plain, bounds, Scale::ONE, &theme);
 
     let mut attn = furniture();
     attn.activation = WindowActivationState::AttentionRequested;
     frame.set_furniture(attn);
     let mut attention = Surface::new(300, 240).expect("surface");
-    frame.render(&mut attention, bounds, Scale::ONE, &theme, font());
+    frame.render(&mut attention, bounds, Scale::ONE, &theme);
     assert_ne!(plain.pixels(), attention.pixels());
 }
 
@@ -876,7 +871,7 @@ fn the_frame_paints_no_furniture_mark_inside_the_client() {
         let mut frame = WindowFrame::new(furn);
         frame.title_bar_mut().set_title("Documents");
         let mut surface = Surface::new(300, 240).expect("surface");
-        frame.render(&mut surface, bounds, Scale::ONE, &theme, font());
+        frame.render(&mut surface, bounds, Scale::ONE, &theme);
         surface
     };
     let resizable = paint(furniture());
@@ -1086,7 +1081,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
     let bounds = title_bounds();
     let paint = |bar: &TitleBar| {
         let mut surface = Surface::new(300, 28).expect("surface");
-        bar.render(&mut surface, bounds, Scale::ONE, &theme, font());
+        bar.render(&mut surface, bounds, Scale::ONE, &theme);
         surface.pixels().to_vec()
     };
 

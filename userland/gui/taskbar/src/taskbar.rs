@@ -23,13 +23,12 @@ use tairix_controls::{
     ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TaskbarPresentation,
     TraySignalAction,
 };
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_proglib::EntryId;
 use tairix_raster::Surface;
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::Theme;
 
 use crate::clock::Clock;
 use crate::edge::Edge;
@@ -620,20 +619,14 @@ impl Taskbar {
     }
 
     /// Compute the context menu's geometry, or `None` while it is closed.
-    ///
-    /// The row text is measured with the same body font the renderer paints
-    /// with (one role, one scale), so the width the layout reserves and the
-    /// width the paint fills can never disagree.
     #[must_use]
     pub fn menu_layout(&self, scale: Scale) -> Option<MenuLayout> {
-        let font = BitmapFont::for_role(self.theme.fonts(), TextRole::Body, scale);
         self.menu.layout(
             self.config.edge,
             self.config.screen_width,
             self.config.screen_height,
             scale,
             &self.theme,
-            font,
         )
     }
 
@@ -645,10 +638,9 @@ impl Taskbar {
     pub fn pin_icon_side(&self, scale: Scale) -> u32 {
         let scaled = self.config.scaled(scale);
         let bounds = Rect::new(0, 0, scaled.pin_extent.max(1), scaled.thickness.max(1));
-        let font = BitmapFont::for_role(self.theme.fonts(), TextRole::Body, scale);
         TaskbarItem::new("", IconKind::AppBundle)
             .with_presentation(TaskbarPresentation::Icon)
-            .icon_side(bounds, scale, &self.theme, font)
+            .icon_side(bounds, scale, &self.theme)
     }
 
     /// Open the context menu for the pin at `index`, anchored at its slot.

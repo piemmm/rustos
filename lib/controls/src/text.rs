@@ -30,12 +30,12 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 use tairix_util::secret::wipe;
 
 use crate::paint::{
     paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead, resolve_frame,
-    surface_rect, to_i32, PlateStyle,
+    role_font, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
@@ -1215,14 +1215,8 @@ impl TextField {
     }
 
     /// Paint the field into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         self.core.render(surface, bounds, scale, theme, font, 0);
     }
 
@@ -1236,8 +1230,8 @@ impl TextField {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<TextAction> {
+        let font = role_font(theme, scale, TextRole::Body);
         self.core.on_pointer(event, bounds, scale, theme, font, 0)
     }
 
@@ -1285,9 +1279,9 @@ pub(crate) fn debug_zeroize(field: &mut TextField) {
     field.core.editor.zeroize();
 }
 
-/// Test-only: the secret-mode cell layout for `bounds` under the given theme,
-/// scale, and font — the surface x the first bead cell starts at, and the
-/// fixed advance between cells.
+/// Test-only: the secret-mode cell layout for `bounds` under the given theme
+/// and scale — the surface x the first bead cell starts at, and the fixed
+/// advance between cells.
 ///
 /// Both come from the exact geometry [`FieldCore::paint_secret`] draws
 /// through, so a test aiming a pointer click at a bead cell boundary cannot
@@ -1297,8 +1291,8 @@ pub(crate) fn debug_secret_cell_layout(
     bounds: Rect,
     scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
 ) -> Option<(u32, u32)> {
+    let font = role_font(theme, scale, TextRole::Body);
     let geom = field_geom(bounds, scale, theme, font, 0)?;
     let (_, _, _, row_h) = geom.row;
     Some((
@@ -1421,14 +1415,8 @@ impl SearchField {
     }
 
     /// Paint the search field into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let leading = Self::leading(bounds, scale, theme, font);
         self.core
             .render(surface, bounds, scale, theme, font, leading);
@@ -1466,8 +1454,8 @@ impl SearchField {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<TextAction> {
+        let font = role_font(theme, scale, TextRole::Body);
         let leading = Self::leading(bounds, scale, theme, font);
         self.core
             .on_pointer(event, bounds, scale, theme, font, leading)

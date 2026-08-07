@@ -573,12 +573,8 @@ impl Chooser {
     #[must_use]
     pub(crate) fn popup_rect(&self, group: OptionGroup, layout: &Layout, style: Style<'_>) -> Rect {
         let field = layout.option_field(group);
-        let (width, height) = self.fields[group.index()].popup_size(
-            field.width,
-            style.scale(),
-            style.theme(),
-            style.font(),
-        );
+        let (width, height) =
+            self.fields[group.index()].popup_size(field.width, style.scale(), style.theme());
         let below = field.bottom();
         let y = if to_u32(below).saturating_add(height) <= self.height {
             below

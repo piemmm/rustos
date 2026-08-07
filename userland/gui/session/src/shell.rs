@@ -43,7 +43,6 @@ use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_browse::{DirectorySource, GridView};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
-use tairix_font::BitmapFont;
 use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource, IconSet,
 };
@@ -54,7 +53,6 @@ use tairix_taskbar::{
     icon_cache, ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
-use tairix_theme::TextRole;
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse, Point,
@@ -751,7 +749,6 @@ impl DesktopShell {
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
         let layout = self.desktop_layout(compositor, desktop);
-        let font = self.desktop_font(scale);
         let backdrop = self.backdrop_colour(desktop.settings().backdrop);
         let theme = self.session.active_theme();
         let wallpaper = self.wallpaper.as_ref();
@@ -769,7 +766,7 @@ impl DesktopShell {
                 surface.blit(0, 0, paper);
             }
             let mut artwork = IconArtworkSource::new(cache, reader, rasteriser);
-            desktop.render(surface, &layout, scale, theme, font, &mut artwork);
+            desktop.render(surface, &layout, scale, theme, &mut artwork);
         });
     }
 
@@ -795,7 +792,6 @@ impl DesktopShell {
     /// on screen untouched rather than showing an empty window.
     pub fn present_pinboard_menu(&mut self, compositor: &mut Compositor, menu: &PinboardMenu) {
         let scale = compositor.scale();
-        let font = self.desktop_font(scale);
         let theme = self.session.active_theme();
         let Some(bounds) = self.pinboard_menu_bounds(compositor, menu) else {
             if let Some(id) = self.pinboard_window.take() {
@@ -807,7 +803,7 @@ impl DesktopShell {
             return;
         };
         let local = Rect::new(0, 0, bounds.width, bounds.height);
-        menu.render(&mut surface, local, scale, theme, font);
+        menu.render(&mut surface, local, scale, theme);
         let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
         self.pinboard_window = Some(place(
             compositor,
@@ -831,21 +827,18 @@ impl DesktopShell {
     /// The one place the plate is measured, so what
     /// [`present_pinboard_menu`](Self::present_pinboard_menu) paints and what
     /// a press is routed against can never be two different rectangles. The
-    /// shell owns the label font and the active theme the measurement needs,
-    /// which is why it is asked here rather than reconstructed by the
-    /// embedder.
+    /// shell owns the active theme the measurement needs, which is why it is
+    /// asked here rather than reconstructed by the embedder.
     #[must_use]
     pub fn pinboard_menu_bounds(
         &self,
         compositor: &Compositor,
         menu: &PinboardMenu,
     ) -> Option<Rect> {
-        let scale = compositor.scale();
         menu.layout(
             compositor.screen_rect(),
-            scale,
+            compositor.scale(),
             self.session.active_theme(),
-            self.desktop_font(scale),
         )
     }
 
@@ -862,15 +855,11 @@ impl DesktopShell {
         compositor: &Compositor,
         desktop: &Desktop<S>,
     ) -> GridView {
-        let scale = compositor.scale();
-        desktop.layout(self.work_area(compositor), scale, self.desktop_font(scale))
-    }
-
-    /// The font the desktop's icon labels are set in: the active theme's
-    /// body face at `scale`.
-    #[must_use]
-    fn desktop_font(&self, scale: Scale) -> BitmapFont {
-        BitmapFont::for_role(self.session.active_theme().fonts(), TextRole::Body, scale)
+        desktop.layout(
+            self.work_area(compositor),
+            compositor.scale(),
+            self.session.active_theme(),
+        )
     }
 
     /// Hand the taskbar's program-library popup the resolved `catalog` (the

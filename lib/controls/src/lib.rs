@@ -11,6 +11,22 @@
 //! (the layering rule), exactly as `lib/geometry` owns the shared coordinate
 //! types and `lib/theme` owns the shared design tokens.
 //!
+//! # The theme chooses the face, not the caller
+//!
+//! No control accepts a typeface. A control names the job its text does — a
+//! `tairix_theme::TextRole` — and the active theme answers with the family,
+//! size, and weight, converted to physical pixels through the one shared DPI
+//! scale. An application therefore cannot substitute a face of its own, so a
+//! menu, button, or dialog reads as the desktop's own furniture wherever it
+//! is drawn: inside the file manager, inside a terminal whose screen is
+//! monospace, or on the pinboard. A control that took a face from its caller
+//! would make the desktop's typography a convention each application could
+//! break, and one of them would.
+//!
+//! An application still draws *its own* text — a document, a terminal grid,
+//! its own labels — in whatever face it needs; the rule binds the shared
+//! controls, not the application's content.
+//!
 //! # Scope
 //!
 //! The first module is the **scroll geometry engine** ([`scroll`]): the one

@@ -36,10 +36,9 @@
 //! every released strip is overwritten before its heap becomes reusable.
 
 use tairix_controls::WindowFrame;
-use tairix_font::BitmapFont;
 use tairix_log::Sink;
 use tairix_reclaim::{window_chrome_cache, CachedBytes, PressureGauge, ReclaimCache};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::Theme;
 
 use crate::color::Pixel;
 use crate::geometry::{Rect, Scale};
@@ -166,11 +165,7 @@ impl WindowChrome {
         let (ow, oh) = outer_size;
         let mut transient = Surface::new(ow, oh)?;
         let outer = Rect::new(0, 0, ow, oh);
-        // Window furniture is titling text, so it draws in the theme's window
-        // title role — the role resolves its own size and weight, and the one
-        // shared logical-to-physical conversion happens inside `for_role`.
-        let font = BitmapFont::for_role(theme.fonts(), TextRole::WindowTitle, scale);
-        frame.render(&mut transient, outer, scale, theme, font);
+        frame.render(&mut transient, outer, scale, theme);
 
         // No corner grip: a resizable window's band is the plain frame inset,
         // too thin to hold one without painting into the client. The grab zone

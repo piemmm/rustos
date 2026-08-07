@@ -35,13 +35,13 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 
 const W: u32 = 240;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -60,14 +60,7 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
 
 fn row_surface(row: &ListRow, theme: &Theme, scale: Scale) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    row.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        scale,
-        theme,
-        font(),
-        None,
-    );
+    row.render(&mut surface, Rect::new(0, 0, W, H), scale, theme, None);
     surface
 }
 
@@ -297,7 +290,6 @@ fn list_row_renders_high_contrast_and_scale() {
         Rect::new(0, 0, W * 2, H * 2),
         scale,
         &Theme::dark(),
-        font(),
         None,
     );
     assert!(has_pixel(&big, premul(Theme::dark().palette().on_surface)));
@@ -317,12 +309,12 @@ fn list_row_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
     let bounds = Rect::new(0, 0, W, H);
     // An empty label so the only content in the render is the icon itself.
     let row = ListRow::new("").with_icon(IconKind::Text);
-    let side = row.icon_side(bounds, Scale::ONE, &theme, font());
+    let side = row.icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0, "the row reserves an icon column");
 
     let art = artwork(side, ART);
     let mut with = Surface::new(W, H).expect("surface");
-    row.render(&mut with, bounds, Scale::ONE, &theme, font(), Some(&art));
+    row.render(&mut with, bounds, Scale::ONE, &theme, Some(&art));
     let drawn = bbox(&with, ART.premultiply()).expect("artwork drawn");
     // Slot-sized artwork fills exactly the column the row advertised.
     assert_eq!(drawn.2 + 1 - drawn.0, side);
@@ -347,7 +339,6 @@ fn a_row_with_no_icon_ignores_supplied_artwork() {
         Rect::new(0, 0, W, H),
         Scale::ONE,
         &theme,
-        font(),
         Some(&art),
     );
     assert!(!has_pixel(&s, ART.premultiply()));
@@ -370,7 +361,6 @@ fn table_surface(row: &TableRow, theme: &Theme, columns: &[u32]) -> Surface {
         Rect::new(0, 0, W, H),
         Scale::ONE,
         theme,
-        font(),
         columns,
     );
     surface
@@ -821,14 +811,7 @@ fn three_columns() -> TableHeader {
 
 fn header_surface(header: &TableHeader, theme: &Theme, scale: Scale, columns: &[u32]) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    header.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        scale,
-        theme,
-        font(),
-        columns,
-    );
+    header.render(&mut surface, Rect::new(0, 0, W, H), scale, theme, columns);
     surface
 }
 
@@ -1164,7 +1147,7 @@ fn a_sort_caret_points_up_for_ascending_and_down_for_descending() {
     // all.
     let scale = Scale::from_percent(300).expect("valid scale");
     let wide = W * 3;
-    let tall = TableHeader::measured_height(scale, &theme, font());
+    let tall = TableHeader::measured_height(scale, &theme);
     let caret = |order| {
         let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
         header.set_sort(Some((0, order)));
@@ -1174,7 +1157,6 @@ fn a_sort_caret_points_up_for_ascending_and_down_for_descending() {
             Rect::new(0, 0, wide, tall),
             scale,
             &theme,
-            font(),
             &[wide],
         );
         halves(&surface, emphasised).expect("caret drawn")
@@ -1307,7 +1289,7 @@ fn degenerate_bounds_omit_the_header_rather_than_clipping_it() {
     for (w, h) in [(0, H), (W, 0), (4, H)] {
         let bounds = Rect::new(0, 0, w, h);
         let mut surface = Surface::new(W, H).expect("surface");
-        header.render(&mut surface, bounds, Scale::ONE, &theme, font(), &COLUMNS);
+        header.render(&mut surface, bounds, Scale::ONE, &theme, &COLUMNS);
         assert!(is_blank(&surface), "a header with no room draws nothing");
         assert_eq!(
             header.column_at(bounds, Scale::ONE, &theme, &COLUMNS, Point::new(1, 1)),
@@ -1317,7 +1299,7 @@ fn degenerate_bounds_omit_the_header_rather_than_clipping_it() {
     // An off-surface origin is refused rather than wrapped into the surface.
     let off = Rect::new(-4, -4, W, H);
     let mut surface = Surface::new(W, H).expect("surface");
-    header.render(&mut surface, off, Scale::ONE, &theme, font(), &COLUMNS);
+    header.render(&mut surface, off, Scale::ONE, &theme, &COLUMNS);
     assert!(is_blank(&surface));
     assert_eq!(
         header.column_at(off, Scale::ONE, &theme, &COLUMNS, Point::new(1, 1)),
@@ -1331,10 +1313,10 @@ fn degenerate_bounds_omit_the_header_rather_than_clipping_it() {
 #[test]
 fn measured_height_never_reads_shorter_than_a_control() {
     let theme = Theme::dark();
-    let one = TableHeader::measured_height(Scale::ONE, &theme, font());
+    let one = TableHeader::measured_height(Scale::ONE, &theme);
     assert!(one >= Scale::ONE.scale_length(theme.metrics().control_height));
     let dense = Scale::from_percent(200).expect("valid scale");
-    assert!(TableHeader::measured_height(dense, &theme, font()) > one);
+    assert!(TableHeader::measured_height(dense, &theme) > one);
 }
 
 #[test]
@@ -1405,7 +1387,7 @@ fn tile_over_backdrop(state: ControlState, theme: &Theme, art: Option<&Surface>)
     let mut s = Surface::new(TW, TH).expect("surface");
     s.fill(BEHIND);
     let tile = IconTile::new("Report.txt", IconKind::Text).with_state(state);
-    tile.render(&mut s, TILE, Scale::ONE, theme, font(), art);
+    tile.render(&mut s, TILE, Scale::ONE, theme, art);
     s
 }
 
@@ -1637,7 +1619,7 @@ fn a_degenerate_tile_draws_nothing() {
     ] {
         let mut s = Surface::new(TW, TH).expect("surface");
         s.fill(BEHIND);
-        IconTile::new("x", IconKind::Text).render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+        IconTile::new("x", IconKind::Text).render(&mut s, bounds, Scale::ONE, &theme, None);
         assert_eq!(
             IconTile::icon_side(bounds, Scale::ONE, &theme),
             0,
@@ -1676,7 +1658,7 @@ fn a_tile_paints_only_within_its_bounds() {
         );
         IconTile::new("A very long name that cannot fit", IconKind::Folder)
             .with_state(state)
-            .render(&mut s, inner, Scale::ONE, &theme, font(), None);
+            .render(&mut s, inner, Scale::ONE, &theme, None);
         for y in 0..s.height() {
             for x in 0..s.width() {
                 let inside = (TW..TW * 2).contains(&x) && (height..height * 2).contains(&y);
@@ -1699,7 +1681,7 @@ const CH: u32 = 140;
 
 fn card_surface(card: &Card, theme: &Theme) -> Surface {
     let mut s = Surface::new(CW, CH).expect("surface");
-    card.render(&mut s, Rect::new(0, 0, CW, CH), Scale::ONE, theme, font());
+    card.render(&mut s, Rect::new(0, 0, CW, CH), Scale::ONE, theme);
     s
 }
 
@@ -1922,7 +1904,7 @@ const PH: u32 = 160;
 
 fn panel_surface(panel: &Panel, theme: &Theme) -> Surface {
     let mut s = Surface::new(PW, PH).expect("surface");
-    panel.render(&mut s, Rect::new(0, 0, PW, PH), Scale::ONE, theme, font());
+    panel.render(&mut s, Rect::new(0, 0, PW, PH), Scale::ONE, theme);
     s
 }
 

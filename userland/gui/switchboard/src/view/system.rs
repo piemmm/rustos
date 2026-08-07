@@ -560,8 +560,7 @@ impl SectionView for SystemSection {
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
         if let Some(sidebar) = ctx.frame.sidebar {
-            self.sidebar
-                .render(surface, sidebar, ctx.scale, ctx.theme, ctx.font);
+            self.sidebar.render(surface, sidebar, ctx.scale, ctx.theme);
         }
         self.render_header(surface, ctx);
         self.render_body(surface, ctx);
@@ -579,11 +578,11 @@ impl SectionView for SystemSection {
             }
         }
         let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
-        self.rail
-            .on_pointer(event, rail, ctx.scale, ctx.theme, ctx.font)
-            .map(|RailAction::Activate { index }| {
+        self.rail.on_pointer(event, rail, ctx.scale, ctx.theme).map(
+            |RailAction::Activate { index }| {
                 SectionOutcome::Action(SwitchboardAction::System { index })
-            })
+            },
+        )
     }
 
     fn apply_focus_marks(&mut self, focused: bool) {
@@ -623,7 +622,7 @@ impl SystemSection {
                 each,
                 band.height,
             );
-            tile.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+            tile.render(surface, rect, ctx.scale, ctx.theme);
         }
     }
 
@@ -655,7 +654,7 @@ impl SystemSection {
                 }
                 PageLine::Fact(fact) => {
                     FactList::new(alloc::vec![fact.clone()])
-                        .render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+                        .render(surface, rect, ctx.scale, ctx.theme);
                 }
                 PageLine::Absence(text) => {
                     ctx.font.draw_text(
@@ -677,11 +676,9 @@ impl SystemSection {
         let Some(rail) = ctx.frame.rail else {
             return;
         };
-        self.rail_panel
-            .render(surface, rail, ctx.scale, ctx.theme, ctx.font);
+        self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
         if let Some(content) = self.rail_panel.content_rect(rail, ctx.scale, ctx.theme) {
-            self.rail
-                .render(surface, content, ctx.scale, ctx.theme, ctx.font);
+            self.rail.render(surface, content, ctx.scale, ctx.theme);
         }
     }
 

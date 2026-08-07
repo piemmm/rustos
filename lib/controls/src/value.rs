@@ -24,12 +24,12 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
-    progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, surface_rect,
-    to_i32, PlateStyle, FULL,
+    progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font,
+    surface_rect, to_i32, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -497,14 +497,8 @@ impl Progress {
     }
 
     /// Paint the trace into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };

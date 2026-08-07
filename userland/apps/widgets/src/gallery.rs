@@ -271,7 +271,7 @@ impl Gallery {
             Color::from(palette.surface),
         );
         let (tabs_rect, content) = Self::layout(viewport, scale, theme);
-        self.tabs.render(surface, tabs_rect, scale, theme, font);
+        self.tabs.render(surface, tabs_rect, scale, theme);
 
         let rects = self.item_rects(content, scale, theme);
         let glyph_h = font.glyph_height();
@@ -290,7 +290,7 @@ impl Gallery {
                 text,
                 Color::from(palette.on_surface),
             );
-            item.widget.render(surface, *rect, scale, theme, font);
+            item.widget.render(surface, *rect, scale, theme);
         }
     }
 
@@ -301,7 +301,6 @@ impl Gallery {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> bool {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
@@ -338,7 +337,7 @@ impl Gallery {
                 self.panels[self.current.index()].get_mut(idx),
                 rects.get(idx),
             ) {
-                let changed = item.widget.on_pointer(event, *rect, scale, theme, font);
+                let changed = item.widget.on_pointer(event, *rect, scale, theme);
                 if changed {
                     self.enforce_radio_group(idx);
                 }

@@ -326,7 +326,6 @@ impl LibraryPopup {
         scale: Scale,
         theme: &Theme,
     ) -> Vec<LibraryIconRequest> {
-        let font = popup_font(theme, scale);
         layout
             .rows
             .iter()
@@ -335,7 +334,7 @@ impl LibraryPopup {
                 let LibraryRow::Entry { id, .. } = row else {
                     return None;
                 };
-                let side = list_row(row, false, false, false).icon_side(rect, scale, theme, font);
+                let side = list_row(row, false, false, false).icon_side(rect, scale, theme);
                 Some(LibraryIconRequest {
                     row: index,
                     side,
@@ -601,12 +600,11 @@ impl LibraryPopup {
         scale: Scale,
     ) -> PopupOutcome {
         self.sync_scroll(layout);
-        let font = popup_font(theme, scale);
         // The search field and scrollbar track the pointer themselves; feed
         // them every event so a caret drag or thumb drag follows motion.
         let mut changed = self
             .search
-            .on_pointer(event, layout.search, scale, theme, font)
+            .on_pointer(event, layout.search, scale, theme)
             .is_some();
         if let Some(action) = pointer_scroll(&mut self.scroll, event, layout, scale, theme) {
             self.scroll_to(action);

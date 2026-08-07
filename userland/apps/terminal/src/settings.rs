@@ -39,7 +39,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use tairix_controls::{
     Button, ButtonAction, ButtonContent, ControlRole, Panel, Radio, ScrollBar, ScrollModel,
@@ -242,27 +242,21 @@ impl Settings {
     }
 
     /// Draw the sheet over the terminal screen already in `surface`.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, viewport: Rect, scale: Scale, theme: &Theme) {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+
         let bounds = panel_bounds(viewport, scale);
-        self.panel.render(surface, bounds, scale, theme, font);
+        self.panel.render(surface, bounds, scale, theme);
         let Some(content) = self.panel.content_rect(bounds, scale, theme) else {
             return;
         };
-        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) =
-            self.bands(content, scale, theme, font);
+        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) = self.bands(content, scale, theme);
         // Drawing cannot mutate the held bar, so the bar is drawn from the
         // same freshly-sized model the rows are laid out at.
         let model = self.scrolled_model(body_rect, scale, theme, font);
 
         if let Some(rect) = tabs_rect {
-            self.tabs.render(surface, rect, scale, theme, font);
+            self.tabs.render(surface, rect, scale, theme);
         }
         if let Some(rect) = body_rect {
             if let Some((bx, by, bw, bh)) = surface_rect(rect) {
@@ -277,7 +271,7 @@ impl Settings {
             bar.render(surface, rect, scale, theme);
         }
         if let Some(rect) = footer_rect {
-            self.render_footer(surface, rect, scale, theme, font);
+            self.render_footer(surface, rect, scale, theme);
         }
     }
 
@@ -293,8 +287,9 @@ impl Settings {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> SheetOutcome {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+
         if let InputEvent::PointerMoved { to } = event {
             self.last_pointer = *to;
         }
@@ -317,8 +312,7 @@ impl Settings {
         let Some(content) = self.panel.content_rect(bounds, scale, theme) else {
             return SheetOutcome::Ignored;
         };
-        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) =
-            self.bands(content, scale, theme, font);
+        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) = self.bands(content, scale, theme);
         self.scroll
             .set_model(self.scrolled_model(body_rect, scale, theme, font));
 
@@ -374,8 +368,9 @@ impl Settings {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> SheetOutcome {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+
         // Keyboard reach never depends on a row's rectangle, so a viewport too
         // small to lay the body out still dismisses, moves focus, and edits.
         // Only scrolling needs the geometry, and an unsizeable body simply
@@ -384,7 +379,7 @@ impl Settings {
         let body_rect = self
             .panel
             .content_rect(bounds, scale, theme)
-            .and_then(|content| self.bands(content, scale, theme, font).1);
+            .and_then(|content| self.bands(content, scale, theme).1);
         self.scroll
             .set_model(self.scrolled_model(body_rect, scale, theme, font));
         if key == Key::Named(NamedKey::Escape) {
@@ -642,10 +637,9 @@ impl Settings {
         content: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> (Option<Rect>, Option<Rect>, Option<Rect>, Option<Rect>) {
         let total_h = content.height;
-        let tabs_h = self.tabs.measured_extent(scale, theme, font).min(total_h);
+        let tabs_h = self.tabs.measured_extent(scale, theme).min(total_h);
         let after_tabs = total_h.saturating_sub(tabs_h);
         let footer_h = scale
             .scale_length(theme.metrics().control_height)
@@ -743,7 +737,7 @@ impl Settings {
         match row {
             Focus::Scheme(index) => {
                 if let Some(radio) = self.scheme_radios.get(index) {
-                    radio.render(surface, rect, scale, theme, font);
+                    radio.render(surface, rect, scale, theme);
                 }
             }
             Focus::TextSize => {
@@ -810,24 +804,17 @@ impl Settings {
             "Custom scheme (not active — select it above to use these colours)"
         };
         draw_row_label(surface, caption, theme, font, text);
-        self.swatches.render(surface, grid, scale, theme, font);
+        self.swatches.render(surface, grid, scale, theme);
     }
 
     /// Paint the *Restore defaults* / *Done* footer buttons.
-    fn render_footer(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    fn render_footer(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
         let (restore, done) = footer_split(rect, scale);
         if let Some(rect) = restore {
-            self.restore.render(surface, rect, scale, theme, font);
+            self.restore.render(surface, rect, scale, theme);
         }
         if let Some(rect) = done {
-            self.done.render(surface, rect, scale, theme, font);
+            self.done.render(surface, rect, scale, theme);
         }
     }
 

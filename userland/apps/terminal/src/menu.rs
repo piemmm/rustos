@@ -15,7 +15,6 @@
 use alloc::vec::Vec;
 
 use tairix_controls::{Menu, MenuAction, MenuItem};
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
@@ -172,22 +171,14 @@ impl ContextMenu {
 
     /// The plate rectangle the menu occupies inside `viewport`.
     #[must_use]
-    pub fn bounds(&self, viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Rect {
-        self.menu
-            .anchored_rect(self.anchor, viewport, scale, theme, font)
+    pub fn bounds(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+        self.menu.anchored_rect(self.anchor, viewport, scale, theme)
     }
 
     /// Draw the menu over whatever is already in `surface`.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        let bounds = self.bounds(viewport, scale, theme, font);
-        self.menu.render(surface, bounds, scale, theme, font);
+    pub fn render(&self, surface: &mut Surface, viewport: Rect, scale: Scale, theme: &Theme) {
+        let bounds = self.bounds(viewport, scale, theme);
+        self.menu.render(surface, bounds, scale, theme);
     }
 
     /// Route one pointer event.
@@ -201,12 +192,11 @@ impl ContextMenu {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> MenuOutcome {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
-        let bounds = self.bounds(viewport, scale, theme, font);
+        let bounds = self.bounds(viewport, scale, theme);
         if matches!(event, InputEvent::PointerPressed { .. }) && !bounds.contains(self.pointer) {
             return MenuOutcome::Dismissed;
         }

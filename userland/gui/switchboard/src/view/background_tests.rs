@@ -108,7 +108,7 @@ fn job_rail_centre(sb: &Switchboard, theme: &Theme, command: usize) -> (i32, i32
     let rect = sb
         .jobs
         .rail
-        .item_rect(content, command, Scale::ONE, theme, font())
+        .item_rect(content, command, Scale::ONE, theme)
         .expect("the rail seats its commands");
     centre(rect)
 }

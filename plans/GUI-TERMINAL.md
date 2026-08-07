@@ -157,10 +157,15 @@ would not otherwise receive as a control byte are claimed, so intercepting one
 never swallows input a program was waiting for.
 
 The popup is the shared `lib/controls` `Menu`, placed by that control's own
-`anchored_rect` rule — hoisted out of `lib/browse` in this change so the
-directory browser and the terminal share one definition. While it is open it is
-modal: a press away dismisses it without acting on what it landed on, and
-`Escape` dismisses from the keyboard.
+`anchored_rect` rule, so the directory browser and the terminal share one
+definition. While it is open it is modal: a press away dismisses it without
+acting on what it landed on, and `Escape` dismisses from the keyboard.
+
+It draws in the **desktop's** interface face, never the terminal's grid face.
+The control resolves the theme's text role itself and accepts no typeface from
+the app, so the menu reads as desktop furniture wherever it opens and its rows
+neither turn monospace nor grow and shrink with the user's terminal text-size
+setting. The same holds for the settings sheet below.
 
 ---
 
@@ -168,9 +173,9 @@ modal: a press away dismisses it without acting on what it landed on, and
 
 **Status: done.**
 
-`userland/apps/terminal/src/settings.rs` — an in-window modal sheet composed
-from the shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`,
-`Button`) plus the app-local colour-well grid.
+`userland/apps/terminal/src/settings.rs` — a modal sheet composed from the
+shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`)
+plus the app-local colour-well grid, on its own popup surface.
 
 - **Appearance**: the scheme chooser, the text-size slider, and the custom
   scheme's editor — a `SwatchGrid` of the twenty editable colours with

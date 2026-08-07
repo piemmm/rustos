@@ -9,6 +9,36 @@ behaviour. The crate lives in `lib/*` because its consumers — the compositing
 window manager, the taskbar, and the graphical apps — may not depend on one
 another.
 
+## The theme chooses the face, not the caller
+
+No control accepts a typeface. A control names the job its text does — a
+`tairix_theme::TextRole` — and the active theme answers with the family, size,
+and weight, converted to physical pixels through the one shared DPI scale
+(`tairix_font::BitmapFont::for_role`, see
+[Theming](../desktop/theming.md#typography)). Interface text resolves
+`TextRole::Body`; window furniture (`TitleBar`, `WindowFrame`) resolves
+`TextRole::WindowTitle`.
+
+An application therefore *cannot* substitute a face of its own, so a menu,
+button, or dialog reads as the desktop's own furniture wherever it is drawn:
+inside the file manager, on the pinboard, or inside a terminal whose screen is
+monospace. Passing the face in would have made the desktop's typography a
+convention each application could break, and one of them did — the graphical
+terminal drew the shared context menu and settings sheet in its own monospace
+grid face at the user's terminal text size, because that was the face it had
+to hand.
+
+An application still draws *its own* content — a document, a terminal grid, a
+label the shared controls do not own — in whatever face it needs. The rule
+binds the shared controls, not the application's content.
+
+Because the theme now owns the face, a plate that carries text is sized to
+hold it: `Metrics::control_height` is a *floor*, not a fit. A theme may author
+its ladder up to `Fonts::MAX_BASE_SIZE_PX`, well above that height, so a menu
+row, rail item, dialog action, panel footer, and field row each take the
+greater of the standard height and the line they draw. The shipped themes sit
+under the floor and are unchanged.
+
 ## The families
 
 | Module | Controls |
@@ -28,10 +58,10 @@ another.
 | `shell` | `Notification`, `TaskbarItem`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip` |
 
-Every one of them resolves its colours, metrics, and corner radii from the
-active `Theme` and `Scale` rather than a hard-coded pixel or hue, composes its
-appearance from the typed `state` vocabulary, and emits a typed action for the
-owning service to authorise. Two control values compare equal exactly when
+Every one of them resolves its colours, metrics, corner radii, **and text
+face** from the active `Theme` and `Scale` rather than a hard-coded pixel, hue,
+or typeface, composes its appearance from the typed `state` vocabulary, and
+emits a typed action for the owning service to authorise. Two control values compare equal exactly when
 they would draw the same pixels, so a host can skip a repaint by comparing
 what it is about to draw against what it drew last.
 

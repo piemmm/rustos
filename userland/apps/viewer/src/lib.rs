@@ -717,9 +717,8 @@ impl Viewer {
             palette.surface_raised.into(),
         );
 
-        let font = BitmapFont::console();
         self.open_button
-            .render(&mut surface, layout.button, scale, theme, font);
+            .render(&mut surface, layout.button, scale, theme);
 
         let text_surface = match self.scroll.as_ref() {
             Some(scroll) => render_lines(

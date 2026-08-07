@@ -17,11 +17,12 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::paint::{
-    foreground, inset, paint_plate, plate_border, surface_rect, to_i32, PlateStyle,
+    foreground, inset, paint_plate, plate_border, role_font, surface_rect, text_plate_height,
+    to_i32, PlateStyle,
 };
 use crate::state::ControlRole;
 
@@ -56,7 +57,7 @@ fn action_row_rects(
     let (ix, iy, iw, ih) = inner;
     let pad = scale.scale_length(theme.metrics().control_inset).max(1);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-    let bh = scale.scale_length(theme.metrics().control_height).max(1);
+    let bh = text_plate_height(theme, scale, TextRole::Body);
     if ih <= bh.saturating_add(pad) {
         return rects;
     }
@@ -192,14 +193,8 @@ impl Dialog {
     }
 
     /// Paint the dialog into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -275,7 +270,7 @@ impl Dialog {
         }
         for (button, rect) in self.actions.iter().zip(rects) {
             if rect.width > 0 {
-                button.render(surface, rect, scale, theme, font);
+                button.render(surface, rect, scale, theme);
             }
         }
     }
@@ -289,13 +284,8 @@ impl Dialog {
     /// that routes clicks through its own press-point hit-test resolve the
     /// exact same button geometry rather than each re-deriving it.
     #[must_use]
-    pub fn action_rects(
-        &self,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> Vec<Rect> {
+    pub fn action_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+        let font = role_font(theme, scale, TextRole::Body);
         match Self::inner(bounds, scale, theme) {
             Some(inner) => action_row_rects(&self.actions, inner, scale, theme, font),
             None => Vec::new(),
@@ -310,9 +300,8 @@ impl Dialog {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<DialogAction> {
-        let rects = self.action_rects(bounds, scale, theme, font);
+        let rects = self.action_rects(bounds, scale, theme);
         let mut action = None;
         for (i, button) in self.actions.iter_mut().enumerate() {
             if let Some(rect) = rects.get(i) {
@@ -370,7 +359,8 @@ impl Tooltip {
     /// The tooltip's preferred `(width, height)` in surface pixels, so the
     /// owner can size the popup surface it anchors the tooltip in.
     #[must_use]
-    pub fn preferred_size(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> (u32, u32) {
+    pub fn preferred_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let margin = border.saturating_add(pad);
@@ -386,14 +376,8 @@ impl Tooltip {
     }
 
     /// Paint the tooltip into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -508,14 +492,16 @@ impl HelpTip {
 
     /// The help tip's preferred `(width, height)` in surface pixels.
     #[must_use]
-    pub fn preferred_size(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> (u32, u32) {
+    pub fn preferred_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let margin = border.saturating_add(pad);
         let mut text_w = font.text_width(&self.reason);
-        let step_h = self.step.as_ref().map_or(0, |_| {
-            scale.scale_length(theme.metrics().control_height).max(1) + pad
-        });
+        let step_h = self
+            .step
+            .as_ref()
+            .map_or(0, |_| text_plate_height(theme, scale, TextRole::Body) + pad);
         if let Some(step) = &self.step {
             text_w = text_w.max(button_width(step, scale, theme, font));
         }
@@ -546,7 +532,7 @@ impl HelpTip {
         let step = self.step.as_ref()?;
         let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let bh = scale.scale_length(theme.metrics().control_height).max(1);
+        let bh = text_plate_height(theme, scale, TextRole::Body);
         if ih <= bh.saturating_add(pad) {
             return None;
         }
@@ -557,14 +543,8 @@ impl HelpTip {
     }
 
     /// Paint the help tip into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -605,7 +585,7 @@ impl HelpTip {
             );
         }
         if let (Some(step), Some(rect)) = (&self.step, self.step_rect(bounds, scale, theme, font)) {
-            step.render(surface, rect, scale, theme, font);
+            step.render(surface, rect, scale, theme);
         }
     }
 
@@ -617,8 +597,8 @@ impl HelpTip {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<HelpTipAction> {
+        let font = role_font(theme, scale, TextRole::Body);
         let rect = self.step_rect(bounds, scale, theme, font)?;
         let step = self.step.as_mut()?;
         (step.on_pointer(event, rect) == Some(ButtonAction::Activated))

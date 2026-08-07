@@ -23,7 +23,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
-use crate::library::{panel_origin, popup_font, probe_chrome};
+use crate::library::{panel_origin, probe_chrome};
 use crate::taskbar::TaskbarConfig;
 
 /// The element of the taskbar under a pointer, returned by
@@ -471,8 +471,7 @@ impl TrayReadoutLayout {
         signal: &TraySignal,
     ) -> Self {
         let corner_radius = scale.scale_length(theme.metrics().popup_corner_radius);
-        let font = popup_font(theme, scale);
-        let (width, height) = signal.readout_size(scale, theme, font);
+        let (width, height) = signal.readout_size(scale, theme);
         let width = width.min(screen_width).max(1);
         let height = height.min(screen_height).max(1);
         let origin = panel_origin(

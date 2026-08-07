@@ -107,7 +107,7 @@ fn open_section_list_from_trail(
     // the leading crumb rather than on a guessed coordinate.
     assert_eq!(
         sb.trail
-            .crumb_at(trail, Scale::ONE, theme, font(), Point::new(x, y)),
+            .crumb_at(trail, Scale::ONE, theme, Point::new(x, y)),
         Some(0),
         "the leading crumb draws at the trail's leading edge"
     );
@@ -123,7 +123,7 @@ fn section_row_centre(sb: &Switchboard, theme: &Theme, section: Section) -> (i32
         .section_menu
         .as_ref()
         .expect("the section list must be open");
-    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme, font());
+    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme);
     let row = menu
         .row_rect(section.index(), rect, Scale::ONE, theme)
         .expect("the row must be drawn");
@@ -676,7 +676,7 @@ fn pointer_after_selection_reaches_the_new_sections_content() {
     let (x, y) = centre(
         sb.recovery
             .rail
-            .item_rect(rail, 0, Scale::ONE, &theme, font())
+            .item_rect(rail, 0, Scale::ONE, &theme)
             .expect("the rail seats its restart command"),
     );
     let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
@@ -1231,7 +1231,7 @@ fn off_menu_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
     let b = bounds();
     let layout = sb.compute_layout(b, Scale::ONE, theme);
     let menu = sb.section_menu.as_ref().expect("the list is open");
-    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme, font());
+    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme);
     let y = rect.bottom() + 4;
     assert!(
         y < layout.content.bottom(),

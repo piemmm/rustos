@@ -18,7 +18,6 @@ use tairix_controls::{
     Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
     SliderAction, SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip, WindowControl,
 };
-use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::Surface;
@@ -61,14 +60,8 @@ pub enum DemoWidget {
 /// The popup rectangle a [`ComboBox`] expands into: directly below its field,
 /// sized by the control's own preferred popup size, so the field draw and the
 /// popup hit-test agree.
-fn combo_popup_rect(
-    combo: &ComboBox,
-    field: Rect,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) -> Rect {
-    let (w, h) = combo.popup_size(field.width, scale, theme, font);
+fn combo_popup_rect(combo: &ComboBox, field: Rect, scale: Scale, theme: &Theme) -> Rect {
+    let (w, h) = combo.popup_size(field.width, scale, theme);
     Rect::new(field.left(), field.bottom(), w, h)
 }
 
@@ -143,46 +136,39 @@ impl DemoWidget {
     }
 
     /// Draw the widget into `surface` at `rect` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
         match self {
-            DemoWidget::Button(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::Button(w) => w.render(surface, rect, scale, theme),
             // The gallery shows the built-in glyph: it is a control catalogue,
             // not an application with icon artwork of its own to supply.
-            DemoWidget::IconButton(w) => w.render(surface, rect, scale, theme, font, None),
-            DemoWidget::SplitButton(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Toggle(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Checkbox(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Radio(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::IconButton(w) => w.render(surface, rect, scale, theme, None),
+            DemoWidget::SplitButton(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Toggle(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Checkbox(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Radio(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Slider(w) => w.render(surface, rect, scale, theme),
-            DemoWidget::Progress(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::TextField(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::SearchField(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::Progress(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::TextField(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::SearchField(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ComboBox(w) => {
-                w.render(surface, rect, scale, theme, font);
+                w.render(surface, rect, scale, theme);
                 if w.is_expanded() {
-                    let popup = combo_popup_rect(w, rect, scale, theme, font);
-                    w.render_popup(surface, popup, scale, theme, font);
+                    let popup = combo_popup_rect(w, rect, scale, theme);
+                    w.render_popup(surface, popup, scale, theme);
                 }
             }
-            DemoWidget::Menu(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, font, None),
+            DemoWidget::Menu(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, None),
             DemoWidget::TableRow(w) => {
                 let columns = equal_columns(w.cells().len(), rect.width);
-                w.render(surface, rect, scale, theme, font, &columns);
+                w.render(surface, rect, scale, theme, &columns);
             }
-            DemoWidget::Card(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Panel(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::HelpTip(w) => w.render(surface, rect, scale, theme, font),
-            DemoWidget::Toolbar(w) => w.render(surface, rect, scale, theme, font),
+            DemoWidget::Card(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Panel(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::HelpTip(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Toolbar(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ScrollBar(w) => w.render(surface, rect, scale, theme),
             DemoWidget::WindowControl(w) => w.render(surface, rect, scale, theme),
         }
@@ -197,7 +183,6 @@ impl DemoWidget {
         rect: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> bool {
         match self {
             DemoWidget::Button(w) => w.on_pointer(event, rect).is_some(),
@@ -232,10 +217,10 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::Progress(_) | DemoWidget::Tooltip(_) => false,
-            DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme, font).is_some(),
-            DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme, font).is_some(),
+            DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme).is_some(),
+            DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme).is_some(),
             DemoWidget::ComboBox(w) => {
-                let popup = combo_popup_rect(w, rect, scale, theme, font);
+                let popup = combo_popup_rect(w, rect, scale, theme);
                 w.on_pointer(event, rect, popup, scale, theme).is_some()
             }
             DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme).is_some(),
@@ -255,8 +240,8 @@ impl DemoWidget {
             },
             DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme).is_some(),
             DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme, font).is_some(),
-            DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme, font).is_some(),
+            DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme).is_some(),
+            DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme).is_some(),
             DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme) {
                 Some(action) => {
                     w.set_active(action.index);

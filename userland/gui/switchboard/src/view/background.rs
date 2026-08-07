@@ -232,7 +232,7 @@ impl JobsSection {
     ) -> Option<DetailLayout> {
         let gap = scale.scale_length(theme.metrics().control_gap);
         let line = font.line_height();
-        let facts_h = FactList::row_height(scale, theme, font).saturating_mul(3);
+        let facts_h = FactList::row_height(scale, theme).saturating_mul(3);
         let mut top = content.top();
         let mut left = content.height;
         let mut take = |height: u32| -> Rect {
@@ -280,13 +280,7 @@ impl JobsSection {
             let Some(card) = self.cards.get(ctx.start + slot as usize) else {
                 break;
             };
-            card.render(
-                surface,
-                info.item_rect(slot),
-                ctx.scale,
-                ctx.theme,
-                ctx.font,
-            );
+            card.render(surface, info.item_rect(slot), ctx.scale, ctx.theme);
         }
     }
 
@@ -296,7 +290,7 @@ impl JobsSection {
             return;
         };
         let panel = Panel::new(self.selected_item().map_or(DETAIL_TITLE, |item| &item.name));
-        panel.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+        panel.render(surface, rect, ctx.scale, ctx.theme);
         let Some(content) = panel.content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
@@ -316,9 +310,9 @@ impl JobsSection {
         );
         throughput_chart(item).render(surface, layout.chart, ctx.scale, ctx.theme);
         let (left, right) = detail_facts(item);
-        left.render(surface, layout.facts_left, ctx.scale, ctx.theme, ctx.font);
-        right.render(surface, layout.facts_right, ctx.scale, ctx.theme, ctx.font);
-        job_timeline(item).render(surface, layout.timeline, ctx.scale, ctx.theme, ctx.font);
+        left.render(surface, layout.facts_left, ctx.scale, ctx.theme);
+        right.render(surface, layout.facts_right, ctx.scale, ctx.theme);
+        job_timeline(item).render(surface, layout.timeline, ctx.scale, ctx.theme);
     }
 
     /// Paint the action rail inside its titled plate.
@@ -326,11 +320,9 @@ impl JobsSection {
         let Some(rail) = ctx.frame.rail else {
             return;
         };
-        self.rail_panel
-            .render(surface, rail, ctx.scale, ctx.theme, ctx.font);
+        self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
         if let Some(content) = self.rail_panel.content_rect(rail, ctx.scale, ctx.theme) {
-            self.rail
-                .render(surface, content, ctx.scale, ctx.theme, ctx.font);
+            self.rail.render(surface, content, ctx.scale, ctx.theme);
         }
     }
 }
@@ -593,8 +585,7 @@ impl SectionView for JobsSection {
         self.render_rail(surface, ctx);
         let band = ctx.frame.footer;
         if !band.is_empty() {
-            self.throttle
-                .render(surface, band, ctx.scale, ctx.theme, ctx.font);
+            self.throttle.render(surface, band, ctx.scale, ctx.theme);
         }
     }
 
@@ -618,9 +609,8 @@ impl SectionView for JobsSection {
 
         let index = self.selected_index()?;
         let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
-        let RailAction::Activate { index: fired } = self
-            .rail
-            .on_pointer(event, rail, ctx.scale, ctx.theme, ctx.font)?;
+        let RailAction::Activate { index: fired } =
+            self.rail.on_pointer(event, rail, ctx.scale, ctx.theme)?;
         Some(SectionOutcome::Action(SwitchboardAction::Job {
             index,
             control: job_control(fired)?,

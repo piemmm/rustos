@@ -18,14 +18,15 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
     plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
-    seam_thickness, seam_width, surface_rect, to_i32, BeadShape, PlateStyle,
+    role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, BeadShape,
+    PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -164,14 +165,8 @@ impl Notification {
     }
 
     /// Paint the notification into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         if let Some(source) = &self.source {
             if let Some((x, y, w, _)) = surface_rect(bounds) {
                 let pad = scale.scale_length(theme.metrics().control_inset).max(1);
@@ -192,7 +187,6 @@ impl Notification {
             self.card_bounds(bounds, scale, theme, font),
             scale,
             theme,
-            font,
         );
     }
 
@@ -206,8 +200,8 @@ impl Notification {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<NotificationAction> {
+        let font = role_font(theme, scale, TextRole::Body);
         let card_bounds = self.card_bounds(bounds, scale, theme, font);
         match self.card.on_pointer(event, card_bounds, scale, theme)? {
             CardAction::FooterActivated { index } => {
@@ -452,7 +446,8 @@ impl TaskbarItem {
     /// item sizes the icon off the text line; an icon-only item sizes it off
     /// the plate like an icon button.
     #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((_, _, w, h)) = surface_rect(bounds) else {
             return 0;
         };
@@ -476,9 +471,9 @@ impl TaskbarItem {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         artwork: Option<&Surface>,
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -535,7 +530,7 @@ impl TaskbarItem {
                 .min(inner_h)
         });
 
-        let side = self.icon_side(bounds, scale, theme, font);
+        let side = self.icon_side(bounds, scale, theme);
         match self.presentation {
             TaskbarPresentation::IconAndLabel => {
                 // The application identity: leading icon then label.
@@ -965,14 +960,8 @@ impl TraySignal {
     }
 
     /// Paint the compact capsule into `surface` at `bounds`.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1082,16 +1071,18 @@ impl TraySignal {
     /// state name, an optional value, and the primary action, so the owner can
     /// size the popup surface it hosts the readout in.
     #[must_use]
-    pub fn readout_size(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> (u32, u32) {
+    pub fn readout_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let line = font.line_height();
         let mut text_w = font.text_width(&self.label);
         if let Some(value) = &self.value {
             text_w = text_w.max(font.text_width(value));
         }
-        let action_h = self.action.as_ref().map_or(0, |_| {
-            scale.scale_length(theme.metrics().control_height).max(1) + pad
-        });
+        let action_h = self
+            .action
+            .as_ref()
+            .map_or(0, |_| text_plate_height(theme, scale, TextRole::Body) + pad);
         let action_w = self.action.as_ref().map_or(0, |a| match a.content() {
             crate::button::ButtonContent::Label(t) => font.text_width(t) + pad.saturating_mul(4),
             _ => scale.scale_length(theme.metrics().control_height).max(1),
@@ -1112,7 +1103,7 @@ impl TraySignal {
         self.action.as_ref()?;
         let (x, y, w, h) = surface_rect(bounds)?;
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let bh = scale.scale_length(theme.metrics().control_height).max(1);
+        let bh = text_plate_height(theme, scale, TextRole::Body);
         let (ix, iy, iw, ih) = inset(x, y, w, h, pad)?;
         if ih <= bh {
             return None;
@@ -1124,14 +1115,8 @@ impl TraySignal {
     /// with the state name, the value, and the primary action. The owner calls
     /// this when [`is_expanded`](Self::is_expanded) is set, at the popup
     /// rectangle it sized from [`readout_size`](Self::readout_size).
-    pub fn render_readout(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render_readout(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1178,7 +1163,7 @@ impl TraySignal {
             }
         }
         if let (Some(action), Some(rect)) = (&self.action, self.action_rect(bounds, scale, theme)) {
-            action.render(surface, rect, scale, theme, font);
+            action.render(surface, rect, scale, theme);
         }
     }
 

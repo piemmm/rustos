@@ -49,12 +49,12 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_raster::{Color, Surface};
-use tairix_theme::{SignalRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::paint::{
     heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
-    plate_border, progress_thickness, signal_color, surface_rect, to_i32, PlateStyle,
+    plate_border, progress_thickness, role_font, signal_color, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -228,7 +228,8 @@ impl MetricTile {
     /// [`render`](Self::render) both build on this one definition, so the two
     /// can never disagree about where the instrument slot begins.
     #[must_use]
-    pub fn reading_height(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn reading_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
         let line_h = font.line_height();
         let mut height = match self.layout {
@@ -245,9 +246,9 @@ impl MetricTile {
     /// `scale` — its plate border and padding (when plated), its reading
     /// lines, and its instrument slot — to draw without clipping.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
         let content = self
-            .reading_height(scale, theme, font)
+            .reading_height(scale, theme)
             .saturating_add(self.instrument_extent(scale, theme));
         if !self.plated {
             return content;
@@ -296,14 +297,8 @@ impl MetricTile {
     /// height remains; a `bounds` too small for the full anatomy degrades by
     /// omitting the instrument, then the detail line, rather than overlapping
     /// or drawing past its own edge (fail closed).
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -658,7 +653,8 @@ impl StatusPill {
     /// The width, in physical pixels, this pill's label needs at `scale`,
     /// including the control padding either side.
     #[must_use]
-    pub fn measured_width(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         font.text_width(&self.label)
             .saturating_add(pad.saturating_mul(2))
@@ -667,7 +663,8 @@ impl StatusPill {
     /// The height, in physical pixels, one pill needs at `scale`: its
     /// label's line height plus the control padding above and below.
     #[must_use]
-    pub fn measured_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         font.line_height().saturating_add(pad.saturating_mul(2))
     }
@@ -678,14 +675,8 @@ impl StatusPill {
     /// shared plate fill, with the label centred inside it. A `bounds` too
     /// small for one full line paints nothing; a label wider than `bounds`
     /// truncates.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };

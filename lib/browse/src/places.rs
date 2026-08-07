@@ -59,9 +59,10 @@ const SYSTEM_ROOT: &str = "System";
 
 /// The longest label among the fixed user places.
 ///
-/// The rail derives its width by measuring this in the active font, so every
-/// fixed row's label fits without truncation at any UI density. A volume whose
-/// label is longer simply truncates in its row, as any over-long label does.
+/// The rail derives its width by measuring this in the theme's body face at
+/// the desktop scale, so every fixed row's label fits without truncation at
+/// any UI density. A volume whose label is longer simply truncates in its row,
+/// as any over-long label does.
 pub const WIDEST_FIXED_LABEL: &str = DOCUMENTS_DIR;
 
 /// What one sidebar row is, and therefore how it was learned.

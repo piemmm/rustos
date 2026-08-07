@@ -18,14 +18,14 @@ use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
     RecoveryState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 use crate::value::{Progress, Slider, SliderAction};
 
 const W: u32 = 200;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -63,13 +63,7 @@ fn slider_surface(slider: &Slider, theme: &Theme) -> Surface {
 
 fn progress_surface(progress: &Progress, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    progress.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    progress.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
@@ -372,8 +366,10 @@ fn known_progress_fills_proportionally_and_labels_percent() {
         &progress_with(ActivityState::Progress(ProgressValue::new(750))),
         &theme,
     );
-    let lo = active_extent(&quarter, accent, H / 2).expect("quarter fill");
-    let hi = active_extent(&most, accent, H / 2).expect("most fill");
+    let (top, bottom) = band_rows(&theme);
+    let row = top + (bottom - top) / 2;
+    let lo = active_extent(&quarter, accent, row).expect("quarter fill");
+    let hi = active_extent(&most, accent, row).expect("most fill");
     assert!(hi > lo);
     // The percentage caption paints foreground text on the plate.
     assert!(has_pixel(&most, premul(theme.palette().on_surface)));

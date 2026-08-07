@@ -5,7 +5,6 @@
 //! of an icon tool and a split tool's disclosure, keyboard focus movement and
 //! activation, the active-tool flag, theme switching, and scale.
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -20,10 +19,6 @@ const W: u32 = 220;
 const H: u32 = 28;
 const GAP: u32 = 8;
 const CH: u32 = 28;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -53,13 +48,7 @@ fn grouped_toolbar() -> Toolbar {
 
 fn render(toolbar: &Toolbar, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    toolbar.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    toolbar.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
@@ -264,13 +253,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let scale = Scale::from_percent(200).expect("valid scale");
     let toolbar = grouped_toolbar();
     let mut surface = Surface::new(W * 2, H * 2).expect("surface");
-    toolbar.render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, H * 2),
-        scale,
-        &theme,
-        font(),
-    );
+    toolbar.render(&mut surface, Rect::new(0, 0, W * 2, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 

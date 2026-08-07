@@ -14,7 +14,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, Palette, Rgba, SignalRole, Theme};
+use tairix_theme::{Contrast, Palette, Rgba, SignalRole, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
 
@@ -22,6 +22,36 @@ use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
     PressureKind, PressureState, RecoveryState, ValidationState,
 };
+
+/// The face a control draws a run of `role` text in.
+///
+/// This is the crate's single statement that the *active theme* chooses a
+/// control's typeface, never the code that happens to be drawing it: a
+/// control names the job its text does and the theme's ladder answers with
+/// the family, size, and weight, converted to physical pixels through the one
+/// shared DPI scale. Callers therefore cannot substitute a face of their own,
+/// so a shared control drawn inside any application is the desktop's text
+/// wherever it appears.
+#[must_use]
+pub(crate) fn role_font(theme: &Theme, scale: Scale, role: TextRole) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), role, scale)
+}
+
+/// The height a plate carrying one line of `role` text needs: the theme's
+/// standard control height, but never shorter than the line itself.
+///
+/// The standard height alone is a floor, not a fit. A theme authors its type
+/// ladder freely up to `Fonts::MAX_BASE_SIZE_PX`, well past the standard
+/// control height, and a plate pinned to that height would cut the text it
+/// exists to show. The shipped themes sit below the floor, so this changes
+/// nothing for them and keeps a larger-typography theme legible.
+#[must_use]
+pub(crate) fn text_plate_height(theme: &Theme, scale: Scale, role: TextRole) -> u32 {
+    scale
+        .scale_length(theme.metrics().control_height)
+        .max(role_font(theme, scale, role).line_height())
+        .max(1)
+}
 
 /// Map a resource pressure to its theme signal role, in one place so no
 /// renderer restates the mapping.

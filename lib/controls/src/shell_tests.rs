@@ -12,7 +12,6 @@
 use alloc::string::String;
 use alloc::vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -29,10 +28,6 @@ use crate::state::{
     PressureState, ProgressValue, RecoveryState, ValidationState,
 };
 use crate::testkit::high_contrast;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn scale2() -> Scale {
     Scale::from_percent(200).expect("valid scale")
@@ -76,7 +71,7 @@ const NH: u32 = 140;
 
 fn note_surface(note: &Notification, theme: &Theme) -> Surface {
     let mut s = Surface::new(NW, NH).expect("surface");
-    note.render(&mut s, Rect::new(0, 0, NW, NH), Scale::ONE, theme, font());
+    note.render(&mut s, Rect::new(0, 0, NW, NH), Scale::ONE, theme);
     s
 }
 
@@ -170,15 +165,12 @@ fn notification_action_activates_by_pointer() {
     let mut note = Notification::new("Job").with_actions(vec![Button::labelled("Clear")]);
     let bounds = Rect::new(0, 0, NW, NH);
     assert_eq!(
-        note.on_pointer(&moved(110, 112), bounds, Scale::ONE, &theme, font()),
+        note.on_pointer(&moved(110, 112), bounds, Scale::ONE, &theme),
         None
     );
+    assert_eq!(note.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        note.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(
-        note.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        note.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         Some(NotificationAction::ActionActivated { index: 0 })
     );
 }
@@ -210,13 +202,7 @@ fn notification_renders_at_scale_without_panic() {
     Notification::new("Scaled")
         .with_source("svc")
         .with_message("body")
-        .render(
-            &mut s,
-            Rect::new(0, 0, NW * 2, NH * 2),
-            scale2(),
-            &theme,
-            font(),
-        );
+        .render(&mut s, Rect::new(0, 0, NW * 2, NH * 2), scale2(), &theme);
     assert!(has_pixel(&s, premul(theme.palette().on_surface)));
 }
 
@@ -232,7 +218,7 @@ fn task_surface(item: &TaskbarItem, theme: &Theme, scale: Scale) -> Surface {
     );
     let (w, h) = (w.max(TW), h.max(TH));
     let mut s = Surface::new(w, h).expect("surface");
-    item.render(&mut s, Rect::new(0, 0, w, h), scale, theme, font(), None);
+    item.render(&mut s, Rect::new(0, 0, w, h), scale, theme, None);
     s
 }
 
@@ -442,15 +428,15 @@ fn taskbar_item_icon_presentation_centres_a_plate_sized_glyph() {
     // The compact look sizes the glyph off the plate (it grows with the
     // slot); the labelled look stays bound to the text line regardless.
     assert!(
-        icon_only.icon_side(wide, Scale::ONE, &theme, font())
-            > icon_only.icon_side(bounds, Scale::ONE, &theme, font())
+        icon_only.icon_side(wide, Scale::ONE, &theme)
+            > icon_only.icon_side(bounds, Scale::ONE, &theme)
     );
     assert_eq!(
-        labelled.icon_side(wide, Scale::ONE, &theme, font()),
-        labelled.icon_side(bounds, Scale::ONE, &theme, font())
+        labelled.icon_side(wide, Scale::ONE, &theme),
+        labelled.icon_side(bounds, Scale::ONE, &theme)
     );
     let mut s = Surface::new(PS, PS).expect("surface");
-    icon_only.render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+    icon_only.render(&mut s, bounds, Scale::ONE, &theme, None);
     // Glyph ink sits in the centre of the plate.
     assert!(region_has(
         &s,
@@ -464,7 +450,7 @@ fn taskbar_item_icon_presentation_centres_a_plate_sized_glyph() {
 fn taskbar_item_icon_side_is_zero_for_degenerate_bounds() {
     let theme = Theme::dark();
     assert_eq!(
-        pin_item().icon_side(Rect::new(-4, -4, 0, 0), Scale::ONE, &theme, font()),
+        pin_item().icon_side(Rect::new(-4, -4, 0, 0), Scale::ONE, &theme),
         0
     );
 }
@@ -485,11 +471,11 @@ fn taskbar_item_artwork_replaces_the_builtin_glyph_in_both_presentations() {
         ),
     ];
     for (item, bounds, w, h) in cases {
-        let side = item.icon_side(bounds, Scale::ONE, &theme, font());
+        let side = item.icon_side(bounds, Scale::ONE, &theme);
         assert!(side > 0);
         let art = Surface::filled(side, side, magenta).expect("artwork");
         let mut s = Surface::new(w, h).expect("surface");
-        item.render(&mut s, bounds, Scale::ONE, &theme, font(), Some(&art));
+        item.render(&mut s, bounds, Scale::ONE, &theme, Some(&art));
         assert!(has_pixel(&s, magenta));
     }
 }
@@ -500,7 +486,7 @@ fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
     let bounds = Rect::new(0, 0, PS, PS);
     let closed = pin_item().with_visibility(TaskVisibility::Closed);
     let mut rest = Surface::new(PS, PS).expect("surface");
-    closed.render(&mut rest, bounds, Scale::ONE, &theme, font(), None);
+    closed.render(&mut rest, bounds, Scale::ONE, &theme, None);
     // At rest a closed pin shows no plate or rim — only the glyph sits on
     // the bar — so it never masquerades as a running task.
     assert!(!has_pixel(&rest, premul(theme.palette().surface_raised)));
@@ -509,7 +495,7 @@ fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
     // Hover raises the plate like any other slot.
     let hovered = closed.with_state(ControlState::idle().with_pointer(PointerState::Hover));
     let mut hover = Surface::new(PS, PS).expect("surface");
-    hovered.render(&mut hover, bounds, Scale::ONE, &theme, font(), None);
+    hovered.render(&mut hover, bounds, Scale::ONE, &theme, None);
     assert_ne!(rest.pixels(), hover.pixels());
     // A denied closed pin still shows its plate and lock bead (a marked
     // state is never hidden by the quiet resting look).
@@ -517,7 +503,7 @@ fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
         .with_visibility(TaskVisibility::Closed)
         .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let mut d = Surface::new(PS, PS).expect("surface");
-    denied.render(&mut d, bounds, Scale::ONE, &theme, font(), None);
+    denied.render(&mut d, bounds, Scale::ONE, &theme, None);
     assert!(has_pixel(&d, premul(theme.palette().denied)));
 }
 
@@ -528,7 +514,7 @@ fn taskbar_item_icon_presentation_keeps_status_furniture() {
     // The active seam still paints along the bottom edge of a compact slot.
     let active = pin_item().with_visibility(TaskVisibility::Active);
     let mut s = Surface::new(PS, PS).expect("surface");
-    active.render(&mut s, bounds, Scale::ONE, &theme, font(), None);
+    active.render(&mut s, bounds, Scale::ONE, &theme, None);
     assert!(region_has(
         &s,
         (PS / 3, PS - PS / 3),
@@ -539,7 +525,7 @@ fn taskbar_item_icon_presentation_keeps_status_furniture() {
     let mut denied =
         pin_item().with_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let mut d = Surface::new(PS, PS).expect("surface");
-    denied.render(&mut d, bounds, Scale::ONE, &theme, font(), None);
+    denied.render(&mut d, bounds, Scale::ONE, &theme, None);
     assert!(has_pixel(&d, premul(theme.palette().denied)));
     assert_eq!(denied.on_pointer(&moved(20, 20), bounds), None);
     assert_eq!(denied.on_pointer(&PRESS, bounds), None);
@@ -552,7 +538,7 @@ const SS: u32 = 32;
 
 fn tray_surface(sig: &TraySignal, theme: &Theme) -> Surface {
     let mut s = Surface::new(SS, SS).expect("surface");
-    sig.render(&mut s, Rect::new(0, 0, SS, SS), Scale::ONE, theme, font());
+    sig.render(&mut s, Rect::new(0, 0, SS, SS), Scale::ONE, theme);
     s
 }
 
@@ -733,7 +719,7 @@ fn tray_signal_badge_coexists_with_bead_stack() {
                 .with_validation(ValidationState::Warning),
         );
     let mut s = Surface::new(W, SS).expect("surface");
-    sig.render(&mut s, Rect::new(0, 0, W, SS), Scale::ONE, &theme, font());
+    sig.render(&mut s, Rect::new(0, 0, W, SS), Scale::ONE, &theme);
     // The badge and both severity beads are all visible; none hides another.
     assert!(has_pixel(&s, premul(theme.palette().accent)));
     assert!(has_pixel(&s, premul(theme.palette().denied)));
@@ -766,7 +752,7 @@ fn tray_signal_badge_on_degenerate_bounds_does_not_panic() {
     ));
     let mut s = Surface::new(1, 1).expect("surface");
     // A capsule too small to hold anything simply draws nothing, never panics.
-    sig.render(&mut s, Rect::new(0, 0, 1, 1), Scale::ONE, &theme, font());
+    sig.render(&mut s, Rect::new(0, 0, 1, 1), Scale::ONE, &theme);
 }
 
 #[test]
@@ -792,9 +778,9 @@ fn tray_signal_readout_renders_name_value_and_action() {
     let sig = TraySignal::new(IconKind::Battery, "Battery")
         .with_value("82%")
         .with_action(Button::labelled("Details"));
-    let (w, h) = sig.readout_size(Scale::ONE, &theme, font());
+    let (w, h) = sig.readout_size(Scale::ONE, &theme);
     let mut s = Surface::new(w, h).expect("surface");
-    sig.render_readout(&mut s, Rect::new(0, 0, w, h), Scale::ONE, &theme, font());
+    sig.render_readout(&mut s, Rect::new(0, 0, w, h), Scale::ONE, &theme);
     assert!(has_pixel(&s, premul(theme.palette().on_surface)));
     assert!(has_pixel(&s, premul(theme.palette().on_surface_muted)));
     assert!(has_pixel(&s, premul(theme.palette().surface_raised)));
@@ -807,7 +793,7 @@ fn tray_signal_readout_action_activates() {
         TraySignal::new(IconKind::Battery, "Battery").with_action(Button::labelled("Fix"));
     sig.set_focused(true);
     let capsule = Rect::new(0, 0, SS, SS);
-    let (w, h) = sig.readout_size(Scale::ONE, &theme, font());
+    let (w, h) = sig.readout_size(Scale::ONE, &theme);
     let rh = h.max(48);
     let readout = Rect::new(0, iv(SS), w.max(80), rh);
     let m = theme.metrics();

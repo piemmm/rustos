@@ -13,15 +13,14 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
-    paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame,
+    paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
     surface_rect, to_i32, ChevronDir, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
@@ -205,17 +204,8 @@ impl ComboBox {
     /// choice row (and never narrower than `field_width`) and tall enough for
     /// every row, so the owner can allocate the popup exactly.
     #[must_use]
-    pub fn popup_size(
-        &self,
-        field_width: u32,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> (u32, u32) {
-        let w = self
-            .menu
-            .preferred_width(scale, theme, font)
-            .max(field_width);
+    pub fn popup_size(&self, field_width: u32, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let w = self.menu.preferred_width(scale, theme).max(field_width);
         let h = self.menu.preferred_height(scale, theme);
         (w, h)
     }
@@ -226,14 +216,8 @@ impl ComboBox {
     }
 
     /// Paint the collapsed field into `surface` at `bounds` for the theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -313,15 +297,8 @@ impl ComboBox {
 
     /// Paint the expanded popup menu into `surface` at `bounds` for the theme.
     /// The owner only calls this while [`ComboBox::is_expanded`] is true.
-    pub fn render_popup(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        self.menu.render(surface, bounds, scale, theme, font);
+    pub fn render_popup(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        self.menu.render(surface, bounds, scale, theme);
     }
 
     /// Feed a pointer event. When collapsed, a primary click on the field

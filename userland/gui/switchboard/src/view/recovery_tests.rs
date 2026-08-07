@@ -75,7 +75,7 @@ fn recovery_row_force_activates_by_pointer() {
     let rect = sb
         .recovery
         .rail
-        .item_rect(content, 1, Scale::ONE, &theme, font())
+        .item_rect(content, 1, Scale::ONE, &theme)
         .expect("the rail seats both of its commands");
     let (x, y) = centre(rect);
     let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
@@ -143,7 +143,7 @@ fn a_press_on_the_rail_resolves_the_command_for_the_pressed_fault() {
     let rect = sb
         .recovery
         .rail
-        .item_rect(content, 1, Scale::ONE, &theme, font())
+        .item_rect(content, 1, Scale::ONE, &theme)
         .expect("the rail seats both of its commands");
     let (rx, ry) = centre(rect);
     assert!(

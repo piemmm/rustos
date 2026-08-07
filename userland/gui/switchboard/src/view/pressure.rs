@@ -234,7 +234,7 @@ impl PressureSection {
             return;
         };
         let panel = self.detail_panel();
-        panel.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+        panel.render(surface, rect, ctx.scale, ctx.theme);
         let Some(content) = panel.content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
@@ -259,7 +259,7 @@ impl PressureSection {
             &identity_text(item),
             Color::from(ctx.theme.palette().on_surface),
         );
-        detail_facts(item).render(surface, layout.facts, ctx.scale, ctx.theme, ctx.font);
+        detail_facts(item).render(surface, layout.facts, ctx.scale, ctx.theme);
     }
 
     /// Build a pressure cause's card, with one footer button per relief
@@ -476,9 +476,7 @@ impl SectionView for PressureSection {
                 item.width,
                 item.height.saturating_sub(gap),
             );
-            entry
-                .card
-                .render(surface, card_rect, ctx.scale, ctx.theme, ctx.font);
+            entry.card.render(surface, card_rect, ctx.scale, ctx.theme);
         }
         self.render_detail(surface, ctx);
     }

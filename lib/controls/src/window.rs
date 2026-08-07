@@ -25,15 +25,14 @@
 
 use alloc::string::String;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface, SUBPIXEL};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     draw_outline, heavy_contrast, inset, key_activation, paint_bead, paint_plate, plate_border,
-    pointer_activation, resolve_bead, resolve_frame, surface_rect, to_i32, PlateStyle,
+    pointer_activation, resolve_bead, resolve_frame, role_font, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, SizeAction,
@@ -791,14 +790,9 @@ impl TitleBar {
     /// The bar background is the window surface; the identity/title is drawn
     /// truncated within the drag region and the controls are painted in their
     /// laid-out slots.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        // Window furniture is titling text, not interface body text.
+        let font = role_font(theme, scale, TextRole::WindowTitle);
         let palette = theme.palette();
         if let Some((x, y, w, h)) = surface_rect(bounds) {
             surface.fill_rect(x, y, w, h, Color::from(palette.surface));
@@ -1290,14 +1284,7 @@ impl WindowFrame {
     /// Paint the frame chrome (rim, body background, title bar) into `surface`
     /// at `bounds`. The client viewport is left for the compositor to clip the
     /// application into; the frame never paints client pixels.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1347,7 +1334,7 @@ impl WindowFrame {
 
         let layout = self.layout(bounds, scale, theme);
         self.title_bar
-            .render(surface, layout.title_bar, scale, theme, font);
+            .render(surface, layout.title_bar, scale, theme);
 
         // A bounded attention dot on the trailing edge of the title bar — never
         // an indefinite pulse (spec §11.17). Static, so it is reduced-motion

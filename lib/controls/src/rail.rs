@@ -26,14 +26,15 @@
 
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{icon_content_side, Button, ButtonContent, ContentAlign};
-use crate::paint::{paint_edge_wake, plate_border, surface_rect, to_i32};
+use crate::paint::{
+    paint_edge_wake, plate_border, role_font, surface_rect, text_plate_height, to_i32,
+};
 
 /// The outcome of feeding input to an [`ActionRail`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -156,7 +157,7 @@ impl ActionRail {
     /// The scaled height of the visible plate every item draws at (the
     /// button family's own standard control height).
     fn content_height(scale: Scale, theme: &Theme) -> u32 {
-        scale.scale_length(theme.metrics().control_height).max(1)
+        text_plate_height(theme, scale, TextRole::Body)
     }
 
     /// The scaled gap that separates one item's plate from the next.
@@ -166,19 +167,17 @@ impl ActionRail {
 
     /// Height one item occupies, including the gap that follows it.
     ///
-    /// `font` is accepted only so this measurement matches the shared
-    /// per-item query shape the rest of the family uses; an item's height is
-    /// the button family's own control height, never a text metric.
+    /// An item's height is the button family's own control height, never a
+    /// text metric.
     #[must_use]
-    pub fn item_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        let _ = font;
+    pub fn item_height(scale: Scale, theme: &Theme) -> u32 {
         Self::content_height(scale, theme).saturating_add(Self::gap(scale, theme))
     }
 
     /// The minimum height the whole rail needs: every item's slot, stacked.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        let per_item = Self::item_height(scale, theme, font);
+    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let per_item = Self::item_height(scale, theme);
         let count = u32::try_from(self.items.len()).unwrap_or(u32::MAX);
         per_item.saturating_mul(count)
     }
@@ -188,7 +187,8 @@ impl ActionRail {
     /// around whichever item's label, icon, or icon-and-label group is
     /// widest.
     #[must_use]
-    pub fn measured_width(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let ch = Self::content_height(scale, theme);
@@ -221,7 +221,7 @@ impl ActionRail {
     /// This is the one layout every measurement, hit test, and paint reads,
     /// so a press can never land on an item [`render`](Self::render) did not
     /// draw.
-    fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Vec<Rect> {
+    fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return Vec::new();
         };
@@ -229,7 +229,7 @@ impl ActionRail {
             return Vec::new();
         }
         let content = Self::content_height(scale, theme);
-        let slot = Self::item_height(scale, theme, font);
+        let slot = Self::item_height(scale, theme);
         let mut rects = Vec::with_capacity(self.items.len());
         let mut top = 0u32;
         for _ in &self.items {
@@ -255,10 +255,9 @@ impl ActionRail {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         point: Point,
     ) -> Option<usize> {
-        self.layout(bounds, scale, theme, font)
+        self.layout(bounds, scale, theme)
             .iter()
             .position(|r| r.contains(point))
     }
@@ -275,25 +274,17 @@ impl ActionRail {
         index: usize,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<Rect> {
-        self.layout(bounds, scale, theme, font).get(index).copied()
+        self.layout(bounds, scale, theme).get(index).copied()
     }
 
     /// Paint the rail into `surface` at `bounds` for the active theme: as
     /// many whole items as fit, each rendering itself, then the leading-edge
     /// Edge Wake when lit — painted last so it reads over every item.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        let rects = self.layout(bounds, scale, theme, font);
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let rects = self.layout(bounds, scale, theme);
         for (item, rect) in self.items.iter().zip(rects.iter()) {
-            item.render(surface, *rect, scale, theme, font);
+            item.render(surface, *rect, scale, theme);
         }
         if self.edge_wake {
             paint_edge_wake(surface, bounds, scale, theme);
@@ -309,9 +300,8 @@ impl ActionRail {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<RailAction> {
-        let rects = self.layout(bounds, scale, theme, font);
+        let rects = self.layout(bounds, scale, theme);
         let mut fired = None;
         for (index, (item, rect)) in self.items.iter_mut().zip(rects.iter()).enumerate() {
             if item.on_pointer(event, *rect).is_some() {

@@ -12,7 +12,6 @@
 
 use alloc::vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -27,10 +26,6 @@ const W: u32 = 160;
 const CH: u32 = 28;
 const GAP: u32 = 8;
 const ITEM_SLOT: u32 = CH + GAP;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -66,13 +61,7 @@ fn with_focus(mut rail: ActionRail, index: usize) -> ActionRail {
 
 fn render(rail: &ActionRail, theme: &Theme, height: u32) -> Surface {
     let mut surface = Surface::new(W, height).expect("surface");
-    rail.render(
-        &mut surface,
-        Rect::new(0, 0, W, height),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    rail.render(&mut surface, Rect::new(0, 0, W, height), Scale::ONE, theme);
     surface
 }
 
@@ -117,23 +106,17 @@ fn an_empty_rail_reports_empty_and_answers_none_everywhere() {
     assert_eq!(rail.len(), 0);
     assert_eq!(rail.focus(), None);
     assert_eq!(
-        rail.item_at(
-            Rect::new(0, 0, W, 100),
-            Scale::ONE,
-            &theme,
-            font(),
-            Point::ORIGIN
-        ),
+        rail.item_at(Rect::new(0, 0, W, 100), Scale::ONE, &theme, Point::ORIGIN),
         None
     );
     assert_eq!(
-        rail.item_rect(Rect::new(0, 0, W, 100), 0, Scale::ONE, &theme, font()),
+        rail.item_rect(Rect::new(0, 0, W, 100), 0, Scale::ONE, &theme),
         None
     );
-    assert_eq!(rail.measured_height(Scale::ONE, &theme, font()), 0);
-    assert_eq!(rail.measured_width(Scale::ONE, &theme, font()), 0);
+    assert_eq!(rail.measured_height(Scale::ONE, &theme), 0);
+    assert_eq!(rail.measured_width(Scale::ONE, &theme), 0);
     assert_eq!(
-        rail.on_pointer(&PRESS, Rect::new(0, 0, W, 100), Scale::ONE, &theme, font()),
+        rail.on_pointer(&PRESS, Rect::new(0, 0, W, 100), Scale::ONE, &theme),
         None
     );
     assert_eq!(rail.on_key(Key::Named(NamedKey::Down)), None);
@@ -162,20 +145,14 @@ fn new_rail_holds_no_focus() {
 #[test]
 fn item_height_is_the_control_height_plus_the_gap() {
     let theme = Theme::dark();
-    assert_eq!(
-        ActionRail::item_height(Scale::ONE, &theme, font()),
-        ITEM_SLOT
-    );
+    assert_eq!(ActionRail::item_height(Scale::ONE, &theme), ITEM_SLOT);
 }
 
 #[test]
 fn measured_height_is_every_items_slot_stacked() {
     let theme = Theme::dark();
     let rail = three_item_rail();
-    assert_eq!(
-        rail.measured_height(Scale::ONE, &theme, font()),
-        ITEM_SLOT * 3
-    );
+    assert_eq!(rail.measured_height(Scale::ONE, &theme), ITEM_SLOT * 3);
 }
 
 #[test]
@@ -183,8 +160,8 @@ fn measured_width_is_positive_and_grows_with_a_longer_label() {
     let theme = Theme::dark();
     let short = ActionRail::new(vec![Button::labelled("A")]);
     let long = ActionRail::new(vec![Button::labelled("A Much Longer Command")]);
-    let w0 = short.measured_width(Scale::ONE, &theme, font());
-    let w1 = long.measured_width(Scale::ONE, &theme, font());
+    let w0 = short.measured_width(Scale::ONE, &theme);
+    let w1 = long.measured_width(Scale::ONE, &theme);
     assert!(w0 > 0);
     assert!(w1 > w0);
 }
@@ -193,11 +170,11 @@ fn measured_width_is_positive_and_grows_with_a_longer_label() {
 fn item_rect_matches_the_geometry_render_draws_at() {
     let theme = Theme::dark();
     let rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     for index in 0..3u32 {
         let rect = rail
-            .item_rect(bounds, index as usize, Scale::ONE, &theme, font())
+            .item_rect(bounds, index as usize, Scale::ONE, &theme)
             .expect("in-range item has a rect");
         assert_eq!(rect.left(), 0);
         assert_eq!(rect.top(), xi(index * ITEM_SLOT));
@@ -205,7 +182,7 @@ fn item_rect_matches_the_geometry_render_draws_at() {
         assert_eq!(rect.height, CH);
     }
     assert_eq!(
-        rail.item_rect(bounds, 3, Scale::ONE, &theme, font()),
+        rail.item_rect(bounds, 3, Scale::ONE, &theme),
         None,
         "an out-of-range index fails closed"
     );
@@ -215,25 +192,25 @@ fn item_rect_matches_the_geometry_render_draws_at() {
 fn item_at_is_the_reverse_mirror_of_item_rect() {
     let theme = Theme::dark();
     let rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     for index in 0..3usize {
         let rect = rail
-            .item_rect(bounds, index, Scale::ONE, &theme, font())
+            .item_rect(bounds, index, Scale::ONE, &theme)
             .expect("item rect");
         let centre = Point::new(
             rect.left() + xi(rect.width / 2),
             rect.top() + xi(rect.height / 2),
         );
         assert_eq!(
-            rail.item_at(bounds, Scale::ONE, &theme, font(), centre),
+            rail.item_at(bounds, Scale::ONE, &theme, centre),
             Some(index)
         );
     }
     // A point in the trailing gap belongs to no item.
     let gap_y = xi(CH + GAP / 2);
     assert_eq!(
-        rail.item_at(bounds, Scale::ONE, &theme, font(), Point::new(4, gap_y)),
+        rail.item_at(bounds, Scale::ONE, &theme, Point::new(4, gap_y)),
         None
     );
 }
@@ -244,13 +221,13 @@ fn item_at_is_the_reverse_mirror_of_item_rect() {
 fn pressing_and_releasing_over_the_same_item_activates_it() {
     let theme = Theme::dark();
     let mut rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     let y = item_centre_y(1);
-    rail.on_pointer(&moved(10, y), bounds, Scale::ONE, &theme, font());
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font());
+    rail.on_pointer(&moved(10, y), bounds, Scale::ONE, &theme);
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
     assert_eq!(
-        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         Some(RailAction::Activate { index: 1 })
     );
 }
@@ -259,43 +236,22 @@ fn pressing_and_releasing_over_the_same_item_activates_it() {
 fn releasing_over_a_different_item_activates_nothing() {
     let theme = Theme::dark();
     let mut rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
-    rail.on_pointer(
-        &moved(10, item_centre_y(0)),
-        bounds,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font());
-    rail.on_pointer(
-        &moved(10, item_centre_y(2)),
-        bounds,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    assert_eq!(
-        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
-        None
-    );
+    rail.on_pointer(&moved(10, item_centre_y(0)), bounds, Scale::ONE, &theme);
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    rail.on_pointer(&moved(10, item_centre_y(2)), bounds, Scale::ONE, &theme);
+    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
 }
 
 #[test]
 fn hovering_an_item_changes_the_render() {
     let theme = Theme::dark();
     let mut rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     let resting = render(&rail, &theme, h);
-    rail.on_pointer(
-        &moved(10, item_centre_y(0)),
-        bounds,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    rail.on_pointer(&moved(10, item_centre_y(0)), bounds, Scale::ONE, &theme);
     let hovered = render(&rail, &theme, h);
     assert_ne!(
         resting.pixels(),
@@ -314,20 +270,11 @@ fn a_disabled_item_never_activates() {
         b.set_state(ControlState::disabled());
         b
     }]);
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
-    rail.on_pointer(
-        &moved(10, item_centre_y(1)),
-        bounds,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font());
-    assert_eq!(
-        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
-        None
-    );
+    rail.on_pointer(&moved(10, item_centre_y(1)), bounds, Scale::ONE, &theme);
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
 }
 
 #[test]
@@ -343,21 +290,12 @@ fn a_denied_item_never_activates_and_shows_the_authority_mark() {
         b.set_state(ControlState::disabled());
         b
     }]);
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
 
-    rail.on_pointer(
-        &moved(10, item_centre_y(1)),
-        bounds,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font());
-    assert_eq!(
-        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
-        None
-    );
+    rail.on_pointer(&moved(10, item_centre_y(1)), bounds, Scale::ONE, &theme);
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
 
     assert!(has_pixel(
         &render(&rail, &theme, h),
@@ -462,7 +400,7 @@ fn role_variants_render_differently() {
         ButtonContent::Label("Go".into()),
         ControlRole::Destructive,
     )]);
-    let h = neutral.measured_height(Scale::ONE, &theme, font());
+    let h = neutral.measured_height(Scale::ONE, &theme);
     let a = render(&neutral, &theme, h);
     let b = render(&primary, &theme, h);
     let c = render(&destructive, &theme, h);
@@ -495,22 +433,16 @@ fn overflow_omits_whole_items_and_hit_testing_agrees() {
     let surface = render(&rail, &theme, h);
 
     assert_eq!(
-        rail.item_rect(bounds, 0, Scale::ONE, &theme, font()),
+        rail.item_rect(bounds, 0, Scale::ONE, &theme),
         Some(Rect::new(0, 0, W, CH))
     );
     assert_eq!(
-        rail.item_rect(bounds, 1, Scale::ONE, &theme, font()),
+        rail.item_rect(bounds, 1, Scale::ONE, &theme),
         None,
         "the second item has no room and is omitted"
     );
     assert_eq!(
-        rail.item_at(
-            bounds,
-            Scale::ONE,
-            &theme,
-            font(),
-            Point::new(10, xi(h - 1))
-        ),
+        rail.item_at(bounds, Scale::ONE, &theme, Point::new(10, xi(h - 1))),
         None,
         "the sliver of unfinished space hit-tests to nothing"
     );
@@ -534,12 +466,12 @@ fn zero_width_bounds_render_and_hit_test_to_nothing() {
     let rail = three_item_rail();
     let bounds = Rect::new(0, 0, 0, 200);
     assert_eq!(
-        rail.item_at(bounds, Scale::ONE, &theme, font(), Point::ORIGIN),
+        rail.item_at(bounds, Scale::ONE, &theme, Point::ORIGIN),
         None
     );
-    assert_eq!(rail.item_rect(bounds, 0, Scale::ONE, &theme, font()), None);
+    assert_eq!(rail.item_rect(bounds, 0, Scale::ONE, &theme), None);
     let mut surface = Surface::new(1, 200).expect("surface");
-    rail.render(&mut surface, bounds, Scale::ONE, &theme, font());
+    rail.render(&mut surface, bounds, Scale::ONE, &theme);
     let empty = Surface::new(1, 200).expect("surface");
     assert_eq!(surface.pixels(), empty.pixels());
 }
@@ -550,11 +482,11 @@ fn zero_height_bounds_render_and_hit_test_to_nothing() {
     let rail = three_item_rail();
     let bounds = Rect::new(0, 0, W, 0);
     assert_eq!(
-        rail.item_at(bounds, Scale::ONE, &theme, font(), Point::ORIGIN),
+        rail.item_at(bounds, Scale::ONE, &theme, Point::ORIGIN),
         None
     );
     let mut surface = Surface::new(W, 1).expect("surface");
-    rail.render(&mut surface, bounds, Scale::ONE, &theme, font());
+    rail.render(&mut surface, bounds, Scale::ONE, &theme);
     let empty = Surface::new(W, 1).expect("surface");
     assert_eq!(surface.pixels(), empty.pixels());
 }
@@ -565,12 +497,12 @@ fn bounds_shorter_than_one_item_draws_nothing() {
     let rail = three_item_rail();
     let bounds = Rect::new(0, 0, W, CH - 1);
     assert_eq!(
-        rail.item_rect(bounds, 0, Scale::ONE, &theme, font()),
+        rail.item_rect(bounds, 0, Scale::ONE, &theme),
         None,
         "not even the first item fits"
     );
     let mut surface = Surface::new(W, CH - 1).expect("surface");
-    rail.render(&mut surface, bounds, Scale::ONE, &theme, font());
+    rail.render(&mut surface, bounds, Scale::ONE, &theme);
     let empty = Surface::new(W, CH - 1).expect("surface");
     assert_eq!(surface.pixels(), empty.pixels());
 }
@@ -581,7 +513,7 @@ fn bounds_shorter_than_one_item_draws_nothing() {
 fn theme_switch_changes_the_render() {
     let theme = Theme::dark();
     let rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let dark = render(&rail, &Theme::dark(), h);
     let light = render(&rail, &Theme::light(), h);
     assert_ne!(dark.pixels(), light.pixels());
@@ -591,7 +523,7 @@ fn theme_switch_changes_the_render() {
 fn a_heavier_contrast_theme_still_renders_the_rail() {
     let theme = high_contrast();
     let rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let surface = render(&rail, &theme, h);
     assert!(!surface.pixels().is_empty());
     assert_ne!(
@@ -606,15 +538,9 @@ fn renders_at_a_larger_scale_without_panicking() {
     let theme = Theme::dark();
     let scale = Scale::from_percent(200).expect("valid scale");
     let rail = three_item_rail();
-    let h = rail.measured_height(scale, &theme, font());
+    let h = rail.measured_height(scale, &theme);
     let mut surface = Surface::new(W * 2, h).expect("surface");
-    rail.render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, h),
-        scale,
-        &theme,
-        font(),
-    );
+    rail.render(&mut surface, Rect::new(0, 0, W * 2, h), scale, &theme);
     assert!(
         surface
             .pixels()
@@ -640,7 +566,7 @@ fn wake_thickness(surface: &Surface, wake: Pixel) -> u32 {
 fn edge_wake_lights_the_leading_edge_only_when_lit() {
     let theme = Theme::dark();
     let rail = three_item_rail();
-    let h = rail.measured_height(Scale::ONE, &theme, font());
+    let h = rail.measured_height(Scale::ONE, &theme);
     let lit = rail.clone().with_edge_wake(true);
     let unlit = rail.with_edge_wake(false);
     assert!(lit.edge_wake());
@@ -663,16 +589,8 @@ fn heavy_contrast_strengthens_the_edge_wake() {
     let theme = Theme::dark();
     let heavy = high_contrast();
     let rail = three_item_rail().with_edge_wake(true);
-    let dark_surface = render(
-        &rail,
-        &theme,
-        rail.measured_height(Scale::ONE, &theme, font()),
-    );
-    let heavy_surface = render(
-        &rail,
-        &heavy,
-        rail.measured_height(Scale::ONE, &heavy, font()),
-    );
+    let dark_surface = render(&rail, &theme, rail.measured_height(Scale::ONE, &theme));
+    let heavy_surface = render(&rail, &heavy, rail.measured_height(Scale::ONE, &heavy));
     let dark_wake = wake_thickness(&dark_surface, premul(theme.palette().rim_active));
     let heavy_wake = wake_thickness(&heavy_surface, premul(heavy.palette().rim_active));
     assert!(

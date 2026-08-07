@@ -16,12 +16,12 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
-    pointer_activation, resolve_bead, resolve_frame, resolve_rail, surface_rect, to_i32, BeadShape,
-    ChevronDir, PlateStyle,
+    pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font, surface_rect, to_i32,
+    BeadShape, ChevronDir, PlateStyle,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
@@ -447,14 +447,8 @@ impl Button {
     }
 
     /// Paint the button into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let res = resolve(theme, self.role, self.state, PlateSeating::Panel);
         paint_frame(surface, bounds, scale, theme, &res);
         if let Some(rect) = surface_rect(bounds) {
@@ -585,12 +579,9 @@ impl IconButton {
     /// per-button artwork produces it at exactly the size [`Self::render`]
     /// will place — the two can never disagree. An icon-only plate sizes the
     /// glyph off the plate (never the text inset), so it fills the button;
-    /// `0` when the bounds are off-surface or too small for a glyph. The
-    /// `font` is accepted only so the query matches the shared
-    /// collection-control shape (an icon button has no label to measure).
+    /// `0` when the bounds are off-surface or too small for a glyph.
     #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        let _ = font;
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         let Some((_, _, w, h)) = surface_rect(bounds) else {
             return 0;
         };
@@ -611,10 +602,8 @@ impl IconButton {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         artwork: Option<&Surface>,
     ) {
-        let _ = font;
         let res = resolve(theme, self.role, self.state, self.seating);
         paint_frame(surface, bounds, scale, theme, &res);
         if let Some((x, y, w, h)) = surface_rect(bounds) {
@@ -754,14 +743,8 @@ impl SplitButton {
     }
 
     /// Paint the split button into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let res = resolve(
             theme,
             self.role,

@@ -19,13 +19,13 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 
 const W: u32 = 140;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -34,13 +34,7 @@ fn premul(rgba: Rgba) -> Pixel {
 
 fn render(button: &Button, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    button.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    button.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
@@ -326,7 +320,6 @@ fn icon_button_paints_and_activates() {
         Rect::new(0, 0, H, H),
         Scale::ONE,
         &theme,
-        font(),
         None,
     );
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
@@ -404,7 +397,7 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
     let theme = Theme::dark();
     let button = IconButton::new(IconKind::Library, ControlRole::Primary);
     let bounds = Rect::new(0, 0, H, H);
-    let side = button.icon_side(bounds, Scale::ONE, &theme, font());
+    let side = button.icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0, "the button reserves an icon slot");
 
     // Slot-sized artwork fills exactly the slot the button advertised.
@@ -414,7 +407,6 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
         bounds,
         Scale::ONE,
         &theme,
-        font(),
         Some(&artwork(side, ART)),
     );
     let drawn = bbox(&with_art, ART.premultiply()).expect("artwork drawn");
@@ -424,7 +416,7 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
     // Without artwork the same button draws its built-in glyph instead — the
     // supplied colour never appears, so a missing icon can never blank it.
     let mut glyph = Surface::new(H, H).expect("surface");
-    button.render(&mut glyph, bounds, Scale::ONE, &theme, font(), None);
+    button.render(&mut glyph, bounds, Scale::ONE, &theme, None);
     assert!(!has_pixel(&glyph, ART.premultiply()));
     assert!(has_pixel(&glyph, premul(theme.palette().on_accent)));
 }
@@ -472,13 +464,7 @@ fn split_button_paints_a_disclosure_chevron() {
     let theme = Theme::dark();
     let split = SplitButton::new(ButtonContent::Label("Run".into()), ControlRole::Neutral);
     let mut surface = Surface::new(W, H).expect("surface");
-    split.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    split.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, &theme);
     // The chevron paints the label colour in the disclosure (right) region.
     let label = premul(theme.palette().on_surface);
     let right = (W - H / 2)..W;
@@ -495,13 +481,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let button = Button::labelled("OK");
     let scale = Scale::from_percent(200).expect("valid scale");
     let mut surface = Surface::new(W * 2, H * 2).expect("surface");
-    button.render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, H * 2),
-        scale,
-        &theme,
-        font(),
-    );
+    button.render(&mut surface, Rect::new(0, 0, W * 2, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 
@@ -635,8 +615,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme)),
         "…and the two must therefore paint identically"
     );
 
@@ -646,8 +626,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b);
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font(), None)),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font(), None)),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, None)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, None)),
     );
 
     let mut a = SplitButton::new(
@@ -659,8 +639,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
     b.on_pointer(&farther, plate(), Scale::ONE, &theme);
     assert_eq!(a, b);
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme)),
     );
 }
 
@@ -679,8 +659,8 @@ fn press_latch_alone_never_changes_a_button_render() {
 
     assert_eq!(latched, shown, "the press latch is not a drawn property");
     assert_eq!(
-        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme)),
         "…and the two must therefore paint identically"
     );
     assert_eq!(

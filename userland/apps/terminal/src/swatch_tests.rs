@@ -1,6 +1,5 @@
 //! Unit tests for the colour-well grid.
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_theme::Theme;
@@ -10,10 +9,6 @@ use crate::swatch::{SwatchAction, SwatchGrid, WELL_COUNT};
 
 const W: u32 = 400;
 const H: u32 = 200;
-
-fn font() -> BitmapFont {
-    BitmapFont::monospace(13)
-}
 
 fn bounds() -> Rect {
     Rect::new(0, 0, W, H)
@@ -199,16 +194,10 @@ fn renders_without_panicking_at_a_generous_and_a_tiny_size() {
     let grid = SwatchGrid::from_scheme(&scheme());
 
     let mut big = tairix_raster::Surface::new(W, H).expect("surface");
-    grid.render(&mut big, bounds(), Scale::ONE, &theme, font());
+    grid.render(&mut big, bounds(), Scale::ONE, &theme);
 
     let mut tiny = tairix_raster::Surface::new(24, 10).expect("surface");
-    grid.render(
-        &mut tiny,
-        Rect::new(0, 0, 24, 10),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    grid.render(&mut tiny, Rect::new(0, 0, 24, 10), Scale::ONE, &theme);
 }
 
 #[test]
@@ -220,11 +209,11 @@ fn the_selected_well_draws_a_shape_mark_distinct_from_an_unselected_well() {
     // unselected well is exactly the selection mark.
     grid.set_selected(0);
     let mut unselected = tairix_raster::Surface::new(W, H).expect("surface");
-    grid.render(&mut unselected, bounds(), Scale::ONE, &theme, font());
+    grid.render(&mut unselected, bounds(), Scale::ONE, &theme);
 
     grid.set_selected(3);
     let mut selected = tairix_raster::Surface::new(W, H).expect("surface");
-    grid.render(&mut selected, bounds(), Scale::ONE, &theme, font());
+    grid.render(&mut selected, bounds(), Scale::ONE, &theme);
 
     assert_ne!(
         unselected.pixels(),

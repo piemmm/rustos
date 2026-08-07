@@ -376,7 +376,7 @@ impl ActivitiesSection {
     ) -> Option<DetailLayout> {
         let gap = scale.scale_length(theme.metrics().control_gap);
         let line = font.line_height();
-        let rows = FactList::row_height(scale, theme, font).saturating_mul(TOTALS);
+        let rows = FactList::row_height(scale, theme).saturating_mul(TOTALS);
         let mut top = content.top();
         let mut left = content.height;
         let mut take = |height: u32| -> Rect {
@@ -420,7 +420,7 @@ impl ActivitiesSection {
             return;
         };
         let panel = self.detail_panel();
-        panel.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+        panel.render(surface, rect, ctx.scale, ctx.theme);
         let Some(content) = panel.content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
@@ -445,10 +445,10 @@ impl ActivitiesSection {
             &identity_text(item),
             Color::from(ctx.theme.palette().on_surface),
         );
-        combined_facts(item).render(surface, layout.totals, ctx.scale, ctx.theme, ctx.font);
+        combined_facts(item).render(surface, layout.totals, ctx.scale, ctx.theme);
         match member_facts(item) {
             Some(facts) => {
-                facts.render(surface, layout.members, ctx.scale, ctx.theme, ctx.font);
+                facts.render(surface, layout.members, ctx.scale, ctx.theme);
             }
             None => {
                 ctx.font.draw_text(
@@ -656,32 +656,25 @@ impl SectionView for ActivitiesSection {
                     let (row_rect, buttons) =
                         Switchboard::split_row(item, Self::BUTTONS, ctx.scale, ctx.theme);
                     if let Some(edit) = self.rename.as_ref().filter(|e| e.index == ai) {
-                        edit.field
-                            .render(surface, row_rect, ctx.scale, ctx.theme, ctx.font);
+                        edit.field.render(surface, row_rect, ctx.scale, ctx.theme);
                     } else {
                         entry
                             .header
-                            .render(surface, row_rect, ctx.scale, ctx.theme, ctx.font, None);
+                            .render(surface, row_rect, ctx.scale, ctx.theme, None);
                     }
                     if let Some(rect) = buttons.first() {
-                        entry
-                            .switch
-                            .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
+                        entry.switch.render(surface, *rect, ctx.scale, ctx.theme);
                     }
                     if let Some(rect) = buttons.get(1) {
                         entry
                             .pause_resume
-                            .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
+                            .render(surface, *rect, ctx.scale, ctx.theme);
                     }
                     if let Some(rect) = buttons.get(2) {
-                        entry
-                            .rename
-                            .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
+                        entry.rename.render(surface, *rect, ctx.scale, ctx.theme);
                     }
                     if let Some(rect) = buttons.get(3) {
-                        entry
-                            .close
-                            .render(surface, *rect, ctx.scale, ctx.theme, ctx.font);
+                        entry.close.render(surface, *rect, ctx.scale, ctx.theme);
                     }
                 }
                 ActivityRow::Member(ai, mi) => {
@@ -689,7 +682,7 @@ impl SectionView for ActivitiesSection {
                         continue;
                     };
                     let row_rect = Self::member_rect(item, ctx.scale, ctx.theme);
-                    member.render(surface, row_rect, ctx.scale, ctx.theme, ctx.font, None);
+                    member.render(surface, row_rect, ctx.scale, ctx.theme, None);
                 }
             }
         }

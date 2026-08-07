@@ -532,13 +532,12 @@ mod program {
         parent_mode: &DisplayMode,
         theme: &Theme,
         desktop: &Desktop,
-        font: BitmapFont,
     ) -> Option<Overlay> {
         let scale = desktop.scale();
         let (content, offset, extent) = match request {
             OverlayRequest::Menu { at } => {
                 let menu = ContextMenu::open(Point::new(0, 0));
-                let plate = menu.bounds(desktop.screen(), scale, theme, font);
+                let plate = menu.bounds(desktop.screen(), scale, theme);
                 (
                     Content::Menu(menu),
                     (at.x, at.y),
@@ -573,7 +572,7 @@ mod program {
             mode,
             dismissed: false,
         };
-        if present_overlay(&overlay, theme, scale, font, client).is_err() {
+        if present_overlay(&overlay, theme, scale, client).is_err() {
             report("overlay present refused; not shown");
             close_popup(client, overlay);
             return None;
@@ -596,15 +595,14 @@ mod program {
         overlay: &Overlay,
         theme: &Theme,
         scale: Scale,
-        font: BitmapFont,
         client: &mut WindowClient<RtWindowTransport>,
     ) -> Result<(), Errno> {
         let viewport = overlay.viewport();
         let mut surface =
             Surface::new(viewport.width, viewport.height).ok_or(Errno::LengthOutOfRange)?;
         match &overlay.content {
-            Content::Menu(menu) => menu.render(&mut surface, viewport, scale, theme, font),
-            Content::Sheet(sheet) => sheet.render(&mut surface, viewport, scale, theme, font),
+            Content::Menu(menu) => menu.render(&mut surface, viewport, scale, theme),
+            Content::Sheet(sheet) => sheet.render(&mut surface, viewport, scale, theme),
         }
         // SAFETY: `open_popup` mapped `overlay.len` zeroed read/write bytes
         // at `overlay.base` and nothing has unmapped or aliased them since —
@@ -954,7 +952,6 @@ mod program {
                         &mut overlay,
                         &mut desktop,
                         theme,
-                        look.font,
                         window,
                         event_endpoint,
                         server,
@@ -980,7 +977,6 @@ mod program {
                                 &mode,
                                 theme,
                                 &desktop,
-                                look.font,
                             );
                         }
                         EventOutcome::OpenSheet => {
@@ -993,21 +989,14 @@ mod program {
                                 &mode,
                                 theme,
                                 &desktop,
-                                look.font,
                             );
                         }
                         EventOutcome::OverlayChanged => {
                             // Only the overlay's own pixels moved, so the
                             // terminal's window is left exactly as it is.
                             if let Some(open) = overlay.as_ref() {
-                                if present_overlay(
-                                    open,
-                                    theme,
-                                    desktop.scale(),
-                                    look.font,
-                                    &mut client,
-                                )
-                                .is_err()
+                                if present_overlay(open, theme, desktop.scale(), &mut client)
+                                    .is_err()
                                 {
                                     return fail(EXIT_CHANNEL_LOST, "overlay present refused");
                                 }
@@ -1059,14 +1048,8 @@ mod program {
                             // shows it (a moved slider, a chosen swatch), so
                             // its popup is re-presented too.
                             if let Some(open) = overlay.as_ref() {
-                                if present_overlay(
-                                    open,
-                                    theme,
-                                    desktop.scale(),
-                                    look.font,
-                                    &mut client,
-                                )
-                                .is_err()
+                                if present_overlay(open, theme, desktop.scale(), &mut client)
+                                    .is_err()
                                 {
                                     return fail(EXIT_CHANNEL_LOST, "overlay present refused");
                                 }
@@ -1357,14 +1340,13 @@ mod program {
         at: Point,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> OverlayRouting {
         let viewport = overlay.viewport();
         let mut routing = OverlayRouting::Nothing;
         match &mut overlay.content {
             Content::Menu(menu) => {
                 for event in pointer_input_events(action, at) {
-                    match menu.on_pointer(&event, viewport, scale, theme, font) {
+                    match menu.on_pointer(&event, viewport, scale, theme) {
                         MenuOutcome::Ignored => {}
                         MenuOutcome::Changed => routing = OverlayRouting::Redraw,
                         MenuOutcome::Dismissed => return OverlayRouting::Dismissed,
@@ -1374,7 +1356,7 @@ mod program {
             }
             Content::Sheet(sheet) => {
                 for event in pointer_input_events(action, at) {
-                    match sheet.on_pointer(&event, viewport, scale, theme, font) {
+                    match sheet.on_pointer(&event, viewport, scale, theme) {
                         SheetOutcome::Ignored => {}
                         SheetOutcome::Changed => routing = OverlayRouting::Redraw,
                         SheetOutcome::Edited => {
@@ -1400,7 +1382,6 @@ mod program {
         key: tairix_abi::input::KeyInput,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> OverlayRouting {
         let input = key_input_event(key);
         let viewport = overlay.viewport();
@@ -1420,7 +1401,7 @@ mod program {
                 let InputEvent::KeyPressed { key, modifiers } = input else {
                     return OverlayRouting::Nothing;
                 };
-                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, font);
+                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme);
                 if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
                     *profile = *sheet.profile();
                 }
@@ -1466,7 +1447,6 @@ mod program {
         overlay: &mut Option<Overlay>,
         desktop: &mut Desktop,
         theme: &Theme,
-        font: BitmapFont,
         window: u64,
         endpoint: u64,
         server: ProcId,
@@ -1514,7 +1494,7 @@ mod program {
                             let Some(open) = overlay.as_mut() else {
                                 continue;
                             };
-                            match route_overlay_key(open, profile, key, scale, theme, font) {
+                            match route_overlay_key(open, profile, key, scale, theme) {
                                 OverlayRouting::Nothing => {}
                                 OverlayRouting::Redraw => redraw = true,
                                 OverlayRouting::Edited => return EventOutcome::ProfileChanged,
@@ -1544,9 +1524,7 @@ mod program {
                                 continue;
                             };
                             let at = client_point(x, y);
-                            match route_overlay_pointer(
-                                open, profile, action, at, scale, theme, font,
-                            ) {
+                            match route_overlay_pointer(open, profile, action, at, scale, theme) {
                                 OverlayRouting::Nothing => {}
                                 OverlayRouting::Redraw => redraw = true,
                                 OverlayRouting::Edited => return EventOutcome::ProfileChanged,

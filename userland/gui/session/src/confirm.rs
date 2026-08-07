@@ -22,9 +22,7 @@ use tairix_abi::PowerAction;
 use tairix_controls::{
     Button, ControlRole, ControlState, Dialog, DialogAction, FocusState, PointerState,
 };
-use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
-use tairix_theme::{TextRole, Theme};
 use tairix_wm::{
     Compositor, InputEvent, Key, NamedKey, Point, PointerButton, Rect, Surface, WindowId,
 };
@@ -184,7 +182,6 @@ impl ConfirmPrompt {
         let w = scale.scale_length(WIN_WIDTH);
         let h = scale.scale_length(WIN_HEIGHT);
         let bounds = Rect::new(0, 0, w, h);
-        let font = prompt_font(shell.session().active_theme(), scale);
         let theme = shell.session().active_theme().clone();
         let action = {
             let active = self.active.as_mut()?;
@@ -195,7 +192,6 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
-                font,
             );
             let _ = active.dialog.on_pointer(
                 &InputEvent::PointerPressed {
@@ -204,7 +200,6 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
-                font,
             );
             active.dialog.on_pointer(
                 &InputEvent::PointerReleased {
@@ -213,7 +208,6 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
-                font,
             )
         };
         self.resolve(action, shell, compositor)
@@ -366,19 +360,6 @@ fn render_surface(dialog: &Dialog, scale: Scale, shell: &DesktopShell) -> Option
     let w = scale.scale_length(WIN_WIDTH);
     let h = scale.scale_length(WIN_HEIGHT);
     let mut surface = Surface::new(w, h)?;
-    dialog.render(
-        &mut surface,
-        Rect::new(0, 0, w, h),
-        scale,
-        theme,
-        prompt_font(theme, scale),
-    );
+    dialog.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
     Some(surface)
-}
-
-/// The prompt's text font: the theme's ordinary interface-text role at the
-/// density of the output it is drawn to, so the render and
-/// hit-test paths agree on one font.
-pub(crate) fn prompt_font(theme: &Theme, scale: Scale) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }

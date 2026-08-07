@@ -33,14 +33,14 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
     dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_chevron,
     paint_count_badge, paint_icon_slot, plate_border, pointer_activation, press_latch,
-    rail_thickness, resolve_bead, resolve_rail, seam_thickness, seam_width, surface_rect, to_i32,
-    ChevronDir,
+    rail_thickness, resolve_bead, resolve_rail, role_font, seam_thickness, seam_width,
+    surface_rect, to_i32, ChevronDir,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -374,7 +374,8 @@ impl ListRow {
     /// whether or not the row carries an icon (the reserved column is fixed),
     /// so a caller can size artwork before deciding to supply it.
     #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         // The list row's icon column is sized purely off the text line and the
         // row height; the scale and theme are accepted only so the query
         // matches the shared collection-control shape.
@@ -407,9 +408,9 @@ impl ListRow {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         artwork: Option<&Surface>,
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some(rect) = surface_rect(bounds) else {
             return;
         };
@@ -777,9 +778,9 @@ impl TableRow {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         columns: &[u32],
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some(rect) = surface_rect(bounds) else {
             return;
         };
@@ -1116,7 +1117,8 @@ impl TableHeader {
     /// the theme's control padding, floored at the theme's standard control
     /// height so a header never reads shorter than an ordinary row.
     #[must_use]
-    pub fn measured_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let text_band = font.glyph_height().saturating_add(pad.saturating_mul(2));
         text_band.max(scale.scale_length(theme.metrics().control_height).max(1))
@@ -1165,9 +1167,9 @@ impl TableHeader {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         columns: &[u32],
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1615,14 +1617,8 @@ impl Card {
     }
 
     /// Paint the card into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1700,7 +1696,7 @@ impl Card {
             .iter()
             .zip(self.footer_rects(bounds, scale, theme))
         {
-            button.render(surface, rect, scale, theme, font);
+            button.render(surface, rect, scale, theme);
         }
     }
 
@@ -1927,9 +1923,9 @@ impl IconTile {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         artwork: Option<&Surface>,
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -2305,14 +2301,8 @@ impl Panel {
     }
 
     /// Paint the panel into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -2385,7 +2375,7 @@ impl Panel {
 
         // The grouped header actions.
         for (button, rect) in self.actions.iter().zip(&action_rects) {
-            button.render(surface, *rect, scale, theme, font);
+            button.render(surface, *rect, scale, theme);
         }
 
         // The anchor notch pointing back toward the invoker.

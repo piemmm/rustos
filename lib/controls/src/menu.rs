@@ -7,7 +7,7 @@
 //! navigation (Up/Down move the current row, Enter/Space activate it, Escape
 //! dismisses), pointer hover/click, and emits a typed [`MenuAction`]; it
 //! performs no privileged work — the owner enforces authority. Every colour,
-//! metric, and radius resolves from the active [`Theme`]
+//! metric, radius, and *face* resolves from the active [`Theme`]
 //! and [`Scale`]; nothing here restates a recipe the shared `crate::paint`
 //! core already owns.
 
@@ -19,11 +19,11 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     draw_outline, heavy_contrast, inset, paint_bead, paint_chevron, plate_border, resolve_bead,
-    surface_rect, to_i32, ChevronDir,
+    role_font, surface_rect, text_plate_height, to_i32, ChevronDir,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
@@ -478,7 +478,7 @@ impl Menu {
 
     /// The scaled height of one menu row.
     fn row_height(scale: Scale, theme: &Theme) -> u32 {
-        scale.scale_length(theme.metrics().control_height).max(1)
+        text_plate_height(theme, scale, TextRole::Body)
     }
 
     /// The scaled height of the band a group divider occupies: the rule with
@@ -551,7 +551,8 @@ impl Menu {
     /// The menu's preferred width for the active theme: wide enough for the
     /// widest row's icon column, label, caption, and submenu chevron.
     #[must_use]
-    pub fn preferred_width(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn preferred_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let row_h = Self::row_height(scale, theme);
@@ -601,10 +602,9 @@ impl Menu {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Rect {
         let width = self
-            .preferred_width(scale, theme, font)
+            .preferred_width(scale, theme)
             .clamp(1, viewport.width.max(1));
         let height = self
             .preferred_height(scale, theme)
@@ -671,20 +671,14 @@ impl Menu {
     }
 
     /// Paint the menu into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
         if w == 0 || h == 0 {
             return;
         }
+        let font = role_font(theme, scale, TextRole::Body);
         let palette = theme.palette();
         let border = plate_border(theme, scale);
         let radius = scale

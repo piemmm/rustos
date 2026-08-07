@@ -154,10 +154,15 @@ mod program {
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = gallery_font(theme, scale);
         let mut surface = tairix_raster::Surface::new(mode.width_px, mode.height_px)
             .ok_or(Errno::LengthOutOfRange)?;
-        gallery.render(&mut surface, viewport, scale, theme, font);
+        gallery.render(
+            &mut surface,
+            viewport,
+            scale,
+            theme,
+            BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
+        );
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
             let at = i * 4;
@@ -213,7 +218,6 @@ mod program {
         event: &WindowEvent,
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = gallery_font(theme, scale);
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
@@ -230,10 +234,7 @@ mod program {
             }
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                (
-                    gallery.on_pointer(&scroll, viewport, scale, theme, font),
-                    false,
-                )
+                (gallery.on_pointer(&scroll, viewport, scale, theme), false)
             }
             // A redraw request needs nothing here: the client library
             // re-presents the last frame, and the gallery it drew has not
@@ -251,26 +252,13 @@ mod program {
         }
     }
 
-    /// The gallery's text font: the theme's ordinary interface-text role
-    /// resolved through the one shared role-to-font conversion, so the gallery
-    /// reads like every other list of interface text.
-    ///
-    /// The window's extents are authored in unscaled pixels ([`WIN_WIDTH`],
-    /// [`WIN_HEIGHT`]), so the role resolves at the desktop's `scale` to keep
-    /// the text and the box it must fit in on one density. It is the one place
-    /// the render and hit-test paths agree on a font.
-    fn gallery_font(theme: &Theme, scale: Scale) -> BitmapFont {
-        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
-    }
-
     /// Route one wire pointer event: a move to `(x, y)` to sync the pointer,
     /// then the press/release the action names. Returns whether the view
     /// changed.
     ///
-    /// The viewport and font are derived from `mode`/`theme`/`scale` here
-    /// (the same derivation [`apply_event`] uses for its own dispatch), so
-    /// the caller passes only the values that can actually differ between
-    /// call sites rather than every value they are derived from.
+    /// The viewport is derived from `mode` here (the same derivation
+    /// [`apply_event`] uses for its own dispatch), so the caller passes only
+    /// the values that can actually differ between call sites.
     fn apply_pointer(
         gallery: &mut Gallery,
         x: u32,
@@ -281,14 +269,13 @@ mod program {
         scale: Scale,
     ) -> bool {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = gallery_font(theme, scale);
         let point = Point::new(
             i32::try_from(x).unwrap_or(i32::MAX),
             i32::try_from(y).unwrap_or(i32::MAX),
         );
         let mut acted = false;
         for input in pointer_input_events(action, point) {
-            acted |= gallery.on_pointer(&input, viewport, scale, theme, font);
+            acted |= gallery.on_pointer(&input, viewport, scale, theme);
         }
         acted
     }

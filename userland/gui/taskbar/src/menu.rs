@@ -15,7 +15,6 @@
 //! [`TaskbarResponse`]: crate::input::TaskbarResponse
 
 use tairix_controls::{Menu, MenuAction, MenuItem};
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, PointerButton};
 use tairix_proglib::EntryId;
@@ -181,10 +180,9 @@ impl BarMenu {
         screen_height: u32,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<MenuLayout> {
         self.subject.as_ref()?;
-        let width = self.menu.preferred_width(scale, theme, font).max(1);
+        let width = self.menu.preferred_width(scale, theme).max(1);
         let height = self.menu.preferred_height(scale, theme).max(1);
         let gap = scale.scale_length(theme.metrics().control_gap);
         let (x, y) = match edge {

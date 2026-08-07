@@ -12,10 +12,11 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::Errno;
-use tairix_geometry::Rect;
+use tairix_font::BitmapFont;
+use tairix_geometry::{Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::browser::Browser;
 use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
@@ -180,10 +181,10 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
 #[test]
 fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::console();
     let window = Rect::new(0, 0, 400, 400);
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
-    let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
+    let view =
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
 
     for index in 0..places.len() {
         let rect = view.row_rect(index).expect("drawn row");
@@ -210,42 +211,42 @@ fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
     assert_eq!(view.index_at(0, below), None);
     // A window with no room for even one row resolves nothing at all.
     let squat = Rect::new(0, 0, 400, 1);
-    let tiny = crate::render::sidebar_view(squat, &theme, font, Some(&places)).expect("rail");
+    let tiny = crate::render::sidebar_view(squat, Scale::ONE, &theme, Some(&places)).expect("rail");
     assert_eq!(tiny.index_at(0, 0), None);
 }
 
 #[test]
 fn the_content_area_is_inset_by_the_rail_and_untouched_without_one() {
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::console();
     let window = Rect::new(0, 0, 400, 300);
     let places = Places::new(&home(), &[]);
-    let view = crate::render::sidebar_view(window, &theme, font, Some(&places)).expect("rail");
+    let view =
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
     let rail = view.width();
     assert!(rail > 0);
 
-    let inset = crate::render::content_area(window, &theme, font, Some(&places));
+    let inset = crate::render::content_area(window, Scale::ONE, &theme, Some(&places));
     assert_eq!(inset.origin.x, i32::try_from(rail).expect("rail width"));
     assert_eq!(inset.width, window.width - rail);
     assert_eq!(inset.origin.y, window.origin.y);
     assert_eq!(inset.height, window.height);
     // Everything the view lays out follows the inset, so the scrollbar sits
     // against the window's right edge rather than the rail's.
-    let bar = crate::render::scrollbar_bounds(&theme, font, inset).expect("scrollbar");
+    let bar = crate::render::scrollbar_bounds(Scale::ONE, &theme, inset).expect("scrollbar");
     assert!(bar.origin.x > inset.origin.x);
     assert!(u32::try_from(bar.origin.x).expect("bar x") + bar.width <= window.width);
 
     // With no rail the area is the window, byte for byte, so a view without a
     // sidebar is laid out exactly as it was before there was one.
     assert_eq!(
-        crate::render::content_area(window, &theme, font, None),
+        crate::render::content_area(window, Scale::ONE, &theme, None),
         window
     );
     // An empty rail is no rail at all.
     let empty = Places::default();
-    assert!(crate::render::sidebar_view(window, &theme, font, Some(&empty)).is_none());
+    assert!(crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&empty)).is_none());
     assert_eq!(
-        crate::render::content_area(window, &theme, font, Some(&empty)),
+        crate::render::content_area(window, Scale::ONE, &theme, Some(&empty)),
         window
     );
 }
@@ -268,22 +269,35 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     // The selection reaches the drawn rail: the frame differs once the
     // browser stands on a place.
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::console();
     let viewport = Rect::new(0, 0, 400, 300);
     let chrome = crate::ManagerChrome {
         tools: &[],
         tool_model: crate::ManagerToolModel::none(),
         sidebar: Some(&places),
     };
-    let unselected =
-        crate::render(&browser, &theme, font, viewport, &chrome, &mut NoArtwork).expect("surface");
+    let unselected = crate::render(
+        &browser,
+        Scale::ONE,
+        &theme,
+        viewport,
+        &chrome,
+        &mut NoArtwork,
+    )
+    .expect("surface");
     let mut at_place = Browser::open_root(MockFs::fixture()).expect("root");
     at_place
         .navigate_to(vec!["System".to_string()])
         .expect("navigate to System");
-    let selected =
-        crate::render(&at_place, &theme, font, viewport, &chrome, &mut NoArtwork).expect("surface");
-    let rail = crate::render::sidebar_view(viewport, &theme, font, Some(&places))
+    let selected = crate::render(
+        &at_place,
+        Scale::ONE,
+        &theme,
+        viewport,
+        &chrome,
+        &mut NoArtwork,
+    )
+    .expect("surface");
+    let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places))
         .expect("rail")
         .row_rect(4)
         .expect("the System row");
@@ -611,8 +625,8 @@ fn render_produces_a_surface_the_size_of_the_viewport() {
     let theme = Theme::dark();
     let surface = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        tairix_font::BitmapFont::console(),
         Rect::new(0, 0, 200, 120),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -627,13 +641,15 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(1).expect("select second entry");
     let theme = Theme::dark();
-    let font = tairix_font::BitmapFont::console();
+    // Measured on the face the engine itself resolves: a hand-picked one
+    // answers a question about a face nothing draws with.
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     let row_height = font.glyph_height() + 4;
-    let header = crate::render::chrome_height(font, &theme);
+    let header = crate::render::chrome_height(Scale::ONE, &theme);
     let surface = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        font,
         Rect::new(0, 0, 200, header + row_height * 3),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -679,8 +695,8 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     // surface rather than panicking.
     let surface = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        tairix_font::BitmapFont::console(),
         Rect::new(0, 0, 4, 3),
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -688,6 +704,77 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     .expect("surface");
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);
+}
+
+/// Every chrome length tracks the desktop's density, not just the glyphs.
+///
+/// The renderer had no `Scale` at all and pinned every length it derived from
+/// the theme at 100%, so the toolbar strip, the scrollbar gutter, the rail's
+/// padding, the tile grid and the overlays' title bands measured exactly the
+/// same at 200% as at 100% while only the text around them grew.
+#[test]
+fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
+    use crate::chrome::ContextMenuModel;
+    use crate::render::{
+        build_context_menu, chrome_height, context_menu_rect, delete_dialog_rect, grid_metrics,
+        properties_panel_rect, row_height, scrollbar_bounds, sidebar_view, toolbar_height,
+    };
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let hidpi = Scale::from_percent(200).expect("200% is a valid scale");
+    let vp = Rect::new(0, 0, 600, 600);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let places = Places::new(&home(), &[]);
+    let menu = build_context_menu(ContextMenuModel::for_browser(&browser, true));
+
+    // The horizontal bands, top to bottom.
+    assert!(toolbar_height(hidpi, &theme) > toolbar_height(Scale::ONE, &theme));
+    assert!(row_height(hidpi, &theme) > row_height(Scale::ONE, &theme));
+    assert!(chrome_height(hidpi, &theme) > chrome_height(Scale::ONE, &theme));
+
+    // The reserved scrollbar gutter, and the header it begins below.
+    let bar = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter at 100%");
+    let bar_hidpi = scrollbar_bounds(hidpi, &theme, vp).expect("a gutter at 200%");
+    assert!(bar_hidpi.width > bar.width);
+    assert!(bar_hidpi.origin.y > bar.origin.y);
+
+    // The places rail and the icon grid's tiles.
+    let rail = sidebar_view(vp, Scale::ONE, &theme, Some(&places)).expect("a rail at 100%");
+    let rail_hidpi = sidebar_view(vp, hidpi, &theme, Some(&places)).expect("a rail at 200%");
+    assert!(rail_hidpi.width() > rail.width());
+    let tiles = grid_metrics(Scale::ONE, &theme);
+    let tiles_hidpi = grid_metrics(hidpi, &theme);
+    assert!(tiles_hidpi.cell_width > tiles.cell_width);
+    assert!(tiles_hidpi.cell_height > tiles.cell_height);
+    assert!(tiles_hidpi.gap > tiles.gap);
+
+    // The overlays: the Properties panel, the delete confirmation, and the
+    // right-click menu.
+    assert!(
+        properties_panel_rect(vp, hidpi, &theme).height
+            > properties_panel_rect(vp, Scale::ONE, &theme).height
+    );
+    assert!(
+        delete_dialog_rect(vp, hidpi, &theme).height
+            > delete_dialog_rect(vp, Scale::ONE, &theme).height
+    );
+    let anchor = Point::new(8, 8);
+    let popup = context_menu_rect(&menu, anchor, vp, Scale::ONE, &theme);
+    let popup_hidpi = context_menu_rect(&menu, anchor, vp, hidpi, &theme);
+    assert!(popup_hidpi.width > popup.width);
+    assert!(popup_hidpi.height > popup.height);
+
+    // And the whole view still paints at the higher density.
+    assert!(crate::render(
+        &browser,
+        hidpi,
+        &theme,
+        vp,
+        &crate::ManagerChrome::none(),
+        &mut NoArtwork,
+    )
+    .is_some());
 }
 
 // --- The VFS engine ------------------------------------------------------
@@ -835,19 +922,18 @@ fn entry_index_at_mirrors_the_rendered_rows() {
     use crate::render::{chrome_height, entry_index_at, row_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
-    let row = row_height(font);
+    let row = row_height(Scale::ONE, &theme);
     // The chrome (toolbar + path bar) reserved above the first entry row.
-    let header = chrome_height(font, &theme);
+    let header = chrome_height(Scale::ONE, &theme);
     // A window wide enough for content beside the scrollbar gutter, the chrome
     // plus several entry rows tall. Clicks land in the content column (x=4).
     let vp = |h: u32| Rect::new(0, 0, 200, h);
     let at = |b: &Browser<MockFs>, h: u32, y: u32| {
         entry_index_at(
             b,
-            font,
+            Scale::ONE,
             &theme,
             vp(h),
             Point::new(4, i32::try_from(y).unwrap()),
@@ -877,7 +963,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
     assert_eq!(
         entry_index_at(
             &browser,
-            font,
+            Scale::ONE,
             &theme,
             vp(viewport_height),
             Point::new(199, i32::try_from(header).unwrap())
@@ -891,24 +977,23 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
     use crate::render::{chrome_height, entry_index_at, reveal_selection, row_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
-    let row = row_height(font);
-    let header = chrome_height(font, &theme);
+    let row = row_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme);
     // Two visible entry rows below the chrome; select the last entry and reveal
     // it so the list scrolls to keep it on the bottom row — as the app does.
     let viewport_height = header + row * 2;
     let vp = Rect::new(0, 0, 200, viewport_height);
     let last = browser.entries().len() - 1;
     browser.select(last).expect("selectable");
-    reveal_selection(&mut browser, font, &theme, vp);
+    reveal_selection(&mut browser, Scale::ONE, &theme, vp);
     // The bottom visible row is the selected (last) entry; the row above
     // it is its predecessor — exactly what `render` draws.
     assert_eq!(
         entry_index_at(
             &browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
             Point::new(4, i32::try_from(header + row).unwrap())
@@ -918,7 +1003,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
     assert_eq!(
         entry_index_at(
             &browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
             Point::new(4, i32::try_from(header).unwrap())
@@ -1002,22 +1087,27 @@ fn render_crumb_at_mirrors_the_drawn_path_bar() {
     use crate::render::{chrome_height, crumb_at, toolbar_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
+    // Measured on the face the engine itself resolves: a hand-picked one
+    // answers a question about a face nothing draws with.
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     // The path bar sits below the toolbar strip; a click lands on a crumb only
     // within that band, so hit-test at its vertical middle.
-    let bar_top = toolbar_height(&theme);
+    let bar_top = toolbar_height(Scale::ONE, &theme);
     let bar_y = i32::try_from(bar_top + 1).unwrap();
-    let vp = Rect::new(0, 0, 200, chrome_height(font, &theme) * 4);
+    let vp = Rect::new(0, 0, 200, chrome_height(Scale::ONE, &theme) * 4);
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
 
     // A click in the toolbar strip (above the path bar) is never a crumb.
-    assert_eq!(crumb_at(&browser, font, &theme, vp, Point::new(4, 0)), None);
+    assert_eq!(
+        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, 0)),
+        None
+    );
 
     // At the root the only crumb is the current directory, which is inert:
     // no click in the path bar resolves to a navigable crumb.
     assert_eq!(
-        crumb_at(&browser, font, &theme, vp, Point::new(4, bar_y)),
+        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, bar_y)),
         None
     );
 
@@ -1032,7 +1122,7 @@ fn render_crumb_at_mirrors_the_drawn_path_bar() {
     assert_eq!(browser.path(), "/System");
     // The root crumb is drawn at the left inset (x = 4).
     assert_eq!(
-        crumb_at(&browser, font, &theme, vp, Point::new(4, bar_y)),
+        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, bar_y)),
         Some(0)
     );
     // A click on the current "System" crumb (drawn after "/" and the
@@ -1040,17 +1130,23 @@ fn render_crumb_at_mirrors_the_drawn_path_bar() {
     let system_x =
         4 + i32::try_from(font.text_width("/") + font.text_width(SEPARATOR)).unwrap() + 1;
     assert_eq!(
-        crumb_at(&browser, font, &theme, vp, Point::new(system_x, bar_y)),
+        crumb_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            Point::new(system_x, bar_y)
+        ),
         None
     );
     // A click below the path bar row is never a crumb (it is the item area).
     assert_eq!(
         crumb_at(
             &browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
-            Point::new(4, i32::try_from(chrome_height(font, &theme)).unwrap())
+            Point::new(4, i32::try_from(chrome_height(Scale::ONE, &theme)).unwrap())
         ),
         None
     );
@@ -1378,29 +1474,28 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
 fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
     use crate::render::{row_height, scroll_lines};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
-    let row = row_height(font);
+    let row = row_height(Scale::ONE, &theme);
     // The chrome (toolbar + path bar) plus four visible rows.
     let vp = Rect::new(
         0,
         0,
         200,
-        crate::render::chrome_height(font, &theme) + row * 4,
+        crate::render::chrome_height(Scale::ONE, &theme) + row * 4,
     );
 
     // Scrolling up at the top does nothing (already clamped).
-    assert!(!scroll_lines(&mut browser, font, &theme, vp, -1));
+    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, -1));
     assert_eq!(browser.scroll_offset(), 0);
     // Scrolling down moves one line per tick.
-    assert!(scroll_lines(&mut browser, font, &theme, vp, 3));
+    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, 3));
     assert_eq!(browser.scroll_offset(), 3);
     // Scrolling far past the end clamps to the last full page (20 rows, four
     // visible → max offset 16) and reports no further movement beyond it.
-    assert!(scroll_lines(&mut browser, font, &theme, vp, 1000));
+    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, 1000));
     assert_eq!(browser.scroll_offset(), 16);
-    assert!(!scroll_lines(&mut browser, font, &theme, vp, 5));
+    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, 5));
     assert_eq!(browser.scroll_offset(), 16);
 }
 
@@ -1408,16 +1503,14 @@ fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
 fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     use crate::render::{row_height, scroll_lines, scroll_model};
     use tairix_controls::{ScrollBar, ScrollOrientation};
-    use tairix_geometry::Scale;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(40);
-    let row = row_height(font);
+    let row = row_height(Scale::ONE, &theme);
     let vp = Rect::new(0, 0, 200, row * 6);
     // Twenty times more content than the viewport shows: the bar is a real,
     // draggable thumb, not a full-track placeholder.
-    let model = scroll_model(&browser, font, &theme, vp);
+    let model = scroll_model(&browser, Scale::ONE, &theme, vp);
     assert!(model.range().is_scrollable());
 
     let bar_bounds = Rect::new(184, i32::try_from(row).unwrap(), 16, row * 5);
@@ -1429,10 +1522,10 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     let top_thumb = geometry.thumb().start;
 
     // Scroll to the end; the drawn thumb moves to the bottom of its travel.
-    scroll_lines(&mut browser, font, &theme, vp, 1000);
+    scroll_lines(&mut browser, Scale::ONE, &theme, vp, 1000);
     let bar = ScrollBar::new(
         ScrollOrientation::Vertical,
-        scroll_model(&browser, font, &theme, vp),
+        scroll_model(&browser, Scale::ONE, &theme, vp),
     );
     let end_geometry = bar
         .geometry(bar_bounds, Scale::ONE, &theme)
@@ -1445,11 +1538,10 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
 fn scrollbar_bounds_matches_the_reserved_gutter() {
     use crate::render::scrollbar_bounds;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 200, 200);
-    let header = crate::render::chrome_height(font, &theme);
-    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    let header = crate::render::chrome_height(Scale::ONE, &theme);
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
     // The bar sits in the reserved right-edge gutter (its right edge is the
     // window's right edge), below the chrome header, and is a real strip wide.
     assert_eq!(bounds.right(), i32::try_from(vp.width).unwrap());
@@ -1457,7 +1549,7 @@ fn scrollbar_bounds_matches_the_reserved_gutter() {
     assert!(bounds.width > 0);
     assert!(bounds.left() > 0 && bounds.left() < i32::try_from(vp.width).unwrap());
     // A window too short for any item area has no gutter.
-    assert!(scrollbar_bounds(&theme, font, Rect::new(0, 0, 200, header)).is_none());
+    assert!(scrollbar_bounds(Scale::ONE, &theme, Rect::new(0, 0, 200, header)).is_none());
 }
 
 #[test]
@@ -1466,17 +1558,16 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
     use tairix_geometry::Point;
     use tairix_input::{InputEvent, PointerButton};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(40);
-    let row = row_height(font);
+    let row = row_height(Scale::ONE, &theme);
     let vp = Rect::new(
         0,
         0,
         200,
-        crate::render::chrome_height(font, &theme) + row * 6,
+        crate::render::chrome_height(Scale::ONE, &theme) + row * 6,
     );
-    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
     let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
 
     // A press on the increment (down) button at the bottom of the bar steps
@@ -1486,7 +1577,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        scroll_pointer(&mut browser, font, &theme, vp, down, &press),
+        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, down, &press),
         Some(true)
     );
     assert_eq!(browser.scroll_offset(), 1);
@@ -1495,7 +1586,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
     // the content (the helper reports it did not consume it).
     let off = Point::new(10, bounds.top() + 4);
     assert_eq!(
-        scroll_pointer(&mut browser, font, &theme, vp, off, &press),
+        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, off, &press),
         None
     );
 }
@@ -1504,26 +1595,25 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
 fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     use crate::render::{row_height, scroll_model, scroll_pointer, scrollbar_bounds};
     use tairix_controls::{ScrollBar, ScrollOrientation, ScrollPart};
-    use tairix_geometry::{Point, Scale};
+    use tairix_geometry::Point;
     use tairix_input::{InputEvent, PointerButton};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(60);
-    let row = row_height(font);
+    let row = row_height(Scale::ONE, &theme);
     let vp = Rect::new(
         0,
         0,
         200,
-        crate::render::chrome_height(font, &theme) + row * 6,
+        crate::render::chrome_height(Scale::ONE, &theme) + row * 6,
     );
-    let bounds = scrollbar_bounds(&theme, font, vp).expect("a gutter exists");
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
     let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
 
     // Find a point on the thumb using the same layout the router uses.
     let probe = ScrollBar::new(
         ScrollOrientation::Vertical,
-        scroll_model(&browser, font, &theme, vp),
+        scroll_model(&browser, Scale::ONE, &theme, vp),
     );
     let thumb_y = (bounds.top()..bounds.bottom())
         .find(|&y| {
@@ -1538,7 +1628,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     assert_eq!(
         scroll_pointer(
             &mut browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
             Point::new(cx, thumb_y),
@@ -1552,7 +1642,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     let to = Point::new(cx, bounds.bottom() - 2);
     let moved = InputEvent::PointerMoved { to };
     assert_eq!(
-        scroll_pointer(&mut browser, font, &theme, vp, to, &moved),
+        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, to, &moved),
         Some(true)
     );
     assert!(browser.scroll_offset() > 0);
@@ -1563,7 +1653,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        scroll_pointer(&mut browser, font, &theme, vp, to, &release),
+        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, to, &release),
         Some(true)
     );
     let off = InputEvent::PointerMoved {
@@ -1572,7 +1662,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     assert_eq!(
         scroll_pointer(
             &mut browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
             Point::new(10, bounds.top() + 3),
@@ -1587,7 +1677,6 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     use crate::render::{entry_index_at, selection_rect};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
@@ -1596,8 +1685,8 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     let vp = Rect::new(0, 0, 400, 400);
     let surface = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        font,
         vp,
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -1607,7 +1696,8 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
 
     // The row shares its leftover width out between its tiles, so the first
     // tile is asked where it is rather than assumed to hug the window's edge.
-    let first = selection_rect(&browser, font, &theme, vp).expect("the first tile is on screen");
+    let first =
+        selection_rect(&browser, Scale::ONE, &theme, vp).expect("the first tile is on screen");
     assert!(
         first.left() > 0,
         "the shared-out width reaches the row's leading end: {first:?}"
@@ -1616,7 +1706,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     assert_eq!(
         entry_index_at(
             &browser,
-            font,
+            Scale::ONE,
             &theme,
             vp,
             Point::new(first.left() + 1, first.top() + 1)
@@ -1625,12 +1715,18 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     );
     // The margin before it belongs to no entry.
     assert_eq!(
-        entry_index_at(&browser, font, &theme, vp, Point::new(0, first.top() + 1)),
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            Point::new(0, first.top() + 1)
+        ),
         None
     );
     // A click on the header resolves to nothing.
     assert_eq!(
-        entry_index_at(&browser, font, &theme, vp, Point::new(4, 0)),
+        entry_index_at(&browser, Scale::ONE, &theme, vp, Point::new(4, 0)),
         None
     );
 }
@@ -1669,7 +1765,6 @@ fn shows(surface: &Surface, color: Color) -> bool {
 
 #[test]
 fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_returns() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let mut browser = many_files(20);
     browser.set_view_mode(ViewMode::Grid);
@@ -1682,8 +1777,8 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
     let mut artwork = RecordingArtwork::new(24, art_colour);
     let drawn = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        font,
         vp,
         &crate::ManagerChrome::none(),
         &mut artwork,
@@ -1703,8 +1798,8 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
     // colour above can only have come through the seam.
     let plain = crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        font,
         vp,
         &crate::ManagerChrome::none(),
         &mut NoArtwork,
@@ -1715,14 +1810,13 @@ fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_retu
 
 #[test]
 fn the_list_view_is_text_only_and_never_consults_the_artwork_lookup() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let browser = many_files(20);
     let mut artwork = RecordingArtwork::new(24, Color::rgb(255, 0, 255));
     crate::render(
         &browser,
+        Scale::ONE,
         &theme,
-        font,
         Rect::new(0, 0, 400, 400),
         &crate::ManagerChrome::none(),
         &mut artwork,
@@ -1852,8 +1946,8 @@ fn grid_surface<S: DirectorySource>(
 ) -> Surface {
     crate::render(
         browser,
+        Scale::ONE,
         &Theme::dark(),
-        tairix_font::BitmapFont::console(),
         vp,
         &crate::ManagerChrome::none(),
         artwork,
@@ -2328,7 +2422,7 @@ mod rename_model {
     use alloc::string::ToString;
 
     use tairix_abi::Errno;
-    use tairix_geometry::Rect;
+    use tairix_geometry::{Rect, Scale};
     use tairix_theme::Theme;
 
     use super::{names, MockFs};
@@ -2474,16 +2568,15 @@ mod rename_model {
 
     #[test]
     fn selection_rect_locates_the_selected_row_and_is_none_when_empty() {
-        let font = tairix_font::BitmapFont::console();
         let theme = Theme::dark();
         let viewport = Rect::new(0, 0, 200, 200);
 
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(1).expect("select second entry");
-        let rect = crate::render::selection_rect(&browser, font, &theme, viewport)
+        let rect = crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport)
             .expect("a selected row has a rectangle");
         // It lies within the window and below the one-row path-bar header.
-        let header = crate::render::row_height(font);
+        let header = crate::render::row_height(Scale::ONE, &theme);
         assert!(rect.origin.y >= i32::try_from(header).unwrap());
         assert!(rect.width > 0 && rect.height > 0);
 
@@ -2491,7 +2584,7 @@ mod rename_model {
         browser.open_index(2).expect("enter System");
         browser.open_index(0).expect("enter Fonts");
         assert_eq!(
-            crate::render::selection_rect(&browser, font, &theme, viewport),
+            crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport),
             None
         );
     }
@@ -4663,7 +4756,6 @@ fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
     use crate::chrome::ContextMenuModel;
     use crate::render::{build_context_menu, context_menu_rect};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     // A window comfortably larger than the menu, so a mid-window anchor fits.
     let vp = Rect::new(0, 0, 800, 600);
@@ -4671,13 +4763,13 @@ fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
     let menu = build_context_menu(ContextMenuModel::for_browser(&browser, true));
 
     // Placed with its top-left at the click point when the whole menu fits.
-    let rect = context_menu_rect(&menu, Point::new(40, 30), vp, font, &theme);
+    let rect = context_menu_rect(&menu, Point::new(40, 30), vp, Scale::ONE, &theme);
     assert_eq!((rect.origin.x, rect.origin.y), (40, 30));
     assert!(rect.width > 0 && rect.height > 0);
 
     // A click near the bottom-right corner shifts the menu left/up so the whole
     // menu stays inside the window rather than spilling off it.
-    let corner = context_menu_rect(&menu, Point::new(798, 598), vp, font, &theme);
+    let corner = context_menu_rect(&menu, Point::new(798, 598), vp, Scale::ONE, &theme);
     assert!(
         corner.origin.x + i32::try_from(corner.width).unwrap() <= i32::try_from(vp.width).unwrap()
     );
@@ -4690,7 +4782,7 @@ fn context_menu_rect_anchors_at_the_click_and_clamps_within_the_viewport() {
     // A window smaller than the menu still yields a drawable clamped rect
     // (no panic), never a zero or over-size rectangle.
     let tiny = Rect::new(0, 0, 10, 8);
-    let small = context_menu_rect(&menu, Point::new(3, 3), tiny, font, &theme);
+    let small = context_menu_rect(&menu, Point::new(3, 3), tiny, Scale::ONE, &theme);
     assert!(small.width >= 1 && small.width <= tiny.width);
     assert!(small.height >= 1 && small.height <= tiny.height);
 }
@@ -4701,7 +4793,6 @@ fn draw_context_menu_paints_into_the_surface_without_panicking() {
     use crate::render::{build_context_menu, draw_context_menu};
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     let browser = Browser::open_root(activation_source()).expect("root");
@@ -4709,7 +4800,14 @@ fn draw_context_menu_paints_into_the_surface_without_panicking() {
 
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_context_menu(&mut surface, &menu, Point::new(20, 20), &theme, font, vp);
+    draw_context_menu(
+        &mut surface,
+        &menu,
+        Point::new(20, 20),
+        Scale::ONE,
+        &theme,
+        vp,
+    );
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
@@ -4718,8 +4816,8 @@ fn draw_context_menu_paints_into_the_surface_without_panicking() {
         &mut tiny,
         &menu,
         Point::new(0, 0),
+        Scale::ONE,
         &theme,
-        font,
         Rect::new(0, 0, 2, 2),
     );
 }
@@ -4729,7 +4827,6 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
     use crate::chrome::{ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
     use crate::render::{build_context_menu, context_menu_command_at};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     // A selection, no clipboard: the item commands are enabled, Paste disabled.
@@ -4748,7 +4845,7 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
             if let Some(cmd) =
-                context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(x, y))
+                context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(x, y))
             {
                 assert!(model.is_enabled(cmd), "resolved a disabled command {cmd:?}");
                 if !seen.contains(&cmd) {
@@ -4769,7 +4866,7 @@ fn context_menu_command_at_mirrors_the_enabled_rows_and_fails_closed() {
 
     // A click well outside the menu resolves nothing (fail closed).
     assert_eq!(
-        context_menu_command_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
+        context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(399, 399)),
         None
     );
 }
@@ -4779,7 +4876,6 @@ fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
     use crate::chrome::{ContextMenuModel, CONTEXT_COMMANDS};
     use crate::render::{build_context_menu, context_menu_command_at, context_menu_command_rect};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     // A selection so the item commands (Delete among them) are enabled.
@@ -4794,13 +4890,13 @@ fn context_menu_command_rect_mirrors_the_hit_test_for_each_command() {
     // command still has a drawn (muted) row, so its rect exists but the
     // hit-test declines it (fail closed).
     for &command in CONTEXT_COMMANDS {
-        let rect = context_menu_command_rect(&menu, anchor, vp, font, &theme, command)
+        let rect = context_menu_command_rect(&menu, anchor, vp, Scale::ONE, &theme, command)
             .expect("every listed command has a drawn row");
         let centre = Point::new(
             rect.left() + i32::try_from(rect.width / 2).unwrap(),
             rect.top() + i32::try_from(rect.height / 2).unwrap(),
         );
-        let hit = context_menu_command_at(&menu, anchor, vp, font, &theme, centre);
+        let hit = context_menu_command_at(&menu, anchor, vp, Scale::ONE, &theme, centre);
         if model.is_enabled(command) {
             assert_eq!(hit, Some(command), "{command:?} rect round-trips");
         } else {
@@ -4833,7 +4929,6 @@ fn build_open_with_menu_lists_each_candidate_application_by_name_in_order() {
 fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
     use crate::render::{build_open_with_menu, open_with_index_at};
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 400);
     let mut store = open_with_store();
@@ -4851,7 +4946,7 @@ fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
             if let Some(index) =
-                open_with_index_at(&menu, anchor, vp, font, &theme, Point::new(x, y))
+                open_with_index_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(x, y))
             {
                 assert!(index < apps.len(), "resolved an out-of-range index {index}");
                 if !seen.contains(&index) {
@@ -4867,7 +4962,7 @@ fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
 
     // A click well outside the menu resolves nothing (fail closed).
     assert_eq!(
-        open_with_index_at(&menu, anchor, vp, font, &theme, Point::new(399, 399)),
+        open_with_index_at(&menu, anchor, vp, Scale::ONE, &theme, Point::new(399, 399)),
         None
     );
 }
@@ -5049,18 +5144,18 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
     use crate::render::{chrome_height, toolbar_command_at, toolbar_height};
     use tairix_geometry::Point;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, chrome_height(font, &theme) + 40);
+    let vp = Rect::new(0, 0, 400, chrome_height(Scale::ONE, &theme) + 40);
 
     // Scan the toolbar strip's middle row and collect every command a click
     // resolves to, so the test does not depend on each tool's exact pixel x.
     let commands_along_toolbar = |browser: &Browser<MockFs>| -> Vec<ToolbarCommand> {
-        let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+        let y = i32::try_from(toolbar_height(Scale::ONE, &theme) / 2).unwrap();
         let mut found = Vec::new();
         for x in 0..vp.width {
             if let Some(cmd) = toolbar_command_at(
                 browser,
+                Scale::ONE,
                 &theme,
                 vp,
                 Point::new(i32::try_from(x).unwrap(), y),
@@ -5097,9 +5192,13 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
     assert_eq!(
         toolbar_command_at(
             &browser,
+            Scale::ONE,
             &theme,
             vp,
-            Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap())
+            Point::new(
+                4,
+                i32::try_from(toolbar_height(Scale::ONE, &theme)).unwrap()
+            )
         ),
         None
     );
@@ -5115,11 +5214,15 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     // (the Empty Trash tool's own enable state is exercised separately).
     let tool_model = ManagerToolModel::new(true);
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, crate::render::chrome_height(font, &theme) + 40);
+    let vp = Rect::new(
+        0,
+        0,
+        400,
+        crate::render::chrome_height(Scale::ONE, &theme) + 40,
+    );
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
-    let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+    let y = i32::try_from(toolbar_height(Scale::ONE, &theme) / 2).unwrap();
 
     // Scan the toolbar's middle row: the manager write tool resolves somewhere,
     // and no pixel resolves to *both* a read-only command and a write tool —
@@ -5127,8 +5230,16 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     let mut saw_new_folder = false;
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
-        let command = toolbar_command_at(&browser, &theme, vp, point);
-        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, tool_model);
+        let command = toolbar_command_at(&browser, Scale::ONE, &theme, vp, point);
+        let tool = manager_tool_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            point,
+            MANAGER_TOOLS,
+            tool_model,
+        );
         assert!(
             !(command.is_some() && tool.is_some()),
             "a pixel resolved to both a command and a write tool"
@@ -5147,7 +5258,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
         assert_eq!(
-            manager_tool_at(&browser, &theme, vp, point, &[], tool_model),
+            manager_tool_at(&browser, Scale::ONE, &theme, vp, point, &[], tool_model),
             None
         );
     }
@@ -5156,9 +5267,13 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     assert_eq!(
         manager_tool_at(
             &browser,
+            Scale::ONE,
             &theme,
             vp,
-            Point::new(4, i32::try_from(toolbar_height(&theme)).unwrap()),
+            Point::new(
+                4,
+                i32::try_from(toolbar_height(Scale::ONE, &theme)).unwrap()
+            ),
             MANAGER_TOOLS,
             tool_model,
         ),
@@ -5181,20 +5296,42 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
     // The New Folder tool has a rect, and that rect's centre hit-tests back
     // to exactly the New Folder tool — paint, hit-test, and aim geometry are
     // one definition.
-    let rect = manager_tool_rect(&browser, &theme, vp, MANAGER_TOOLS, ManagerTool::NewFolder)
-        .expect("the New Folder tool is laid out");
+    let rect = manager_tool_rect(
+        &browser,
+        Scale::ONE,
+        &theme,
+        vp,
+        MANAGER_TOOLS,
+        ManagerTool::NewFolder,
+    )
+    .expect("the New Folder tool is laid out");
     let centre = Point::new(
         rect.left() + i32::try_from(rect.width).unwrap() / 2,
         rect.top() + i32::try_from(rect.height).unwrap() / 2,
     );
     assert_eq!(
-        manager_tool_at(&browser, &theme, vp, centre, MANAGER_TOOLS, tool_model),
+        manager_tool_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            centre,
+            MANAGER_TOOLS,
+            tool_model
+        ),
         Some(ManagerTool::NewFolder),
     );
 
     // The read-only picker (no write tools) never lays a write tool out.
     assert_eq!(
-        manager_tool_rect(&browser, &theme, vp, &[], ManagerTool::NewFolder),
+        manager_tool_rect(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            &[],
+            ManagerTool::NewFolder
+        ),
         None,
     );
 }
@@ -5208,7 +5345,7 @@ fn render_manager_tool_at_gates_empty_trash_on_the_model() {
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 400, 200);
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
-    let y = i32::try_from(toolbar_height(&theme) / 2).unwrap();
+    let y = i32::try_from(toolbar_height(Scale::ONE, &theme) / 2).unwrap();
 
     // With the model reporting the current directory is *not* a populated
     // Trash, the Empty Trash tool is drawn (its rect exists) but renders
@@ -5218,7 +5355,15 @@ fn render_manager_tool_at_gates_empty_trash_on_the_model() {
     let mut saw_new_folder = false;
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
-        let tool = manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, disabled);
+        let tool = manager_tool_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            point,
+            MANAGER_TOOLS,
+            disabled,
+        );
         assert_ne!(
             tool,
             Some(ManagerTool::EmptyTrash),
@@ -5236,8 +5381,15 @@ fn render_manager_tool_at_gates_empty_trash_on_the_model() {
     let mut saw_empty_trash = false;
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
-        if manager_tool_at(&browser, &theme, vp, point, MANAGER_TOOLS, enabled)
-            == Some(ManagerTool::EmptyTrash)
+        if manager_tool_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            point,
+            MANAGER_TOOLS,
+            enabled,
+        ) == Some(ManagerTool::EmptyTrash)
         {
             saw_empty_trash = true;
         }
@@ -5424,12 +5576,11 @@ fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
 
 #[test]
 fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     // A generous window: the panel fits and is centered within it.
     let vp = Rect::new(0, 0, 480, 320);
-    let rect = properties_panel_rect(vp, font, &theme);
+    let rect = properties_panel_rect(vp, Scale::ONE, &theme);
     assert!(rect.width > 0 && rect.height > 0);
     assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
     assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
@@ -5445,7 +5596,7 @@ fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
     // A window smaller than the panel would like still yields a drawable rect
     // clamped to the window, never a zero or over-size rectangle (no panic).
     let tiny = Rect::new(0, 0, 20, 16);
-    let small = properties_panel_rect(tiny, font, &theme);
+    let small = properties_panel_rect(tiny, Scale::ONE, &theme);
     assert!(small.width >= 1 && small.width <= tiny.width);
     assert!(small.height >= 1 && small.height <= tiny.height);
 }
@@ -5454,7 +5605,6 @@ fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_properties_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5466,12 +5616,12 @@ fn draw_properties_paints_into_the_surface_without_panicking() {
     // A blank base to compare against: after drawing the overlay the surface
     // is no longer uniform, proving the panel actually painted.
     let before = surface.pixels().to_vec();
-    draw_properties(&mut surface, &props, &theme, font, vp);
+    draw_properties(&mut surface, &props, Scale::ONE, &theme, vp);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_properties(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2));
+    draw_properties(&mut tiny, &props, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
 }
 
 #[test]
@@ -5534,10 +5684,10 @@ use tairix_geometry::Point;
 
 #[test]
 fn permission_toggle_cells_are_pairwise_non_overlapping() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 480);
-    let cells = permission_toggle_cells(vp, font, &theme).expect("grid fits the default popup");
+    let cells =
+        permission_toggle_cells(vp, Scale::ONE, &theme).expect("grid fits the default popup");
 
     // Every checkbox is a legible, non-degenerate target.
     for cell in &cells {
@@ -5602,7 +5752,6 @@ fn permission_cells_report_exactly_the_set_rwx_bits() {
 fn draw_properties_editable_paints_the_toggles_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 480);
     let props = Properties::from_stat(
@@ -5612,17 +5761,16 @@ fn draw_properties_editable_paints_the_toggles_without_panicking() {
     );
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_properties_editable(&mut surface, &props, &theme, font, vp);
+    draw_properties_editable(&mut surface, &props, Scale::ONE, &theme, vp);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_properties_editable(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2));
+    draw_properties_editable(&mut tiny, &props, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
 }
 
 #[test]
 fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     // The editable Properties popup is tall enough to hold the metadata fields
     // plus the labelled permissions grid at the default window height.
@@ -5636,7 +5784,7 @@ fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
     while y < i32::try_from(vp.height).unwrap() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
-            if let Some(bit) = permission_cell_at(vp, font, &theme, Point::new(x, y)) {
+            if let Some(bit) = permission_cell_at(vp, Scale::ONE, &theme, Point::new(x, y)) {
                 assert!(PERMISSION_BITS.contains(&bit), "resolved a non-grid bit");
                 seen.insert(bit);
             }
@@ -5649,13 +5797,13 @@ fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
 
     // A click well outside the panel resolves nothing (fail closed).
     assert_eq!(
-        permission_cell_at(vp, font, &theme, Point::new(-5, -5)),
+        permission_cell_at(vp, Scale::ONE, &theme, Point::new(-5, -5)),
         None
     );
     // On a window too small for the grid, no cell resolves (fail closed).
     let tiny = Rect::new(0, 0, 20, 16);
     assert_eq!(
-        permission_cell_at(tiny, font, &theme, Point::new(5, 5)),
+        permission_cell_at(tiny, Scale::ONE, &theme, Point::new(5, 5)),
         None
     );
 }
@@ -5667,7 +5815,6 @@ use tairix_controls::text::TextField;
 
 #[test]
 fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5684,7 +5831,7 @@ fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
     while y < i32::try_from(vp.height).unwrap() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
-            if let Some(field) = owner_field_at(&props, vp, font, &theme, Point::new(x, y)) {
+            if let Some(field) = owner_field_at(&props, vp, Scale::ONE, &theme, Point::new(x, y)) {
                 seen.insert(field);
             }
             x += 1;
@@ -5698,13 +5845,13 @@ fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
 
     // A click well outside the panel resolves nothing (fail closed).
     assert_eq!(
-        owner_field_at(&props, vp, font, &theme, Point::new(-5, -5)),
+        owner_field_at(&props, vp, Scale::ONE, &theme, Point::new(-5, -5)),
         None
     );
     // On a window too small for the owner row, no field resolves (fail closed).
     let tiny = Rect::new(0, 0, 20, 16);
     assert_eq!(
-        owner_field_at(&props, tiny, font, &theme, Point::new(5, 5)),
+        owner_field_at(&props, tiny, Scale::ONE, &theme, Point::new(5, 5)),
         None
     );
 }
@@ -5713,7 +5860,6 @@ fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
 fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let props = Properties::from_stat(
@@ -5725,7 +5871,7 @@ fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
     // With no active editor the underlines mark both values as editable.
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_owner_control(&mut surface, &props, &theme, font, vp, None);
+    draw_owner_control(&mut surface, &props, Scale::ONE, &theme, vp, None);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // With the uid field being edited the active field renders over its value.
@@ -5735,8 +5881,8 @@ fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
     draw_owner_control(
         &mut edited,
         &props,
+        Scale::ONE,
         &theme,
-        font,
         vp,
         Some((OwnerField::Uid, &editor)),
     );
@@ -5744,7 +5890,14 @@ fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_owner_control(&mut tiny, &props, &theme, font, Rect::new(0, 0, 2, 2), None);
+    draw_owner_control(
+        &mut tiny,
+        &props,
+        Scale::ONE,
+        &theme,
+        Rect::new(0, 0, 2, 2),
+        None,
+    );
 }
 
 // --- FM7b: the delete-confirmation dialog ---------------------------------
@@ -5812,11 +5965,10 @@ fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
 
 #[test]
 fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     let vp = Rect::new(0, 0, 480, 320);
-    let rect = delete_dialog_rect(vp, font, &theme);
+    let rect = delete_dialog_rect(vp, Scale::ONE, &theme);
     assert!(rect.width > 0 && rect.height > 0);
     assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
     assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
@@ -5831,7 +5983,7 @@ fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
     // A window smaller than the dialog would like still yields a drawable rect
     // clamped to the window, never a zero or over-size rectangle (no panic).
     let tiny = Rect::new(0, 0, 20, 16);
-    let small = delete_dialog_rect(tiny, font, &theme);
+    let small = delete_dialog_rect(tiny, Scale::ONE, &theme);
     assert!(small.width >= 1 && small.width <= tiny.width);
     assert!(small.height >= 1 && small.height <= tiny.height);
 }
@@ -5840,24 +5992,28 @@ fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
 
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_delete_dialog(&mut surface, &dialog, &theme, font, vp);
+    draw_delete_dialog(&mut surface, &dialog, Scale::ONE, &theme, vp);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_delete_dialog(&mut tiny, &dialog, &theme, font, Rect::new(0, 0, 2, 2));
+    draw_delete_dialog(
+        &mut tiny,
+        &dialog,
+        Scale::ONE,
+        &theme,
+        Rect::new(0, 0, 2, 2),
+    );
 }
 
 #[test]
 fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
@@ -5871,7 +6027,7 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
             if let Some(index) =
-                delete_dialog_action_at(&dialog, vp, font, &theme, Point::new(x, y))
+                delete_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(x, y))
             {
                 assert!(
                     index == DELETE_CONFIRM_INDEX || index == DELETE_CANCEL_INDEX,
@@ -5892,14 +6048,14 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
 
     // A click well outside the dialog resolves nothing (fail closed).
     assert_eq!(
-        delete_dialog_action_at(&dialog, vp, font, &theme, Point::new(-5, -5)),
+        delete_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(-5, -5)),
         None
     );
     // On a window too small for the dialog buttons, nothing resolves (fail
     // closed) rather than placing a phantom button.
     let tiny = Rect::new(0, 0, 20, 16);
     assert_eq!(
-        delete_dialog_action_at(&dialog, tiny, font, &theme, Point::new(5, 5)),
+        delete_dialog_action_at(&dialog, tiny, Scale::ONE, &theme, Point::new(5, 5)),
         None
     );
 }
@@ -6009,11 +6165,10 @@ fn progress_cancel_is_latched_and_shown() {
 
 #[test]
 fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
 
     let vp = Rect::new(0, 0, 480, 320);
-    let rect = progress_dialog_rect(vp, font, &theme);
+    let rect = progress_dialog_rect(vp, Scale::ONE, &theme);
     assert!(rect.width > 0 && rect.height > 0);
     assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
     assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
@@ -6023,7 +6178,7 @@ fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
     // A window smaller than the panel still yields a drawable clamped rect (no
     // panic).
     let tiny = Rect::new(0, 0, 20, 16);
-    let small = progress_dialog_rect(tiny, font, &theme);
+    let small = progress_dialog_rect(tiny, Scale::ONE, &theme);
     assert!(small.width >= 1 && small.width <= tiny.width);
     assert!(small.height >= 1 && small.height <= tiny.height);
 }
@@ -6032,7 +6187,6 @@ fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
 fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
     use tairix_raster::Surface;
 
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
     let mut model = ProgressModel::new(ProgressOp::Copy);
@@ -6040,17 +6194,16 @@ fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
 
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_progress_dialog(&mut surface, &model, &theme, font, vp);
+    draw_progress_dialog(&mut surface, &model, Scale::ONE, &theme, vp);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_progress_dialog(&mut tiny, &model, &theme, font, Rect::new(0, 0, 2, 2));
+    draw_progress_dialog(&mut tiny, &model, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
 }
 
 #[test]
 fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
-    let font = tairix_font::BitmapFont::console();
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 480, 320);
 
@@ -6062,7 +6215,7 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
     while y < i32::try_from(vp.height).unwrap() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
-            if progress_cancel_at(vp, font, &theme, Point::new(x, y)) {
+            if progress_cancel_at(vp, Scale::ONE, &theme, Point::new(x, y)) {
                 hits += 1;
             }
             x += 1;
@@ -6072,11 +6225,21 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
     assert!(hits > 0, "the Cancel button is reachable");
 
     // A click well outside the panel resolves nothing (fail closed).
-    assert!(!progress_cancel_at(vp, font, &theme, Point::new(-5, -5)));
+    assert!(!progress_cancel_at(
+        vp,
+        Scale::ONE,
+        &theme,
+        Point::new(-5, -5)
+    ));
     // On a window too small to place the button, nothing resolves (fail
     // closed) rather than placing a phantom button.
     let tiny = Rect::new(0, 0, 20, 16);
-    assert!(!progress_cancel_at(tiny, font, &theme, Point::new(5, 5)));
+    assert!(!progress_cancel_at(
+        tiny,
+        Scale::ONE,
+        &theme,
+        Point::new(5, 5)
+    ));
 }
 
 mod trash {

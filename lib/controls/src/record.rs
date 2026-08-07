@@ -30,9 +30,9 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{SignalRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
-use crate::paint::{paint_filled_circle, plate_border, surface_rect, to_i32};
+use crate::paint::{paint_filled_circle, plate_border, role_font, surface_rect, to_i32};
 
 /// One label/value pair of a [`FactList`].
 ///
@@ -138,16 +138,17 @@ impl FactList {
     /// and [`render`](Self::render), so a host laying several rows out
     /// cannot disagree with what the list actually draws.
     #[must_use]
-    pub fn row_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn row_height(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         text_row_height(scale, theme, font)
     }
 
     /// The height, in physical pixels, this list needs at `scale` to draw
     /// every fact without clipping.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
         let count = u32::try_from(self.facts.len()).unwrap_or(u32::MAX);
-        Self::row_height(scale, theme, font).saturating_mul(count)
+        Self::row_height(scale, theme).saturating_mul(count)
     }
 
     /// Paint the list into `surface` at `bounds` for the active theme.
@@ -157,14 +158,8 @@ impl FactList {
     /// a drawn row the value keeps its measured width and the label
     /// truncates into whatever remains, because the reading is what the
     /// reader came for. An empty list draws nothing at all.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         if self.facts.is_empty() {
             return;
         }
@@ -177,7 +172,7 @@ impl FactList {
         let palette = theme.palette();
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
         let line_h = font.line_height();
-        let row_h = Self::row_height(scale, theme, font);
+        let row_h = Self::row_height(scale, theme);
         let bottom = y.saturating_add(h);
         let right = x.saturating_add(w);
         let sep_thickness = plate_border(theme, scale).min(gap);
@@ -340,16 +335,17 @@ impl Timeline {
     /// and [`render`](Self::render), so a host laying several rows out
     /// cannot disagree with what the timeline actually draws.
     #[must_use]
-    pub fn row_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn row_height(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         text_row_height(scale, theme, font)
     }
 
     /// The height, in physical pixels, this timeline needs at `scale` to
     /// draw every event without clipping.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
         let count = u32::try_from(self.events.len()).unwrap_or(u32::MAX);
-        Self::row_height(scale, theme, font).saturating_mul(count)
+        Self::row_height(scale, theme).saturating_mul(count)
     }
 
     /// Width of the gutter (spine plus marks) before the stamp column.
@@ -372,14 +368,8 @@ impl Timeline {
     /// width is the widest stamp measured through `font`, so every stamp
     /// aligns on one shared measurement. An empty timeline draws nothing at
     /// all.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         if self.events.is_empty() {
             return;
         }
@@ -392,7 +382,7 @@ impl Timeline {
         let palette = theme.palette();
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
         let line_h = font.line_height();
-        let row_h = Self::row_height(scale, theme, font);
+        let row_h = Self::row_height(scale, theme);
         let bottom = y.saturating_add(h);
         let right = x.saturating_add(w);
 

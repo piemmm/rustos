@@ -9,7 +9,6 @@
 
 use alloc::vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -17,15 +16,11 @@ use tairix_theme::{Rgba, Theme};
 
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::state::{AuthorityState, ControlRole, ControlState};
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast, text_ladder};
 
 const W: u32 = 200;
 const ROW_H: u32 = 28;
 const BORDER: u32 = 1;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -53,13 +48,7 @@ fn row_centre_y(i: u32) -> i32 {
 
 fn render(menu: &Menu, theme: &Theme, height: u32) -> Surface {
     let mut surface = Surface::new(W, height).expect("surface");
-    menu.render(
-        &mut surface,
-        Rect::new(0, 0, W, height),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    menu.render(&mut surface, Rect::new(0, 0, W, height), Scale::ONE, theme);
     surface
 }
 
@@ -100,8 +89,8 @@ fn preferred_width_is_positive_and_grows_with_a_shortcut() {
     let plain = Menu::new(vec![MenuItem::new("A")]);
     let with_shortcut = Menu::new(vec![MenuItem::new("A").with_shortcut("Ctrl+Shift+A")]);
     let theme = Theme::dark();
-    let w0 = plain.preferred_width(Scale::ONE, &theme, font());
-    let w1 = with_shortcut.preferred_width(Scale::ONE, &theme, font());
+    let w0 = plain.preferred_width(Scale::ONE, &theme);
+    let w1 = with_shortcut.preferred_width(Scale::ONE, &theme);
     assert!(w0 > 0);
     assert!(w1 > w0);
 }
@@ -379,13 +368,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let menu = three_item_menu();
     let h = menu.preferred_height(scale, &theme);
     let mut surface = Surface::new(W * 2, h).expect("surface");
-    menu.render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, h),
-        scale,
-        &theme,
-        font(),
-    );
+    menu.render(&mut surface, Rect::new(0, 0, W * 2, h), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 
@@ -605,7 +588,7 @@ fn anchored_rect_places_the_top_left_at_the_anchor_when_it_fits() {
     let theme = Theme::dark();
     let menu = three_item_menu();
     let viewport = Rect::new(0, 0, 800, 600);
-    let rect = menu.anchored_rect(Point::new(40, 30), viewport, Scale::ONE, &theme, font());
+    let rect = menu.anchored_rect(Point::new(40, 30), viewport, Scale::ONE, &theme);
     assert_eq!((rect.origin.x, rect.origin.y), (40, 30));
     assert!(rect.width > 0 && rect.height > 0);
 }
@@ -616,7 +599,7 @@ fn anchored_rect_shifts_left_near_the_right_edge() {
     let menu = three_item_menu();
     let viewport = Rect::new(0, 0, 800, 600);
     let anchor = Point::new(798, 30);
-    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme);
     assert!(
         rect.origin.x < anchor.x,
         "an anchor near the right edge shifts the menu left off it"
@@ -630,7 +613,7 @@ fn anchored_rect_shifts_up_near_the_bottom_edge() {
     let menu = three_item_menu();
     let viewport = Rect::new(0, 0, 800, 600);
     let anchor = Point::new(30, 598);
-    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    let rect = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme);
     assert!(
         rect.origin.y < anchor.y,
         "an anchor near the bottom edge shifts the menu up off it"
@@ -643,7 +626,7 @@ fn anchored_rect_shifts_both_ways_at_a_corner() {
     let theme = Theme::dark();
     let menu = three_item_menu();
     let viewport = Rect::new(0, 0, 800, 600);
-    let corner = menu.anchored_rect(Point::new(798, 598), viewport, Scale::ONE, &theme, font());
+    let corner = menu.anchored_rect(Point::new(798, 598), viewport, Scale::ONE, &theme);
     assert!(
         corner.origin.x >= 0 && corner.origin.y >= 0,
         "the menu never leaves the viewport origin"
@@ -657,7 +640,7 @@ fn anchored_rect_clamps_to_a_viewport_smaller_than_the_menu() {
     let theme = Theme::dark();
     let menu = three_item_menu();
     let tiny = Rect::new(0, 0, 10, 8);
-    let rect = menu.anchored_rect(Point::new(3, 3), tiny, Scale::ONE, &theme, font());
+    let rect = menu.anchored_rect(Point::new(3, 3), tiny, Scale::ONE, &theme);
     assert!(rect.width >= 1 && rect.width <= tiny.width);
     assert!(rect.height >= 1 && rect.height <= tiny.height);
     assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
@@ -669,9 +652,87 @@ fn anchored_rect_grows_with_a_larger_scale() {
     let menu = three_item_menu();
     let viewport = Rect::new(0, 0, 1600, 1200);
     let anchor = Point::new(10, 10);
-    let unscaled = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme, font());
+    let unscaled = menu.anchored_rect(anchor, viewport, Scale::ONE, &theme);
     let scale = Scale::from_percent(200).expect("valid scale");
-    let doubled = menu.anchored_rect(anchor, viewport, scale, &theme, font());
+    let doubled = menu.anchored_rect(anchor, viewport, scale, &theme);
     assert!(doubled.width > unscaled.width);
     assert!(doubled.height > unscaled.height);
+}
+
+// --- The theme owns the face -------------------------------------------
+
+/// A menu measures and paints with the *theme's* interface face, so a theme
+/// that authors larger interface text yields a wider plate and different
+/// pixels for the same rows.
+///
+/// The regression: the menu used to measure with a face handed in by whoever
+/// drew it and never consulted `theme.fonts()` at all, so both assertions
+/// below held equal — its typography followed the drawing application rather
+/// than the desktop. The graphical terminal handed it the monospace grid face
+/// at the user's terminal text size, and the menu duly rendered in it.
+#[test]
+fn the_plate_measures_and_paints_with_the_themes_own_interface_face() {
+    let small = text_ladder(tairix_theme::Fonts::MIN_BASE_SIZE_PX);
+    let large = text_ladder(tairix_theme::Fonts::MAX_BASE_SIZE_PX);
+    let menu = three_item_menu();
+
+    let narrow = menu.preferred_width(Scale::ONE, &small);
+    let wide = menu.preferred_width(Scale::ONE, &large);
+    assert!(
+        wide > narrow,
+        "a larger interface face must widen the plate"
+    );
+
+    let viewport = Rect::new(0, 0, 1600, 1200);
+    let anchor = Point::new(10, 10);
+    assert!(
+        menu.anchored_rect(anchor, viewport, Scale::ONE, &large)
+            .width
+            > menu
+                .anchored_rect(anchor, viewport, Scale::ONE, &small)
+                .width,
+        "the placement rule must size from the same face"
+    );
+
+    // Measuring right while painting with something else would still be the
+    // defect, so the drawn rows must differ too.
+    let h = menu.preferred_height(Scale::ONE, &small);
+    assert_ne!(
+        render(&menu, &small, h).pixels(),
+        render(&menu, &large, h).pixels(),
+        "the rows must be drawn in the face the theme names"
+    );
+}
+
+/// A row is never shorter than the line of text it draws, so a theme whose
+/// type ladder rises above the standard control height gets taller rows rather
+/// than labels cut off inside them.
+///
+/// The standard control height is a floor, not a fit: the shipped themes sit
+/// under it and are unchanged, but a theme may author text up to
+/// `Fonts::MAX_BASE_SIZE_PX` and once did so into a row pinned at 28 physical
+/// pixels.
+#[test]
+fn a_row_grows_to_hold_text_taller_than_the_standard_control_height() {
+    let menu = three_item_menu();
+    let shipped = Theme::dark();
+    let standard = Scale::ONE.scale_length(shipped.metrics().control_height);
+    assert!(control_font(&shipped, Scale::ONE).line_height() < standard);
+    assert_eq!(
+        menu.preferred_height(Scale::ONE, &shipped),
+        BORDER * 2 + 3 * standard,
+        "a theme under the floor keeps the standard row"
+    );
+
+    let tall = text_ladder(tairix_theme::Fonts::MAX_BASE_SIZE_PX);
+    let line = control_font(&tall, Scale::ONE).line_height();
+    assert!(
+        line > standard,
+        "the fixture must clear the floor to test it"
+    );
+    assert_eq!(
+        menu.preferred_height(Scale::ONE, &tall),
+        BORDER * 2 + 3 * line,
+        "a row must hold the line it draws"
+    );
 }

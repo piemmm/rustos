@@ -2648,14 +2648,13 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
 
-    // The picker resolves its font from the active theme's UI size; the
-    // click row must be computed from the same font so it lands on row 0.
+    // The click row must be computed at the scale and theme the picker draws
+    // with, so it lands on row 0.
     let theme = shell.session().active_theme();
-    let font = crate::picker::picker_font(theme, Scale::ONE);
     // The first entry row sits directly below the chrome (the command toolbar
     // strip over the breadcrumb path bar), so compute it from the shared
     // `chrome_height` the renderer reserves.
-    let row = i32::try_from(chrome_height(font, theme)).expect("a small chrome height");
+    let row = i32::try_from(chrome_height(Scale::ONE, theme)).expect("a small chrome height");
     let first_row = Point::new(4, row);
     assert_eq!(
         picker.handle_click(first_row, &mut shell, &mut comp),
@@ -2693,7 +2692,7 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
     // Sweep the toolbar strip's middle row: every click is a read-only
     // command (or an inert gap / disabled tool), so none may conclude the
     // pick or tear the window down.
-    let y = i32::try_from(toolbar_height(shell.session().active_theme()) / 2)
+    let y = i32::try_from(toolbar_height(Scale::ONE, shell.session().active_theme()) / 2)
         .expect("a small strip height");
     let width = i32::try_from(WIN_WIDTH).expect("a bounded window width");
     let mut x = 0;
@@ -4819,22 +4818,19 @@ fn a_pending_open_refused_by_a_full_mailbox_survives_to_the_next_publish() {
 
 // --- The system quick-actions menu's session half (T13) -----------------
 
-use crate::confirm::{
-    build_dialog, prompt_font, Answer, ConfirmPrompt, CONFIRM_ORIGIN, WIN_HEIGHT, WIN_WIDTH,
-};
+use crate::confirm::{build_dialog, Answer, ConfirmPrompt, CONFIRM_ORIGIN, WIN_HEIGHT, WIN_WIDTH};
 use crate::relay_power;
 use tairix_abi::PowerAction;
 
 /// The prompt-local centre of the action button at `index`, resolved through
-/// the very dialog and font the prompt draws, so a test presses the button
-/// rather than a re-derived guess at where it sits.
+/// the very dialog the prompt draws, so a test presses the button rather
+/// than a re-derived guess at where it sits.
 fn prompt_action_centre(action: PowerAction, index: usize, shell: &DesktopShell) -> Point {
     let theme = shell.session().active_theme();
     let rects = build_dialog(action).action_rects(
         Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
         Scale::ONE,
         theme,
-        prompt_font(theme, Scale::ONE),
     );
     let rect = rects[index];
     assert!(rect.width > 0, "the button fitted the action band");

@@ -13,7 +13,6 @@
 
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
@@ -236,14 +235,7 @@ impl Toolbar {
     }
 
     /// Paint the toolbar into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let palette = theme.palette();
         if let Some((x, y, w, h)) = surface_rect(bounds) {
             if w > 0 && h > 0 {
@@ -275,8 +267,8 @@ impl Toolbar {
 
         for (entry, rect) in self.entries.iter().zip(rects.iter()) {
             match &entry.tool {
-                Tool::Icon(b) => b.render(surface, *rect, scale, theme, font, None),
-                Tool::Split(b) => b.render(surface, *rect, scale, theme, font),
+                Tool::Icon(b) => b.render(surface, *rect, scale, theme, None),
+                Tool::Split(b) => b.render(surface, *rect, scale, theme),
             }
             if entry.active {
                 Self::paint_active_seam(surface, *rect, scale, theme);

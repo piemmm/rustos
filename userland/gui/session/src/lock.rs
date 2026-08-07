@@ -54,10 +54,9 @@ use alloc::string::ToString;
 
 use tairix_abi::Errno;
 use tairix_controls::{Panel, PointerState, TextAction, TextField, ValidationState};
-use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 use tairix_raster::Color;
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::Theme;
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Surface, WindowId};
 
 use crate::shell::DesktopShell;
@@ -228,7 +227,6 @@ impl ScreenLock {
         let scale = compositor.scale();
         let screen = compositor.screen_rect();
         let theme = shell.session().active_theme();
-        let font = prompt_font(theme, scale);
         let Some(engaged) = self.engaged.as_mut() else {
             return LockOutcome::Pending;
         };
@@ -249,7 +247,7 @@ impl ScreenLock {
             | InputEvent::PointerReleased { .. } => {
                 let bounds = field_rect(&engaged.panel, panel_rect(screen, scale), scale, theme);
                 let local = to_window_space(event, screen);
-                let action = engaged.field.on_pointer(&local, bounds, scale, theme, font);
+                let action = engaged.field.on_pointer(&local, bounds, scale, theme);
                 let after = engaged.field.state();
                 // Pointer motion is the one event that streams. Repainting
                 // the whole screen for each one would rebuild a
@@ -471,25 +469,16 @@ fn render_surface(
     shell: &DesktopShell,
 ) -> Option<Surface> {
     let theme = shell.session().active_theme();
-    let font = prompt_font(theme, scale);
     let mut surface = Surface::new(screen.width, screen.height)?;
     surface.fill(Color::from(theme.palette().desktop));
 
     let bounds = panel_rect(screen, scale);
-    panel.render(&mut surface, bounds, scale, theme, font);
+    panel.render(&mut surface, bounds, scale, theme);
     field.render(
         &mut surface,
         field_rect(panel, bounds, scale, theme),
         scale,
         theme,
-        font,
     );
     Some(surface)
-}
-
-/// The prompt's text font: the theme's ordinary interface-text role at the
-/// density of the output it is drawn to, so the paint and the
-/// hit test agree on one font.
-fn prompt_font(theme: &Theme, scale: Scale) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }

@@ -127,7 +127,13 @@ cell-height ceiling (`AGENTS.md` §5.4).
 Sizes are *logical* pixels at `tairix_geometry::REFERENCE_DPI`;
 `tairix_font::BitmapFont::for_role(fonts, role, scale)` is the one place a role
 and the active `Scale` become a rasterised face, so the logical→physical
-arithmetic is never duplicated (`AGENTS.md` §10, §2.2). The weight a role names
+arithmetic is never duplicated (`AGENTS.md` §10, §2.2).
+
+The shared controls (`lib/controls`) and the shared directory-browser engine
+(`lib/browse`) call it *themselves*: neither accepts a face from the
+application drawing it, so a control's typography cannot be overridden at a
+call site. See
+[the control library](../lib/controls.md#the-theme-chooses-the-face-not-the-caller). The weight a role names
 is the font service's own `FontWeight`, re-exported rather than restated: the
 shipped faces are Regular-only, so `fontd` synthesises the heavier weights as a
 bounded thickening of the same outline coverage, leaving the advance — and

@@ -92,6 +92,11 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 # test transport (never a running `fontd`) via the `test-util` feature.
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The control family's own theme fixtures, so a test that varies the desktop's
+# typography uses the one shared fixture rather than a private copy.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
+    "test-support",
+] }
 
 [lints]
 workspace = true

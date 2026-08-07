@@ -273,7 +273,7 @@ fn popup_row_point(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> (i
     let ctx = sb.section_ctx(&layout, b, Scale::ONE, theme, font());
     let anchor = sb.tasks.anchor_rect(ctx);
     let popup = sb.tasks.popup.as_ref().expect("an open Group popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, theme, font());
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, theme);
     let x = rect.left() + i32::try_from(rect.width).unwrap_or(0) / 2;
     for y in rect.top()..rect.bottom() {
         if popup.menu.row_at(rect, Scale::ONE, theme, Point::new(x, y)) == Some(index) {
@@ -310,7 +310,7 @@ fn group_popup_anchors_below_its_command_inside_the_window() {
     let expected = task_rail_rects(&sb, b, Scale::ONE, &theme)[TasksSection::group_slot()];
     assert_eq!(anchor, expected, "the anchor is the Group command itself");
     let popup = sb.tasks.popup.as_ref().expect("popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme, font());
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme);
     // The Group command sits low in the rail, so the popup opens upward from
     // it rather than off the bottom of the window — either way it meets its
     // anchor's edge and stays wholly inside the window.
@@ -447,7 +447,7 @@ fn group_popup_outside_press_dismisses_without_emitting() {
     let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
     let anchor = sb.tasks.anchor_rect(ctx);
     let popup = sb.tasks.popup.as_ref().expect("popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme, font());
+    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme);
     // The location band sits above the command the popup anchors on, so a
     // press there is genuinely outside it.
     let (x, y) = centre(layout.location);

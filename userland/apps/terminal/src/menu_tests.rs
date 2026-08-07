@@ -2,17 +2,17 @@
 
 use alloc::vec::Vec;
 
+use tairix_controls::testkit::text_ladder;
 use tairix_controls::{Menu, MenuItem};
-use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_theme::Theme;
+use tairix_theme::{Fonts, Theme};
 
 use super::{Command, ContextMenu, MenuOutcome};
 
-fn test_font() -> BitmapFont {
-    BitmapFont::monospace(tairix_font::atlas::CELL_HEIGHT)
-}
+/// A type ladder above the theme's standard control height, so the two
+/// fixtures the face test compares differ in both plate axes.
+const LARGER_BASE_SIZE_PX: u16 = 48;
 
 fn viewport() -> Rect {
     Rect::new(0, 0, 400, 300)
@@ -50,9 +50,9 @@ fn menu_rows() -> Menu {
 
 /// The centre point of row `index`, in the window-local coordinates a
 /// `ContextMenu` opened at `anchor` places it at.
-fn row_center(anchor: Point, index: usize, theme: &Theme, font: BitmapFont) -> Point {
+fn row_center(anchor: Point, index: usize, theme: &Theme) -> Point {
     let context_menu = ContextMenu::open(anchor);
-    let bounds = context_menu.bounds(viewport(), Scale::ONE, theme, font);
+    let bounds = context_menu.bounds(viewport(), Scale::ONE, theme);
     let rect = menu_rows()
         .row_rect(index, bounds, Scale::ONE, theme)
         .expect("row in range");
@@ -210,23 +210,22 @@ fn escape_dismisses() {
 #[test]
 fn a_primary_press_outside_the_plate_dismisses_without_choosing() {
     let theme = Theme::dark();
-    let font = test_font();
     let anchor = Point::new(10, 10);
     let mut menu = ContextMenu::open(anchor);
-    let bounds = menu.bounds(viewport(), Scale::ONE, &theme, font);
+    let bounds = menu.bounds(viewport(), Scale::ONE, &theme);
     // A point well outside the plate on every side.
     let outside = Point::new(bounds.right() + 50, bounds.bottom() + 50);
 
     let moved = InputEvent::PointerMoved { to: outside };
     assert_eq!(
-        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme, font),
+        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme),
         MenuOutcome::Changed
     );
     let pressed = InputEvent::PointerPressed {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme, font),
+        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme),
         MenuOutcome::Dismissed
     );
 }
@@ -234,29 +233,28 @@ fn a_primary_press_outside_the_plate_dismisses_without_choosing() {
 #[test]
 fn a_press_inside_on_a_row_chooses_it() {
     let theme = Theme::dark();
-    let font = test_font();
     let anchor = Point::new(10, 10);
     let target_row = 2;
-    let point = row_center(anchor, target_row, &theme, font);
+    let point = row_center(anchor, target_row, &theme);
 
     let mut menu = ContextMenu::open(anchor);
     let moved = InputEvent::PointerMoved { to: point };
     assert_eq!(
-        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme, font),
+        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme),
         MenuOutcome::Changed
     );
     let pressed = InputEvent::PointerPressed {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme, font),
+        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme),
         MenuOutcome::Changed
     );
     let released = InputEvent::PointerReleased {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&released, viewport(), Scale::ONE, &theme, font),
+        menu.on_pointer(&released, viewport(), Scale::ONE, &theme),
         MenuOutcome::Chose(Command::ALL[target_row])
     );
 }
@@ -266,14 +264,38 @@ fn a_press_inside_on_a_row_chooses_it() {
 #[test]
 fn the_menus_rect_stays_inside_the_viewport_when_opened_at_a_corner() {
     let theme = Theme::dark();
-    let font = test_font();
     let view = viewport();
     let corner = Point::new(view.right(), view.bottom());
     let menu = ContextMenu::open(corner);
-    let bounds = menu.bounds(view, Scale::ONE, &theme, font);
+    let bounds = menu.bounds(view, Scale::ONE, &theme);
 
     assert!(bounds.left() >= view.left());
     assert!(bounds.top() >= view.top());
     assert!(bounds.right() <= view.right());
     assert!(bounds.bottom() <= view.bottom());
+}
+
+/// The menu is desktop furniture, so its plate is measured with the *desktop's*
+/// interface face named by the active theme — never the terminal's own
+/// monospace grid face at the user's terminal text size.
+///
+/// The regression: the app used to hand the shared menu the very face it draws
+/// its screen cells with, so the menu rendered monospace, resized with the
+/// profile's text-size setting, and read nothing like the same menu on the
+/// pinboard or in the file manager. With the face resolved from the theme, the
+/// theme's own type ladder is the only thing that can move it.
+#[test]
+fn the_plate_follows_the_desktop_face_not_the_terminal_grid() {
+    let small = text_ladder(Fonts::MIN_BASE_SIZE_PX);
+    let large = text_ladder(LARGER_BASE_SIZE_PX);
+    let menu = ContextMenu::open(Point::new(0, 0));
+    // Wide enough that neither plate is clamped by the viewport instead.
+    let room = Rect::new(0, 0, 4000, 3000);
+
+    let narrow = menu.bounds(room, Scale::ONE, &small);
+    let wide = menu.bounds(room, Scale::ONE, &large);
+    assert!(
+        wide.width > narrow.width && wide.height > narrow.height,
+        "the desktop's type ladder must size the terminal's menu"
+    );
 }

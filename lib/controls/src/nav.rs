@@ -33,11 +33,11 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     draw_outline, heavy_contrast, key_activation, paint_bead, paint_chevron, plate_border,
-    resolve_bead, surface_rect, to_i32, ChevronDir,
+    resolve_bead, role_font, surface_rect, to_i32, ChevronDir,
 };
 use crate::state::{ControlState, FocusState, RenderInvariant};
 
@@ -336,7 +336,8 @@ impl Breadcrumb {
     /// The minimum height, in physical pixels, the trail needs at `scale` to
     /// draw one line of crumb text without clipping.
     #[must_use]
-    pub fn measured_height(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_height(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         Self::cell_pad(scale, theme)
             .saturating_mul(2)
             .saturating_add(font.line_height())
@@ -345,7 +346,8 @@ impl Breadcrumb {
     /// The width the whole trail wants before any elision: every crumb's own
     /// cell plus a chevron (with its gaps) between each pair.
     #[must_use]
-    pub fn measured_width(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some(last) = self.crumbs.len().checked_sub(1) else {
             return 0;
         };
@@ -445,9 +447,9 @@ impl Breadcrumb {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         point: Point,
     ) -> Option<usize> {
+        let font = role_font(theme, scale, TextRole::Body);
         self.plan(bounds, scale, theme, font)
             .into_iter()
             .find(|p| {
@@ -463,14 +465,8 @@ impl Breadcrumb {
     // --- Rendering --------------------------------------------------------
 
     /// Paint the trail into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         let placements = self.plan(bounds, scale, theme, font);
         let last = placements.len().saturating_sub(1);
         for (i, placement) in placements.iter().enumerate() {
@@ -601,13 +597,12 @@ impl Breadcrumb {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<BreadcrumbAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let over = self
-            .crumb_at(bounds, scale, theme, font, *self.pointer)
+            .crumb_at(bounds, scale, theme, *self.pointer)
             .filter(|&i| !self.is_current(i));
         match event {
             InputEvent::PointerMoved { .. } => {

@@ -15,7 +15,6 @@
 //! [`SwatchGrid::apply_to`] writes them back; the two are exact inverses of
 //! each other.
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
@@ -182,19 +181,7 @@ impl SwatchGrid {
     /// The selected well additionally carries an accent ring and a drawn
     /// mark, so selection reads by shape as well as by colour — the wells
     /// hold arbitrary colours, so hue alone cannot carry the state.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        // Wells are pure colour plates; a well's name is accessible/tooltip
-        // metadata the caller draws where it needs to, never text on the
-        // swatch face, so the font is accepted only to keep the shape every
-        // control's `render` shares.
-        let _ = font;
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         for index in 0..WELL_COUNT {
             if let Some(cell) = cell_rect(bounds, index) {
                 self.paint_well(surface, index, cell, scale, theme);

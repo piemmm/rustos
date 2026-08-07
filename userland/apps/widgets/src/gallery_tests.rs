@@ -31,7 +31,7 @@ fn click(gallery: &mut Gallery, point: Point, viewport: Rect, themes: &ThemeRegi
         },
     ];
     for event in &seq {
-        gallery.on_pointer(event, viewport, Scale::ONE, theme, font());
+        gallery.on_pointer(event, viewport, Scale::ONE, theme);
     }
 }
 

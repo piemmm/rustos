@@ -22,10 +22,10 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
-    draw_outline, heavy_contrast, paint_bead, plate_border, seam_thickness, seam_width,
+    draw_outline, heavy_contrast, paint_bead, plate_border, role_font, seam_thickness, seam_width,
     surface_rect, to_i32, BeadShape,
 };
 use crate::state::{
@@ -251,7 +251,8 @@ impl Tabs {
     /// competing for space, so the vertical extent additionally reserves the
     /// bead's own footprint.
     #[must_use]
-    pub fn measured_extent(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    pub fn measured_extent(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let text_band = font.glyph_height().saturating_add(pad.saturating_mul(2));
         let base = text_band.max(scale.scale_length(theme.metrics().control_height).max(1));
@@ -354,14 +355,8 @@ impl Tabs {
     }
 
     /// Paint the strip into `surface` at `bounds` for the active theme.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let font = role_font(theme, scale, TextRole::Body);
         for index in 0..self.items.len() {
             if let Some(rect) = self.tab_rect(index, bounds) {
                 self.paint_tab(surface, index, rect, scale, theme, font);

@@ -60,7 +60,7 @@ use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
-use tairix_theme::{Palette, TextRole, Theme};
+use tairix_theme::{Palette, TextRole};
 
 use crate::layout::BarLayout;
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
@@ -260,9 +260,11 @@ impl TaskbarRenderer {
             set: &self.icon_set,
             generation: self.icon_generation,
         };
-        let fonts = PanelFonts::resolve(theme, scale);
         let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
         let origin = layout.bar.origin;
+        // The clock is a de-emphasised annotation, set a step smaller like
+        // every other caption on the desktop.
+        let clock_font = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
 
         surface.fill(theme.palette().surface_raised.into());
         for (button, rect, kind) in [
@@ -273,9 +275,9 @@ impl TaskbarRenderer {
                 continue;
             }
             let bounds = local_rect(rect, origin);
-            let side = button.icon_side(bounds, scale, theme, fonts.text);
+            let side = button.icon_side(bounds, scale, theme);
             let art = artwork.artwork(IconRequest::kind(kind), side);
-            button.render(&mut surface, bounds, scale, theme, fonts.text, art);
+            button.render(&mut surface, bounds, scale, theme, art);
         }
 
         let strip = taskbar.pins();
@@ -289,9 +291,9 @@ impl TaskbarRenderer {
             let view = strip.get(index);
             let kind = view.map_or(IconKind::AppBundle, PinView::icon);
             let bounds = local_rect(*slot, origin);
-            let side = item.icon_side(bounds, scale, theme, fonts.text);
+            let side = item.icon_side(bounds, scale, theme);
             let art = slot_artwork(view.and_then(PinView::artwork), kind, side, artwork);
-            item.render(&mut surface, bounds, scale, theme, fonts.text, art);
+            item.render(&mut surface, bounds, scale, theme, art);
         }
 
         for (index, (slot, entry)) in layout
@@ -324,9 +326,9 @@ impl TaskbarRenderer {
                 .with_visibility(visibility)
                 .with_state(ControlState::idle().with_pointer(pointer));
             let bounds = local_rect(*slot, origin);
-            let side = item.icon_side(bounds, scale, theme, fonts.text);
+            let side = item.icon_side(bounds, scale, theme);
             let art = slot_artwork(pin.and_then(PinView::artwork), icon, side, artwork);
-            item.render(&mut surface, bounds, scale, theme, fonts.text, art);
+            item.render(&mut surface, bounds, scale, theme, art);
         }
 
         paint_trailing(
@@ -335,7 +337,7 @@ impl TaskbarRenderer {
             taskbar.notifications(),
             taskbar.clock().label(),
             theme.palette(),
-            fonts,
+            clock_font,
             &mut icons,
         );
 
@@ -345,7 +347,6 @@ impl TaskbarRenderer {
                 local_rect(layout.switchboard, origin),
                 scale,
                 theme,
-                fonts.text,
             );
         }
         Some(surface)
@@ -363,13 +364,12 @@ impl TaskbarRenderer {
     pub fn render_menu(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
         let layout = taskbar.menu_layout(scale)?;
         let theme = taskbar.theme();
-        let fonts = PanelFonts::resolve(theme, scale);
         let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
         let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
         taskbar
             .menu()
             .control()
-            .render(&mut surface, local, scale, theme, fonts.text);
+            .render(&mut surface, local, scale, theme);
         Some(surface)
     }
 
@@ -400,14 +400,12 @@ impl TaskbarRenderer {
             local_bounds,
             scale,
             theme,
-            font,
         );
         popup.search_field().render(
             &mut surface,
             local_rect(layout.search, origin),
             scale,
             theme,
-            font,
         );
 
         let row_focus = popup.focus() == LibraryFocus::Rows;
@@ -422,7 +420,6 @@ impl TaskbarRenderer {
                 local_rect(rect, origin),
                 scale,
                 theme,
-                font,
                 popup.row_artwork(index),
             );
         }
@@ -461,7 +458,6 @@ impl TaskbarRenderer {
     pub fn render_notifications(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
         let layout = taskbar.notifications_layout(scale)?;
         let theme = taskbar.theme();
-        let fonts = PanelFonts::resolve(theme, scale);
         let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
         let origin = layout.panel.origin;
         let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
@@ -471,7 +467,6 @@ impl TaskbarRenderer {
             local_bounds,
             scale,
             theme,
-            fonts.text,
         );
 
         let notifications = taskbar.notifications();
@@ -479,13 +474,7 @@ impl TaskbarRenderer {
             let Some(note) = notifications.notification(placed.index) else {
                 continue;
             };
-            card_control(note).render(
-                &mut surface,
-                local_rect(placed.card, origin),
-                scale,
-                theme,
-                fonts.text,
-            );
+            card_control(note).render(&mut surface, local_rect(placed.card, origin), scale, theme);
         }
         Some(surface)
     }
@@ -504,40 +493,13 @@ impl TaskbarRenderer {
     pub fn render_tray_readout(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
         let layout = taskbar.tray_readout_layout(scale)?;
         let theme = taskbar.theme();
-        let fonts = PanelFonts::resolve(theme, scale);
         let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
         let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
         taskbar
             .tray()
             .signal()
-            .render_readout(&mut surface, local, scale, theme, fonts.text);
+            .render_readout(&mut surface, local, scale, theme);
         Some(surface)
-    }
-}
-
-/// The two fonts the panel draws with, each resolved from the text role whose
-/// job it does.
-///
-/// A task title and a popup row are ordinary interface text; the clock is a
-/// de-emphasised annotation, set a step smaller like every other caption on
-/// the desktop. Resolving both from the theme's roles keeps their relative
-/// size and weight the theme's decision rather than this screen's.
-#[derive(Copy, Clone)]
-struct PanelFonts {
-    /// Task titles and the leading buttons' (unused) label font.
-    text: BitmapFont,
-    /// The clock readout.
-    clock: BitmapFont,
-}
-
-impl PanelFonts {
-    /// The panel's fonts under `theme` at `scale`.
-    fn resolve(theme: &Theme, scale: Scale) -> Self {
-        let fonts = theme.fonts();
-        Self {
-            text: BitmapFont::for_role(fonts, TextRole::Body, scale),
-            clock: BitmapFont::for_role(fonts, TextRole::Caption, scale),
-        }
     }
 }
 
@@ -581,7 +543,7 @@ fn paint_trailing(
     notifications: &NotificationArea,
     clock_label: &str,
     palette: &Palette,
-    fonts: PanelFonts,
+    clock_font: BitmapFont,
     icons: &mut IconContext<'_>,
 ) {
     let origin = layout.bar.origin;
@@ -602,7 +564,7 @@ fn paint_trailing(
         layout.clock,
         clock_label,
         palette.on_surface.into(),
-        fonts.clock,
+        clock_font,
     );
 }
 

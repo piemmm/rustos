@@ -54,6 +54,14 @@ states (`WindowControlKind`/`WindowActivationState`/`WindowSizeState`/
 `WindowFurnitureState`). Illegal states are unrepresentable and `ProgressValue`
 clamps out-of-range input.
 
+**The theme chooses the face, not the caller.** No control accepts a typeface.
+A control names the job its text does (a `tairix_theme::TextRole`) and the
+active theme answers with the family, size, and weight, converted to physical
+pixels through the one shared DPI scale. An application cannot substitute a
+face of its own, so a menu drawn inside a monospace terminal is still the
+desktop's own menu. An application's *own* content — a document, a terminal
+grid — is unaffected; the rule binds the shared controls.
+
 The **button family** (`button`) is the first drawn control family: `Button`,
 `IconButton`, and `SplitButton`. Each resolves every colour, metric, and corner
 radius from the active `tairix_theme::Theme` and `tairix_geometry::Scale`; rounds

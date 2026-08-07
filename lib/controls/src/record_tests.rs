@@ -20,12 +20,12 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, SignalRole, Theme};
 
 use crate::record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 
 const W: u32 = 320;
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -76,10 +76,10 @@ fn signal_roles() -> [SignalRole; 10] {
 
 // --- FactList -------------------------------------------------------------
 
-fn fact_surface(list: &FactList, theme: &Theme, scale: Scale, font: BitmapFont) -> Surface {
-    let h = list.measured_height(scale, theme, font);
+fn fact_surface(list: &FactList, theme: &Theme, scale: Scale) -> Surface {
+    let h = list.measured_height(scale, theme);
     let mut surface = Surface::new(W, h.max(1)).expect("surface");
-    list.render(&mut surface, Rect::new(0, 0, W, h), scale, theme, font);
+    list.render(&mut surface, Rect::new(0, 0, W, h), scale, theme);
     surface
 }
 
@@ -110,19 +110,18 @@ fn fact_list_construction_reports_its_facts() {
 #[test]
 fn fact_list_measured_height_matches_the_row_count_render_lays_out() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
-    let row = FactList::row_height(scale, &theme, font);
+    let row = FactList::row_height(scale, &theme);
     let list = FactList::new(vec![
         Fact::new("A", "1"),
         Fact::new("B", "2"),
         Fact::new("C", "3"),
     ]);
-    assert_eq!(list.measured_height(scale, &theme, font), row * 3);
+    assert_eq!(list.measured_height(scale, &theme), row * 3);
 
     // Every row fits within exactly that height: both the muted label
     // foreground and the emphasised value foreground appear.
-    let surface = fact_surface(&list, &theme, scale, font);
+    let surface = fact_surface(&list, &theme, scale);
     assert!(has_pixel(
         &surface,
         premul(theme.palette().on_surface_muted)
@@ -133,21 +132,18 @@ fn fact_list_measured_height_matches_the_row_count_render_lays_out() {
 #[test]
 fn fact_list_measured_height_grows_with_scale() {
     let theme = Theme::dark();
-    let font = font();
     let list = FactList::new(vec![Fact::new("A", "1")]);
-    let unit = list.measured_height(Scale::ONE, &theme, font);
-    let doubled =
-        list.measured_height(Scale::from_percent(200).expect("valid scale"), &theme, font);
+    let unit = list.measured_height(Scale::ONE, &theme);
+    let doubled = list.measured_height(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit, "a larger scale must need more height");
 }
 
 #[test]
 fn fact_values_are_right_aligned() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![Fact::new("CPU Usage", "42").with_tone(SignalRole::Cpu)]);
-    let surface = fact_surface(&list, &theme, scale, font);
+    let surface = fact_surface(&list, &theme, scale);
     let tone = premul(theme.palette().signal(SignalRole::Cpu));
     let (_, _, max_x, _) = bbox(&surface, tone).expect("value drawn");
     assert_eq!(max_x, W - 1, "the value must sit flush with the right edge");
@@ -156,11 +152,10 @@ fn fact_values_are_right_aligned() {
 #[test]
 fn every_tone_resolves_its_own_value_colour() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     for role in signal_roles() {
         let list = FactList::new(vec![Fact::new("L", "V").with_tone(role)]);
-        let surface = fact_surface(&list, &theme, scale, font);
+        let surface = fact_surface(&list, &theme, scale);
         let expected = premul(theme.palette().signal(role));
         assert!(
             has_pixel(&surface, expected),
@@ -172,10 +167,9 @@ fn every_tone_resolves_its_own_value_colour() {
 #[test]
 fn an_untoned_value_takes_the_plain_foreground() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![Fact::new("L", "V")]);
-    let surface = fact_surface(&list, &theme, scale, font);
+    let surface = fact_surface(&list, &theme, scale);
     assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
 
@@ -190,20 +184,14 @@ fn the_label_truncates_before_the_value_under_a_narrow_width() {
     let value = "OK";
     let list = FactList::new(vec![Fact::new(label, value)]);
     let value_w = font.text_width(value);
-    let row_h = FactList::row_height(scale, &theme, font);
+    let row_h = FactList::row_height(scale, &theme);
     let label_color = premul(theme.palette().on_surface_muted);
     let value_color = premul(theme.palette().on_surface);
 
     // Exactly three label characters' worth of room after the value and gap.
     let narrow_w = value_w + gap + cell * 3;
     let mut narrow = Surface::new(narrow_w, row_h).expect("surface");
-    list.render(
-        &mut narrow,
-        Rect::new(0, 0, narrow_w, row_h),
-        scale,
-        &theme,
-        font,
-    );
+    list.render(&mut narrow, Rect::new(0, 0, narrow_w, row_h), scale, &theme);
     let narrow_label_w = bbox(&narrow, label_color).map_or(0, |(x0, _, x1, _)| x1 - x0 + 1);
     assert_eq!(
         narrow_label_w,
@@ -220,13 +208,7 @@ fn the_label_truncates_before_the_value_under_a_narrow_width() {
     // Ample room: the whole label draws.
     let full_w = value_w + gap + font.text_width(label) + gap.saturating_mul(4);
     let mut full = Surface::new(full_w, row_h).expect("surface");
-    list.render(
-        &mut full,
-        Rect::new(0, 0, full_w, row_h),
-        scale,
-        &theme,
-        font,
-    );
+    list.render(&mut full, Rect::new(0, 0, full_w, row_h), scale, &theme);
     let full_label_w = bbox(&full, label_color).map_or(0, |(x0, _, x1, _)| x1 - x0 + 1);
     assert_eq!(
         full_label_w,
@@ -246,7 +228,7 @@ fn separators_draw_between_rows_but_never_after_the_last() {
         Fact::new("C", "3"),
     ])
     .with_separators(true);
-    let row_h = FactList::row_height(scale, &theme, font);
+    let row_h = FactList::row_height(scale, &theme);
     let line_h = font.line_height();
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let sep_thickness = crate::paint::plate_border(&theme, scale).min(gap);
@@ -255,7 +237,7 @@ fn separators_draw_between_rows_but_never_after_the_last() {
 
     let h = row_h * 3;
     let mut surface = Surface::new(W, h).expect("surface");
-    list.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme, font);
+    list.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme);
 
     let sep_y = |row: u32| row * row_h + line_h + offset;
     assert!(
@@ -275,10 +257,9 @@ fn separators_draw_between_rows_but_never_after_the_last() {
 #[test]
 fn no_separator_draws_when_disabled() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![Fact::new("A", "1"), Fact::new("B", "2")]);
-    let surface = fact_surface(&list, &theme, scale, font);
+    let surface = fact_surface(&list, &theme, scale);
     assert!(!has_pixel(&surface, premul(theme.palette().rim)));
 }
 
@@ -292,12 +273,12 @@ fn fact_rows_are_omitted_rather_than_clipped_when_the_height_runs_out() {
         Fact::new("B", "2").with_tone(SignalRole::Memory),
         Fact::new("C", "3").with_tone(SignalRole::Disk),
     ]);
-    let row_h = FactList::row_height(scale, &theme, font);
+    let row_h = FactList::row_height(scale, &theme);
     let line_h = font.line_height();
     // Room for two whole rows, but short of a third's text line.
     let h = row_h * 2 + line_h.saturating_sub(1);
     let mut surface = Surface::new(W, h).expect("surface");
-    list.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme, font);
+    list.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme);
 
     assert!(has_pixel(
         &surface,
@@ -316,65 +297,61 @@ fn fact_rows_are_omitted_rather_than_clipped_when_the_height_runs_out() {
 #[test]
 fn an_empty_fact_list_paints_nothing() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(Vec::new());
-    assert_eq!(list.measured_height(scale, &theme, font), 0);
+    assert_eq!(list.measured_height(scale, &theme), 0);
 
     let fill = Color::rgb(12, 34, 56).premultiply();
     let mut surface = Surface::filled(W, 40, fill).expect("surface");
     let before = surface.clone();
-    list.render(&mut surface, Rect::new(0, 0, W, 40), scale, &theme, font);
+    list.render(&mut surface, Rect::new(0, 0, W, 40), scale, &theme);
     assert_eq!(surface, before);
 }
 
 #[test]
 fn fact_list_degenerate_bounds_do_not_panic() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![Fact::new("A", "1")]);
     let mut surface = Surface::new(8, 8).expect("surface");
-    list.render(&mut surface, Rect::new(0, 0, 0, 8), scale, &theme, font);
-    list.render(&mut surface, Rect::new(0, 0, 8, 0), scale, &theme, font);
-    list.render(&mut surface, Rect::new(0, 0, 1, 8), scale, &theme, font);
+    list.render(&mut surface, Rect::new(0, 0, 0, 8), scale, &theme);
+    list.render(&mut surface, Rect::new(0, 0, 8, 0), scale, &theme);
+    list.render(&mut surface, Rect::new(0, 0, 1, 8), scale, &theme);
 }
 
 #[test]
 fn fact_list_renders_in_both_themes() {
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![
         Fact::new("Memory", "8.6 GB").with_tone(SignalRole::Memory)
     ]);
-    let dark = fact_surface(&list, &Theme::dark(), scale, font);
-    let light = fact_surface(&list, &Theme::light(), scale, font);
+    let dark = fact_surface(&list, &Theme::dark(), scale);
+    let light = fact_surface(&list, &Theme::light(), scale);
     assert_ne!(dark.pixels(), light.pixels());
 }
 
 #[test]
 fn fact_list_high_contrast_changes_the_separator_rendering() {
-    let font = font();
     let scale = Scale::ONE;
     let list = FactList::new(vec![Fact::new("A", "1"), Fact::new("B", "2")]).with_separators(true);
-    let normal = fact_surface(&list, &Theme::dark(), scale, font);
-    let heavy = fact_surface(&list, &high_contrast(), scale, font);
+    let normal = fact_surface(&list, &Theme::dark(), scale);
+    let heavy = fact_surface(&list, &high_contrast(), scale);
     assert_ne!(normal.pixels(), heavy.pixels());
 }
 
 // --- Timeline ---------------------------------------------------------
 
-fn timeline_surface(timeline: &Timeline, theme: &Theme, scale: Scale, font: BitmapFont) -> Surface {
-    let h = timeline.measured_height(scale, theme, font);
+fn timeline_surface(timeline: &Timeline, theme: &Theme, scale: Scale) -> Surface {
+    let h = timeline.measured_height(scale, theme);
     let mut surface = Surface::new(W, h.max(1)).expect("surface");
-    timeline.render(&mut surface, Rect::new(0, 0, W, h), scale, theme, font);
+    timeline.render(&mut surface, Rect::new(0, 0, W, h), scale, theme);
     surface
 }
 
 /// The y coordinate of row `row`'s mark centre, following exactly the same
 /// arithmetic [`Timeline::render`] uses.
 fn row_center(row: u32, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-    let row_h = Timeline::row_height(scale, theme, font);
+    let row_h = Timeline::row_height(scale, theme);
     let line_h = font.line_height();
     row * row_h + line_h / 2
 }
@@ -414,37 +391,33 @@ fn timeline_construction_reports_its_events() {
 #[test]
 fn timeline_measured_height_matches_the_row_count_render_lays_out() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
-    let row = Timeline::row_height(scale, &theme, font);
+    let row = Timeline::row_height(scale, &theme);
     let timeline = Timeline::new(vec![
         TimelineEvent::new("09:00", "Started"),
         TimelineEvent::new("10:00", "Finished"),
     ]);
-    assert_eq!(timeline.measured_height(scale, &theme, font), row * 2);
+    assert_eq!(timeline.measured_height(scale, &theme), row * 2);
     assert!(Timeline::gutter_width(scale, &theme) > 0);
 }
 
 #[test]
 fn timeline_measured_height_grows_with_scale() {
     let theme = Theme::dark();
-    let font = font();
     let timeline = Timeline::new(vec![TimelineEvent::new("09:00", "Started")]);
-    let unit = timeline.measured_height(Scale::ONE, &theme, font);
-    let doubled =
-        timeline.measured_height(Scale::from_percent(200).expect("valid scale"), &theme, font);
+    let unit = timeline.measured_height(Scale::ONE, &theme);
+    let doubled = timeline.measured_height(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit, "a larger scale must need more height");
 }
 
 #[test]
 fn the_spine_is_absent_for_a_single_event() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![TimelineEvent::new("09:00", "Started")
         .with_mark(EventMark::Notable)
         .with_tone(SignalRole::Cpu)]);
-    let surface = timeline_surface(&timeline, &theme, scale, font);
+    let surface = timeline_surface(&timeline, &theme, scale);
     assert!(
         !has_pixel(&surface, premul(theme.palette().rim)),
         "a single event has nothing to connect, so no spine may draw"
@@ -473,7 +446,7 @@ fn the_spine_spans_only_from_the_first_mark_to_the_last() {
             .with_mark(EventMark::Notable)
             .with_tone(SignalRole::Cpu),
     ]);
-    let surface = timeline_surface(&timeline, &theme, scale, font);
+    let surface = timeline_surface(&timeline, &theme, scale);
     let rim = premul(theme.palette().rim);
     let radius = mark_radius(scale, &theme);
     let spine_x = radius;
@@ -507,7 +480,6 @@ fn the_spine_spans_only_from_the_first_mark_to_the_last() {
 #[test]
 fn notable_and_routine_marks_differ_in_pixels() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let notable = Timeline::new(vec![
         TimelineEvent::new("09:00", "A").with_mark(EventMark::Notable)
@@ -515,8 +487,8 @@ fn notable_and_routine_marks_differ_in_pixels() {
     let routine = Timeline::new(vec![
         TimelineEvent::new("09:00", "A").with_mark(EventMark::Routine)
     ]);
-    let notable_surface = timeline_surface(&notable, &theme, scale, font);
-    let routine_surface = timeline_surface(&routine, &theme, scale, font);
+    let notable_surface = timeline_surface(&notable, &theme, scale);
+    let routine_surface = timeline_surface(&routine, &theme, scale);
     assert_ne!(
         notable_surface.pixels(),
         routine_surface.pixels(),
@@ -527,13 +499,12 @@ fn notable_and_routine_marks_differ_in_pixels() {
 #[test]
 fn every_tone_resolves_its_own_notable_mark_colour() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     for role in signal_roles() {
         let timeline = Timeline::new(vec![TimelineEvent::new("09:00", "A")
             .with_mark(EventMark::Notable)
             .with_tone(role)]);
-        let surface = timeline_surface(&timeline, &theme, scale, font);
+        let surface = timeline_surface(&timeline, &theme, scale);
         let expected = premul(theme.palette().signal(role));
         assert!(
             has_pixel(&surface, expected),
@@ -545,27 +516,25 @@ fn every_tone_resolves_its_own_notable_mark_colour() {
 #[test]
 fn an_untoned_notable_mark_takes_the_accent() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![
         TimelineEvent::new("09:00", "A").with_mark(EventMark::Notable)
     ]);
-    let surface = timeline_surface(&timeline, &theme, scale, font);
+    let surface = timeline_surface(&timeline, &theme, scale);
     assert!(has_pixel(&surface, premul(theme.palette().accent)));
 }
 
 #[test]
 fn the_stamp_column_aligns_on_the_widest_stamp() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![
         TimelineEvent::new("1", "X"),
         TimelineEvent::new("1234567890", "X"),
     ]);
-    let surface = timeline_surface(&timeline, &theme, scale, font);
+    let surface = timeline_surface(&timeline, &theme, scale);
     let text_color = premul(theme.palette().on_surface);
-    let row_h = Timeline::row_height(scale, &theme, font);
+    let row_h = Timeline::row_height(scale, &theme);
 
     let leftmost = |y: u32| (0..surface.width()).find(|&x| surface.get(x, y) == Some(text_color));
     let row0 = leftmost(0);
@@ -584,7 +553,7 @@ fn event_text_truncates_when_the_width_runs_out() {
     let scale = Scale::ONE;
     let long_text = "AAAAAAAAAAAAAAAAAAAA";
     let timeline = Timeline::new(vec![TimelineEvent::new("1", long_text)]);
-    let row_h = Timeline::row_height(scale, &theme, font);
+    let row_h = Timeline::row_height(scale, &theme);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let gutter_w = Timeline::gutter_width(scale, &theme);
     let stamp_w = font.text_width("1");
@@ -598,7 +567,6 @@ fn event_text_truncates_when_the_width_runs_out() {
         Rect::new(0, 0, narrow_w, row_h),
         scale,
         &theme,
-        font,
     );
     let text_color = premul(theme.palette().on_surface);
     let (_, _, max_x, _) = bbox(&surface, text_color).expect("text drawn");
@@ -625,11 +593,11 @@ fn timeline_rows_are_omitted_rather_than_clipped_when_the_height_runs_out() {
             .with_mark(EventMark::Notable)
             .with_tone(SignalRole::Disk),
     ]);
-    let row_h = Timeline::row_height(scale, &theme, font);
+    let row_h = Timeline::row_height(scale, &theme);
     let line_h = font.line_height();
     let h = row_h * 2 + line_h.saturating_sub(1);
     let mut surface = Surface::new(W, h).expect("surface");
-    timeline.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme, font);
+    timeline.render(&mut surface, Rect::new(0, 0, W, h), scale, &theme);
 
     assert!(has_pixel(
         &surface,
@@ -648,30 +616,28 @@ fn timeline_rows_are_omitted_rather_than_clipped_when_the_height_runs_out() {
 #[test]
 fn an_empty_timeline_paints_nothing() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(Vec::new());
-    assert_eq!(timeline.measured_height(scale, &theme, font), 0);
+    assert_eq!(timeline.measured_height(scale, &theme), 0);
 
     let fill = Color::rgb(65, 43, 21).premultiply();
     let mut surface = Surface::filled(W, 40, fill).expect("surface");
     let before = surface.clone();
-    timeline.render(&mut surface, Rect::new(0, 0, W, 40), scale, &theme, font);
+    timeline.render(&mut surface, Rect::new(0, 0, W, 40), scale, &theme);
     assert_eq!(surface, before);
 }
 
 #[test]
 fn timeline_degenerate_bounds_do_not_panic() {
     let theme = Theme::dark();
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![
         TimelineEvent::new("1", "A"),
         TimelineEvent::new("2", "B"),
     ]);
     let mut surface = Surface::new(8, 40).expect("surface");
-    timeline.render(&mut surface, Rect::new(0, 0, 0, 40), scale, &theme, font);
-    timeline.render(&mut surface, Rect::new(0, 0, 8, 0), scale, &theme, font);
+    timeline.render(&mut surface, Rect::new(0, 0, 0, 40), scale, &theme);
+    timeline.render(&mut surface, Rect::new(0, 0, 8, 0), scale, &theme);
     let gutter_w = Timeline::gutter_width(scale, &theme);
     let narrower_than_the_gutter = gutter_w.saturating_sub(1).max(1);
     timeline.render(
@@ -679,31 +645,28 @@ fn timeline_degenerate_bounds_do_not_panic() {
         Rect::new(0, 0, narrower_than_the_gutter, 40),
         scale,
         &theme,
-        font,
     );
 }
 
 #[test]
 fn timeline_renders_in_both_themes() {
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![
         TimelineEvent::new("09:00", "Started").with_tone(SignalRole::Cpu)
     ]);
-    let dark = timeline_surface(&timeline, &Theme::dark(), scale, font);
-    let light = timeline_surface(&timeline, &Theme::light(), scale, font);
+    let dark = timeline_surface(&timeline, &Theme::dark(), scale);
+    let light = timeline_surface(&timeline, &Theme::light(), scale);
     assert_ne!(dark.pixels(), light.pixels());
 }
 
 #[test]
 fn timeline_high_contrast_changes_the_routine_ring_rendering() {
-    let font = font();
     let scale = Scale::ONE;
     let timeline = Timeline::new(vec![
         TimelineEvent::new("09:00", "A"),
         TimelineEvent::new("10:00", "B"),
     ]);
-    let normal = timeline_surface(&timeline, &Theme::dark(), scale, font);
-    let heavy = timeline_surface(&timeline, &high_contrast(), scale, font);
+    let normal = timeline_surface(&timeline, &Theme::dark(), scale);
+    let heavy = timeline_surface(&timeline, &high_contrast(), scale);
     assert_ne!(normal.pixels(), heavy.pixels());
 }

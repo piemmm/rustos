@@ -304,9 +304,9 @@ pub enum GridFill {
 /// The pixel metrics of one grid tile: its size, and the gap between tiles.
 ///
 /// Grouped rather than passed loose because the three are derived and consumed
-/// together — `render::grid_metrics` measures all three from one font — and
-/// because three bare pixel counts in a positional argument list are easy to
-/// transpose.
+/// together — `render::grid_metrics` measures all three from the theme's body
+/// face at the desktop scale — and because three bare pixel counts in a
+/// positional argument list are easy to transpose.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GridMetrics {
     /// Tile width in pixels.

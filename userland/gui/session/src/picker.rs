@@ -31,10 +31,8 @@ use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
 use tairix_browse::ManagerChrome;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
-use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 use tairix_icon::NoArtwork;
-use tairix_theme::{TextRole, Theme};
 use tairix_wm::{Compositor, Point, Rect, WindowId};
 
 use crate::shell::DesktopShell;
@@ -218,13 +216,12 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<ConcludedPick> {
-        // Hit-test with the same font and theme the picker renders with, so a
+        // Hit-test at the same scale and theme the picker renders with, so a
         // click resolves to exactly the item the user saw (list row or grid
         // tile), and a click on the path bar or the scrollbar gutter resolves
         // to nothing.
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
-        let font = picker_font(theme, scale);
         let viewport = Rect::new(
             0,
             0,
@@ -236,7 +233,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         if let Some(command) = self
             .active
             .as_ref()
-            .and_then(|active| toolbar_command_at(&active.browser, theme, viewport, local))
+            .and_then(|active| toolbar_command_at(&active.browser, scale, theme, viewport, local))
         {
             return self.navigate(shell, compositor, move |browser| {
                 match apply_command(browser, command) {
@@ -248,7 +245,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let index = self
             .active
             .as_ref()
-            .and_then(|active| entry_index_at(&active.browser, font, theme, viewport, local))?;
+            .and_then(|active| entry_index_at(&active.browser, scale, theme, viewport, local))?;
         self.navigate(shell, compositor, move |browser| {
             open_or_choose(browser, index)
         })
@@ -273,7 +270,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     let theme = shell.session().active_theme();
                     reveal_selection(
                         &mut active.browser,
-                        picker_font(theme, scale),
+                        scale,
                         theme,
                         Rect::new(
                             0,
@@ -410,22 +407,12 @@ fn render_surface<S: DirectorySource>(
     let h = scale.scale_length(WIN_HEIGHT);
     render(
         browser,
+        scale,
         theme,
-        picker_font(theme, scale),
         Rect::new(0, 0, w, h),
         &ManagerChrome::none(),
         &mut NoArtwork,
     )
-}
-
-/// The picker's text font: the theme's ordinary interface-text role resolved
-/// through the one shared role-to-font conversion, so the picker's rows are
-/// sized and weighted exactly like every other list of interface text.
-///
-/// It is the one place the render and hit-test paths agree on a font,
-/// resolved at the density of the output it is drawn to.
-pub(crate) fn picker_font(theme: &Theme, scale: Scale) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }
 
 /// Repaint the picker window after a navigation change. A surface that

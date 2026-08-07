@@ -105,7 +105,6 @@ mod program {
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_controls::Menu;
-    use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
@@ -118,7 +117,7 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::{TextRole, Theme, ThemeRegistry};
+    use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
         pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowTransport,
     };
@@ -977,23 +976,13 @@ mod program {
         drag: BundleDrag,
     }
 
-    /// The font every part of the browser window draws its text in: the
-    /// theme's body role, resolved through the one shared role-to-font path.
-    ///
-    /// Resolving it here once keeps the listing, the overlays,
-    /// and the hit-testing that measures them on the same font.
-    fn ui_font(theme: &Theme, scale: Scale) -> BitmapFont {
-        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
-    }
-
     /// How the window is drawn at this moment: the active theme, the
     /// surface a frame is laid out for, and the desktop's UI density.
     ///
     /// One value rather than three parameters, because every consumer
-    /// resolves the same two things from them — the text face and the
-    /// window rectangle — and threading them separately is how a painted
-    /// frame and the hit-test that must match it come to disagree. All
-    /// three change together when the desktop does.
+    /// resolves the same geometry from them, and threading them separately
+    /// is how a painted frame and the hit-test that must match it come to
+    /// disagree. All three change together when the desktop does.
     #[derive(Copy, Clone)]
     struct Canvas<'a> {
         /// The active theme, as the desktop reports its appearance.
@@ -1008,11 +997,6 @@ mod program {
         /// The active theme.
         fn theme(&self) -> &'a Theme {
             self.theme
-        }
-
-        /// The text face every part of the window draws in.
-        fn font(&self) -> BitmapFont {
-            ui_font(self.theme, self.scale)
         }
 
         /// The whole window, as a rectangle at its own origin.
@@ -1050,12 +1034,11 @@ mod program {
         let can_chown = overlays.can_chown;
         let mode = target.mode;
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let font = ui_font(theme, scale);
         // The rail owns the window's leading edge, so every overlay drawn over
         // the view is placed within what is left — the one shared inset the
         // pointer hit-tests resolve through, so a dialog is never centred over
         // the rail it does not belong to.
-        let viewport = tairix_browse::render::content_area(window, theme, font, Some(places));
+        let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
         // Each visible grid tile resolves its icon through the artwork
         // pipeline: the shipped raster master for the entry's content type,
         // read bounded and decoded in the sandbox once per (asset, pixel side)
@@ -1067,8 +1050,8 @@ mod program {
             let mut pipeline = icons.borrow_mut();
             render(
                 browser,
+                scale,
                 theme,
-                font,
                 window,
                 &ManagerChrome {
                     tools: MANAGER_TOOLS,
@@ -1084,34 +1067,34 @@ mod program {
         // on the item the user is renaming (§2.2).
         if let Some(field) = rename {
             if let Some(bounds) =
-                tairix_browse::render::selection_rect(browser, font, theme, viewport)
+                tairix_browse::render::selection_rect(browser, scale, theme, viewport)
             {
-                field.render(&mut surface, bounds, scale, theme, font);
+                field.render(&mut surface, bounds, scale, theme);
             }
         }
         // With the Properties overlay open, draw it centered on top of the
         // view (the shared drawn panel painting the already-authorised
         // metadata). Rename and Properties are never open together.
         if let Some(props) = properties {
-            draw_properties_editable(&mut surface, props, theme, font, viewport);
+            draw_properties_editable(&mut surface, props, scale, theme, viewport);
             // Reassigning an owner is privileged, so the ownership control is
             // drawn only where the launching user holds `CAP_FS_CHOWN` — never
             // shown to a session that cannot use it (§2.24).
             if can_chown {
                 let active = owner.map(|ed| (ed.field, &ed.editor));
-                draw_owner_control(&mut surface, props, theme, font, viewport, active);
+                draw_owner_control(&mut surface, props, scale, theme, viewport, active);
             }
         }
         // The delete-confirmation dialog is modal: drawn last, on top of the
         // view, and never open together with the rename/Properties overlays.
         if let Some(confirm) = overlays.delete.as_ref() {
-            draw_delete_dialog(&mut surface, &confirm.dialog, theme, font, viewport);
+            draw_delete_dialog(&mut surface, &confirm.dialog, scale, theme, viewport);
         }
         // The right-click context menu draws last, on top of the view. It opens
         // only in navigation mode, so it never overlaps the modal overlays
         // above; drawing it last keeps it topmost regardless.
         if let Some(ctx) = overlays.menu.as_ref() {
-            draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, theme, font, viewport);
+            draw_context_menu(&mut surface, &ctx.menu, ctx.anchor, scale, theme, viewport);
         }
         // The "Open With…" chooser draws on top of the view exactly as the
         // context menu does; the two are never open together (the chooser
@@ -1121,15 +1104,15 @@ mod program {
                 &mut surface,
                 &chooser.menu,
                 chooser.anchor,
+                scale,
                 theme,
-                font,
                 viewport,
             );
         }
         // A running long operation's progress + cancel panel is modal: drawn
         // last so it is topmost while the walk runs interleaved with input.
         if let Some(operation) = overlays.operation.as_ref() {
-            draw_progress_dialog(&mut surface, &operation.progress, theme, font, viewport);
+            draw_progress_dialog(&mut surface, &operation.progress, scale, theme, viewport);
         }
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -1147,7 +1130,7 @@ mod program {
     /// listing changed (and must re-present) and whether the app should
     /// end (the desktop asked the window to close).
     ///
-    /// `canvas` gives the reveal/scroll helpers the same font and content
+    /// `canvas` gives the reveal/scroll helpers the same scale and content
     /// viewport the renderer uses, so the drawn view, the selection reveal,
     /// and the wheel scroll all agree on the geometry; `link` carries the
     /// launcher and the window channel the session-facing verbs (launch,
@@ -1161,12 +1144,12 @@ mod program {
         event: &WindowEvent,
     ) -> (bool, bool) {
         let theme = canvas.theme();
-        let font = canvas.font();
+        let scale = canvas.scale;
         let window = canvas.window();
         // Everything below the rail lays out in what the rail leaves, resolved
         // through the one shared inset the renderer paints with, so a click
         // lands on exactly the control the user saw.
-        let viewport = tairix_browse::render::content_area(window, theme, font, Some(places));
+        let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
 
         // A close request ends the app whatever mode it is in; an open rename
         // edit or properties overlay is simply abandoned (nothing was written).
@@ -1204,19 +1187,19 @@ mod program {
         // launcher for a context-menu Open, so it is handled here rather than
         // in the launcher-less modal router.
         if overlays.menu.is_some() {
-            return apply_menu_event(browser, overlays, link, font, theme, viewport, event);
+            return apply_menu_event(browser, overlays, link, scale, theme, viewport, event);
         }
 
         // The "Open With…" chooser likewise owns input while open (it replaces
         // the context menu that opened it) and needs the launcher to hand the
         // chosen application its file.
         if overlays.open_with.is_some() {
-            return apply_open_with_event(overlays, link.launcher, font, theme, viewport, event);
+            return apply_open_with_event(overlays, link.launcher, scale, theme, viewport, event);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
         // nested in it) owns the window while it is open; handle it and return.
-        if let Some(result) = apply_modal_event(browser, overlays, font, theme, viewport, event) {
+        if let Some(result) = apply_modal_event(browser, overlays, scale, theme, viewport, event) {
             return result;
         }
 
@@ -1230,7 +1213,7 @@ mod program {
                 } => apply_rename_key(
                     browser,
                     &mut overlays.rename,
-                    font,
+                    scale,
                     theme,
                     viewport,
                     *key,
@@ -1244,7 +1227,7 @@ mod program {
         // re-reads the mount table in the same gesture. The kernel publishes no
         // mount-change notification today, so this — not a poll — is how a
         // newly attached volume appears; nothing here spins waiting for one.
-        if sidebar::is_refresh_request(browser, theme, viewport, event) {
+        if sidebar::is_refresh_request(browser, scale, theme, viewport, event) {
             let (home, volumes) = places_source();
             sidebar::refresh_places(places, &home, &volumes);
         }
@@ -1253,8 +1236,8 @@ mod program {
         // every motion that reaches here, and it consumes the presses and keys
         // that belong to it. Whatever it does not consume routes to the view,
         // carrying any repaint the highlight alone owed.
-        let hover_moved = sidebar::track_hover(places, theme, font, window, event);
-        if let Some(outcome) = sidebar::apply_event(browser, places, theme, font, window, event) {
+        let hover_moved = sidebar::track_hover(places, scale, theme, window, event);
+        if let Some(outcome) = sidebar::apply_event(browser, places, scale, theme, window, event) {
             if let Some(reason) = &outcome.refused {
                 report_error(reason);
             }
@@ -1262,7 +1245,7 @@ mod program {
         }
 
         let (changed, close) =
-            apply_nav_event(browser, overlays, link, font, theme, viewport, event);
+            apply_nav_event(browser, overlays, link, scale, theme, viewport, event);
         (changed || hover_moved, close)
     }
 
@@ -1273,7 +1256,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -1292,7 +1275,7 @@ mod program {
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     begin_properties(browser, &mut overlays.properties)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-                    activate(browser, link.launcher, font, theme, viewport)
+                    activate(browser, link.launcher, scale, theme, viewport)
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
                     begin_delete(browser, &mut overlays.delete)
                 } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
@@ -1306,7 +1289,7 @@ mod program {
                     apply_nav_key(
                         browser,
                         &mut overlays.rename,
-                        font,
+                        scale,
                         theme,
                         viewport,
                         *key,
@@ -1322,7 +1305,7 @@ mod program {
             WindowEvent::Scrolled { dy, .. } => {
                 let moved = tairix_browse::render::scroll_lines(
                     browser,
-                    font,
+                    scale,
                     theme,
                     viewport,
                     i64::from(*dy),
@@ -1332,7 +1315,7 @@ mod program {
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
             WindowEvent::Pointer { .. } => {
-                apply_pointer(browser, overlays, link, font, theme, viewport, event)
+                apply_pointer(browser, overlays, link, scale, theme, viewport, event)
             }
             // Focus changes and key releases repaint nothing. The browser
             // never requests a pick, so a pick conclusion is a session bug and
@@ -1426,7 +1409,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -1440,7 +1423,7 @@ mod program {
         );
         let mut scrolled = None;
         for input in pointer_input_events(*action, point) {
-            if let Some(repaint) = scroll_pointer(browser, font, theme, viewport, point, &input) {
+            if let Some(repaint) = scroll_pointer(browser, scale, theme, viewport, point, &input) {
                 scrolled = Some(scrolled.unwrap_or(false) || repaint);
             }
         }
@@ -1452,14 +1435,14 @@ mod program {
             return (false, false);
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
-            return open_context_menu(browser, overlays, font, theme, viewport, point);
+            return open_context_menu(browser, overlays, scale, theme, viewport, point);
         }
         match press_point(*action, *x, *y) {
             Some(point) => apply_primary_press(
                 browser,
                 overlays,
                 link.launcher,
-                font,
+                scale,
                 theme,
                 viewport,
                 point,
@@ -1481,7 +1464,7 @@ mod program {
     fn apply_modal_event<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -1489,7 +1472,7 @@ mod program {
         // The delete-confirmation dialog is the topmost modal: while it is up
         // it owns the window, so it is handled before anything else.
         if overlays.delete.is_some() {
-            return Some(apply_delete_event(overlays, font, theme, viewport, event));
+            return Some(apply_delete_event(overlays, scale, theme, viewport, event));
         }
         if overlays.owner.is_some() {
             return Some(match event {
@@ -1521,7 +1504,7 @@ mod program {
                 }
                 WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
                     Some(point) => {
-                        apply_properties_pointer(browser, overlays, font, theme, viewport, point)
+                        apply_properties_pointer(browser, overlays, scale, theme, viewport, point)
                     }
                     None => (false, false),
                 },
@@ -1539,7 +1522,7 @@ mod program {
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         key: KeyValue,
@@ -1550,39 +1533,39 @@ mod program {
             // climb commands, F5 refreshes — the same shared dispatch a toolbar
             // click uses, so the keyboard and the toolbar cannot disagree (§2.2).
             KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
-                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Back)
+                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Back)
             }
             KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
-                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Forward)
+                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Forward)
             }
             KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
-                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Up)
+                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Up)
             }
             KeyValue::Named(NamedKeyCode::F5) => {
-                apply_toolbar_command(browser, font, theme, viewport, ToolbarCommand::Refresh)
+                apply_toolbar_command(browser, scale, theme, viewport, ToolbarCommand::Refresh)
             }
             // Ctrl+Shift+N: the keyboard equivalent of the New Folder tool.
             // Shift may deliver 'n' upper- or lower-case, so match either.
             KeyValue::Char(ch)
                 if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
             {
-                begin_new_folder(browser, rename, font, theme, viewport)
+                begin_new_folder(browser, rename, scale, theme, viewport)
             }
             KeyValue::Named(NamedKeyCode::Down) => {
                 browser.select_next();
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             KeyValue::Named(NamedKeyCode::Up) => {
                 browser.select_previous();
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             KeyValue::Named(NamedKeyCode::Backspace) => (browser.go_up().unwrap_or(false), false),
             // F2 begins an in-place rename of the selected item; with nothing
             // selected (an empty directory) it is a no-op.
             KeyValue::Named(NamedKeyCode::F2) => {
-                begin_rename(browser, rename, font, theme, viewport)
+                begin_rename(browser, rename, scale, theme, viewport)
             }
             _ => (false, false),
         }
@@ -1614,13 +1597,13 @@ mod program {
     fn activate<S: DirectorySource>(
         browser: &mut Browser<S>,
         launcher: &RefCell<Launcher>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
     ) -> (bool, bool) {
         match browser.activate_selected() {
             Ok(Activation::Descended) => {
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             Ok(Activation::LaunchBundle { path }) => {
@@ -1772,7 +1755,7 @@ mod program {
     /// authority (§4, §5.4).
     fn apply_delete_event(
         overlays: &mut Overlays,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -1792,7 +1775,7 @@ mod program {
                 press_point(*action, *x, *y).and_then(|point| {
                     let confirm = overlays.delete.as_ref()?;
                     let index =
-                        delete_dialog_action_at(&confirm.dialog, viewport, font, theme, point);
+                        delete_dialog_action_at(&confirm.dialog, viewport, scale, theme, point);
                     if index == Some(DELETE_CONFIRM_INDEX) {
                         Some(true)
                     } else if index == Some(DELETE_CANCEL_INDEX) {
@@ -2028,7 +2011,7 @@ mod program {
     /// (fail closed, §5.4).
     fn operation_control(event: &WindowEvent, canvas: Canvas<'_>) -> OperationControl {
         let theme = canvas.theme();
-        let font = canvas.font();
+        let scale = canvas.scale;
         let viewport = canvas.window();
         match event {
             WindowEvent::CloseRequested { .. } => OperationControl::Close,
@@ -2041,7 +2024,7 @@ mod program {
                 ..
             } => OperationControl::Cancel,
             WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
-                Some(point) if progress_cancel_at(viewport, font, theme, point) => {
+                Some(point) if progress_cancel_at(viewport, scale, theme, point) => {
                     OperationControl::Cancel
                 }
                 _ => OperationControl::Ignore,
@@ -2720,13 +2703,14 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
         if let Some(tool) = manager_tool_at(
             browser,
+            scale,
             theme,
             viewport,
             point,
@@ -2734,10 +2718,10 @@ mod program {
             manager_tool_model(browser),
         ) {
             overlays.double_click.reset();
-            return apply_manager_tool(browser, overlays, font, theme, viewport, tool);
+            return apply_manager_tool(browser, overlays, scale, theme, viewport, tool);
         }
         if let Some(index) =
-            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
+            tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point)
         {
             // Any primary press over an item also drives the drag-out
             // detector: a bundle row arms a potential drag (the offer fires
@@ -2751,13 +2735,13 @@ mod program {
             {
                 ClickKind::Double => {
                     let _ = browser.select(index);
-                    activate(browser, launcher, font, theme, viewport)
+                    activate(browser, launcher, scale, theme, viewport)
                 }
                 ClickKind::Single => (browser.select(index).is_ok(), false),
             };
         }
         overlays.double_click.reset();
-        apply_chrome_press(browser, font, theme, viewport, point)
+        apply_chrome_press(browser, scale, theme, viewport, point)
     }
 
     /// Apply one primary press that landed on the read-only **chrome** (the
@@ -2774,7 +2758,7 @@ mod program {
     /// nothing.
     fn apply_chrome_press<S: DirectorySource>(
         browser: &mut Browser<S>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
@@ -2783,15 +2767,15 @@ mod program {
         // the keyboard accelerators use; a disabled command resolves to nothing
         // (`toolbar_command_at` fails closed) and repaints nothing.
         if let Some(command) =
-            tairix_browse::render::toolbar_command_at(browser, theme, viewport, point)
+            tairix_browse::render::toolbar_command_at(browser, scale, theme, viewport, point)
         {
-            return apply_toolbar_command(browser, font, theme, viewport, command);
+            return apply_toolbar_command(browser, scale, theme, viewport, command);
         }
-        if let Some(depth) = tairix_browse::render::crumb_at(browser, font, theme, viewport, point)
+        if let Some(depth) = tairix_browse::render::crumb_at(browser, scale, theme, viewport, point)
         {
             let moved = browser.navigate_to_depth(depth).unwrap_or(false);
             if moved {
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
             }
             return (moved, false);
         }
@@ -2824,13 +2808,13 @@ mod program {
     fn open_context_menu<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
         if let Some(index) =
-            tairix_browse::render::entry_index_at(browser, font, theme, viewport, point)
+            tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point)
         {
             let _ = browser.select(index);
         } else {
@@ -2854,7 +2838,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -2881,7 +2865,8 @@ mod program {
                 let Some(ctx) = overlays.menu.take() else {
                     return (false, false);
                 };
-                match context_menu_command_at(&ctx.menu, ctx.anchor, viewport, font, theme, point) {
+                match context_menu_command_at(&ctx.menu, ctx.anchor, viewport, scale, theme, point)
+                {
                     // Open With… uniquely opens a submenu at the right-click
                     // anchor rather than acting at once, so it is handled here
                     // where the anchor is in hand; every other command runs its
@@ -2890,7 +2875,7 @@ mod program {
                         begin_open_with(browser, overlays, ctx.anchor)
                     }
                     Some(command) => dispatch_context_command(
-                        browser, overlays, link, font, theme, viewport, command,
+                        browser, overlays, link, scale, theme, viewport, command,
                     ),
                     None => (true, false),
                 }
@@ -2907,20 +2892,20 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         command: ContextCommand,
     ) -> (bool, bool) {
         match command {
-            ContextCommand::Open => activate(browser, link.launcher, font, theme, viewport),
+            ContextCommand::Open => activate(browser, link.launcher, scale, theme, viewport),
             // Open With… opens a submenu anchored at the right-click point, so
             // it is dispatched by `apply_menu_event` (which holds the anchor)
             // rather than here.
             ContextCommand::OpenWith => (false, false),
             ContextCommand::PinToTaskbar => pin_selected_bundle(browser, link),
             ContextCommand::Rename => {
-                begin_rename(browser, &mut overlays.rename, font, theme, viewport)
+                begin_rename(browser, &mut overlays.rename, scale, theme, viewport)
             }
             ContextCommand::Cut => apply_clipboard_verb(
                 browser,
@@ -3096,7 +3081,7 @@ mod program {
     fn apply_open_with_event(
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         event: &WindowEvent,
@@ -3126,7 +3111,7 @@ mod program {
                     &chooser.menu,
                     chooser.anchor,
                     viewport,
-                    font,
+                    scale,
                     theme,
                     point,
                 ) {
@@ -3155,14 +3140,14 @@ mod program {
     /// nothing.
     fn apply_toolbar_command<S: DirectorySource>(
         browser: &mut Browser<S>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         command: ToolbarCommand,
     ) -> (bool, bool) {
         match tairix_browse::apply_command(browser, command) {
             Ok(true) => {
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             Ok(false) | Err(_) => (false, false),
@@ -3176,16 +3161,16 @@ mod program {
     fn apply_manager_tool<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         tool: ManagerTool,
     ) -> (bool, bool) {
         match tool {
             ManagerTool::NewFolder => {
-                begin_new_folder(browser, &mut overlays.rename, font, theme, viewport)
+                begin_new_folder(browser, &mut overlays.rename, scale, theme, viewport)
             }
-            ManagerTool::Trash => go_to_trash(browser, font, theme, viewport),
+            ManagerTool::Trash => go_to_trash(browser, scale, theme, viewport),
             ManagerTool::EmptyTrash => begin_empty_trash(browser, &mut overlays.delete),
         }
     }
@@ -3226,7 +3211,7 @@ mod program {
     /// or a fabricated view.
     fn go_to_trash<S: DirectorySource>(
         browser: &mut Browser<S>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
     ) -> (bool, bool) {
@@ -3245,7 +3230,7 @@ mod program {
         }
         match browser.navigate_to(trash) {
             Ok(true) => {
-                tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                 (true, false)
             }
             // Already in the Trash, or (fail closed) it could not be listed.
@@ -3326,7 +3311,7 @@ mod program {
     fn begin_new_folder<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
     ) -> (bool, bool) {
@@ -3339,7 +3324,7 @@ mod program {
                 Err(errno_from(ret))
             }
         }) {
-            Ok(()) => begin_rename(browser, rename, font, theme, viewport),
+            Ok(()) => begin_rename(browser, rename, scale, theme, viewport),
             Err(err) => {
                 let msg = err.message();
                 let _ = writeln!(Stderr, "files: {msg}");
@@ -3355,14 +3340,14 @@ mod program {
     fn begin_rename<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
     ) -> (bool, bool) {
         let Some(name) = browser.selected_name().map(ToString::to_string) else {
             return (false, false);
         };
-        tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
         let mut field = TextField::new().with_text(&name).with_max_len(FS_NAME_MAX);
         field.set_focused(true);
         *rename = Some(field);
@@ -3445,12 +3430,12 @@ mod program {
     fn apply_permission_toggle<S: DirectorySource>(
         browser: &mut Browser<S>,
         properties: &mut Option<Properties>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
-        let Some(bit) = permission_cell_at(viewport, font, theme, point) else {
+        let Some(bit) = permission_cell_at(viewport, scale, theme, point) else {
             return (false, false);
         };
         let Some(props) = properties.as_ref() else {
@@ -3494,16 +3479,16 @@ mod program {
     fn apply_properties_pointer<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
-        if permission_cell_at(viewport, font, theme, point).is_some() {
+        if permission_cell_at(viewport, scale, theme, point).is_some() {
             return apply_permission_toggle(
                 browser,
                 &mut overlays.properties,
-                font,
+                scale,
                 theme,
                 viewport,
                 point,
@@ -3511,7 +3496,7 @@ mod program {
         }
         if overlays.can_chown {
             if let Some(props) = overlays.properties.as_ref() {
-                if let Some(field) = owner_field_at(props, viewport, font, theme, point) {
+                if let Some(field) = owner_field_at(props, viewport, scale, theme, point) {
                     return begin_owner_edit(props, &mut overlays.owner, field);
                 }
             }
@@ -3647,7 +3632,7 @@ mod program {
     fn apply_rename_key<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
-        font: BitmapFont,
+        scale: Scale,
         theme: &Theme,
         viewport: Rect,
         key: KeyValue,
@@ -3675,7 +3660,7 @@ mod program {
                     // closes the editor; the selection follows the entry.
                     Ok(()) | Err(RenameError::Unchanged) => {
                         *rename = None;
-                        tairix_browse::render::reveal_selection(browser, font, theme, viewport);
+                        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
                         (true, false)
                     }
                     // A refused rename stays open with the honest reason shown

@@ -34,7 +34,6 @@ use core::cmp::Ordering;
 
 use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
-use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -1277,10 +1276,7 @@ impl TasksSection {
             return Vec::new();
         };
         (0..self.rail.len())
-            .filter_map(|slot| {
-                self.rail
-                    .item_rect(content, slot, ctx.scale, ctx.theme, ctx.font)
-            })
+            .filter_map(|slot| self.rail.item_rect(content, slot, ctx.scale, ctx.theme))
             .collect()
     }
 
@@ -1313,9 +1309,7 @@ impl TasksSection {
         let field = Self::footer_split(&ctx.frame)
             .grouping
             .unwrap_or(ctx.frame.footer);
-        let (w, h) = self
-            .grouping
-            .popup_size(field.width, ctx.scale, ctx.theme, ctx.font);
+        let (w, h) = self.grouping.popup_size(field.width, ctx.scale, ctx.theme);
         // A footer sits at the bottom of the content, so the list opens
         // upward from the field rather than off the bottom of the window.
         let top = field.top().saturating_sub(to_i32(h)).max(ctx.bounds.top());
@@ -1339,7 +1333,7 @@ impl TasksSection {
         let anchored = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
             .and_then(|content| {
                 self.rail
-                    .item_rect(content, Self::group_slot(), ctx.scale, ctx.theme, ctx.font)
+                    .item_rect(content, Self::group_slot(), ctx.scale, ctx.theme)
             });
         anchored.unwrap_or(ctx.frame.primary)
     }
@@ -1797,36 +1791,26 @@ impl SectionView for TasksSection {
     }
 
     /// Paint the census tiles the location band seated for this section.
-    fn render_band(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    fn render_band(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
         for (tile, rect) in self
             .census
             .iter()
             .zip(self.census_rects(rect, scale, theme))
         {
-            tile.render(surface, rect, scale, theme, font);
+            tile.render(surface, rect, scale, theme);
         }
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
         let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
-        self.filters
-            .render(surface, filters, ctx.scale, ctx.theme, ctx.font);
-        self.search
-            .render(surface, search, ctx.scale, ctx.theme, ctx.font);
+        self.filters.render(surface, filters, ctx.scale, ctx.theme);
+        self.search.render(surface, search, ctx.scale, ctx.theme);
 
         self.header.render(
             surface,
             Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
             ctx.scale,
             ctx.theme,
-            ctx.font,
             &COLUMN_WEIGHTS,
         );
 
@@ -1836,14 +1820,9 @@ impl SectionView for TasksSection {
                 break;
             };
             let item = info.item_rect(slot);
-            entry.row.render(
-                surface,
-                item,
-                ctx.scale,
-                ctx.theme,
-                ctx.font,
-                &COLUMN_WEIGHTS,
-            );
+            entry
+                .row
+                .render(surface, item, ctx.scale, ctx.theme, &COLUMN_WEIGHTS);
             if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
                 entry.spark.render(surface, rect, ctx.scale, ctx.theme);
             }
@@ -1854,24 +1833,22 @@ impl SectionView for TasksSection {
         // and its caption rather than appearing and vanishing under the
         // reader as the selection changes.
         if let Some(rail) = ctx.frame.rail {
-            self.rail_panel
-                .render(surface, rail, ctx.scale, ctx.theme, ctx.font);
+            self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
             if let Some(content) =
                 Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
             {
-                self.rail
-                    .render(surface, content, ctx.scale, ctx.theme, ctx.font);
+                self.rail.render(surface, content, ctx.scale, ctx.theme);
             }
         }
 
         let footer = Self::footer_split(&ctx.frame);
         self.count
-            .render(surface, footer.count, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, footer.count, ctx.scale, ctx.theme);
         self.auto_refresh
-            .render(surface, footer.refresh, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, footer.refresh, ctx.scale, ctx.theme);
         if let Some(grouping) = footer.grouping {
             self.grouping
-                .render(surface, grouping, ctx.scale, ctx.theme, ctx.font);
+                .render(surface, grouping, ctx.scale, ctx.theme);
         }
     }
 
@@ -1884,7 +1861,7 @@ impl SectionView for TasksSection {
         }
         if self
             .search
-            .on_pointer(event, search, ctx.scale, ctx.theme, ctx.font)
+            .on_pointer(event, search, ctx.scale, ctx.theme)
             .is_some()
         {
             self.arrange();
@@ -1930,9 +1907,8 @@ impl SectionView for TasksSection {
         if let Some(content) =
             Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
         {
-            if let Some(RailAction::Activate { index }) = self
-                .rail
-                .on_pointer(event, content, ctx.scale, ctx.theme, ctx.font)
+            if let Some(RailAction::Activate { index }) =
+                self.rail.on_pointer(event, content, ctx.scale, ctx.theme)
             {
                 return self.invoke_rail(index);
             }
@@ -2010,24 +1986,14 @@ impl SectionView for TasksSection {
                 self.grouping_popup_rect(ctx),
                 ctx.scale,
                 ctx.theme,
-                ctx.font,
             );
         }
         let Some(popup) = &self.popup else {
             return;
         };
         let anchor = self.anchor_rect(ctx);
-        let rect = Switchboard::popup_rect(
-            &popup.menu,
-            anchor,
-            ctx.bounds,
-            ctx.scale,
-            ctx.theme,
-            ctx.font,
-        );
-        popup
-            .menu
-            .render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+        let rect = Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
+        popup.menu.render(surface, rect, ctx.scale, ctx.theme);
     }
 
     /// A primary press outside the popup's bounds dismisses it without
@@ -2053,14 +2019,8 @@ impl SectionView for TasksSection {
         }
         let popup = self.popup.as_ref()?;
         let anchor = self.anchor_rect(ctx);
-        let popup_rect = Switchboard::popup_rect(
-            &popup.menu,
-            anchor,
-            ctx.bounds,
-            ctx.scale,
-            ctx.theme,
-            ctx.font,
-        );
+        let popup_rect =
+            Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
 
         if let InputEvent::PointerPressed {
             button: PointerButton::Primary,

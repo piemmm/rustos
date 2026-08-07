@@ -13,7 +13,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -22,10 +21,6 @@ use tairix_theme::{Rgba, Theme};
 use crate::nav::{Breadcrumb, BreadcrumbAction, Crumb};
 use crate::state::{AuthorityState, ControlState};
 use crate::testkit::high_contrast;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -45,7 +40,7 @@ fn bounds(w: u32, h: u32) -> Rect {
 
 fn render(bc: &Breadcrumb, theme: &Theme, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    bc.render(&mut surface, bounds(w, h), Scale::ONE, theme, font());
+    bc.render(&mut surface, bounds(w, h), Scale::ONE, theme);
     surface
 }
 
@@ -54,8 +49,8 @@ fn render(bc: &Breadcrumb, theme: &Theme, w: u32, h: u32) -> Surface {
 /// check is `<=`), so a test using this can reason about pointer positions
 /// without needing elision itself.
 fn render_full(bc: &Breadcrumb, theme: &Theme) -> Surface {
-    let w = bc.measured_width(Scale::ONE, theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, theme, font());
+    let w = bc.measured_width(Scale::ONE, theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, theme);
     render(bc, theme, w, h)
 }
 
@@ -111,12 +106,9 @@ fn empty_trail_reports_empty_and_no_current() {
 #[test]
 fn measured_height_grows_with_scale() {
     let theme = Theme::dark();
-    let unit = Breadcrumb::measured_height(Scale::ONE, &theme, font());
-    let doubled = Breadcrumb::measured_height(
-        Scale::from_percent(200).expect("valid scale"),
-        &theme,
-        font(),
-    );
+    let unit = Breadcrumb::measured_height(Scale::ONE, &theme);
+    let doubled =
+        Breadcrumb::measured_height(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit);
 }
 
@@ -125,17 +117,14 @@ fn measured_width_grows_with_more_or_longer_crumbs() {
     let theme = Theme::dark();
     let short = trail(&["Root", "file.txt"]);
     let long = trail(&["Root", "Docs", "Projects", "file.txt"]);
-    assert!(
-        long.measured_width(Scale::ONE, &theme, font())
-            > short.measured_width(Scale::ONE, &theme, font())
-    );
+    assert!(long.measured_width(Scale::ONE, &theme) > short.measured_width(Scale::ONE, &theme));
 }
 
 #[test]
 fn measured_width_of_empty_trail_is_zero() {
     let theme = Theme::dark();
     let bc = Breadcrumb::new(Vec::new());
-    assert_eq!(bc.measured_width(Scale::ONE, &theme, font()), 0);
+    assert_eq!(bc.measured_width(Scale::ONE, &theme), 0);
 }
 
 // --- The current (trailing) crumb never activates -----------------------
@@ -144,19 +133,19 @@ fn measured_width_of_empty_trail_is_zero() {
 fn current_crumb_never_activates_by_pointer() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let point = Point::new(xi(w) - 1, xi(h) / 2);
     assert_eq!(
-        bc.crumb_at(b, Scale::ONE, &theme, font(), point),
+        bc.crumb_at(b, Scale::ONE, &theme, point),
         Some(2),
         "the point must land on the current crumb's own cell"
     );
-    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, font());
-    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme);
+    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme), None);
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
         None,
         "pressing the current location is a no-op"
     );
@@ -181,13 +170,13 @@ fn single_crumb_trail_has_no_activatable_ancestor() {
     assert_eq!(bc.on_key(Key::Named(NamedKey::Right)), None);
     assert_eq!(bc.focus(), None);
     let theme = Theme::dark();
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let point = Point::new(1, xi(h) / 2);
-    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, font());
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font());
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme);
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
+    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
 }
 
 // --- Hover and focus rendering differ from rest --------------------------
@@ -196,16 +185,16 @@ fn single_crumb_trail_has_no_activatable_ancestor() {
 fn hover_changes_the_rendered_ancestor() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let rest = render(&bc, &theme, w, h);
 
     assert_eq!(
-        bc.crumb_at(b, Scale::ONE, &theme, font(), Point::new(1, xi(h) / 2)),
+        bc.crumb_at(b, Scale::ONE, &theme, Point::new(1, xi(h) / 2)),
         Some(0)
     );
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, font());
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
     let hovered = render(&bc, &theme, w, h);
     assert_ne!(
         rest.pixels(),
@@ -218,11 +207,11 @@ fn hover_changes_the_rendered_ancestor() {
 fn hovering_the_current_crumb_changes_nothing() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let rest = render(&bc, &theme, w, h);
-    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme, font());
+    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme);
     let after = render(&bc, &theme, w, h);
     assert_eq!(
         rest.pixels(),
@@ -235,18 +224,12 @@ fn hovering_the_current_crumb_changes_nothing() {
 fn keyboard_focus_draws_a_ring_distinct_from_rest_and_from_hover() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let rest = render(&bc, &theme, w, h);
 
     let mut hovered_only = bc.clone();
-    hovered_only.on_pointer(
-        &moved(1, xi(h) / 2),
-        bounds(w, h),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    hovered_only.on_pointer(&moved(1, xi(h) / 2), bounds(w, h), Scale::ONE, &theme);
     let hovered = render(&hovered_only, &theme, w, h);
 
     bc.set_focus(Some(0));
@@ -283,9 +266,9 @@ fn disabled_ancestor_refuses_activation_by_pointer() {
     let surface = render_full(&bc, &theme);
     let (w, h) = (surface.width(), surface.height());
     let b = bounds(w, h);
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, font());
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font());
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
+    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
 }
 
 #[test]
@@ -378,17 +361,17 @@ fn enter_and_space_activate_the_focused_ancestor() {
 fn hover_then_click_activates_an_ancestor() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let point = Point::new(1, xi(h) / 2);
     assert_eq!(
-        bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, font()),
+        bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme),
         None
     );
-    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme), None);
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
         Some(BreadcrumbAction::Activate { index: 0 })
     );
 }
@@ -397,14 +380,14 @@ fn hover_then_click_activates_an_ancestor() {
 fn release_outside_the_pressed_crumb_does_not_activate() {
     let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, font());
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font());
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
     // Slide onto the current (trailing) crumb before releasing.
-    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme, font());
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme);
+    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
 }
 
 // --- Elision --------------------------------------------------------------
@@ -416,7 +399,7 @@ fn release_outside_the_pressed_crumb_does_not_activate() {
 fn sweep(bc: &Breadcrumb, b: Rect, theme: &Theme, h: u32) -> Vec<usize> {
     let mut seen = Vec::new();
     for x in 0..b.width {
-        if let Some(idx) = bc.crumb_at(b, Scale::ONE, theme, font(), Point::new(xi(x), xi(h) / 2)) {
+        if let Some(idx) = bc.crumb_at(b, Scale::ONE, theme, Point::new(xi(x), xi(h) / 2)) {
             if seen.last() != Some(&idx) {
                 seen.push(idx);
             }
@@ -441,11 +424,11 @@ fn elision_keeps_the_current_crumb_and_activates_the_newest_hidden_ancestor() {
     ];
     let mut bc = trail(&labels);
     let last = bc.len() - 1;
-    let full_w = bc.measured_width(Scale::ONE, &theme, font());
+    let full_w = bc.measured_width(Scale::ONE, &theme);
     // A quarter of the unelided width comfortably forces elision while
     // still fitting the ellipsis and a couple of trailing crumbs.
     let w = full_w / 4;
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
 
     let seen = sweep(&bc, b, &theme, h);
@@ -481,10 +464,10 @@ fn elision_keeps_the_current_crumb_and_activates_the_newest_hidden_ancestor() {
 
     // Activating the leading (ellipsis) cell reaches the newest ancestor it
     // hides.
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, font());
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, font());
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()),
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
         Some(BreadcrumbAction::Activate {
             index: newest_hidden
         })
@@ -495,8 +478,8 @@ fn elision_keeps_the_current_crumb_and_activates_the_newest_hidden_ancestor() {
 fn a_wide_bound_elides_nothing() {
     let theme = Theme::dark();
     let bc = trail(&["Root", "Docs", "Projects", "file.txt"]);
-    let full_w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let full_w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let seen = sweep(&bc, bounds(full_w, h), &theme, h);
     // Every crumb shows individually: no ellipsis stands in for any of them.
     assert_eq!(seen, vec![0, 1, 2, 3]);
@@ -506,7 +489,7 @@ fn a_wide_bound_elides_nothing() {
 fn extremely_narrow_bounds_show_only_the_truncated_current_crumb() {
     let theme = Theme::dark();
     let bc = trail(&["Alpha", "Bravo", "Charlie", "much-longer-current-name.txt"]);
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     // Too small even for the leading ellipsis plus the current crumb.
     let w = 40;
     let b = bounds(w, h);
@@ -528,12 +511,9 @@ fn zero_width_bounds_paint_nothing_and_hit_test_nothing() {
     let bc = trail(&["Root", "file.txt"]);
     let mut surface = Surface::new(20, 40).expect("surface");
     let b = Rect::new(0, 0, 0, 40);
-    bc.render(&mut surface, b, Scale::ONE, &theme, font());
+    bc.render(&mut surface, b, Scale::ONE, &theme);
     assert!(surface.pixels().iter().all(|&p| p == Pixel::TRANSPARENT));
-    assert_eq!(
-        bc.crumb_at(b, Scale::ONE, &theme, font(), Point::new(0, 0)),
-        None
-    );
+    assert_eq!(bc.crumb_at(b, Scale::ONE, &theme, Point::new(0, 0)), None);
 }
 
 #[test]
@@ -542,31 +522,22 @@ fn zero_height_bounds_paint_nothing_and_hit_test_nothing() {
     let bc = trail(&["Root", "file.txt"]);
     let mut surface = Surface::new(40, 20).expect("surface");
     let b = Rect::new(0, 0, 40, 0);
-    bc.render(&mut surface, b, Scale::ONE, &theme, font());
+    bc.render(&mut surface, b, Scale::ONE, &theme);
     assert!(surface.pixels().iter().all(|&p| p == Pixel::TRANSPARENT));
-    assert_eq!(
-        bc.crumb_at(b, Scale::ONE, &theme, font(), Point::new(0, 0)),
-        None
-    );
+    assert_eq!(bc.crumb_at(b, Scale::ONE, &theme, Point::new(0, 0)), None);
 }
 
 #[test]
 fn bounds_narrower_than_one_crumb_render_without_panicking() {
     let theme = Theme::dark();
     let bc = trail(&["Root", "Docs", "file.txt"]);
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let w = 2;
     let mut surface = Surface::new(w, h).expect("surface");
-    bc.render(&mut surface, bounds(w, h), Scale::ONE, &theme, font());
+    bc.render(&mut surface, bounds(w, h), Scale::ONE, &theme);
     // No panic, and the crumb_at contract still holds: any hit must resolve
     // to the trailing (current) crumb, since only it can fit at all.
-    let hit = bc.crumb_at(
-        bounds(w, h),
-        Scale::ONE,
-        &theme,
-        font(),
-        Point::new(0, xi(h) / 2),
-    );
+    let hit = bc.crumb_at(bounds(w, h), Scale::ONE, &theme, Point::new(0, xi(h) / 2));
     assert!(hit.is_none() || hit == Some(2));
 }
 
@@ -577,10 +548,10 @@ fn empty_trail_renders_nothing_and_answers_none_everywhere() {
     let theme = Theme::dark();
     let bc = Breadcrumb::new(Vec::new());
     let mut surface = Surface::new(80, 40).expect("surface");
-    bc.render(&mut surface, bounds(80, 40), Scale::ONE, &theme, font());
+    bc.render(&mut surface, bounds(80, 40), Scale::ONE, &theme);
     assert!(surface.pixels().iter().all(|&p| p == Pixel::TRANSPARENT));
     assert_eq!(
-        bc.crumb_at(bounds(80, 40), Scale::ONE, &theme, font(), Point::new(5, 5)),
+        bc.crumb_at(bounds(80, 40), Scale::ONE, &theme, Point::new(5, 5)),
         None
     );
     assert_eq!(bc.current(), None);
@@ -588,7 +559,7 @@ fn empty_trail_renders_nothing_and_answers_none_everywhere() {
     let mut bc = bc;
     assert_eq!(bc.on_key(Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        bc.on_pointer(&moved(5, 5), bounds(80, 40), Scale::ONE, &theme, font()),
+        bc.on_pointer(&moved(5, 5), bounds(80, 40), Scale::ONE, &theme),
         None
     );
 }
@@ -620,10 +591,10 @@ fn renders_at_a_larger_scale_without_panicking() {
     let theme = Theme::dark();
     let scale = Scale::from_percent(200).expect("valid scale");
     let bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(scale, &theme, font());
-    let h = Breadcrumb::measured_height(scale, &theme, font());
+    let w = bc.measured_width(scale, &theme);
+    let h = Breadcrumb::measured_height(scale, &theme);
     let mut surface = Surface::new(w, h).expect("surface");
-    bc.render(&mut surface, bounds(w, h), scale, &theme, font());
+    bc.render(&mut surface, bounds(w, h), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
 
@@ -633,28 +604,16 @@ fn renders_at_a_larger_scale_without_panicking() {
 fn hit_test_bookkeeping_is_invisible_to_the_trail() {
     let theme = Theme::dark();
     let bc = trail(&["Root", "Docs", "file.txt"]);
-    let w = bc.measured_width(Scale::ONE, &theme, font());
-    let h = Breadcrumb::measured_height(Scale::ONE, &theme, font());
+    let w = bc.measured_width(Scale::ONE, &theme);
+    let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
 
     // Two samples clear of the trail, so only the recorded coordinate
     // differs — that is not a drawn property.
     let mut a = bc.clone();
     let mut b_copy = bc.clone();
-    a.on_pointer(
-        &moved(xi(w) + 40, xi(h) + 40),
-        b,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    b_copy.on_pointer(
-        &moved(xi(w) + 90, xi(h) + 12),
-        b,
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    a.on_pointer(&moved(xi(w) + 40, xi(h) + 40), b, Scale::ONE, &theme);
+    b_copy.on_pointer(&moved(xi(w) + 90, xi(h) + 12), b, Scale::ONE, &theme);
     assert_eq!(a, b_copy);
     assert_eq!(
         render(&a, &theme, w, h).pixels(),

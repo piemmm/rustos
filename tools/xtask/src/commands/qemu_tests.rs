@@ -7988,7 +7988,8 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // select it and repaint — correct app behaviour, but it would add presents
     // the fixed count gate must not see.)
     let path_bar_y =
-        tairix_browse::render::toolbar_height(shell.session().active_theme()).saturating_add(4);
+        tairix_browse::render::toolbar_height(Scale::ONE, shell.session().active_theme())
+            .saturating_add(4);
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
     let window = Point::new(
         files_client.left() + (tairix_browse::WIN_WIDTH / 2) as i32,

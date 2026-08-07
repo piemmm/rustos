@@ -73,7 +73,6 @@ use tairix_browse::{
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::Surface;
@@ -411,7 +410,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// `work_area` is the screen with the taskbar's band removed, so an icon
     /// can never be drawn under the bar or hit-tested through it.
     #[must_use]
-    pub fn layout(&self, work_area: Rect, scale: Scale, font: BitmapFont) -> GridView {
+    pub fn layout(&self, work_area: Rect, scale: Scale, theme: &Theme) -> GridView {
         let margin = scale.scale_length(DESKTOP_MARGIN);
         let viewport = Rect::new(
             work_area.origin.x.saturating_add_unsigned(margin),
@@ -425,7 +424,7 @@ impl<S: DirectorySource> Desktop<S> {
         // file manager's spreading grid deliberately does.
         GridView::new(
             viewport,
-            grid_metrics(font),
+            grid_metrics(scale, theme),
             0,
             self.entries.len(),
             grid_flow(self.settings.icons),
@@ -451,7 +450,6 @@ impl<S: DirectorySource> Desktop<S> {
         layout: &GridView,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         artwork: &mut dyn IconArtwork,
     ) {
         // Spelled once for the whole pass; a bundle icon appends its own leaf
@@ -470,7 +468,7 @@ impl<S: DirectorySource> Desktop<S> {
             let side = IconTile::icon_side(bounds, scale, theme);
             let request = entry_icon_request(&dir, entry, kind, &mut bundle);
             let art = artwork.artwork(request, side);
-            tile.render(surface, bounds, scale, theme, font, art);
+            tile.render(surface, bounds, scale, theme, art);
         }
     }
 

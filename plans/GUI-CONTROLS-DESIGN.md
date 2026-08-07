@@ -316,6 +316,8 @@ A `SizeToggle` renders the action that will occur next: `Maximize` while restore
 
 Every visible property must resolve from the active `Theme` plus control state. A control must not hard-code colors, radii, font sizes, or animation timings outside test fixtures.
 
+**Nor may a control accept a visible property from its caller.** A control takes no typeface argument: it names the job its text does (a `TextRole`) and the theme answers with the face, sized through the one shared `Scale`. Hard-coding a face and accepting one are the same defect wearing different clothes — both put a visible property somewhere other than the theme — and accepting one is the more dangerous, because it launders the violation through a call site that looks innocent. It is not a theoretical risk: the graphical terminal drew the shared menu and settings sheet in its own monospace grid face, at the user's terminal text size, simply because that was the face it had to hand. An application draws its *own* content in whatever face it likes; a shared control is desktop furniture and reads as such wherever it appears.
+
 ```rust
 pub struct Theme {
     pub palette: Palette,

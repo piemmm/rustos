@@ -15,7 +15,6 @@
 
 use alloc::vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -28,10 +27,6 @@ use crate::testkit::high_contrast;
 const W: u32 = 240;
 const H: u32 = 28;
 const EACH: u32 = W / 3;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -49,13 +44,7 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
 
 fn render(tabs: &Tabs, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
@@ -147,13 +136,7 @@ fn loading_tab_shows_a_lower_heat_seam() {
         Tab::new("Busy").with_state(ControlState::idle().with_activity(ActivityState::Working)),
     ]);
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, &theme);
     let each = W / 2;
     assert!(region_has(
         &surface,
@@ -168,13 +151,7 @@ fn modified_tab_shows_a_bead() {
     let theme = Theme::dark();
     let tabs = Tabs::new(vec![Tab::new("Doc").with_modified(true), Tab::new("Other")]);
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, &theme);
     let each = W / 2;
     // The modified bead sits at the top-trailing corner of tab 0.
     assert!(region_has(
@@ -312,13 +289,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let mut tabs = three_tabs();
     tabs.set_selected(0);
     let mut surface = Surface::new(W, H * 2).expect("surface");
-    tabs.render(
-        &mut surface,
-        Rect::new(0, 0, W, H * 2),
-        scale,
-        &theme,
-        font(),
-    );
+    tabs.render(&mut surface, Rect::new(0, 0, W, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().accent)));
 }
 
@@ -383,7 +354,7 @@ fn vertical_three() -> Tabs {
 /// Render `tabs` into its own `w`×`h` surface at `scale`.
 fn render_in(tabs: &Tabs, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, w, h), scale, theme, font());
+    tabs.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
     surface
 }
 
@@ -666,16 +637,16 @@ fn measured_extent_covers_both_orientations() {
     let theme = Theme::dark();
     let horizontal = three_tabs();
     let vertical = vertical_three();
-    let across = horizontal.measured_extent(Scale::ONE, &theme, font());
-    let down = vertical.measured_extent(Scale::ONE, &theme, font());
+    let across = horizontal.measured_extent(Scale::ONE, &theme);
+    let down = vertical.measured_extent(Scale::ONE, &theme);
     assert!(across >= Scale::ONE.scale_length(theme.metrics().control_height));
     assert!(
         down > across,
         "a column's fixed width also reserves the bead's footprint beside its labels"
     );
     let dense = Scale::from_percent(200).expect("valid scale");
-    assert!(horizontal.measured_extent(dense, &theme, font()) > across);
-    assert!(vertical.measured_extent(dense, &theme, font()) > down);
+    assert!(horizontal.measured_extent(dense, &theme) > across);
+    assert!(vertical.measured_extent(dense, &theme) > down);
 }
 
 #[test]
@@ -685,14 +656,14 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
         for (w, h) in [(0, VH), (VW, 0), (0, 0)] {
             let bounds = Rect::new(0, 0, w, h);
             let mut surface = Surface::new(VW, VH).expect("surface");
-            tabs.render(&mut surface, bounds, Scale::ONE, &theme, font());
+            tabs.render(&mut surface, bounds, Scale::ONE, &theme);
             assert!(is_blank(&surface));
             assert_eq!(tabs.tab_at(bounds, Point::new(0, 0)), None);
         }
         // An off-surface origin is refused rather than wrapped into the surface.
         let off = Rect::new(-4, -4, VW, VH);
         let mut surface = Surface::new(VW, VH).expect("surface");
-        tabs.render(&mut surface, off, Scale::ONE, &theme, font());
+        tabs.render(&mut surface, off, Scale::ONE, &theme);
         assert!(is_blank(&surface));
         assert_eq!(tabs.tab_at(off, Point::new(0, 0)), None);
         // A bounds smaller than the surface leaves the rest of it untouched.
@@ -702,7 +673,6 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
             Rect::new(0, 0, VW / 2, VH / 2),
             Scale::ONE,
             &theme,
-            font(),
         );
         assert!(untouched_outside(&surface, VW / 2, VH / 2));
     }

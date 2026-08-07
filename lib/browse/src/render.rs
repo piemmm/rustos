@@ -2,11 +2,13 @@
 //!
 //! [`render`] turns a [`Browser`]'s path and entries into a premultiplied-alpha
 //! [`Surface`] sized to the app's content viewport, using the active theme's
-//! [`Palette`] for the path bar and the shared `lib/controls` collection
-//! controls for the items. The surface is the window manager's to place and
-//! round: the browser paints a *rectangular* buffer and the compositor applies
-//! any corner radius through its single anti-aliased rounded-corner path. There
-//! is no rounding here.
+//! [`Palette`](tairix_theme::Palette) for the path bar and the shared
+//! `lib/controls` collection controls for the items, every length converted
+//! from logical pixels through the desktop's one [`Scale`]. The theme picks
+//! the text face, never the caller. The surface is the window manager's to
+//! place and round: the browser paints a *rectangular* buffer and the
+//! compositor applies any corner radius through its single anti-aliased
+//! rounded-corner path. There is no rounding here.
 //!
 //! The top row is a path bar showing the current directory; below it the
 //! current directory is drawn in whichever [`ViewMode`] the browser holds — a
@@ -46,7 +48,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
-use tairix_theme::{Palette, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
@@ -68,10 +70,10 @@ use crate::properties::Properties;
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 
-/// Padding in pixels between the path bar's edge and its label text.
+/// Padding between the path bar's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
 
-/// Vertical padding above and below a row's glyphs.
+/// Vertical padding above and below a row's glyphs, in logical pixels.
 const ROW_PADDING: u32 = 2;
 
 /// Relative widths of the list view's name, size, and modified columns.
@@ -104,6 +106,10 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// [`NoArtwork`](tairix_icon::NoArtwork), which always returns `None` (every
 /// tile then draws its built-in glyph).
 ///
+/// `scale` is the desktop's density factor: every chrome length here is
+/// authored logically and converted through it, and the text face is the one
+/// `theme`'s ladder names at that scale — the caller never chooses a typeface.
+///
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
 /// dimensions cannot be allocated (a surface that could never exist), so the
@@ -111,50 +117,42 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 #[must_use]
 pub fn render<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
     chrome: &ManagerChrome<'_>,
     artwork: &mut dyn IconArtwork,
 ) -> Option<Surface> {
-    let row_height = row_height(font);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    let area = content_area(viewport, theme, font, chrome.sidebar);
+    let area = content_area(viewport, scale, theme, chrome.sidebar);
     if let (Some(places), Some(view)) = (
         chrome.sidebar,
-        sidebar_view(viewport, theme, font, chrome.sidebar),
+        sidebar_view(viewport, scale, theme, chrome.sidebar),
     ) {
         let selected = places.index_of(browser.components());
-        draw_sidebar(&mut surface, theme, font, places, &view, selected, artwork);
+        draw_sidebar(&mut surface, scale, theme, places, &view, selected, artwork);
     }
     draw_toolbar(
         &mut surface,
+        scale,
         theme,
-        font,
         browser,
         area,
         chrome.tools,
         chrome.tool_model,
     );
-    draw_path_bar(
-        &mut surface,
-        font,
-        palette,
-        browser,
-        area,
-        toolbar_height(theme),
-        row_height,
-    );
+    draw_path_bar(&mut surface, scale, theme, font, browser, area);
 
-    let content = content_viewport(area, theme);
+    let content = content_viewport(area, scale, theme);
     match browser.view_mode() {
-        ViewMode::List => draw_list(&mut surface, font, theme, browser, content),
-        ViewMode::Grid => draw_grid(&mut surface, font, theme, browser, content, artwork),
+        ViewMode::List => draw_list(&mut surface, scale, theme, browser, content),
+        ViewMode::Grid => draw_grid(&mut surface, scale, theme, browser, content, artwork),
     }
-    draw_scrollbar(&mut surface, theme, browser, font, area);
+    draw_scrollbar(&mut surface, scale, theme, browser, area);
     Some(surface)
 }
 
@@ -196,14 +194,12 @@ impl ManagerChrome<'_> {
 }
 
 /// The width of the places rail: a row's icon column, the widest fixed place
-/// label, and the row padding around them, all measured from the active font
+/// label, and the row padding around them, all measured from the drawn face
 /// and the theme's metrics rather than a fixed pixel count, so the rail tracks
 /// the interface's density. Clamped to a third of the window so a narrow
 /// window keeps most of its width for the listing.
-fn sidebar_width(theme: &Theme, font: BitmapFont, viewport_width: u32) -> u32 {
-    let pad = Scale::ONE
-        .scale_length(theme.metrics().control_inset)
-        .max(1);
+fn sidebar_width(scale: Scale, theme: &Theme, font: BitmapFont, viewport_width: u32) -> u32 {
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
     font.glyph_height()
         .saturating_add(font.text_width(places::WIDEST_FIXED_LABEL))
         .saturating_add(pad.saturating_mul(3))
@@ -213,8 +209,8 @@ fn sidebar_width(theme: &Theme, font: BitmapFont, viewport_width: u32) -> u32 {
 /// The height of the band separating the user's own places from the mounted
 /// volumes: the theme's control gap, so the separation reads at the same
 /// rhythm as every other gap in the interface.
-fn separator_height(theme: &Theme) -> u32 {
-    Scale::ONE.scale_length(theme.metrics().control_gap).max(1)
+fn separator_height(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
 /// The places rail's geometry for `sidebar`, or `None` when there is no rail
@@ -226,19 +222,20 @@ fn separator_height(theme: &Theme) -> u32 {
 #[must_use]
 pub fn sidebar_view(
     viewport: Rect,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     sidebar: Option<&Places>,
 ) -> Option<SidebarView> {
     let places = sidebar?;
     if places.is_empty() {
         return None;
     }
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     Some(SidebarView::new(
         viewport,
-        sidebar_width(theme, font, viewport.width),
-        row_height(font),
-        separator_height(theme),
+        sidebar_width(scale, theme, font, viewport.width),
+        row_height(scale, theme),
+        separator_height(scale, theme),
         places.len(),
         places.volume_start(),
     ))
@@ -254,13 +251,8 @@ pub fn sidebar_view(
 /// them. A caller with no rail gets the window back unchanged, so a view
 /// without a sidebar is laid out precisely as it was before there was one.
 #[must_use]
-pub fn content_area(
-    viewport: Rect,
-    theme: &Theme,
-    font: BitmapFont,
-    sidebar: Option<&Places>,
-) -> Rect {
-    let Some(view) = sidebar_view(viewport, theme, font, sidebar) else {
+pub fn content_area(viewport: Rect, scale: Scale, theme: &Theme, sidebar: Option<&Places>) -> Rect {
+    let Some(view) = sidebar_view(viewport, scale, theme, sidebar) else {
         return viewport;
     };
     let rail = view.width();
@@ -281,12 +273,12 @@ pub fn content_area(
 #[must_use]
 pub fn sidebar_index_at(
     viewport: Rect,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     sidebar: Option<&Places>,
     point: Point,
 ) -> Option<usize> {
-    let view = sidebar_view(viewport, theme, font, sidebar)?;
+    let view = sidebar_view(viewport, scale, theme, sidebar)?;
     let x = u32::try_from(point.x).ok()?;
     let y = u32::try_from(point.y).ok()?;
     view.index_at(x, y)
@@ -303,8 +295,8 @@ pub fn sidebar_index_at(
 /// same set [`SidebarView::index_at`] will resolve a click to.
 fn draw_sidebar(
     surface: &mut Surface,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     places: &Places,
     view: &SidebarView,
     selected: Option<usize>,
@@ -322,9 +314,7 @@ fn draw_sidebar(
         palette.surface_raised.into(),
     );
     if let Some(band) = view.separator_rect() {
-        let pad = Scale::ONE
-            .scale_length(theme.metrics().control_inset)
-            .max(1);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let x = u32::try_from(band.origin.x)
             .unwrap_or(0)
             .saturating_add(pad);
@@ -344,9 +334,9 @@ fn draw_sidebar(
             break;
         };
         let row = place_row(place, places, index, selected);
-        let side = row.icon_side(bounds, Scale::ONE, theme, font);
+        let side = row.icon_side(bounds, scale, theme);
         let art = artwork.artwork(IconRequest::kind(place.icon()), side);
-        row.render(surface, bounds, Scale::ONE, theme, font, art);
+        row.render(surface, bounds, scale, theme, art);
     }
 }
 
@@ -391,13 +381,15 @@ fn place_row(place: &Place, places: &Places, index: usize, selected: Option<usiz
 /// click to exactly the crumb painted here (§2.2).
 fn draw_path_bar<S: DirectorySource>(
     surface: &mut Surface,
+    scale: Scale,
+    theme: &Theme,
     font: BitmapFont,
-    palette: &Palette,
     browser: &Browser<S>,
     area: Rect,
-    top: u32,
-    row_height: u32,
 ) {
+    let palette = theme.palette();
+    let top = toolbar_height(scale, theme);
+    let row_height = row_height(scale, theme);
     let left = u32::try_from(area.origin.x).unwrap_or(0);
     surface.fill_rect(
         left,
@@ -409,7 +401,12 @@ fn draw_path_bar<S: DirectorySource>(
     let crumbs = chrome::breadcrumbs(browser);
     let widths = crumb_widths(&crumbs, font);
     let sep_width = font.text_width(SEPARATOR);
-    let placed = breadcrumb::layout(&widths, area.width, LABEL_PADDING, sep_width);
+    let placed = breadcrumb::layout(
+        &widths,
+        area.width,
+        scale.scale_length(LABEL_PADDING),
+        sep_width,
+    );
     let y = top.saturating_add(row_height.saturating_sub(font.glyph_height()) / 2);
     let y = to_i32(y);
     let left = to_i32(left);
@@ -467,22 +464,23 @@ fn crumb_widths(crumbs: &[chrome::Crumb], font: BitmapFont) -> Vec<u32> {
 #[must_use]
 pub fn crumb_at<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     point: Point,
 ) -> Option<usize> {
     let y = u32::try_from(point.y).ok()?;
-    let top = toolbar_height(theme);
-    if y < top || y >= top.saturating_add(row_height(font)) {
+    let top = toolbar_height(scale, theme);
+    if y < top || y >= top.saturating_add(row_height(scale, theme)) {
         return None;
     }
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let crumbs = chrome::breadcrumbs(browser);
     let widths = crumb_widths(&crumbs, font);
     let placed = breadcrumb::layout(
         &widths,
         viewport.width,
-        LABEL_PADDING,
+        scale.scale_length(LABEL_PADDING),
         font.text_width(SEPARATOR),
     );
     let index = breadcrumb::crumb_at(
@@ -502,12 +500,12 @@ pub fn crumb_at<S: DirectorySource>(
 /// giving the selected entry the row chrome's selection state.
 fn draw_list<S: DirectorySource>(
     surface: &mut Surface,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
 ) {
-    let view = list_view(browser, font, theme, content);
+    let view = list_view(browser, scale, theme, content);
     let visible = view.visible_rows();
     if visible == 0 {
         return;
@@ -526,7 +524,7 @@ fn draw_list<S: DirectorySource>(
             continue;
         };
         let row = entry_row(entry, selected == Some(index));
-        row.render(surface, bounds, Scale::ONE, theme, font, &COLUMNS);
+        row.render(surface, bounds, scale, theme, &COLUMNS);
     }
 }
 
@@ -555,13 +553,13 @@ fn draw_list<S: DirectorySource>(
 /// to know it sits at an edge.
 fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
     artwork: &mut dyn IconArtwork,
 ) {
-    let view = grid_view(browser, font, theme, content);
+    let view = grid_view(browser, scale, theme, content);
     let Some((area_x, area_y, area_w, area_h)) = area_pixels(view.tile_area()) else {
         return;
     };
@@ -588,9 +586,9 @@ fn draw_grid<S: DirectorySource>(
                 state.selection = SelectionState::Selected;
             }
             let tile = grid_tile(entry, state, kind);
-            let side = IconTile::icon_side(bounds, Scale::ONE, theme);
+            let side = IconTile::icon_side(bounds, scale, theme);
             let art = artwork.artwork(request, side);
-            tile.render(surface, bounds, Scale::ONE, theme, font, art);
+            tile.render(surface, bounds, scale, theme, art);
         }
     });
 }
@@ -614,12 +612,12 @@ fn area_pixels(area: Rect) -> Option<(u32, u32, u32, u32)> {
 /// (or with no scrollable content) simply draws nothing there.
 fn draw_scrollbar<S: DirectorySource>(
     surface: &mut Surface,
+    scale: Scale,
     theme: &Theme,
     browser: &Browser<S>,
-    font: BitmapFont,
     viewport: Rect,
 ) {
-    let Some(bounds) = scrollbar_bounds(theme, font, viewport) else {
+    let Some(bounds) = scrollbar_bounds(scale, theme, viewport) else {
         return;
     };
     // Draw the browser's own interactive bar (its live hover/drag/held state),
@@ -627,8 +625,8 @@ fn draw_scrollbar<S: DirectorySource>(
     // position match the listing exactly. The bar is `Copy`, so this reflects
     // the live interaction state without disturbing the stored offset owner.
     let mut bar: ScrollBar = *browser.scrollbar();
-    bar.set_model(scroll_model(browser, font, theme, viewport));
-    bar.render(surface, bounds, Scale::ONE, theme);
+    bar.set_model(scroll_model(browser, scale, theme, viewport));
+    bar.render(surface, bounds, scale, theme);
 }
 
 /// The screen rectangle (window-local) the vertical [`ScrollBar`] occupies: the
@@ -638,13 +636,13 @@ fn draw_scrollbar<S: DirectorySource>(
 /// [`scroll_pointer`] hit-tests against), so a pointer hit-test and the drawn
 /// bar can never disagree (§2.2).
 #[must_use]
-pub fn scrollbar_bounds(theme: &Theme, font: BitmapFont, viewport: Rect) -> Option<Rect> {
-    let gutter = gutter_width(theme, viewport.width);
-    let header = chrome_height(font, theme);
+pub fn scrollbar_bounds(scale: Scale, theme: &Theme, viewport: Rect) -> Option<Rect> {
+    let gutter = gutter_width(scale, theme, viewport.width);
+    let header = chrome_height(scale, theme);
     if gutter == 0 || viewport.height <= header {
         return None;
     }
-    let content = content_viewport(viewport, theme);
+    let content = content_viewport(viewport, scale, theme);
     Some(Rect::new(
         content.origin.x.saturating_add_unsigned(content.width),
         content
@@ -673,14 +671,14 @@ pub fn scrollbar_bounds(theme: &Theme, font: BitmapFont, viewport: Rect) -> Opti
 /// synthetic move to that position, exactly as the window controls are fed).
 pub fn scroll_pointer<S: DirectorySource>(
     browser: &mut Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     point: Point,
     event: &InputEvent,
 ) -> Option<bool> {
-    let bounds = scrollbar_bounds(theme, font, viewport)?;
-    let model = scroll_model(browser, font, theme, viewport);
+    let bounds = scrollbar_bounds(scale, theme, viewport)?;
+    let model = scroll_model(browser, scale, theme, viewport);
     let bar = browser.scrollbar_mut();
     bar.set_model(model);
     // Position the bar at this event before applying the action, so a press
@@ -689,21 +687,18 @@ pub fn scroll_pointer<S: DirectorySource>(
     let synth = bar.on_pointer(
         &InputEvent::PointerMoved { to: point },
         bounds,
-        Scale::ONE,
+        scale,
         theme,
     );
     let pressing_before = bar.is_pressing();
-    let on_bar = bar.part_at(bounds, point, Scale::ONE, theme) != ScrollPart::Outside;
+    let on_bar = bar.part_at(bounds, point, scale, theme) != ScrollPart::Outside;
     let (consumed, action) = match event {
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
-        } => (on_bar, bar.on_pointer(event, bounds, Scale::ONE, theme)),
+        } => (on_bar, bar.on_pointer(event, bounds, scale, theme)),
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
-        } => (
-            pressing_before,
-            bar.on_pointer(event, bounds, Scale::ONE, theme),
-        ),
+        } => (pressing_before, bar.on_pointer(event, bounds, scale, theme)),
         InputEvent::PointerMoved { .. } => (pressing_before || on_bar, synth),
         _ => (false, None),
     };
@@ -763,19 +758,20 @@ pub fn entry_label(entry: &Entry) -> String {
 }
 
 /// Height in pixels of one rendered list row — the path bar and every entry
-/// row alike, derived from `font` exactly as [`render`] draws them, so
-/// hit-testing and painting can never disagree.
+/// row alike, measured on the theme's own body face at `scale` exactly as
+/// [`render`] draws them, so hit-testing and painting can never disagree.
 #[must_use]
-pub fn row_height(font: BitmapFont) -> u32 {
-    font.glyph_height()
-        .saturating_add(ROW_PADDING.saturating_mul(2))
+pub fn row_height(scale: Scale, theme: &Theme) -> u32 {
+    BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
+        .glyph_height()
+        .saturating_add(scale.scale_length(ROW_PADDING).saturating_mul(2))
 }
 
 /// The width of the reserved scrollbar gutter for a `viewport_width`-pixel
 /// window: the theme's scrollbar breadth, clamped so it never exceeds the
 /// window (a window too narrow for the gutter simply has none).
-fn gutter_width(theme: &Theme, viewport_width: u32) -> u32 {
-    Scale::ONE
+fn gutter_width(scale: Scale, theme: &Theme, viewport_width: u32) -> u32 {
+    scale
         .scale_length(theme.metrics().scrollbar_breadth)
         .max(1)
         .min(viewport_width)
@@ -784,19 +780,19 @@ fn gutter_width(theme: &Theme, viewport_width: u32) -> u32 {
 /// The toolbar strip's rectangle within the browser's content area: the full
 /// width of the area, at its top. One definition, so the drawn toolbar and
 /// each of the three hit-tests that invert it cannot place it differently.
-fn toolbar_bounds(theme: &Theme, area: Rect) -> Rect {
+fn toolbar_bounds(scale: Scale, theme: &Theme, area: Rect) -> Rect {
     Rect::new(
         area.origin.x,
         area.origin.y,
         area.width,
-        toolbar_height(theme),
+        toolbar_height(scale, theme),
     )
 }
 
 /// The content viewport (the window minus the reserved scrollbar gutter). The
 /// item views lay out within this, so no item ever underlaps the scrollbar.
-fn content_viewport(viewport: Rect, theme: &Theme) -> Rect {
-    let gutter = gutter_width(theme, viewport.width);
+fn content_viewport(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+    let gutter = gutter_width(scale, theme, viewport.width);
     Rect::new(
         viewport.origin.x,
         viewport.origin.y,
@@ -805,20 +801,22 @@ fn content_viewport(viewport: Rect, theme: &Theme) -> Rect {
     )
 }
 
-/// The dimensions of one grid tile and the gap between tiles, derived from the
-/// render font so they scale with the theme's UI size (the window is not
-/// DPI-scaled today, so the font is the density proxy).
+/// The dimensions of one grid tile and the gap between tiles, measured on the
+/// theme's own body face at `scale`, so a tile grows with the desktop's
+/// density instead of staying a fixed pixel count.
 ///
 /// Shared with the desktop's icon column, which lays the same tiles out under
 /// a different [`GridFlow`], so the two views can never disagree about how big
 /// an icon tile is.
 #[must_use]
-pub fn grid_metrics(font: BitmapFont) -> GridMetrics {
-    let glyph = font.glyph_height().max(1);
+pub fn grid_metrics(scale: Scale, theme: &Theme) -> GridMetrics {
+    let glyph = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
+        .glyph_height()
+        .max(1);
     GridMetrics {
-        cell_width: glyph.saturating_mul(6).max(48),
-        cell_height: glyph.saturating_mul(5).max(48),
-        gap: (glyph / 2).max(2),
+        cell_width: glyph.saturating_mul(6).max(scale.scale_length(48)),
+        cell_height: glyph.saturating_mul(5).max(scale.scale_length(48)),
+        gap: (glyph / 2).max(scale.scale_length(2)),
     }
 }
 
@@ -827,10 +825,10 @@ pub fn grid_metrics(font: BitmapFont) -> GridMetrics {
 /// pixels. One definition so the drawn toolbar, the path bar's vertical offset,
 /// the item area, and the hit-tests all agree on where each chrome band sits.
 #[must_use]
-pub fn toolbar_height(theme: &Theme) -> u32 {
+pub fn toolbar_height(scale: Scale, theme: &Theme) -> u32 {
     let metrics = theme.metrics();
-    let gap = Scale::ONE.scale_length(metrics.control_gap);
-    Scale::ONE
+    let gap = scale.scale_length(metrics.control_gap);
+    scale
         .scale_length(metrics.control_height)
         .saturating_add(gap.saturating_mul(2))
         .max(1)
@@ -841,8 +839,8 @@ pub fn toolbar_height(theme: &Theme) -> u32 {
 /// item views lay out below and the top of the scrollbar gutter, so paint and
 /// hit-test share one offset (§2.2).
 #[must_use]
-pub fn chrome_height(font: BitmapFont, theme: &Theme) -> u32 {
-    toolbar_height(theme).saturating_add(row_height(font))
+pub fn chrome_height(scale: Scale, theme: &Theme) -> u32 {
+    toolbar_height(scale, theme).saturating_add(row_height(scale, theme))
 }
 
 /// The group each toolbar command belongs to, so related commands read as a
@@ -897,16 +895,16 @@ fn build_toolbar(
 /// which).
 fn draw_toolbar<S: DirectorySource>(
     surface: &mut Surface,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     browser: &Browser<S>,
     viewport: Rect,
     tools: &[ManagerTool],
     tool_model: ManagerToolModel,
 ) {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(theme, viewport);
-    toolbar.render(surface, bounds, Scale::ONE, theme, font);
+    let bounds = toolbar_bounds(scale, theme, viewport);
+    toolbar.render(surface, bounds, scale, theme);
 }
 
 /// The actionable toolbar command at window-local pixel `point`, or `None`
@@ -919,14 +917,15 @@ fn draw_toolbar<S: DirectorySource>(
 #[must_use]
 pub fn toolbar_command_at<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     point: Point,
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
     let toolbar = build_toolbar(model, &[], ManagerToolModel::none());
-    let bounds = toolbar_bounds(theme, viewport);
-    let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
+    let bounds = toolbar_bounds(scale, theme, viewport);
+    let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
     model.is_enabled(command).then_some(command)
 }
@@ -944,6 +943,7 @@ pub fn toolbar_command_at<S: DirectorySource>(
 #[must_use]
 pub fn manager_tool_at<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     point: Point,
@@ -951,8 +951,8 @@ pub fn manager_tool_at<S: DirectorySource>(
     tool_model: ManagerToolModel,
 ) -> Option<ManagerTool> {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(theme, viewport);
-    let index = toolbar.tool_at(bounds, Scale::ONE, theme, point)?;
+    let bounds = toolbar_bounds(scale, theme, viewport);
+    let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
     let tool = tools.get(tool_index).copied()?;
     tool_model.is_enabled(tool).then_some(tool)
@@ -974,6 +974,7 @@ pub fn manager_tool_at<S: DirectorySource>(
 #[must_use]
 pub fn manager_tool_rect<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     tools: &[ManagerTool],
@@ -985,23 +986,22 @@ pub fn manager_tool_rect<S: DirectorySource>(
         tools,
         ManagerToolModel::new(true),
     );
-    let bounds = toolbar_bounds(theme, viewport);
+    let bounds = toolbar_bounds(scale, theme, viewport);
     let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
-    toolbar.tool_rect(index, bounds, Scale::ONE, theme)
+    toolbar.tool_rect(index, bounds, scale, theme)
 }
 
 /// The [`ListView`] for `browser` at the given content viewport.
 fn list_view<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     content: Rect,
 ) -> ListView {
-    let row_height = row_height(font);
     ListView::new(
         content,
-        row_height,
-        chrome_height(font, theme),
+        row_height(scale, theme),
+        chrome_height(scale, theme),
         browser.entries().len(),
     )
 }
@@ -1014,14 +1014,14 @@ fn list_view<S: DirectorySource>(
 /// tile re-flows the listing into the extra column.
 fn grid_view<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     content: Rect,
 ) -> GridView {
     GridView::new(
         content,
-        grid_metrics(font),
-        chrome_height(font, theme),
+        grid_metrics(scale, theme),
+        chrome_height(scale, theme),
         browser.entries().len(),
         GridFlow::RowsFromLeading,
         GridFill::Spread,
@@ -1035,11 +1035,11 @@ fn grid_view<S: DirectorySource>(
 #[must_use]
 pub fn scroll_model<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) -> ScrollModel {
-    let view = view_layout_for(browser, font, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport);
     scroll_model_for(&view, browser.scroll_offset())
 }
 
@@ -1055,12 +1055,12 @@ fn scroll_model_for(view: &ViewLayout, offset: u64) -> ScrollModel {
 /// drawn scrollbar. Returns `true` when the offset actually moved.
 pub fn scroll_lines<S: DirectorySource>(
     browser: &mut Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     delta: i64,
 ) -> bool {
-    let view = view_layout_for(browser, font, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport);
     let model = scroll_model_for(&view, browser.scroll_offset());
     let moved = model.scroll_by(delta);
     let changed = moved.offset() != model.offset();
@@ -1073,11 +1073,11 @@ pub fn scroll_lines<S: DirectorySource>(
 /// selection-changing key or a directory change, before it repaints.
 pub fn reveal_selection<S: DirectorySource>(
     browser: &mut Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) {
-    let view = view_layout_for(browser, font, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport);
     let revealed = view.reveal(browser.scroll_offset(), browser.selected_index());
     browser.set_scroll_offset(revealed);
 }
@@ -1093,14 +1093,14 @@ pub fn reveal_selection<S: DirectorySource>(
 #[must_use]
 pub fn entry_index_at<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     point: Point,
 ) -> Option<usize> {
     let x = u32::try_from(point.x).ok()?;
     let y = u32::try_from(point.y).ok()?;
-    let view = view_layout_for(browser, font, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport);
     view.index_at(browser.scroll_offset(), x, y)
 }
 
@@ -1116,12 +1116,12 @@ pub fn entry_index_at<S: DirectorySource>(
 #[must_use]
 pub fn selection_rect<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) -> Option<Rect> {
     let selected = browser.selected_index()?;
-    let view = view_layout_for(browser, font, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport);
     view.item_rect(browser.scroll_offset(), selected)
 }
 
@@ -1130,14 +1130,14 @@ pub fn selection_rect<S: DirectorySource>(
 /// content viewport (window minus the scrollbar gutter) the renderer uses.
 fn view_layout_for<S: DirectorySource>(
     browser: &Browser<S>,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) -> ViewLayout {
-    let content = content_viewport(viewport, theme);
+    let content = content_viewport(viewport, scale, theme);
     match browser.view_mode() {
-        ViewMode::List => ViewLayout::List(list_view(browser, font, theme, content)),
-        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, font, theme, content)),
+        ViewMode::List => ViewLayout::List(list_view(browser, scale, theme, content)),
+        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, scale, theme, content)),
     }
 }
 
@@ -1210,14 +1210,12 @@ const PERMISSION_GRID_ROWS: usize = 5;
 /// rows they reserve, never in how the panel is placed or clamped (§2.2).
 fn properties_panel_rect_for(
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     content_rows: usize,
 ) -> Rect {
-    let line = row_height(font);
-    let title = Scale::ONE
-        .scale_length(theme.metrics().title_bar_height)
-        .max(1);
+    let line = row_height(scale, theme);
+    let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
     let rows = u32::try_from(content_rows).unwrap_or(u32::MAX);
     let content = line.saturating_mul(rows.saturating_add(2));
     let height = title.saturating_add(content).min(viewport.height.max(1));
@@ -1247,8 +1245,8 @@ fn properties_panel_rect_for(
 /// popup uses the taller [`properties_editable_panel_rect`], which reserves
 /// extra rows below the fields for the labelled permissions grid.
 #[must_use]
-pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
-    properties_panel_rect_for(viewport, font, theme, PROPERTY_ROW_COUNT)
+pub fn properties_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+    properties_panel_rect_for(viewport, scale, theme, PROPERTY_ROW_COUNT)
 }
 
 /// The centered bounds of the *editable* Properties popup [`Panel`] within
@@ -1261,10 +1259,10 @@ pub fn properties_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) ->
 /// [`properties_panel_rect`] and never draws a permission toggle (the editable
 /// surface is separated by call site, the manager-only write-tool precedent).
 #[must_use]
-pub fn properties_editable_panel_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+pub fn properties_editable_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     properties_panel_rect_for(
         viewport,
-        font,
+        scale,
         theme,
         PROPERTY_ROW_COUNT + PERMISSION_GRID_ROWS,
     )
@@ -1284,19 +1282,20 @@ struct FieldLayout {
 }
 
 impl FieldLayout {
-    fn resolve(content: Rect, font: BitmapFont) -> Self {
+    fn resolve(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
         let label_col = PROPERTY_LABELS
             .iter()
             .map(|label| font.text_width(label))
             .max()
             .unwrap_or(0);
-        let gap = font.text_width("  ").max(LABEL_PADDING);
-        let left = content.left().saturating_add(to_i32(LABEL_PADDING));
+        let pad = scale.scale_length(LABEL_PADDING);
+        let gap = font.text_width("  ").max(pad);
+        let left = content.left().saturating_add(to_i32(pad));
         let value_x = left.saturating_add(to_i32(label_col.saturating_add(gap)));
         Self {
             left,
             value_x,
-            line: row_height(font),
+            line: row_height(scale, theme),
         }
     }
 }
@@ -1308,12 +1307,16 @@ fn draw_property_fields(
     surface: &mut Surface,
     props: &Properties,
     content: Rect,
-    palette: &Palette,
+    scale: Scale,
+    theme: &Theme,
     font: BitmapFont,
 ) {
-    let layout = FieldLayout::resolve(content, font);
+    let palette = theme.palette();
+    let layout = FieldLayout::resolve(content, scale, theme, font);
     let bottom = content.top().saturating_add(to_i32(content.height));
-    let mut y = content.top().saturating_add(to_i32(ROW_PADDING));
+    let mut y = content
+        .top()
+        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
     for (label, value) in &properties_rows(props) {
         if y >= bottom {
             break;
@@ -1344,16 +1347,17 @@ fn draw_property_fields(
 fn draw_properties_at(
     surface: &mut Surface,
     props: &Properties,
+    scale: Scale,
     theme: &Theme,
     font: BitmapFont,
     bounds: Rect,
 ) {
     let panel = Panel::new(props.name());
-    panel.render(surface, bounds, Scale::ONE, theme, font);
-    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
+    panel.render(surface, bounds, scale, theme);
+    let Some(content) = panel.content_rect(bounds, scale, theme) else {
         return;
     };
-    draw_property_fields(surface, props, content, theme.palette(), font);
+    draw_property_fields(surface, props, content, scale, theme, font);
 }
 
 /// Draw the read-only Properties overlay for `props` centered in `viewport`.
@@ -1364,16 +1368,18 @@ fn draw_properties_at(
 pub fn draw_properties(
     surface: &mut Surface,
     props: &Properties,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
 ) {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     draw_properties_at(
         surface,
         props,
+        scale,
         theme,
         font,
-        properties_panel_rect(viewport, font, theme),
+        properties_panel_rect(viewport, scale, theme),
     );
 }
 
@@ -1470,16 +1476,18 @@ impl PermGrid {
 /// the grid does not fit the panel's content (a window too small) — so the
 /// painter and the hit-test both fail closed there rather than placing cells
 /// off the panel (§2.2, §5.4).
-fn perm_grid(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<PermGrid> {
-    let bounds = properties_editable_panel_rect(viewport, font, theme);
-    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
-    let line = row_height(font);
+fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<PermGrid> {
+    let bounds = properties_editable_panel_rect(viewport, scale, theme);
+    let content = Panel::new(String::new()).content_rect(bounds, scale, theme)?;
+    let line = row_height(scale, theme);
     let box_side = font.glyph_height().max(1);
     // The metadata fields occupy the first `PROPERTY_ROW_COUNT` rows from the
     // top; the grid sits below a one-row blank separator, its column headers
     // one row above the three triad rows.
     let meta_rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
-    let top = content.top().saturating_add(to_i32(ROW_PADDING));
+    let top = content
+        .top()
+        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
     let header_y = top.saturating_add(to_i32(line.saturating_mul(meta_rows.saturating_add(1))));
     let first_row_y = header_y.saturating_add(to_i32(line));
     let last_row_bottom = first_row_y
@@ -1489,7 +1497,8 @@ fn perm_grid(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<PermGrid
     if last_row_bottom > content_bottom {
         return None;
     }
-    let label_x = content.left().saturating_add(to_i32(LABEL_PADDING));
+    let pad = scale.scale_length(LABEL_PADDING);
+    let label_x = content.left().saturating_add(to_i32(pad));
     let row_label_w = PERMISSION_ROW_LABELS
         .iter()
         .map(|label| font.text_width(label))
@@ -1500,7 +1509,7 @@ fn perm_grid(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<PermGrid
         .map(|label| font.text_width(label))
         .max()
         .unwrap_or(0);
-    let gap = font.text_width("  ").max(LABEL_PADDING);
+    let gap = font.text_width("  ").max(pad);
     let cols_x = label_x.saturating_add(to_i32(row_label_w.saturating_add(gap)));
     let col_pitch = col_label_w.max(box_side).saturating_add(gap);
     Some(PermGrid {
@@ -1520,10 +1529,11 @@ fn perm_grid(viewport: Rect, font: BitmapFont, theme: &Theme) -> Option<PermGrid
 /// hit-test both fail closed there (§2.2, §5.4).
 pub(crate) fn permission_toggle_cells(
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
 ) -> Option<[Rect; 9]> {
-    Some(perm_grid(viewport, font, theme)?.cells())
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    Some(perm_grid(viewport, scale, theme, font)?.cells())
 }
 
 /// Draw the editable Properties overlay for `props`: the metadata fields as in
@@ -1545,18 +1555,20 @@ pub(crate) fn permission_toggle_cells(
 pub fn draw_properties_editable(
     surface: &mut Surface,
     props: &Properties,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
 ) {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     draw_properties_at(
         surface,
         props,
+        scale,
         theme,
         font,
-        properties_editable_panel_rect(viewport, font, theme),
+        properties_editable_panel_rect(viewport, scale, theme),
     );
-    let Some(grid) = perm_grid(viewport, font, theme) else {
+    let Some(grid) = perm_grid(viewport, scale, theme, font) else {
         return;
     };
     let palette = theme.palette();
@@ -1599,13 +1611,7 @@ pub fn draw_properties_editable(
             } else {
                 SelectionState::Unselected
             };
-            Checkbox::new(String::new(), selection).render(
-                surface,
-                grid.cell(index),
-                Scale::ONE,
-                theme,
-                font,
-            );
+            Checkbox::new(String::new(), selection).render(surface, grid.cell(index), scale, theme);
         }
     }
 }
@@ -1623,11 +1629,11 @@ pub fn draw_properties_editable(
 #[must_use]
 pub fn permission_cell_at(
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<u32> {
-    let cells = permission_toggle_cells(viewport, font, theme)?;
+    let cells = permission_toggle_cells(viewport, scale, theme)?;
     for (i, rect) in cells.iter().enumerate() {
         let right = rect.left().saturating_add(to_i32(rect.width));
         let bottom = rect.top().saturating_add(to_i32(rect.height));
@@ -1677,17 +1683,18 @@ struct OwnerRowGeom {
 fn owner_row_geom(
     props: &Properties,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
+    font: BitmapFont,
 ) -> Option<OwnerRowGeom> {
-    let bounds = properties_editable_panel_rect(viewport, font, theme);
-    let content = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme)?;
-    let layout = FieldLayout::resolve(content, font);
+    let bounds = properties_editable_panel_rect(viewport, scale, theme);
+    let content = Panel::new(String::new()).content_rect(bounds, scale, theme)?;
+    let layout = FieldLayout::resolve(content, scale, theme, font);
     let glyph = font.glyph_height().max(1);
     let row_index = u32::try_from(OWNER_ROW_INDEX).unwrap_or(u32::MAX);
     let row_top = content
         .top()
-        .saturating_add(to_i32(ROW_PADDING))
+        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)))
         .saturating_add(to_i32(layout.line.saturating_mul(row_index)));
     let content_bottom = content.top().saturating_add(to_i32(content.height));
     if row_top.saturating_add(to_i32(glyph)) > content_bottom {
@@ -1724,11 +1731,12 @@ fn owner_row_geom(
 pub fn owner_field_at(
     props: &Properties,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<OwnerField> {
-    let geom = owner_row_geom(props, viewport, font, theme)?;
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let geom = owner_row_geom(props, viewport, scale, theme, font)?;
     let fields = [OwnerField::Uid, OwnerField::Gid];
     for (rect, field) in geom.cells.iter().zip(fields) {
         let right = rect.left().saturating_add(to_i32(rect.width));
@@ -1766,16 +1774,17 @@ fn owner_editor_width(font: BitmapFont) -> u32 {
 pub fn draw_owner_control(
     surface: &mut Surface,
     props: &Properties,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
     editor: Option<(OwnerField, &TextField)>,
 ) {
-    let Some(geom) = owner_row_geom(props, viewport, font, theme) else {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let Some(geom) = owner_row_geom(props, viewport, scale, theme, font) else {
         return;
     };
     let palette = theme.palette();
-    let thickness = Scale::ONE.scale_length(1).max(1);
+    let thickness = scale.scale_length(1).max(1);
     let fields = [OwnerField::Uid, OwnerField::Gid];
     for (rect, field) in geom.cells.iter().zip(fields) {
         if let Some((editing, text_field)) = editor {
@@ -1784,7 +1793,7 @@ pub fn draw_owner_control(
                 let avail = viewport.width.saturating_sub(left).max(1);
                 let width = owner_editor_width(font).min(avail);
                 let bounds = Rect::new(rect.left(), rect.top(), width, geom.line);
-                text_field.render(surface, bounds, Scale::ONE, theme, font);
+                text_field.render(surface, bounds, scale, theme);
                 continue;
             }
         }
@@ -1907,10 +1916,10 @@ fn build_permanent_delete_dialog(plan: &DeletePlan) -> Dialog {
 /// [`draw_delete_dialog`] and [`delete_dialog_action_at`] place and hit-test
 /// the same rectangle (§2.2).
 #[must_use]
-pub fn delete_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
+pub fn delete_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     // Title bar, up to two message lines, and the action-button band, with
     // margins — generous so the buttons are not clipped at a normal size.
-    centered_overlay_rect(viewport, font, theme, 6)
+    centered_overlay_rect(viewport, scale, theme, 6)
 }
 
 /// A centered, clamped modal-overlay rectangle within `viewport`, sized to a
@@ -1920,16 +1929,9 @@ pub fn delete_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Re
 ///
 /// The one sizing definition the delete-confirmation dialog and the progress
 /// panel share, so their placement stays consistent and cannot drift (§2.2).
-fn centered_overlay_rect(
-    viewport: Rect,
-    font: BitmapFont,
-    theme: &Theme,
-    content_lines: u32,
-) -> Rect {
-    let line = row_height(font);
-    let title = Scale::ONE
-        .scale_length(theme.metrics().title_bar_height)
-        .max(1);
+fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_lines: u32) -> Rect {
+    let line = row_height(scale, theme);
+    let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
     let content = line.saturating_mul(content_lines);
     let height = title.saturating_add(content).min(viewport.height.max(1));
     let width = viewport
@@ -1958,12 +1960,12 @@ fn centered_overlay_rect(
 pub fn draw_delete_dialog(
     surface: &mut Surface,
     dialog: &Dialog,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
 ) {
-    let bounds = delete_dialog_rect(viewport, font, theme);
-    dialog.render(surface, bounds, Scale::ONE, theme, font);
+    let bounds = delete_dialog_rect(viewport, scale, theme);
+    dialog.render(surface, bounds, scale, theme);
 }
 
 /// The action-button index the delete-confirmation `dialog` draws at
@@ -1980,12 +1982,12 @@ pub fn draw_delete_dialog(
 pub fn delete_dialog_action_at(
     dialog: &Dialog,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    let bounds = delete_dialog_rect(viewport, font, theme);
-    let rects = dialog.action_rects(bounds, Scale::ONE, theme, font);
+    let bounds = delete_dialog_rect(viewport, scale, theme);
+    let rects = dialog.action_rects(bounds, scale, theme);
     for (i, rect) in rects.iter().enumerate() {
         if rect.width == 0 {
             continue;
@@ -2006,8 +2008,8 @@ pub fn delete_dialog_action_at(
 /// and hit-test the same rectangle (§2.2), sized like the delete-confirmation
 /// dialog so the two modal surfaces sit consistently.
 #[must_use]
-pub fn progress_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> Rect {
-    centered_overlay_rect(viewport, font, theme, 6)
+pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+    centered_overlay_rect(viewport, scale, theme, 6)
 }
 
 /// The Cancel-button rectangle within the progress panel's `content` area —
@@ -2015,13 +2017,13 @@ pub fn progress_dialog_rect(viewport: Rect, font: BitmapFont, theme: &Theme) -> 
 /// content so a small window never places it off the panel. The one definition
 /// [`draw_progress_dialog`] paints and [`progress_cancel_at`] hit-tests, so a
 /// click resolves to exactly the drawn button (§2.2).
-fn progress_cancel_rect(content: Rect, font: BitmapFont) -> Rect {
-    let pad = font.text_width("  ").max(LABEL_PADDING);
+fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Rect {
+    let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
     let width = font
         .text_width("Cancel")
         .saturating_add(pad.saturating_mul(2))
         .min(content.width);
-    let height = row_height(font).min(content.height);
+    let height = row_height(scale, theme).min(content.height);
     let x = content
         .left()
         .saturating_add(to_i32(content.width.saturating_sub(width)));
@@ -2077,25 +2079,26 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
 pub fn draw_progress_dialog(
     surface: &mut Surface,
     model: &ProgressModel,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
 ) {
-    let bounds = progress_dialog_rect(viewport, font, theme);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let bounds = progress_dialog_rect(viewport, scale, theme);
     let panel = Panel::new(model.title());
-    panel.render(surface, bounds, Scale::ONE, theme, font);
-    let Some(content) = panel.content_rect(bounds, Scale::ONE, theme) else {
+    panel.render(surface, bounds, scale, theme);
+    let Some(content) = panel.content_rect(bounds, scale, theme) else {
         return;
     };
     let bar = Rect::new(
         content.left(),
         content.top(),
         content.width,
-        row_height(font),
+        row_height(scale, theme),
     );
-    build_progress(model).render(surface, bar, Scale::ONE, theme, font);
-    let cancel_rect = progress_cancel_rect(content, font);
-    build_progress_cancel(model).render(surface, cancel_rect, Scale::ONE, theme, font);
+    build_progress(model).render(surface, bar, scale, theme);
+    let cancel_rect = progress_cancel_rect(content, scale, theme, font);
+    build_progress_cancel(model).render(surface, cancel_rect, scale, theme);
 }
 
 /// Whether the progress panel's Cancel button is drawn at window-local pixel
@@ -2108,14 +2111,15 @@ pub fn draw_progress_dialog(
 /// a panel too small to place it — returns `false`, changing nothing (fail
 /// closed, §5.4).
 #[must_use]
-pub fn progress_cancel_at(viewport: Rect, font: BitmapFont, theme: &Theme, point: Point) -> bool {
-    let bounds = progress_dialog_rect(viewport, font, theme);
+pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Point) -> bool {
+    let bounds = progress_dialog_rect(viewport, scale, theme);
     // The content area is title-text-independent, so an empty-title panel
     // mirrors the titled panel [`draw_progress_dialog`] draws.
-    let Some(content) = Panel::new(String::new()).content_rect(bounds, Scale::ONE, theme) else {
+    let Some(content) = Panel::new(String::new()).content_rect(bounds, scale, theme) else {
         return false;
     };
-    let rect = progress_cancel_rect(content, font);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let rect = progress_cancel_rect(content, scale, theme, font);
     if rect.width == 0 || rect.height == 0 {
         return false;
     }
@@ -2160,10 +2164,10 @@ pub fn context_menu_rect(
     menu: &Menu,
     anchor: Point,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
 ) -> Rect {
-    menu.anchored_rect(anchor, viewport, Scale::ONE, theme, font)
+    menu.anchored_rect(anchor, viewport, scale, theme)
 }
 
 /// Draw the context `menu` anchored at `anchor`, on top of the current view.
@@ -2175,12 +2179,12 @@ pub fn draw_context_menu(
     surface: &mut Surface,
     menu: &Menu,
     anchor: Point,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     viewport: Rect,
 ) {
-    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
-    menu.render(surface, bounds, Scale::ONE, theme, font);
+    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
+    menu.render(surface, bounds, scale, theme);
 }
 
 /// The enabled [`ContextCommand`] the context `menu` (opened at `anchor`) draws
@@ -2198,11 +2202,11 @@ pub fn context_menu_command_at(
     menu: &Menu,
     anchor: Point,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<ContextCommand> {
-    let index = menu_enabled_row_at(menu, anchor, viewport, font, theme, point)?;
+    let index = menu_enabled_row_at(menu, anchor, viewport, scale, theme, point)?;
     chrome::CONTEXT_COMMANDS.get(index).copied()
 }
 
@@ -2219,15 +2223,15 @@ pub fn context_menu_command_rect(
     menu: &Menu,
     anchor: Point,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     command: ContextCommand,
 ) -> Option<Rect> {
     let index = chrome::CONTEXT_COMMANDS
         .iter()
         .position(|&c| c == command)?;
-    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
-    menu.row_rect(index, bounds, Scale::ONE, theme)
+    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
+    menu.row_rect(index, bounds, scale, theme)
 }
 
 /// The index of the enabled row of `menu` (anchored at `anchor`) that
@@ -2242,12 +2246,12 @@ fn menu_enabled_row_at(
     menu: &Menu,
     anchor: Point,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    let bounds = context_menu_rect(menu, anchor, viewport, font, theme);
-    let index = menu.row_at(bounds, Scale::ONE, theme, point)?;
+    let bounds = context_menu_rect(menu, anchor, viewport, scale, theme);
+    let index = menu.row_at(bounds, scale, theme, point)?;
     if !menu.items().get(index)?.state().is_actionable() {
         return None;
     }
@@ -2285,9 +2289,9 @@ pub fn open_with_index_at(
     menu: &Menu,
     anchor: Point,
     viewport: Rect,
-    font: BitmapFont,
+    scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    menu_enabled_row_at(menu, anchor, viewport, font, theme, point)
+    menu_enabled_row_at(menu, anchor, viewport, scale, theme, point)
 }

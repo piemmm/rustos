@@ -113,7 +113,7 @@ fn paint_options(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
         if !field.is_empty() {
             chooser
                 .field(group)
-                .render(surface, field, style.scale(), style.theme(), style.font());
+                .render(surface, field, style.scale(), style.theme());
         }
     }
 
@@ -227,14 +227,7 @@ fn paint_tile(
     };
     IconTile::new(candidate.label.clone(), IconKind::Image)
         .with_state(state)
-        .render(
-            surface,
-            bounds,
-            style.scale(),
-            style.theme(),
-            style.font(),
-            artwork,
-        );
+        .render(surface, bounds, style.scale(), style.theme(), artwork);
 
     if candidate.thumbnail == Thumbnail::Refused {
         let side = IconTile::icon_side(bounds, style.scale(), style.theme());
@@ -269,20 +262,12 @@ fn paint_footer(surface: &mut Surface, chooser: &Chooser, layout: &Layout, style
         );
     }
 
-    chooser.close_button().render(
-        surface,
-        layout.close(),
-        style.scale(),
-        style.theme(),
-        style.font(),
-    );
-    chooser.apply_button().render(
-        surface,
-        layout.apply(),
-        style.scale(),
-        style.theme(),
-        style.font(),
-    );
+    chooser
+        .close_button()
+        .render(surface, layout.close(), style.scale(), style.theme());
+    chooser
+        .apply_button()
+        .render(surface, layout.apply(), style.scale(), style.theme());
 }
 
 /// Paint the expanded drop-down's list, over everything else.
@@ -298,7 +283,7 @@ fn paint_expanded_list(
     let popup = chooser.popup_rect(group, layout, style);
     chooser
         .field(group)
-        .render_popup(surface, popup, style.scale(), style.theme(), style.font());
+        .render_popup(surface, popup, style.scale(), style.theme());
 }
 
 /// The square swatch of the chosen backdrop a tile draws as its picture when

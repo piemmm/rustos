@@ -9,7 +9,6 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -22,10 +21,6 @@ const W: u32 = 160;
 const H: u32 = 28;
 const ROW_H: u32 = 28;
 const BORDER: u32 = 1;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -80,7 +75,7 @@ fn open_and_popup(combo: &mut ComboBox, theme: &Theme) -> Rect {
     );
     combo.on_pointer(&PRESS, field, Rect::new(0, 0, 0, 0), Scale::ONE, theme);
     combo.on_pointer(&RELEASE, field, Rect::new(0, 0, 0, 0), Scale::ONE, theme);
-    let (pw, ph) = combo.popup_size(W, Scale::ONE, theme, font());
+    let (pw, ph) = combo.popup_size(W, Scale::ONE, theme);
     Rect::new(0, xi(H), pw, ph)
 }
 
@@ -107,7 +102,7 @@ fn collapsed_field_paints_a_plate_and_rim() {
     let mut surface = Surface::new(W, H).expect("surface");
     combo()
         .with_selected(0)
-        .render(&mut surface, field_bounds(), Scale::ONE, &theme, font());
+        .render(&mut surface, field_bounds(), Scale::ONE, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
     assert_eq!(surface.get(0, H / 2), Some(premul(theme.palette().rim)));
 }
@@ -220,7 +215,7 @@ fn denied_field_never_opens() {
     assert!(!combo.is_expanded());
     // A denied field also shows the lock bead.
     let mut surface = Surface::new(W, H).expect("surface");
-    combo.render(&mut surface, field, Scale::ONE, &theme, font());
+    combo.render(&mut surface, field, Scale::ONE, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().denied)));
 }
 
@@ -229,7 +224,7 @@ fn denied_field_never_opens() {
 #[test]
 fn popup_is_never_narrower_than_the_field() {
     let theme = Theme::dark();
-    let (w, h) = combo().popup_size(W, Scale::ONE, &theme, font());
+    let (w, h) = combo().popup_size(W, Scale::ONE, &theme);
     assert!(w >= W);
     assert_eq!(h, BORDER * 2 + 3 * ROW_H);
 }
@@ -239,20 +234,8 @@ fn theme_switch_repaints_the_field_rim() {
     let combo = combo().with_selected(0);
     let mut dark = Surface::new(W, H).expect("surface");
     let mut light = Surface::new(W, H).expect("surface");
-    combo.render(
-        &mut dark,
-        field_bounds(),
-        Scale::ONE,
-        &Theme::dark(),
-        font(),
-    );
-    combo.render(
-        &mut light,
-        field_bounds(),
-        Scale::ONE,
-        &Theme::light(),
-        font(),
-    );
+    combo.render(&mut dark, field_bounds(), Scale::ONE, &Theme::dark());
+    combo.render(&mut light, field_bounds(), Scale::ONE, &Theme::light());
     assert_ne!(dark.get(0, H / 2), light.get(0, H / 2));
 }
 
@@ -261,13 +244,9 @@ fn renders_at_a_larger_scale_without_panicking() {
     let theme = Theme::dark();
     let scale = Scale::from_percent(200).expect("valid scale");
     let mut surface = Surface::new(W * 2, H * 2).expect("surface");
-    combo().with_selected(0).render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, H * 2),
-        scale,
-        &theme,
-        font(),
-    );
+    combo()
+        .with_selected(0)
+        .render(&mut surface, Rect::new(0, 0, W * 2, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 
@@ -278,7 +257,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
     let theme = Theme::dark();
     let render = |combo: &ComboBox| {
         let mut surface = Surface::new(W, H).expect("surface");
-        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme, font());
+        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme);
         surface
     };
 

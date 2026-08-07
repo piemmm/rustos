@@ -16,8 +16,7 @@ use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_abi::Errno;
 use tairix_browse::render::{content_area, sidebar_view, toolbar_command_at};
 use tairix_browse::{Browser, DirectorySource, Entry, Places, SidebarView, ToolbarCommand, Volume};
-use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{apply_event, is_refresh_request, press_point, refresh_places, track_hover};
@@ -97,11 +96,6 @@ fn places() -> Places {
     )
 }
 
-/// The font the rail is measured in.
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
-
 /// The centre of the rail row at `index`.
 fn row_centre(places: &Places, index: usize) -> Point {
     let view = rail(places);
@@ -116,7 +110,7 @@ fn row_centre(places: &Places, index: usize) -> Point {
 
 /// The rail's geometry in this test's window.
 fn rail(places: &Places) -> SidebarView {
-    sidebar_view(WINDOW, &Theme::dark(), font(), Some(places)).expect("the rail has rows")
+    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places)).expect("the rail has rows")
 }
 
 /// A primary press at `point`.
@@ -161,7 +155,7 @@ fn route(
     places: &mut Places,
     event: &WindowEvent,
 ) -> Option<super::SidebarOutcome> {
-    apply_event(browser, places, &Theme::dark(), font(), WINDOW, event)
+    apply_event(browser, places, Scale::ONE, &Theme::dark(), WINDOW, event)
 }
 
 #[test]
@@ -371,8 +365,8 @@ fn the_hover_highlight_follows_the_pointer_and_clears_off_the_rail() {
     let over_second = motion(row_centre(&places, 1));
     assert!(track_hover(
         &mut places,
+        Scale::ONE,
         &theme,
-        font(),
         WINDOW,
         &over_second
     ));
@@ -380,8 +374,8 @@ fn the_hover_highlight_follows_the_pointer_and_clears_off_the_rail() {
     // The same row again is not a change, so it owes no repaint.
     assert!(!track_hover(
         &mut places,
+        Scale::ONE,
         &theme,
-        font(),
         WINDOW,
         &over_second
     ));
@@ -390,8 +384,8 @@ fn the_hover_highlight_follows_the_pointer_and_clears_off_the_rail() {
     let outside = Point::new(i32::try_from(width).unwrap_or(0) + 20, 4);
     assert!(track_hover(
         &mut places,
+        Scale::ONE,
         &theme,
-        font(),
         WINDOW,
         &motion(outside)
     ));
@@ -399,7 +393,13 @@ fn the_hover_highlight_follows_the_pointer_and_clears_off_the_rail() {
 
     // A press is not a motion: the highlight is only ever moved by one.
     let on_first = press(row_centre(&places, 0));
-    assert!(!track_hover(&mut places, &theme, font(), WINDOW, &on_first));
+    assert!(!track_hover(
+        &mut places,
+        Scale::ONE,
+        &theme,
+        WINDOW,
+        &on_first
+    ));
 }
 
 #[test]
@@ -407,16 +407,18 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     let browser = browser();
     let places = places();
     let theme = Theme::dark();
-    let viewport = content_area(WINDOW, &theme, font(), Some(&places));
+    let viewport = content_area(WINDOW, Scale::ONE, &theme, Some(&places));
 
     assert!(is_refresh_request(
         &browser,
+        Scale::ONE,
         &theme,
         viewport,
         &named(NamedKeyCode::F5)
     ));
     assert!(!is_refresh_request(
         &browser,
+        Scale::ONE,
         &theme,
         viewport,
         &named(NamedKeyCode::Enter)
@@ -432,7 +434,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     for y in viewport.origin.y..bottom {
         for x in viewport.origin.x..right {
             let point = Point::new(x, y);
-            match toolbar_command_at(&browser, &theme, viewport, point) {
+            match toolbar_command_at(&browser, Scale::ONE, &theme, viewport, point) {
                 Some(ToolbarCommand::Refresh) if refresh.is_none() => refresh = Some(point),
                 Some(command) if command != ToolbarCommand::Refresh && other.is_none() => {
                     other = Some(point);
@@ -448,12 +450,14 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     let other = other.expect("the toolbar carries more than one enabled command");
     assert!(is_refresh_request(
         &browser,
+        Scale::ONE,
         &theme,
         viewport,
         &press(refresh)
     ));
     assert!(!is_refresh_request(
         &browser,
+        Scale::ONE,
         &theme,
         viewport,
         &press(other)
@@ -461,6 +465,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     // A motion over Refresh is not a request; only a press is.
     assert!(!is_refresh_request(
         &browser,
+        Scale::ONE,
         &theme,
         viewport,
         &motion(refresh)

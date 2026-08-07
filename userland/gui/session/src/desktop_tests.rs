@@ -12,11 +12,10 @@ use core::cell::RefCell;
 use tairix_abi::{Errno, Time64};
 use tairix_browse::{AppAssociation, DirectorySource, Entry, EntryKind, GridView};
 use tairix_controls::{ActivityState, MenuItem};
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_raster::Surface;
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::Theme;
 use tairix_wallpaper::{Backdrop, IconFlow, IconSort, PinboardSettings, Rgb, WallpaperChoice};
 use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 
@@ -119,18 +118,13 @@ fn theme() -> Theme {
     Theme::dark()
 }
 
-fn font(theme: &Theme) -> BitmapFont {
-    BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE)
-}
-
 /// A work area the size of a modest screen with room for several columns.
 fn work_area() -> Rect {
     Rect::new(0, 0, 800, 600)
 }
 
 fn layout_of(desktop: &Desktop<FakeDir>) -> GridView {
-    let theme = theme();
-    desktop.layout(work_area(), Scale::ONE, font(&theme))
+    desktop.layout(work_area(), Scale::ONE, &theme())
 }
 
 /// The centre of the icon at `index`, in screen coordinates.
@@ -511,14 +505,7 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
     desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
     desktop.pointer_moved(centre_of(&layout, 1), &layout, 1);
 
-    desktop.render(
-        &mut surface,
-        &layout,
-        Scale::ONE,
-        &theme,
-        font(&theme),
-        &mut NoArtwork,
-    );
+    desktop.render(&mut surface, &layout, Scale::ONE, &theme, &mut NoArtwork);
 
     // With no artwork store at all every tile still draws its built-in
     // glyph, so no icon slot can come out blank.
@@ -534,14 +521,7 @@ fn an_empty_desktop_paints_nothing_and_leaves_the_wallpaper_showing() {
     let layout = layout_of(&desktop);
     let theme = theme();
     let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
-    desktop.render(
-        &mut surface,
-        &layout,
-        Scale::ONE,
-        &theme,
-        font(&theme),
-        &mut NoArtwork,
-    );
+    desktop.render(&mut surface, &layout, Scale::ONE, &theme, &mut NoArtwork);
     assert!(
         !painted(&surface, work_area()),
         "an empty folder leaves the layer fully transparent"
@@ -886,7 +866,7 @@ fn screen() -> Rect {
 
 /// The menu's plate on [`screen`], which must exist for an open menu.
 fn plate_of(menu: &PinboardMenu, theme: &Theme) -> Rect {
-    menu.layout(screen(), Scale::ONE, theme, font(theme))
+    menu.layout(screen(), Scale::ONE, theme)
         .expect("an open menu has a plate")
 }
 
@@ -1009,7 +989,7 @@ fn the_menu_is_clamped_wholly_onto_the_screen_from_every_corner() {
     let screen = screen();
     let mut menu = PinboardMenu::new();
     assert_eq!(
-        menu.layout(screen, Scale::ONE, &theme, font(&theme)),
+        menu.layout(screen, Scale::ONE, &theme),
         None,
         "a closed menu has no plate"
     );

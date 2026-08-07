@@ -7,7 +7,6 @@
 //! Pressure Rail, the pending Heat Seam, focus, high contrast, and the
 //! pointer/keyboard activation and next-value semantics of each control.
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -23,10 +22,6 @@ use crate::testkit::high_contrast;
 
 const W: u32 = 160;
 const H: u32 = 28;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn premul(rgba: Rgba) -> Pixel {
     Color::from(rgba).premultiply()
@@ -58,37 +53,19 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
 
 fn toggle_surface(toggle: &Toggle, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    toggle.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    toggle.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
 fn checkbox_surface(checkbox: &Checkbox, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    checkbox.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    checkbox.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
 fn radio_surface(radio: &Radio, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    radio.render(
-        &mut surface,
-        Rect::new(0, 0, W, H),
-        Scale::ONE,
-        theme,
-        font(),
-    );
+    radio.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
 }
 
@@ -417,13 +394,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let theme = Theme::dark();
     let scale = Scale::from_percent(200).expect("valid scale");
     let mut surface = Surface::new(W * 2, H * 2).expect("surface");
-    Toggle::new("Big", true).render(
-        &mut surface,
-        Rect::new(0, 0, W * 2, H * 2),
-        scale,
-        &theme,
-        font(),
-    );
+    Toggle::new("Big", true).render(&mut surface, Rect::new(0, 0, W * 2, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().surface_raised)));
 }
 
@@ -455,8 +426,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme)),
         "…and the two must therefore paint identically"
     );
 
@@ -466,8 +437,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b);
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme)),
     );
 
     let mut a = Radio::new("Daily", false);
@@ -476,8 +447,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
     b.on_pointer(&farther, plate());
     assert_eq!(a, b);
     assert_eq!(
-        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| b.render(s, plate(), Scale::ONE, &theme)),
     );
 }
 
@@ -496,8 +467,8 @@ fn press_latch_alone_never_changes_a_selector_render() {
 
     assert_eq!(latched, shown, "the press latch is not a drawn property");
     assert_eq!(
-        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme, font())),
-        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme, font())),
+        pixels_of(|s| latched.render(s, plate(), Scale::ONE, &theme)),
+        pixels_of(|s| shown.render(s, plate(), Scale::ONE, &theme)),
         "…and the two must therefore paint identically"
     );
     assert_eq!(

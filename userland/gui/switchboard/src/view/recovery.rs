@@ -400,9 +400,9 @@ impl RecoverySection {
     ) -> Option<DetailLayout> {
         let gap = scale.scale_length(theme.metrics().control_gap);
         let line = font.line_height();
-        let pill_h = StatusPill::measured_height(scale, theme, font);
-        let facts_h = FactList::row_height(scale, theme, font).saturating_mul(3);
-        let pages_h = pages.measured_extent(scale, theme, font);
+        let pill_h = StatusPill::measured_height(scale, theme);
+        let facts_h = FactList::row_height(scale, theme).saturating_mul(3);
+        let pages_h = pages.measured_extent(scale, theme);
         let mut top = content.top();
         let mut left = content.height;
         let mut take = |height: u32| -> Rect {
@@ -462,7 +462,7 @@ impl RecoverySection {
             return;
         };
         let panel = self.detail_panel();
-        panel.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+        panel.render(surface, rect, ctx.scale, ctx.theme);
         let Some(content) = panel.content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
@@ -489,10 +489,10 @@ impl RecoverySection {
             &identity_text(item),
             Color::from(palette.on_surface),
         );
-        impact_pill(item).render(surface, layout.pill, ctx.scale, ctx.theme, ctx.font);
-        detail_facts(item).render(surface, layout.facts, ctx.scale, ctx.theme, ctx.font);
+        impact_pill(item).render(surface, layout.pill, ctx.scale, ctx.theme);
+        detail_facts(item).render(surface, layout.facts, ctx.scale, ctx.theme);
         self.pages
-            .render(surface, layout.pages, ctx.scale, ctx.theme, ctx.font);
+            .render(surface, layout.pages, ctx.scale, ctx.theme);
         self.render_page(surface, item, layout.body, ctx);
     }
 
@@ -510,10 +510,10 @@ impl RecoverySection {
         let muted = Color::from(ctx.theme.palette().on_surface_muted);
         match self.page {
             FaultPage::Timeline => {
-                fault_timeline(item).render(surface, body, ctx.scale, ctx.theme, ctx.font);
+                fault_timeline(item).render(surface, body, ctx.scale, ctx.theme);
             }
             FaultPage::CrashSnapshot => match crash_facts(item) {
-                Some(facts) => facts.render(surface, body, ctx.scale, ctx.theme, ctx.font),
+                Some(facts) => facts.render(surface, body, ctx.scale, ctx.theme),
                 None => {
                     ctx.font
                         .draw_text(surface, body.left(), body.top(), NO_CRASH_RECORD, muted);
@@ -549,7 +549,7 @@ impl RecoverySection {
                 column.width,
                 each,
             );
-            tile.render(surface, rect, ctx.scale, ctx.theme, ctx.font);
+            tile.render(surface, rect, ctx.scale, ctx.theme);
         }
     }
 
@@ -558,11 +558,9 @@ impl RecoverySection {
         let Some(rail) = ctx.frame.rail else {
             return;
         };
-        self.rail_panel
-            .render(surface, rail, ctx.scale, ctx.theme, ctx.font);
+        self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
         if let Some(content) = self.rail_panel.content_rect(rail, ctx.scale, ctx.theme) {
-            self.rail
-                .render(surface, content, ctx.scale, ctx.theme, ctx.font);
+            self.rail.render(surface, content, ctx.scale, ctx.theme);
         }
     }
 
@@ -928,13 +926,7 @@ impl SectionView for RecoverySection {
             let Some(card) = self.cards.get(ctx.start + slot as usize) else {
                 break;
             };
-            card.render(
-                surface,
-                info.item_rect(slot),
-                ctx.scale,
-                ctx.theme,
-                ctx.font,
-            );
+            card.render(surface, info.item_rect(slot), ctx.scale, ctx.theme);
         }
         self.render_detail(surface, ctx);
         self.render_impact(surface, ctx);
@@ -978,9 +970,8 @@ impl SectionView for RecoverySection {
 
         let index = self.selected_index()?;
         let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
-        let RailAction::Activate { index: fired } = self
-            .rail
-            .on_pointer(event, rail, ctx.scale, ctx.theme, ctx.font)?;
+        let RailAction::Activate { index: fired } =
+            self.rail.on_pointer(event, rail, ctx.scale, ctx.theme)?;
         Some(SectionOutcome::Action(SwitchboardAction::Recovery {
             index,
             control: rail_control(fired)?,

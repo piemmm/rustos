@@ -24,7 +24,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::state::{AuthorityState, ControlState, ValidationState};
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 use crate::text::{
     debug_buffer_identity, debug_bytes, debug_secret_cell_layout, debug_zeroize, zeroize_range,
     SearchField, TextAction, TextField,
@@ -34,7 +34,7 @@ const W: u32 = 200;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -79,13 +79,13 @@ const CTRL: Modifiers = Modifiers {
 
 fn field_surface(field: &TextField, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    field.render(&mut surface, bounds(), Scale::ONE, theme, font());
+    field.render(&mut surface, bounds(), Scale::ONE, theme);
     surface
 }
 
 fn search_surface(field: &SearchField, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    field.render(&mut surface, bounds(), Scale::ONE, theme, font());
+    field.render(&mut surface, bounds(), Scale::ONE, theme);
     surface
 }
 
@@ -321,13 +321,7 @@ fn inline_message_is_drawn_below_when_there_is_room() {
     let mut surface = Surface::new(W, 80).expect("surface");
     let mut field = TextField::new().with_text("x").with_message("required");
     field.set_state(ControlState::idle().with_validation(ValidationState::Invalid));
-    field.render(
-        &mut surface,
-        Rect::new(0, 0, W, 80),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    field.render(&mut surface, Rect::new(0, 0, W, 80), Scale::ONE, &theme);
     // The message row (below the standard control height) is painted danger.
     let control_h = Scale::ONE.scale_length(theme.metrics().control_height);
     let mut found = false;
@@ -352,9 +346,9 @@ fn click_focuses_caret_and_typing_inserts_there() {
     let mut field = TextField::new().with_text("aaaa");
     field.set_focused(true);
     // Click near the far left to place the caret at the start.
-    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, font());
+    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
     type_str(&mut field, "Z");
     assert!(
         field.text().starts_with('Z'),
@@ -370,11 +364,11 @@ fn drag_selects_a_range_then_typing_replaces_it() {
     field.set_focused(true);
     let advance = font().cell_width();
     // Press at the start, drag several cells right, release: selects a run.
-    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
+    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
     let far = 3 * i32::try_from(advance).unwrap() + 2;
-    field.on_pointer(&moved(far, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, font());
+    field.on_pointer(&moved(far, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
     type_str(&mut field, "Z");
     assert!(
         field.text().starts_with('Z') && field.text().ends_with("def"),
@@ -438,7 +432,6 @@ fn renders_at_double_scale_without_panic() {
         Rect::new(0, 0, W * 2, H * 2),
         Scale::from_percent(200).expect("scale"),
         &theme,
-        font(),
     );
     assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
@@ -448,13 +441,7 @@ fn degenerate_bounds_do_not_panic() {
     let theme = Theme::dark();
     let mut surface = Surface::new(4, 4).expect("surface");
     let field = TextField::new().with_text("too big for me");
-    field.render(
-        &mut surface,
-        Rect::new(0, 0, 4, 4),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    field.render(&mut surface, Rect::new(0, 0, 4, 4), Scale::ONE, &theme);
     // No assertion beyond "did not panic".
 }
 
@@ -515,9 +502,9 @@ fn search_click_places_caret_after_the_magnifier() {
     let mut search = SearchField::new().with_text("aaaa");
     search.set_focused(true);
     // A click well to the right lands somewhere in the text without panic.
-    search.on_pointer(&moved(80, 14), bounds(), Scale::ONE, &theme, font());
-    search.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
-    search.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, font());
+    search.on_pointer(&moved(80, 14), bounds(), Scale::ONE, &theme);
+    search.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    search.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
     // Typing at that caret keeps the buffer well-formed.
     search.on_key(Key::Char('Z'), NONE_MODS);
     assert!(search.text().contains('Z'));
@@ -578,7 +565,7 @@ fn max_row_runs(surface: &Surface, want: Pixel) -> usize {
 /// The bead cell layout (first cell's surface x, per-cell advance) a masked
 /// field of the standard test bounds draws with.
 fn cell_layout(theme: &Theme) -> (u32, u32) {
-    debug_secret_cell_layout(bounds(), Scale::ONE, theme, font()).expect("cell layout")
+    debug_secret_cell_layout(bounds(), Scale::ONE, theme).expect("cell layout")
 }
 
 #[test]
@@ -803,9 +790,9 @@ fn clicking_a_secret_field_places_the_caret_on_a_cell_boundary() {
     let mut field = TextField::new().secret(8).with_text("abcde");
     field.set_focused(true);
     let x = i32::try_from(text_x0 + 2 * advance).expect("cell x");
-    field.on_pointer(&moved(x, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, font());
+    field.on_pointer(&moved(x, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
     type_str(&mut field, "Z");
     assert_eq!(
         field.text(),
@@ -822,10 +809,10 @@ fn dragging_a_secret_field_selects_whole_cells_and_typing_replaces_them() {
     field.set_focused(true);
     let start = i32::try_from(text_x0).expect("cell x");
     let end = i32::try_from(text_x0 + 3 * advance).expect("cell x");
-    field.on_pointer(&moved(start, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&moved(end, 14), bounds(), Scale::ONE, &theme, font());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, font());
+    field.on_pointer(&moved(start, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(end, 14), bounds(), Scale::ONE, &theme);
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
     type_str(&mut field, "Z");
     assert_eq!(
         field.text(),
@@ -914,20 +901,8 @@ fn pointer_position_alone_never_changes_a_text_field_render() {
     let theme = Theme::dark();
     let mut a = TextField::new().with_text("hello");
     let mut b = a.clone();
-    a.on_pointer(
-        &moved(OFF_A.0, OFF_A.1),
-        bounds(),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    b.on_pointer(
-        &moved(OFF_B.0, OFF_B.1),
-        bounds(),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), bounds(), Scale::ONE, &theme);
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), bounds(), Scale::ONE, &theme);
 
     assert_eq!(
         a, b,
@@ -949,11 +924,11 @@ fn selection_drag_latch_alone_never_changes_a_text_field_render() {
     // An empty field maps every press to byte zero, so the press moves no
     // caret and creates no selection: the drag latch is the only difference.
     let mut dragging = TextField::new();
-    dragging.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
-    dragging.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, font());
+    dragging.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
+    dragging.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
 
     let mut shown = TextField::new();
-    shown.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
+    shown.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
     let mut pressed = ControlState::idle();
     pressed.pointer = crate::state::PointerState::Pressed;
     shown.set_state(pressed);
@@ -976,20 +951,8 @@ fn pointer_position_alone_never_changes_a_search_field_render() {
     let theme = Theme::dark();
     let mut a = SearchField::new();
     let mut b = a.clone();
-    a.on_pointer(
-        &moved(OFF_A.0, OFF_A.1),
-        bounds(),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
-    b.on_pointer(
-        &moved(OFF_B.0, OFF_B.1),
-        bounds(),
-        Scale::ONE,
-        &theme,
-        font(),
-    );
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), bounds(), Scale::ONE, &theme);
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), bounds(), Scale::ONE, &theme);
 
     assert_eq!(a, b);
     let sa = search_surface(&a, &theme);
@@ -1003,7 +966,7 @@ fn hover_and_typing_each_change_a_text_field_render() {
     let resting = TextField::new();
 
     let mut hovered = resting.clone();
-    hovered.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, font());
+    hovered.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
     assert_ne!(resting, hovered, "a hover highlight is visible");
 
     let typed = TextField::new().with_text("a");

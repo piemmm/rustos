@@ -363,9 +363,10 @@ can never diverge in navigation semantics, listing policy, or look.
     never masquerade as an internal disk, and nothing here classifies a device
     by its name or by guesswork.
   - **Geometry defined once** (`layout::SidebarView`): the rail's width is
-    derived from the theme metrics and the active font — the padded row height
-    plus the measured `WIDEST_FIXED_LABEL`, clamped to a third of the window —
-    never a magic constant, so every fixed label fits at any UI density.
+    derived from the theme metrics and the theme's own body face — the padded
+    row height plus the measured `WIDEST_FIXED_LABEL`, clamped to a third of
+    the window — never a magic constant, so every fixed label fits at any UI
+    density.
     `rail_rect`, `row_rect`, and `separator_rect` place the paint and
     `index_at` inverts exactly those rectangles, so the row drawn and the row a
     click resolves to can never disagree; a point outside the rail, past the
@@ -516,7 +517,14 @@ can never diverge in navigation semantics, listing policy, or look.
   `crumb_at` is the mirror hit-test over that same placement. Font-agnostic
   (it works in measured pixel widths), so it is host-proven with synthetic
   widths and shared by the painter and the pointer hit-test (one definition).
-- **Renderer** (`render`): paints the path bar and the current directory
+- **Renderer** (`render`): every entry point takes the desktop's
+  `tairix_geometry::Scale` and the active `Theme`, and nothing takes a
+  typeface: each resolves the body face the theme's own ladder names at that
+  scale, so a caller cannot substitute a face the desktop does not draw with,
+  and every chrome length — row pitch, tile size, toolbar strip, scrollbar
+  gutter, panel and dialog bounds, menu placement — is authored logically and
+  converted through that one scale, so the chrome tracks the display density
+  the text does. It paints the path bar and the current directory
   into a `lib/raster` `Surface` in the browser's `ViewMode` — the path bar as
   a clickable breadcrumb trail (ancestors in the accent colour, the current
   directory drawn solid and inert) over the `breadcrumb` placement, list

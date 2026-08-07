@@ -27,8 +27,7 @@ use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, toolbar_command_at};
 use tairix_browse::{Browser, DirectorySource, Places, ToolbarCommand, Volume};
-use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 /// What routing an event to the rail did.
@@ -82,6 +81,7 @@ pub fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
 /// against the control the user saw.
 pub fn is_refresh_request<S: DirectorySource>(
     browser: &Browser<S>,
+    scale: Scale,
     theme: &Theme,
     viewport: Rect,
     event: &WindowEvent,
@@ -96,7 +96,7 @@ pub fn is_refresh_request<S: DirectorySource>(
             ..
         } => true,
         WindowEvent::Pointer { x, y, action, .. } => press_point(*action, *x, *y)
-            .and_then(|point| toolbar_command_at(browser, theme, viewport, point))
+            .and_then(|point| toolbar_command_at(browser, scale, theme, viewport, point))
             .is_some_and(|command| command == ToolbarCommand::Refresh),
         _ => false,
     }
@@ -124,8 +124,8 @@ pub fn refresh_places(places: &mut Places, home: &[String], volumes: &[Volume]) 
 /// drag-out detector depends on seeing every motion.
 pub fn track_hover(
     places: &mut Places,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     window: Rect,
     event: &WindowEvent,
 ) -> bool {
@@ -142,7 +142,7 @@ pub fn track_hover(
         i32::try_from(*x).unwrap_or(i32::MAX),
         i32::try_from(*y).unwrap_or(i32::MAX),
     );
-    let row = sidebar_index_at(window, theme, font, Some(places), point);
+    let row = sidebar_index_at(window, scale, theme, Some(places), point);
     places.set_hovered(row)
 }
 
@@ -159,8 +159,8 @@ pub fn track_hover(
 pub fn apply_event<S: DirectorySource>(
     browser: &mut Browser<S>,
     places: &mut Places,
+    scale: Scale,
     theme: &Theme,
-    font: BitmapFont,
     window: Rect,
     event: &WindowEvent,
 ) -> Option<SidebarOutcome> {
@@ -203,7 +203,7 @@ pub fn apply_event<S: DirectorySource>(
         }
         WindowEvent::Pointer { x, y, action, .. } => {
             let point = press_point(*action, *x, *y)?;
-            let index = sidebar_index_at(window, theme, font, Some(places), point)?;
+            let index = sidebar_index_at(window, scale, theme, Some(places), point)?;
             places.set_focused(true);
             places.set_cursor(index);
             let mut outcome = navigate_to(browser, places, index);

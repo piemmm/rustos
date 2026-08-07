@@ -272,7 +272,9 @@ impl<'a> Style<'a> {
         self.screen
     }
 
-    /// The interface text face: every label, choice, and status line.
+    /// The interface text face the chooser sets its own text in: the option
+    /// labels, the preview's placeholder, and the footer's status line.
+    /// Shared controls resolve their own face from the theme.
     #[must_use]
     pub const fn font(&self) -> BitmapFont {
         self.font

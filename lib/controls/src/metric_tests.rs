@@ -21,10 +21,10 @@ use tairix_theme::{SignalRole, Theme};
 use crate::chart::Chart;
 use crate::metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
 use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 
 fn font() -> BitmapFont {
-    BitmapFont::console()
+    control_font(&Theme::dark(), Scale::ONE)
 }
 
 fn premul(rgba: tairix_theme::Rgba) -> Pixel {
@@ -65,24 +65,24 @@ fn measured(permille: u16) -> MeterValue {
 
 fn tile_surface_at(tile: &MetricTile, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    tile.render(&mut surface, Rect::new(0, 0, w, h), scale, theme, font());
+    tile.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
     surface
 }
 
 fn tile_surface(tile: &MetricTile, theme: &Theme, scale: Scale) -> Surface {
-    let h = tile.measured_height(scale, theme, font());
+    let h = tile.measured_height(scale, theme);
     tile_surface_at(tile, theme, scale, 220, h)
 }
 
 fn pill_surface_at(pill: &StatusPill, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    pill.render(&mut surface, Rect::new(0, 0, w, h), scale, theme, font());
+    pill.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
     surface
 }
 
 fn pill_surface(pill: &StatusPill, theme: &Theme, scale: Scale) -> Surface {
-    let w = pill.measured_width(scale, theme, font());
-    let h = StatusPill::measured_height(scale, theme, font());
+    let w = pill.measured_width(scale, theme);
+    let h = StatusPill::measured_height(scale, theme);
     pill_surface_at(pill, theme, scale, w, h)
 }
 
@@ -141,12 +141,9 @@ fn instrument_none_draws_no_instrument_band() {
     let tile = MetricTile::new("CPU", "62%", PressureKind::Cpu);
     // With no instrument the tile's minimum height is just its reading lines
     // plus the plate border and padding — no extra slot is reserved.
-    let expected = total_height_for_content(
-        &theme,
-        Scale::ONE,
-        tile.reading_height(Scale::ONE, &theme, font()),
-    );
-    assert_eq!(tile.measured_height(Scale::ONE, &theme, font()), expected);
+    let expected =
+        total_height_for_content(&theme, Scale::ONE, tile.reading_height(Scale::ONE, &theme));
+    assert_eq!(tile.measured_height(Scale::ONE, &theme), expected);
     let surface = tile_surface(&tile, &theme, Scale::ONE);
     assert!(!has_pixel(&surface, premul(theme.palette().cpu_pressure)));
     assert!(!has_pixel(&surface, premul(theme.palette().scroll_track)));
@@ -240,8 +237,8 @@ fn a_unit_extends_the_reading_line_in_the_muted_foreground() {
     let with_unit = value_only.clone().with_unit("GB / 16 GB");
     let scale = Scale::ONE;
     let h = value_only
-        .measured_height(scale, &theme, font())
-        .max(with_unit.measured_height(scale, &theme, font()));
+        .measured_height(scale, &theme)
+        .max(with_unit.measured_height(scale, &theme));
     let a = tile_surface_at(&value_only, &theme, scale, 220, h);
     let b = tile_surface_at(&with_unit, &theme, scale, 220, h);
     assert_ne!(
@@ -274,10 +271,7 @@ fn reading_height_grows_with_a_detail_line() {
     let theme = Theme::dark();
     let bare = MetricTile::new("CPU", "62%", PressureKind::Cpu);
     let detailed = bare.clone().with_detail("4 cores");
-    assert!(
-        detailed.reading_height(Scale::ONE, &theme, font())
-            > bare.reading_height(Scale::ONE, &theme, font())
-    );
+    assert!(detailed.reading_height(Scale::ONE, &theme) > bare.reading_height(Scale::ONE, &theme));
 }
 
 // --- Progressive omission under shrinking heights -------------------------
@@ -293,8 +287,8 @@ fn shrinking_height_omits_the_instrument_before_the_detail_line() {
     let bare = MetricTile::new("CPU", "62%", PressureKind::Cpu)
         .with_instrument(MetricInstrument::Track(measured(620)));
 
-    let reading_with_detail = tile.reading_height(scale, &theme, f);
-    let reading_without_detail = bare.reading_height(scale, &theme, f);
+    let reading_with_detail = tile.reading_height(scale, &theme);
+    let reading_without_detail = bare.reading_height(scale, &theme);
     let (band_from, band_to) = detail_band(&theme, scale, f, MetricLayout::Stacked);
     let cpu = premul(theme.palette().cpu_pressure);
     let muted = premul(theme.palette().on_surface_muted);
@@ -302,7 +296,7 @@ fn shrinking_height_omits_the_instrument_before_the_detail_line() {
     let w = 220;
 
     // Full height: label, value, detail, and the instrument all fit.
-    let full_h = tile.measured_height(scale, &theme, f);
+    let full_h = tile.measured_height(scale, &theme);
     let full = tile_surface_at(&tile, &theme, scale, w, full_h);
     assert!(
         has_pixel(&full, cpu),
@@ -352,7 +346,7 @@ fn long_label_value_unit_and_detail_all_truncate_within_the_content_region() {
         .with_unit(long.clone())
         .with_detail(long);
     let w = 160;
-    let h = tile.measured_height(scale, &theme, font());
+    let h = tile.measured_height(scale, &theme);
     let surface = tile_surface_at(&tile, &theme, scale, w, h);
     let (_, _, cw, _) = content_rect(&theme, scale, (0, 0, w, h));
     // A couple of pixels of slack absorbs a glyph's own anti-aliased
@@ -400,13 +394,7 @@ fn a_tile_far_smaller_than_its_content_still_renders_without_panicking() {
         .with_instrument(MetricInstrument::Track(measured(620)));
     for (w, h) in [(1, 1), (0, 40), (40, 0)] {
         let mut surface = Surface::new(w.max(1), h.max(1)).expect("surface");
-        tile.render(
-            &mut surface,
-            Rect::new(0, 0, w, h),
-            Scale::ONE,
-            &theme,
-            font(),
-        );
+        tile.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
         assert_eq!(
             surface.pixels().len() as u64,
             u64::from(w.max(1)) * u64::from(h.max(1))
@@ -440,8 +428,8 @@ fn an_icon_reserves_a_leading_gutter_and_shifts_the_text() {
 
     // The icon claims no extra height: the reading anatomy is unchanged, so a
     // tile with no icon still measures and lays out exactly as it always has.
-    let h = bare.measured_height(Scale::ONE, &theme, font());
-    assert_eq!(h, iconed.measured_height(Scale::ONE, &theme, font()));
+    let h = bare.measured_height(Scale::ONE, &theme);
+    assert_eq!(h, iconed.measured_height(Scale::ONE, &theme));
 
     let bare_surface = tile_surface_at(&bare, &theme, Scale::ONE, 220, h);
     let iconed_surface = tile_surface_at(&iconed, &theme, Scale::ONE, 220, h);
@@ -487,22 +475,18 @@ fn inline_reading_height_is_shorter_than_stacked_for_the_same_tile() {
     let theme = Theme::dark();
     let stacked = MetricTile::new("CPU", "62%", PressureKind::Cpu);
     let inline = stacked.clone().with_layout(MetricLayout::Inline);
-    assert!(
-        inline.reading_height(Scale::ONE, &theme, font())
-            < stacked.reading_height(Scale::ONE, &theme, font())
-    );
+    assert!(inline.reading_height(Scale::ONE, &theme) < stacked.reading_height(Scale::ONE, &theme));
 }
 
 #[test]
 fn inline_layout_places_the_label_leading_and_the_reading_trailing() {
     let theme = Theme::dark();
-    let f = font();
     let scale = Scale::ONE;
     let tile = MetricTile::new("CPU", "62", PressureKind::Cpu)
         .with_unit("%")
         .with_layout(MetricLayout::Inline);
     let w = 220;
-    let h = tile.measured_height(scale, &theme, f);
+    let h = tile.measured_height(scale, &theme);
     let surface = tile_surface_at(&tile, &theme, scale, w, h);
 
     let (cx, _, cw, _) = content_rect(&theme, scale, (0, 0, w, h));
@@ -522,15 +506,14 @@ fn inline_layout_places_the_label_leading_and_the_reading_trailing() {
 #[test]
 fn inline_reading_stays_right_aligned_regardless_of_the_label_length() {
     let theme = Theme::dark();
-    let f = font();
     let scale = Scale::ONE;
     let w = 220;
     let short = MetricTile::new("A", "62%", PressureKind::Cpu).with_layout(MetricLayout::Inline);
     let long = MetricTile::new("Central Processing Unit", "62%", PressureKind::Cpu)
         .with_layout(MetricLayout::Inline);
     let h = short
-        .measured_height(scale, &theme, f)
-        .max(long.measured_height(scale, &theme, f));
+        .measured_height(scale, &theme)
+        .max(long.measured_height(scale, &theme));
     let short_surface = tile_surface_at(&short, &theme, scale, w, h);
     let long_surface = tile_surface_at(&long, &theme, scale, w, h);
 
@@ -551,7 +534,7 @@ fn inline_layout_truncates_the_label_before_the_reading_when_both_cannot_fit() {
     let long_label = "Central Processing Unit Utilisation Across All Cores";
     let tile =
         MetricTile::new(long_label, "62%", PressureKind::Cpu).with_layout(MetricLayout::Inline);
-    let h = tile.measured_height(scale, &theme, f);
+    let h = tile.measured_height(scale, &theme);
 
     let wide = tile_surface_at(&tile, &theme, scale, 400, h);
     let muted = premul(theme.palette().on_surface_muted);
@@ -671,15 +654,15 @@ fn shrinking_height_omits_the_instrument_before_the_detail_line_in_inline_layout
         .with_layout(MetricLayout::Inline)
         .with_instrument(MetricInstrument::Track(measured(620)));
 
-    let reading_with_detail = tile.reading_height(scale, &theme, f);
-    let reading_without_detail = bare.reading_height(scale, &theme, f);
+    let reading_with_detail = tile.reading_height(scale, &theme);
+    let reading_without_detail = bare.reading_height(scale, &theme);
     let (band_from, band_to) = detail_band(&theme, scale, f, MetricLayout::Inline);
     let cpu = premul(theme.palette().cpu_pressure);
     let muted = premul(theme.palette().on_surface_muted);
     let value_fg = premul(theme.palette().on_surface);
     let w = 220;
 
-    let full_h = tile.measured_height(scale, &theme, f);
+    let full_h = tile.measured_height(scale, &theme);
     let full = tile_surface_at(&tile, &theme, scale, w, full_h);
     assert!(
         has_pixel(&full, cpu),
@@ -728,11 +711,10 @@ fn an_unplated_tile_draws_no_plate_or_rim_but_still_draws_its_content() {
     // With no plate to pad, an unplated tile needs less height for the same
     // content.
     assert!(
-        unplated.measured_height(Scale::ONE, &theme, font())
-            < plated.measured_height(Scale::ONE, &theme, font())
+        unplated.measured_height(Scale::ONE, &theme) < plated.measured_height(Scale::ONE, &theme)
     );
 
-    let h = plated.measured_height(Scale::ONE, &theme, font());
+    let h = plated.measured_height(Scale::ONE, &theme);
     let plated_surface = tile_surface_at(&plated, &theme, Scale::ONE, 220, h);
     let unplated_surface = tile_surface_at(&unplated, &theme, Scale::ONE, 220, h);
 
@@ -761,8 +743,7 @@ fn an_unplated_tile_draws_flush_to_its_own_bounds() {
     let theme = Theme::dark();
     let tile = MetricTile::new("CPU", "62%", PressureKind::Cpu).unplated();
     let scale = Scale::ONE;
-    let f = font();
-    let h = tile.measured_height(scale, &theme, f);
+    let h = tile.measured_height(scale, &theme);
     let surface = tile_surface_at(&tile, &theme, scale, 220, h);
     let muted = premul(theme.palette().on_surface_muted);
     let label_x = leftmost_column(&surface, muted).expect("label drawn");
@@ -785,8 +766,7 @@ fn the_three_additions_compose_in_an_unplated_inline_tile_with_an_icon_and_a_tra
     assert_eq!(tile.icon(), Some(IconKind::Network));
 
     let scale = Scale::ONE;
-    let f = font();
-    let h = tile.measured_height(scale, &theme, f);
+    let h = tile.measured_height(scale, &theme);
     let surface = tile_surface_at(&tile, &theme, scale, 220, h);
 
     let cpu = premul(theme.palette().cpu_pressure);
@@ -822,7 +802,6 @@ fn every_new_addition_renders_in_both_themes_and_under_high_contrast() {
 #[test]
 fn every_new_combination_renders_without_panicking_in_degenerate_bounds() {
     let theme = Theme::dark();
-    let f = font();
     let base = MetricTile::new("CPU", "62%", PressureKind::Cpu)
         .with_detail("4 cores")
         .with_instrument(MetricInstrument::Track(measured(620)))
@@ -836,7 +815,7 @@ fn every_new_combination_renders_without_panicking_in_degenerate_bounds() {
     for tile in variants {
         for (w, h) in [(1_u32, 1_u32), (0, 40), (40, 0)] {
             let mut surface = Surface::new(w.max(1), h.max(1)).expect("surface");
-            tile.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme, f);
+            tile.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
             assert_eq!(
                 surface.pixels().len() as u64,
                 u64::from(w.max(1)) * u64::from(h.max(1))
@@ -899,17 +878,10 @@ fn measured_width_grows_with_the_label_and_with_scale() {
     let theme = Theme::dark();
     let short = StatusPill::new("OK");
     let long = StatusPill::new("Recovering");
-    assert!(
-        long.measured_width(Scale::ONE, &theme, font())
-            > short.measured_width(Scale::ONE, &theme, font())
-    );
+    assert!(long.measured_width(Scale::ONE, &theme) > short.measured_width(Scale::ONE, &theme));
 
-    let unit = short.measured_width(Scale::ONE, &theme, font());
-    let doubled = short.measured_width(
-        Scale::from_percent(200).expect("valid scale"),
-        &theme,
-        font(),
-    );
+    let unit = short.measured_width(Scale::ONE, &theme);
+    let doubled = short.measured_width(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit, "a larger scale must need more width");
 }
 
@@ -941,7 +913,7 @@ fn a_pill_renders_in_both_themes() {
 fn a_long_pill_label_truncates_within_bounds() {
     let theme = Theme::dark();
     let pill = StatusPill::new("X".repeat(200));
-    let h = StatusPill::measured_height(Scale::ONE, &theme, font());
+    let h = StatusPill::measured_height(Scale::ONE, &theme);
     let surface = pill_surface_at(&pill, &theme, Scale::ONE, 80, h);
     // Must not panic, and the label must never draw past the pill's own
     // bounds.
@@ -969,13 +941,7 @@ fn a_pill_in_degenerate_bounds_never_panics() {
     let pill = StatusPill::new("OK").with_tone(SignalRole::Success);
     for (w, h) in [(1_u32, 1_u32), (0, 40), (40, 0)] {
         let mut surface = Surface::new(w.max(1), h.max(1)).expect("surface");
-        pill.render(
-            &mut surface,
-            Rect::new(0, 0, w, h),
-            Scale::ONE,
-            &theme,
-            font(),
-        );
+        pill.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
         assert_eq!(
             surface.pixels().len() as u64,
             u64::from(w.max(1)) * u64::from(h.max(1))

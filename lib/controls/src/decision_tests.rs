@@ -9,7 +9,6 @@
 use alloc::string::String;
 use alloc::vec;
 
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -19,10 +18,6 @@ use crate::button::{Button, ButtonContent};
 use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::high_contrast;
-
-fn font() -> BitmapFont {
-    BitmapFont::console()
-}
 
 fn scale2() -> Scale {
     Scale::from_percent(200).expect("valid scale")
@@ -66,7 +61,7 @@ const DH: u32 = 160;
 
 fn dialog_surface(dialog: &Dialog, theme: &Theme) -> Surface {
     let mut s = Surface::new(DW, DH).expect("surface");
-    dialog.render(&mut s, Rect::new(0, 0, DW, DH), Scale::ONE, theme, font());
+    dialog.render(&mut s, Rect::new(0, 0, DW, DH), Scale::ONE, theme);
     s
 }
 
@@ -125,21 +120,12 @@ fn dialog_denied_action_shows_lock_and_does_not_activate() {
     // Fail closed: clicking a denied action never activates it.
     let bounds = Rect::new(0, 0, DW, DH);
     assert_eq!(
-        dialog.on_pointer(
-            &moved(iv(DW) - 15, iv(DH) - 15),
-            bounds,
-            Scale::ONE,
-            &theme,
-            font()
-        ),
+        dialog.on_pointer(&moved(iv(DW) - 15, iv(DH) - 15), bounds, Scale::ONE, &theme),
         None
     );
+    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         None
     );
 }
@@ -161,15 +147,12 @@ fn dialog_action_activates_by_pointer() {
     let bounds = Rect::new(0, 0, DW, DH);
     let (cx, cy) = (iv(DW) - 15, iv(DH) - 15);
     assert_eq!(
-        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, font()),
+        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
         None
     );
+    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         Some(DialogAction::ActionActivated { index: 0 })
     );
 }
@@ -191,7 +174,7 @@ fn dialog_action_rects_match_the_pointer_hit_geometry() {
     let bounds = Rect::new(0, 0, DW, DH);
     let mut dialog = Dialog::new("Confirm")
         .with_actions(vec![Button::labelled("Cancel"), Button::labelled("OK")]);
-    let rects = dialog.action_rects(bounds, Scale::ONE, &theme, font());
+    let rects = dialog.action_rects(bounds, Scale::ONE, &theme);
     // One rect per action, in action order.
     assert_eq!(rects.len(), 2);
     // A move-then-press-then-release at the reported centre of action 1
@@ -201,15 +184,12 @@ fn dialog_action_rects_match_the_pointer_hit_geometry() {
     let cx = target.origin.x + iv(target.width) / 2;
     let cy = target.origin.y + iv(target.height) / 2;
     assert_eq!(
-        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, font()),
+        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
         None
     );
+    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         Some(DialogAction::ActionActivated { index: 1 })
     );
 }
@@ -220,7 +200,7 @@ fn dialog_action_rects_are_empty_when_the_plate_has_no_interior() {
     let dialog = Dialog::new("Confirm").with_actions(vec![Button::labelled("OK")]);
     // A zero-area plate has no drawable interior, so there are no button rects
     // (fail closed) rather than a phantom placement.
-    let rects = dialog.action_rects(Rect::new(0, 0, 0, 0), Scale::ONE, &theme, font());
+    let rects = dialog.action_rects(Rect::new(0, 0, 0, 0), Scale::ONE, &theme);
     assert!(rects.is_empty());
 }
 
@@ -255,13 +235,7 @@ fn dialog_high_contrast_and_scale_render() {
     Dialog::new("Scaled")
         .with_message("body")
         .with_actions(vec![Button::labelled("OK")])
-        .render(
-            &mut s,
-            Rect::new(0, 0, DW * 2, DH * 2),
-            scale2(),
-            &hc,
-            font(),
-        );
+        .render(&mut s, Rect::new(0, 0, DW * 2, DH * 2), scale2(), &hc);
     assert!(has_pixel(&s, premul(hc.palette().on_surface)));
 }
 
@@ -271,9 +245,9 @@ fn dialog_high_contrast_and_scale_render() {
 fn tooltip_renders_text_in_both_themes() {
     for theme in [Theme::dark(), Theme::light()] {
         let tip = Tooltip::new("Save the document");
-        let (w, h) = tip.preferred_size(Scale::ONE, &theme, font());
+        let (w, h) = tip.preferred_size(Scale::ONE, &theme);
         let mut s = Surface::new(w, h).expect("surface");
-        tip.render(&mut s, Rect::new(0, 0, w, h), Scale::ONE, &theme, font());
+        tip.render(&mut s, Rect::new(0, 0, w, h), Scale::ONE, &theme);
         assert!(has_pixel(&s, premul(theme.palette().on_surface)));
         assert!(has_pixel(&s, premul(theme.palette().surface_raised)));
         assert_eq!(tip.text(), "Save the document");
@@ -283,7 +257,7 @@ fn tooltip_renders_text_in_both_themes() {
 #[test]
 fn tooltip_preferred_size_is_positive() {
     let theme = Theme::dark();
-    let (w, h) = Tooltip::new("hi").preferred_size(Scale::ONE, &theme, font());
+    let (w, h) = Tooltip::new("hi").preferred_size(Scale::ONE, &theme);
     assert!(w > 0 && h > 0);
 }
 
@@ -296,7 +270,6 @@ fn tooltip_renders_in_tight_bounds_without_panic() {
         Rect::new(0, 0, 12, 8),
         Scale::ONE,
         &theme,
-        font(),
     );
 }
 
@@ -310,7 +283,7 @@ fn helptip_neutral_reason_is_cautionary() {
     let theme = Theme::dark();
     let tip = HelpTip::new("This action is not available yet.");
     let mut s = Surface::new(HW, HH).expect("surface");
-    tip.render(&mut s, Rect::new(0, 0, HW, HH), Scale::ONE, &theme, font());
+    tip.render(&mut s, Rect::new(0, 0, HW, HH), Scale::ONE, &theme);
     assert!(has_pixel(&s, premul(theme.palette().warning)));
 }
 
@@ -319,7 +292,7 @@ fn helptip_recommended_reason_is_accent() {
     let theme = Theme::dark();
     let tip = HelpTip::new("Recommended for security.").with_role(ControlRole::Recommended);
     let mut s = Surface::new(HW, HH).expect("surface");
-    tip.render(&mut s, Rect::new(0, 0, HW, HH), Scale::ONE, &theme, font());
+    tip.render(&mut s, Rect::new(0, 0, HW, HH), Scale::ONE, &theme);
     assert!(has_pixel(&s, premul(theme.palette().accent)));
 }
 
@@ -330,15 +303,12 @@ fn helptip_step_activates_by_pointer() {
     let bounds = Rect::new(0, 0, HW, HH);
     let (cx, cy) = (30, iv(HH) - 15);
     assert_eq!(
-        tip.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, font()),
+        tip.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
         None
     );
+    assert_eq!(tip.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        tip.on_pointer(&PRESS, bounds, Scale::ONE, &theme, font()),
-        None
-    );
-    assert_eq!(
-        tip.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, font()),
+        tip.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
         Some(HelpTipAction::NextStep)
     );
 }
@@ -357,12 +327,6 @@ fn helptip_high_contrast_and_scale_render() {
     let mut s = Surface::new(HW * 2, HH * 2).expect("surface");
     HelpTip::new("Reason")
         .with_step(Button::labelled("Fix"))
-        .render(
-            &mut s,
-            Rect::new(0, 0, HW * 2, HH * 2),
-            scale2(),
-            &hc,
-            font(),
-        );
+        .render(&mut s, Rect::new(0, 0, HW * 2, HH * 2), scale2(), &hc);
     assert!(has_pixel(&s, premul(hc.palette().warning)));
 }

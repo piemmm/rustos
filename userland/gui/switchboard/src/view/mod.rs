@@ -610,15 +610,8 @@ trait SectionView {
     ///
     /// Nothing by default: a section with no census in its anatomy is never
     /// given a rectangle to paint into, so the two can never disagree.
-    fn render_band(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        let _ = (surface, rect, scale, theme, font);
+    fn render_band(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
+        let _ = (surface, rect, scale, theme);
     }
 
     /// Route a pointer event to the section's items.
@@ -957,9 +950,8 @@ impl Switchboard {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Rect {
-        let w = menu.preferred_width(scale, theme, font).min(bounds.width);
+        let w = menu.preferred_width(scale, theme).min(bounds.width);
         let h = menu.preferred_height(scale, theme).min(bounds.height);
         let max_x = bounds.left().max(bounds.right() - to_i32(w));
         let x = anchor.left().clamp(bounds.left(), max_x);
@@ -1264,7 +1256,7 @@ impl Switchboard {
         // pixel no control covers keeps whatever the shared frame region held
         // before, which reads as a transparent window.
         Self::fill_client(surface, bounds, theme);
-        self.render_location(surface, layout.location, scale, theme, font);
+        self.render_location(surface, layout.location, scale, theme);
         self.render_section(surface, ctx);
 
         // The scrollbar, drawn after the content so its thumb sits above it.
@@ -1276,30 +1268,22 @@ impl Switchboard {
         // can reach the control that would open the other.
         self.active().render_overlay(surface, ctx);
         if let Some(menu) = &self.section_menu {
-            let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme, font);
-            menu.render(surface, rect, scale, theme, font);
+            let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme);
+            menu.render(surface, rect, scale, theme);
         }
     }
 
     /// Paint the location band: the trail naming where the reader is, the
     /// section's own summary beside it, then the command that opens the
     /// section list, over the one [`Switchboard::band`] the hit test reads.
-    fn render_location(
-        &self,
-        surface: &mut Surface,
-        location: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    fn render_location(&self, surface: &mut Surface, location: Rect, scale: Scale, theme: &Theme) {
         let band = self.band(location, theme, scale);
-        self.trail.render(surface, band.trail, scale, theme, font);
+        self.trail.render(surface, band.trail, scale, theme);
         if let Some(summary) = band.summary {
-            self.active()
-                .render_band(surface, summary, scale, theme, font);
+            self.active().render_band(surface, summary, scale, theme);
         }
         self.section_list
-            .render(surface, band.command, scale, theme, font, None);
+            .render(surface, band.command, scale, theme, None);
     }
 
     /// Paint the active section's content, then the Edge Wake on the action
@@ -1329,7 +1313,7 @@ impl Switchboard {
             let scrolled = self.offsets[self.section.index()] != 0;
             ActionRail::new(Vec::new())
                 .with_edge_wake(scrolled)
-                .render(surface, column, ctx.scale, ctx.theme, ctx.font);
+                .render(surface, column, ctx.scale, ctx.theme);
         }
     }
 
@@ -1358,7 +1342,7 @@ impl Switchboard {
             return outcome.and_then(|outcome| self.resolve_outcome(outcome));
         }
         if self.section_menu.is_some() {
-            return self.section_menu_on_pointer(event, bounds, scale, theme, font);
+            return self.section_menu_on_pointer(event, bounds, scale, theme);
         }
 
         self.sync_scroll(bounds, scale, theme);
@@ -1386,7 +1370,7 @@ impl Switchboard {
         let band = self.band(layout.location, theme, scale);
         let (trail, command) = (band.trail, band.command);
         if let Some(BreadcrumbAction::Activate { .. }) =
-            self.trail.on_pointer(event, trail, scale, theme, font)
+            self.trail.on_pointer(event, trail, scale, theme)
         {
             self.open_section_menu();
             return None;
@@ -1446,11 +1430,10 @@ impl Switchboard {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> Option<SwitchboardAction> {
         let layout = self.compute_layout(bounds, scale, theme);
         let menu = self.section_menu.as_ref()?;
-        let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme, font);
+        let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme);
 
         if let InputEvent::PointerPressed {
             button: PointerButton::Primary,

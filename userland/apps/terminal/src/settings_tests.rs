@@ -68,7 +68,7 @@ fn bands(
         .panel
         .content_rect(bounds, SCALE, &theme())
         .expect("the panel has a content rectangle");
-    sheet.bands(content, SCALE, &theme(), font())
+    sheet.bands(content, SCALE, &theme())
 }
 
 /// The scrollable body band for `viewport`.
@@ -128,20 +128,20 @@ fn centre(rect: Rect) -> Point {
 /// Move the pointer to `at` and press, reporting the press outcome — the
 /// gesture a slider commits on.
 fn press_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
-    sheet.on_pointer(&moved(at), viewport, SCALE, &theme(), font());
-    sheet.on_pointer(&PRESS, viewport, SCALE, &theme(), font())
+    sheet.on_pointer(&moved(at), viewport, SCALE, &theme());
+    sheet.on_pointer(&PRESS, viewport, SCALE, &theme())
 }
 
 /// A complete primary click at `at`, reporting the release outcome — the
 /// gesture a radio or button commits on.
 fn click_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
     press_at(sheet, viewport, at);
-    sheet.on_pointer(&RELEASE, viewport, SCALE, &theme(), font())
+    sheet.on_pointer(&RELEASE, viewport, SCALE, &theme())
 }
 
 /// One unmodified key press.
 fn key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
-    sheet.on_key(key, Modifiers::default(), viewport, SCALE, &theme(), font())
+    sheet.on_key(key, Modifiers::default(), viewport, SCALE, &theme())
 }
 
 /// One Shift-modified key press.
@@ -150,7 +150,7 @@ fn shift_key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
         shift: true,
         ..Modifiers::default()
     };
-    sheet.on_key(key, modifiers, viewport, SCALE, &theme(), font())
+    sheet.on_key(key, modifiers, viewport, SCALE, &theme())
 }
 
 /// Tab forward until `target` holds focus.
@@ -190,7 +190,7 @@ fn effect_values(effects: Effects) -> [u16; EFFECT_COUNT] {
 fn renders_at_the_small_screen_client_budget() {
     let sheet = sheet();
     let mut surface = surface(CLIENT);
-    sheet.render(&mut surface, CLIENT, SCALE, &theme(), font());
+    sheet.render(&mut surface, CLIENT, SCALE, &theme());
     assert!(surface.pixels().iter().any(|pixel| pixel.a > 0));
 }
 
@@ -198,7 +198,7 @@ fn renders_at_the_small_screen_client_budget() {
 fn renders_at_a_tiny_viewport_without_panicking() {
     let sheet = sheet();
     let mut surface = surface(TINY);
-    sheet.render(&mut surface, TINY, SCALE, &theme(), font());
+    sheet.render(&mut surface, TINY, SCALE, &theme());
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn renders_the_effects_tab_at_both_viewports() {
         let mut sheet = sheet();
         select_effects_tab(&mut sheet, viewport);
         let mut surface = surface(viewport);
-        sheet.render(&mut surface, viewport, SCALE, &theme(), font());
+        sheet.render(&mut surface, viewport, SCALE, &theme());
     }
 }
 
@@ -215,7 +215,7 @@ fn renders_the_effects_tab_at_both_viewports() {
 fn renders_under_the_light_theme_too() {
     let sheet = sheet();
     let mut surface = surface(CLIENT);
-    sheet.render(&mut surface, CLIENT, SCALE, &Theme::light(), font());
+    sheet.render(&mut surface, CLIENT, SCALE, &Theme::light());
     assert!(surface.pixels().iter().any(|pixel| pixel.a > 0));
 }
 
@@ -384,7 +384,7 @@ fn the_opacity_slider_spans_its_own_floor_to_full() {
         "the low end of the travel is the readable floor, not a dead zone"
     );
 
-    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), font());
+    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
     assert_eq!(
         press_at(&mut sheet, CLIENT, slider_point(row, 1000)),
         SheetOutcome::Edited
@@ -411,11 +411,11 @@ fn the_profile_stays_clamped_after_extreme_values() {
     for index in 0..EFFECT_COUNT {
         let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
         press_at(&mut sheet, CLIENT, slider_point(row, 0));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), font());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
         press_at(&mut sheet, CLIENT, slider_point(row, 1000));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), font());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
         press_at(&mut sheet, CLIENT, slider_point(row, 0));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), font());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
     }
     focus_on(&mut sheet, CLIENT, Focus::Tabs);
     key(&mut sheet, CLIENT, Key::Named(NamedKey::Left));

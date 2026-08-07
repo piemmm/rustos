@@ -21,7 +21,6 @@
 use alloc::vec::Vec;
 
 use tairix_controls::{ActivityState, ControlState, Menu, MenuAction, MenuItem};
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -183,15 +182,9 @@ impl PinboardMenu {
     /// the edge. A closed menu has no plate at all rather than a fabricated
     /// one at the origin.
     #[must_use]
-    pub fn layout(
-        &self,
-        screen: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> Option<Rect> {
+    pub fn layout(&self, screen: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
         let at = self.anchor?;
-        let width = self.menu.preferred_width(scale, theme, font);
+        let width = self.menu.preferred_width(scale, theme);
         let height = self.menu.preferred_height(scale, theme);
         Some(Rect::new(
             clamped_edge(screen.origin.x, screen.width, at.x, width),
@@ -203,18 +196,11 @@ impl PinboardMenu {
 
     /// Paint the open menu into `surface` at `bounds` through the shared menu
     /// control. A closed menu draws nothing.
-    pub fn render(
-        &self,
-        surface: &mut Surface,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if !self.is_open() {
             return;
         }
-        self.menu.render(surface, bounds, scale, theme, font);
+        self.menu.render(surface, bounds, scale, theme);
     }
 
     /// Route one pointer `event`, with the live `pointer` position, into the
