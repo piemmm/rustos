@@ -36,6 +36,7 @@ Here are some screenshots of TAIRiX running, showcasing the current state of the
 </tr>
 <tr>
     <td align="center"><a href="docs/screenshots/supervisor.png"><img src="docs/screenshots/supervisor.png" alt="Supervisor system monitor" width="140"></a><br><sub>Supervisor preboot monitor</sub></td>
+    <td align="center"><a href="docs/screenshots/transparency-blur-compositor.png"><img src="docs/screenshots/transparency-blur-compositor.png" alt="Compositor with transparency/blur support" width="140"></a><br><sub>Compositor with transparency/blur support</sub></td>
 
 </tr>
 </table>
