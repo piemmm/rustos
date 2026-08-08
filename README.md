@@ -81,39 +81,6 @@ for filesystems, the feature section below.
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 
-Networking is the virtio-net link-layer driver plus the user-space
-`netstack` service: a dual-stack (IPv4 + IPv6) network layer — ARP,
-Neighbour Discovery, ICMP/ICMPv6 echo + errors, fragment reassembly,
-routing, UDP with multicast, and TCP (RFC 9293 with CUBIC/NewReno
-congestion control, SACK loss recovery, and SYN-cookie listeners) — over a
-capability-gated shared-memory frame-ring seam, plus the datagram and
-stream socket ABIs. A discovered NIC's driver runs as its own user process
-and its frame channel is autobound into the running stack by the device
-manager (`plans/NETWORK.md` N4d) — proven end-to-end in a two-process live
-boot on all three Tier-1 targets, where the production boot autoloads the
-virtio-net driver, the stack auto-configures the interface's IPv6
-link-local, and it answers a host peer's echo (N4e-β on aarch64,
-N4e-riscv64, and N4e-x86_64 over virtio-PCI with kernel-routed MSI-X). The
-driver negotiates receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM`) and
-the stack skips the redundant fold for a device-validated frame; TCP
-transmit-checksum offload (`VIRTIO_NET_F_CSUM`), handing the device a
-segment with only the partial pseudo-header checksum to complete; TCP
-segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6`), handing the device
-one over-size super-segment to split; mergeable receive buffers
-(`VIRTIO_NET_F_MRG_RXBUF`), posting a pool of receive buffers and
-reassembling a device-merged frame; and multiqueue receive
-(`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`), enabling one receive ring per
-device receive queue via the control-queue pair-count command and
-harvesting each into its own ring — the software path stays the
-byte-for-byte conformance oracle for each (N7a, N7b, N7c). The engine's
-receive and transmit fast paths allocate nothing on the heap in steady
-state (a reused output recycles frame and payload buffers through a bounded
-pool), enforced by a counting-allocator regression test (N7c-3). UDP
-transmit-checksum offload is a settled software-path decision (virtio's
-partial-checksum contract cannot honour RFC 768's zero-checksum rule).
-Multiqueue receive is host-test-proven; a live multiqueue vertical awaits a
-`tap`-backed harness (the `dgram` test backend QEMU restricts to one
-queue). Interface configuration / bonding (N9) remains, hence still `◐`.
 
 ## Filesystem feature support
 
@@ -150,35 +117,13 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
 TAIRiX ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
-interoperability drivers for foreign volumes: ext4 maintains every on-disk
-checksum it mounts (`metadata_csum`, `gdt_csum`, `64bit`) and fails closed to
-read-only on feature sets outside its write allow-list; FAT32 has no on-disk
-security metadata (ownership and permissions live in the VFS layer); ADFS
-covers every Acorn `FileCore` format (S/M/L/D old map, E/F new map, E+/F+
-big directories, old- and new-map hard discs), validating every on-disc
-checksum and surfacing RISC OS load/exec/filetype/datestamp metadata through
-the shared `acorn.*` attribute keys. The
-drivers' declared-limit timestamp surface is staged per `AGENTS.md` §21.
-btrfs, XFS, and bcachefs have no TAIRiX driver and appear only for
-comparison — including what ARXFS does *not* do: snapshots, multi-device
-pooling/RAID, and self-healing of *data* (ARXFS today detects and classifies
-bad data blocks through its three-layer integrity pipeline but repairs only
-its mirrored metadata; data reconstruction is a recognised later stage).
-Per-driver detail lives in each crate's `README.md` under
-[`drivers/filesystem/`](./drivers/filesystem) and the
-[`docs/src/filesystem/`](./docs/src/filesystem) book pages.
+interoperability drivers for foreign volumes
 
 ## Security & attack-vector prevention
 
 The attack classes TAIRiX forecloses, and where each defence stands per
 target. The structural defences (capability authority, process isolation,
-no ambient root, signed code) are designed in from the kernel up; the
-hardening defences below are the [`AGENTS.md`](./AGENTS.md) §4/§5/§19
-controls, tracked against the §19 burn-down in [`PLAN.md`](./PLAN.md). Same
-legend as above: `✓` implemented · `◐` in progress · `▢` planned ·
-`—` not applicable. Architecture-neutral rows are `✓` on every target by
-design; rows that depend on the MMU or on backing storage are `—` on
-`wasm32` (it runs in the browser's sandbox with no page tables or swap).
+no ambient root, signed code) are designed in from the kernel up.
 
 | Defence (`AGENTS.md` §) | Attack vector closed | x86_64 | aarch64 | riscv64 | wasm32 |
 | --- | --- | :-: | :-: | :-: | :-: |
@@ -204,12 +149,6 @@ design; rows that depend on the MMU or on backing storage are `—` on
 | Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net) | ▢ | ▢ | ▢ | ▢ |
 | Hardware memory tagging — MTE / ADI (§19.10) | Use-after-free (hardware-enforced) | — | ▢ | ▢ | — |
 
-`◐` rows have their architecture-neutral core landed with the remaining
-stage-blocked work (signed log anchors, the driver-signing trust anchor,
-reproducible builds, shadow stacks, KPTI page-table isolation) tracked in
-the [`PLAN.md`](./PLAN.md) §19 burn-down — not deferred by choice. The
-explicit non-goals (phishing, physical/cold-boot attacks, compromise of an
-admin capability holder, compiler bugs) are listed in `AGENTS.md` §19.9.
 
 ## Building
 
