@@ -74,6 +74,15 @@ pub struct LoginScreen<T: SessionTransport> {
     /// cursor would not rasterise keeps hit-testing and typing with nothing
     /// drawn, which is a missing pointer rather than a broken login.
     pointer: Option<PlacedCursor>,
+    /// The surface as last rendered, with no cursor drawn into it.
+    ///
+    /// Everything the render reads — the account tiles, the field, the
+    /// chrome, the lockout, the backdrop — changes only through the surface
+    /// reporting it or a wallpaper arriving, and both drop this. A pointer
+    /// sliding across an unchanged screen therefore re-composes a
+    /// cursor-sized patch of pixels that already exist, instead of building
+    /// a whole screen for every motion report the seat delivers.
+    painted: Option<Surface>,
 }
 
 /// A decoded, screen-fitted wallpaper and the scrim sized for it.
@@ -82,55 +91,49 @@ struct Wallpaper {
     scrim: u8,
 }
 
-/// A repaint request: whether to paint, and which pixels change.
+/// A repaint request: what changed, and which pixels it changed.
 ///
 /// Two updates can land in one round — a keystroke and the lockout that
-/// answered it — and the surface reports each separately, so they are
-/// combined here. A whole-screen damage from either side stays whole: one
-/// part of a paint changing everything is not narrowed by another changing a
-/// rectangle.
+/// answered it, or a move and the tile it moved onto — and each is reported
+/// separately, so they are combined here. A whole-screen surface change from
+/// either side stays whole: one part of a paint changing everything is not
+/// narrowed by another changing a rectangle.
+///
+/// A pointer that only moved is kept apart from a surface that changed: the
+/// pixels it moves over are already rendered, so only the frame composed
+/// from them is redone.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Repaint {
-    redraw: bool,
-    damage: Option<Rect>,
+enum Repaint {
+    /// Nothing changed, so nothing is painted.
+    Nothing,
+    /// Only the pointer moved, over these pixels.
+    Cursor(Rect),
+    /// The surface's own content changed, within this rectangle — `None` for
+    /// all of it.
+    Painted(Option<Rect>),
 }
 
 impl Repaint {
-    /// Nothing to paint.
-    const QUIET: Self = Self {
-        redraw: false,
-        damage: None,
-    };
-
     fn of(outcome: Outcome) -> Self {
-        Self {
-            redraw: outcome.redraw(),
-            damage: outcome.damage(),
-        }
-    }
-
-    /// Paint exactly `rect`.
-    const fn region(rect: Rect) -> Self {
-        Self {
-            redraw: true,
-            damage: Some(rect),
+        if outcome.redraw() {
+            Self::Painted(outcome.damage())
+        } else {
+            Self::Nothing
         }
     }
 
     fn merged(self, other: Self) -> Self {
-        if !other.redraw {
-            return self;
-        }
-        if !self.redraw {
-            return other;
-        }
-        let damage = match (self.damage, other.damage) {
-            (Some(mine), Some(theirs)) => Some(mine.union(&theirs)),
-            _ => None,
-        };
-        Self {
-            redraw: true,
-            damage,
+        match (self, other) {
+            (Self::Nothing, repaint) | (repaint, Self::Nothing) => repaint,
+            (Self::Cursor(mine), Self::Cursor(theirs)) => Self::Cursor(mine.union(&theirs)),
+            (Self::Painted(None), _) | (_, Self::Painted(None)) => Self::Painted(None),
+            (Self::Cursor(moved), Self::Painted(Some(damage)))
+            | (Self::Painted(Some(damage)), Self::Cursor(moved)) => {
+                Self::Painted(Some(damage.union(&moved)))
+            }
+            (Self::Painted(Some(mine)), Self::Painted(Some(theirs))) => {
+                Self::Painted(Some(mine.union(&theirs)))
+            }
         }
     }
 }
@@ -161,6 +164,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             wallpaper: None,
             cursor,
             pointer: None,
+            painted: None,
         }
     }
 
@@ -172,6 +176,7 @@ impl<T: SessionTransport> LoginScreen<T> {
         let panel = panel_rect(self.screen(), self.scale);
         let scrim = scrim_alpha(&image, panel, &self.theme);
         self.wallpaper = Some(Wallpaper { image, scrim });
+        self.painted = None;
     }
 
     /// Draw `image` as the pointer, from where the pointer already is.
@@ -201,12 +206,12 @@ impl<T: SessionTransport> LoginScreen<T> {
         self.scanout.frame()
     }
 
-    /// Paint the whole screen and present all of it.
+    /// Compose the whole screen and present all of it.
     ///
     /// Used for the first frame and after anything that changes more than one
     /// part of the surface.
     pub fn repaint(&mut self) -> Present {
-        self.paint(None)
+        self.compose(None)
     }
 
     /// Apply one input event.
@@ -241,7 +246,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             // The authentication surface has nothing scrollable.
             PointerInput::Scrolled { .. } => return Step::quiet(),
         };
-        let mut repaint = moved.map_or(Repaint::QUIET, Repaint::region);
+        let mut repaint = moved.map_or(Repaint::Nothing, Repaint::Cursor);
         let mut verified = false;
         let mut answer = None;
         for event in pointer_input_events(action, self.cursor.at()) {
@@ -326,17 +331,39 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
-    /// Repaint for `repaint`, or present nothing when it changed nothing.
+    /// Present what `repaint` changed, or nothing when it changed nothing.
     fn present_for(&mut self, repaint: Repaint) -> Present {
-        if !repaint.redraw {
-            return Present::Nothing;
+        match repaint {
+            Repaint::Nothing => Present::Nothing,
+            Repaint::Cursor(damage) => self.compose(Some(damage)),
+            Repaint::Painted(damage) => {
+                self.painted = None;
+                self.compose(damage)
+            }
         }
-        self.paint(repaint.damage)
     }
 
-    /// Render the surface and copy `damage` of it into the frame.
-    fn paint(&mut self, damage: Option<Rect>) -> Present {
-        let screen = self.scanout.screen();
+    /// Copy `damage` of the painted surface into the frame with the pointer
+    /// over it, rendering the surface first when nothing holds it.
+    fn compose(&mut self, damage: Option<Rect>) -> Present {
+        if self.painted.is_none() {
+            self.painted = self.render();
+        }
+        let Self {
+            scanout,
+            pointer,
+            painted,
+            ..
+        } = self;
+        let Some(painted) = painted.as_ref() else {
+            return Present::Nothing;
+        };
+        scanout.compose(painted, pointer.as_ref(), damage)
+    }
+
+    /// The surface as it now stands, with no cursor drawn into it, or `None`
+    /// when it will not render at all.
+    fn render(&self) -> Option<Surface> {
         let backdrop = match self.wallpaper.as_ref() {
             Some(paper) => Backdrop::Wallpaper {
                 image: &paper.image,
@@ -344,18 +371,8 @@ impl<T: SessionTransport> LoginScreen<T> {
             },
             None => Backdrop::Desktop,
         };
-        let Some(mut painted) = self
-            .surface
-            .render(screen, self.scale, &self.theme, backdrop)
-        else {
-            return Present::Nothing;
-        };
-        // Over everything the surface drew: the pointer is the top-most
-        // thing on the screen.
-        if let Some(pointer) = self.pointer.as_ref() {
-            pointer.draw(&mut painted);
-        }
-        self.scanout.compose(&painted, damage)
+        self.surface
+            .render(self.scanout.screen(), self.scale, &self.theme, backdrop)
     }
 }
 

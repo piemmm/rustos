@@ -1101,20 +1101,37 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
 - Only *state* paints anything behind the picture:
   - Hover and press take the shared pointer wash (`surface_hover` /
     `surface_pressed`) as a rounded panel across the whole tile.
-  - **Selection takes the selection accent and inverts the tile's label and
-    glyph to the on-accent foreground.** Selection therefore differs from hover
-    in contrast, not merely in hue, and the pointer can never imitate it (§11.13
-    states the same rule for rows).
+  - **Selection lays a soft accent halo behind the picture and carries the
+    name on a solid accent pill**, the label and glyph inverting to the
+    on-accent foreground. The halo is the theme's `selection_glow` — its own
+    accent at half opacity — filled inset by the scaled `selection_glow_blur`
+    and blurred through the one shared blur, so the falloff stays inside the
+    tile. The pill is what keeps selection a *contrast* difference rather than
+    a hue one now that the halo is translucent: a near-white on-accent name
+    over a half-transparent wash would be unreadable on a light theme, so the
+    name gets an opaque ground of its own. The pointer can never imitate
+    either (§11.13 states the same rule for rows).
+  - **A high-contrast theme keeps the crisp opaque accent panel.** A blurred
+    translucent halo is the wrong answer where contrast is the whole point, so
+    the accessible path paints the flat panel and no blur at all.
   - Keyboard focus draws the shared Focus Ring, so a focused tile reads
     distinctly from a hovered one.
   - An authority or recovery state shows its shape-coded Signal Bead (§12.4) in
     the top-trailing corner, so a denied or unhealthy item is legible without
     relying on colour.
 - The picture occupies a square slot across the top of the tile, capped so the
-  lower part always remains for the label; the label is centred beneath it and
-  truncated to the tile's width rather than wrapped or spilled. There is exactly
-  one definition of that slot geometry, and an owner queries it to rasterise
-  artwork at precisely the side the tile will draw it in.
+  lower part always remains for the label. **The label wraps**: it is centred
+  beneath the picture over as many whole lines as the band under the picture
+  holds, broken at whitespace (an unbreakable word is broken mid-word rather
+  than spilled), and only the last line is elided, with the shared ellipsis
+  mark. A name too long for one line is not silently cut — that reads as a
+  different name.
+- There is exactly one definition of each of the two geometries, and an owner
+  queries it rather than re-deriving it: `icon_side` for the picture slot, so
+  artwork is rasterised at precisely the side the tile will draw it in, and
+  `label_lines` for the band, so an owner can size a tile tall enough for the
+  names it will carry. Line capacity is not layout — a one-word name still
+  draws one line.
 - Artwork reaches the tile already decoded and rasterised (§10 of the charter,
   `plans/ICONS.md`); a tile with none falls back to the built-in glyph for its
   icon kind, tinted like its label, so a system with no artwork on disk still

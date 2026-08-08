@@ -145,9 +145,11 @@ the final segment encodes the scan-out frame, so the intermediate stages
 cost no wasted encoding, and several blurred windows in one stack simply
 segment it further.
 
-The blur itself is a **separable box blur** (`blur::box_blur`): a
-horizontal pass then a vertical one, each carrying a running sum so the
-window slides by one add and one subtract per output. The cost is
+The blur itself is `lib/raster`'s shared `tairix_raster::box_blur` — the
+one blur definition the desktop has, which a control frosting its own
+artwork draws through too. It is a **separable box blur**: a horizontal
+pass then a vertical one, each carrying a running sum so the window slides
+by one add and one subtract per output. The cost is
 proportional to the rectangle's *area* whatever the radius, never to area
 × radius. Both scratch buffers belong to the compositor and grow to the
 largest frosted rectangle the session has needed, so a frosted window

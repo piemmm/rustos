@@ -51,6 +51,20 @@ This crate owns:
   Newton iteration that stopped when two successive estimates agreed — for a
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
+- `box_blur` / `Surface::blur` — the single separable box blur, a horizontal
+  pass then a vertical one carrying running sums, so the cost is the region's
+  area whatever the radius. Every channel including alpha is averaged, which
+  on premultiplied data is the convex combination compositing would give, so
+  the `colour <= alpha` invariant survives and no halo appears at a
+  translucent edge; samples past an edge replicate it, which keeps the
+  divisor constant and leaves a uniform field exactly unchanged. `box_blur`
+  takes the caller's own scratch buffer, so the per-frame path (the
+  compositor's backdrop blur, which grows and reuses one) allocates nothing;
+  `Surface::blur` allocates its own for a cold path such as a control
+  rasterising a frosted highlight once per repaint. Both were the window
+  manager's alone until the graphical login screen needed the same effect,
+  and neither the login screen nor any other `lib/*` consumer may depend on
+  the window manager.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
@@ -229,7 +243,9 @@ crates, never the reverse — `Layer::Lib` in the §17.4 layering.
 
 ## Stability tier
 
-`experimental` — the Stage 7 desktop rasterisation seam, consumed by
-`userland/gui/wm` and `userland/gui/taskbar`. It is `no_std` (with `alloc`).
+`experimental` — the Stage 7 desktop rasterisation seam, consumed by the GUI
+crates (`userland/gui/wm`, `userland/gui/taskbar`) and by the `lib/*` crates
+that draw through it (text, cursors, icons, controls, the login screen). It is
+`no_std` (with `alloc`).
 No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
 (`AGENTS.md` §2.9).

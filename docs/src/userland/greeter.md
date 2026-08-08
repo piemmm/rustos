@@ -101,6 +101,14 @@ presents only the damage rectangle the surface reported — the field for a
 keystroke, the panel for a verdict, the chrome band for a clock tick — so a
 keystroke uploads a small rectangle rather than a screen.
 
+A wake also drains a whole burst before it presents. Every waiting keyboard
+and pointer record is applied, what each changed is merged into one
+rectangle, and the display is called once with it, because a present is a
+round trip to the display service and a moving mouse delivers reports far
+faster than a screen refreshes. A drain that changed nothing calls nothing;
+a verified secret stops the drain there and then, having presented what the
+records before it changed.
+
 ## The pointer
 
 The seat reports *relative* motion, so the screen keeps the running position
@@ -110,15 +118,25 @@ a move **and** a transition) and they present as one frame, not two.
 
 The pointer is also drawn, which is what makes it usable: the built-in
 `Arrow` from [`lib/cursor`](../desktop/cursors.md) is rasterised **once** at
-start-up for the active UI scale and blended over each painted frame before
-it is scanned out, so it is always on top of everything the surface drew.
-Motion presents the union of the cursor's old and new rectangles clipped to
-the screen — never a whole-screen present for a mouse move, and never a
-cursor left painted where it no longer is — and motion the screen edge
-swallows presents nothing at all. Placement is `tairix_cursor::PlacedCursor`,
-the same type the compositor draws its pointer with; a login screen may not
-depend on the window manager, so the placement lives in `lib/cursor` and
-there is one definition of it.
+start-up for the active UI scale, and it is **sampled over the surface as
+the frame is composed** rather than painted into it, so it is on top of
+everything the surface drew and the pixels beneath it are still there when
+it moves off them. Motion presents the union of the cursor's old and new
+rectangles clipped to the screen — never a whole-screen present for a mouse
+move, and never a cursor left painted where it no longer is — and motion the
+screen edge swallows presents nothing at all. Placement is
+`tairix_cursor::PlacedCursor`, the same type the compositor draws its
+pointer with; a login screen may not depend on the window manager, so the
+placement lives in `lib/cursor` and there is one definition of it.
+
+Keeping the cursor out of the surface is what makes a moving mouse cheap.
+The rendered surface is kept between frames and rebuilt only when its own
+content changes — a keystroke, a verdict, a countdown, a clock tick, a
+chooser tile taking the focus, an arriving wallpaper — so a report that
+slides the pointer over an unchanged screen re-composes a cursor-sized patch
+of pixels that already exist and renders nothing. Motion that does change
+something merges the two rectangles and pays exactly one render for the
+report, never one per surface event it expanded into.
 
 ## The wallpaper is untrusted input
 
@@ -179,8 +197,10 @@ authority's own records for the same login are in its `10000..11000` range.
 screen does* behind the injected seams: a keystroke reaching a verdict, a
 refusal becoming a countdown, an empty account list, the bounded and
 malformed paging walks, the park deadline (including an untouched screen
-arming no timer), the drawn pointer and its damage, and the
-surface-to-scan-out composition. `tests/session_v1.rs`
+arming no timer), the drawn pointer and its damage, the kept surface (a move
+that changes nothing renders once in total, and the frame it leaves is what
+a full repaint would have drawn), and the surface-to-scan-out composition.
+`tests/session_v1.rs`
 additionally wires the transport seam straight to the authority's own
 request handler — a test-only edge — so the two halves of one protocol are
 proven against each other rather than each against its own mock.

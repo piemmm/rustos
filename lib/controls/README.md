@@ -171,6 +171,31 @@ control decodes an image: artwork arrives already decoded and rasterised
 through the desktop's sandboxed asset path, so a malformed file can only fail
 to produce artwork.
 
+## A selected icon tile: soft halo, named on a pill
+
+`collection::IconTile` wears no plate of its own, so a selection has to be
+drawn behind the picture. It is the theme's translucent `selection_glow`,
+filled as a rounded rectangle **inset by the scaled `selection_glow_blur` on
+every side** and blurred by that radius through the one shared box blur the
+compositor frosts a window backdrop with (`tairix_raster`). Insetting before
+blurring is what keeps the softened edge inside the tile's bounds. Only a
+selected tile pays for it, and only one scratch surface at the tile's own size.
+
+Because the halo lets the wallpaper or window surface read through, the name is
+carried on a solid `accent` pill in `on_accent` ink — which is what keeps
+selection a difference in *contrast* rather than only in hue now that the halo
+is soft. Under a heavier `Contrast` the tile drops the halo for the crisp opaque
+accent panel: a translucent wash would trade away the very contrast that policy
+exists to add. Hover and press keep their own crisp washes, so the pointer can
+never imitate a selection.
+
+The name wraps rather than being cut: as many whole lines as the band under the
+picture holds, each centred, the last elided with the shared ellipsis when the
+name runs past them; a band too short for one whole line draws nothing rather
+than clipping a glyph. `IconTile::label_lines` reports that budget from the same
+geometry the render lays out to, so an owner sizing its tiles asks the tile
+instead of re-deriving its label layout — the pair to `icon_side` above.
+
 ## Masked text entry
 
 `TextField::secret(max_len)` turns a field into a password/passphrase/PIN

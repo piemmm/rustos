@@ -159,9 +159,11 @@ mod render {
     use tairix_raster::{Color, Surface};
     use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
 
+    use alloc::vec::Vec;
+
     use crate::atlas;
     use crate::client::{install_test_transport, set_glyph_cache};
-    use crate::font::BitmapFont;
+    use crate::font::{BitmapFont, TextLine, ELLIPSIS};
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
     const WHITE: Color = Color::rgb(255, 255, 255);
@@ -565,5 +567,230 @@ mod render {
         assert!(entries.iter().any(|entry| entry.key == FamilyKey::MONO));
         let metrics = BitmapFont::console().metrics();
         assert_eq!(metrics.pixel_height, atlas::CELL_HEIGHT);
+    }
+
+    /// A line drawn without the ellipsis mark.
+    fn line(text: &str) -> TextLine<'_> {
+        TextLine {
+            text,
+            elided: false,
+        }
+    }
+
+    /// The width `line` occupies once its mark, if any, is drawn.
+    fn drawn_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
+        font.text_width(line.text)
+            + if line.elided {
+                font.text_width(ELLIPSIS)
+            } else {
+                0
+            }
+    }
+
+    #[test]
+    fn elide_to_width_keeps_a_string_that_already_fits() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.elide_to_width("hello", 5 * cell), ("hello", false));
+        assert_eq!(font.elide_to_width("hello", 40 * cell), ("hello", false));
+        assert_eq!(font.elide_to_width("", 0), ("", false));
+    }
+
+    #[test]
+    fn elide_to_width_reserves_room_for_the_mark() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // A plain truncation keeps four glyphs; eliding gives one of them
+        // back to the mark.
+        assert_eq!(font.truncate_to_width("hello", 4 * cell), "hell");
+        let (text, elided) = font.elide_to_width("hello", 4 * cell);
+        assert_eq!((text, elided), ("hel", true));
+        assert!(drawn_width(font, TextLine { text, elided }) <= 4 * cell);
+    }
+
+    #[test]
+    fn elide_to_width_draws_nothing_when_the_mark_itself_does_not_fit() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.elide_to_width("hello", cell - 1), ("", false));
+        assert_eq!(font.elide_to_width("hello", 0), ("", false));
+        // Exactly the mark's width: the mark alone, and no text with it.
+        assert_eq!(font.elide_to_width("hello", cell), ("", true));
+    }
+
+    #[test]
+    fn elide_to_width_cuts_on_char_boundaries() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.elide_to_width("ééé", 2 * cell), ("é", true));
+        // A wide scalar is dropped whole rather than half-shown.
+        assert_eq!(font.elide_to_width("a日本", 3 * cell), ("a", true));
+    }
+
+    #[test]
+    fn elide_to_width_reserves_the_marks_own_advance_in_a_proportional_family() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let text = "iMxWiMxW";
+        let full = font.text_width(text);
+        assert_eq!(font.elide_to_width(text, full), (text, false));
+        let (prefix, elided) = font.elide_to_width(text, full - 1);
+        assert!(elided, "a string one pixel too wide needs the mark");
+        assert!(text.starts_with(prefix));
+        assert!(
+            drawn_width(
+                font,
+                TextLine {
+                    text: prefix,
+                    elided
+                }
+            ) < full
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_at_whitespace_rather_than_splitting_a_word() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let lines: Vec<_> = font
+            .wrap_to_width("System Administrator", 13 * cell, 4)
+            .collect();
+        assert_eq!(lines, [line("System"), line("Administrator")]);
+        // The break lands on the space even when the fitting prefix ends
+        // exactly at one.
+        let lines: Vec<_> = font.wrap_to_width("abcd ef", 4 * cell, 3).collect();
+        assert_eq!(lines, [line("abcd"), line("ef")]);
+    }
+
+    #[test]
+    fn wrap_breaks_an_unbreakable_word_mid_word_rather_than_looping() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let lines: Vec<_> = font.wrap_to_width("abcdefghij", 4 * cell, 9).collect();
+        assert_eq!(lines, [line("abcd"), line("efgh"), line("ij")]);
+    }
+
+    #[test]
+    fn wrap_elides_the_last_line_when_text_remains() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let lines: Vec<_> = font
+            .wrap_to_width("System Administrator", 7 * cell, 2)
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], line("System"));
+        assert!(lines[1].elided, "the last line marks what it dropped");
+        assert!("Administrator".starts_with(lines[1].text));
+        assert!(drawn_width(font, lines[1]) <= 7 * cell);
+    }
+
+    #[test]
+    fn wrap_yields_nothing_without_a_line_budget_or_room_for_a_glyph() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.wrap_to_width("anything", 40 * cell, 0).count(), 0);
+        for max_lines in 1..=3 {
+            assert_eq!(font.wrap_to_width("hello", cell - 1, max_lines).count(), 0);
+            assert_eq!(font.wrap_to_width("hello", 0, max_lines).count(), 0);
+        }
+    }
+
+    #[test]
+    fn wrap_draws_no_leading_or_trailing_whitespace() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let lines: Vec<_> = font.wrap_to_width("  ab   cd  ", 4 * cell, 4).collect();
+        assert_eq!(lines, [line("ab"), line("cd")]);
+        assert_eq!(font.wrap_to_width("   ", 40 * cell, 3).count(), 0);
+        assert_eq!(font.wrap_to_width("", 40 * cell, 3).count(), 0);
+        // An elided last line drops the space it would otherwise draw
+        // between its text and the mark.
+        let lines: Vec<_> = font.wrap_to_width("ab cdefgh", 4 * cell, 1).collect();
+        assert_eq!(
+            lines,
+            [TextLine {
+                text: "ab",
+                elided: true
+            }]
+        );
+    }
+
+    #[test]
+    fn wrapping_is_lazy_and_can_be_measured_before_it_is_drawn() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let mut drawing = font.wrap_to_width("System Administrator", 13 * cell, 3);
+        // Counting a clone leaves the original to draw from: a caller sizes
+        // the block vertically and then paints it, with no heap traffic and
+        // no second layout call.
+        assert_eq!(drawing.clone().count(), 2);
+        assert_eq!(drawing.next(), Some(line("System")));
+        assert_eq!(drawing.next(), Some(line("Administrator")));
+        assert_eq!(drawing.next(), None);
+        assert_eq!(drawing.next(), None, "an exhausted wrap stays exhausted");
+    }
+
+    #[test]
+    fn every_wrapped_line_fits_its_width_and_the_line_budget() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let texts = [
+            "",
+            "a",
+            "  spaced   out  ",
+            "System Administrator",
+            "supercalifragilisticexpialidocious",
+            "日本語 テスト です",
+            "ééé ààà ûûû",
+            "\n\ttabbed\nand newlined\n",
+        ];
+        for text in texts {
+            for cells in 1..=10 {
+                for max_lines in 0..=4 {
+                    let width = cells * cell;
+                    let lines: Vec<_> = font.wrap_to_width(text, width, max_lines).collect();
+                    assert!(lines.len() <= max_lines, "{text:?} at {cells} cells");
+                    for (index, &laid) in lines.iter().enumerate() {
+                        let last = index + 1 == lines.len();
+                        assert!(
+                            drawn_width(font, laid) <= width,
+                            "{laid:?} overflows {cells} cells of {text:?}"
+                        );
+                        assert_eq!(laid.text.trim(), laid.text, "{laid:?} draws whitespace");
+                        assert!(!laid.elided || last, "{laid:?} elides before the last line");
+                        assert!(
+                            !laid.text.is_empty() || laid.elided,
+                            "an empty line was yielded for {text:?}"
+                        );
+                        assert!(text.contains(laid.text), "{laid:?} is not part of {text:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_account_tiles_display_name_wraps_instead_of_being_cut_mid_word() {
+        install();
+        // The graphical login screen's account tile: a proportional display
+        // name in a 132-pixel-wide label box, two lines tall.
+        let font = BitmapFont::new(proportional_family(), 16);
+        let name = "System Administrator";
+        let tile = 132;
+        assert!(font.text_width(name) > tile, "the name must not fit a line");
+        assert!(font.text_width("System") <= tile, "its first word must fit");
+        let lines: Vec<_> = font.wrap_to_width(name, tile, 2).collect();
+        assert_eq!(lines, [line("System"), line("Administrator")]);
     }
 }

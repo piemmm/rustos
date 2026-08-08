@@ -33,7 +33,13 @@ pub(crate) const TILE_WIDTH: u32 = 132;
 
 /// One tile's height in pixels at the reference density: the monogram disc
 /// and the name under it.
-pub(crate) const TILE_HEIGHT: u32 = 148;
+///
+/// Sized so the band under the disc holds three whole label lines at the
+/// reference density and at a doubled one, which is capacity rather than
+/// layout — a one-word name still draws one line. Two lines would leave a
+/// long single word (`Administrator`) with no room to fall past, so a face
+/// wider than the reference one would break it mid-word and elide it.
+pub(crate) const TILE_HEIGHT: u32 = 154;
 
 /// The gap between tiles in pixels at the reference density.
 pub(crate) const TILE_GAP: u32 = 12;

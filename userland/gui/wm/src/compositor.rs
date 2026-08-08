@@ -27,10 +27,10 @@ use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_input::{InputEvent, Key};
+use tairix_raster::box_blur;
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
 
-use crate::blur;
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
@@ -113,7 +113,7 @@ pub struct Compositor {
     back: Surface,
     frame: Vec<u8>,
     /// Scratch for a backdrop blur: the copy of the backdrop that
-    /// [`blur::box_blur`] blurs, and the intermediate buffer its two
+    /// [`box_blur`] blurs, and the intermediate buffer its two
     /// passes hand over through. Both are owned by the compositor and
     /// grown to the largest blurred rectangle a frame has needed, so a
     /// frosted window costs no allocation once it has been drawn once.
@@ -1904,7 +1904,7 @@ impl Compositor {
             };
             dst.copy_from_slice(src);
         }
-        blur::box_blur(pixels, width, height, radius, aux);
+        box_blur(pixels, width, height, radius, aux);
         // The region's top-left in the window's own coordinates: a window
         // that starts off screen is frosted from the row and column the
         // screen begins at, and its shape is still read from its own

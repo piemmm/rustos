@@ -532,7 +532,7 @@ at the epoch so a stampless file is never given a fabricated date, §21). In the
 **grid** view each entry is a shared `lib/controls` `IconTile` — its file-type
 icon over that same label, with no plate of its own, so a folder reads as a field
 of icons rather than a grid of boxes and only a hovered, selected, or focused
-entry paints a panel behind its icon — wrapped into as many columns as fit the
+entry paints anything behind its icon — wrapped into as many columns as fit the
 width; the two views share one selection model, so toggling never moves the
 selection or re-reads the directory. The icon is the shared registry's
 (`media_for_entry(entry, parent).icon()`, above): one classification both the
@@ -571,8 +571,8 @@ of counts (`cells_per_line`, `lines_total`, `visible_lines`, and the
 `visible_range(offset)` the painter iterates), so the two surfaces cannot
 drift apart (`AGENTS.md` §2.2). The tile itself is shared the same way: the
 `render` helpers `grid_metrics`, `grid_tile`, and `entry_label` are public, so
-the desktop paints the *same* `IconTile` — same icon side, same label
-elision, same selection state — as the file manager's grid rather than a
+the desktop paints the *same* `IconTile` — same icon side, same wrapped and
+elided label, same selection state — as the file manager's grid rather than a
 lookalike.
 
 Only whole tiles are ever laid out — no icon is cut by an edge — and the two

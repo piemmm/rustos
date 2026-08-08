@@ -68,6 +68,13 @@ wraps into a grid only when the screen cannot hold it, so a grid where a row
 would do never reads as a list. `Escape` returns to the chooser and wipes
 whatever had been typed.
 
+A tile's height comes from `IconTile::label_lines`, sized so the band under
+the disc holds three whole lines at the reference density and at a doubled
+one. That is capacity rather than layout — a one-word name still draws a
+single line — but "System Administrator" wraps instead of being cut, and a
+face wider than the reference one has a line to fall onto rather than being
+broken mid-word.
+
 An `Other…` tile is always present and always last, even when the list is
 empty, and leads to a typed login name. It wears a disc bearing an ellipsis in
 the quiet plate colours, so it reads as a peer of the accounts rather than as a

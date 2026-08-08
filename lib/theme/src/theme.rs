@@ -158,6 +158,7 @@ impl Theme {
     /// nine levels lighter than the bar behind it.
     #[must_use]
     pub fn dark() -> Self {
+        let accent = Rgba::rgb(0xd1, 0x55, 0x0f);
         Self::new(
             ThemeId::DARK,
             "TAIRiX Dark",
@@ -168,8 +169,9 @@ impl Theme {
                 surface_raised: Rgba::rgb(0x15, 0x1b, 0x1f),
                 on_surface: Rgba::rgb(0xe8, 0xeb, 0xed),
                 on_surface_muted: Rgba::rgb(0x8e, 0x97, 0x9c),
-                accent: Rgba::rgb(0xd1, 0x55, 0x0f),
+                accent,
                 on_accent: ON_ACCENT,
+                selection_glow: accent.with_alpha(GLOW_ALPHA),
                 border: Rgba::rgb(0x1c, 0x23, 0x27),
                 surface_hover: Rgba::rgb(0x1e, 0x25, 0x2a),
                 surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
@@ -208,6 +210,7 @@ impl Theme {
     /// so orange-on-white text and rims stay legible.
     #[must_use]
     pub fn light() -> Self {
+        let accent = Rgba::rgb(0xc8, 0x50, 0x0c);
         Self::new(
             ThemeId::LIGHT,
             "TAIRiX Light",
@@ -218,8 +221,9 @@ impl Theme {
                 surface_raised: Rgba::rgb(0xf4, 0xf0, 0xec),
                 on_surface: Rgba::rgb(0x1b, 0x1d, 0x20),
                 on_surface_muted: Rgba::rgb(0x6a, 0x6f, 0x75),
-                accent: Rgba::rgb(0xc8, 0x50, 0x0c),
+                accent,
                 on_accent: ON_ACCENT,
+                selection_glow: accent.with_alpha(GLOW_ALPHA),
                 border: Rgba::rgb(0xdd, 0xd6, 0xce),
                 surface_hover: Rgba::rgb(0xee, 0xea, 0xe5),
                 surface_pressed: Rgba::rgb(0xe9, 0xe4, 0xde),
@@ -257,6 +261,13 @@ impl Theme {
 /// appearance, so the two variants share the token instead of restating it.
 const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 
+/// The opacity both built-in themes give their selection halo: half.
+///
+/// A halo marks an item without hiding it, so the surface or wallpaper under
+/// a selected tile still reads through the accent rather than being replaced
+/// by it. Each theme still authors its own halo colour and may tune this.
+const GLOW_ALPHA: u8 = 128;
+
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and
 /// light themes share them rather than restate identical numbers.
@@ -272,6 +283,7 @@ fn common_metrics() -> Metrics {
         control_inset: 10,
         control_gap: 8,
         control_corner_radius: 6,
+        selection_glow_blur: 19,
         seam_thickness: 2,
         rail_thickness: 3,
         bead_size: 8,

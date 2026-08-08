@@ -17,17 +17,19 @@ router**:
 - Anti-aliased rounded corners (`corner`) via deterministic
   supersampling, with a square-corner opt-out — the single
   rounded-corner path the taskbar reuses (`AGENTS.md` §2.2).
-- Backdrop blur (`blur`): a window can ask for the already-composited
+- Backdrop blur: a window can ask for the already-composited
   content behind its rectangle to be frosted before its own translucent
   pixels blend over it. Composition is back-to-front, so the back buffer
   already holds that backdrop: the compositor composes the layers below
   the window, blurs the back buffer inside that window's rectangle only,
-  and resumes composing from the window itself. The filter is a separable
-  box blur carrying running sums — cost proportional to the rectangle's
-  area whatever the radius — over premultiplied channels including alpha,
-  with samples past an edge replicating it, so the effect can neither pull
-  a neighbour's pixels in nor write outside the rectangle and a uniform
-  backdrop comes out unchanged. The radius is a desktop length in logical
+  and resumes composing from the window itself. The filter is
+  `lib/raster`'s shared `tairix_raster::box_blur` — the one blur definition
+  the desktop has, so a control frosting its own artwork draws through the
+  same code — a separable box blur carrying running sums, cost proportional
+  to the rectangle's area whatever the radius, over premultiplied channels
+  including alpha, with samples past an edge replicating it, so the effect
+  can neither pull a neighbour's pixels in nor write outside the rectangle
+  and a uniform backdrop comes out unchanged. The radius is a desktop length in logical
   pixels resolved through the output's `Scale`, and the mix back into the
   back buffer is weighted by the window's own rounded-corner coverage, so
   a rounded window's frosting fades across exactly the arc its pixels do.

@@ -264,7 +264,7 @@ login screen's — it opens on the chooser.
   | field (`field_rect`) | 320 × `control_height` | block top; a pill, edged `rim_active` or `danger` |
   | notice | block width × 20 | 10 under the field |
   | step-back | block width × 18 | 6 under the notice, only when a chooser exists |
-  | chooser grid | tiles 132 × 148, gap 12 | as many columns as fit; wraps only when it must |
+  | chooser grid | tiles 132 × 154, gap 12 | as many columns as fit; wraps only when it must |
 
   Every one of those is a *logical* length converted through `Scale` exactly
   once, so the screen is correct at any density and a second conversion
@@ -300,7 +300,14 @@ login screen's — it opens on the chooser.
   activates, `Escape` returns to the chooser and wipes the typed secret; the
   surface is fully operable with no pointer, because a machine without one
   must still log in. Tiles are `lib/controls` `IconTile`s, so the login
-  screen is not a second visual vocabulary.
+  screen is not a second visual vocabulary: the chosen account takes the
+  shared soft accent halo with its name on an accent pill, and a long
+  display name **wraps** rather than being cut — `System Administrator` reads
+  as itself, not as `System Admini`. The tile's height is derived from the
+  control's own `label_lines`, not guessed: 154 logical pixels is the first
+  height that holds three whole label lines at the reference density *and* at
+  a doubled one, so a face wider than the test face still has somewhere for a
+  long single word to fall.
   An `AccountTile` carries only what is drawn — display name, login name,
   live flag — never credential material, a uid, a capability set, or a home
   path. A tile draws a **monogram**, not an avatar: the system has no
@@ -410,15 +417,39 @@ and a greeter cannot hold the screen behind a running desktop.
 **The pointer is drawn by the service, not the engine.** A seat with a mouse
 must show one — an invisible-but-working pointer is a defect, not a
 minimalism — so the greeter rasterises the built-in arrow once at start-up
-for the active `Scale` and blends it over the rendered surface before the
-frame is composed. The placement (origin = pointer − hotspot, and sampling
-the artwork under a screen row) is `lib/cursor`'s `PlacedCursor`, shared
-with the compositor: there is one definition of where a cursor sits, and it
-lives in `lib/*` precisely because `userland/session/*` may not reach into
-the window manager for it. Motion presents the **union of the cursor's old
-and new rectangles** clipped to the screen — never the whole screen for a
-mouse move, and never a stale pointer left behind — and motion that moves
+for the active `Scale`. The placement (origin = pointer − hotspot, and
+sampling the artwork under a screen row) is `lib/cursor`'s `PlacedCursor`,
+shared with the compositor: there is one definition of where a cursor sits,
+and it lives in `lib/*` precisely because `userland/session/*` may not reach
+into the window manager for it. Motion presents the **union of the cursor's
+old and new rectangles** clipped to the screen — never the whole screen for
+a mouse move, and never a stale pointer left behind — and motion that moves
 nothing presents nothing, so an untouched screen still arms no timer.
+
+**Moving the mouse costs no render and no round trip.** Pointer motion
+streams: a hand movement is tens of reports a second, and the screen has to
+stay ahead of it.
+
+- The service keeps the **clean** rendered surface — the one
+  `AuthSurface::render` produced, with no cursor in it — and re-renders only
+  when the surface's own state changed. The set of things a render reads is
+  closed (the surface's state, the screen, the scale, the backdrop) and each
+  of them changes only through a call that returns an `Outcome` or installs a
+  wallpaper, which is why the cache provably cannot go stale. A `Repaint` is
+  therefore three cases, not two: nothing, cursor-only, or painted — and a
+  cursor-only round keeps the surface.
+- The cursor is composited **at scan-out**, sampled over the cached surface
+  while the damaged rows are copied, so it is always on top and never dirties
+  the thing being reused.
+- A drain applies every queued report and presents **once**, merging the
+  damage (`Nothing` is the identity, whole-screen dominates, two regions
+  become the region containing both, re-classified through the shared
+  `sub_screen_damage` so a union that has grown to cover the screen is
+  presented as the whole screen rather than an over-large region).
+
+A bare move is then a hit test, two rectangle unions and a copy of the
+cursor-sized union — no allocation, no glyph, no wallpaper blit, and one
+display call per burst instead of one per report.
 
 ## G4. The session authority
 

@@ -80,6 +80,12 @@ lockout while one is counting down, whichever is nearer. When neither applies
 the wait has no timeout at all, so an untouched screen arms no timer. There is
 no poll loop and no yield.
 
+A wake drains the whole burst the seat is holding before it presents: every
+record is applied, what each changed is merged into one rectangle, and the
+display is called once with it. A present is a round trip and a moving mouse
+outpaces the screen, so one per report would be one round trip per report. A
+drain that changed nothing presents nothing.
+
 ## The pointer
 
 The seat reports relative motion, so `screen` keeps the running position,
@@ -88,11 +94,18 @@ hit-tests. One seat report expands to at most two surface events — a button is
 a move *and* a transition — and they present as one frame.
 
 The built-in arrow is rasterised **once** at start-up for the active scale and
-blended over each painted frame before it is scanned out, so it sits on top of
-everything the surface drew. A move presents the union of the cursor's old and
-new rectangles clipped to the screen — never the whole screen, and never a
-cursor left where it no longer is — and a move the screen edge swallows
-presents nothing.
+sampled over the surface as the frame is composed — never painted into it — so
+it sits on top of everything the surface drew and the pixels beneath it
+survive for when it moves off them. A move presents the union of the cursor's
+old and new rectangles clipped to the screen — never the whole screen, and
+never a cursor left where it no longer is — and a move the screen edge
+swallows presents nothing.
+
+That is what makes a moving mouse cheap. The rendered surface is kept and
+rebuilt only when its own content changes — a keystroke, a verdict, a
+countdown, a clock tick, a tile taking the focus, an arriving wallpaper — so a
+report sliding the pointer across an unchanged screen re-composes a
+cursor-sized patch of pixels that already exist and renders nothing at all.
 
 ## Untrusted input
 
@@ -114,7 +127,8 @@ malformed or oversize image is the flat desktop colour, not a crash.
 * `cursor` — the pointer position the seat's relative motion accumulates into,
   held inside the screen for every screen shape, and the built-in arrow
   resolved for a scale.
-* `frame` — the surface-to-scan-out composition.
+* `frame` — the surface-to-scan-out composition, the pointer sampled over it,
+  and the merge that turns a drain's changes into one present.
 * `wait` — the lockout countdown and the park deadline.
 * `screen` — `LoginScreen`, the whole flow over those seams.
 

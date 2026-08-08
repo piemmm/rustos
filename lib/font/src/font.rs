@@ -28,6 +28,15 @@
 //! 8-bit coverage level into a 256-entry table, and blended per lit pixel —
 //! so anti-aliased edges and translucent text both come out right with no
 //! colour arithmetic duplicated here.
+//!
+//! # Fitting a label to its box
+//!
+//! [`BitmapFont::elide_to_width`] and [`BitmapFont::wrap_to_width`] build on
+//! that one measurement: the first reserves room for [`ELLIPSIS`] and cuts,
+//! the second breaks a label at whitespace across a bounded number of lines
+//! and elides only the last. Both borrow slices of the caller's text and
+//! allocate nothing, so a label laid out every repaint costs no heap
+//! traffic.
 
 use core::ops::Range;
 
@@ -39,6 +48,15 @@ use tairix_vt::char_width;
 
 use crate::atlas;
 use crate::client;
+
+/// The mark that ends a line the text outgrew: HORIZONTAL ELLIPSIS.
+///
+/// One definition serves both halves of the job —
+/// [`BitmapFont::text_width`] reserves room for it and
+/// [`BitmapFont::draw_text`] paints it — so the mark measured and the mark
+/// drawn can never disagree. It is a `&str` for exactly that reason: a
+/// `char` would have to be encoded at every call site.
+pub const ELLIPSIS: &str = "\u{2026}";
 
 /// A family, pixel height, and weight to draw with: the reference a client
 /// needs to fetch a family's line metrics and any glyph's coverage bitmap
@@ -292,6 +310,73 @@ impl BitmapFont {
         &text[..end]
     }
 
+    /// The longest prefix of `text` that fits in `width` pixels **once room
+    /// for [`ELLIPSIS`] is reserved**, and whether that mark is needed.
+    ///
+    /// `(text, false)` when the whole string already fits — draw it and
+    /// nothing else. Otherwise `(prefix, true)`: draw the prefix, then the
+    /// mark at the pen [`draw_text`](Self::draw_text) hands back.
+    ///
+    /// When the mark alone is wider than `width` the answer is `("", false)`:
+    /// draw nothing. A mark that spills out of the very box it exists to keep
+    /// text inside is worse than an empty box, and the pair is a drawing
+    /// instruction rather than a report about the input, so the flag says
+    /// "do not draw the mark" instead of leaving a caller to second-guess it.
+    ///
+    /// The prefix is cut on a `char` boundary by the shared
+    /// [`truncate_to_width`](Self::truncate_to_width); this adds the
+    /// ellipsis policy and no per-glyph walk of its own. It is the *longest*
+    /// such prefix, trailing space included, so a caller that would rather
+    /// not leave a gap before the mark trims it — as
+    /// [`wrap_to_width`](Self::wrap_to_width) does.
+    #[must_use]
+    pub fn elide_to_width(self, text: &str, width: u32) -> (&str, bool) {
+        if self.truncate_to_width(text, width).len() == text.len() {
+            return (text, false);
+        }
+        let Some(room) = width.checked_sub(self.text_width(ELLIPSIS)) else {
+            return ("", false);
+        };
+        (self.truncate_to_width(text, room), true)
+    }
+
+    /// Lay `text` out over at most `max_lines` lines of `width` pixels,
+    /// yielding one [`TextLine`] per line.
+    ///
+    /// This is the shared label fitter every text region too narrow for its
+    /// label uses — an account tile's display name, a desktop icon's caption
+    /// — so no consumer writes its own break loop. The iterator is lazy and
+    /// its lines borrow `text`, so a caller counts a `clone` of it to place
+    /// the block vertically and then walks it to draw, allocating nothing.
+    ///
+    /// A line breaks at whitespace wherever one is available, so a word
+    /// starts the next line rather than being split; a word too long for
+    /// `width` on its own is broken mid-word on a `char` boundary, since the
+    /// alternatives are a line that overflows and a line that never
+    /// advances. Whitespace a break consumes is not drawn, and none of it is
+    /// a *forced* break: a newline is a break opportunity like any other
+    /// space.
+    ///
+    /// The last permitted line carries everything left, elided through
+    /// [`elide_to_width`](Self::elide_to_width) when that does not fit — and
+    /// trimmed, so no gap opens between it and the mark. A `max_lines` of
+    /// `0`, a blank `text`, and a `width` too narrow for even one glyph all
+    /// yield nothing at all.
+    ///
+    /// To draw a line centred in a `box_width`: measure
+    /// [`text_width`](Self::text_width) of its text plus, when it is
+    /// `elided`, `text_width(ELLIPSIS)`; draw the text; and draw
+    /// [`ELLIPSIS`] at the pen [`draw_text`](Self::draw_text) returned.
+    #[must_use]
+    pub fn wrap_to_width(self, text: &str, width: u32, max_lines: usize) -> TextWrap<'_> {
+        TextWrap {
+            font: self,
+            rest: text,
+            width,
+            remaining: max_lines,
+        }
+    }
+
     /// Draw `text` onto `surface` with its pen starting at `(x, y)` in
     /// `color`, returning the pen x-coordinate after the last glyph.
     ///
@@ -320,6 +405,103 @@ impl BitmapFont {
         }
         pen
     }
+}
+
+/// One laid-out line of a wrapped label: the text to draw, and whether
+/// [`ELLIPSIS`] follows it because the label ran out of lines.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TextLine<'a> {
+    /// The line's text, already free of the whitespace a break consumed.
+    pub text: &'a str,
+    /// Whether [`ELLIPSIS`] is drawn after [`text`](Self::text).
+    pub elided: bool,
+}
+
+/// The lazy iterator [`BitmapFont::wrap_to_width`] returns.
+///
+/// It holds the font, the unconsumed tail of the label, and the line budget
+/// — nothing heap-allocated — so a caller counts a `clone` of it to size the
+/// block and then walks the original to draw, for the cost of measuring
+/// twice and no allocation at all. It is deliberately not `Copy`: a `for`
+/// loop over one would silently duplicate rather than consume it.
+#[derive(Clone, Debug)]
+pub struct TextWrap<'a> {
+    font: BitmapFont,
+    rest: &'a str,
+    width: u32,
+    remaining: usize,
+}
+
+impl TextWrap<'_> {
+    /// Yield nothing further: the line budget is spent, or the tail cannot
+    /// advance.
+    fn finish(&mut self) {
+        self.rest = "";
+        self.remaining = 0;
+    }
+}
+
+impl<'a> Iterator for TextWrap<'a> {
+    type Item = TextLine<'a>;
+
+    fn next(&mut self) -> Option<TextLine<'a>> {
+        // Leading whitespace belongs to the break that ended the previous
+        // line, and the tail's trailing whitespace is drawn on no line at
+        // all, so neither is measured against the width.
+        let rest = self.rest.trim();
+        if self.remaining == 0 || rest.is_empty() {
+            self.finish();
+            return None;
+        }
+        if self.remaining == 1 {
+            let (text, elided) = self.font.elide_to_width(rest, self.width);
+            // A cut can land inside a run of spaces, and a gap before the
+            // mark would read as part of the missing text.
+            let text = text.trim_end();
+            self.finish();
+            return (!text.is_empty() || elided).then_some(TextLine { text, elided });
+        }
+        let head = self.font.truncate_to_width(rest, self.width);
+        if head.len() == rest.len() {
+            self.finish();
+            return Some(TextLine {
+                text: rest,
+                elided: false,
+            });
+        }
+        let Some(split) = line_break(rest, head) else {
+            self.finish();
+            return None;
+        };
+        self.rest = &rest[split..];
+        self.remaining -= 1;
+        Some(TextLine {
+            text: rest[..split].trim_end(),
+            elided: false,
+        })
+    }
+}
+
+/// Where to break `rest`, given `head`: the longest prefix of it that fits
+/// the line, already known to be shorter than `rest` itself.
+///
+/// The break is the last whitespace inside `head`, so a word that would
+/// otherwise be split starts the next line instead. A run with no
+/// whitespace in it breaks where it stopped fitting — a `char` boundary,
+/// because that is what `head` ends on. `None` when not one glyph fits: no
+/// break could then make progress, and a line that consumes nothing would
+/// never end.
+///
+/// The offset is always at least one byte: `rest` is trimmed, so its first
+/// character is not whitespace and no break can land at zero.
+fn line_break(rest: &str, head: &str) -> Option<usize> {
+    if head.is_empty() {
+        return None;
+    }
+    if rest[head.len()..].starts_with(char::is_whitespace) {
+        return Some(head.len());
+    }
+    Some(head.rfind(char::is_whitespace).unwrap_or(head.len()))
 }
 
 /// Clamp a requested pixel height into

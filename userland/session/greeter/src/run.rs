@@ -62,7 +62,7 @@ mod program {
         SCREEN_UNAVAILABLE, VERDICT_RECEIVED, WALLPAPER_UNAVAILABLE,
     };
     use tairix_greeter_service::frame::{Present, Scanout};
-    use tairix_greeter_service::screen::{LoginScreen, Step};
+    use tairix_greeter_service::screen::LoginScreen;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
     use tairix_raster::Surface;
@@ -325,72 +325,80 @@ mod program {
         Lost,
     }
 
-    /// Drain the seat's pointer channel into the screen, presenting each
-    /// change.
+    /// Drain the seat's pointer channel into the screen and present the
+    /// union of everything it changed, once.
+    ///
+    /// A burst of motion is a stream of reports the seat already holds, and
+    /// each present is a round trip to the display service, so the whole
+    /// burst is applied and then shown as one frame. A drain that changed
+    /// nothing shows nothing.
     fn drain_pointer<D: Display, T: SessionTransport>(
         screen: &mut LoginScreen<T>,
         display: &mut D,
+        mode: &DisplayMode,
     ) -> Drained {
         let mut wire = [0u8; PointerInput::WIRE_LEN];
-        loop {
+        let mut pending = Present::Nothing;
+        let drained = loop {
             let read = tairix_rt::pointer_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
-                return Drained::Empty;
+                break Drained::Empty;
             }
             // Anything but one whole record is unreadable: a short count would
             // decode fresh bytes together with the tail of the last record.
             if usize::try_from(read).ok() != Some(PointerInput::WIRE_LEN) {
-                return Drained::Lost;
+                break Drained::Lost;
             }
             let Ok(input) = PointerInput::from_bytes(&wire) else {
                 continue;
             };
             let step = screen.on_pointer(&input, tairix_rt::clock_get());
-            if finish(screen, display, step) {
-                return Drained::Verified;
+            pending = pending.merged(step.present, mode);
+            if let Some(answer) = step.answer {
+                audit(answer.verdict);
             }
-        }
+            if step.verified {
+                break Drained::Verified;
+            }
+        };
+        show(display, screen.frame(), pending);
+        drained
     }
 
-    /// Drain the seat's keyboard channel into the screen, presenting each
-    /// change.
+    /// Drain the seat's keyboard channel into the screen and present the
+    /// union of everything it changed, once.
     fn drain_keyboard<D: Display, T: SessionTransport>(
         screen: &mut LoginScreen<T>,
         display: &mut D,
+        mode: &DisplayMode,
     ) -> Drained {
         let mut wire = [0u8; KeyInput::WIRE_LEN];
-        loop {
+        let mut pending = Present::Nothing;
+        let drained = loop {
             let read = tairix_rt::keyboard_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
-                return Drained::Empty;
+                break Drained::Empty;
             }
             // Anything but one whole record is unreadable: a short count would
             // decode fresh bytes together with the tail of the last record.
             if usize::try_from(read).ok() != Some(KeyInput::WIRE_LEN) {
-                return Drained::Lost;
+                break Drained::Lost;
             }
             let Ok(input) = KeyInput::from_bytes(&wire) else {
                 continue;
             };
             let event = tairix_window::key_input_event(input);
             let step = screen.on_input(&event, tairix_rt::clock_get());
-            if finish(screen, display, step) {
-                return Drained::Verified;
+            pending = pending.merged(step.present, mode);
+            if let Some(answer) = step.answer {
+                audit(answer.verdict);
             }
-        }
-    }
-
-    /// Present a step's damage and audit its answer.
-    fn finish<D: Display, T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut D,
-        step: Step,
-    ) -> bool {
-        show(display, screen.frame(), step.present);
-        if let Some(answer) = step.answer {
-            audit(answer.verdict);
-        }
-        step.verified
+            if step.verified {
+                break Drained::Verified;
+            }
+        };
+        show(display, screen.frame(), pending);
+        drained
     }
 
     /// Map the frame ring and hand it to the display service.
@@ -508,7 +516,7 @@ mod program {
         {
             return fail(EXIT_NO_WAITSET, "the seat's input could not be waited on");
         }
-        park_loop(&mut screen, &mut display, set)
+        park_loop(&mut screen, &mut display, &mode, set)
     }
 
     /// Serve the screen until it is finished, parking between wakes.
@@ -519,11 +527,12 @@ mod program {
     fn park_loop<D: Display, T: SessionTransport>(
         screen: &mut LoginScreen<T>,
         display: &mut D,
+        mode: &DisplayMode,
         set: u64,
     ) -> i32 {
         loop {
-            let drained = match drain_keyboard(screen, display) {
-                Drained::Empty => drain_pointer(screen, display),
+            let drained = match drain_keyboard(screen, display, mode) {
+                Drained::Empty => drain_pointer(screen, display, mode),
                 ended => ended,
             };
             match drained {
@@ -536,10 +545,10 @@ mod program {
             }
             let now = tairix_rt::clock_get();
             let wall = wall_now();
-            let step = screen.refresh(now, wall);
-            if finish(screen, display, step) {
-                return 0;
-            }
+            // The clock and a running lockout ask the authority nothing, so
+            // this round has a frame to show and no verdict to audit.
+            let refreshed = screen.refresh(now, wall);
+            show(display, screen.frame(), refreshed.present);
             let timeout = screen.park_timeout(tairix_rt::clock_get(), wall);
             let mut token = 0u64;
             let woken = tairix_rt::waitset_wait(set, timeout, &mut token);

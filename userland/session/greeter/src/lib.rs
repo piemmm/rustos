@@ -45,7 +45,8 @@
 //! * [`chrome`](mod@chrome) — the clock, date, and host name text.
 //! * [`cursor`] — the pointer position the seat's relative motion feeds,
 //!   and the arrow drawn at it.
-//! * [`frame`] — the surface-to-scan-out composition.
+//! * [`frame`] — the surface-to-scan-out composition, the pointer sampled
+//!   over it, and the merge that turns a drain's changes into one present.
 //! * [`wait`] — the lockout countdown and the park deadline.
 //! * [`screen`] — [`LoginScreen`], the whole flow over those seams.
 //!

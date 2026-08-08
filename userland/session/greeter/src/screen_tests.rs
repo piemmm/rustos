@@ -158,6 +158,49 @@ fn differing(left: &[u8], right: &[u8]) -> Vec<(i32, i32)> {
     found
 }
 
+/// A colour no render of this screen produces.
+const MARK: Pixel = Pixel {
+    r: 1,
+    g: 2,
+    b: 3,
+    a: 255,
+};
+
+/// A screen with its pointer and its first frame already up.
+fn ready() -> LoginScreen<Authority> {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.set_pointer(arrow());
+    login.repaint();
+    login
+}
+
+/// Stamp [`MARK`] into the kept surface at `at`.
+///
+/// A render cannot produce that colour, so a surface still carrying the
+/// stamp is demonstrably the one that was rendered before it — which is how
+/// these tests count renders without the screen counting them for them.
+fn stamp(login: &mut LoginScreen<Authority>, at: (i32, i32)) {
+    let surface = login.painted.as_mut().expect("a surface is kept");
+    surface.set(on_screen(at.0), on_screen(at.1), MARK);
+}
+
+/// The kept surface's own pixel at `at`, or `None` when no surface is kept.
+fn kept(login: &LoginScreen<Authority>, at: (i32, i32)) -> Option<Pixel> {
+    let surface = login.painted.as_ref()?;
+    Some(
+        surface
+            .get(on_screen(at.0), on_screen(at.1))
+            .expect("a pixel on the screen"),
+    )
+}
+
+fn on_screen(value: i32) -> u32 {
+    u32::try_from(value).expect("a coordinate on the screen")
+}
+
 /// Pick the focused tile, then type `secret` and submit it. Returns the step
 /// the submitting event produced.
 fn offer<T: SessionTransport>(
@@ -407,6 +450,19 @@ fn the_pointer_is_drawn_over_the_surface_and_only_where_it_sits() {
     }
 }
 
+/// The region `step` presented, or a failure naming what came instead.
+fn presented(step: crate::Step) -> Rect {
+    let Present::Region(region) = step.present else {
+        panic!("a sub-screen change is a region present, got {step:?}");
+    };
+    Rect::new(
+        i32::try_from(region.x).expect("on screen"),
+        i32::try_from(region.y).expect("on screen"),
+        region.width_px,
+        region.height_px,
+    )
+}
+
 #[test]
 fn a_move_presents_the_old_and_new_cursor_rectangles_and_nothing_larger() {
     let mut login = screen(
@@ -424,16 +480,224 @@ fn a_move_presents_the_old_and_new_cursor_rectangles_and_nothing_larger() {
 
     let along = (70, 30);
     let step = login.on_pointer(&moved_from(corner, along), 0);
-    let Present::Region(region) = step.present else {
-        panic!("a pointer move repaints the pointer: {step:?}");
-    };
     let expected = cursor_rect(&image, corner.0, corner.1)
         .union(&cursor_rect(&image, along.0, along.1))
         .intersection(&login.screen());
-    assert_eq!(region.x, u32::try_from(expected.left()).expect("on screen"));
-    assert_eq!(region.y, u32::try_from(expected.top()).expect("on screen"));
-    assert_eq!(region.width_px, expected.width);
-    assert_eq!(region.height_px, expected.height);
+    assert_eq!(presented(step), expected);
+
+    // And into the corner, where the union runs off the screen: what is
+    // presented is the part that is on it.
+    let step = login.on_pointer(&moved_from(along, (0, 0)), 0);
+    let clipped = cursor_rect(&image, along.0, along.1)
+        .union(&cursor_rect(&image, 0, 0))
+        .intersection(&login.screen());
+    assert_eq!(presented(step), clipped);
+    assert_eq!(
+        login.screen().union(&clipped),
+        login.screen(),
+        "the clipped union reaches past the screen"
+    );
+}
+
+#[test]
+fn a_move_that_changes_no_control_state_renders_the_surface_once_in_total() {
+    let mut login = ready();
+    // Away from the centred panel, so nothing the sweep passes over is a
+    // tile whose focus would honestly change.
+    let start = (30, 30);
+    login.on_pointer(&moved_from(centre(), start), 0);
+    stamp(&mut login, start);
+
+    // The stream a hand resting on the mouse produces.
+    let mut from = start;
+    for step in 1..=50 {
+        let to = (start.0 + step, start.1);
+        assert_ne!(
+            login.on_pointer(&moved_from(from, to), 0).present,
+            Present::Nothing
+        );
+        from = to;
+    }
+
+    assert_eq!(
+        kept(&login, start),
+        Some(MARK),
+        "the surface was rendered again for a move that changed nothing"
+    );
+}
+
+#[test]
+fn the_frame_after_a_move_is_what_a_full_repaint_would_have_drawn() {
+    let spot = (240, 180);
+    let mut moved = ready();
+    moved.on_pointer(&moved_from(centre(), spot), 0);
+
+    let mut fresh = ready();
+    fresh.on_pointer(&moved_from(centre(), spot), 0);
+    assert_eq!(fresh.repaint(), Present::Whole);
+
+    let differences = differing(moved.frame(), fresh.frame());
+    assert!(
+        differences.is_empty(),
+        "{} pixels differ from a full repaint, first at {:?}",
+        differences.len(),
+        differences.first()
+    );
+}
+
+/// What a drain does with a burst: apply every record, merge what each one
+/// changed, and hand the display that one present.
+#[test]
+fn a_run_of_moves_merges_into_one_present_covering_every_one_of_them() {
+    let mut login = ready();
+    let image = arrow();
+    let start = (100, 100);
+    login.on_pointer(&moved_from(centre(), start), 0);
+
+    let mut merged = Present::Nothing;
+    let mut from = start;
+    for step in 1..=8 {
+        let to = (start.0 + step * 3, start.1);
+        let present = login.on_pointer(&moved_from(from, to), 0).present;
+        merged = merged.merged(present, login.scanout.mode());
+        from = to;
+    }
+
+    let expected = cursor_rect(&image, start.0, start.1)
+        .union(&cursor_rect(&image, from.0, from.1))
+        .intersection(&login.screen());
+    let Present::Region(region) = merged else {
+        panic!("a run across the backdrop is one sub-screen region, got {merged:?}");
+    };
+    assert_eq!(
+        Rect::new(
+            i32::try_from(region.x).expect("on screen"),
+            i32::try_from(region.y).expect("on screen"),
+            region.width_px,
+            region.height_px,
+        ),
+        expected
+    );
+}
+
+#[test]
+fn a_move_onto_the_field_presents_the_field_and_the_pointer_together() {
+    let mut login = ready();
+    let image = arrow();
+    login.on_input(&key(NamedKey::Enter), 0);
+
+    let away = (5, 5);
+    login.on_pointer(&moved_from(centre(), away), 0);
+    let field = login
+        .surface
+        .field_rect(login.screen(), login.scale, &login.theme);
+    let onto = (field.origin.x + 2, field.origin.y + 2);
+
+    let step = login.on_pointer(&moved_from(away, onto), 0);
+    let expected = cursor_rect(&image, away.0, away.1)
+        .union(&cursor_rect(&image, onto.0, onto.1))
+        .union(&field)
+        .intersection(&login.screen());
+    assert_eq!(presented(step), expected);
+}
+
+#[test]
+fn a_keystroke_and_a_clock_tick_each_rebuild_the_surface() {
+    let mut login = ready();
+    login.on_input(&key(NamedKey::Enter), 0);
+    stamp(&mut login, centre());
+    assert_ne!(login.on_input(&typed('x'), 0).present, Present::Nothing);
+    assert_ne!(kept(&login, centre()), Some(MARK), "a keystroke");
+
+    let mut login = ready();
+    stamp(&mut login, centre());
+    let noon = Time64::from_secs(1_700_000_060);
+    assert_ne!(login.refresh(0, Some(noon)).present, Present::Nothing);
+    assert_ne!(kept(&login, centre()), Some(MARK), "a clock tick");
+}
+
+#[test]
+fn a_verdict_and_the_countdown_it_starts_each_rebuild_the_surface() {
+    let mut login = ready();
+    login.on_input(&key(NamedKey::Enter), 0);
+    for ch in "wrong".chars() {
+        login.on_input(&typed(ch), 0);
+    }
+
+    stamp(&mut login, centre());
+    let verdict = login.on_input(&key(NamedKey::Enter), 0);
+    assert_eq!(
+        verdict.answer.map(|answer| answer.verdict),
+        Some(Verdict::Refused)
+    );
+    assert_ne!(verdict.present, Present::Nothing);
+    assert_ne!(kept(&login, centre()), Some(MARK), "a verdict");
+
+    stamp(&mut login, centre());
+    let counted = login.refresh(10 * 1_000_000_000, None);
+    assert_ne!(counted.present, Present::Nothing);
+    assert_ne!(
+        kept(&login, centre()),
+        Some(MARK),
+        "a lockout counting down"
+    );
+}
+
+#[test]
+fn an_installed_wallpaper_drops_the_kept_surface() {
+    let mut login = ready();
+    stamp(&mut login, centre());
+
+    login.set_wallpaper(
+        Surface::filled(
+            mode().width_px,
+            mode().height_px,
+            Pixel {
+                r: 200,
+                g: 40,
+                b: 40,
+                a: 255,
+            },
+        )
+        .expect("a screen-sized image"),
+    );
+    assert_eq!(kept(&login, centre()), None, "the wallpaper is behind it");
+    assert_eq!(login.repaint(), Present::Whole);
+    assert_ne!(kept(&login, centre()), Some(MARK));
+}
+
+/// Installed pointer artwork is sampled over the kept surface rather than
+/// painted into it, so it appears on the next frame without the screen being
+/// rendered again — and the pixels behind it are still there to be restored
+/// when it moves off them.
+#[test]
+fn an_installed_pointer_draws_over_the_kept_surface_without_rebuilding_it() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    let bare = login.frame().to_vec();
+    stamp(&mut login, centre());
+
+    let image = arrow();
+    login.set_pointer(image.clone());
+    assert_eq!(
+        kept(&login, centre()),
+        Some(MARK),
+        "the pointer is not part of the surface"
+    );
+
+    assert_eq!(login.repaint(), Present::Whole);
+    let sits = cursor_rect(&image, centre().0, centre().1);
+    let changed = differing(&bare, login.frame());
+    assert!(!changed.is_empty(), "the new pointer is on the frame");
+    for (x, y) in changed {
+        assert!(
+            sits.contains(Point::new(x, y)) || (x, y) == centre(),
+            "({x}, {y}) changed outside the cursor at {sits:?}"
+        );
+    }
 }
 
 #[test]

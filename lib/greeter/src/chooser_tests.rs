@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 
@@ -29,6 +30,25 @@ fn accounts(names: &[&str]) -> Vec<AccountTile> {
 /// its tiles are.
 fn grid(names: &[&str]) -> Chooser {
     Chooser::new(accounts(names))
+}
+
+/// An account tile is tall enough for a two-word display name with a line to
+/// spare: "System Administrator" wraps rather than being cut short, and a face
+/// wider than the reference one can push a long word onto a third line instead
+/// of breaking it mid-word. Pinned at the reference density and at a doubled
+/// one, because the band and the line height scale by different roundings.
+#[test]
+fn an_account_tile_holds_a_two_word_name_at_every_density() {
+    let theme = theme();
+    for percent in [100, 200] {
+        let scale = Scale::from_percent(percent).expect("a supported density");
+        let tile = grid(&["ann"]).tile_rect(0, SCREEN, scale).expect("a tile");
+        assert!(
+            IconTile::label_lines(tile, scale, &theme) >= 3,
+            "at {percent}% a tile holds {} label lines",
+            IconTile::label_lines(tile, scale, &theme)
+        );
+    }
 }
 
 fn shift() -> Modifiers {

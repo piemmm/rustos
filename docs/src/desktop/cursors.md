@@ -69,9 +69,10 @@ A `CursorImage` is artwork; where it goes is a `PlacedCursor`. It stores the
 image's top-left corner as the pointer position minus the hotspot, so the
 hotspot lands exactly on the pointer, and it answers the two questions a
 screen has about a drawn cursor: `bounds()` — the rectangle it covers, for
-damage — and how to get its pixels, either `draw`n onto a `lib/raster`
-`Surface` in one blit or sampled a row at a time (`local_row` / `sample_row`)
-by a compositor blending it alongside other layers.
+damage — and how to get its pixels, sampled a row at a time (`local_row` /
+`sample_row` / `sample_local`) by whatever is blending it over what lies
+behind. Sampling is the only way in: a screen that painted the cursor into
+what is behind it would have to rebuild those pixels before it could move.
 
 This lives in `lib/cursor` rather than in the window manager because it has
 two consumers that may not depend on one another (`AGENTS.md` §17.3 / §2.2):
@@ -92,14 +93,18 @@ the window stack uses), and hiding the cursor restores the pixels beneath it.
 
 The greeter has no compositor and no cursor sets on disk yet, so it takes the
 built-in `Arrow`, rasterises it once at start-up for the active
-`tairix_geometry::Scale`, and blends the `PlacedCursor` over each painted
-frame before it is scanned out — the pointer is therefore always on top of
-everything the authentication surface drew. Motion damages the union of the
-cursor's old and new rectangles clipped to the screen, so a mouse move never
-costs a whole-screen present and never leaves a cursor painted where it no
-longer is. An arrow that will not rasterise costs the *drawing* only: the
-pointer still moves and still hit-tests, the event is logged, and the screen
-stays usable (`AGENTS.md` §2.9).
+`tairix_geometry::Scale`, and samples the `PlacedCursor` over the painted
+surface as each frame is composed — the pointer is therefore always on top of
+everything the authentication surface drew, and the surface itself never
+holds it. That is what lets the login screen keep its rendered surface
+between frames and rebuild it only when its own content changes, so a moving
+mouse re-composes a cursor-sized patch of pixels that already exist instead
+of repainting the screen. Motion damages the union of the cursor's old and
+new rectangles clipped to the screen, so a mouse move never costs a
+whole-screen present and never leaves a cursor painted where it no longer is.
+An arrow that will not rasterise costs the *drawing* only: the pointer still
+moves and still hit-tests, the event is logged, and the screen stays usable
+(`AGENTS.md` §2.9).
 
 ## Choosing the shape from interaction state
 

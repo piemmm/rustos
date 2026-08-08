@@ -40,6 +40,7 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.on_surface, l.on_surface);
     assert_ne!(d.on_surface_muted, l.on_surface_muted);
     assert_ne!(d.accent, l.accent);
+    assert_ne!(d.selection_glow, l.selection_glow);
     assert_ne!(d.border, l.border);
     // The Reactive Alloy control roles and semantic signals also differ per
     // appearance, so a theme switch retunes them consistently.
@@ -103,6 +104,35 @@ fn accent_labels_stay_legible_on_the_accent_fill() {
 /// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
 fn luma(c: Rgba) -> u32 {
     (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
+}
+
+#[test]
+fn the_selection_halo_is_each_theme_s_own_accent_at_half_opacity() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_eq!(
+            p.selection_glow.a,
+            128,
+            "{}: an opaque halo would hide what a selection sits on",
+            theme.name()
+        );
+        assert_eq!(
+            p.selection_glow.with_alpha(p.accent.a),
+            p.accent,
+            "{}: the halo is the theme's own accent, not a second hue",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn the_selection_halo_blurs_at_three_tenths_of_the_widest_window_backdrop() {
+    // The rationale the metric's rustdoc states, asserted against the real
+    // protocol bound so the two cannot drift apart.
+    let want = u32::from(tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX) * 30 / 100;
+    for theme in [Theme::dark(), Theme::light()] {
+        assert_eq!(theme.metrics().selection_glow_blur, want);
+    }
 }
 
 #[test]
@@ -503,6 +533,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             on_surface_muted: Rgba::rgb(160, 160, 160),
             accent: Rgba::rgb(80, 140, 255),
             on_accent: Rgba::rgb(0, 0, 0),
+            selection_glow: Rgba::new(80, 140, 255, 128),
             border: Rgba::rgb(60, 60, 60),
             surface_hover: Rgba::rgb(30, 30, 30),
             surface_pressed: Rgba::rgb(5, 5, 5),
@@ -534,6 +565,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             control_inset: 8,
             control_gap: 6,
             control_corner_radius: 4,
+            selection_glow_blur: 5,
             seam_thickness: 2,
             rail_thickness: 2,
             bead_size: 6,

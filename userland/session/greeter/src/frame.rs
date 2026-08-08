@@ -10,6 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_cursor::PlacedCursor;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
@@ -26,6 +27,45 @@ pub enum Present {
     Region(DamageRect),
     /// Present the whole frame.
     Whole,
+}
+
+impl Present {
+    /// One present covering both this and `other`, so a drain that composed
+    /// several changes hands the display one call rather than one per
+    /// record.
+    ///
+    /// Two regions become the rectangle containing both, which `mode`
+    /// resolves back to a whole present once it covers the screen — the one
+    /// definition of that question. A region whose origin will not convert
+    /// becomes the whole frame: presenting more than changed is wasteful,
+    /// presenting less shows stale pixels.
+    #[must_use]
+    pub fn merged(self, other: Self, mode: &DisplayMode) -> Self {
+        match (self, other) {
+            (Self::Nothing, present) | (present, Self::Nothing) => present,
+            (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
+            (Self::Region(mine), Self::Region(theirs)) => {
+                let (Some(mine), Some(theirs)) = (rect_of(mine), rect_of(theirs)) else {
+                    return Self::Whole;
+                };
+                match sub_screen_damage(&mine.union(&theirs), mode) {
+                    Some(region) => Self::Region(region),
+                    None => Self::Whole,
+                }
+            }
+        }
+    }
+}
+
+/// `damage` as a geometry rectangle, or `None` when its origin lies beyond
+/// the signed coordinate space a rectangle is expressed in.
+fn rect_of(damage: DamageRect) -> Option<Rect> {
+    Some(Rect::new(
+        i32::try_from(damage.x).ok()?,
+        i32::try_from(damage.y).ok()?,
+        damage.width_px,
+        damage.height_px,
+    ))
 }
 
 /// One screen-shaped scan-out frame and the order its pixels go out in.
@@ -78,12 +118,22 @@ impl Scanout {
         &self.frame
     }
 
-    /// Copy `surface` into the frame within `damage`, and say what to present.
+    /// Copy `surface` into the frame within `damage`, `cursor` over the top,
+    /// and say what to present.
     ///
     /// `damage` is `None` for "the whole screen changed". A rectangle is
     /// clipped to the screen first, so one that lies partly or wholly outside
     /// copies what overlaps and asks for nothing when nothing does.
-    pub fn compose(&mut self, surface: &Surface, damage: Option<Rect>) -> Present {
+    ///
+    /// The cursor is sampled here rather than drawn into `surface`, so the
+    /// pixels behind it are never overwritten and one painted surface serves
+    /// every position the pointer takes over it.
+    pub fn compose(
+        &mut self,
+        surface: &Surface,
+        cursor: Option<&PlacedCursor>,
+        damage: Option<Rect>,
+    ) -> Present {
         let screen = self.screen();
         let clip = match damage {
             Some(damage) => damage.intersection(&screen),
@@ -92,20 +142,25 @@ impl Scanout {
         if clip.is_empty() {
             return Present::Nothing;
         }
-        self.blit(surface, clip);
+        self.blit(surface, cursor, clip);
         match sub_screen_damage(&clip, &self.mode) {
             Some(region) => Present::Region(region),
             None => Present::Whole,
         }
     }
 
-    /// Encode `clip`'s pixels from `surface` into the frame.
+    /// Encode `clip`'s pixels from `surface`, blended under `cursor`, into
+    /// the frame.
     ///
     /// `clip` is already inside the screen, and the frame is stride-shaped
     /// for that screen, so a pixel the surface does not have is skipped
     /// rather than faulted: a surface smaller than the screen leaves those
     /// bytes as they were.
-    fn blit(&mut self, surface: &Surface, clip: Rect) {
+    ///
+    /// Which image row the cursor draws from is resolved once per scanline,
+    /// and a scanline it does not reach walks the plain copy, so the blend
+    /// costs only the rows the pointer actually covers.
+    fn blit(&mut self, surface: &Surface, cursor: Option<&PlacedCursor>, clip: Rect) {
         let Ok(stride) = usize::try_from(self.mode.stride_bytes) else {
             return;
         };
@@ -151,8 +206,20 @@ impl Scanout {
                 continue;
             };
             let (slots, _) = target.as_chunks_mut::<PIXEL_BYTES>();
-            for (slot, pixel) in slots.iter_mut().zip(source) {
-                *slot = order.encode(*pixel);
+            let cursor_row = cursor
+                .zip(i32::try_from(y).ok())
+                .and_then(|(cursor, y)| cursor.local_row(y).map(|ly| (cursor, ly)));
+            let Some((cursor, ly)) = cursor_row else {
+                for (slot, pixel) in slots.iter_mut().zip(source) {
+                    *slot = order.encode(*pixel);
+                }
+                continue;
+            };
+            for ((slot, pixel), x) in slots.iter_mut().zip(source).zip(clip.left()..) {
+                let painted = cursor
+                    .sample_row(x, ly)
+                    .map_or(*pixel, |sprite| sprite.over(*pixel));
+                *slot = order.encode(painted);
             }
         }
     }

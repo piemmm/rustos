@@ -9,11 +9,18 @@ This crate is pure theme *data*. A `Theme` is a table of:
 
 - `Palette` — semantic `Rgba` colour roles (`desktop`, `surface`,
   `surface_raised`, `on_surface`, `on_surface_muted`, `accent`, `on_accent`,
-  `border`). Roles are fixed fields, so a theme can never omit one and a
-  consumer can never ask for one that does not exist (`AGENTS.md` §2.11).
+  `selection_glow`, `border`). Roles are fixed fields, so a theme can never
+  omit one and a consumer can never ask for one that does not exist
+  (`AGENTS.md` §2.11). `selection_glow` is the soft halo behind a selected
+  item — each theme's own `accent` at half opacity (`#d1550f80` on dark,
+  `#c8500c80` on light), authored per theme so a theme can tune its weight
+  rather than have it derived at the draw site.
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
-  consumes (`AGENTS.md` §2.2).
+  consumes (`AGENTS.md` §2.2), plus `selection_glow_blur`, the halo's blur
+  radius in logical pixels (`19` in both themes: thirty percent of the widest
+  window-backdrop blur the compositor accepts, `64`, so a selection reads as a
+  soft mark on one item rather than the frosted glass a whole window sits on).
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing
   faces under `/System/Fonts`. A theme sizes text by the *job* it does
   (`Display`, `Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`,

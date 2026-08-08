@@ -76,6 +76,12 @@ charter forbids.
 - **`Other…` is always there.** Always the last tile, present even with no
   accounts at all, leading to a typed login name so an unlisted account stays
   reachable.
+- **A tile is tall enough for the name on it.** Its height is sized from
+  `IconTile::label_lines` so the band under the disc holds three whole lines
+  at the reference density and at a doubled one. That is capacity, not layout:
+  a one-word name still draws one line, but "System Administrator" wraps
+  instead of being cut, and a face wider than the reference one has a line to
+  fall onto rather than being broken mid-word.
 - **The paint and the hit test cannot disagree.** The prompt block, the field,
   and the tile grid each have one definition, read by the paint, the pointer
   hit test, and the damage report alike.

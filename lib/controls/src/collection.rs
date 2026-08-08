@@ -28,18 +28,18 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, TextLine, TextWrap, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    dominant_color, draw_outline, foreground, inset, key_activation, paint_bead, paint_chevron,
-    paint_count_badge, paint_icon_slot, plate_border, pointer_activation, press_latch,
-    rail_thickness, resolve_bead, resolve_rail, role_font, seam_thickness, seam_width,
+    dominant_color, draw_outline, foreground, heavy_contrast, inset, key_activation, paint_bead,
+    paint_chevron, paint_count_badge, paint_icon_slot, plate_border, pointer_activation,
+    press_latch, rail_thickness, resolve_bead, resolve_rail, role_font, seam_thickness, seam_width,
     surface_rect, to_i32, ChevronDir,
 };
 use crate::state::{
@@ -1853,10 +1853,11 @@ impl Card {
 ///
 /// State is what makes a tile paint anything behind its picture:
 /// * the pointer wash while hovered or pressed, in the shared plate colours;
-/// * the selection panel, in the palette's selection accent, which also flips
-///   the label and glyph to the on-accent foreground — so selection differs
-///   from a hover by contrast, not merely by hue, and the pointer can never
-///   imitate it;
+/// * the selection halo, in the palette's translucent selection glow, blurred
+///   through the shared box blur so the picture sits in soft light rather than
+///   on a block of accent, with the name carried on an accent pill in the
+///   on-accent foreground — so selection still differs from a hover by
+///   contrast, not merely by hue, and the pointer can never imitate it;
 /// * the keyboard Focus Ring, through the one shared outline every row and tab
 ///   family draws, so a focused tile reads distinctly from a hovered one;
 /// * the Signal Bead of an authority or recovery state, so a denied or
@@ -1934,22 +1935,17 @@ impl IconTile {
         }
         let ink = self.label_color(theme);
         self.paint_backdrop(surface, (x, y, w, h), scale, theme);
-        let label_top = match Self::icon_slot(bounds, scale, theme) {
-            Some((ix, iy, side)) => {
-                paint_icon_slot(surface, ix, iy, side, self.icon, ink, artwork);
-                iy.saturating_add(side)
-            }
-            None => y,
-        };
-        let bottom = y.saturating_add(h);
-        self.paint_label(surface, (x, w, label_top, bottom), scale, theme, font, ink);
+        if let Some((ix, iy, side)) = Self::icon_slot(bounds, scale, theme) {
+            paint_icon_slot(surface, ix, iy, side, self.icon, ink, artwork);
+        }
+        self.paint_label(surface, bounds, scale, theme, font, ink);
         self.paint_bead(surface, (x, y, w, h), scale, theme);
     }
 
     /// Paint whatever the tile's state puts *behind* its picture: the pointer
-    /// or selection panel, then the keyboard Focus Ring. A resting, unselected,
-    /// unfocused tile paints nothing at all, which is what keeps an icon view a
-    /// field of pictures rather than a grid of plates.
+    /// wash or the selection halo, then the keyboard Focus Ring. A resting,
+    /// unselected, unfocused tile paints nothing at all, which is what keeps an
+    /// icon view a field of pictures rather than a grid of plates.
     fn paint_backdrop(
         &self,
         surface: &mut Surface,
@@ -1959,25 +1955,25 @@ impl IconTile {
     ) {
         let (x, y, w, h) = rect;
         let palette = theme.palette();
-        // A pressed tile recesses; a selected one takes the selection accent
-        // (its label inverting with it); a hovered one takes the shared pointer
-        // wash, so the pointer never imitates selection. The drag states carry
-        // no wash of their own here, exactly as they carry no tint in the
-        // shared plate colours every other control paints through: the drag
-        // vocabulary is one decision for the whole control set, not one a tile
-        // invents for itself.
-        let panel = match self.state.pointer {
-            PointerState::Pressed => Some(palette.surface_pressed),
-            _ if self.is_selected() => Some(palette.accent),
-            PointerState::Hover => Some(palette.surface_hover),
-            PointerState::None | PointerState::DragSource | PointerState::DragTarget => None,
-        };
-        if let Some(fill) = panel {
-            let radius = scale
-                .scale_length(theme.metrics().control_corner_radius)
-                .min(w / 2)
-                .min(h / 2);
-            surface.fill_round_rect(x, y, w, h, radius, Color::from(fill));
+        // A pressed tile recesses; a selected one takes its selection mark; a
+        // hovered one takes the shared pointer wash, so the pointer never
+        // imitates selection. The drag states carry no wash of their own here,
+        // exactly as they carry no tint in the shared plate colours every other
+        // control paints through: the drag vocabulary is one decision for the
+        // whole control set, not one a tile invents for itself.
+        if self.state.pointer == PointerState::Pressed {
+            fill_panel(surface, rect, scale, theme, palette.surface_pressed);
+        } else if self.is_selected() {
+            // A heavier contrast policy asks for a crisp panel rather than a
+            // soft translucent wash, which would trade away the very contrast
+            // that policy exists to add.
+            if heavy_contrast(theme) {
+                fill_panel(surface, rect, scale, theme, palette.accent);
+            } else {
+                paint_selection_glow(surface, rect, scale, theme);
+            }
+        } else if self.state.pointer == PointerState::Hover {
+            fill_panel(surface, rect, scale, theme, palette.surface_hover);
         }
         if self.state.focus.focused {
             draw_outline(
@@ -1992,30 +1988,62 @@ impl IconTile {
         }
     }
 
-    /// Paint the tile's name, centred under its picture and truncated to the
-    /// tile's width. A name too long for one line is cut rather than wrapped or
-    /// spilled past the tile, and one with no room left for a whole line of text
-    /// is dropped rather than clipped mid-glyph.
+    /// How many whole lines of its name a tile occupying `bounds` draws.
+    ///
+    /// This is the render geometry itself, exposed so an owner sizing its tiles
+    /// — a login chooser widening an account tile until a two-word display name
+    /// fits — asks the tile rather than re-deriving its label layout. `0` when
+    /// the tile is off-surface or its band cannot hold a whole line, which is
+    /// exactly when [`Self::render`] draws no name at all.
+    #[must_use]
+    pub fn label_lines(bounds: Rect, scale: Scale, theme: &Theme) -> usize {
+        Self::label_band(
+            bounds,
+            scale,
+            theme,
+            role_font(theme, scale, TextRole::Body),
+        )
+        .map_or(0, |band| band.lines)
+    }
+
+    /// Paint the tile's name under its picture: wrapped over as many whole
+    /// lines as the band holds, each centred, the last elided when the name
+    /// runs past them. A band with no room for a whole line draws nothing
+    /// rather than clipping a glyph.
+    ///
+    /// A selected tile draws its lines on an accent pill, so its on-accent ink
+    /// always has the accent behind it: that is what keeps selection a
+    /// difference in contrast rather than merely in hue, now that the halo
+    /// behind the picture is soft and translucent.
     fn paint_label(
         &self,
         surface: &mut Surface,
-        bounds: (u32, u32, u32, u32),
+        bounds: Rect,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
         color: Color,
     ) {
-        let (x, w, top, bottom) = bounds;
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let left = x.saturating_add(pad);
-        let right = x.saturating_add(w).saturating_sub(pad);
-        let baseline = top.saturating_add(pad);
-        if right <= left || baseline.saturating_add(font.line_height()) > bottom {
+        let Some(band) = Self::label_band(bounds, scale, theme, font) else {
+            return;
+        };
+        let wrap = font.wrap_to_width(&self.label, band.right - band.left, band.lines);
+        let (drawn, widest) = wrap_extent(wrap.clone(), font);
+        if drawn == 0 {
             return;
         }
-        let fitted = font.truncate_to_width(&self.label, right - left);
-        let text_left = text_x(font, fitted, left, right, true);
-        font.draw_text(surface, text_left, to_i32(baseline), fitted, color);
+        if self.on_selection_accent() {
+            paint_label_pill(surface, band, (drawn, widest), scale, theme, font);
+        }
+        let mut top = band.top;
+        for line in wrap {
+            let x = to_i32(centre_x(line_width(font, line), band.left, band.right));
+            let pen = font.draw_text(surface, x, to_i32(top), line.text, color);
+            if line.elided {
+                font.draw_text(surface, pen, to_i32(top), ELLIPSIS, color);
+            }
+            top = top.saturating_add(font.line_height());
+        }
     }
 
     /// Paint the Signal Bead of an authority or recovery state in the tile's
@@ -2051,14 +2079,52 @@ impl IconTile {
         )
     }
 
+    /// Whether the tile's content sits on the selection accent: selected, and
+    /// not pressed — a press takes the recessed plate and the ordinary ink.
+    fn on_selection_accent(&self) -> bool {
+        self.is_selected() && self.state.pointer != PointerState::Pressed
+    }
+
     /// The colour the tile's label and built-in glyph take: the on-accent
-    /// foreground over a selection panel, otherwise the shared surface
+    /// foreground when the tile is selected, otherwise the shared surface
     /// foreground for the tile's disposition.
     fn label_color(&self, theme: &Theme) -> Color {
-        if self.is_selected() && self.state.pointer != PointerState::Pressed {
+        if self.on_selection_accent() {
             return Color::from(theme.palette().on_accent);
         }
         foreground(theme, self.state.disposition())
+    }
+
+    /// The band a tile occupying `bounds` draws its name in: the column
+    /// `[left, right)` each line is centred in, the top of the first line, and
+    /// how many whole lines fit beneath the picture. `None` when the tile is
+    /// off-surface or the band cannot hold one whole line.
+    ///
+    /// The one definition of that geometry, so the budget an owner reads
+    /// ([`Self::label_lines`]) is the budget [`Self::render`] lays out to.
+    fn label_band(
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<LabelBand> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        let top = match Self::icon_slot(bounds, scale, theme) {
+            Some((_, iy, side)) => iy.saturating_add(side),
+            None => y,
+        };
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let left = x.saturating_add(pad);
+        let right = x.saturating_add(w).saturating_sub(pad);
+        let top = top.saturating_add(pad);
+        let whole = y.saturating_add(h).saturating_sub(top) / font.line_height().max(1);
+        let lines = usize::try_from(whole).unwrap_or(0);
+        (right > left && lines > 0).then_some(LabelBand {
+            left,
+            right,
+            top,
+            lines,
+        })
     }
 
     /// The square picture slot a tile occupying `bounds` reserves at the top of
@@ -2085,15 +2151,124 @@ impl IconTile {
     }
 }
 
-/// The x at which to draw `text` within the column `[left, right)`: leading
-/// (at `left`) normally, or centred within the column when `centered`.
-fn text_x(font: BitmapFont, text: &str, left: u32, right: u32, centered: bool) -> i32 {
-    if !centered {
-        return to_i32(left);
-    }
+/// The x at which a run `width` pixels wide sits centred in the column
+/// `[left, right)`, pinned to `left` when it is wider than the column.
+fn centre_x(width: u32, left: u32, right: u32) -> u32 {
     let avail = right.saturating_sub(left);
-    let tw = font.text_width(text).min(avail);
-    to_i32(left) + (to_i32(avail) - to_i32(tw)) / 2
+    left.saturating_add((avail - width.min(avail)) / 2)
+}
+
+/// The band an [`IconTile`] draws its name in.
+#[derive(Copy, Clone)]
+struct LabelBand {
+    /// The left edge of the column each line is centred in.
+    left: u32,
+    /// One past the right edge of that column.
+    right: u32,
+    /// The top of the first line's box.
+    top: u32,
+    /// How many whole lines the band holds.
+    lines: usize,
+}
+
+/// The drawn width of one wrapped line, ellipsis included.
+fn line_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
+    let width = font.text_width(line.text);
+    if line.elided {
+        return width.saturating_add(font.text_width(ELLIPSIS));
+    }
+    width
+}
+
+/// How many lines `wrap` yields and how wide the widest of them draws.
+///
+/// Walking a clone of the iterator is what lets a caller place a block of text
+/// before drawing it without collecting the lines into an allocation.
+fn wrap_extent(wrap: TextWrap<'_>, font: BitmapFont) -> (u32, u32) {
+    wrap.fold((0, 0), |(lines, widest), line| {
+        (lines.saturating_add(1), widest.max(line_width(font, line)))
+    })
+}
+
+/// Fill an [`IconTile`]'s whole `rect` with one plate colour, rounded by the
+/// theme's control radius (which the shared fill clamps to the shape).
+fn fill_panel(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &Theme,
+    fill: Rgba,
+) {
+    let (x, y, w, h) = rect;
+    let radius = scale.scale_length(theme.metrics().control_corner_radius);
+    surface.fill_round_rect(x, y, w, h, radius, Color::from(fill));
+}
+
+/// Paint the soft halo behind a selected [`IconTile`]: the theme's translucent
+/// selection glow, rounded like a plate and blurred through the shared box
+/// blur — the same blur the compositor frosts a window's backdrop with.
+///
+/// The glow rectangle is inset by the blur radius on every side, and that
+/// radius is capped at half the tile, so the spread lands inside `rect` and
+/// the tile still keeps a lit core however small it is.
+fn paint_selection_glow(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &Theme,
+) {
+    let (x, y, w, h) = rect;
+    let blur = scale
+        .scale_length(theme.metrics().selection_glow_blur)
+        .min(w.saturating_sub(1) / 2)
+        .min(h.saturating_sub(1) / 2);
+    let (Some((gx, gy, gw, gh)), Some(mut glow)) = (inset(0, 0, w, h, blur), Surface::new(w, h))
+    else {
+        return;
+    };
+    let radius = scale.scale_length(theme.metrics().control_corner_radius);
+    glow.fill_round_rect(
+        gx,
+        gy,
+        gw,
+        gh,
+        radius,
+        Color::from(theme.palette().selection_glow),
+    );
+    glow.blur(blur);
+    surface.blit(to_i32(x), to_i32(y), &glow);
+}
+
+/// Paint the accent pill a selected [`IconTile`]'s name sits on: the union of
+/// the `lines` drawn lines (the `widest` of them, plus the control inset on
+/// each side), so on-accent ink always has the accent behind it.
+fn paint_label_pill(
+    surface: &mut Surface,
+    band: LabelBand,
+    (lines, widest): (u32, u32),
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let w = widest
+        .min(band.right.saturating_sub(band.left))
+        .saturating_add(pad.saturating_mul(2));
+    let h = font.line_height().saturating_mul(lines);
+    let x = centre_x(
+        w,
+        band.left.saturating_sub(pad),
+        band.right.saturating_add(pad),
+    );
+    let radius = scale.scale_length(theme.metrics().control_corner_radius);
+    surface.fill_round_rect(
+        x,
+        band.top,
+        w,
+        h,
+        radius,
+        Color::from(theme.palette().accent),
+    );
 }
 
 /// Render a `u32` as decimal into a small stack buffer, `no_std`-friendly.

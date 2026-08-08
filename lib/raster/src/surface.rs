@@ -9,6 +9,9 @@
 //! bounds what it draws to the area it owns — an item grid confines its tiles
 //! to its item area — by stating that bound once, rather than every drawing
 //! routine trimming its own geometry to an edge.
+//!
+//! [`Surface::blur`] is the allocating, cold-path form of the shared
+//! [`box_blur`]; a per-frame caller owns its own scratch buffer instead.
 
 use core::mem::size_of;
 use core::num::NonZeroU64;
@@ -19,6 +22,7 @@ use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
 
+use crate::blur::box_blur;
 use crate::color::{Color, Pixel};
 use crate::round::round_rect_coverage;
 
@@ -388,6 +392,33 @@ impl Surface {
                 radius,
             );
         }
+    }
+
+    /// Blur the whole surface in place with a separable box blur of `radius`
+    /// pixels, through the crate's one [`box_blur`] definition.
+    ///
+    /// This form allocates its own intermediate buffer, so it is for a
+    /// **cold** path: a control rasterising a soft highlight once per
+    /// repaint, an asset frosted when the theme or scale changes. A caller
+    /// on a per-frame hot path owns a scratch buffer it grows and reuses and
+    /// calls [`box_blur`] directly, as the compositor does for its backdrop.
+    ///
+    /// A `radius` of `0` and a surface with no pixels both leave every pixel
+    /// exactly as it was, and neither allocates. The clip window does not
+    /// confine the blur: a neighbourhood filter would read pixels it then
+    /// could not write, so a caller wanting one region frosted blurs a
+    /// sub-surface and [`blit`](Self::blit)s it back.
+    pub fn blur(&mut self, radius: u32) {
+        let (Ok(width), Ok(height)) = (usize::try_from(self.width), usize::try_from(self.height))
+        else {
+            return;
+        };
+        if radius == 0 || self.pixels.is_empty() {
+            return;
+        }
+        let radius = usize::try_from(radius).unwrap_or(usize::MAX);
+        let mut scratch = vec![Pixel::TRANSPARENT; self.pixels.len()];
+        box_blur(&mut self.pixels, width, height, radius, &mut scratch);
     }
 
     /// Make `[x, x+w)` of row `y` fully transparent, within the surface

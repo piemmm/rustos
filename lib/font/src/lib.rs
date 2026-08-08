@@ -50,6 +50,16 @@
 //! grid stays one scalar per grid entry, a wide Japanese or Korean bitmap
 //! covering the lead and continuation cells reserved by `tairix_vt::char_width`.
 //!
+//! # Fitting a label to its box
+//!
+//! Above that measurement sit the two shared fitters every text region too
+//! narrow for its label uses, so none of them writes its own break loop:
+//! [`BitmapFont::elide_to_width`] cuts to a prefix and reports that
+//! [`ELLIPSIS`] is needed, and [`BitmapFont::wrap_to_width`] lays a label
+//! over a bounded number of lines, breaking at whitespace and eliding only
+//! the last. Wrapping is a lazy iterator of [`TextLine`]s borrowing the
+//! label, so a caller counts the lines and draws them without allocating.
+//!
 //! # A shared cache declaration for the whole endpoint
 //!
 //! [`glyph_cache`] (feature `glyph-cache`, pulled in by `render`) declares
@@ -88,7 +98,7 @@ pub use client::{
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
 #[cfg(feature = "render")]
-pub use font::BitmapFont;
+pub use font::{BitmapFont, TextLine, TextWrap, ELLIPSIS};
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
 #[cfg(feature = "glyph-cache")]
 pub use glyph_cache::{

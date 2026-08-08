@@ -18,8 +18,9 @@
 //! degenerate bounds, and both themes plus the heavier-contrast path.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -1434,12 +1435,13 @@ fn a_resting_tile_paints_no_plate_over_what_lies_behind_it() {
     }
 }
 
-/// Hover and selection are both panels, but they are not the same panel: a
-/// selected tile takes the selection accent *and* flips its label and glyph to
-/// the on-accent foreground, so it differs from a hover in contrast and not
-/// merely in hue, and the pointer can never imitate selection.
+/// Hover, selection, and press are three different marks: the pointer washes
+/// are crisp plates, selection is a soft translucent halo carrying its name on
+/// an accent pill, and each keeps its own ink. A pointer can never imitate
+/// selection, and selection still differs from a hover in contrast rather than
+/// merely in hue.
 #[test]
-fn hover_selection_and_press_paint_distinct_panels() {
+fn hover_selection_and_press_paint_distinct_marks() {
     let theme = Theme::dark();
     let palette = theme.palette();
 
@@ -1460,11 +1462,14 @@ fn hover_selection_and_press_paint_distinct_panels() {
         &theme,
         None,
     );
+    // The accent survives as the pill under the name, over-printed with the
+    // on-accent ink — the halo itself is translucent and never lands as the
+    // flat accent.
     assert!(has_pixel(&selected, premul(palette.accent)));
     assert!(!has_pixel(&selected, premul(palette.surface_hover)));
     assert!(
         has_pixel(&selected, premul(palette.on_accent)),
-        "a selected tile inverts its label and glyph onto the accent"
+        "a selected tile inverts its label onto the accent"
     );
 
     let pressed = tile_over_backdrop(
@@ -1474,14 +1479,134 @@ fn hover_selection_and_press_paint_distinct_panels() {
     );
     assert!(has_pixel(&pressed, premul(palette.surface_pressed)));
 
-    // Each panel covers the tile, so none of them is a mere edge mark: only the
-    // rounded corners can leave the backdrop showing.
+    // Each mark covers the tile, so none of them is a mere edge mark: only the
+    // faintest reach of the halo can leave the backdrop untouched.
     for s in [&hovered, &selected, &pressed] {
         assert!(
             behind_pixels(s) * 10 < s.pixels().len(),
-            "a state panel left the tile bare"
+            "a state mark left the tile bare"
         );
     }
+
+    // No two marks are the same picture.
+    assert_ne!(hovered.pixels(), selected.pixels());
+    assert_ne!(pressed.pixels(), selected.pixels());
+    assert_ne!(hovered.pixels(), pressed.pixels());
+}
+
+/// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
+fn luma(p: Pixel) -> u32 {
+    (u32::from(p.r) * 299 + u32::from(p.g) * 587 + u32::from(p.b) * 114) / 1000
+}
+
+/// How far a rendered pixel has moved from the backdrop it was painted over —
+/// zero where the tile left it alone, largest where it covered it outright.
+fn distance(p: Pixel, from: Pixel) -> u32 {
+    u32::from(p.r.abs_diff(from.r))
+        + u32::from(p.g.abs_diff(from.g))
+        + u32::from(p.b.abs_diff(from.b))
+}
+
+/// A selected tile lights its picture with a soft halo rather than stamping a
+/// block of accent over it: the mark fades in across its edge instead of
+/// stepping, which is what a blur — and only a blur — produces.
+#[test]
+fn the_selection_halo_fades_in_rather_than_stepping() {
+    let theme = Theme::dark();
+    let s = tile_over_backdrop(
+        ControlState::idle().with_selection(SelectionState::Selected),
+        &theme,
+        None,
+    );
+    let behind = BEHIND.premultiply();
+    // Down the tile's centre line, above the picture slot: nothing but the
+    // halo is drawn there, so the ramp is the blur's own.
+    let ramp: Vec<u32> = (0..10)
+        .map(|y| distance(s.get(TW / 2, y).expect("in bounds"), behind))
+        .collect();
+    let total = ramp
+        .last()
+        .copied()
+        .expect("sampled")
+        .saturating_sub(ramp[0]);
+    assert!(total > 0, "the halo never arrives: {ramp:?}");
+    for pair in ramp.windows(2) {
+        assert!(pair[1] >= pair[0], "the halo is not monotonic: {ramp:?}");
+        assert!(
+            pair[1] - pair[0] <= total / 2,
+            "the halo steps rather than fades: {ramp:?}"
+        );
+    }
+    let mut levels = ramp.clone();
+    levels.dedup();
+    assert!(
+        levels.len() >= 6,
+        "a blurred edge is a gradient, not a handful of bands: {ramp:?}"
+    );
+}
+
+/// The halo is translucent: at full strength it is the theme's selection glow
+/// *blended with* whatever lies behind the tile, never the flat accent that
+/// would hide it.
+#[test]
+fn the_selection_halo_is_translucent_over_what_lies_behind_it() {
+    // A tile roomy enough to have halo at full strength beside its picture.
+    const SIDE: u32 = 200;
+
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let bounds = Rect::new(0, 0, SIDE, SIDE);
+    let mut s = Surface::new(SIDE, SIDE).expect("surface");
+    s.fill(BEHIND);
+    IconTile::new("Report.txt", IconKind::Text)
+        .with_state(ControlState::idle().with_selection(SelectionState::Selected))
+        .render(&mut s, bounds, Scale::ONE, &theme, None);
+
+    // Left of the picture slot, well inside the blurred rectangle.
+    let icon_x = (SIDE - IconTile::icon_side(bounds, Scale::ONE, &theme)) / 2;
+    let sample = s.get(icon_x - 4, SIDE / 2).expect("in bounds");
+    let want = Color::from(palette.selection_glow)
+        .premultiply()
+        .over(BEHIND.premultiply());
+    assert_eq!(
+        sample, want,
+        "the halo's core is the selection glow blended over the backdrop"
+    );
+    assert_ne!(sample, premul(palette.accent), "the halo is not a block");
+    assert_ne!(sample, BEHIND.premultiply());
+}
+
+/// A heavier contrast policy keeps the crisp, opaque accent panel: a soft
+/// translucent wash is the opposite of what such a theme asks for, so the
+/// accessible path must not quietly lose contrast.
+#[test]
+fn a_high_contrast_theme_keeps_the_crisp_selection_panel() {
+    let theme = high_contrast();
+    let s = tile_over_backdrop(
+        ControlState::idle().with_selection(SelectionState::Selected),
+        &theme,
+        None,
+    );
+    let accent = premul(theme.palette().accent);
+    // Flat, not a ramp: the panel is the accent outright over almost the whole
+    // tile, and its edge is a step.
+    let flat = s.pixels().iter().filter(|p| **p == accent).count();
+    assert!(
+        flat * 2 > s.pixels().len(),
+        "the high-contrast panel is not solid accent"
+    );
+    assert_eq!(
+        s.get(TW / 2, 0),
+        Some(accent),
+        "the panel reaches the tile's edge crisply"
+    );
+    // And the soft form is nowhere on it.
+    assert!(!has_pixel(
+        &s,
+        Color::from(theme.palette().selection_glow)
+            .premultiply()
+            .over(BEHIND.premultiply())
+    ));
 }
 
 /// Keyboard focus draws the shared Focus Ring, so it reads distinctly from a
@@ -1672,6 +1797,240 @@ fn a_tile_paints_only_within_its_bounds() {
             }
         }
     }
+}
+
+/// Paint `label` on a tile of `bounds` over the sentinel backdrop, with slot
+/// artwork in its picture so the only ink on the surface is the name's.
+fn label_surface(label: &str, state: ControlState, theme: &Theme, bounds: Rect) -> Surface {
+    let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
+    s.fill(BEHIND);
+    let art = artwork(IconTile::icon_side(bounds, Scale::ONE, theme).max(1), ART);
+    IconTile::new(label, IconKind::Text)
+        .with_state(state)
+        .render(&mut s, bounds, Scale::ONE, theme, Some(&art));
+    s
+}
+
+/// The `ink` drawn on row `y`, as `(left, width)`.
+fn row_span(surface: &Surface, ink: Pixel, y: u32) -> Option<(u32, u32)> {
+    let mut span: Option<(u32, u32)> = None;
+    for x in 0..surface.width() {
+        if surface.get(x, y) == Some(ink) {
+            span = Some(span.map_or((x, x), |(l, _)| (l, x)));
+        }
+    }
+    span.map(|(l, r)| (l, r + 1 - l))
+}
+
+/// The lines of text drawn in `ink`, top to bottom, as `(left, width)`.
+///
+/// The host face draws every glyph as a solid block the full line height, so
+/// the lines sit one line-height apart from the first inked row and each has
+/// ink on its own top row.
+fn ink_lines(surface: &Surface, ink: Pixel) -> Vec<(u32, u32)> {
+    let step = font().line_height().max(1);
+    let Some(top) = (0..surface.height()).find(|y| row_span(surface, ink, *y).is_some()) else {
+        return Vec::new();
+    };
+    (0..surface.height())
+        .map(|line| top + line * step)
+        .take_while(|y| *y < surface.height())
+        .map_while(|y| row_span(surface, ink, y))
+        .collect()
+}
+
+/// A tile whose label column is exactly `column` pixels wide and whose band
+/// holds `lines` whole lines — the height found by asking the tile itself
+/// rather than re-deriving its band geometry.
+fn tile_fitting(column: u32, lines: usize, theme: &Theme) -> Rect {
+    let pad = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1);
+    let width = column + pad * 2;
+    let bounds = (1..1000)
+        .map(|h| Rect::new(0, 0, width, h))
+        .find(|b| IconTile::label_lines(*b, Scale::ONE, theme) >= lines)
+        .expect("some height holds the lines");
+    assert_eq!(IconTile::label_lines(bounds, Scale::ONE, theme), lines);
+    bounds
+}
+
+/// Each line is centred in the tile, to within the odd pixel of a width that
+/// cannot be split evenly.
+fn assert_centred(lines: &[(u32, u32)], tile_width: u32) {
+    for &(left, width) in lines {
+        assert!(
+            (left * 2 + width).abs_diff(tile_width) <= 1,
+            "line at {left} of {width} is not centred in {tile_width}"
+        );
+    }
+}
+
+/// A name too long for one line wraps onto the next at a word break and stays
+/// centred, rather than being cut mid-word: "System Administrator" reads in
+/// full on two lines.
+#[test]
+fn a_long_two_word_name_wraps_onto_two_centred_lines() {
+    let theme = Theme::dark();
+    let f = font();
+    let bounds = tile_fitting(f.text_width("Administrator"), 2, &theme);
+    let s = label_surface("System Administrator", ControlState::idle(), &theme, bounds);
+
+    let lines = ink_lines(&s, premul(theme.palette().on_surface));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    // Each word is drawn whole — an elided line would run wider by the mark.
+    assert_eq!(lines[0].1, f.text_width("System"));
+    assert_eq!(lines[1].1, f.text_width("Administrator"));
+    assert_centred(&lines, bounds.width);
+}
+
+/// When the name outruns the lines available, only the *last* line is elided,
+/// and the mark is really drawn — the drawn line is wider than its text alone
+/// by exactly the ellipsis.
+#[test]
+fn a_name_longer_than_the_band_elides_only_its_last_line() {
+    const NAME: &str = "System Administrator Account";
+
+    let theme = Theme::dark();
+    let f = font();
+    let column = f.text_width("Administrator");
+    let bounds = tile_fitting(column, 2, &theme);
+    let s = label_surface(NAME, ControlState::idle(), &theme, bounds);
+
+    // What the shared wrap engine says the two lines are…
+    let wrapped: Vec<_> = f
+        .wrap_to_width(NAME, column, 2)
+        .map(|line| (line.text, line.elided))
+        .collect();
+    assert_eq!(wrapped.len(), 2);
+    assert!(!wrapped[0].1, "the first line is not the one elided");
+    assert!(wrapped[1].1, "the last line runs out of room");
+
+    // …is what the tile draws, mark included.
+    let lines = ink_lines(&s, premul(theme.palette().on_surface));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0].1, f.text_width(wrapped[0].0));
+    assert_eq!(
+        lines[1].1,
+        f.text_width(wrapped[1].0) + f.text_width(ELLIPSIS),
+        "the elision mark is reported but not drawn"
+    );
+    assert_centred(&lines, bounds.width);
+}
+
+/// A single unbreakable word is broken across the lines it has and elided at
+/// the end, rather than overflowing the tile it cannot fit in.
+#[test]
+fn one_unbreakable_word_is_broken_and_elided_rather_than_overflowing() {
+    const WORD: &str = "Supercalifragilisticexpialidocious";
+
+    let theme = Theme::dark();
+    let f = font();
+    let column = f.text_width("Administrator");
+    let bounds = tile_fitting(column, 2, &theme);
+    let s = label_surface(WORD, ControlState::idle(), &theme, bounds);
+
+    // The word has no break in it, so the shared engine splits it mid-word and
+    // marks the last line…
+    let wrapped: Vec<_> = f
+        .wrap_to_width(WORD, column, 2)
+        .map(|line| (line.text, line.elided))
+        .collect();
+    assert_eq!(wrapped.len(), 2);
+    assert!(WORD.starts_with(wrapped[0].0) && wrapped[0].0 != WORD);
+    assert!(wrapped[1].1, "the tail of the word is marked as dropped");
+
+    // …and the tile draws exactly that, inside its column rather than over it.
+    let lines = ink_lines(&s, premul(theme.palette().on_surface));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0].1, f.text_width(wrapped[0].0));
+    assert_eq!(
+        lines[1].1,
+        f.text_width(wrapped[1].0) + f.text_width(ELLIPSIS)
+    );
+    for &(left, width) in &lines {
+        assert!(width <= column, "a line overflowed its column: {width}");
+        assert!(left + width <= bounds.width);
+    }
+    assert_centred(&lines, bounds.width);
+}
+
+/// The budget an owner reads is the budget the render lays out to: for every
+/// tile height, the number of lines actually drawn is the number
+/// [`IconTile::label_lines`] promised.
+#[test]
+fn label_lines_agrees_with_the_lines_the_render_draws() {
+    // A name long enough to fill any budget, so the drawn count is the budget
+    // rather than the text running out.
+    const NAME: &str = "System Administrator Account Recovery Console Operator Emeritus \
+         Of The Second Machine Room On The Left Past The Coffee";
+
+    let theme = Theme::dark();
+    for height in 8..(TH * 2) {
+        let bounds = Rect::new(0, 0, TW, height);
+        let promised = IconTile::label_lines(bounds, Scale::ONE, &theme);
+        let s = label_surface(NAME, ControlState::idle(), &theme, bounds);
+        let drawn = ink_lines(&s, premul(theme.palette().on_surface)).len();
+        assert_eq!(drawn, promised, "a {height}-pixel tile drew {drawn} lines");
+    }
+}
+
+/// A selected name is drawn on an accent pill, so its on-accent ink keeps the
+/// contrast the theme designed for it — on the light theme especially, where
+/// near-white ink over the translucent halo alone would wash out.
+#[test]
+fn a_selected_name_reads_against_its_pill_on_both_themes() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        let bounds = tile_fitting(font().text_width("Administrator"), 2, &theme);
+        // Painted over the theme's own surface, which is what a selected item
+        // actually sits on.
+        let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
+        s.fill(Color::from(p.surface));
+        let art = artwork(IconTile::icon_side(bounds, Scale::ONE, &theme).max(1), ART);
+        IconTile::new("System Administrator", IconKind::Text)
+            .with_state(ControlState::idle().with_selection(SelectionState::Selected))
+            .render(&mut s, bounds, Scale::ONE, &theme, Some(&art));
+
+        let ink = premul(p.on_accent);
+        let lines = ink_lines(&s, ink);
+        assert_eq!(lines.len(), 2, "{}: {lines:?}", theme.name());
+        // The pixel beside the ink is the pill, not the halo.
+        let (left, width) = lines[0];
+        let row = (0..bounds.height)
+            .find(|y| s.get(left, *y) == Some(ink))
+            .expect("an ink row");
+        assert_eq!(
+            s.get(left + width, row),
+            Some(premul(p.accent)),
+            "{}: the name is not on its pill",
+            theme.name()
+        );
+
+        // Measured on the pixels actually drawn: the name carries exactly the
+        // contrast the theme designs for a label on its accent.
+        let measured = luma(ink).abs_diff(luma(s.get(left + width, row).expect("in bounds")));
+        assert_eq!(
+            measured,
+            luma(premul(p.on_accent)).abs_diff(luma(premul(p.accent))),
+            "{}: the selected name lost the theme's accent contrast",
+            theme.name()
+        );
+    }
+
+    // Why the pill is there at all: on the light theme the same ink over the
+    // bare halo falls short of that designed contrast, so a soft halo alone
+    // would have washed the name out.
+    let light = Theme::light();
+    let p = light.palette();
+    let ink = premul(p.on_accent);
+    let designed = luma(ink).abs_diff(luma(premul(p.accent)));
+    let bare = luma(ink).abs_diff(luma(
+        Color::from(p.selection_glow)
+            .premultiply()
+            .over(premul(p.surface)),
+    ));
+    assert!(bare < designed, "{bare} vs {designed}");
 }
 
 // --- Card (spec §11.15) ------------------------------------------------

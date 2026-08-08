@@ -215,12 +215,31 @@ group of state and actions it owns.
 
 Only state paints anything behind the picture, and each state uses the mark the
 language already owns for it: the shared pointer wash for hover and press, the
-selection accent for a selected tile (whose label and glyph invert onto it, so
-selection differs from a hover in contrast rather than only in hue), the shared
-focus ring for the keyboard, and the shape-coded Signal Bead for a denied or
-unhealthy item. Nothing a tile draws escapes its bounds, so a view may lay tiles
-edge to edge — and bound the whole grid's paint to the area it owns — without a
-tile bleeding onto its neighbour.
+selection halo for a selected tile, the shared focus ring for the keyboard, and
+the shape-coded Signal Bead for a denied or unhealthy item. Nothing a tile draws
+escapes its bounds, so a view may lay tiles edge to edge — and bound the whole
+grid's paint to the area it owns — without a tile bleeding onto its neighbour.
+
+The selection halo is the theme's translucent `selection_glow`, filled as a
+rounded rectangle inset by the scaled `selection_glow_blur` on every side and
+blurred by that radius through the one shared box blur the compositor frosts a
+window backdrop with. Insetting first is what keeps the softened edge inside
+the tile. Because the halo lets the wallpaper or window surface read through it,
+the tile's name is carried on a solid `accent` pill in `on_accent` ink, so
+selection still differs from a hover in contrast rather than only in hue. Under
+a heavier `Contrast` the tile drops the halo and fills the crisp opaque accent
+panel instead: a soft translucent wash would trade away the very contrast that
+policy exists to add. Only a selected tile pays for the halo — one scratch
+surface, rasterised and blurred at the tile's own size.
+
+The name wraps rather than being cut. `paint_label` lays it out over as many
+whole lines as the band under the picture holds, each centred in the band's
+column, and elides the last with the shared ellipsis when the name runs past
+them; a band with no room for one whole line draws nothing rather than clipping
+a glyph. `IconTile::label_lines` reports that budget from the same geometry the
+render lays out to, so an owner sizing its tiles — the login chooser sizing an
+account tile so a two-word display name is not elided — asks the tile instead of
+re-deriving its label layout.
 
 A tile renders state and never dispatches. The view owns the grid geometry and
 hit-tests pointer input against that same geometry, so a tile carries no pointer

@@ -79,10 +79,27 @@ the payload exceeds the pre-Korean size ceiling.
   blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
   §2.2). Both of a glyph's axes are clipped against the surface once, before
   any pixel is touched, and each visible row then blends its coverage bytes
-  against the destination row slice (`Surface::row_mut`) in step, so a bounds
+  against the destination row slice (`Surface::row_span_mut`) in step, so a bounds
   check and a row address are paid per row rather than per pixel and a glyph
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
+- `font::BitmapFont::elide_to_width` / `font::BitmapFont::wrap_to_width` —
+  the two shared fitters over that arithmetic, so no text region writes its
+  own break loop (`AGENTS.md` §2.2). The first returns the longest prefix
+  that fits *once room for `ELLIPSIS` is reserved* and whether the mark is
+  needed; a box too narrow for even the mark draws nothing, a mark that
+  spills out of the box it exists to enforce being worse than an empty box.
+  The second lays a label over at most *n* lines — breaking at whitespace so
+  a word starts the next line rather than being split, breaking an
+  over-long word mid-word on a `char` boundary (a run that cannot break must
+  still advance), drawing no surrounding whitespace, and eliding only the
+  last line. It is a **lazy iterator** of `TextLine { text, elided }`
+  borrowing the label, never a `Vec`: a caller counts a clone to size the
+  block and walks the original to draw, so a label re-laid out every repaint
+  allocates nothing.
+- `font::ELLIPSIS` — the one definition of the mark a shortened line ends
+  with, measured and drawn through the same constant so the two can never
+  disagree.
 - `client` — the process-global font-service client behind `render`: the
   injected transport seam to `fontd` and the byte-budgeted local glyph cache
   fetched coverage is memoised in. See *Rendering at a chosen size* below.

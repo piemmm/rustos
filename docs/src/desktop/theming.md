@@ -21,7 +21,8 @@ bundles, under a stable `ThemeId`:
 
 - `Palette` — semantic `Rgba` colour roles: the surface/foreground base
   (`desktop`, `surface`, `surface_raised`, `on_surface`, `on_surface_muted`,
-  `accent`, `on_accent`, `border`), the Reactive Alloy control roles
+  `accent`, `on_accent`, `selection_glow`, `border`), the Reactive Alloy
+  control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
   signal roles the boards' legend fixes (the `*_pressure` set,
   `network_activity`, `recovery`, `success`, `warning`, `denied`), and the
@@ -40,6 +41,14 @@ bundles, under a stable `ThemeId`:
     `surface_raised` (the bar fill) in the direction its appearance calls for —
     brighter on dark, deeper on light — and the tests assert that separation on
     both appearances rather than trusting the authored numbers.
+  - `selection_glow` is the soft halo behind a selected item — an icon tile in
+    the file manager's grid, on the desktop's icon field, or on the login
+    chooser. It is each theme's own `accent` at half opacity (alpha `128`):
+    `#d1550f80` on dark, `#c8500c80` on light. Being translucent, what lies
+    behind the item — a window's surface, the wallpaper — still reads through
+    the selection instead of being replaced by a block of accent. It is
+    authored per theme rather than derived from `accent` at the draw site, so
+    a theme can tune the halo's weight against its own surfaces.
   - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
     a step deeper on light — and it is deliberately **not** a focus signal.
     Every window wears the same quiet rim at every activation, because the rim
@@ -54,12 +63,22 @@ bundles, under a stable `ThemeId`:
   renderer carries a private constant: the corner radii and
   `border_thickness`; the scrollbar's `scrollbar_breadth` and
   `min_thumb_length`; the control anatomy (`control_height`,
-  `control_inset`, `control_gap`, `control_corner_radius`, `seam_thickness`,
+  `control_inset`, `control_gap`, `control_corner_radius`,
+  `selection_glow_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
   `chart_height`, `selector_extent`, `toggle_track_length`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `window_control_extent`,
   `resize_grabber_extent`, `hit_slop`).
+  - `selection_glow_blur` is the radius the `selection_glow` halo is blurred
+    by, `19` logical pixels in both themes. That is thirty percent of
+    `tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX` (`64`), the widest
+    backdrop blur a window may ask the compositor for: a selection halo is a
+    soft mark on one item, not the frosted glass a whole window sits on, so it
+    takes a fraction of the strongest blur the desktop draws and stays
+    recognisably the same effect. Both radii scale through `Scale`, and the
+    halo is drawn with the one shared box blur the compositor frosts a
+    backdrop with rather than a second implementation.
   - `chart_height` is the one measured instrument that is a *box* rather than
     a line: a history plot needs vertical room to rise and fall in, so it is
     several times `progress_thickness`. A trend confined to a track's

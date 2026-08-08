@@ -7,7 +7,6 @@
 
 use tairix_geometry::{Point, Rect};
 use tairix_raster::color::Pixel;
-use tairix_raster::Surface;
 
 use crate::raster::CursorImage;
 
@@ -33,17 +32,6 @@ impl PlacedCursor {
     /// Move the cursor so its hotspot sits at `pointer`.
     pub fn set_pointer(&mut self, pointer: Point) {
         self.origin = top_left(&self.image, pointer);
-    }
-
-    /// Composite this cursor onto `target` at its placed position.
-    ///
-    /// The blend is `lib/raster`'s one premultiplied sprite path, so a
-    /// transparent-background cursor lands without a rectangular halo, and a
-    /// cursor overhanging an edge draws the part that fits. A screen that
-    /// composites the cursor pixel by pixel alongside other layers samples it
-    /// through [`sample_row`](Self::sample_row) instead.
-    pub fn draw(&self, target: &mut Surface) {
-        target.blit(self.origin.x, self.origin.y, self.image.surface());
     }
 
     /// The screen rectangle the cursor currently covers.

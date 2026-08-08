@@ -6027,6 +6027,15 @@ here.
   capability-empty sandbox worker, draws the pointer through the hoisted
   `tairix_cursor::PlacedCursor`, presents only the damage rectangle, and
   parks with no timer at all when nothing is counting down.
+  **Pointer motion costs no render and no round trip.** The service keeps
+  the *clean* rendered surface and re-renders only when the surface's own
+  state changed — a closed set (its state, screen, scale, backdrop), which
+  is why the cache cannot go stale — so `Repaint` is three cases (nothing /
+  cursor-only / painted) and the cursor is instead sampled over the cached
+  pixels at scan-out. A drain applies every queued report and presents
+  **once**, merging damage through the shared `sub_screen_damage`
+  classification. A bare move is then a hit test, two rectangle unions and
+  a cursor-sized copy: no allocation, no glyph, no wallpaper blit.
 - **`CAP_SANDBOX_SPAWN` (new, id 43).** Isolating untrusted input must not
   cost the authority to start a general process, so the narrow capability
   admits *only* a canonical parser sandbox — a child the kernel brands
@@ -6048,11 +6057,29 @@ here.
   absent rather than broken when the mailbox could not be bound.
 - **Shared, not duplicated:** the scan-out encode (frame length, channel
   order, damage-vs-whole-frame) moved out of the window manager into
-  `lib/display::scanout`, and cursor *placement* (origin = pointer −
-  hotspot, sampling under a screen row) out of it into
-  `tairix_cursor::PlacedCursor` — so the compositor and the login screen
-  share one pixel-exact definition of each, and `userland/session/*` needs
-  no forbidden edge into the window manager to draw a pointer.
+  `lib/display::scanout`, cursor *placement* (origin = pointer − hotspot,
+  sampling under a screen row) out of it into
+  `tairix_cursor::PlacedCursor`, and the separable box blur out of it into
+  `tairix_raster::box_blur` (+ the allocating `Surface::blur` for a cold
+  path) — so the compositor and the login screen share one pixel-exact
+  definition of each, and `userland/session/*` needs no forbidden edge into
+  the window manager to draw a pointer or a soft edge. `lib/font` gained
+  the matching text fitters every too-narrow label now shares:
+  `elide_to_width` and the lazy, non-allocating `wrap_to_width`, over one
+  `ELLIPSIS` mark that is both measured and drawn.
+- **The account tile is the shared `IconTile`, improved for everyone.** A
+  selected tile takes a *soft* halo — the theme's new `selection_glow`
+  (its own accent at half opacity) filled inset by the scaled
+  `selection_glow_blur` (19 logical px, three tenths of the protocol's
+  `WINDOW_BACKDROP_BLUR_MAX_PX`, asserted against it so the two cannot
+  drift) and blurred through the shared blur, so nothing escapes the tile's
+  bounds — with the name carried on a solid accent pill, which is what keeps
+  selection a *contrast* difference rather than a hue one; a high-contrast
+  theme keeps the crisp opaque panel instead. The label **wraps** over as
+  many whole lines as the band holds, centred, only the last elided, and
+  `IconTile::label_lines` exposes that budget so an owner sizes a tile from
+  the render's own geometry — which is how the greeter's tile is 132 × 154
+  (three whole lines at 100% *and* 200%), not a guess.
 - **Remaining: G7.1** — the QEMU verticals (boot to the greeter,
   authenticate onto the desktop, log out, switch accounts). Staged
   separately: no integration test drives a graphical userland under QEMU

@@ -58,6 +58,18 @@ pub struct Metrics {
     /// The corner radius of an ordinary control plate (the Alloy Plate), in
     /// logical pixels. `0` is square.
     pub control_corner_radius: u32,
+    /// The blur radius of the halo behind a selected item
+    /// ([`Palette::selection_glow`](crate::Palette::selection_glow)), in
+    /// logical pixels. `0` leaves the halo crisp.
+    ///
+    /// Thirty percent of
+    /// [`WINDOW_BACKDROP_BLUR_MAX_PX`](tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX),
+    /// the widest backdrop blur a window may ask the compositor for (64
+    /// logical pixels): a selection halo is a soft mark on one item, not the
+    /// frosted glass a whole window sits on, so it takes a fraction of the
+    /// strongest blur the desktop draws and stays recognisably the same
+    /// effect.
+    pub selection_glow_blur: u32,
     /// The thickness of a Heat Seam (an activity/progress line on an edge),
     /// in logical pixels.
     pub seam_thickness: u32,

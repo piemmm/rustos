@@ -62,6 +62,30 @@ monospace family reports one advance for every glyph and keeps a fast path
 over it, so the terminal grid pays nothing for the generality: measuring a
 run of *n* characters there is still one multiplication.
 
+## Fitting a label to its box
+
+Two shared fitters sit on top of that measurement, so no text region writes
+its own break loop. `elide_to_width` gives the longest prefix that fits *once
+room for the ellipsis mark is reserved*, plus whether the mark is needed; a
+box too narrow for even the mark draws nothing at all, since a mark that
+spills out of the box it exists to enforce is worse than an empty box.
+`wrap_to_width` lays a label over at most *n* lines: it breaks at whitespace
+so a word starts the next line rather than being split, breaks a word too
+long for the box mid-word on a `char` boundary (a run that cannot break must
+still advance), draws no leading or trailing whitespace, and elides only the
+last line, through `elide_to_width`. The mark itself has one definition,
+`tairix_font::ELLIPSIS`, so what is measured and what is drawn cannot
+disagree.
+
+Wrapping is a **lazy iterator** of `TextLine { text, elided }` borrowing the
+label, never a `Vec`: a caller counts a clone of it to size the block
+vertically, then walks the original to draw, and a label re-laid out on every
+repaint costs no heap traffic. It centres a line by measuring
+`text_width(line.text)` plus, when the line is `elided`, `text_width(ELLIPSIS)`,
+and draws the mark at the pen `draw_text` returns. This is what an account
+tile on the graphical login screen lays a display name out with, instead of
+cutting `System Administrator` mid-word.
+
 A family's line metrics — box height, baseline, line height, and the single
 advance a monospace family lays a grid out with — come from the service once
 per `(family, pixel height, weight)` and are cached beside the glyphs. A

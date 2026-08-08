@@ -176,7 +176,9 @@ application bundle the icon it carries in its own `Resources/`, falling back
 to built-in glyphs exactly as the file manager's grid does. Each icon is a
 shared `lib/controls` `IconTile` — the picture over its name with no plate of
 its own, so the icons sit on the wallpaper rather than in a row of boxes, and
-only a hovered, selected, or focused icon paints a panel behind itself.
+only a hovered, selected, or focused icon paints anything behind itself. A
+selected icon takes the theme's soft translucent selection halo, so the
+wallpaper still reads through it, with its name carried on an accent pill.
 
 The one place the desktop's geometry deliberately differs from the file
 manager's is what it does with the space a column has left over: the field

@@ -1,19 +1,16 @@
-//! The compositor's backdrop blur.
+//! The shared separable box blur.
 //!
-//! A window may ask the session to blur whatever is already composited
-//! behind its rectangle before its own — typically translucent — pixels are
-//! blended over it, so a panel or terminal reads like frosted glass. This
-//! module is the one definition of that blur: a separable box blur, run as
-//! a horizontal pass and then a vertical one, each carrying a running sum
-//! so the cost is proportional to the region's area rather than to the area
-//! times the radius.
+//! One definition serves every frosted surface: the compositor's backdrop
+//! blur (a window's rectangle frosted before its own translucent pixels
+//! blend over it) and a control's own soft highlight. A horizontal pass then
+//! a vertical one, each carrying a running sum, so the cost is the region's
+//! area rather than its area times the radius.
 //!
-//! The pixels are premultiplied, and every channel — alpha included — is
-//! averaged. Averaging premultiplied channels is the correct operation on
-//! premultiplied data: the result is the same convex combination of the
-//! contributing colours that compositing them would give, so the
-//! `colour <= alpha` invariant survives and no halo appears around a
-//! translucent edge.
+//! Every channel — alpha included — is averaged. Averaging premultiplied
+//! channels is the correct operation on premultiplied data: the result is
+//! the same convex combination of the contributing colours that compositing
+//! them would give, so the `colour <= alpha` invariant survives and no halo
+//! appears around a translucent edge.
 //!
 //! Edges replicate: a sample past the region's edge takes the edge pixel.
 //! Every output therefore averages exactly `2 * radius + 1` samples, which
@@ -27,14 +24,16 @@ use crate::color::Pixel;
 /// `radius` physical pixels using `aux` as the intermediate buffer.
 ///
 /// `aux` is supplied by the caller — the compositor owns a scratch buffer
-/// it grows and reuses — so a blur costs no allocation on the frame path.
+/// it grows and reuses — so a blur costs no allocation on the frame path. A
+/// caller that blurs once per repaint rather than per frame can take
+/// [`Surface::blur`](crate::Surface::blur) instead and let it allocate.
 ///
 /// Nothing is blurred, and `region` is left exactly as it was, when the
 /// radius is `0` (the effect is disabled), when either dimension is `0`, or
 /// when `region` or `aux` is shorter than `width * height`: a caller that
 /// mis-sizes a buffer gets the unblurred backdrop, never a partly-blurred
 /// or out-of-bounds one.
-pub(crate) fn box_blur(
+pub fn box_blur(
     region: &mut [Pixel],
     width: usize,
     height: usize,
@@ -140,9 +139,10 @@ fn index(stride: usize, i: usize) -> Option<usize> {
 ///
 /// A `u32` per channel is ample: a channel is at most 255 and the window
 /// holds at most one screen dimension's worth of samples, so the sum cannot
-/// approach the type's range. The saturating arithmetic is belt-and-braces
-/// against a caller that unbalanced the adds and subtractions rather than a
-/// reachable state.
+/// approach the type's range for any radius a surface is drawn at. Every
+/// operation saturates so that a caller passing an absurd radius — the
+/// entry point is public and takes any `usize` — gets a flattened region
+/// rather than an arithmetic panic.
 #[derive(Copy, Clone, Default)]
 struct Sum {
     r: u32,
@@ -155,10 +155,11 @@ impl Sum {
     /// Add `times` copies of `pixel` to the window.
     fn add(&mut self, pixel: Pixel, times: usize) {
         let times = u32::try_from(times).unwrap_or(u32::MAX);
-        self.r = self.r.saturating_add(u32::from(pixel.r) * times);
-        self.g = self.g.saturating_add(u32::from(pixel.g) * times);
-        self.b = self.b.saturating_add(u32::from(pixel.b) * times);
-        self.a = self.a.saturating_add(u32::from(pixel.a) * times);
+        let weighted = |channel: u8| u32::from(channel).saturating_mul(times);
+        self.r = self.r.saturating_add(weighted(pixel.r));
+        self.g = self.g.saturating_add(weighted(pixel.g));
+        self.b = self.b.saturating_add(weighted(pixel.b));
+        self.a = self.a.saturating_add(weighted(pixel.a));
     }
 
     /// Remove one copy of `pixel` from the window.
@@ -171,8 +172,9 @@ impl Sum {
 
     /// The window's mean over `count` samples, rounded to nearest.
     ///
-    /// Every channel divides by the same `count` and rounds the same way, so
-    /// a channel can never round above the alpha it is premultiplied by.
+    /// Every channel divides by the same `count` and rounds the same way, and
+    /// the sums are monotonic in the channel, so a channel can never round
+    /// above the alpha it is premultiplied by.
     fn mean(self, count: usize) -> Pixel {
         let count = u32::try_from(count).unwrap_or(u32::MAX).max(1);
         Pixel {
@@ -186,136 +188,10 @@ impl Sum {
 
 /// One channel's rounded mean, clamped into a byte.
 fn mean(sum: u32, count: u32) -> u8 {
-    let rounded = (sum + count / 2) / count;
+    let rounded = sum.saturating_add(count / 2) / count;
     u8::try_from(rounded.min(255)).unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]
-mod tests {
-    use alloc::vec;
-    use alloc::vec::Vec;
-
-    use super::box_blur;
-    use crate::color::Pixel;
-
-    /// An opaque grey.
-    fn grey(v: u8) -> Pixel {
-        Pixel {
-            r: v,
-            g: v,
-            b: v,
-            a: 255,
-        }
-    }
-
-    /// Blur `region` (given as `width`×`height`) and hand back the result.
-    fn blurred(region: &[Pixel], width: usize, height: usize, radius: usize) -> Vec<Pixel> {
-        let mut pixels = region.to_vec();
-        let mut aux = vec![Pixel::TRANSPARENT; width * height];
-        box_blur(&mut pixels, width, height, radius, &mut aux);
-        pixels
-    }
-
-    #[test]
-    fn uniform_field_is_unchanged() {
-        let field = vec![grey(40); 7 * 5];
-        assert_eq!(blurred(&field, 7, 5, 2), field);
-    }
-
-    #[test]
-    fn radius_zero_is_identity() {
-        let mut field = vec![grey(10); 9];
-        field[4] = grey(200);
-        assert_eq!(blurred(&field, 3, 3, 0), field);
-    }
-
-    #[test]
-    fn impulse_spreads_symmetrically() {
-        let mut field = vec![grey(0); 5 * 5];
-        field[2 * 5 + 2] = grey(255);
-        let out = blurred(&field, 5, 5, 1);
-
-        let centre = out[2 * 5 + 2];
-        assert!(centre.r > 0 && centre.r < 255, "the impulse spread out");
-        for (x, y) in [(1, 2), (3, 2), (2, 1), (2, 3)] {
-            assert_eq!(
-                out[y * 5 + x],
-                centre,
-                "a 3x3 box spreads an impulse equally over its whole window"
-            );
-        }
-        assert_eq!(out[0], grey(0), "a pixel two columns away is untouched");
-    }
-
-    #[test]
-    fn impulse_conserves_total_energy() {
-        let mut field = vec![Pixel::TRANSPARENT; 9 * 9];
-        field[4 * 9 + 4] = grey(90);
-        let out = blurred(&field, 9, 9, 1);
-        let total: u32 = out.iter().map(|p| u32::from(p.r)).sum();
-        assert_eq!(total, 90, "a box blur redistributes, it does not amplify");
-    }
-
-    #[test]
-    fn alpha_is_averaged_with_the_colour_channels() {
-        let opaque = grey(200);
-        let field = vec![
-            opaque,
-            opaque,
-            opaque,
-            Pixel::TRANSPARENT,
-            Pixel::TRANSPARENT,
-            Pixel::TRANSPARENT,
-        ];
-        let out = blurred(&field, 6, 1, 1);
-        let edge = out[3];
-        assert!(
-            edge.a > 0 && edge.a < 255,
-            "alpha blurs across the edge like every other channel"
-        );
-        assert!(
-            edge.r <= edge.a,
-            "the premultiplied invariant survives the blur"
-        );
-    }
-
-    #[test]
-    fn single_pixel_region_is_returned_unchanged() {
-        let field = vec![grey(77)];
-        assert_eq!(blurred(&field, 1, 1, 4), field);
-    }
-
-    #[test]
-    fn single_column_and_single_row_regions_are_handled() {
-        let column = vec![grey(0), grey(255), grey(0)];
-        let out = blurred(&column, 1, 3, 3);
-        assert_eq!(out[0], out[2], "a clamped column blurs symmetrically");
-        assert!(out[1].r > 0 && out[1].r < 255);
-
-        let row = vec![grey(0), grey(255), grey(0)];
-        assert_eq!(blurred(&row, 3, 1, 3), out, "a row blurs like a column");
-    }
-
-    #[test]
-    fn radius_wider_than_the_region_still_averages() {
-        let field = vec![grey(0), grey(120), grey(240), grey(0)];
-        let out = blurred(&field, 4, 1, 64);
-        assert!(
-            out.windows(2).all(|pair| pair[0] == pair[1]),
-            "a radius that swallows the region flattens it"
-        );
-    }
-
-    #[test]
-    fn short_buffers_leave_the_region_untouched() {
-        let field = vec![grey(10), grey(250), grey(10), grey(250)];
-        let mut pixels = field.clone();
-        let mut aux = vec![Pixel::TRANSPARENT; 2];
-        box_blur(&mut pixels, 2, 2, 1, &mut aux[..1]);
-        assert_eq!(pixels, field, "a short scratch buffer blurs nothing");
-
-        let mut short = field[..3].to_vec();
-        box_blur(&mut short, 2, 2, 1, &mut aux);
-        assert_eq!(short, field[..3], "a short region blurs nothing");
-    }
-}
+#[path = "blur_tests.rs"]
+mod tests;
