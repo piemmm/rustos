@@ -818,7 +818,7 @@ const fn sort_mode(sort: IconSort) -> SortMode {
 /// its `Run` binary", so the desktop's three launch paths cannot diverge.
 fn launch_of(bundle: &str, label: String, argument: Option<String>) -> DesktopActivation {
     DesktopActivation::Launch {
-        run_path: format!("{bundle}/Run"),
+        run_path: format!("{bundle}{}", crate::pins::BUNDLE_RUN_SUFFIX),
         label,
         argument,
     }

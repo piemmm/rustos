@@ -51,6 +51,10 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # title-bar identity/title through the one `lib/font` blitter every consumer
 # uses, so decorated windows render text without a second font path (§2.2).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared icon vocabulary (§6, §17.4): a decorated window carries its
+# owning application's `IconKind` so the title bar reserves and draws the
+# identity slot through the one shared icon path, never a second one (§2.2).
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # cursor controller's rasterised-image cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an

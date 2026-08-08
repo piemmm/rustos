@@ -154,6 +154,11 @@ impl WindowChrome {
     /// only the transient full-size buffer is temporary; what is kept
     /// afterwards is the four strips.
     ///
+    /// `artwork` is the owning application's identity icon, already
+    /// rasterised at the title bar's slot side; it is handed straight to
+    /// [`WindowFrame::render`], which draws the built-in glyph instead when
+    /// it is `None`.
+    ///
     /// [`Window::local_furniture_bands`]: crate::window::Window::local_furniture_bands
     pub(crate) fn render(
         frame: &WindowFrame,
@@ -161,11 +166,12 @@ impl WindowChrome {
         outer_size: (u32, u32),
         scale: Scale,
         theme: &Theme,
+        artwork: Option<&Surface>,
     ) -> Option<Self> {
         let (ow, oh) = outer_size;
         let mut transient = Surface::new(ow, oh)?;
         let outer = Rect::new(0, 0, ow, oh);
-        frame.render(&mut transient, outer, scale, theme);
+        frame.render(&mut transient, outer, scale, theme, artwork);
 
         // No corner grip: a resizable window's band is the plain frame inset,
         // too thin to hold one without painting into the client. The grab zone

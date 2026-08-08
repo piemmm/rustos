@@ -145,6 +145,20 @@ impl TaskList {
         true
     }
 
+    /// Retitle the task with `id`, relabelling its entry.
+    ///
+    /// The window manager relays an owner's retitle here so the bar's
+    /// label tracks the window's own title bar. Returns `false`, changing
+    /// nothing, for an unknown id (fail closed); the order, focus, and
+    /// minimised state are untouched — only the label moves.
+    pub fn retitle(&mut self, id: TaskId, title: impl Into<String>) -> bool {
+        let Some(index) = self.position(id) else {
+            return false;
+        };
+        self.entries[index].title = title.into();
+        true
+    }
+
     /// Remove the task for a closed window, clearing focus if it held it.
     /// Returns `false` for an unknown id.
     pub fn remove(&mut self, id: TaskId) -> bool {

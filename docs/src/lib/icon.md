@@ -33,10 +33,10 @@ draw site always gets something:
 2. **Vector SVG (next).** The scalable `<asset-id>.svg` source under the same
    directory (`icon_vector_path(kind)`), decoded into a `VectorIcon` through
    the SVG-first loader. A kind ships **one** class master, in whichever of
-   the two formats suits its artwork — the folder is vector, the illustrative
-   file-class and disk pictures are raster. Shipping one id in both formats is
-   a packaging defect the image build refuses, because the raster tier would
-   always win and the vector could never be selected.
+   the two formats suits its artwork — the folders are vector, the
+   illustrative file-class and disk pictures are raster. Shipping one id in
+   both formats is a packaging defect the image build refuses, because the
+   raster tier would always win and the vector could never be selected.
 3. **Built-in glyph (always last).** `builtin_icon(kind, colour)` — the
    monochrome vector silhouette compiled into the crate. This tier can never
    be absent, so the desktop always shows a meaningful icon even with no

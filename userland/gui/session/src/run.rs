@@ -108,17 +108,18 @@ mod program {
     use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::{
         build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
-        open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
-        serve_switchboard_request, window_control_event, Answer, ArtworkFileReader, ArtworkSandbox,
-        CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction,
-        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin,
-        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable,
-        LockedDrain, OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu,
-        PinboardMenuOutcome, PinboardStore, PinboardStoreError, ResolvedPin, ScreenLock,
-        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
-        SessionPins, SessionReveal, SessionWindows, ShellWindowHost, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        open_tray, parse, reap_launched, relay_power, resolve_window_identities,
+        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
+        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
+        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, HoldBack,
+        IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow,
+        PickConclusion, PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
+        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionReveal,
+        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -1648,6 +1649,18 @@ mod program {
                             &mut reply,
                         )
                     };
+                    // A window opened by this pass wears the icon of the
+                    // application the kernel says opened it. It runs here,
+                    // not in the bridge, because the attested-caller table
+                    // and the launch records are both borrowed while a
+                    // request is served.
+                    resolve_window_identities(
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &launched,
+                        |owner| identity.pid_of(owner),
+                    );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
                 }
             } else if token == NOTIFY_TOKEN {
@@ -3002,6 +3015,25 @@ mod program {
                     if let Some(event) =
                         window_control_event(control, window, work_area, shell, compositor, windows)
                     {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut pins.service,
+                            &event,
+                        );
+                    }
+                }
+                // A secondary press landed on a title-bar control: the window
+                // manager changed nothing, so the only outcome is the app-ward
+                // event the one shared rule yields (Close→AlternateCloseRequested;
+                // every other control, and a window the session itself owns,
+                // yields none and the press does nothing at all).
+                InputResponse::WindowControlAlternate { window, control } => {
+                    if let Some(event) = window_control_alternate_event(control, window, windows) {
                         deliver(
                             server,
                             sink,

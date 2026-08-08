@@ -137,6 +137,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Re-authenticated screen lock (§5.4, §10) | Unattended-session takeover at the keyboard | ✓ | ✓ | ✓ | ✓ |
 | Login screen split from the session authority (§4, §5.2) | Compromised login surface reading credentials or starting a session | ✓ | ✓ | ✓ | ✓ |
 | Terminal purged at every session boundary (§5.4) | Next user reading the last session's screen, hidden alternate screen, scrollback, or type-ahead | ✓ | ✓ grids | ✓ | ✓ |
+| Window identity from the attested launch record (§4, §5.4) | An application dressing its window as another in the title bar or taskbar | ✓ | ✓ | ✓ | ✓ |
 | Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |

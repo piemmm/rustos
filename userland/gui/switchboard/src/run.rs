@@ -739,7 +739,11 @@ mod program {
                 }
                 return;
             }
-            WindowEvent::Key { .. }
+            // A secondary press on Close asks to leave what the window is
+            // showing; the overview has nothing to leave but itself, and a
+            // primary press already closes it.
+            WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::FilePicked { .. }

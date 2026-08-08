@@ -1621,7 +1621,12 @@ mod program {
                         // window is likewise nothing: a popup is neither
                         // decorated nor resizable, so it has no size of its
                         // own for the session to change.
-                        WindowEvent::Focus { .. }
+                        //
+                        // A secondary press on Close asks to leave what the
+                        // window is showing; the terminal has nothing to leave
+                        // but itself, and a primary press already closes it.
+                        WindowEvent::AlternateCloseRequested { .. }
+                        | WindowEvent::Focus { .. }
                         | WindowEvent::Scrolled { .. }
                         | WindowEvent::Minimized { .. }
                         | WindowEvent::Resized { .. }

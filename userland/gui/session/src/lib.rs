@@ -223,9 +223,10 @@ pub use picker::{
 };
 pub use pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
 pub use pins::{
-    build_pin_views, resolve_library_icons, resolve_pin_drop, resolve_pins, ArtworkFileReader,
-    ArtworkSandbox, DragOffer, DragOrigin, IconRasteriser, PinBridge, PinEditError, PinIconSource,
-    PinService, ResolvedPin, SessionPins,
+    build_pin_views, bundle_icon_source, bundle_manifest_path, decode_bundle_manifest,
+    resolve_library_icons, resolve_pin_drop, resolve_pins, ArtworkFileReader, ArtworkSandbox,
+    DragOffer, DragOrigin, IconRasteriser, PinBridge, PinEditError, PinIconSource, PinService,
+    ResolvedPin, SessionPins, BUNDLE_RUN_SUFFIX,
 };
 pub use presenter::TaskbarPresenter;
 pub use reveal::{
@@ -249,4 +250,7 @@ pub use switchuser::{
 };
 pub use tasks::TaskBridge;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
-pub use windows::{desktop_info, window_control_event, SessionWindows, ShellWindowHost};
+pub use windows::{
+    desktop_info, resolve_window_identities, window_control_alternate_event, window_control_event,
+    SessionWindows, ShellWindowHost,
+};

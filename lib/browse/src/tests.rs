@@ -354,13 +354,12 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     assert_eq!(rail.origin.y, i32::try_from(band).expect("band"));
     assert_eq!(rail.height, window.height - band);
 
-    // The first rail row shares its top with the path bar, one band down.
+    // The toolbar is the whole chrome, so the first rail row shares its top
+    // with the first drawn listing row and the two columns read on one grid.
     let first = view.row_rect(0).expect("first row");
     assert_eq!(first.origin.y, i32::try_from(band).expect("band"));
     assert_eq!(first.height, row);
 
-    // The second shares its top with the first drawn listing row, so the two
-    // columns read on one grid.
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(0).expect("select the first entry");
     let area = content_area(window, Scale::ONE, &theme, Some(&places));
@@ -369,10 +368,7 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
         listing.origin.y,
         i32::try_from(chrome_height(Scale::ONE, &theme)).expect("chrome")
     );
-    assert_eq!(
-        view.row_rect(1).expect("second row").origin.y,
-        listing.origin.y
-    );
+    assert_eq!(first.origin.y, listing.origin.y);
 
     // Every drawn row is on that grid, displaced only by the volumes' band.
     let separator = view.separator_rect().expect("separator").height;
@@ -1325,136 +1321,6 @@ fn a_missing_directory_surfaces_the_fetch_refusal() {
         source.list(&["System".to_string()]),
         Err(Errno::NotFound),
         "the engine adds no authority and fabricates no listing"
-    );
-}
-
-// --- FM4b: the clickable breadcrumb path bar -----------------------------
-
-#[test]
-fn breadcrumb_layout_left_aligns_when_the_trail_fits() {
-    use crate::breadcrumb::layout;
-    // widths 10/20/30, pad 4, sep 6: full = 10+6+20+6+30 = 72 ≤ usable
-    // (200-8 = 192), so the strip starts at `pad` and runs left to right.
-    let placed = layout(&[10, 20, 30], 200, 4, 6);
-    assert_eq!(placed.len(), 3);
-    assert_eq!((placed[0].x, placed[0].width), (4, 10));
-    assert_eq!((placed[1].x, placed[1].width), (20, 20));
-    assert_eq!((placed[2].x, placed[2].width), (46, 30));
-}
-
-#[test]
-fn breadcrumb_layout_right_anchors_when_the_trail_overflows() {
-    use crate::breadcrumb::layout;
-    // The same strip (full = 72) in a 40-wide bar (usable = 32) cannot fit,
-    // so the trail slides left: the leading crumbs go off-screen (negative x)
-    // and the terminal crumb's right edge sits flush at bar_width - pad = 36.
-    let placed = layout(&[10, 20, 30], 40, 4, 6);
-    assert_eq!(placed[0].x, -36);
-    assert_eq!(placed[1].x, -20);
-    assert_eq!(placed[2].x, 6);
-    assert_eq!(placed[2].x + i32::try_from(placed[2].width).unwrap(), 36);
-}
-
-#[test]
-fn breadcrumb_layout_is_empty_for_no_crumbs() {
-    assert!(crate::breadcrumb::layout(&[], 200, 4, 6).is_empty());
-}
-
-#[test]
-fn breadcrumb_crumb_at_resolves_labels_and_rejects_gaps() {
-    use crate::breadcrumb::{crumb_at, layout};
-    let placed = layout(&[10, 20, 30], 200, 4, 6);
-    // A column inside a crumb resolves to it; the right edge is exclusive.
-    assert_eq!(crumb_at(&placed, 5, 200), Some(0));
-    assert_eq!(crumb_at(&placed, 13, 200), Some(0));
-    assert_eq!(crumb_at(&placed, 14, 200), None); // separator gap
-    assert_eq!(crumb_at(&placed, 20, 200), Some(1));
-    assert_eq!(crumb_at(&placed, 75, 200), Some(2));
-    assert_eq!(crumb_at(&placed, 76, 200), None); // just past the last crumb
-                                                  // A negative column and a column at/after the bar width never resolve.
-    assert_eq!(crumb_at(&placed, -1, 200), None);
-    assert_eq!(crumb_at(&placed, 200, 200), None);
-}
-
-#[test]
-fn breadcrumb_crumb_at_ignores_crumbs_clipped_off_the_left() {
-    use crate::breadcrumb::{crumb_at, layout};
-    // In the overflow case only the terminal crumb ([6, 36)) is on screen;
-    // the off-screen ancestors (negative x) never answer a click.
-    let placed = layout(&[10, 20, 30], 40, 4, 6);
-    assert_eq!(crumb_at(&placed, 10, 40), Some(2));
-    assert_eq!(crumb_at(&placed, 5, 40), None); // gap before the visible crumb
-    assert_eq!(crumb_at(&placed, 0, 40), None); // where an off-screen crumb ends
-}
-
-#[test]
-fn render_crumb_at_mirrors_the_drawn_path_bar() {
-    use crate::breadcrumb::SEPARATOR;
-    use crate::render::{chrome_height, crumb_at, toolbar_height};
-    use tairix_geometry::Point;
-
-    let theme = Theme::dark();
-    // Measured on the face the engine itself resolves: a hand-picked one
-    // answers a question about a face nothing draws with.
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
-    // The path bar sits below the toolbar strip; a click lands on a crumb only
-    // within that band, so hit-test at its vertical middle.
-    let bar_top = toolbar_height(Scale::ONE, &theme);
-    let bar_y = i32::try_from(bar_top + 1).unwrap();
-    let vp = Rect::new(0, 0, 200, chrome_height(Scale::ONE, &theme) * 4);
-    let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
-
-    // A click in the toolbar strip (above the path bar) is never a crumb.
-    assert_eq!(
-        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, 0)),
-        None
-    );
-
-    // At the root the only crumb is the current directory, which is inert:
-    // no click in the path bar resolves to a navigable crumb.
-    assert_eq!(
-        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, bar_y)),
-        None
-    );
-
-    // Descend into /System; now "/" is a navigable ancestor at depth 0 and
-    // "System" is the inert current crumb.
-    let sys = browser
-        .entries()
-        .iter()
-        .position(|e| e.name() == "System")
-        .expect("fixture has System");
-    browser.open_index(sys).expect("descend into /System");
-    assert_eq!(browser.path(), "/System");
-    // The root crumb is drawn at the left inset (x = 4).
-    assert_eq!(
-        crumb_at(&browser, Scale::ONE, &theme, vp, Point::new(4, bar_y)),
-        Some(0)
-    );
-    // A click on the current "System" crumb (drawn after "/" and the
-    // separator) is inert.
-    let system_x =
-        4 + i32::try_from(font.text_width("/") + font.text_width(SEPARATOR)).unwrap() + 1;
-    assert_eq!(
-        crumb_at(
-            &browser,
-            Scale::ONE,
-            &theme,
-            vp,
-            Point::new(system_x, bar_y)
-        ),
-        None
-    );
-    // A click below the path bar row is never a crumb (it is the item area).
-    assert_eq!(
-        crumb_at(
-            &browser,
-            Scale::ONE,
-            &theme,
-            vp,
-            Point::new(4, i32::try_from(chrome_height(Scale::ONE, &theme)).unwrap())
-        ),
-        None
     );
 }
 
@@ -2622,46 +2488,6 @@ fn a_fresh_navigation_clears_the_forward_history() {
     assert!(browser.can_go_back());
     assert_eq!(browser.go_back(), Ok(true));
     assert_eq!(browser.path(), "/");
-}
-
-#[test]
-fn navigate_to_depth_climbs_to_a_breadcrumb_ancestor() {
-    let mut dirs = BTreeMap::new();
-    dirs.insert(
-        "/".to_string(),
-        encoded_stream(&[(b"System", FileKind::Directory)]),
-    );
-    dirs.insert(
-        "/System".to_string(),
-        encoded_stream(&[(b"Fonts", FileKind::Directory)]),
-    );
-    dirs.insert("/System/Fonts".to_string(), encoded_stream(&[]));
-    let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
-
-    browser.open_index(0).expect("into /System");
-    browser.open_index(0).expect("into /System/Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
-    assert_eq!(browser.components().len(), 2);
-
-    // Clicking the current-directory crumb (depth == len) is a no-op; clicking
-    // past the end (no such ancestor) is likewise a no-op, not an error.
-    assert_eq!(browser.navigate_to_depth(2), Ok(false));
-    assert_eq!(browser.navigate_to_depth(99), Ok(false));
-    assert_eq!(browser.path(), "/System/Fonts");
-
-    // Clicking the "System" crumb (depth 1) climbs to that ancestor and
-    // records the move so Back returns to where we were.
-    assert_eq!(browser.navigate_to_depth(1), Ok(true));
-    assert_eq!(browser.path(), "/System");
-    assert!(browser.can_go_back());
-
-    // Clicking the root crumb (depth 0) goes all the way to the root.
-    assert_eq!(browser.navigate_to_depth(0), Ok(true));
-    assert_eq!(browser.path(), "/");
-    assert!(browser.is_root());
-
-    assert_eq!(browser.go_back(), Ok(true));
-    assert_eq!(browser.path(), "/System");
 }
 
 #[test]
@@ -5273,61 +5099,6 @@ fn open_with_index_at_mirrors_the_rows_and_fails_closed_off_the_menu() {
     );
 }
 
-#[test]
-fn the_breadcrumbs_at_the_root_are_a_single_current_root_crumb() {
-    use crate::chrome::breadcrumbs;
-
-    let browser = Browser::open_root(MockFs::fixture()).expect("root");
-    let crumbs = breadcrumbs(&browser);
-    assert_eq!(crumbs.len(), 1);
-    assert_eq!(crumbs[0].label(), "/");
-    assert_eq!(crumbs[0].depth(), 0);
-    assert!(crumbs[0].is_current());
-}
-
-#[test]
-fn the_breadcrumbs_track_the_components_and_bind_each_to_its_depth() {
-    use crate::chrome::breadcrumbs;
-
-    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(2).expect("enter System");
-    browser.open_index(0).expect("enter Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
-
-    let crumbs = breadcrumbs(&browser);
-    // Root crumb + one per component, root-first.
-    assert_eq!(crumbs.len(), 3);
-    assert_eq!(crumbs[0].label(), "/");
-    assert_eq!(crumbs[0].depth(), 0);
-    assert!(!crumbs[0].is_current());
-    assert_eq!(crumbs[1].label(), "System");
-    assert_eq!(crumbs[1].depth(), 1);
-    assert!(!crumbs[1].is_current());
-    // The terminal crumb is the directory being shown: it is current and its
-    // depth equals the number of components (a navigate_to_depth no-op).
-    assert_eq!(crumbs[2].label(), "Fonts");
-    assert_eq!(crumbs[2].depth(), 2);
-    assert!(crumbs[2].is_current());
-    assert_eq!(crumbs[2].depth(), browser.components().len());
-}
-
-#[test]
-fn a_breadcrumb_depth_climbs_to_exactly_the_ancestor_it_names() {
-    use crate::chrome::breadcrumbs;
-
-    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.open_index(2).expect("enter System");
-    browser.open_index(0).expect("enter Fonts");
-
-    // Binding the "System" crumb (depth 1) to navigate_to_depth climbs to it.
-    let system_depth = {
-        let crumbs = breadcrumbs(&browser);
-        crumbs[1].depth()
-    };
-    assert_eq!(browser.navigate_to_depth(system_depth), Ok(true));
-    assert_eq!(browser.path(), "/System");
-}
-
 // ---------------------------------------------------------------------------
 // FM4b — the drawn toolbar: command dispatch, glyphs, and pointer resolution.
 // ---------------------------------------------------------------------------
@@ -6709,5 +6480,480 @@ mod trash {
                 "a child named {bad:?} must refuse the whole empty"
             );
         }
+    }
+}
+
+// --- The location a window title carries ----------------------------------
+
+mod title_location {
+    use super::comps;
+    use crate::vfs::{spell_absolute_path, spell_title_location};
+    use tairix_abi::window_ipc::{WindowTitle, WINDOW_TITLE_MAX};
+    use tairix_font::ELLIPSIS;
+
+    /// The title budget an app really has, so the tests measure the fit the
+    /// window channel will accept rather than a number of their own.
+    const BUDGET: usize = WINDOW_TITLE_MAX;
+
+    #[test]
+    fn a_path_that_fits_is_spelled_whole() {
+        assert_eq!(spell_title_location(&comps(&[]), BUDGET), "/");
+        assert_eq!(
+            spell_title_location(&comps(&["Users", "root", "Documents"]), BUDGET),
+            "/Users/root/Documents"
+        );
+    }
+
+    /// The folder the window is *in* is what the reader needs, so the oldest
+    /// ancestors go first and the leaf always survives.
+    #[test]
+    fn a_long_path_drops_leading_components_behind_the_mark() {
+        let deep = comps(&["Users", "root", "Documents", "Projects", "tairix", "plans"]);
+        let fitted = spell_title_location(&deep, 24);
+
+        assert!(fitted.len() <= 24, "{fitted:?} exceeds the budget");
+        assert!(fitted.starts_with(ELLIPSIS), "{fitted:?} carries no mark");
+        assert!(fitted.ends_with("/plans"), "{fitted:?} dropped the leaf");
+        assert_eq!(fitted, alloc::format!("{ELLIPSIS}/tairix/plans"));
+    }
+
+    /// Whole components are dropped, never a partial name: what is shown is a
+    /// real path suffix, so it cannot read as a directory that does not exist.
+    #[test]
+    fn every_kept_component_is_whole() {
+        let deep = comps(&["alpha", "bravo", "charlie", "delta"]);
+        for budget in 0..=40 {
+            let fitted = spell_title_location(&deep, budget);
+            assert!(fitted.len() <= budget, "{fitted:?} exceeds {budget}");
+            let Some(tail) = fitted.strip_prefix(ELLIPSIS) else {
+                continue;
+            };
+            for component in tail.split('/').filter(|part| !part.is_empty()) {
+                assert!(
+                    deep.iter().any(|whole| whole == component) || "delta".starts_with(component),
+                    "{component:?} is neither a whole component nor a cut leaf"
+                );
+            }
+        }
+    }
+
+    /// A name a foreign volume can carry but a title field refuses must still
+    /// yield a usable title, or a window could never state where it is. The
+    /// path spelled for *opening* the directory keeps the byte as it is.
+    #[test]
+    fn a_control_character_in_a_name_is_shown_not_refused() {
+        let hostile = comps(&["Users", "note\u{7}here"]);
+
+        let title = spell_title_location(&hostile, BUDGET);
+
+        assert!(
+            WindowTitle::new(&title).is_ok(),
+            "the channel must accept {title:?}"
+        );
+        assert_eq!(title, "/Users/note\u{FFFD}here");
+        assert!(
+            spell_absolute_path(&hostile).contains('\u{7}'),
+            "the path opened is spelled exactly as it is on disk"
+        );
+    }
+
+    /// The replacement mark is wider than the byte it stands for, so a name
+    /// made entirely of them must still be fitted, not overflow the field.
+    #[test]
+    fn a_name_of_control_characters_still_fits_the_budget() {
+        let noisy = comps(&["Users", &"\u{7}".repeat(40)]);
+
+        let title = spell_title_location(&noisy, BUDGET);
+
+        assert!(title.len() <= BUDGET, "{title:?} exceeds the budget");
+        assert!(WindowTitle::new(&title).is_ok());
+    }
+
+    /// A budget too small even for the mark and the leaf still yields a
+    /// readable name rather than nothing. The name shown is always a prefix of
+    /// the real one, so a multi-byte `char` is never cut in half.
+    #[test]
+    fn a_budget_too_small_for_the_leaf_cuts_the_name() {
+        const NAME: &str = "Ünterlagen";
+        let leaf = comps(&[NAME]);
+        for budget in 0..=16 {
+            let fitted = spell_title_location(&leaf, budget);
+            assert!(fitted.len() <= budget, "{fitted:?} exceeds {budget}");
+            let shown = fitted
+                .strip_prefix(ELLIPSIS)
+                .unwrap_or(fitted.as_str())
+                .trim_start_matches('/');
+            assert!(
+                NAME.starts_with(shown),
+                "{shown:?} is not a prefix of the real name"
+            );
+        }
+        assert_eq!(spell_title_location(&leaf, 0), "");
+    }
+}
+
+// --- Folder occupancy ----------------------------------------------------
+//
+// A directory's `size` is `0` and no VFS surface reports a child count, so
+// "does this folder hold anything?" is a separate, per-child directory read.
+// These tests pin what that read costs as much as what it draws.
+
+mod occupancy {
+    use super::*;
+
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+
+    use tairix_abi::time::Time64;
+
+    use crate::entry::{EntryKind, Occupancy};
+    use crate::media::icon_for_entry;
+    use crate::render::visible_range;
+    use crate::vfs::VfsDirectorySource;
+
+    /// The probe tally a test reads while the browser holds the source.
+    type Probes = Rc<RefCell<BTreeMap<String, usize>>>;
+
+    /// A source over an in-memory tree that counts every occupancy probe, so
+    /// a test can assert what the browser *asked the filesystem*, not only
+    /// what it drew.
+    struct ProbeFs {
+        dirs: BTreeMap<String, Vec<Entry>>,
+        refused: BTreeSet<String>,
+        probes: Probes,
+    }
+
+    impl ProbeFs {
+        fn new(root: Vec<Entry>) -> Self {
+            let mut dirs = BTreeMap::new();
+            dirs.insert("/".to_string(), root);
+            Self {
+                dirs,
+                refused: BTreeSet::new(),
+                probes: Probes::default(),
+            }
+        }
+
+        fn with_dir(mut self, path: &str, children: Vec<Entry>) -> Self {
+            self.dirs.insert(path.to_string(), children);
+            self
+        }
+
+        fn refusing(mut self, path: &str) -> Self {
+            self.refused.insert(path.to_string());
+            self
+        }
+
+        fn tally(&self) -> Probes {
+            Rc::clone(&self.probes)
+        }
+    }
+
+    impl DirectorySource for ProbeFs {
+        fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+            self.dirs
+                .get(&key(components))
+                .cloned()
+                .ok_or(Errno::NotFound)
+        }
+
+        fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {
+            let path = key(components);
+            *self.probes.borrow_mut().entry(path.clone()).or_insert(0) += 1;
+            if self.refused.contains(&path) {
+                return Err(Errno::PermissionDenied);
+            }
+            self.dirs
+                .get(&path)
+                .map(|children| !children.is_empty())
+                .ok_or(Errno::NotFound)
+        }
+    }
+
+    /// How many times `path` was probed.
+    fn probes_of(tally: &Probes, path: &str) -> usize {
+        tally.borrow().get(path).copied().unwrap_or(0)
+    }
+
+    /// How many probes were made in total.
+    fn total_probes(tally: &Probes) -> usize {
+        tally.borrow().values().sum()
+    }
+
+    /// The viewport every test in this module renders and measures against.
+    fn viewport() -> Rect {
+        Rect::new(0, 0, 400, 400)
+    }
+
+    /// A root holding one empty and one occupied directory.
+    fn empty_and_full() -> ProbeFs {
+        ProbeFs::new(vec![
+            Entry::directory("aa-empty"),
+            Entry::directory("bb-full"),
+        ])
+        .with_dir("/aa-empty", Vec::new())
+        .with_dir("/bb-full", vec![Entry::file("child")])
+    }
+
+    /// Resolve occupancy for everything the browser would draw — what the app
+    /// does at the head of each frame.
+    fn resolve_visible<S: DirectorySource>(browser: &mut Browser<S>) {
+        let range = visible_range(browser, Scale::ONE, &Theme::dark(), viewport());
+        browser.resolve_occupancy(range);
+    }
+
+    /// Render `browser` with no artwork, so every icon is the built-in glyph.
+    fn frame<S: DirectorySource>(browser: &Browser<S>, artwork: &mut dyn IconArtwork) -> Surface {
+        crate::render(
+            browser,
+            Scale::ONE,
+            &Theme::dark(),
+            viewport(),
+            &crate::ManagerChrome::none(),
+            artwork,
+        )
+        .expect("frame")
+    }
+
+    /// The icon kind each tile of a grid render asked artwork for, in order.
+    fn tile_kinds<S: DirectorySource>(browser: &Browser<S>) -> Vec<IconKind> {
+        let mut artwork = RecordingArtwork::new(8, Color::rgb(0x10, 0x20, 0x30));
+        let _ = frame(browser, &mut artwork);
+        artwork.asked.iter().map(|(kind, _)| *kind).collect()
+    }
+
+    #[test]
+    fn a_probing_vfs_source_decides_occupancy_from_one_record() {
+        // The kernel packs the whole listing or refuses, so one maximal
+        // record decides all three cases without transferring a listing: no
+        // bytes is empty, some bytes is occupied, and a listing too big for
+        // the buffer is occupied too.
+        for (answer, want) in [
+            (Ok(0), false),
+            (Ok(48), true),
+            (Err(Errno::BufferTooSmall), true),
+        ] {
+            let mut source = VfsDirectorySource::probing(
+                |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
+                move |_: &str, _: &mut [u8]| answer,
+            );
+            assert_eq!(source.has_children(&["d".to_string()]), Ok(want));
+        }
+
+        // Any other refusal is surfaced, never guessed at.
+        let mut refusing = VfsDirectorySource::probing(
+            |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
+            |_: &str, _: &mut [u8]| Err(Errno::PermissionDenied),
+        );
+        assert_eq!(
+            refusing.has_children(&["d".to_string()]),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn a_source_built_without_a_probe_offers_none() {
+        // The trusted picker's source: it never reads a directory it is only
+        // displaying, so the cue degrades to the plain folder.
+        let mut picker = VfsDirectorySource::new(|_: &str| Err::<Vec<u8>, _>(Errno::NotFound));
+        assert_eq!(
+            picker.has_children(&["d".to_string()]),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    #[test]
+    fn the_grid_draws_the_filled_folder_only_for_a_directory_that_holds_something() {
+        let mut browser = Browser::open_root(empty_and_full()).expect("root");
+        browser.set_view_mode(ViewMode::Grid);
+
+        assert_eq!(
+            tile_kinds(&browser),
+            vec![IconKind::Folder, IconKind::Folder],
+            "an unprobed folder never claims contents"
+        );
+
+        resolve_visible(&mut browser);
+        assert_eq!(
+            tile_kinds(&browser),
+            vec![IconKind::Folder, IconKind::FolderFilled]
+        );
+    }
+
+    #[test]
+    fn the_list_row_draws_the_filled_folder_only_for_a_directory_that_holds_something() {
+        let mut browser = Browser::open_root(empty_and_full()).expect("root");
+        browser.set_view_mode(ViewMode::List);
+        let plain = frame(&browser, &mut NoArtwork).pixels().to_vec();
+
+        resolve_visible(&mut browser);
+        assert_eq!(
+            browser
+                .entries()
+                .iter()
+                .map(|entry| icon_for_entry(entry, browser.components()))
+                .collect::<Vec<_>>(),
+            vec![IconKind::Folder, IconKind::FolderFilled]
+        );
+        assert_ne!(frame(&browser, &mut NoArtwork).pixels(), plain.as_slice());
+
+        // A refused probe is indistinguishable from an empty folder on
+        // screen: an unknown answer never claims contents.
+        let mut refused = Browser::open_root(empty_and_full().refusing("/bb-full")).expect("root");
+        refused.set_view_mode(ViewMode::List);
+        resolve_visible(&mut refused);
+        assert_eq!(frame(&refused, &mut NoArtwork).pixels(), plain.as_slice());
+    }
+
+    #[test]
+    fn a_refused_probe_is_recorded_and_never_retried() {
+        let source = ProbeFs::new(vec![Entry::directory("locked")]).refusing("/locked");
+        let tally = source.tally();
+        let mut browser = Browser::open_root(source).expect("root");
+
+        for _ in 0..5 {
+            resolve_visible(&mut browser);
+        }
+
+        assert_eq!(probes_of(&tally, "/locked"), 1);
+        assert_eq!(browser.entries()[0].occupancy(), Occupancy::Indeterminate);
+        assert_eq!(
+            icon_for_entry(&browser.entries()[0], browser.components()),
+            IconKind::Folder
+        );
+    }
+
+    #[test]
+    fn files_and_bundles_are_never_probed() {
+        let source = ProbeFs::new(vec![
+            Entry::file("notes.txt"),
+            Entry::new("Thing.app", EntryKind::Bundle, 0, Time64::UNIX_EPOCH),
+        ])
+        .with_dir("/Thing.app", vec![Entry::file("Run")]);
+        let tally = source.tally();
+        let mut browser = Browser::open_root(source).expect("root");
+
+        resolve_visible(&mut browser);
+
+        assert_eq!(total_probes(&tally), 0);
+        assert!(browser
+            .entries()
+            .iter()
+            .all(|entry| entry.occupancy() == Occupancy::Unprobed));
+    }
+
+    #[test]
+    fn an_answered_entry_is_not_probed_again_and_a_reload_re_probes() {
+        let source = empty_and_full();
+        let tally = source.tally();
+        let mut browser = Browser::open_root(source).expect("root");
+
+        resolve_visible(&mut browser);
+        resolve_visible(&mut browser);
+        assert_eq!(probes_of(&tally, "/aa-empty"), 1);
+        assert_eq!(probes_of(&tally, "/bb-full"), 1);
+
+        // A fresh listing is a fresh set of entries, so the answers go with
+        // the old ones.
+        browser.refresh().expect("refresh");
+        assert!(browser
+            .entries()
+            .iter()
+            .all(|entry| entry.occupancy() == Occupancy::Unprobed));
+        resolve_visible(&mut browser);
+        assert_eq!(probes_of(&tally, "/aa-empty"), 2);
+        assert_eq!(probes_of(&tally, "/bb-full"), 2);
+    }
+
+    #[test]
+    fn a_huge_listing_probes_only_what_is_on_screen() {
+        const ENTRIES: usize = 100_000;
+        let mut root = Vec::with_capacity(ENTRIES);
+        for i in 0..ENTRIES {
+            root.push(Entry::directory(format!("d{i:06}")));
+        }
+        let mut source = ProbeFs::new(root);
+        for i in 0..ENTRIES {
+            source.dirs.insert(format!("/d{i:06}"), Vec::new());
+        }
+        let tally = source.tally();
+        let mut browser = Browser::open_root(source).expect("root");
+        browser.set_view_mode(ViewMode::List);
+
+        let on_screen = visible_range(&browser, Scale::ONE, &Theme::dark(), viewport()).len();
+        assert!(
+            on_screen > 0 && on_screen < ENTRIES,
+            "the window, not the listing"
+        );
+
+        resolve_visible(&mut browser);
+        assert_eq!(total_probes(&tally), on_screen);
+
+        // Scrolling one row on pays for the row that entered the window and
+        // re-asks nothing already answered.
+        browser.set_scroll_offset(1);
+        resolve_visible(&mut browser);
+        assert_eq!(total_probes(&tally), on_screen + 1);
+
+        // Scrolling back over answered rows costs nothing at all.
+        browser.set_scroll_offset(0);
+        resolve_visible(&mut browser);
+        assert_eq!(total_probes(&tally), on_screen + 1);
+    }
+}
+
+// --- Entry labels --------------------------------------------------------
+
+mod entry_labels {
+    use super::*;
+
+    use crate::render::entry_label;
+
+    /// One entry named `name`, of `kind`, rendered in the list view.
+    fn one_entry_list(entry: Entry) -> Surface {
+        let mut dirs = BTreeMap::new();
+        dirs.insert("/".to_string(), vec![entry]);
+        let mut browser = Browser::open_root(MockFs {
+            dirs,
+            denied: BTreeSet::new(),
+            deny_after_first: BTreeSet::new(),
+            reads: BTreeMap::new(),
+            root_after_refresh: None,
+        })
+        .expect("root");
+        browser.set_view_mode(ViewMode::List);
+        crate::render(
+            &browser,
+            Scale::ONE,
+            &Theme::dark(),
+            Rect::new(0, 0, 400, 400),
+            &crate::ManagerChrome::none(),
+            &mut NoArtwork,
+        )
+        .expect("frame")
+    }
+
+    #[test]
+    fn a_label_is_the_bare_name_whatever_the_entry_is() {
+        assert_eq!(entry_label(&Entry::directory("thing")), "thing");
+        assert_eq!(entry_label(&Entry::file("thing")), "thing");
+        assert_eq!(
+            entry_label(&Entry::new(
+                "Thing.app",
+                crate::entry::EntryKind::Bundle,
+                0,
+                tairix_abi::time::Time64::UNIX_EPOCH,
+            )),
+            "Thing.app"
+        );
+    }
+
+    #[test]
+    fn a_list_row_tells_a_directory_from_a_file_by_its_icon_alone() {
+        // The labels are now identical, so any difference on screen is the
+        // row's leading icon — the cue that replaced the name suffix.
+        let folder = one_entry_list(Entry::directory("thing"));
+        let file = one_entry_list(Entry::file("thing"));
+        assert_ne!(folder.pixels(), file.pixels());
     }
 }

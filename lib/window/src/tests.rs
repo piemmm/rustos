@@ -16,7 +16,7 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest};
+use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest, WINDOW_TITLE_MAX};
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Rect, Scale};
@@ -120,7 +120,7 @@ impl CallerIdentity for MockIdentity {
 /// A host recording every bridge call, optionally refusing opens, picker
 /// requests, pins, and drag offers.
 struct RecordingHost {
-    opened: Vec<(u64, DisplayMode, String, bool)>,
+    opened: Vec<(ProcId, u64, DisplayMode, String, bool)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
@@ -130,9 +130,11 @@ struct RecordingHost {
     drag_offers: Vec<(ProcId, u64, String)>,
     drag_withdraws: Vec<(ProcId, u64)>,
     blur_sets: Vec<(u64, u16)>,
+    retitled: Vec<(u64, String)>,
     refuse_open: bool,
     refuse_popup: bool,
     refuse_resize: Option<Errno>,
+    refuse_retitle: Option<Errno>,
     refuse_pick: Option<Errno>,
     /// The outcome the next `PinBundle` receives.
     pin_decision: PinDecision,
@@ -156,9 +158,11 @@ impl Default for RecordingHost {
             drag_offers: Vec::new(),
             drag_withdraws: Vec::new(),
             blur_sets: Vec::new(),
+            retitled: Vec::new(),
             refuse_open: false,
             refuse_popup: false,
             refuse_resize: None,
+            refuse_retitle: None,
             refuse_pick: None,
             pin_decision: PinDecision::Pinned,
             drag_offer_accepts: true,
@@ -179,6 +183,7 @@ fn sample_desktop() -> DesktopInfo {
 impl WindowHost for RecordingHost {
     fn window_opened(
         &mut self,
+        owner: ProcId,
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
@@ -188,7 +193,7 @@ impl WindowHost for RecordingHost {
             return Err(Errno::WouldBlock);
         }
         self.opened
-            .push((window_id, *surface, String::from(title), resizable));
+            .push((owner, window_id, *surface, String::from(title), resizable));
         Ok(())
     }
 
@@ -224,6 +229,14 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.resized.push((window_id, *surface));
+        Ok(())
+    }
+
+    fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_retitle {
+            return Err(err);
+        }
+        self.retitled.push((window_id, String::from(title)));
         Ok(())
     }
 
@@ -269,6 +282,7 @@ struct MinimalHost;
 impl WindowHost for MinimalHost {
     fn window_opened(
         &mut self,
+        _owner: ProcId,
         _window_id: u64,
         _surface: &DisplayMode,
         _title: &str,
@@ -288,6 +302,10 @@ impl WindowHost for MinimalHost {
     }
 
     fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_retitled(&mut self, _window_id: u64, _title: &str) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -556,7 +574,8 @@ fn create_present_close_round_trips_through_the_loopback() {
         assert_eq!(inner.server.window_count(), 1);
         assert_eq!(
             inner.host.opened,
-            alloc::vec![(1, SURFACE, String::from("Files"), false)]
+            alloc::vec![(proc_id(0xA1), 1, SURFACE, String::from("Files"), false)],
+            "the host is told the kernel-attested owner, not anything the client said"
         );
     }
 
@@ -606,7 +625,7 @@ fn create_forwards_the_resizable_flag_to_the_host() {
         .host
         .opened
         .iter()
-        .map(|(_, _, _, resizable)| *resizable)
+        .map(|(_, _, _, _, resizable)| *resizable)
         .collect();
     assert_eq!(flags, alloc::vec![false, true]);
 }
@@ -715,10 +734,12 @@ fn a_caller_cannot_touch_another_clients_window() {
         Err(Errno::NotFound)
     );
     assert_eq!(client.close(window), Err(Errno::NotFound));
+    assert_eq!(client.set_title(window, "B's"), Err(Errno::NotFound));
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
         assert!(inner.host.closed.is_empty());
+        assert!(inner.host.retitled.is_empty());
     }
 
     // A still owns it.
@@ -726,6 +747,38 @@ fn a_caller_cannot_touch_another_clients_window() {
     client
         .present(window, 0, full_damage())
         .expect("A presents");
+}
+
+#[test]
+fn an_owner_retitles_its_window_and_a_refusal_changes_nothing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("A creates");
+    client
+        .set_title(window, "Files - Documents")
+        .expect("the owner retitles");
+    assert_eq!(
+        loopback.borrow().host.retitled,
+        [(window, String::from("Files - Documents"))]
+    );
+
+    // A title the protocol refuses never reaches the session.
+    let over_long = "t".repeat(WINDOW_TITLE_MAX + 1);
+    assert_eq!(
+        client.set_title(window, &over_long),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        client.set_title(window, "two\nlines"),
+        Err(Errno::OutOfRange)
+    );
+    // An unknown window is refused, and a host refusal leaves the
+    // previous title standing.
+    assert_eq!(client.set_title(window + 1, "ghost"), Err(Errno::NotFound));
+    loopback.borrow_mut().host.refuse_retitle = Some(Errno::WouldBlock);
+    assert_eq!(client.set_title(window, "refused"), Err(Errno::WouldBlock));
+    assert_eq!(loopback.borrow().host.retitled.len(), 1);
 }
 
 #[test]
@@ -869,7 +922,7 @@ fn create_popup_round_trips_and_present_and_close_act_on_its_own_id() {
         );
         assert_eq!(
             inner.host.opened,
-            alloc::vec![(parent, SURFACE, String::from("Files"), false)]
+            alloc::vec![(proc_id(0xA1), parent, SURFACE, String::from("Files"), false)]
         );
     }
 

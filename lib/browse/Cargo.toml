@@ -27,7 +27,7 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 # primitives the window manager paints with (§17.4, §2.2).
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 # Shared text rasterisation: the built-in bitmap face and glyph blitter the
-# path bar and entry names are drawn with (§16.4, §17.4).
+# toolbar and entry names are drawn with.
 tairix-font = { path = "../font", version = "=0.0.0" }
 # Shared Reactive Alloy GUI controls: the item view paints entries through the
 # collection controls (`TableRow`/`TableCell`) and clamps its scroll window

@@ -27,6 +27,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render, reveal_selection, toolbar_command_at};
 use tairix_browse::ManagerChrome;
@@ -37,9 +38,18 @@ use tairix_wm::{Compositor, Point, Rect, WindowId};
 
 use crate::shell::DesktopShell;
 
-/// Title of the picker window — on the taskbar and in the window chrome,
-/// so the user always sees which UI is asking on an app's behalf.
+/// Fixed prefix of the picker window's title — on the taskbar and in the
+/// window chrome, so the user always sees which UI is asking on an app's
+/// behalf. The directory being browsed follows it.
 pub const PICKER_TITLE: &str = "Choose a file";
+
+/// Between the fixed prefix and the location it is showing.
+const PICKER_TITLE_SEPARATOR: &str = ": ";
+
+/// Bytes a location has left once the fixed prefix is spelled. Derived here
+/// once, so the prefix and the room it leaves can never drift apart.
+const PICKER_LOCATION_BUDGET: usize =
+    WINDOW_TITLE_MAX - PICKER_TITLE.len() - PICKER_TITLE_SEPARATOR.len();
 
 /// Top-left of the picker window, in screen pixels. One deterministic
 /// spot (clear of the first cascade slots), exported so a host-side
@@ -208,8 +218,8 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// through the shared hit-test
     /// (`tairix_browse::render::entry_index_at` — exactly the rows the
     /// renderer drew): a directory row descends, a regular-file row
-    /// chooses that file. A click on the path bar, a disabled tool, past the
-    /// listing, or on an unresolvable coordinate changes nothing.
+    /// chooses that file. A click on a disabled tool, past the listing, or on
+    /// an unresolvable coordinate changes nothing.
     pub fn handle_click(
         &mut self,
         local: Point,
@@ -218,8 +228,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     ) -> Option<ConcludedPick> {
         // Hit-test at the same scale and theme the picker renders with, so a
         // click resolves to exactly the item the user saw (list row or grid
-        // tile), and a click on the path bar or the scrollbar gutter resolves
-        // to nothing.
+        // tile), and a click on the scrollbar gutter resolves to nothing.
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
         let viewport = Rect::new(
@@ -252,7 +261,8 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     }
 
     /// Run one navigation step against the active browser, repaint on a
-    /// change, and conclude when the step chose a file.
+    /// change, retitle the window when the step moved to another directory,
+    /// and conclude when the step chose a file.
     fn navigate(
         &mut self,
         shell: &mut DesktopShell,
@@ -261,6 +271,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     ) -> Option<ConcludedPick> {
         let active = self.active.as_mut()?;
         let scale = compositor.scale();
+        let titled = picker_title(active.browser.components());
         match step(&mut active.browser) {
             NavOutcome::None => None,
             NavOutcome::Redraw => {
@@ -281,6 +292,14 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     );
                 }
                 redraw(&active.browser, active.wm, shell, compositor);
+                // The picker is session-owned and has no window channel of
+                // its own, so it retitles through the compositor. A step that
+                // only moved the selection leaves the title alone rather than
+                // re-presenting the taskbar for an unchanged label.
+                let located = picker_title(active.browser.components());
+                if located != titled {
+                    shell.retitle_window(compositor, active.wm, &located);
+                }
                 None
             }
             NavOutcome::Chosen(path) => {
@@ -332,7 +351,12 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         let surface =
             render_surface(&browser, compositor.scale(), shell).ok_or(Errno::LengthOutOfRange)?;
         let wm = shell
-            .open_window(compositor, PICKER_ORIGIN, surface, PICKER_TITLE)
+            .open_window(
+                compositor,
+                PICKER_ORIGIN,
+                surface,
+                picker_title(browser.components()),
+            )
             .ok_or(Errno::NoSpace)?;
         self.active = Some(ActivePick {
             for_window,
@@ -351,6 +375,25 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             let _ = self.conclude(shell, compositor, PickConclusion::Cancelled);
         }
     }
+}
+
+/// Spell the picker window's title: the fixed [`PICKER_TITLE`] prefix and the
+/// directory the picker is showing, fitted to the bounded title field.
+///
+/// `components` is the browser's own root-first location, never a path an app
+/// supplied. Fitting is the shared title spelling
+/// ([`vfs::spell_title_location`]), which drops whole leading components
+/// behind the shared ellipsis and always keeps the folder the user is in, so
+/// the result never exceeds [`WINDOW_TITLE_MAX`] bytes.
+#[must_use]
+fn picker_title(components: &[String]) -> String {
+    let mut title = String::from(PICKER_TITLE);
+    title.push_str(PICKER_TITLE_SEPARATOR);
+    title.push_str(&vfs::spell_title_location(
+        components,
+        PICKER_LOCATION_BUDGET,
+    ));
+    title
 }
 
 /// What one navigation step did.

@@ -10,8 +10,8 @@ use crate::vector::{IconLayer, VectorIcon};
 
 const FG: Color = Color::rgb(230, 230, 235);
 
-/// The tests iterate the one canonical kind table rather than a second copy
-/// (§2.2), so a new kind is covered the moment it enters `ICON_KINDS`.
+/// The tests iterate the one canonical kind table rather than a second copy,
+/// so a new kind is covered the moment it enters `ICON_KINDS`.
 const ALL_KINDS: [IconKind; crate::load::ICON_KINDS.len()] = crate::load::ICON_KINDS;
 
 #[test]

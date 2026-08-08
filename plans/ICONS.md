@@ -80,7 +80,8 @@ Two families of master, one contract.
 the asset id, and the id *is* an `IconKind::asset_id()`, so a typo cannot
 ship: `tools/syshelp`'s build script fails the build on an unrecognised name,
 an oversize file, or a duplicate id. A kind ships **one** master, in whichever
-format suits its artwork — the folder is vector (`folder.svg`), the
+format suits its artwork — the folders are vector (`folder.svg`,
+`folder-filled.svg`), the
 illustrative file-class and disk pictures are raster. Two files claiming one
 id is a duplicate the build refuses: the raster tier would always win, so the
 vector could never be selected.

@@ -2,7 +2,7 @@
 //!
 //! [`render`] turns a [`Browser`]'s path and entries into a premultiplied-alpha
 //! [`Surface`] sized to the app's content viewport, using the active theme's
-//! [`Palette`](tairix_theme::Palette) for the path bar and the shared
+//! [`Palette`](tairix_theme::Palette) for the chrome and the shared
 //! `lib/controls` collection controls for the items, every length converted
 //! from logical pixels through the desktop's one [`Scale`]. The theme picks
 //! the text face, never the caller. The surface is the window manager's to
@@ -10,7 +10,7 @@
 //! compositor applies any corner radius through its single anti-aliased
 //! rounded-corner path. There is no rounding here.
 //!
-//! The top row is a path bar showing the current directory; below it the
+//! The top row is the command toolbar; below it the
 //! current directory is drawn in whichever [`ViewMode`] the browser holds — a
 //! column of full-width [`TableRow`]s (list) or a wrapped grid of
 //! [`IconTile`]s (grid) — over the one shared selection state, with a drawn
@@ -50,7 +50,6 @@ use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
-use crate::breadcrumb::{self, SEPARATOR};
 use crate::browser::Browser;
 use crate::chrome::{
     self, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
@@ -62,7 +61,7 @@ use crate::format::{format_date, format_size};
 use crate::layout::{
     GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
 };
-use crate::media::{entry_icon_request, media_for_entry};
+use crate::media::{entry_icon_request, icon_for_entry};
 use crate::open_with::AppAssociation;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
@@ -70,7 +69,7 @@ use crate::properties::Properties;
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 
-/// Padding between the path bar's edge and its label text, in logical pixels.
+/// Padding between a panel's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
 
 /// Vertical padding above and below a row's glyphs, in logical pixels.
@@ -123,7 +122,6 @@ pub fn render<S: DirectorySource>(
     chrome: &ManagerChrome<'_>,
     artwork: &mut dyn IconArtwork,
 ) -> Option<Surface> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let mut surface = Surface::new(viewport.width, viewport.height)?;
     let palette = theme.palette();
 
@@ -148,7 +146,6 @@ pub fn render<S: DirectorySource>(
         chrome.tools,
         chrome.tool_model,
     );
-    draw_path_bar(&mut surface, scale, theme, font, browser, area);
 
     let content = content_viewport(area, scale, theme);
     match browser.view_mode() {
@@ -223,7 +220,7 @@ fn separator_height(scale: Scale, theme: &Theme) -> u32 {
 /// The rail is laid out *below* the command toolbar band — inset at the top by
 /// [`toolbar_height`], with the rest of the window's height — because the
 /// toolbar is window chrome that spans the full width. Its row pitch is
-/// [`row_height`], the pitch the path bar and the list rows use, so the rail's
+/// [`row_height`], the pitch the list rows use, so the rail's
 /// rows land on exactly the row grid of the listing beside them.
 ///
 /// The one definition the painter, the pointer hit-test
@@ -257,18 +254,17 @@ pub fn sidebar_view(
     ))
 }
 
-/// The window area the path bar, the item view, and the scrollbar occupy: the
-/// whole `window`, less the places rail on the leading edge when one is drawn.
+/// The window area the item view and the scrollbar occupy: the whole
+/// `window`, less the places rail on the leading edge when one is drawn.
 ///
 /// The command toolbar is **not** measured here. It is window chrome: its band
 /// spans the full window width across the top, above the rail and over this
 /// area's own top strip, so [`toolbar_command_at`], [`manager_tool_at`], and
 /// [`manager_tool_rect`] take the *window* while every entry point below the
-/// band — [`crumb_at`], [`entry_index_at`], [`selection_rect`],
-/// [`scrollbar_bounds`] and the overlays — takes this area. A caller drawing a
-/// rail resolves this once and passes it wherever it would otherwise pass the
-/// window; the path bar, the rows, and the scrollbar then sit exactly where a
-/// click looks for them.
+/// band — [`entry_index_at`], [`selection_rect`], [`scrollbar_bounds`] and the
+/// overlays — takes this area. A caller drawing a rail resolves this once and
+/// passes it wherever it would otherwise pass the window; the rows and the
+/// scrollbar then sit exactly where a click looks for them.
 ///
 /// A caller with no rail gets the window back unchanged, so a view without a
 /// sidebar (the trusted file picker) is laid out precisely as it was before
@@ -394,134 +390,7 @@ fn place_row(place: &Place, places: &Places, index: usize, selected: Option<usiz
     row
 }
 
-/// Fill the top path bar and draw the current directory as a clickable
-/// breadcrumb trail: the root crumb followed by one crumb per path component,
-/// right-anchored so the current directory stays visible when the trail
-/// overflows (`plans/NEW-FILEMANAGER.md` `FM4b`).
-///
-/// Ancestor crumbs are drawn in the accent colour to read as navigable; the
-/// terminal crumb (the current directory) is drawn solid to read as "you are
-/// here" and is inert; the separators between them are muted. The placement is
-/// the shared [`breadcrumb::layout`], so the hit-test ([`crumb_at`]) resolves a
-/// click to exactly the crumb painted here (§2.2).
-fn draw_path_bar<S: DirectorySource>(
-    surface: &mut Surface,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-    browser: &Browser<S>,
-    area: Rect,
-) {
-    let palette = theme.palette();
-    let top = toolbar_height(scale, theme);
-    let row_height = row_height(scale, theme);
-    let left = u32::try_from(area.origin.x).unwrap_or(0);
-    surface.fill_rect(
-        left,
-        top,
-        area.width,
-        row_height,
-        palette.surface_raised.into(),
-    );
-    let crumbs = chrome::breadcrumbs(browser);
-    let widths = crumb_widths(&crumbs, font);
-    let sep_width = font.text_width(SEPARATOR);
-    let placed = breadcrumb::layout(
-        &widths,
-        area.width,
-        scale.scale_length(LABEL_PADDING),
-        sep_width,
-    );
-    let y = top.saturating_add(row_height.saturating_sub(font.glyph_height()) / 2);
-    let y = to_i32(y);
-    let left = to_i32(left);
-    for (position, crumb) in placed.iter().zip(crumbs.iter()) {
-        // The separator sits in the gap before every crumb but the first,
-        // drawn from the previous crumb's right edge so it lands exactly in
-        // the space the layout reserved for it.
-        if position.index > 0 {
-            let sep_x = position
-                .x
-                .saturating_add(left)
-                .saturating_sub(to_i32(sep_width));
-            font.draw_text(
-                surface,
-                sep_x,
-                y,
-                SEPARATOR,
-                palette.on_surface_muted.into(),
-            );
-        }
-        let color = if crumb.is_current() {
-            palette.on_surface
-        } else {
-            palette.accent
-        };
-        font.draw_text(
-            surface,
-            position.x.saturating_add(left),
-            y,
-            crumb.label(),
-            color.into(),
-        );
-    }
-}
-
-/// The rendered pixel width of each crumb's label, in crumb order — the
-/// per-crumb measurement the shared [`breadcrumb::layout`] places from.
-fn crumb_widths(crumbs: &[chrome::Crumb], font: BitmapFont) -> Vec<u32> {
-    crumbs
-        .iter()
-        .map(|crumb| font.text_width(crumb.label()))
-        .collect()
-}
-
-/// The ancestor depth to [`navigate_to_depth`](Browser::navigate_to_depth) for
-/// a click at window-local pixel `point`, or `None` when the click is not on a
-/// navigable crumb — outside the path bar row, on a separator gap, on the
-/// inert current crumb, or past a crumb clipped off the trail's left edge.
-///
-/// This mirrors the drawn path bar's own placement through the shared
-/// [`breadcrumb::layout`], so a pointer-driven jump lands on exactly the crumb
-/// the user clicked (§2.2). `theme` gives the path bar's vertical band (it sits
-/// below the toolbar strip); the crumbs span the whole window width, not the
-/// scrollbar-inset content area.
-#[must_use]
-pub fn crumb_at<S: DirectorySource>(
-    browser: &Browser<S>,
-    scale: Scale,
-    theme: &Theme,
-    viewport: Rect,
-    point: Point,
-) -> Option<usize> {
-    let y = u32::try_from(point.y).ok()?;
-    let top = toolbar_height(scale, theme);
-    if y < top || y >= top.saturating_add(row_height(scale, theme)) {
-        return None;
-    }
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let crumbs = chrome::breadcrumbs(browser);
-    let widths = crumb_widths(&crumbs, font);
-    let placed = breadcrumb::layout(
-        &widths,
-        viewport.width,
-        scale.scale_length(LABEL_PADDING),
-        font.text_width(SEPARATOR),
-    );
-    let index = breadcrumb::crumb_at(
-        &placed,
-        point.x.saturating_sub(viewport.origin.x),
-        viewport.width,
-    )?;
-    let crumb = crumbs.get(index)?;
-    if crumb.is_current() {
-        None
-    } else {
-        Some(crumb.depth())
-    }
-}
-
-/// Draw the visible list rows below the path bar as shared [`TableRow`]s,
+/// Draw the visible list rows below the toolbar as shared [`TableRow`]s,
 /// giving the selected entry the row chrome's selection state.
 fn draw_list<S: DirectorySource>(
     surface: &mut Surface,
@@ -531,34 +400,32 @@ fn draw_list<S: DirectorySource>(
     content: Rect,
 ) {
     let view = list_view(browser, scale, theme, content);
-    let visible = view.visible_rows();
-    if visible == 0 {
-        return;
-    }
     let offset = browser.scroll_offset();
-    let first = view.first_visible(offset);
     let selected = browser.selected_index();
-    for (index, entry) in browser
-        .entries()
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(visible)
-    {
+    let parent = browser.components();
+    let entries = browser.entries();
+    for index in view.visible_range(offset) {
+        let Some(entry) = entries.get(index) else {
+            break;
+        };
         let Some(bounds) = view.row_rect(offset, index) else {
             continue;
         };
-        let row = entry_row(entry, selected == Some(index));
+        let row = entry_row(
+            entry,
+            selected == Some(index),
+            icon_for_entry(entry, parent),
+        );
         row.render(surface, bounds, scale, theme, &COLUMNS);
     }
 }
 
-/// Draw the visible icon-grid tiles below the path bar as shared [`IconTile`]s,
+/// Draw the visible icon-grid tiles below the toolbar as shared [`IconTile`]s,
 /// giving the selected entry the tile's selection state.
 ///
-/// Each tile's icon is the shared content-type classification
-/// ([`media_for_entry`]): the entry's [`MediaType`](crate::media::MediaType)
-/// decides an [`IconKind`], and `artwork` is asked for a
+/// Each tile's icon is the shared classification ([`icon_for_entry`]): the
+/// entry's content type and folder occupancy
+/// decide an [`IconKind`], and `artwork` is asked for a
 /// pre-rasterised surface at the tile's [`IconTile::icon_side`] slot. When it
 /// supplies one the tile draws that artwork; otherwise the tile falls back to
 /// the built-in glyph for the kind. The classification is resolved once here so
@@ -604,7 +471,7 @@ fn draw_grid<S: DirectorySource>(
             let Some(bounds) = view.cell_rect(offset, index) else {
                 continue;
             };
-            let kind = media_for_entry(entry, parent).icon();
+            let kind = icon_for_entry(entry, parent);
             let request = entry_icon_request(&dir, entry, kind, &mut bundle);
             let mut state = ControlState::idle();
             if selected == Some(index) {
@@ -633,7 +500,7 @@ fn area_pixels(area: Rect) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Draw the vertical [`ScrollBar`] in the reserved right-edge gutter, spanning
-/// the item area below the path bar. A viewport with no room for the gutter
+/// the item area below the toolbar. A viewport with no room for the gutter
 /// (or with no scrollable content) simply draws nothing there.
 fn draw_scrollbar<S: DirectorySource>(
     surface: &mut Surface,
@@ -655,7 +522,7 @@ fn draw_scrollbar<S: DirectorySource>(
 }
 
 /// The screen rectangle (window-local) the vertical [`ScrollBar`] occupies: the
-/// reserved right-edge gutter spanning the item area below the path bar, or
+/// reserved right-edge gutter spanning the item area below the toolbar, or
 /// `None` when the window is too narrow for a gutter or too short for any item
 /// area. This is the exact geometry the drawn scrollbar paints into (and that
 /// [`scroll_pointer`] hit-tests against), so a pointer hit-test and the drawn
@@ -741,17 +608,23 @@ pub fn scroll_pointer<S: DirectorySource>(
     }
 }
 
-/// Build the [`TableRow`] for one list entry: a leading name cell (a directory
-/// suffixed with `/`), a trailing numeric size cell (blank for a directory or
+/// Build the [`TableRow`] for one list entry: a leading name cell carrying the
+/// entry's `icon`, a trailing numeric size cell (blank for a directory or
 /// bundle, which carry no meaningful byte size), and a modified-date cell.
-fn entry_row(entry: &Entry, selected: bool) -> TableRow {
+///
+/// `icon` is the shared classification ([`icon_for_entry`]) the grid tile
+/// draws too, so a row and a tile can never picture the same entry
+/// differently. The name cell paints the built-in glyph for that kind — the
+/// row control takes an [`IconKind`], not cached artwork — which is what makes
+/// the kind readable in a view whose rows are otherwise text.
+fn entry_row(entry: &Entry, selected: bool, icon: IconKind) -> TableRow {
     let size = if matches!(entry.kind(), EntryKind::File) {
         format_size(entry.size())
     } else {
         String::new()
     };
     let cells = vec![
-        TableCell::new(entry_label(entry)),
+        TableCell::new(entry_label(entry)).with_icon(icon),
         TableCell::numeric(size),
         TableCell::new(format_date(entry.modified())),
     ];
@@ -762,29 +635,27 @@ fn entry_row(entry: &Entry, selected: bool) -> TableRow {
 
 /// Build the [`IconTile`] for one grid entry: the entry's file-type `icon`
 /// above its label, carrying the shared selection state when selected. The
-/// `icon` is the shared content-type classification
-/// ([`media_for_entry`]) resolved by the caller — a display hint only, decided
-/// once so the manager and picker draw the same glyph for the same entry.
+/// `icon` is the shared classification ([`icon_for_entry`]) resolved by the
+/// caller — a display hint only, decided once so a tile and a list row draw
+/// the same icon for the same entry.
 #[must_use]
 pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
     IconTile::new(entry_label(entry), icon).with_state(state)
 }
 
-/// The name shown for an entry: a directory is suffixed with `/` so its kind
-/// reads at a glance in the list view (whose rows carry no icon), and stays a
-/// familiar cue beneath the grid tile's folder glyph.
+/// The name shown for an entry: exactly the name the volume holds.
+///
+/// No kind suffix is appended — both views carry the entry's icon
+/// ([`icon_for_entry`]), so the label is the name and nothing else, and what
+/// the user reads on screen is what they type, copy, and rename.
 #[must_use]
 pub fn entry_label(entry: &Entry) -> String {
-    let mut label = String::from(entry.name());
-    if entry.is_directory() {
-        label.push('/');
-    }
-    label
+    String::from(entry.name())
 }
 
-/// Height in pixels of one rendered list row — the path bar and every entry
-/// row alike, measured on the theme's own body face at `scale` exactly as
-/// [`render`] draws them, so hit-testing and painting can never disagree.
+/// Height in pixels of one rendered list row, measured on the theme's own body
+/// face at `scale` exactly as [`render`] draws them, so hit-testing and
+/// painting can never disagree.
 #[must_use]
 pub fn row_height(scale: Scale, theme: &Theme) -> u32 {
     BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
@@ -850,8 +721,8 @@ pub fn grid_metrics(scale: Scale, theme: &Theme) -> GridMetrics {
 
 /// The height in pixels of the command toolbar strip at the top of the window:
 /// the theme's control height plus a gap above and below, scaled to physical
-/// pixels. One definition so the drawn toolbar, the path bar's vertical offset,
-/// the item area, and the hit-tests all agree on where each chrome band sits.
+/// pixels. One definition so the drawn toolbar, the item area, and the
+/// hit-tests all agree on where the chrome band sits.
 #[must_use]
 pub fn toolbar_height(scale: Scale, theme: &Theme) -> u32 {
     let metrics = theme.metrics();
@@ -863,12 +734,12 @@ pub fn toolbar_height(scale: Scale, theme: &Theme) -> u32 {
 }
 
 /// The total height reserved for the window chrome above the item area: the
-/// command toolbar strip plus the breadcrumb path bar. This is the header the
-/// item views lay out below and the top of the scrollbar gutter, so paint and
-/// hit-test share one offset (§2.2).
+/// command toolbar strip, and nothing else. This is the header the item views
+/// lay out below and the top of the scrollbar gutter, so paint and hit-test
+/// share one offset.
 #[must_use]
 pub fn chrome_height(scale: Scale, theme: &Theme) -> u32 {
-    toolbar_height(scale, theme).saturating_add(row_height(scale, theme))
+    toolbar_height(scale, theme)
 }
 
 /// The group each toolbar command belongs to, so related commands read as a
@@ -918,7 +789,7 @@ fn build_toolbar(
 
 /// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] then
 /// the manager-only write `tools`, as themed [`IconButton`]s over the
-/// [`ToolbarModel`], spanning the full window width above the path bar. A
+/// [`ToolbarModel`], spanning the full window width above the item view. A
 /// disabled command reads muted rather than vanishing (the model decides
 /// which).
 fn draw_toolbar<S: DirectorySource>(
@@ -944,7 +815,7 @@ fn draw_toolbar<S: DirectorySource>(
 /// whether or not write tools follow them, so this needs no `tools` argument.
 ///
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
-/// not the rail-inset [`content_area`] the path bar and the listing take.
+/// not the rail-inset [`content_area`] the listing takes.
 #[must_use]
 pub fn toolbar_command_at<S: DirectorySource>(
     browser: &Browser<S>,
@@ -973,7 +844,7 @@ pub fn toolbar_command_at<S: DirectorySource>(
 /// (fail closed — a disabled tool does not act).
 ///
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
-/// not the rail-inset [`content_area`] the path bar and the listing take.
+/// not the rail-inset [`content_area`] the listing takes.
 #[must_use]
 pub fn manager_tool_at<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1007,7 +878,7 @@ pub fn manager_tool_at<S: DirectorySource>(
 /// must only *act* on an enabled tool gates that through [`manager_tool_at`].
 ///
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
-/// not the rail-inset [`content_area`] the path bar and the listing take.
+/// not the rail-inset [`content_area`] the listing takes.
 #[must_use]
 pub fn manager_tool_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1120,8 +991,8 @@ pub fn reveal_selection<S: DirectorySource>(
 }
 
 /// The index of the entry at window-local pixel `point` for the browser's
-/// current view and scroll offset, or `None` for the path bar, an empty gap,
-/// the scrollbar gutter, and any coordinate outside the item area.
+/// current view and scroll offset, or `None` for the toolbar band, an empty
+/// gap, the scrollbar gutter, and any coordinate outside the item area.
 ///
 /// This mirrors [`render`]'s own layout through the shared [`ViewLayout`], so a
 /// pointer-driven view resolves a click to exactly the item the user saw —
@@ -1160,6 +1031,26 @@ pub fn selection_rect<S: DirectorySource>(
     let selected = browser.selected_index()?;
     let view = view_layout_for(browser, scale, theme, viewport);
     view.item_rect(browser.scroll_offset(), selected)
+}
+
+/// The half-open range of entry indices `browser` currently draws at
+/// `viewport` — the one definition of "what is on screen", whichever view is
+/// active.
+///
+/// [`render`] iterates exactly this range, so a caller that resolves per-entry
+/// state through it (the file manager's folder-occupancy probe,
+/// [`Browser::resolve_occupancy`]) pays for precisely the entries the next
+/// frame paints, and the two can never disagree about which those are.
+///
+/// [`Browser::resolve_occupancy`]: crate::Browser::resolve_occupancy
+#[must_use]
+pub fn visible_range<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+) -> core::ops::Range<usize> {
+    view_layout_for(browser, scale, theme, viewport).visible_range(browser.scroll_offset())
 }
 
 /// The resolved view layout for `browser` at `viewport` — the one dispatch the

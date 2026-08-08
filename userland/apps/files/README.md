@@ -110,14 +110,27 @@ refusal (`AGENTS.md` §2.24, §5.4); a `CloseRequested` from the desktop
 ends the program cleanly; every bring-up refusal exits fail-loud with a
 reserved code and a stated reason on `stderr`.
 
+The window's **title is the directory it is showing**, retitled over the
+window channel whenever — and only when — the browser moves, so the desktop
+and its taskbar always name the location rather than the program. A location
+too long for the bounded title field drops whole leading components behind
+the shared ellipsis, keeping the folder the user is in.
+
+A **secondary press on the window's Close control means "leave this
+folder"**: it climbs to the parent and closes the window only at the top,
+where there is nothing left to leave. A parent that cannot be listed keeps
+the window open and states which place was refused — an unreadable ancestor
+must never destroy the window. A primary press always closes.
+
 ## The places / devices sidebar
 
-A shortcut rail runs down the leading edge of the window: the user's own
-places above, every mounted volume below, with the content area — toolbar,
-path bar, listing, and scrollbar gutter — inset beside it. The row order is
-fixed, so the rail never reshuffles under the user: Home, Desktop,
-Documents, `Apps`, `System`, a drawn separation, then the volumes sorted by
-label.
+A shortcut rail runs down the leading edge of the window, below the toolbar
+band: the user's own places above, every mounted volume below, with the
+listing and its scrollbar gutter inset beside it. A place name too long for
+the rail ends in the shared ellipsis, so hidden text is never silent. The
+row order is fixed, so the rail never reshuffles under the user: Home,
+Desktop, Documents, `Apps`, `System`, a drawn separation, then the volumes
+sorted by label.
 
 The volumes are **real mount data, not a guess**. The app reads the
 `MOUNT_LIST` System Information query through the shared `lib/procinfo`

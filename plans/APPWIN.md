@@ -127,7 +127,10 @@ speculative:
   precedent): `WindowServer` (decode → `CallerIdentity` attestation
   (`call_peer_origin`) → owner/bounds validation → the `WindowHost`
   compositor bridge; windows keyed to the owner's `ProcId`, `NotFound`
-  for any window the caller does not own, map-once regions via the
+  for any window the caller does not own — `SetTitle` included, so an app
+  can retitle only its own window and the attested `ProcId` reaches
+  `window_opened` as the sole source of a window's identity icon —
+  map-once regions via the
   shared `tairix_display::ShmMapper`, `WINDOWS_PER_CLIENT_MAX` cap,
   `client_exited` teardown, `deliver_event` app-ward routing validated
   against the live window) and `WindowClient`/`WindowEvents` (typed

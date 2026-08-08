@@ -3,6 +3,7 @@
 use tairix_controls::{
     FrameInsets, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
 };
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_reclaim::CachedBytes;
 use tairix_theme::{CursorKind, Theme};
@@ -70,6 +71,14 @@ pub struct Window {
     viewport: Option<RootViewport>,
     frame: Option<WindowFrame>,
     band: Option<FrameInsets>,
+    /// The owning application's identity artwork, rasterised at the title
+    /// bar's slot side for the active scale. One small square per decorated
+    /// window, re-derivable from the owner's bundle at any time, so it is
+    /// dropped and re-resolved on a scale or theme change rather than kept in
+    /// every size. `None` means the title bar falls back to the built-in
+    /// glyph for its identity class, or draws no slot at all when it has no
+    /// identity.
+    identity_artwork: Option<Surface>,
     /// Whether the window is restored or maximized. Meaningful only for a
     /// decorated, resizable window; a plain window is always `Restored`.
     size_state: WindowSizeState,
@@ -105,6 +114,7 @@ impl Window {
             viewport: None,
             frame: None,
             band: None,
+            identity_artwork: None,
             size_state: WindowSizeState::Restored,
             restore_outer: None,
             app_presented: false,
@@ -656,6 +666,37 @@ impl Window {
         true
     }
 
+    /// The owning application's identity artwork, rasterised at the title
+    /// bar's identity-slot side, or `None` when this window has none — an
+    /// unidentified window, or an identified one whose picture would not
+    /// resolve and so draws its built-in glyph.
+    #[must_use]
+    pub fn identity_artwork(&self) -> Option<&Surface> {
+        self.identity_artwork.as_ref()
+    }
+
+    /// Set the decorated window's owning-application identity: the icon class
+    /// its title bar reserves a slot for, and the `artwork` to draw there.
+    ///
+    /// `artwork` must already be rasterised at
+    /// [`TitleBar::icon_side`](tairix_controls::TitleBar::icon_side) of the
+    /// laid-out title band; `None` leaves the built-in glyph for `identity`.
+    /// The identity is the embedder's attestation of who owns the window,
+    /// never anything the application claimed. Returns `false` for an
+    /// undecorated window (there is no title bar to identify).
+    pub(crate) fn set_frame_identity(
+        &mut self,
+        identity: IconKind,
+        artwork: Option<Surface>,
+    ) -> bool {
+        let Some(frame) = self.frame.as_mut() else {
+            return false;
+        };
+        frame.title_bar_mut().set_identity(Some(identity));
+        self.identity_artwork = artwork;
+        true
+    }
+
     /// Feed a pointer `event` to this window's decoration furniture (the title
     /// bar and its command controls) so hover and press states advance, and
     /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
@@ -816,7 +857,14 @@ impl Window {
     pub(crate) fn render_chrome(&self, scale: Scale, theme: &Theme) -> Option<WindowChrome> {
         let frame = self.frame.as_ref()?;
         let bands = self.local_furniture_bands();
-        WindowChrome::render(frame, bands, self.outer_size(), scale, theme)
+        WindowChrome::render(
+            frame,
+            bands,
+            self.outer_size(),
+            scale,
+            theme,
+            self.identity_artwork.as_ref(),
+        )
     }
 
     /// Whether this window has furniture to render at all — the test the

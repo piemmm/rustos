@@ -564,6 +564,31 @@ impl DesktopShell {
         };
     }
 
+    /// Retitle `window`: relabel its taskbar entry and, when it wears the
+    /// window-manager frame, its title bar, then re-present the bar so the
+    /// new label shows.
+    ///
+    /// One call moves both, so an app that renames its window can never
+    /// leave the bar naming the old subject. The session's own undecorated
+    /// trusted surfaces (the file picker) relabel on the bar alone — they
+    /// have no title bar to move. Returns `false`, changing nothing, when
+    /// `window` is not a tracked task.
+    pub fn retitle_window(
+        &mut self,
+        compositor: &mut Compositor,
+        window: WindowId,
+        title: &str,
+    ) -> bool {
+        if !self
+            .tasks
+            .retitle(compositor, self.session.taskbar_mut(), window, title)
+        {
+            return false;
+        }
+        self.present(compositor);
+        true
+    }
+
     /// Close `window`: remove it from the compositor and the taskbar, dropping
     /// focus if it held it, and re-present the bar so the task disappears.
     ///
@@ -1114,6 +1139,7 @@ impl DesktopShell {
             // secondary (right) press activates+focuses the same way.
             InputResponse::Activated { window, .. }
             | InputResponse::SecondaryActivated { window, .. }
+            | InputResponse::WindowControlAlternate { window, .. }
             | InputResponse::FurniturePressed { window } => Some(window),
             InputResponse::DesktopPressed => None,
             // A secondary press on the backdrop opens the pinboard's context

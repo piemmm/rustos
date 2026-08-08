@@ -447,6 +447,28 @@ impl<T: WindowTransport> WindowClient<T> {
         Ok(())
     }
 
+    /// Retitle window `window_id` — one of the caller's own windows — to
+    /// `title`, replacing the title given at creation.
+    ///
+    /// The session applies the new title to the window's chrome and to
+    /// its taskbar entry together, so an app whose window shows a
+    /// changing subject (the folder it is browsing, the document it
+    /// holds) names that subject in both places from this one call.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a title the
+    ///   protocol refuses (over-long, or holding a control character),
+    ///   caught before any call (never truncated).
+    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
+    ///   windows.
+    /// * A transport failure, or a corrupt status frame.
+    pub fn set_title(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
+        let title = WindowTitle::new(title)?;
+        let request = WindowRequest::SetTitle { window_id, title }.to_le_bytes();
+        self.status_call(&request)
+    }
+
     /// Ask the session to run its trusted file picker for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
     ///

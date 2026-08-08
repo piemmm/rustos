@@ -297,6 +297,52 @@ fn entry_icon_source(catalog: &Catalog, id: &EntryId) -> Option<PinIconSource> {
     })
 }
 
+/// The entry-point leaf of a bundle's spawn path: `<bundle>` followed by
+/// this is the `Run` binary the desktop launches, and stripping it turns a
+/// recorded launch back into the bundle it came from.
+pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
+
+/// The path of `bundle`'s own signed manifest, `bundle` being the bundle
+/// *directory* (no trailing separator) — the one spelling every reader of a
+/// bundle's declared identity uses.
+#[must_use]
+pub fn bundle_manifest_path(bundle: &str) -> String {
+    format!("{bundle}/AppInfo")
+}
+
+/// Decode a bundle's `AppInfo` bytes, bounded by the shared ABI manifest cap
+/// and decoded by the shared fail-closed header decoder.
+///
+/// `manifest` is the raw contents of [`bundle_manifest_path`]. An absent,
+/// over-long, or malformed manifest is `None`, so a caller degrades to the
+/// bundle's leaf identity rather than handling an error.
+#[must_use]
+pub fn decode_bundle_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
+    if manifest.len() > APPINFO_WIRE_MAX {
+        return None;
+    }
+    AppInfoHeader::from_bytes(manifest).ok()
+}
+
+/// The icon source `header` declares for its own `bundle` directory.
+///
+/// `header` is that bundle's decoded manifest and `bundle` its directory
+/// path: the declared asset is always resolved *inside* that bundle, so
+/// untrusted manifest text can only ever name artwork the bundle itself
+/// ships. `None` when it declares no icon, or names one the shared asset
+/// check refuses — either way the caller stays on the shipped
+/// application-bundle artwork.
+#[must_use]
+pub fn bundle_icon_source(header: &AppInfoHeader, bundle: &str) -> Option<PinIconSource> {
+    header
+        .library_icon()
+        .and_then(|asset| IconAsset::new(asset).ok())
+        .map(|asset| PinIconSource {
+            bundle: bundle.to_string(),
+            asset: asset.as_str().to_string(),
+        })
+}
+
 /// Resolve a `bundle` pin through the bundle's own `AppInfo` manifest.
 ///
 /// The read is bounded by the shared ABI manifest cap and the decode is the
@@ -307,11 +353,11 @@ where
     R: SessionFileReader + ?Sized,
 {
     let fallback_label = bundle_leaf_label(bundle.as_str());
-    let manifest = format!("{}/AppInfo", bundle.as_str());
-    let header = match reader.read(&manifest) {
-        Ok(bytes) if bytes.len() <= APPINFO_WIRE_MAX => AppInfoHeader::from_bytes(&bytes).ok(),
-        _ => None,
-    };
+    let header = reader
+        .read(&bundle_manifest_path(bundle.as_str()))
+        .ok()
+        .as_deref()
+        .and_then(decode_bundle_manifest);
     let Some(header) = header else {
         return ResolvedPin {
             label: fallback_label,
@@ -320,17 +366,11 @@ where
             icon: None,
         };
     };
-    let icon = header
-        .library_icon()
-        .and_then(|asset| IconAsset::new(asset).ok())
-        .map(|asset| PinIconSource {
-            bundle: bundle.as_str().to_string(),
-            asset: asset.as_str().to_string(),
-        });
+    let icon = bundle_icon_source(&header, bundle.as_str());
     ResolvedPin {
         label: header.bundle_name().to_string(),
         entry: None,
-        run_path: Some(format!("{}/Run", bundle.as_str())),
+        run_path: Some(format!("{}{BUNDLE_RUN_SUFFIX}", bundle.as_str())),
         icon,
     }
 }

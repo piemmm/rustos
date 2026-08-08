@@ -101,7 +101,7 @@ impl DoubleClickTracker {
     /// Forget any remembered press, so the next press starts a fresh single.
     ///
     /// The caller resets when an intervening interaction breaks the pair — a
-    /// press that lands on chrome (a toolbar tool, a path-bar crumb) rather
+    /// press that lands on chrome (a toolbar tool, the places rail) rather
     /// than an item — so a click *through* the chrome and back onto the same
     /// item is never mistaken for a double-click of that item.
     pub fn reset(&mut self) {

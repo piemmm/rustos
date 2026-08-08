@@ -22,7 +22,7 @@ use tairix_abi::Errno;
 use crate::activate::Activation;
 use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::delete::DeletePlan;
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{Entry, EntryKind, Occupancy};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::mkdir::{validate_new_dir_name, MkdirError};
@@ -90,8 +90,8 @@ impl<S: DirectorySource> Browser<S> {
     /// listing its children (an empty slice is the root `/`, so
     /// [`open_root`](Self::open_root) is exactly `open_at(source, [])`).
     ///
-    /// The browser starts *at* that directory: its breadcrumb shows the given
-    /// path and [`go_up`](Self::go_up) climbs toward the root from there, with
+    /// The browser starts *at* that directory: [`components`](Self::components)
+    /// is the given path and [`go_up`](Self::go_up) climbs toward the root from there, with
     /// an empty back/forward history exactly as a fresh open has. This is how a
     /// consumer opens where the user expects to start — the trusted file picker
     /// opens at the user's home rather than dumping them at the storage-forest
@@ -233,6 +233,46 @@ impl<S: DirectorySource> Browser<S> {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Learn whether each plain directory in `range` holds anything, so the
+    /// renderer can draw the empty/non-empty folder cue.
+    ///
+    /// Occupancy costs a directory read per child, so the caller decides what
+    /// it is worth: pass the indices actually on screen
+    /// ([`render::visible_range`](crate::render::visible_range)) and the cost
+    /// is bounded by the window, not by the listing — a hundred-thousand-entry
+    /// directory probes only the rows it draws. There is no hidden sweep and
+    /// no built-in budget.
+    ///
+    /// Only an entry that [needs one](Entry::needs_occupancy_probe) is probed:
+    /// a file has no children, a bundle is a sealed unit drawing its own icon,
+    /// and an already-answered entry is never asked twice — including one
+    /// whose probe was refused, which stays
+    /// [`Indeterminate`](Occupancy::Indeterminate) rather than becoming a
+    /// per-frame syscall. Indices past the end of the listing are ignored. A
+    /// fresh listing resets every answer, so a reload re-probes.
+    pub fn resolve_occupancy(&mut self, range: core::ops::Range<usize>) {
+        let end = range.end.min(self.entries.len());
+        for index in range.start..end {
+            let Some(entry) = self.entries.get(index) else {
+                continue;
+            };
+            if !entry.needs_occupancy_probe() {
+                continue;
+            }
+            self.components.push(String::from(entry.name()));
+            let answer = self.source.has_children(&self.components);
+            self.components.pop();
+            let occupancy = match answer {
+                Ok(true) => Occupancy::NonEmpty,
+                Ok(false) => Occupancy::Empty,
+                Err(_) => Occupancy::Indeterminate,
+            };
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.set_occupancy(occupancy);
+            }
+        }
     }
 
     /// The index of the selected entry, or `None` when the directory is empty.
@@ -756,40 +796,14 @@ impl<S: DirectorySource> Browser<S> {
         Ok(true)
     }
 
-    /// Navigate to the ancestor `depth` path components deep (root-first) — the
-    /// breadcrumb-click primitive. `depth == 0` is the filesystem root and
-    /// `depth == components().len()` is the directory already shown.
-    ///
-    /// Records the move on the back history like any other navigation, and
-    /// stays transactional and fail closed: the ancestor is listed before any
-    /// state changes, so a refused read leaves the browser exactly where it
-    /// was.
-    ///
-    /// Returns `Ok(true)` after moving and `Ok(false)` when `depth` already
-    /// names the current directory or is past its end (no such ancestor) — a
-    /// no-op, not an error, exactly as clicking the current-directory crumb is.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BrowseError::Source`] if the ancestor cannot be listed; the
-    /// browser stays on the current directory.
-    pub fn navigate_to_depth(&mut self, depth: usize) -> Result<bool, BrowseError> {
-        if depth >= self.components.len() {
-            return Ok(false);
-        }
-        let target = self.components[..depth].to_vec();
-        self.navigate_recording(target)?;
-        Ok(true)
-    }
-
     /// Navigate to the directory named by root-first `components`, listing it
     /// and recording the move on the back history like any other navigation —
     /// the jump-to-an-arbitrary-location primitive (the file manager's "go to
     /// Trash" location uses it to reach `Library/Trash` from wherever the user
     /// is).
     ///
-    /// Unlike [`navigate_to_depth`](Self::navigate_to_depth) (which only climbs
-    /// to an *ancestor* of the current directory) and [`open_index`](Self::open_index)
+    /// Unlike [`go_up`](Self::go_up) (which climbs to the immediate parent) and
+    /// [`open_index`](Self::open_index)
     /// (which only *descends* into a listed child), this reaches any location
     /// the source can list, so a caller that knows a path it wants to show —
     /// not necessarily on the current directory's spine — can go straight

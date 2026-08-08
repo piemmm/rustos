@@ -35,8 +35,9 @@ panicking (`AGENTS.md` §2.9).
 
 `IconKind` is the closed set of built-in glyphs: the status kinds (`Network`
 — rising signal bars, `Volume`, `Battery`, `Bell`), the file-manager kinds
-(`Folder`/`FolderOpen`, `File`, `AppBundle`, the type badges `Text`/`Image`/
-`Archive`/`Executable`, the toolbar's `NavBack`/`NavForward`/`NavUp`/
+(`Folder`/`FolderFilled`/`FolderOpen` — an empty folder, one that holds
+something, and an open one — `File`, `AppBundle`, the type badges
+`Text`/`Image`/`Archive`/`Executable`, the toolbar's `NavBack`/`NavForward`/`NavUp`/
 `Refresh`/`ViewToggle`/`Sort`/`NewFolder`, and `Trash`/`EmptyTrash`), the
 taskbar's `Library` (the program-library launcher's three-by-three tile
 grid, `plans/NEW-TASKBAR.md` T4) and `Switchboard` (its always-trailing tray

@@ -5,7 +5,6 @@
 //! app makes — which press lands on which row, where the keyboard focus goes,
 //! and what a refused place does — is exercised without a kernel.
 
-use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -13,71 +12,19 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
-use tairix_abi::Errno;
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
-use tairix_browse::{Browser, DirectorySource, Entry, Places, SidebarView, ToolbarCommand, Volume};
+use tairix_browse::{Browser, Places, SidebarView, ToolbarCommand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{apply_event, is_refresh_request, press_point, refresh_places, track_hover};
+use crate::test_fs::{browser, FakeFs};
 
 /// The window the rail is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 480);
 
 /// The window this app is given, addressed by every synthesised event.
 const WINDOW_ID: u64 = 7;
-
-/// An in-memory directory tree: a path either lists (empty) or is refused.
-///
-/// The rail only cares whether a place *can* be listed, so the listings
-/// themselves are empty — what is exercised here is where the browser ends up
-/// and what happens when it cannot get there.
-struct FakeFs {
-    listable: BTreeSet<String>,
-}
-
-impl FakeFs {
-    /// The user's home tree and the machine roots, with the user's Desktop
-    /// deliberately unreadable so the refusal path can be driven.
-    fn fixture() -> Self {
-        let mut listable = BTreeSet::new();
-        for path in [
-            "/",
-            "/Users",
-            "/Users/ann",
-            "/Users/ann/Documents",
-            "/Apps",
-            "/System",
-            "/Storage/Backup",
-        ] {
-            listable.insert(path.to_string());
-        }
-        Self { listable }
-    }
-}
-
-impl DirectorySource for FakeFs {
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
-        let mut path = String::new();
-        for component in components {
-            path.push('/');
-            path.push_str(component);
-        }
-        if path.is_empty() {
-            path.push('/');
-        }
-        if self.listable.contains(&path) {
-            Ok(Vec::new())
-        } else {
-            Err(Errno::PermissionDenied)
-        }
-    }
-}
-
-/// A browser opened at the storage root.
-fn browser() -> Browser<FakeFs> {
-    Browser::open_root(FakeFs::fixture()).expect("the fixture root lists")
-}
 
 /// The user's home directory components.
 fn home() -> Vec<String> {

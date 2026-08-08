@@ -863,7 +863,12 @@ mod program {
                 // which is also where the repaint a real change needs is
                 // decided. Listed rather than caught by a wildcard so a new
                 // event forces a decision here.
-                WindowEvent::Key { .. }
+                //
+                // A secondary press on Close asks to leave what the window is
+                // showing; the chooser has nothing to leave but itself, and a
+                // primary press already closes it.
+                WindowEvent::AlternateCloseRequested { .. }
+                | WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::RedrawRequested { .. }

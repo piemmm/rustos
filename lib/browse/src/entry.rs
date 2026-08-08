@@ -107,6 +107,33 @@ pub fn is_bundle_name(name: &str) -> bool {
             .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
 }
 
+/// Whether a listed directory holds anything, as far as the browser knows.
+///
+/// No VFS surface reports a child count — a directory's `size` is `0` and
+/// there is no link count — so occupancy is only knowable by *reading* the
+/// directory. That read is a syscall the browser must not make for every
+/// listed child, so the state is four-valued and honest rather than a `bool`
+/// that would have to guess: a child starts [`Unprobed`](Self::Unprobed), and
+/// a probe that is refused or fails records
+/// [`Indeterminate`](Self::Indeterminate) so the refusal is never retried.
+///
+/// Only a plain directory has a meaningful occupancy: a bundle is a sealed
+/// unit that draws its own icon and a file has no children, so neither is
+/// ever probed.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Occupancy {
+    /// Not yet asked — the entry has never been probed.
+    #[default]
+    Unprobed,
+    /// The directory was read and has no children.
+    Empty,
+    /// The directory was read and has at least one child.
+    NonEmpty,
+    /// The probe was refused or failed; the answer is unknown and the entry
+    /// is not probed again.
+    Indeterminate,
+}
+
 /// One child of the directory currently shown.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -114,6 +141,7 @@ pub struct Entry {
     kind: EntryKind,
     size: u64,
     modified: Time64,
+    occupancy: Occupancy,
 }
 
 impl Entry {
@@ -125,6 +153,7 @@ impl Entry {
             kind,
             size,
             modified,
+            occupancy: Occupancy::Unprobed,
         }
     }
 
@@ -187,5 +216,25 @@ impl Entry {
     #[must_use]
     pub const fn is_directory_backed(&self) -> bool {
         self.kind.is_directory_backed()
+    }
+
+    /// What the browser knows about this entry's contents.
+    #[must_use]
+    pub const fn occupancy(&self) -> Occupancy {
+        self.occupancy
+    }
+
+    /// Record the answer a probe gave for this entry.
+    pub const fn set_occupancy(&mut self, occupancy: Occupancy) {
+        self.occupancy = occupancy;
+    }
+
+    /// `true` if this entry is a plain directory whose occupancy is still
+    /// unknown — the one shape [`Browser::resolve_occupancy`] probes.
+    ///
+    /// [`Browser::resolve_occupancy`]: crate::Browser::resolve_occupancy
+    #[must_use]
+    pub const fn needs_occupancy_probe(&self) -> bool {
+        self.is_directory() && matches!(self.occupancy, Occupancy::Unprobed)
     }
 }

@@ -2,6 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -47,14 +48,15 @@ use tairix_wm::{
 
 use crate::{
     build_pin_views, deliver_pending_open, desktop_info, load_icon_set, load_library,
-    maybe_send_seat_report, open_tray, resolve_library_icons, serve_switchboard_request,
-    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, IconRasteriser,
-    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
-    PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
-    SessionInputResponse, SessionInputRouter, SessionPins, SessionReveal, SessionWindows,
-    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
-    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    maybe_send_seat_report, open_tray, resolve_library_icons, resolve_window_identities,
+    serve_switchboard_request, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
+    DragOrigin, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
+    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader,
+    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, SessionReveal,
+    SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX,
+    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -177,6 +179,12 @@ pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, Chrome
 /// how tight memory is, exactly as the shipping session does.
 pub(crate) fn test_pressure() -> &'static ReportedPressure {
     &NORMAL_PRESSURE
+}
+
+/// A distinct attested window owner. The bytes are opaque to everything
+/// but equality, so `fill` only has to differ between owners.
+pub(crate) fn window_owner(fill: u8) -> ProcId {
+    ProcId::from_raw([fill; tairix_abi::PROC_ID_LEN])
 }
 
 /// A shell for `config`, with both rasterised-asset caches built through
@@ -2658,8 +2666,8 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     // with, so it lands on row 0.
     let theme = shell.session().active_theme();
     // The first entry row sits directly below the chrome (the command toolbar
-    // strip over the breadcrumb path bar), so compute it from the shared
-    // `chrome_height` the renderer reserves.
+    // strip), so compute it from the shared `chrome_height` the renderer
+    // reserves.
     let row = i32::try_from(chrome_height(Scale::ONE, theme)).expect("a small chrome height");
     let first_row = Point::new(4, row);
     assert_eq!(
@@ -2674,13 +2682,54 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
         concluded.conclusion,
         PickConclusion::Chosen(String::from("/Docs/notes.txt"))
     );
-    // A click on the path bar concludes nothing.
+    // A click on the chrome strip above the rows concludes nothing.
     let mut picker = SessionPicker::new(TreeSource::fixture);
     picker.begin(7, &mut shell, &mut comp).expect("accepted");
     assert_eq!(
         picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
         None
     );
+}
+
+/// The picker's window title carries the directory it is browsing and
+/// follows every navigation, so the user can always see where the session
+/// is looking on the app's behalf.
+#[test]
+fn picker_title_carries_the_location_and_follows_a_navigation() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    let task = shell.tasks().task_for(wm).expect("the picker is a task");
+    let labelled = |shell: &DesktopShell| {
+        shell
+            .session()
+            .taskbar()
+            .tasks()
+            .entries()
+            .iter()
+            .find(|entry| entry.id == task)
+            .map(|entry| entry.title.clone())
+            .expect("the picker's entry")
+    };
+
+    assert_eq!(labelled(&shell), "Choose a file: /");
+
+    // Descending into `Docs/` moves the title with it.
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    assert_eq!(labelled(&shell), "Choose a file: /Docs");
+
+    // Moving the selection inside one directory is not a navigation, so the
+    // title stands.
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
+    assert_eq!(labelled(&shell), "Choose a file: /Docs");
+
+    // Climbing back returns it.
+    let back = pressed(KeyValue::Named(NamedKeyCode::Backspace));
+    assert_eq!(picker.handle_key(&back, &mut shell, &mut comp), None);
+    assert_eq!(labelled(&shell), "Choose a file: /");
 }
 
 /// A click anywhere on the shared command toolbar strip runs a read-only
@@ -6675,7 +6724,7 @@ fn open_parent_and_popup(
 ) -> (WindowId, WindowId) {
     with_window_host(shell, comp, windows, |host| {
         assert_eq!(
-            host.window_opened(1, &served_mode(320, 240), "Terminal", true),
+            host.window_opened(window_owner(1), 1, &served_mode(320, 240), "Terminal", true),
             Ok(())
         );
         assert_eq!(
@@ -6835,7 +6884,7 @@ fn keep_popups_stacked_is_idle_with_no_popup_open() {
     let mut windows = SessionWindows::new();
     with_window_host(&mut shell, &mut comp, &mut windows, |host| {
         assert_eq!(
-            host.window_opened(1, &served_mode(320, 240), "Terminal", true),
+            host.window_opened(window_owner(1), 1, &served_mode(320, 240), "Terminal", true),
             Ok(())
         );
     });
@@ -7227,5 +7276,293 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
         lock.park_deadline_ns(at, NO_DEADLINE_NS),
         NO_DEADLINE_NS,
         "a settled lock screen is back to arming no timer"
+    );
+}
+
+// --- The owning application's identity icon -------------------------------
+
+/// Lends one counting double to the shell's boxed artwork seam while the
+/// test keeps reading its counts — the shell owns its seams outright, so a
+/// shared handle is the only way to ask afterwards what was read or decoded.
+struct Shared<T>(Rc<RefCell<T>>);
+
+impl<T: SessionFileReader> SessionFileReader for Shared<T> {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.0.borrow_mut().read(path)
+    }
+}
+
+impl<T: IconRasteriser> IconRasteriser for Shared<T> {
+    fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
+        self.0.borrow_mut().rasterise(side, icon)
+    }
+}
+
+/// The bundle each identity test's window owner was launched from.
+const EDITOR_BUNDLE: &str = "/Apps/editor.app";
+const CHESS_BUNDLE: &str = "/Apps/chess.app";
+
+/// The task ids the launch table records those bundles under.
+const EDITOR_PID: u64 = 41;
+const CHESS_PID: u64 = 42;
+
+/// The tint each bundle's own icon rasterises to, so a drawn slot names the
+/// bundle it came from.
+const EDITOR_TINT: u8 = 0xE1;
+const CHESS_TINT: u8 = 0xC5;
+
+/// An asset table holding `bundle`'s manifest (declaring its own icon) and
+/// that icon's bytes, whose first byte is the tint it rasterises to. Empty
+/// `icon` bytes stand for an asset the decoder refuses.
+fn identity_bundle(assets: MemoryAssets, bundle: &str, name: &str, icon: &[u8]) -> MemoryAssets {
+    assets
+        .with(
+            &format!("{bundle}/AppInfo"),
+            &manifest_fixture(name, Some("icon.svg")),
+        )
+        .with(&format!("{bundle}/Resources/icon.svg"), icon)
+}
+
+/// A desktop whose artwork seams read `assets` and rasterise by tint, with
+/// the reader and rasteriser shared back so a test can count what the
+/// resolution actually cost.
+#[allow(clippy::type_complexity)] // The two shared doubles are the point.
+fn identity_desktop(
+    assets: MemoryAssets,
+) -> (
+    DesktopShell,
+    Compositor,
+    Rc<RefCell<CountingAssets>>,
+    Rc<RefCell<TaggedRasteriser>>,
+) {
+    let reader = Rc::new(RefCell::new(CountingAssets::new(assets)));
+    let rasteriser = Rc::new(RefCell::new(TaggedRasteriser::new()));
+    let mut shell = shell();
+    shell.set_artwork_source(
+        alloc::boxed::Box::new(ArtworkFileReader(Shared(Rc::clone(&reader)))),
+        alloc::boxed::Box::new(ArtworkSandbox(Shared(Rc::clone(&rasteriser)))),
+    );
+    (shell, compositor(), reader, rasteriser)
+}
+
+/// Open served window `window_id` exactly as the serve loop does, for the
+/// attested `owner`.
+fn open_owned_window(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    windows: &mut SessionWindows,
+    owner: ProcId,
+    window_id: u64,
+) {
+    with_window_host(shell, comp, windows, |host| {
+        host.window_opened(owner, window_id, &served_mode(320, 240), "App", true)
+            .expect("the window opens");
+    });
+}
+
+/// A launch table recording each `(pid, bundle)` the desktop started, and
+/// the attestation map from that pid's owner to it.
+fn launched_bundles(records: &[(u64, &str)]) -> LaunchTable {
+    let mut launched = LaunchTable::new();
+    for (pid, bundle) in records {
+        launched.record(*pid, "App", &format!("{bundle}{BUNDLE_RUN_SUFFIX}"));
+    }
+    launched
+}
+
+/// The identity the decorated window `wm` wears, and the opaque tint of the
+/// artwork drawn in its slot when it has any.
+fn window_identity(comp: &Compositor, wm: WindowId) -> (Option<IconKind>, Option<u8>) {
+    let window = comp.window(wm).expect("the window is live");
+    let identity = window
+        .frame()
+        .expect("a served window is decorated")
+        .title_bar()
+        .identity();
+    let tint = window
+        .identity_artwork()
+        .and_then(|art| art.pixels().first().map(|pixel| pixel.r));
+    (identity, tint)
+}
+
+#[test]
+fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    ));
+    let mut windows = SessionWindows::new();
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    let wm = windows.wm_id(1).expect("the window is live");
+    let side = comp
+        .window_title_icon_side(wm)
+        .expect("a decorated window draws an identity slot");
+
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
+        |owner| (owner == window_owner(1)).then_some(EDITOR_PID),
+    );
+
+    assert_eq!(
+        window_identity(&comp, wm),
+        (Some(IconKind::AppBundle), Some(EDITOR_TINT)),
+        "the bundle the desktop launched supplies the icon"
+    );
+    let artwork = comp
+        .window(wm)
+        .expect("live")
+        .identity_artwork()
+        .expect("the bundle's icon was drawn");
+    assert_eq!(
+        artwork.width(),
+        side,
+        "rasterised at exactly the slot the title bar draws"
+    );
+}
+
+#[test]
+fn a_window_whose_owner_the_desktop_did_not_launch_gets_no_identity() {
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    ));
+    let mut windows = SessionWindows::new();
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(9), 1);
+    let wm = windows.wm_id(1).expect("the window is live");
+
+    // A shell-spawned program: attested, but this desktop never launched it,
+    // so there is no bundle to name it by.
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
+        |_| None,
+    );
+
+    assert_eq!(
+        window_identity(&comp, wm),
+        (None, None),
+        "an application that cannot be named wears no badge"
+    );
+}
+
+#[test]
+fn one_owners_pid_cannot_yield_another_bundles_icon() {
+    let assets = identity_bundle(
+        identity_bundle(
+            MemoryAssets::default(),
+            EDITOR_BUNDLE,
+            "Editor",
+            &[EDITOR_TINT],
+        ),
+        CHESS_BUNDLE,
+        "Chess",
+        &[CHESS_TINT],
+    );
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
+    let mut windows = SessionWindows::new();
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(2), 2);
+
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE), (CHESS_PID, CHESS_BUNDLE)]),
+        |owner| match owner {
+            owner if owner == window_owner(1) => Some(EDITOR_PID),
+            owner if owner == window_owner(2) => Some(CHESS_PID),
+            _ => None,
+        },
+    );
+
+    let editor = windows.wm_id(1).expect("live");
+    let chess = windows.wm_id(2).expect("live");
+    assert_eq!(window_identity(&comp, editor).1, Some(EDITOR_TINT));
+    assert_eq!(
+        window_identity(&comp, chess).1,
+        Some(CHESS_TINT),
+        "each window wears the icon of the bundle its own attested owner runs"
+    );
+}
+
+#[test]
+fn a_window_opens_and_keeps_its_identity_when_the_icon_cannot_be_resolved() {
+    // The bundle declares an icon whose bytes the decoder refuses, and no
+    // shipped application-bundle master stands behind it.
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[],
+    ));
+    let mut windows = SessionWindows::new();
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    let wm = windows.wm_id(1).expect("the window opened regardless");
+
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
+        |_| Some(EDITOR_PID),
+    );
+
+    assert_eq!(windows.len(), 1, "the window is live");
+    assert_eq!(
+        window_identity(&comp, wm),
+        (Some(IconKind::AppBundle), None),
+        "a refused picture leaves the identity on its built-in glyph"
+    );
+}
+
+#[test]
+fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
+    let (mut shell, mut comp, reader, rasteriser) = identity_desktop(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    ));
+    let mut windows = SessionWindows::new();
+    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
+
+    let mut costs = Vec::new();
+    for window_id in 1..=2 {
+        let before = reader.borrow().reads;
+        open_owned_window(
+            &mut shell,
+            &mut comp,
+            &mut windows,
+            window_owner(1),
+            window_id,
+        );
+        resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+            Some(EDITOR_PID)
+        });
+        costs.push(reader.borrow().reads - before);
+    }
+
+    assert_eq!(
+        window_identity(&comp, windows.wm_id(2).expect("live")).1,
+        Some(EDITOR_TINT),
+        "the second window wears the same icon"
+    );
+    assert_eq!(
+        rasteriser.borrow().calls,
+        1,
+        "which the one shared cache served without decoding again"
+    );
+    assert_eq!(
+        costs[1], 1,
+        "and cost only the bundle's own manifest read, not a second artwork fetch"
     );
 }

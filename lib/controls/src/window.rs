@@ -25,14 +25,17 @@
 
 use alloc::string::String;
 
+use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
-    draw_outline, heavy_contrast, inset, key_activation, paint_bead, paint_plate, plate_border,
-    pointer_activation, resolve_bead, resolve_frame, role_font, surface_rect, to_i32, PlateStyle,
+    draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
+    paint_icon_slot, paint_plate, plate_border, pointer_activation, resolve_bead, resolve_frame,
+    role_font, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, SizeAction,
@@ -254,6 +257,15 @@ fn paint_command_glyph(
 pub enum WindowControlAction {
     /// The control was activated and its command should be dispatched.
     Invoked(WindowControlKind),
+    /// A secondary press landed on the control: the alternate gesture, a
+    /// different request from the control's own command.
+    ///
+    /// The control neither arms nor washes for it, so it draws exactly as
+    /// it did before the press and can never also fire
+    /// [`Invoked`](Self::Invoked) from the same gesture. What the alternate
+    /// gesture *means* is the window manager's to decide; the control only
+    /// reports that it happened over this kind.
+    AlternateInvoked(WindowControlKind),
 }
 
 /// One compact window-command furniture button (spec §11.19–§11.22).
@@ -428,8 +440,14 @@ impl WindowControl {
     }
 
     /// Feed a pointer event, given the control's current `bounds`, returning
-    /// [`WindowControlAction::Invoked`] on a completed primary click. The
-    /// press is never forwarded to the client surface (spec §11.18).
+    /// [`WindowControlAction::Invoked`] on a completed primary click, or
+    /// [`WindowControlAction::AlternateInvoked`] on a secondary press over
+    /// an actionable control. The press is never forwarded to the client
+    /// surface (spec §11.18).
+    ///
+    /// A secondary press takes no latch and leaves `state` alone, so the
+    /// control's appearance is bit-identical across it and the two gestures
+    /// can never both fire.
     ///
     /// On the release that completes a click the control returns to rest — its
     /// hover/press highlight and any keyboard focus ring are cleared — so a
@@ -443,6 +461,13 @@ impl WindowControl {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
+        if let InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        } = event
+        {
+            return (inside && self.state.is_actionable())
+                .then_some(WindowControlAction::AlternateInvoked(self.kind));
+        }
         if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
             self.rest();
             Some(WindowControlAction::Invoked(self.kind))
@@ -543,6 +568,10 @@ pub enum TitleBarEvent {
     DragEnd,
     /// A window control was invoked.
     Control(WindowControlKind),
+    /// A secondary press landed on a window control — the alternate
+    /// gesture beside its command, leaving the control's drawn state and
+    /// the window untouched.
+    AlternateControl(WindowControlKind),
 }
 
 /// Where a point falls within a title bar.
@@ -563,7 +592,16 @@ pub struct TitleBarLayout {
     pub controls: [(WindowControlKind, Rect); 4],
     /// The bounding rect of the whole command group.
     pub group: Rect,
-    /// The draggable title/identity region (never overlaps a control).
+    /// The identity icon's square slot, at the leading edge of the draggable
+    /// region. [`Rect::EMPTY`] when the bar carries no identity, or when the
+    /// band leaves no room for the slot.
+    pub icon: Rect,
+    /// Where the title text is drawn: the draggable region past the identity
+    /// slot, never overlapping a control.
+    ///
+    /// This is the *text* region, not the drag region. Everything in the band
+    /// that is not a control drags the window — the identity slot included —
+    /// so a bar with an identity still drags from its icon.
     pub title: Rect,
 }
 
@@ -595,19 +633,24 @@ fn sanitize_label(text: &str) -> String {
 /// characters are replaced, and it truncates with an ellipsis before it would
 /// overlap the controls.
 ///
+/// The owning application's identity icon sits at the leading edge of the
+/// drag region, before the text. It is inert: it drags the window like the
+/// rest of the region and is never a control.
+///
 /// Equal title bars draw the same pixels, so a host may use `==` as its
 /// repaint gate: the furniture state, control placement, the four commands
-/// with their own visible states, and both texts all compare. The whole drag
-/// gesture behind them does not — the pointer coordinate, the pending-press
-/// and dragging latches, and the press origin the threshold is measured from
-/// are hit-testing bookkeeping no render path reads. What a drag *shows* is
-/// the window moving, which is the owner's geometry rather than this bar's
-/// pixels.
+/// with their own visible states, the identity class, and both texts all
+/// compare. The whole drag gesture behind them does not — the pointer
+/// coordinate, the pending-press and dragging latches, and the press origin
+/// the threshold is measured from are hit-testing bookkeeping no render path
+/// reads. What a drag *shows* is the window moving, which is the owner's
+/// geometry rather than this bar's pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBar {
     furniture: WindowFurnitureState,
     placement: ControlPlacement,
     controls: [WindowControl; 4],
+    identity: Option<IconKind>,
     app_name: String,
     title: String,
     /// The last pointer position — hit-testing input, never drawn.
@@ -636,6 +679,7 @@ impl TitleBar {
             furniture,
             placement: ControlPlacement::Trailing,
             controls,
+            identity: None,
             app_name: String::new(),
             title: String::new(),
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -692,6 +736,44 @@ impl TitleBar {
     /// Set the application-identity name (untrusted; sanitised).
     pub fn set_app_name(&mut self, name: &str) {
         self.app_name = sanitize_label(name);
+    }
+
+    /// Set the owning application's identity icon, or clear it with `None`.
+    ///
+    /// This is the *class* of the icon, never the artwork: it is small and
+    /// cheaply compared, so a host may keep using `==` on the whole bar as its
+    /// repaint gate. The artwork itself is the owner's, passed to
+    /// [`render`](Self::render) at draw time. A bar with no identity reserves
+    /// no slot and its title text takes the whole draggable region.
+    ///
+    /// The identity is the window manager's own attestation of who owns the
+    /// window, not anything the application said about itself.
+    pub fn set_identity(&mut self, identity: Option<IconKind>) {
+        self.identity = identity;
+    }
+
+    /// The owning application's identity icon class, if it has one.
+    #[must_use]
+    pub fn identity(&self) -> Option<IconKind> {
+        self.identity
+    }
+
+    /// The pixel side the identity icon paints at inside the title band
+    /// `bounds`.
+    ///
+    /// `bounds` is the title band itself — the same rectangle passed to
+    /// [`layout`](Self::layout) and [`render`](Self::render), never the whole
+    /// window's bounds. This is the render geometry, exposed so an owner
+    /// rasterising the window's identity artwork produces it at exactly the
+    /// size [`render`](Self::render) will place. The side is the same whether
+    /// or not the bar carries an identity, so a caller can size artwork before
+    /// deciding to supply it.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        icon_slot_side(
+            role_font(theme, scale, TextRole::WindowTitle),
+            bounds.height,
+        )
     }
 
     /// Set the window title (untrusted; sanitised).
@@ -759,7 +841,7 @@ impl TitleBar {
         }
 
         let group = Rect::new(group_left.max(bounds.left()), cy, group_w, e);
-        let title = match self.placement {
+        let drag = match self.placement {
             ControlPlacement::Trailing => Rect::new(
                 bounds.left() + to_i32(ins),
                 bounds.top(),
@@ -777,20 +859,61 @@ impl TitleBar {
                 )
             }
         };
+        let (icon, title) = self.split_identity(drag, scale, theme, ins);
 
         TitleBarLayout {
             controls,
             group,
+            icon,
             title,
         }
     }
 
+    /// Divide the draggable region `drag` into the identity slot and the text
+    /// region that follows it, separated by `gap` pixels.
+    ///
+    /// A bar with no identity, or a band too narrow to seat the slot, keeps
+    /// the whole region for its text and reserves nothing — a window without
+    /// an identifiable owner reads exactly as it did before one existed.
+    fn split_identity(&self, drag: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
+        let side = self.icon_side(drag, scale, theme);
+        if self.identity.is_none() || side == 0 || drag.width < side {
+            return (Rect::EMPTY, drag);
+        }
+        let iy = drag.top() + (to_i32(drag.height) - to_i32(side)).max(0) / 2;
+        let taken = side.saturating_add(gap);
+        (
+            Rect::new(drag.left(), iy, side, side),
+            Rect::new(
+                drag.left() + to_i32(taken),
+                drag.top(),
+                drag.width.saturating_sub(taken),
+                drag.height,
+            ),
+        )
+    }
+
     /// Paint the title bar into `surface` at `bounds` for the active theme.
     ///
-    /// The bar background is the window surface; the identity/title is drawn
-    /// truncated within the drag region and the controls are painted in their
-    /// laid-out slots.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    /// `bounds` is the title band, not the whole window. The bar background is
+    /// the window surface; the identity icon is painted in its laid-out slot,
+    /// the identity/title text is elided to what is left of the drag region,
+    /// and the controls are painted in their laid-out slots.
+    ///
+    /// `artwork` is the owning application's identity icon, pre-rasterised by
+    /// the owner at [`icon_side`](Self::icon_side); `None` falls back to the
+    /// built-in glyph for the identity class, so a bar with an identity always
+    /// draws something. It is ignored by a bar with no identity. The artwork
+    /// is decoded and rasterised long before it reaches this call — a control
+    /// never parses image bytes.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: Option<&Surface>,
+    ) {
         // Window furniture is titling text, not interface body text.
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let palette = theme.palette();
@@ -799,21 +922,32 @@ impl TitleBar {
         }
         let layout = self.layout(bounds, scale, theme);
 
-        // The title/identity text, truncated so it never overlaps a control.
         let active = self.furniture.activation != WindowActivationState::Inactive;
         let text_color = if active {
             Color::from(palette.on_surface)
         } else {
             Color::from(palette.on_surface_muted)
         };
+        if let Some(kind) = self.identity {
+            if let Some((ix, iy, side, _)) = surface_rect(layout.icon) {
+                paint_icon_slot(surface, ix, iy, side, kind, text_color, artwork);
+            }
+        }
+
         if layout.title.width > 0 {
             let glyph_h = font.glyph_height();
             let ty =
                 layout.title.top() + (to_i32(layout.title.height) - to_i32(glyph_h)).max(0) / 2;
             let tx = layout.title.left();
             let combined = self.display_text();
-            let fitted = font.truncate_to_width(&combined, layout.title.width);
-            font.draw_text(surface, tx, ty, fitted, text_color);
+            // Titles carry paths, so a tail that does not fit ends in the
+            // shared mark: a reader can tell a hidden remainder from a name
+            // that simply ends there.
+            let (fitted, marked) = font.elide_to_width(&combined, layout.title.width);
+            let pen = font.draw_text(surface, tx, ty, fitted, text_color);
+            if marked {
+                font.draw_text(surface, pen, ty, ELLIPSIS, text_color);
+            }
         }
 
         for (kind, rect) in layout.controls {
@@ -871,12 +1005,16 @@ impl TitleBar {
         let mut fired = None;
         for (kind, rect) in layout.controls {
             if let Some(action) = self.control_mut(kind).on_pointer(event, rect) {
-                let WindowControlAction::Invoked(k) = action;
-                fired = Some(k);
+                fired = Some(action);
             }
         }
-        if let Some(kind) = fired {
-            return Some(TitleBarEvent::Control(kind));
+        if let Some(action) = fired {
+            return Some(match action {
+                WindowControlAction::Invoked(kind) => TitleBarEvent::Control(kind),
+                WindowControlAction::AlternateInvoked(kind) => {
+                    TitleBarEvent::AlternateControl(kind)
+                }
+            });
         }
 
         let over_control = layout
@@ -1284,7 +1422,19 @@ impl WindowFrame {
     /// Paint the frame chrome (rim, body background, title bar) into `surface`
     /// at `bounds`. The client viewport is left for the compositor to clip the
     /// application into; the frame never paints client pixels.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    ///
+    /// `bounds` is the whole decorated window's outer rectangle, not the title
+    /// band. `artwork` is the owning application's identity icon, pre-rasterised
+    /// at [`TitleBar::icon_side`] of the *laid-out title band*, and is handed
+    /// straight to [`TitleBar::render`].
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: Option<&Surface>,
+    ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1334,7 +1484,7 @@ impl WindowFrame {
 
         let layout = self.layout(bounds, scale, theme);
         self.title_bar
-            .render(surface, layout.title_bar, scale, theme);
+            .render(surface, layout.title_bar, scale, theme, artwork);
 
         // A bounded attention dot on the trailing edge of the title bar — never
         // an indefinite pulse (spec §11.17). Static, so it is reduced-motion

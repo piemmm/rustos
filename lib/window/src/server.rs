@@ -103,11 +103,16 @@ pub trait CallerIdentity {
 /// re-derives protocol policy.
 pub trait WindowHost {
     /// A validated `Create` opened `window_id` with `surface` geometry,
-    /// titled `title`. `resizable` is the app's request that the window
-    /// manager present the window with a resize grabber and a live
-    /// maximize/restore size toggle (a fixed-size app passes `false`).
-    /// An error refuses the create: the engine unmaps the region and
-    /// replies the refusal, keeping engine and host in lockstep.
+    /// titled `title`, for the attested `owner`. `resizable` is the app's
+    /// request that the window manager present the window with a resize
+    /// grabber and a live maximize/restore size toggle (a fixed-size app
+    /// passes `false`). An error refuses the create: the engine unmaps the
+    /// region and replies the refusal, keeping engine and host in lockstep.
+    ///
+    /// `owner` is the kernel-attested caller, not anything the client
+    /// said — it is the only trustworthy answer to "which application is
+    /// this window?", so a host that shows the owning application's
+    /// identity (its icon) resolves it from this and never from `title`.
     ///
     /// # Errors
     ///
@@ -115,6 +120,7 @@ pub trait WindowHost {
     /// desktop is tearing down); the refusal is relayed to the client.
     fn window_opened(
         &mut self,
+        owner: ProcId,
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
@@ -178,6 +184,19 @@ pub trait WindowHost {
     /// cannot reallocate, the desktop is tearing down); the refusal is
     /// relayed to the client and the old geometry stands.
     fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno>;
+
+    /// A validated `SetTitle`: the attested owner of live `window_id`
+    /// retitled it to `title`, already bounded and control-character-free
+    /// by the engine's ABI decode. The host applies it to the window's
+    /// chrome and its taskbar entry from this one call, so the two can
+    /// never disagree.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot retitle for (it is tearing down, its
+    /// compositor no longer holds the window); the refusal is relayed to
+    /// the client and the previous title stands.
+    fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno>;
 
     /// `window_id` is gone — closed by its owner or torn down after the
     /// owner exited. Infallible: the window is already unmapped and
@@ -524,6 +543,10 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 status(reply, self.resize(host, caller, spec))
             }
+            WindowRequest::SetTitle { window_id, title } => status(
+                reply,
+                self.set_title(host, caller, window_id, title.as_str()),
+            ),
             WindowRequest::PinBundle { window, path } => {
                 status(reply, self.pin_bundle(host, caller, window, path.as_str()))
             }
@@ -594,6 +617,7 @@ impl<M: ShmMapper> WindowServer<M> {
         // Tell the host before committing: a refused open leaves no
         // record and drops the mapping (the mapper's cue to unmap).
         host.window_opened(
+            caller,
             window_id,
             &spec.surface,
             spec.title.as_str(),
@@ -771,6 +795,23 @@ impl<M: ShmMapper> WindowServer<M> {
         host.pick_requested(window_id)?;
         record.pick_pending = true;
         Ok(())
+    }
+
+    /// Retitle `caller`'s window `window_id` to `title`.
+    ///
+    /// Ownership is checked before the host is told anything, so a
+    /// retitle aimed at another client's window (or issued by a kernel
+    /// caller, which owns none) answers `NotFound` and changes nothing.
+    /// A host refusal leaves the previous title standing.
+    fn set_title(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        title: &str,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        host.window_retitled(window_id, title)
     }
 
     /// Ask the host to pin `path` on behalf of `caller`'s window

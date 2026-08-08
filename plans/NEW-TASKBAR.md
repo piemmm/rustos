@@ -644,6 +644,11 @@ What now stands, and the invariants a future change must keep:
   window ownership (never titles), and re-resolves on a dirty latch before
   the next present. `ActivatePin` resolves through the same idempotent
   launch-or-raise rule as the Files button (the shared `activate_bundle`).
+- **A running task's label follows its window's title.** An app that retitles
+  its window over the channel (`WindowRequest::SetTitle`) moves the title bar
+  and the bar entry from one call (`TaskBridge::retitle` →
+  `TaskList::retitle`), so the two can never name different subjects; a
+  session-owned undecorated window relabels on the bar alone.
 - **Per-application icons land here too** (beyond the staged text — task
   direction): a pin's bundle icon (the manifest's `library_icon` asset, SVG
   or PNG) is untrusted third-party input, so the session never decodes it

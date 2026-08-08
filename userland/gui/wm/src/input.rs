@@ -183,6 +183,22 @@ pub enum InputResponse {
         /// Which window command the control represents.
         control: WindowControlKind,
     },
+    /// A secondary press landed on a window-command control — the alternate
+    /// gesture beside the control's own command, which the control never
+    /// performs.
+    ///
+    /// The window manager changes nothing for it: the window is raised and
+    /// focused as any secondary press raises and focuses, the control's
+    /// drawn state is untouched, and no window command runs. The embedder
+    /// decides what (if anything) the gesture means for that control and
+    /// tells the owning client; a surface with no owning client is left
+    /// alone.
+    WindowControlAlternate {
+        /// The decorated window whose frame control took the press.
+        window: WindowId,
+        /// Which window command the pressed control represents.
+        control: WindowControlKind,
+    },
     /// An active resize-grab dragged a decorated window's frame edge, so the
     /// window manager resized the window to a new outer geometry (its client
     /// content surface grew or shrank to match). The embedder forwards the
@@ -612,12 +628,31 @@ impl InputRouter {
     /// owner; one on window furniture opens no menu (the window manager
     /// consumes it). The WM never synthesises a menu of its own — only the
     /// surface pressed decides what a right-click means.
+    ///
+    /// One furniture region answers more than "consumed": a press on a
+    /// window-command control is reported as
+    /// [`InputResponse::WindowControlAlternate`] so the embedder can offer
+    /// the control's alternate gesture. The control itself neither arms nor
+    /// changes appearance, and no window command runs.
     fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::DesktopSecondaryPressed;
         };
         compositor.raise(window);
         self.focused = Some(window);
+        // Route the press through the frame furniture, which owns the one
+        // definition of which control lies under a point. A synthetic move
+        // first, so the control knows the pointer is over it.
+        let moved = InputEvent::PointerMoved { to: self.pointer };
+        compositor.frame_pointer(window, &moved);
+        let press = InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        };
+        if let Some(TitleBarEvent::AlternateControl(control)) =
+            compositor.frame_pointer(window, &press)
+        {
+            return InputResponse::WindowControlAlternate { window, control };
+        }
         // A right-click on the outer decoration frame or the root-viewport
         // furniture is not a client press: the window manager owns those
         // regions and offers no context menu there, so consume it.

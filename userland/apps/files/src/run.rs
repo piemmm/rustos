@@ -61,8 +61,12 @@
 extern crate alloc;
 
 pub mod command;
+pub mod location;
 pub mod operation;
 pub mod sidebar;
+
+#[cfg(test)]
+mod test_fs;
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
@@ -124,6 +128,7 @@ mod program {
     };
 
     use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
+    use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
 
@@ -302,10 +307,11 @@ mod program {
 
     /// The window surface one present writes into, threaded through the
     /// present path as one value: the channel half and the window the frame is
-    /// presented over, the mapped frame bytes, and the pixel layout those
-    /// bytes are shaped as. Bundling them keeps a frame inseparable from the
-    /// mode that describes it and the window it belongs to — the same shape
-    /// [`SessionLink`] uses for the app's outbound verbs.
+    /// presented over, the mapped frame bytes, the pixel layout those bytes are
+    /// shaped as, and the title the session was last told. Bundling them keeps
+    /// a frame inseparable from the mode that describes it and the window it
+    /// belongs to — the same shape [`SessionLink`] uses for the app's outbound
+    /// verbs.
     struct FrameTarget<'a, T: WindowTransport> {
         /// The app half of the window channel the present goes out over.
         client: &'a mut WindowClient<T>,
@@ -315,6 +321,9 @@ mod program {
         frame: &'a mut [u8],
         /// The pixel layout `frame` is shaped as.
         mode: &'a DisplayMode,
+        /// The title the window currently carries, owned by the run so it
+        /// outlives one frame: the location is only sent again when it moves.
+        title: &'a mut String,
     }
 
     /// The file manager's launched children: the application bundles it
@@ -968,7 +977,7 @@ mod program {
         /// the same item activates it, exactly as `Enter` does. It lives in the
         /// app (the engine is pointer-agnostic) and is reset whenever a press
         /// lands on chrome rather than an item, so a click through the toolbar
-        /// or path bar never pairs across it.
+        /// or the places rail never pairs across it.
         double_click: DoubleClickTracker,
         /// The bundle drag-out detector: a primary press over a bundle row
         /// arms it, and motion beyond the shared threshold offers the bundle
@@ -1010,15 +1019,26 @@ mod program {
     /// Render the browser into `frame` (the shared window surface) and
     /// present the whole window.
     ///
-    /// The full-window damage is deliberate: a listing change repaints
-    /// the path bar, the rows, and the selection highlight together, and
-    /// the surface is one window — not a screen — so the copy is small.
+    /// The full-window damage is deliberate: a listing change repaints the
+    /// toolbar, the rows, and the selection highlight together, and the surface
+    /// is one window — not a screen — so the copy is small.
+    ///
+    /// The window's title is the location it is showing, so the frame begins by
+    /// retitling when — and only when — the browser has moved since the last
+    /// one. A repaint that did not move sends nothing.
     ///
     /// The ownership control is drawn on the Properties overlay only where the
     /// launching user holds `CAP_FS_CHOWN` (`overlays.can_chown`), so a session
-    /// that cannot use it is never shown it (§2.24).
+    /// that cannot use it is never shown it.
+    ///
+    /// The frame also resolves the folder-occupancy of exactly the entries it
+    /// is about to draw, so an empty folder and a full one are drawn apart.
+    /// The probe is bounded by the visible range, so a listing of
+    /// a hundred thousand entries costs one directory read per row on screen,
+    /// not per entry, and each answer — including a refusal — is remembered
+    /// until the next listing.
     fn present_frame<S, T>(
-        browser: &Browser<S>,
+        browser: &mut Browser<S>,
         overlays: &Overlays,
         places: &Places,
         theme: &Theme,
@@ -1041,6 +1061,18 @@ mod program {
         // pointer hit-tests resolve through, so a dialog is never centred over
         // the rail it does not belong to.
         let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
+        browser.resolve_occupancy(tairix_browse::render::visible_range(
+            browser, scale, theme, viewport,
+        ));
+        let browser = &*browser;
+        // The title is the location, so it is sent only when the browser has
+        // moved. A refused retitle leaves the remembered text alone rather than
+        // claiming a title the session does not carry: the next frame retries.
+        if let Some(title) = retitle(browser, target.title) {
+            if target.client.set_title(target.window, &title).is_ok() {
+                *target.title = title;
+            }
+        }
         // Each visible grid tile resolves its icon through the artwork
         // pipeline: the shipped raster master for the entry's content type,
         // read bounded and decoded in the sandbox once per (asset, pixel side)
@@ -1254,9 +1286,9 @@ mod program {
     /// places rail did not claim it — reporting whether the view changed and
     /// whether the window should close.
     ///
-    /// `viewport` is the rail-inset content area the path bar, the listing and
-    /// the scrollbar occupy; the toolbar band spans the whole window, which the
-    /// routers below read from `canvas`.
+    /// `viewport` is the rail-inset content area the listing and the scrollbar
+    /// occupy; the toolbar band spans the whole window, which the routers below
+    /// read from `canvas`.
     fn apply_nav_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -1323,6 +1355,19 @@ mod program {
             WindowEvent::Pointer { .. } => {
                 apply_pointer(browser, overlays, link, canvas, viewport, event)
             }
+            // A secondary press on the window's Close control asks to leave the
+            // folder rather than the window: it climbs to the parent and closes
+            // only at the top, where there is nothing left to leave. A parent
+            // that cannot be listed keeps the window open and states which place
+            // was refused.
+            WindowEvent::AlternateCloseRequested { .. } => match leave_directory(browser) {
+                Leave::Climbed => (true, false),
+                Leave::Closed => (false, true),
+                Leave::Refused(reason) => {
+                    report_error(&reason);
+                    (false, false)
+                }
+            },
             // Focus changes and key releases repaint nothing. The browser
             // never requests a pick, so a pick conclusion is a session bug and
             // is ignored rather than acted on (an unredeemed delegation is
@@ -1583,7 +1628,7 @@ mod program {
     ///
     /// * [`Activation::Descended`] — the engine descended into a directory (its
     ///   own transactional, fail-closed navigation); the selection is revealed
-    ///   and the view repainted, exactly as a breadcrumb-click navigation is.
+    ///   and the view repainted, exactly as a rail-click navigation is.
     /// * [`Activation::LaunchBundle`] — the entry is a `<Name>.app` bundle,
     ///   launched through the ordinary signed app-load gate ([`Launcher`]),
     ///   asynchronously so the event loop never blocks behind the load.
@@ -2651,9 +2696,9 @@ mod program {
     /// tracker: a click *through* the chrome and back onto the same item is
     /// never mistaken for a double-click of that item.
     ///
-    /// `viewport` is the rail-inset content area the items and the path bar
-    /// occupy; the write tools sit on the toolbar band, which spans the whole
-    /// window (`canvas.window()`).
+    /// `viewport` is the rail-inset content area the items occupy; the write
+    /// tools sit on the toolbar band, which spans the whole window
+    /// (`canvas.window()`).
     fn apply_primary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -2701,21 +2746,17 @@ mod program {
     }
 
     /// Apply one primary press that landed on the read-only **chrome** (the
-    /// toolbar or the path bar), reporting whether the view changed.
+    /// toolbar), reporting whether the view changed.
     ///
     /// The caller ([`apply_primary_press`]) resolves manager write tools and
     /// item clicks first, so by the time a press reaches here it is neither. A
     /// click on a toolbar command runs it through the same shared dispatch the
-    /// keyboard accelerators use, and a click on a path-bar crumb climbs to
-    /// that ancestor through the same transactional
-    /// [`Browser::navigate_to_depth`] the keyboard uses (a refused re-listing
-    /// leaves the browser exactly where it was). A click on the inert current
-    /// crumb, a separator gap, or empty space resolves to nothing and repaints
-    /// nothing.
+    /// keyboard accelerators use; a click on empty space resolves to nothing
+    /// and repaints nothing.
     ///
     /// The toolbar band spans the whole window (`canvas.window()`), so it is
-    /// hit-tested against that; the path bar sits in `viewport`, the rail-inset
-    /// content area below the band.
+    /// hit-tested against that; `viewport` is the rail-inset content area the
+    /// command it runs acts within.
     fn apply_chrome_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         canvas: Canvas<'_>,
@@ -2731,14 +2772,6 @@ mod program {
             tairix_browse::render::toolbar_command_at(browser, scale, theme, canvas.window(), point)
         {
             return apply_toolbar_command(browser, scale, theme, viewport, command);
-        }
-        if let Some(depth) = tairix_browse::render::crumb_at(browser, scale, theme, viewport, point)
-        {
-            let moved = browser.navigate_to_depth(depth).unwrap_or(false);
-            if moved {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
-            }
-            return (moved, false);
         }
         (false, false)
     }
@@ -3824,14 +3857,28 @@ mod program {
         tairix_rt::read_dir_all(path.as_bytes()).map_err(errno_from)
     }
 
+    /// The live folder-occupancy probe: open the directory, read at most one
+    /// packed record, close it. The browser only asks "is there a first
+    /// child?", so this never grows the buffer and never transfers a listing
+    /// — a directory of a hundred thousand entries costs what an empty one
+    /// does. It runs under the launching user's own identity, so a directory
+    /// the user may not read simply refuses.
+    fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(errno_from)?;
+        dir.read(buf).map_err(errno_from)
+    }
+
     /// The browser's live directory source. Named so a fresh one can be built
     /// per open attempt: opening consumes its source, so a refused attempt
     /// cannot hand the same one to the next.
-    type LiveSource = VfsDirectorySource<fn(&str) -> Result<alloc::vec::Vec<u8>, Errno>>;
+    type LiveSource = VfsDirectorySource<
+        fn(&str) -> Result<alloc::vec::Vec<u8>, Errno>,
+        fn(&str, &mut [u8]) -> Result<usize, Errno>,
+    >;
 
-    /// One live source over [`list_directory`].
+    /// One live source over [`list_directory`] and [`probe_directory`].
     fn live_source() -> LiveSource {
-        VfsDirectorySource::new(list_directory)
+        VfsDirectorySource::probing(list_directory, probe_directory)
     }
 
     /// Open the manager's browser at the first location that actually lists,
@@ -3977,13 +4024,17 @@ mod program {
             Err(code) => return code,
         };
 
+        // The window's title is the location it shows, so it opens carrying it
+        // rather than a name the first frame would have to replace. The run
+        // keeps what was last sent, so a later frame retitles only on a move.
+        let mut title = location_title(&browser);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) = client.create(
             grant as u64,
             event_endpoint,
             FRAME_COUNT,
             &mode,
-            "Files",
+            &title,
             WIN_RESIZABLE,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
@@ -4011,7 +4062,7 @@ mod program {
         let icons = RefCell::new(IconPipeline::new(frame_len));
 
         if present_frame(
-            &browser,
+            &mut browser,
             &overlays,
             &places,
             theme,
@@ -4020,6 +4071,7 @@ mod program {
                 window,
                 frame: &mut *frames,
                 mode: &mode,
+                title: &mut title,
             },
             &icons,
             desktop.scale(),
@@ -4066,7 +4118,7 @@ mod program {
                 overlays.drag.release();
                 let finished = overlays.operation.as_mut().is_some_and(advance_operation);
                 if present_frame(
-                    &browser,
+                    &mut browser,
                     &overlays,
                     &places,
                     theme,
@@ -4075,6 +4127,7 @@ mod program {
                         window,
                         frame: &mut *frames,
                         mode: &mode,
+                        title: &mut title,
                     },
                     &icons,
                     desktop.scale(),
@@ -4094,7 +4147,7 @@ mod program {
                     // ran (the wait-set was not parked on during it).
                     launcher.borrow_mut().reap();
                     if present_frame(
-                        &browser,
+                        &mut browser,
                         &overlays,
                         &places,
                         theme,
@@ -4103,6 +4156,7 @@ mod program {
                             window,
                             frame: &mut *frames,
                             mode: &mode,
+                            title: &mut title,
                         },
                         &icons,
                         desktop.scale(),
@@ -4178,7 +4232,7 @@ mod program {
                     themes.set_appearance(desktop.appearance());
                     theme = themes.active();
                     if present_frame(
-                        &browser,
+                        &mut browser,
                         &overlays,
                         &places,
                         theme,
@@ -4187,6 +4241,7 @@ mod program {
                             window,
                             frame: &mut *frames,
                             mode: &mode,
+                            title: &mut title,
                         },
                         &icons,
                         desktop.scale(),
@@ -4228,7 +4283,7 @@ mod program {
                         core::slice::from_raw_parts_mut(region_base as *mut u8, region_len)
                     };
                     if present_frame(
-                        &browser,
+                        &mut browser,
                         &overlays,
                         &places,
                         theme,
@@ -4237,6 +4292,7 @@ mod program {
                             window,
                             frame: &mut *frames,
                             mode: &mode,
+                            title: &mut title,
                         },
                         &icons,
                         desktop.scale(),
@@ -4271,7 +4327,7 @@ mod program {
             }
             if changed
                 && present_frame(
-                    &browser,
+                    &mut browser,
                     &overlays,
                     &places,
                     theme,
@@ -4280,6 +4336,7 @@ mod program {
                         window,
                         frame: &mut *frames,
                         mode: &mode,
+                        title: &mut title,
                     },
                     &icons,
                     desktop.scale(),

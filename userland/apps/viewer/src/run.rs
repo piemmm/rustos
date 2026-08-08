@@ -698,7 +698,12 @@ mod program {
             // frame, which is still what the viewer would draw. Listed
             // rather than caught by a wildcard so a new event forces a
             // decision here.
-            WindowEvent::DesktopChanged { .. }
+            //
+            // A secondary press on Close asks to leave what the window is
+            // showing; the viewer has nothing to leave but itself, and a
+            // primary press already closes it.
+            WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::DesktopChanged { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

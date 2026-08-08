@@ -17,6 +17,8 @@
 //! out-of-range `set_sort`), the caret's direction and side, the keyboard model,
 //! degenerate bounds, and both themes plus the heavier-contrast path.
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -294,6 +296,91 @@ fn list_row_renders_high_contrast_and_scale() {
         None,
     );
     assert!(has_pixel(&big, premul(Theme::dark().palette().on_surface)));
+}
+
+// --- Text a row cannot show (spec §11.13) ------------------------------
+
+/// The run a row really drew for `text`, recovered from the paint: the
+/// shortest prefix of `text` — bare, or carrying the mark — whose own render
+/// is pixel-identical to `text`'s. `None` when nothing matches.
+///
+/// Reading the answer back out of the pixels is what makes these cases proof
+/// rather than a restatement of the row's own arithmetic. `build` places the
+/// run, so the label and the trailing caption are asserted the same way.
+///
+/// The host font stub paints every scalar as a solid block of its own
+/// advance, so two runs of equal drawn extent are indistinguishable here;
+/// each case below picks text whose shorter candidates cannot paint the same
+/// extent.
+fn drawn_run(text: &str, theme: &Theme, build: impl Fn(&str) -> ListRow) -> Option<String> {
+    let want = row_surface(&build(text), theme, Scale::ONE);
+    text.char_indices()
+        .map(|(at, _)| at)
+        .chain(core::iter::once(text.len()))
+        .flat_map(|end| {
+            [
+                String::from(&text[..end]),
+                format!("{}{ELLIPSIS}", &text[..end]),
+            ]
+        })
+        .find(|candidate| {
+            row_surface(&build(candidate), theme, Scale::ONE).pixels() == want.pixels()
+        })
+}
+
+/// A favourite place whose name is far wider than the rail that lists it.
+const LONG_PLACE: &str = "Very-Long-Favourite-Place-Name-That-Cannot-Fit";
+
+#[test]
+fn list_row_marks_a_label_it_had_to_cut() {
+    let theme = Theme::dark();
+    let build = |text: &str| ListRow::new(text);
+    let drawn = drawn_run(LONG_PLACE, &theme, build).expect("the row drew a label");
+    assert!(drawn.ends_with(ELLIPSIS), "{drawn:?} carries no mark");
+    let shown = drawn.trim_end_matches(ELLIPSIS);
+    assert!(LONG_PLACE.starts_with(shown), "{drawn:?} is not a prefix");
+    assert_ne!(shown, LONG_PLACE, "the name did not need cutting");
+}
+
+#[test]
+fn list_row_leaves_a_label_that_fits_unmarked() {
+    let theme = Theme::dark();
+    let build = |text: &str| ListRow::new(text);
+    let drawn = drawn_run("Home", &theme, build).expect("the row drew a label");
+    assert_eq!(drawn, "Home");
+}
+
+#[test]
+fn list_row_marks_a_trailing_caption_it_had_to_cut() {
+    let theme = Theme::dark();
+    let build = |text: &str| ListRow::new("").with_trailing(text);
+    let drawn = drawn_run(LONG_PLACE, &theme, build).expect("the row drew a caption");
+    assert!(drawn.ends_with(ELLIPSIS), "{drawn:?} carries no mark");
+    assert!(LONG_PLACE.starts_with(drawn.trim_end_matches(ELLIPSIS)));
+}
+
+#[test]
+fn a_row_too_narrow_for_even_the_mark_draws_no_text() {
+    let theme = Theme::dark();
+    let on = premul(theme.palette().on_surface);
+    let row = ListRow::new(LONG_PLACE).with_trailing("9.9 GB");
+    let narrow = |w: u32| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        row.render(
+            &mut surface,
+            Rect::new(0, 0, w, H),
+            Scale::ONE,
+            &theme,
+            None,
+        );
+        has_pixel(&surface, on)
+    };
+    // Every width up to the mark's own is swept, so the degenerate ones are
+    // exercised rather than assumed: none may draw, and none may panic.
+    for w in 0..=font().text_width(ELLIPSIS) {
+        assert!(!narrow(w), "a {w}px row drew text it cannot hold");
+    }
+    assert!(narrow(W), "the full-width row drew nothing");
 }
 
 // --- Owner-supplied artwork --------------------------------------------

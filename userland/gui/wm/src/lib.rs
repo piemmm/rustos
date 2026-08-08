@@ -88,3 +88,8 @@ pub use tairix_controls::{
     ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,
     WindowControlKind, WindowFrame, WindowFurnitureState, WindowSizeState,
 };
+/// The icon class a decorated window's title-bar identity names, re-exported
+/// so an embedder naming one for
+/// [`Compositor::set_window_identity`](compositor::Compositor::set_window_identity)
+/// uses the one shared vocabulary rather than a parallel enum.
+pub use tairix_icon::IconKind;

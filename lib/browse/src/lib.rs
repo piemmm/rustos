@@ -12,7 +12,7 @@
 //!   are transactional and fail closed: the new directory is listed
 //!   *before* any state changes, so a refused or failing read leaves the
 //!   browser exactly where it was.
-//! * [`render()`] paints the path bar and the (scrolling) entry list into
+//! * [`render()`] paints the toolbar and the (scrolling) entry list into
 //!   a `lib/raster` [`Surface`](tairix_raster::Surface) using the active
 //!   theme's palette and the shared `lib/font` face — the same surface the
 //!   compositor places and rounds.
@@ -42,12 +42,9 @@
 //!   (`plans/NEW-TASKBAR.md` T7).
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
-//!   enable state, the [`breadcrumbs`] path bar
-//!   (`plans/NEW-FILEMANAGER.md` `FM4b`), and the manager-only [`ManagerTool`]
+//!   enable state, and the manager-only [`ManagerTool`]
 //!   write-tool vocabulary (with the [`ManagerToolModel`] enable state) the
 //!   read-only picker never composes.
-//! * [`breadcrumb`](mod@breadcrumb) — the drawn path bar's placement: the one
-//!   right-anchored crumb layout the painter and the pointer hit-test share.
 //! * [`select`](mod@select) — the [`Selection`] multi-entry set (single /
 //!   toggle / range / select-all) the management verbs act on.
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
@@ -124,7 +121,6 @@
 extern crate alloc;
 
 pub mod activate;
-pub mod breadcrumb;
 pub mod browser;
 pub mod chrome;
 pub mod click;
@@ -155,9 +151,8 @@ pub mod vfs;
 pub use activate::Activation;
 pub use browser::Browser;
 pub use chrome::{
-    apply_command, breadcrumbs, ContextCommand, ContextMenuModel, Crumb, ManagerTool,
-    ManagerToolModel, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS,
-    TOOLBAR_COMMANDS,
+    apply_command, ContextCommand, ContextMenuModel, ManagerTool, ManagerToolModel, ToolbarCommand,
+    ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
@@ -165,7 +160,7 @@ pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
 pub use drag::{BundleDrag, DRAG_THRESHOLD_PX};
-pub use entry::{is_bundle_name, Entry, EntryKind};
+pub use entry::{is_bundle_name, Entry, EntryKind, Occupancy};
 pub use error::BrowseError;
 pub use execute::{
     paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyWalk, CopyWalkError,
@@ -175,7 +170,7 @@ pub use format::{format_date, format_datetime, format_size};
 pub use layout::{
     GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
 };
-pub use media::{entry_icon_request, media_for_entry, media_for_name, MediaType};
+pub use media::{entry_icon_request, icon_for_entry, media_for_entry, media_for_name, MediaType};
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{applications_for, association_from_appinfo, AppAssociation, BundleSource};
@@ -192,7 +187,7 @@ pub use trash::{
     empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
 };
-pub use vfs::VfsDirectorySource;
+pub use vfs::{NoProbe, VfsDirectorySource};
 
 /// Window content width of a browser view, in pixels — the one definition
 /// the files app's `Run` binary and the session's trusted picker size

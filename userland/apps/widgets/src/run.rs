@@ -238,8 +238,11 @@ mod program {
             }
             // A redraw request needs nothing here: the client library
             // re-presents the last frame, and the gallery it drew has not
-            // changed. The rest are events the gallery does not act on.
-            WindowEvent::Key { .. }
+            // changed. The rest are events the gallery does not act on: a
+            // secondary press on Close asks to leave what the window is
+            // showing, and the gallery has nothing to leave but itself.
+            WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Resized { .. }

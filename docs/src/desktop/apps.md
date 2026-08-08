@@ -159,7 +159,7 @@ cursor:
 
 - `open_root` opens at `/` and lists it; `open_at(source, components)` opens
   *at* a given directory (root-first `components`, empty being `/`, so
-  `open_root` is exactly `open_at(source, [])`). Its breadcrumb shows that
+  `open_root` is exactly `open_at(source, [])`). The window title carries that
   path and `go_up` climbs from there, with a fresh (empty) history — the one
   way a consumer starts somewhere other than `/` without a second navigation
   model. The desktop session's trusted picker opens at the user's home this
@@ -172,19 +172,15 @@ cursor:
 - `select`, `select_next`, and `select_previous` move the selection, clamping
   at both ends.
 
-`Browser` also keeps a bounded **navigation history** and the breadcrumb
-jump both the toolbar and the path bar drive:
+`Browser` also keeps a bounded **navigation history**, which the toolbar's
+Back / Forward tools drive:
 
 - `go_back` / `go_forward` walk a back / forward stack; `can_go_back` /
   `can_go_forward` report whether each move is available, which is exactly
   the enable state of the Back / Forward toolbar controls. Any fresh
-  navigation (descend, climb, or a breadcrumb jump) records the directory
+  navigation (descend, climb, or a jump to a location) records the directory
   it left on the back stack and clears the forward branch, as a web
   browser's forward history is discarded on a new turn.
-- `navigate_to_depth(depth)` is the breadcrumb-click primitive: it jumps to
-  the ancestor `depth` path components deep (`0` is the filesystem root,
-  `components().len()` is the directory already shown — a no-op, as is a
-  depth past the end).
 
 The history is a bounded ring: once it reaches its cap it drops the
 *oldest* location rather than growing without bound. It is a UX
@@ -195,16 +191,16 @@ forgets the least-recent step.
 Every directory-listing move is **transactional and fails closed**
 (`AGENTS.md` §5.4): the target is listed *before* any state changes, so a
 refused or failing read leaves the browser on the directory it was already
-showing — a `go_back` / `go_forward` / breadcrumb jump to a directory that
+showing — a `go_back` / `go_forward` / location jump to a directory that
 has become unreadable leaves the browser *and its history* exactly as they
 were. The fail-closed outcomes are the `BrowseError` variants: `Source`
 (the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`, and
 `NotADirectory`.
 
-### The frame model — toolbar and breadcrumb
+### The frame model — the toolbar
 
-The drawn window chrome — the `lib/controls` toolbar and the breadcrumb
-path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
+The drawn window chrome — the `lib/controls` toolbar
+(`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
 `chrome` model, host-proven ahead of the widgets it drives, exactly as the
 `Activation` and `open_with` decisions are:
 
@@ -217,14 +213,6 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   stays stable — and `view_mode()` / `sort_mode()` give the view toggle and
   sort control their current (pressed) state. `TOOLBAR_COMMANDS` is the one
   left-to-right command order the chrome iterates.
-- `breadcrumbs(browser)` turns the current directory's root-first
-  components into the ordered `Crumb`s of the path bar: the root crumb
-  (`depth` `0`) followed by one crumb per component (component `i` is depth
-  `i + 1`). Each crumb's `depth()` is what the drawn crumb binds to
-  `navigate_to_depth`, so a click climbs to exactly the ancestor it names.
-  The terminal crumb — the directory being shown — is flagged
-  `is_current()` and the bar renders it inactive, because a jump to it is
-  the documented no-op.
 - `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable. **Open**,
   **Rename**, **Cut**, **Copy**, **Properties**, and **Delete** act on the
@@ -243,7 +231,7 @@ path bar (`plans/NEW-FILEMANAGER.md` FM4b) — is painted from a pure
   and `CONTEXT_COMMANDS` is the one top-to-bottom order the drawn menu
   iterates.
 
-The model decides *what is offered* and *where a crumb leads*; it performs
+The model decides *what is offered*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
 picker builds the same model). Only commands the file manager can actually
 carry out today are modelled, so none is speculative surface (`AGENTS.md`
@@ -380,7 +368,7 @@ double-click can never open something a keyboard `Enter` would not
 selects the item under the pointer, and a second press on that *same* item
 within `DOUBLE_CLICK_INTERVAL_NS` (half a second, timed by the capability-free
 monotonic `clock_get`) activates it. The tracker is reset whenever a press
-lands on chrome (a toolbar tool or a path-bar crumb) rather than an item, so a
+lands on chrome (a toolbar tool) rather than an item, so a
 click *through* the chrome and back is never mistaken for a double-click; a
 non-monotonic clock reading fails closed to a single click. On any activation,
 a `Descended` reveals the selection and repaints, and a
@@ -502,8 +490,8 @@ read-only picker composes the same engine and never launches.
 ### Rendering
 
 `render(browser, theme, font, viewport, tools, tool_model, artwork)` paints a
-command toolbar strip,
-a path bar, and the current directory into a `tairix-raster` `Surface` sized to
+command toolbar strip
+and the current directory into a `tairix-raster` `Surface` sized to
 the viewport, in whichever of the two views the browser holds
 (`ViewMode::List` or `ViewMode::Grid`). The **file manager opens on the icon
 grid** and its toolbar toggle switches to the list; the engine's own default
@@ -511,24 +499,20 @@ and the trusted file picker stay `List`, since a chooser wants names, sizes
 and dates rather than tiles. `tools` is the manager-only
 `ManagerTool` set drawn after the read-only commands — the file manager passes
 `MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
-(see the frame model above); the item area sits below the combined chrome
-(`chrome_height` = the toolbar strip plus the path bar), the one header offset
+(see the frame model above); the item area sits below it
+(`chrome_height` = the toolbar strip), the one header offset
 the item views, the scrollbar gutter, and every hit-test share so paint and
-hit-test can never disagree (`AGENTS.md` §2.2). The
-path bar takes the theme's raised role and draws the current directory as a
-clickable **breadcrumb trail** (`plans/NEW-FILEMANAGER.md` FM4b): the root
-crumb followed by one crumb per path component. Ancestor crumbs are drawn in
-the accent colour to read as navigable and the terminal crumb (the current
-directory) is drawn solid and inert; the trail is **right-anchored**, so when
-it is wider than the window the leading ancestors scroll off the left and are
-clipped while the current directory stays visible. The placement is the shared
-`breadcrumb::layout`, so the paint and the crumb hit-test cannot disagree
-(`AGENTS.md` §2.2). In the **list** view each entry is a
+hit-test can never disagree (`AGENTS.md` §2.2). The window title carries the
+current path, so no band of the window is spent restating it. In the **list**
+view each entry is a
 shared `lib/controls` `TableRow` with an aligned **name / size / modified**
 column layout — the same collection control (and the same one column-width
 definition) the trusted picker uses, so the file manager and the picker are
 one coherent themed surface rather than a browser-private row painter
-(`AGENTS.md` §2.2). A directory's name carries a trailing `/`; the size column
+(`AGENTS.md` §2.2). A name is spelled bare, whatever the entry is, and the row's
+name cell carries the entry's icon — the same `icon_for_entry` classification
+the grid tile draws, painted as the built-in glyph — so a folder is told from a
+file by that icon rather than by a name suffix. The size column
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
 (`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
 at the epoch so a stampless file is never given a fabricated date, §21). In the
@@ -537,11 +521,14 @@ icon over that same label, with no plate of its own, so a folder reads as a fiel
 of icons rather than a grid of boxes and only a hovered, selected, or focused
 entry paints anything behind its icon — wrapped into as many columns as fit the
 width; the two views share one selection model, so toggling never moves the
-selection or re-reads the directory. The icon is the shared registry's
-(`media_for_entry(entry, parent).icon()`, above): one classification both the
-file manager and the trusted picker draw from (`AGENTS.md` §2.2) and a
+selection or re-reads the directory. The icon is `icon_for_entry(entry,
+parent)`: one classification both views and both consumers draw from
+(`AGENTS.md` §2.2) and a
 **display hint only** — it decides a glyph, never an operation; authority stays
-in the VFS and the launcher. `render` takes a
+in the VFS and the launcher. It is the shared registry's glyph
+(`media_for_entry(..).icon()`, above), except that a plain directory *known* to
+hold something takes the filled-folder icon instead — see *Folder occupancy*
+below. `render` takes a
 trailing `artwork: &mut dyn tairix_icon::IconArtwork` lookup and asks it for
 each tile's icon at the exact `IconTile::icon_side` the tile reserves, blitting
 the real icon artwork when the system ships and can decode it and drawing the
@@ -553,7 +540,8 @@ the icon `ls` carries in its own `Resources/` rather than the one generic
 every-application picture. The file manager binds a real cache to that lookup
 (*Grid-view icon artwork*, below); the read-only trusted picker still passes
 `NoArtwork`, so it draws glyphs only.
-The list view is text-only and never consults the lookup. The selected
+A list row's name cell carries the same classified kind, drawn as the row
+control's built-in glyph rather than through the artwork lookup. The selected
 item carries the shared selection state — the raised surface plus the accent
 selection rail every collection view shares — not a bespoke accent fill.
 
@@ -599,14 +587,44 @@ the user last saw it whatever the work area's exact extent is. A vertical
 same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
 (`scroll_lines`), and a selection-moving key reveals the selection the least it
 can (`reveal_selection`) — the browser owns the one scroll offset both consume.
-The path bar has its own mirror hit-test, `crumb_at`, which maps a click in the
-path bar row to the ancestor `depth` of the crumb under it (and to nothing for
-a separator gap, the inert current crumb, or a crumb clipped off the left) over
-that same `breadcrumb::layout`.
+`render::visible_range` is the one definition of which entry indices are on
+screen, dispatching on the view mode over the same geometry both painters use,
+so the folder-occupancy probe the app resolves before a frame asks about
+exactly the rows it is about to draw.
 The surface is rectangular; the compositor places and rounds it through its
 single anti-aliased rounded-corner path, so there is no rounding in the app.
 Every length saturates so a degenerate viewport paints what it can rather than
 panicking (`AGENTS.md` §2.9).
+
+### Folder occupancy
+
+An empty folder and one that holds something draw different icons:
+`IconKind::Folder` and `IconKind::FolderFilled`. A directory's `size` is `0`
+and no VFS surface reports a child count, so occupancy is a separate read, and
+the engine only ever draws an answer it has:
+
+- `Entry::occupancy()` is one of four honest states — `Unprobed`, `Empty`,
+  `NonEmpty`, and `Indeterminate` (a probe that was refused or failed). Only
+  `NonEmpty` draws the filled folder; every other state, and every file or
+  bundle, draws exactly what it drew before.
+- `DirectorySource::has_children(components)` is the probe. `VfsDirectorySource`
+  answers it with the cheapest honest call sequence — open the directory, read
+  **one** maximal record, close — never a listing and never a walk, so the cost
+  does not grow with the child count. The kernel packs a whole listing or
+  refuses, so no bytes means empty, some bytes means occupied, and a listing
+  too large for the one-record buffer means occupied too.
+- `Browser::resolve_occupancy(range)` answers only the indices its caller
+  passes, and only for an entry that still needs one. The file manager passes
+  `render::visible_range`, so a hundred-thousand-entry directory probes what is
+  on screen rather than what is listed. A refusal is recorded as
+  `Indeterminate` and never re-asked, so a locked folder costs one probe rather
+  than one per frame; a fresh listing resets every answer, so a refresh
+  re-probes.
+- The probe is a directory read on a child the caller is only *displaying*, so
+  a source may decline it: the trait's default answers `NotImplemented`, which
+  reads as `Indeterminate`. The trusted picker takes that default deliberately
+  — the cue adds nothing to choosing a file — so it exercises no authority it
+  does not need and its folders stay plain.
 
 ### Grid-view icon artwork
 
@@ -733,11 +751,12 @@ a third of the window), its per-row rectangles, the separator band, and the
 **The command toolbar is window chrome, and the rail starts below it.**
 `render::sidebar_view` lays the rail out in the window inset at the top by the
 toolbar band and no taller than what is left, so the rail's first row top *is*
-the path bar's top and every rail row sits on the same `row_height` grid as the
+the first listing row's top and every rail row sits on the same `row_height`
+grid as the
 listing rows beside it. `render::toolbar_bounds` — and the three hit-tests that
 invert it, `toolbar_command_at`, `manager_tool_at`, and `manager_tool_rect` —
 take the **whole window**, because the band spans it edge to edge like the rest
-of the desktop's chrome. `render::content_area` is what the path bar, the
+of the desktop's chrome. `render::content_area` is what the
 list/grid, the scrollbar, and every overlay drawn over the view occupy — the
 window less the rail on the leading edge, full height — and is the rectangle
 those entry points are hit-tested against, so a click resolves to the control
@@ -787,9 +806,7 @@ folder, and the toolbar accelerators `Alt+←/→/↑` and `F5`) and the pointer
 primary-button press first checks the manager-only write tools
 (`render::manager_tool_at` → New Folder), then the read-only command toolbar
 (`render::toolbar_command_at` → the shared `apply_command`, so a click on a
-disabled tool does nothing), then a path-bar
-crumb climbs to that ancestor through the same transactional
-`Browser::navigate_to_depth` the keyboard uses, and a press on an item selects
+disabled tool does nothing), and a press on an item selects
 it (`Browser::select`) — the GUI is a spelling of the user's
 intent, never an escalation, so a refused re-listing leaves the browser exactly
 where it was. A `CloseRequested` from the desktop ends it cleanly, and every
@@ -1476,7 +1493,7 @@ The file manager opens its window `resizable`, so the window manager presents
 it with a live maximize/restore size toggle and a resize grabber (a fixed-size
 app is offered neither). On a `WindowEvent::Resized` the `Run` binary re-maps
 its zero-copy frame region at the new client size and re-presents; the shared
-`lib/browse` renderer lays the toolbar, path bar, listing, and scrollbar out to
+`lib/browse` renderer lays the toolbar, listing, and scrollbar out to
 whatever viewport it is handed, so the content fills the new size with no
 per-size layout code. The re-map is fail-closed (`AGENTS.md` §5.4): a fresh
 region is allocated and granted and adopted only once the session accepts

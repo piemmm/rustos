@@ -17,16 +17,21 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::{Errno, ProcId};
+use tairix_icon::{IconKind, IconRequest};
 use tairix_window::PinDecision;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
+use crate::launch::LaunchTable;
 use crate::picker::PickerSlot;
-use crate::pins::PinBridge;
+use crate::pins::{
+    bundle_icon_source, bundle_manifest_path, decode_bundle_manifest, PinBridge, BUNDLE_RUN_SUFFIX,
+};
 use crate::shell::DesktopShell;
 
 /// The freshly opened window's fill until the app's first present lands:
@@ -76,6 +81,10 @@ pub struct SessionWindows {
     /// per-wake stacking pass costs one integer test on the overwhelmingly
     /// common wake with no popup open, instead of walking every record.
     popups: usize,
+    /// Windows opened since the last drain, each with the kernel-attested
+    /// process that opened it, awaiting identification of the application
+    /// they belong to.
+    opened_owners: Vec<(WindowId, ProcId)>,
 }
 
 impl SessionWindows {
@@ -121,6 +130,18 @@ impl SessionWindows {
     /// The cascade origin for the next opened window.
     fn next_origin(&self) -> Point {
         cascade_origin_for(self.opened)
+    }
+
+    /// Take the windows opened since the last call, each paired with the
+    /// kernel-attested process that opened it.
+    ///
+    /// The owning application is named *after* the request that opened the
+    /// window is served, because both halves of the answer — the task id an
+    /// attested process ran as, and the desktop's own launch records — are
+    /// borrowed for the duration of that serve pass. Draining leaves the
+    /// list empty, so each window is offered for identification once.
+    pub fn take_opened_owners(&mut self) -> Vec<(WindowId, ProcId)> {
+        core::mem::take(&mut self.opened_owners)
     }
 
     /// Re-assert every live popup's stacking: each popup is restacked
@@ -238,6 +259,103 @@ pub fn window_control_event(
     }
 }
 
+/// The app-ward [`WindowEvent`] a secondary press on `wm`'s title-bar
+/// `control` must be delivered as, or `None` when the gesture means
+/// nothing here.
+///
+/// It is deliberately narrow: only the close control carries an alternate
+/// meaning — a request the app interprets for itself (a file manager steps
+/// up a folder rather than closing) — and the session performs no window
+/// action of its own for it, so an app that ignores the event sees nothing
+/// change. A press on any other control, or on a window the session itself
+/// owns (the trusted picker, the greeter), has no owning app to tell and
+/// yields `None`.
+#[must_use]
+pub fn window_control_alternate_event(
+    control: WindowControlKind,
+    wm: WindowId,
+    windows: &SessionWindows,
+) -> Option<WindowEvent> {
+    let window_id = windows.ipc_id(wm)?;
+    match control {
+        WindowControlKind::Close => Some(WindowEvent::AlternateCloseRequested { window_id }),
+        WindowControlKind::Minimize
+        | WindowControlKind::PutToBack
+        | WindowControlKind::SizeToggle => None,
+    }
+}
+
+/// Give every window opened since the last pass the icon of the
+/// application that opened it.
+///
+/// `windows` supplies each freshly opened compositor window paired with the
+/// kernel-attested process that opened it, `task_of` resolves that process
+/// to the task id the desktop's launch records are keyed by, and `launched`
+/// is those records. Nothing an application sent is consulted, so no
+/// program can wear another's identity.
+///
+/// A window whose owner this desktop did not launch — a shell-spawned
+/// program, a child process — is left with no identity, so its title keeps
+/// the whole band rather than a badge for an application that cannot be
+/// named. An identified bundle whose declared artwork is absent, refused,
+/// or undecodable keeps the identity and loses only the picture: the title
+/// bar draws the shared application-bundle glyph. Resolution never fails a
+/// window; it is already open.
+///
+/// Each icon is resolved through the session's one artwork cache at the
+/// pixel side that window's own title band draws it at, so a second window
+/// of the same application costs a lookup rather than a read and a decode.
+pub fn resolve_window_identities<F>(
+    shell: &mut DesktopShell,
+    compositor: &mut Compositor,
+    windows: &mut SessionWindows,
+    launched: &LaunchTable,
+    task_of: F,
+) where
+    F: Fn(ProcId) -> Option<u64>,
+{
+    for (wm, owner) in windows.take_opened_owners() {
+        let Some(bundle) = task_of(owner)
+            .and_then(|task| launched.get(task))
+            .and_then(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
+        else {
+            continue;
+        };
+        let Some(side) = compositor.window_title_icon_side(wm) else {
+            continue;
+        };
+        let artwork = bundle_artwork(shell, bundle, side);
+        compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
+    }
+}
+
+/// The picture for `bundle`'s own icon at `side` pixels, resolved through
+/// the session's one artwork cache and its sandboxed decode seam.
+///
+/// `bundle` is the bundle *directory* of the application the kernel
+/// attested owns the window, never a path an application sent; `side` is
+/// the pixel side that window's title bar draws its identity slot at, so
+/// the artwork is rasterised at exactly the size drawn. The bundle's own
+/// manifest is consulted for a declared icon and the shipped
+/// application-bundle artwork stands in when it declares none — the same
+/// order a pinned application resolves through. `None` when neither reads
+/// or decodes, leaving the title bar on its built-in glyph.
+fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> Option<Surface> {
+    let manifest_path = bundle_manifest_path(bundle);
+    let (cache, reader, rasteriser) = shell.artwork_parts();
+    let declared = reader
+        .read(&manifest_path)
+        .as_deref()
+        .and_then(decode_bundle_manifest)
+        .and_then(|header| bundle_icon_source(&header, bundle))
+        .map(|source| source.path());
+    let request = declared.as_deref().map_or_else(
+        || IconRequest::kind(IconKind::AppBundle),
+        |path| IconRequest::asset(IconKind::AppBundle, path),
+    );
+    cache.artwork(reader, rasteriser, request, side).cloned()
+}
+
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
 /// the compositor, the session's window table, and the trusted picker
 /// slot a validated `PickFile` opens.
@@ -263,6 +381,7 @@ pub struct ShellWindowHost<'a> {
 impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn window_opened(
         &mut self,
+        owner: ProcId,
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
@@ -303,6 +422,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.compositor.set_app_presented(wm, true);
         self.windows.opened += 1;
         self.windows.insert(window_id, wm, None);
+        // Who owns this window is the kernel's answer, kept for the
+        // identification pass that runs once this request is served.
+        self.windows.opened_owners.push((wm, owner));
         Ok(())
     }
 
@@ -409,6 +531,22 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             // knows: refuse the resize (fail closed), leaving the old
             // geometry the engine will keep in step.
             Err(Errno::LengthOutOfRange)
+        }
+    }
+
+    fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
+        // The engine attested the caller and validated that the window is
+        // its own, and bounded the title on decode. One shell call moves
+        // the title bar and the taskbar entry together, so the two can
+        // never name different subjects. A popup carries neither, and a
+        // window the session no longer knows fails closed.
+        let Some(record) = self.windows.records.get(&window_id) else {
+            return Err(Errno::NotFound);
+        };
+        if self.shell.retitle_window(self.compositor, record.wm, title) {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
         }
     }
 
@@ -652,6 +790,8 @@ mod tests {
     use tairix_window::WindowHost;
     use tairix_wm::{InputEvent, PointerButton};
 
+    use crate::tests::window_owner;
+
     fn mode(width: u32, height: u32, format: DisplayFormat) -> DisplayMode {
         DisplayMode {
             width_px: width,
@@ -734,10 +874,22 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(7, &mode(64, 48, DisplayFormat::Rgba8888), "files", false)
-                .expect("opens");
-            host.window_opened(9, &mode(64, 48, DisplayFormat::Rgba8888), "terminal", false)
-                .expect("opens");
+            host.window_opened(
+                window_owner(1),
+                7,
+                &mode(64, 48, DisplayFormat::Rgba8888),
+                "files",
+                false,
+            )
+            .expect("opens");
+            host.window_opened(
+                window_owner(1),
+                9,
+                &mode(64, 48, DisplayFormat::Rgba8888),
+                "terminal",
+                false,
+            )
+            .expect("opens");
         }
         assert_eq!(windows.len(), 2);
         let wm_of_7 = windows.records.get(&7).expect("recorded").wm;
@@ -777,7 +929,8 @@ mod tests {
                     picker: &mut picker,
                     pins: &mut RefusingPins,
                 };
-                host.window_opened(1, &m, "w", false).expect("opens");
+                host.window_opened(window_owner(1), 1, &m, "w", false)
+                    .expect("opens");
                 // One frame with the probe pixel at (2, 1).
                 let mut frame = [0u8; 4 * 4 * 4];
                 let offset = (4 + 2) * 4;
@@ -825,7 +978,8 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w", false).expect("opens");
+        host.window_opened(window_owner(1), 1, &m, "w", false)
+            .expect("opens");
         let frame = [0u8; 4 * 4 * 4];
         let full = DamageRect {
             x: 0,
@@ -891,7 +1045,8 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(1, &m, "w", true).expect("opens");
+            host.window_opened(window_owner(1), 1, &m, "w", true)
+                .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("the first present lands");
             host.windows.records.get(&1).expect("live").wm
@@ -965,7 +1120,8 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(1, &m, "w", false).expect("opens");
+            host.window_opened(window_owner(1), 1, &m, "w", false)
+                .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("first present lands");
         }
@@ -1013,7 +1169,8 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(1, &m, "w", false).expect("opens");
+            host.window_opened(window_owner(1), 1, &m, "w", false)
+                .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("first present lands");
         }
@@ -1060,7 +1217,8 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(1, &m, "w", false).expect("opens");
+            host.window_opened(window_owner(1), 1, &m, "w", false)
+                .expect("opens");
             assert_eq!(
                 host.window_presented(
                     1,
@@ -1104,7 +1262,8 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w", false).expect("opens");
+        host.window_opened(window_owner(1), 1, &m, "w", false)
+            .expect("opens");
         let wm = host.windows.records.get(&1).expect("live").wm;
         host.window_closed(1);
         assert!(host.windows.is_empty());
@@ -1127,8 +1286,14 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(3, &mode(120, 80, DisplayFormat::Rgba8888), "Files", false)
-                .expect("opens");
+            host.window_opened(
+                window_owner(1),
+                3,
+                &mode(120, 80, DisplayFormat::Rgba8888),
+                "Files",
+                false,
+            )
+            .expect("opens");
             host.windows.records.get(&3).expect("live").wm
         };
         // The window manager decorated the served window with its channel
@@ -1213,8 +1378,14 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(7, &mode(480, 320, DisplayFormat::Rgba8888), "Files", false)
-                .expect("opens");
+            host.window_opened(
+                window_owner(1),
+                7,
+                &mode(480, 320, DisplayFormat::Rgba8888),
+                "Files",
+                false,
+            )
+            .expect("opens");
             host.windows.records.get(&7).expect("live").wm
         };
 
@@ -1381,6 +1552,7 @@ mod tests {
     /// Open one served window with an explicit `resizable` request.
     fn open_one_sized(host: &mut ShellWindowHost<'_>, window_id: u64, resizable: bool) -> WindowId {
         host.window_opened(
+            window_owner(1),
             window_id,
             &mode(120, 80, DisplayFormat::Rgba8888),
             "app",
@@ -1445,6 +1617,60 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_secondary_close_reaches_only_the_owning_app_and_closes_nothing() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            open_one(&mut host, 7)
+        };
+        // A session-owned window (the trusted picker, the greeter) is served
+        // to no app, so it has nothing to notify.
+        let session_owned = shell
+            .open_window(
+                &mut compositor,
+                Point::new(10, 10),
+                Surface::new(40, 20).expect("surface"),
+                "Picker",
+            )
+            .expect("a session window");
+
+        assert_eq!(
+            window_control_alternate_event(WindowControlKind::Close, wm, &windows),
+            Some(WindowEvent::AlternateCloseRequested { window_id: 7 })
+        );
+        // The session performs nothing of its own: the window is still open,
+        // visible, and where it was.
+        assert!(compositor.window(wm).expect("live").is_visible());
+        assert!(windows.records.contains_key(&7));
+        // Every other control's secondary press means nothing.
+        for control in [
+            WindowControlKind::Minimize,
+            WindowControlKind::PutToBack,
+            WindowControlKind::SizeToggle,
+        ] {
+            assert_eq!(
+                window_control_alternate_event(control, wm, &windows),
+                None,
+                "{control:?} has no alternate meaning"
+            );
+        }
+        // A session-owned window's close control leaks no event.
+        assert_eq!(
+            window_control_alternate_event(WindowControlKind::Close, session_owned, &windows),
+            None
+        );
+        assert!(compositor.window(session_owned).expect("live").is_visible());
     }
 
     /// A validated backdrop-blur request frosts exactly the window it
@@ -1656,6 +1882,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_retitled_moves_the_chrome_and_the_taskbar_label_together() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            let wm = open_one(&mut host, 7);
+            host.window_retitled(7, "Files - Documents")
+                .expect("the owner retitles");
+            // An unknown window is refused and changes nothing.
+            assert_eq!(host.window_retitled(99, "ghost"), Err(Errno::NotFound));
+            wm
+        };
+        let title = compositor
+            .window(wm)
+            .expect("live")
+            .frame()
+            .expect("decorated")
+            .title_bar()
+            .title();
+        assert_eq!(title, "Files - Documents");
+        let labels: alloc::vec::Vec<&str> = shell
+            .session()
+            .taskbar()
+            .tasks()
+            .entries()
+            .iter()
+            .map(|entry| entry.title.as_str())
+            .collect();
+        assert_eq!(labels, ["Files - Documents"]);
+    }
+
     /// The bridge forwards a validated pick request to the slot and
     /// aborts the window's pick when the window closes.
     #[test]
@@ -1671,7 +1936,8 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(1, &m, "w", false).expect("opens");
+        host.window_opened(window_owner(1), 1, &m, "w", false)
+            .expect("opens");
         host.pick_requested(1).expect("slot accepts");
         host.window_closed(1);
         assert_eq!(picker.begun, alloc::vec![1]);

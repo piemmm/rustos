@@ -75,9 +75,12 @@ pub fn operation_control(
         // arm of its own: the modal loop that polls this re-presents the
         // progress panel in full on every pass, so the released pixels are back
         // on the next step. A desktop change is already adopted by the caller
-        // before this is reached. The rest is input that must not navigate
-        // behind the modal panel.
-        WindowEvent::Key { .. }
+        // before this is reached. The alternate close means "leave this folder",
+        // which would move the listing the running operation is walking, so it
+        // is ignored while the panel is up rather than deferred. The rest is
+        // input that must not navigate behind the modal panel.
+        WindowEvent::AlternateCloseRequested { .. }
+        | WindowEvent::Key { .. }
         | WindowEvent::Focus { .. }
         | WindowEvent::Minimized { .. }
         | WindowEvent::RedrawRequested { .. }

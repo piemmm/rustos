@@ -60,6 +60,10 @@ pub enum IconKind {
     Folder,
     /// An open folder, for a directory being entered or a drop target.
     FolderOpen,
+    /// A folder with pages stacked behind it, for a directory that holds at
+    /// least one entry — the occupancy cue beside the empty
+    /// [`Folder`](Self::Folder).
+    FolderFilled,
     /// A generic document, for a regular file of no recognised class.
     File,
     /// An application tile, for a `<Name>.app` bundle.
@@ -165,6 +169,7 @@ impl IconKind {
             "bell" => Self::Bell,
             "folder" => Self::Folder,
             "folder-open" => Self::FolderOpen,
+            "folder-filled" => Self::FolderFilled,
             "file" => Self::File,
             "app-bundle" => Self::AppBundle,
             "text" => Self::Text,
@@ -266,6 +271,7 @@ impl IconKind {
             Self::Resume => 44,
             Self::Priority => 45,
             Self::Quit => 46,
+            Self::FolderFilled => 47,
         }
     }
 
@@ -326,6 +332,7 @@ impl IconKind {
             Self::Resume => "resume",
             Self::Priority => "priority",
             Self::Quit => "quit",
+            Self::FolderFilled => "folder-filled",
         }
     }
 }
@@ -357,6 +364,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Bell => bell(color),
         IconKind::Folder => folder(color),
         IconKind::FolderOpen => folder_open(color),
+        IconKind::FolderFilled => folder_filled(color),
         IconKind::File => file(color),
         // The app-bundle, text, and image families each share one built-in
         // glyph: the fine-grained kinds differ only in their shipped raster
@@ -463,6 +471,19 @@ fn folder_open(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![
         IconLayer::from_points(color, BACK),
         IconLayer::from_points(color, FRONT),
+    ]
+}
+
+/// A folder holding papers: a low folder body with two offset sheets standing
+/// clear above it, so the stack still reads as "holds something" in one tint.
+fn folder_filled(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const PAGE_BACK: &[(i32, i32)] = &[(10, 2), (19, 2), (19, 10), (10, 10)];
+    const PAGE_FRONT: &[(i32, i32)] = &[(6, 4), (15, 4), (15, 10), (6, 10)];
+    const BODY: &[(i32, i32)] = &[(2, 12), (8, 12), (10, 14), (22, 14), (22, 21), (2, 21)];
+    vec![
+        IconLayer::from_points(color, PAGE_BACK),
+        IconLayer::from_points(color, PAGE_FRONT),
+        IconLayer::from_points(color, BODY),
     ]
 }
 

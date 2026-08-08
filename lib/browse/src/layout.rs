@@ -9,7 +9,7 @@
 //! user saw (§2.2). [`ViewLayout`] is the dispatch that lets a caller treat the
 //! two uniformly without branching on the browser's [`ViewMode`].
 //!
-//! Each view is a fixed-height header (the path bar) followed by the scrolling
+//! Each view is a fixed-height header (the toolbar) followed by the scrolling
 //! item area. The scroll offset — a *desired first visible line*, in the view's
 //! own line unit (list rows, or whichever axis the grid's [`GridFlow`] scrolls
 //! along) — is owned by the [`Browser`] and clamped here through the shared
@@ -135,6 +135,19 @@ impl ListView {
     #[must_use]
     pub fn first_visible(&self, offset: u64) -> usize {
         usize::try_from(self.scroll_range(offset).offset()).unwrap_or(usize::MAX)
+    }
+
+    /// The half-open range of entry indices currently drawn for the desired
+    /// scroll `offset` — the one definition a renderer iterates, so it can
+    /// never disagree with [`row_rect`](Self::row_rect) about which rows are
+    /// on screen.
+    #[must_use]
+    pub fn visible_range(&self, offset: u64) -> core::ops::Range<usize> {
+        let start = self.first_visible(offset);
+        let end = start
+            .saturating_add(self.visible_rows())
+            .min(self.entry_count);
+        start..end.max(start)
     }
 
     /// The scroll offset that keeps `selected` visible while moving the least:
@@ -754,6 +767,16 @@ impl ViewLayout {
         match self {
             Self::List(v) => v.visible_rows(),
             Self::Grid(v) => v.visible_lines(),
+        }
+    }
+
+    /// The half-open range of entry indices the active view currently draws
+    /// for the desired scroll `offset`.
+    #[must_use]
+    pub fn visible_range(&self, offset: u64) -> core::ops::Range<usize> {
+        match self {
+            Self::List(v) => v.visible_range(offset),
+            Self::Grid(v) => v.visible_range(offset),
         }
     }
 }

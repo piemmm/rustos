@@ -26,6 +26,7 @@ use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 
 use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::BlurScratch;
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
@@ -1102,6 +1103,57 @@ impl Compositor {
         };
         self.damage.add(band);
         true
+    }
+
+    /// Give the decorated window named by `id` the owning application's
+    /// identity: `identity` is the icon class its title bar reserves a slot
+    /// for, and `artwork` is the picture to draw there. Returns `false` for an
+    /// unknown or undecorated window.
+    ///
+    /// `artwork` must already be rasterised at
+    /// [`TitleBar::icon_side`](tairix_controls::TitleBar::icon_side) of this
+    /// window's laid-out *title band*, which is what
+    /// [`window_title_icon_side`](Self::window_title_icon_side) reports;
+    /// `None` draws the built-in glyph for `identity`, so an identified window
+    /// is never a blank slot. The identity is the embedder's attestation of
+    /// who owns the window, never a string the application supplied.
+    ///
+    /// Only the top (title) furniture band is marked dirty and only this
+    /// window's chrome-cache entry is dropped — an identity is no more
+    /// expensive than a retitle.
+    pub fn set_window_identity(
+        &mut self,
+        id: WindowId,
+        identity: IconKind,
+        artwork: Option<Surface>,
+    ) -> bool {
+        let band = self.mutate_frame(id, |window, _, _| {
+            window
+                .set_frame_identity(identity, artwork)
+                .then(|| window.title_band())
+        });
+        let Some(Some(band)) = band else {
+            return false;
+        };
+        self.damage.add(band);
+        true
+    }
+
+    /// The pixel side the identity icon of the decorated window named by `id`
+    /// paints at, or `None` for an unknown or undecorated window.
+    ///
+    /// This is the size an owner rasterises artwork at before handing it to
+    /// [`set_window_identity`](Self::set_window_identity): the compositor
+    /// resolves it from the window's own laid-out title band at the active
+    /// scale and theme, so a caller never has to reconstruct that geometry.
+    #[must_use]
+    pub fn window_title_icon_side(&self, id: WindowId) -> Option<u32> {
+        let window = self.window(id)?;
+        let frame = window.frame()?;
+        let band = frame
+            .layout(window.bounds(), self.scale, &self.theme)
+            .title_bar;
+        Some(frame.title_bar().icon_side(band, self.scale, &self.theme))
     }
 
     /// Classify the screen `point` against the furniture of the window named

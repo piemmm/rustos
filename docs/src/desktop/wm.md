@@ -377,8 +377,9 @@ the chrome. The furniture family itself lives once in
 - **Rendering.** A decorated window's furniture is a `WindowChrome`: the
   four strips the frame actually draws into — the top (title) band, the
   bottom band, and the two side borders — painted through
-  `WindowFrame::render` / `TitleBar::render` (rim, body, the sanitised title
-  text via `lib/font`, and the four command controls), using the one
+  `WindowFrame::render` / `TitleBar::render` (rim, body, the owning
+  application's identity icon, the sanitised title text via `lib/font`, and
+  the four command controls), using the one
   `lib/raster` fill and the shared rounded-corner path — so the rim's
   rounded corners stay transparent and the desktop shows through. Only the
   strips are kept: the region between them is never sampled (the compositor
@@ -462,7 +463,11 @@ the chrome. The furniture family itself lives once in
   (`tairix_desktop_session::window_control_event`), so the live serve loop and
   the tests drive the same rule: **Close** returns
   `WindowEvent::CloseRequested` (the app tears down cooperatively — the window
-  manager never destroys a window behind the app's back); **Minimize** hides
+  manager never destroys a window behind the app's back); a **secondary**
+  press on Close is a distinct gesture, `WindowEvent::AlternateCloseRequested`
+  (`window_control_alternate_event`), which closes nothing itself — the file
+  manager reads it as "go up a folder", an app with no such notion ignores it,
+  and a session-owned window with no channel drops it; **Minimize** hides
   the window, marks its taskbar entry minimised, drops focus, and returns
   `WindowEvent::Minimized`; **PutToBack** restacks to the bottom of the
   z-order with no app-ward event; **SizeToggle** maximizes to the session work
@@ -537,7 +542,49 @@ The desktop session (`userland/gui/session`) turns decorations on for every
 `ShellWindowHost::window_opened` opens the bare window through the shell and
 then calls `DesktopShell::decorate_window`, which attaches a `WindowFrame`
 (always movable by its title bar) and labels its title bar with the channel's
-`WindowTitle`. Files, the terminal, and any future windowed app are decorated
+`WindowTitle`.
+
+The title bar also carries the **owning application's identity icon**, drawn
+in a square slot at the leading edge of the drag region with the title text
+starting after it. The icon is inert: it drags the window like the rest of
+the region and is never a control. A window with no identity reserves no slot
+and its title takes the whole band.
+
+- **Attested, never claimed.** `WindowServer` hands
+  `WindowHost::window_opened` the caller's kernel-attested `ProcId`, which
+  `ShellWindowHost` records against the compositor window it just opened.
+  The session's `resolve_window_identities` then drains those records — the
+  step immediately after the serve pass, because the attested-caller table
+  and the launch records are both borrowed while a request is served — maps
+  each pid to the bundle the desktop launched (`LaunchTable`) and resolves
+  that bundle's own icon through the one chain a taskbar pin uses
+  (`bundle_manifest_path` → `decode_bundle_manifest` → `bundle_icon_source`
+  → the session's single `ArtworkCache` and sandboxed rasteriser). No string
+  an app supplies can choose the icon, and one app's pid cannot yield another
+  app's artwork.
+- **Total resolution, and a window always opens.** An unidentified caller (a
+  shell-spawned app, a child process) gets no icon at all rather than a
+  fabricated badge. An identified bundle whose artwork is missing, refused,
+  or undecodable gets `IconKind::AppBundle` with no artwork — the built-in
+  glyph — so a slot is never blank. Every failure is a missing icon, never a
+  failed window open.
+- **Rasterised once, at the size drawn.** `Compositor::window_title_icon_side`
+  reports the slot side for that window's laid-out title band at the active
+  scale, and `Compositor::set_window_identity` takes the identity plus the
+  artwork already rasterised at it, dirtying only the title band and dropping
+  only that window's chrome-cache entry. A second window of the same
+  application costs a cache lookup: the shared `ArtworkCache` serves it
+  without re-reading or re-decoding the asset.
+
+The title text elides with the shared `ELLIPSIS` mark rather than being cut,
+because a title may be a path.
+
+An app retitles its own window over the channel with
+`WindowRequest::SetTitle`, which the server admits only from the window's
+owner; `ShellWindowHost::window_retitled` moves the title bar and the taskbar
+entry label from that one call, so the two cannot diverge.
+
+Files, the terminal, and any future windowed app are decorated
 this way with **no per-app decoration code** — the one place a served window is
 dressed is the window manager.
 

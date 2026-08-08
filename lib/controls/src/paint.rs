@@ -241,6 +241,18 @@ pub(crate) fn paint_text_line(
     y.saturating_add(line_h).saturating_add(gap)
 }
 
+/// The side of the square icon slot a control reserves beside a line of text
+/// whose content height is `content_height`: the text line, never taller than
+/// the content.
+///
+/// Sizing the slot off the text line is what makes an icon line up with the
+/// label beside it. One definition, so a control's "what side do I paint at"
+/// and an owner's "what side do I rasterise at" cannot drift apart, and so a
+/// list row and a title bar reserve the same column for the same text.
+pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
+    font.glyph_height().min(content_height)
+}
+
 /// Paint a content icon at `(x, y)` into a `side`-pixel square slot: the
 /// owner-supplied `artwork` when present, else the built-in class glyph for
 /// `kind` tinted `tint`.

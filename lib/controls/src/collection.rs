@@ -28,7 +28,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::{BitmapFont, TextLine, ELLIPSIS};
+use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -37,10 +37,10 @@ use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    dominant_color, draw_outline, foreground, heavy_contrast, inset, key_activation, paint_bead,
-    paint_chevron, paint_count_badge, paint_icon_slot, plate_border, pointer_activation,
-    press_latch, rail_thickness, resolve_bead, resolve_rail, role_font, seam_thickness, seam_width,
-    surface_rect, to_i32, ChevronDir,
+    dominant_color, draw_outline, foreground, heavy_contrast, icon_slot_side, inset,
+    key_activation, paint_bead, paint_chevron, paint_count_badge, paint_icon_slot, plate_border,
+    pointer_activation, press_latch, rail_thickness, resolve_bead, resolve_rail, role_font,
+    seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -383,15 +383,7 @@ impl ListRow {
         let Some((_, _, _, h)) = surface_rect(bounds) else {
             return 0;
         };
-        Self::icon_slot_side(font, h)
-    }
-
-    /// The side of the square icon column a row of content height `ch`
-    /// reserves: the text line, never taller than the row. One definition so
-    /// [`Self::icon_side`] and [`Self::render`] cannot size the column
-    /// differently.
-    fn icon_slot_side(font: BitmapFont, ch: u32) -> u32 {
-        font.glyph_height().min(ch)
+        icon_slot_side(font, h)
     }
 
     /// Paint the row into `surface` at `bounds` for the active theme.
@@ -402,6 +394,11 @@ impl ListRow {
     /// row with no reserved icon ignores it. The artwork is decoded and
     /// rasterised long before it reaches this call — a control never parses
     /// image bytes.
+    ///
+    /// The trailing caption takes what it needs of the content and the label
+    /// takes the rest; either one too long for its share ends with
+    /// [`ELLIPSIS`], so a reader can tell a hidden tail from a name that
+    /// simply ends there.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -426,7 +423,7 @@ impl ListRow {
         let mut left = cx;
         // The leading icon on a reserved column, so labels line up whether or
         // not a row has an icon (text stability, spec §14).
-        let icon_slot = Self::icon_slot_side(font, ch);
+        let icon_slot = icon_slot_side(font, ch);
         if let Some(kind) = self.icon {
             if icon_slot > 0 {
                 let iy = cy + (ch.saturating_sub(icon_slot)) / 2;
@@ -439,18 +436,23 @@ impl ListRow {
         // The trailing caption, muted and right-aligned inside the content.
         if let Some(text) = &self.trailing {
             if right > left {
-                let fitted = font.truncate_to_width(text, right - left);
-                let tw = font.text_width(fitted);
-                let tx = to_i32(right) - to_i32(tw);
-                font.draw_text(surface, tx, text_y, fitted, muted);
+                let run = font.elide_to_width(text, right - left);
+                let tw = run_width(font, run);
+                paint_run(
+                    surface,
+                    font,
+                    run,
+                    (to_i32(right) - to_i32(tw), text_y),
+                    muted,
+                );
                 right = right.saturating_sub(tw).saturating_sub(pad);
             }
         }
 
         // The label, left-aligned in the remaining space.
         if right > left {
-            let fitted = font.truncate_to_width(&self.label, right - left);
-            font.draw_text(surface, to_i32(left), text_y, fitted, fg);
+            let run = font.elide_to_width(&self.label, right - left);
+            paint_run(surface, font, run, (to_i32(left), text_y), fg);
         }
     }
 
@@ -2077,11 +2079,9 @@ impl IconTile {
         };
         let mut top = band.top;
         for line in font.wrap_to_width(&self.label, band.right - band.left, band.lines) {
-            let x = to_i32(centre_x(line_width(font, line), band.left, band.right));
-            let pen = font.draw_text(surface, x, to_i32(top), line.text, color);
-            if line.elided {
-                font.draw_text(surface, pen, to_i32(top), ELLIPSIS, color);
-            }
+            let run = (line.text, line.elided);
+            let x = to_i32(centre_x(run_width(font, run), band.left, band.right));
+            paint_run(surface, font, run, (x, to_i32(top)), color);
             top = top.saturating_add(font.line_height());
         }
     }
@@ -2226,13 +2226,36 @@ struct LabelBand {
     lines: usize,
 }
 
-/// The drawn width of one wrapped line, ellipsis included.
-fn line_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
-    let width = font.text_width(line.text);
-    if line.elided {
+/// The drawn width of a fitted run — the pair a fitter hands back, text and
+/// whether [`ELLIPSIS`] follows it — mark included.
+fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
+    let (text, elided) = run;
+    let width = font.text_width(text);
+    if elided {
         return width.saturating_add(font.text_width(ELLIPSIS));
     }
     width
+}
+
+/// Draw a fitted run at `at`, its mark included.
+///
+/// The one "text, then the mark" recipe every collection control paints cut
+/// text through, so a hidden tail always says so rather than stopping
+/// mid-word as if the text ended there. A run the fitter marked unelided —
+/// including a box too narrow for the mark itself — draws its text alone.
+fn paint_run(
+    surface: &mut Surface,
+    font: BitmapFont,
+    run: (&str, bool),
+    at: (i32, i32),
+    color: Color,
+) {
+    let (text, elided) = run;
+    let (x, y) = at;
+    let pen = font.draw_text(surface, x, y, text, color);
+    if elided {
+        font.draw_text(surface, pen, y, ELLIPSIS, color);
+    }
 }
 
 /// Fill an [`IconTile`]'s whole `rect` with one plate colour, rounded by the

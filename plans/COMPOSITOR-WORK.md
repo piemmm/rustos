@@ -171,7 +171,27 @@ guarantees:
   same paths.
 - The title the WM receives on the channel (`WindowTitle`) is rendered in the
   title bar via `Compositor::set_window_title`, not merely used as the taskbar
-  label.
+  label. It elides with the shared `ELLIPSIS` mark (`BitmapFont::elide_to_width`)
+  rather than being cut, because a title may be a path.
+- The title bar carries the **owning application's identity icon** in a square
+  slot at the leading edge of the drag region, with the text starting after
+  it; a window with no identity reserves no slot and its title takes the whole
+  band. The slot is `crate::paint::icon_slot_side` and the artwork is drawn by
+  the shared `paint_icon_slot`, so there is no second icon path. The icon is
+  inert — part of the draggable region, never a control.
+  `Compositor::window_title_icon_side` reports the side to rasterise at and
+  `Compositor::set_window_identity` takes the identity plus that artwork,
+  dirtying only the title band and dropping only that window's chrome entry.
+  Identity comes from the caller `WindowServer` attested:
+  `WindowHost::window_opened` carries the `ProcId`, `ShellWindowHost` records
+  it against the window, and `resolve_window_identities` drains those records
+  immediately after the serve pass (the attested-caller table and the launch
+  records are both borrowed while a request is served), mapping pid →
+  `LaunchTable` bundle → that bundle's own `AppInfo` icon through the one
+  `ArtworkCache` a taskbar pin uses. No app-supplied string can choose it, an
+  unidentified caller gets no icon, an unresolvable one gets the built-in
+  `IconKind::AppBundle` glyph — a window always opens — and a second window of
+  the same application is a cache hit, not a second read and decode.
 - Activation follows the focused window through
   `Compositor::set_active_frame`, which repaints the title and controls;
   attention requests are preserved rather than clobbered by a focus change.
@@ -312,6 +332,24 @@ complete. What it now guarantees:
   windowed app are decorated with **no per-app decoration code**. The session's
   own trusted file picker is session chrome, dismissed by its own keys, so it
   opens *undecorated* — no inert title bar.
+- **An app retitles its own window.** `WindowRequest::SetTitle` (`OP_SET_TITLE`
+  12) carries a `WindowTitle` for a window the caller owns; the server applies
+  the same ownership check `Present`/`Resize` use before touching any state and
+  answers a foreign id `NotFound`. `ShellWindowHost::window_retitled` moves the
+  title bar and the taskbar entry label from one call
+  (`DesktopShell::retitle_window` → `TaskBridge::retitle`), so the two cannot
+  diverge; a session-owned undecorated window relabels on the bar alone. The
+  file picker uses it to show where it is browsing, spelled by the shared
+  `tairix_browse::vfs::spell_title_location` against a budget derived once from
+  `WINDOW_TITLE_MAX` minus its fixed prefix.
+- **A secondary press on Close is its own gesture.** `WindowControl::on_pointer`
+  resolves it to `WindowControlAction::AlternateInvoked` *without* touching the
+  control's press latch or arming it, so the drawn state is provably
+  unchanged and the control never also activates; the window manager reports
+  `InputResponse::WindowControlAlternate` and the session maps it to
+  `WindowEvent::AlternateCloseRequested` (`EV_ALTERNATE_CLOSE_REQUESTED` 12)
+  for the owning app only. It closes nothing. A session-owned window has no
+  channel id, so the press is dropped rather than leaked.
 - **Exactly one active frame follows focus.** `DesktopShell::sync_active_frame`
   reconciles the compositor's active-frame decoration with the window manager's
   focused window on every focus change (click-to-activate, taskbar activation,

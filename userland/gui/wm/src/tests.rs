@@ -23,7 +23,7 @@ use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 use crate::select::{cursor_cache, CursorEpoch};
 
-use crate::{WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
+use crate::{IconKind, WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
 fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
@@ -2628,6 +2628,82 @@ fn the_window_title_is_rendered_in_the_title_bar() {
 }
 
 #[test]
+fn setting_an_identity_repaints_only_the_title_band() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_title(id, "Documents"));
+    c.composite();
+    assert!(!c.has_damage());
+
+    assert!(c.set_window_identity(id, IconKind::AppBundle, None));
+    assert!(c.has_damage());
+
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+    assert!(!c.damage_covers(centre(client)));
+    assert!(!c.damage_covers(Point::new(centre(bounds).x, bounds.bottom() - 1)));
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+
+    // Refused for an undecorated or unknown window, which therefore has no
+    // slot side to report either.
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    assert!(!c.set_window_identity(plain, IconKind::AppBundle, None));
+    assert!(!c.set_window_identity(WindowId(9_999), IconKind::AppBundle, None));
+    assert_eq!(c.window_title_icon_side(plain), None);
+    assert_eq!(c.window_title_icon_side(WindowId(9_999)), None);
+}
+
+#[test]
+fn the_owning_applications_icon_is_drawn_in_the_title_bar() {
+    // Two identical titled windows differing only in whether they carry an
+    // identity must composite to different frames: the icon is drawn, and its
+    // artwork is drawn in place of the built-in glyph.
+    let (mut bare, bare_id) = decorated_compositor();
+    assert!(bare.set_window_title(bare_id, "Documents"));
+    bare.composite();
+
+    let (mut glyphed, id) = decorated_compositor();
+    assert!(glyphed.set_window_title(id, "Documents"));
+    let side = glyphed
+        .window_title_icon_side(id)
+        .expect("a decorated window reports its slot side");
+    assert!(side > 0);
+    assert!(glyphed.set_window_identity(id, IconKind::AppBundle, None));
+    glyphed.composite();
+    assert_ne!(
+        bare.frame(),
+        glyphed.frame(),
+        "an identity with no artwork still draws its built-in glyph"
+    );
+
+    let (mut arted, other) = decorated_compositor();
+    assert!(arted.set_window_title(other, "Documents"));
+    assert!(arted.set_window_identity(other, IconKind::AppBundle, Some(opaque(side, side, GREEN))));
+    arted.composite();
+    assert_ne!(
+        glyphed.frame(),
+        arted.frame(),
+        "the owner's artwork replaces the glyph"
+    );
+}
+
+#[test]
+fn setting_an_identity_evicts_only_that_windows_chrome() {
+    let (mut c, first) = decorated_compositor();
+    let second = c.add_window(Point::new(120, 120), opaque(60, 40, RED));
+    assert!(c.set_window_frame(second, WindowFrame::new(decorated())));
+    c.composite();
+    assert!(c.chrome_resident(first));
+    assert!(c.chrome_resident(second));
+
+    assert!(c.set_window_identity(second, IconKind::AppBundle, None));
+    assert!(
+        c.chrome_resident(first),
+        "the sibling window's furniture is still valid"
+    );
+    assert!(!c.chrome_resident(second));
+}
+
+#[test]
 fn the_light_theme_draws_the_furniture_chrome() {
     let (mut c, id) = decorated_compositor();
     assert!(c.set_theme(Theme::light()));
@@ -2966,6 +3042,58 @@ fn a_command_control_click_emits_its_typed_action() {
             window: id,
             control: kind,
         }
+    );
+}
+
+#[test]
+fn a_secondary_press_on_a_command_control_reports_the_alternate_gesture() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let kind = match c.frame_hit(id, control) {
+        Some(FurniturePart::WindowControl(kind)) => kind,
+        other => panic!("expected a control, found {other:?}"),
+    };
+    let bounds = c.window(id).expect("window").bounds();
+
+    router.handle(moved(control.x, control.y), &mut c);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::WindowControlAlternate {
+            window: id,
+            control: kind,
+        }
+    );
+    // The window is raised and focused as any secondary press does, but its
+    // geometry and size state are untouched: no command ran.
+    assert_eq!(router.focused(), Some(id));
+    assert_eq!(c.window(id).expect("window").bounds(), bounds);
+    assert_eq!(
+        c.window(id).expect("window").size_state(),
+        WindowSizeState::Restored
+    );
+    // A following primary click on the same control still means the command.
+    router.handle(press_primary(), &mut c);
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::WindowControl {
+            window: id,
+            control: kind,
+        }
+    );
+}
+
+#[test]
+fn a_secondary_press_elsewhere_on_the_frame_is_still_consumed() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("a title band");
+
+    router.handle(moved(drag.x, drag.y), &mut c);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c),
+        InputResponse::FurniturePressed { window: id }
     );
 }
 

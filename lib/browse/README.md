@@ -39,6 +39,22 @@ can never diverge in navigation semantics, listing policy, or look.
   never narrows what can open it. The whole registry is a **display and offer
   hint only**: it decides a glyph and which applications are *offered*, never
   an operation; authority stays in the VFS and the launcher.
+  `icon_for_entry(entry, parent)` is the one classification both views draw
+  through: the registry's glyph, except that a plain directory *known* to hold
+  something takes `IconKind::FolderFilled`. Only a known answer changes the
+  icon, so an unprobed, empty, or unreadable folder is the plain one.
+- **Folder occupancy** (`Occupancy`, `DirectorySource::has_children`,
+  `Browser::resolve_occupancy`): a directory's `size` is `0` and no VFS
+  surface reports a child count, so "does this folder hold anything?" is a
+  separate per-child read. An `Entry` carries the four honest answers
+  — `Unprobed`, `Empty`, `NonEmpty`, `Indeterminate` (refused or failed) — and
+  `resolve_occupancy(range)` answers only the indices its caller passes,
+  probing only an entry that still needs one, so a hundred-thousand-entry
+  directory costs what is on screen. A refusal is recorded rather than
+  retried, and a fresh listing resets every answer. A source that does not
+  implement the probe answers `NotImplemented`, which reads as
+  `Indeterminate`: the trusted picker takes that default deliberately, so it
+  exercises no directory-read authority it does not need.
 - **Sort** (`SortMode`/`sort_entries`): the one listing order both views
   share — directories first, then a `Name`/`Size`/`Modified` key with a
   direction, with a case-insensitive name tiebreak so the result never
@@ -53,12 +69,10 @@ can never diverge in navigation semantics, listing policy, or look.
   engine never fabricates an entry: it shows exactly what its source
   returns, with every permission decision staying in the VFS behind the
   source under the composing process's own identity.
-- **Navigation history and breadcrumbs** (`Browser`): a bounded back /
+- **Navigation history** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar
-  controls), `navigate_to_depth`, the breadcrumb-click primitive that
-  jumps to an ancestor by path depth (`0` is the root, `components().len()`
-  is the current directory — a no-op), and `navigate_to(components)`, the
+  controls) and `navigate_to(components)`, the
   jump-to-an-arbitrary-location primitive (neither an ancestor nor a listed
   child — the file manager's "go to Trash" location uses it to reach
   `Library/Trash`). Every one of these is the same transactional, fail-closed
@@ -67,16 +81,13 @@ can never diverge in navigation semantics, listing policy, or look.
   history is a bounded ring that drops the oldest location rather than growing
   without bound.
 - **Frame model** (`chrome`, `plans/NEW-FILEMANAGER.md` FM4b): the pure
-  model behind the drawn toolbar and breadcrumb path bar, host-proven ahead
+  model behind the drawn toolbar, host-proven ahead
   of the chrome it drives. `ToolbarModel::for_browser` snapshots which
   `ToolbarCommand` is actionable — Back / Forward / Up reflect the navigation
   history and depth (`can_go_back` / `can_go_forward` / `!is_root`); Refresh,
   the view toggle, and sort are always available — plus the active view and
   sort so a tool renders disabled (never hidden) when it cannot apply.
-  `breadcrumbs` turns the root-first components into the ordered `Crumb`s of
-  the path bar, each carrying the ancestor `depth` the drawn crumb binds to
-  `navigate_to_depth` (`0` is the root); the terminal crumb is the current
-  directory (`is_current`), whose jump is a no-op. `ToolbarCommand::icon`
+  `ToolbarCommand::icon`
   gives each command its `lib/icon` glyph, and `apply_command(browser, cmd)`
   is the one shared, **read-only** dispatch (Back / Forward / Up / Refresh /
   view toggle / sort cycle over `ViewMode::toggled` and `SortMode::next`) both
@@ -517,14 +528,6 @@ can never diverge in navigation semantics, listing policy, or look.
   and does no I/O, so the read-only picker (which never deletes or copies)
   never builds one. The delete, copy/paste, and move-to-Trash drives are all
   wired end to end in the files app, each reusing this one panel.
-- **Breadcrumb placement** (`breadcrumb`, `plans/NEW-FILEMANAGER.md` FM4b):
-  the pure geometry of the drawn, clickable path bar. `layout` places each
-  `Crumb`'s label left to right from measured widths and **right-anchors** the
-  strip so the current directory stays visible, letting overflowing leading
-  ancestors scroll off the left (clipped) rather than dropping any crumb;
-  `crumb_at` is the mirror hit-test over that same placement. Font-agnostic
-  (it works in measured pixel widths), so it is host-proven with synthetic
-  widths and shared by the painter and the pointer hit-test (one definition).
 - **Renderer** (`render`): every entry point takes the desktop's
   `tairix_geometry::Scale` and the active `Theme`, and nothing takes a
   typeface: each resolves the body face the theme's own ladder names at that
@@ -532,10 +535,8 @@ can never diverge in navigation semantics, listing policy, or look.
   and every chrome length — row pitch, tile size, toolbar strip, scrollbar
   gutter, panel and dialog bounds, menu placement — is authored logically and
   converted through that one scale, so the chrome tracks the display density
-  the text does. It paints the path bar and the current directory
-  into a `lib/raster` `Surface` in the browser's `ViewMode` — the path bar as
-  a clickable breadcrumb trail (ancestors in the accent colour, the current
-  directory drawn solid and inert) over the `breadcrumb` placement, list
+  the text does. It paints the current directory
+  into a `lib/raster` `Surface` in the browser's `ViewMode` — list
   entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
   grid entries as shared `IconTile`s, each carrying the icon of its
   registry-classified type above the label and no plate of its own (only a
@@ -550,12 +551,16 @@ can never diverge in navigation semantics, listing policy, or look.
   blits what it returns or draws the built-in vector glyph when it returns
   `None` — so a missing, oversize, or refused asset degrades to a meaningful
   icon and can never blank the tile. A caller with no cache passes
-  `tairix_icon::NoArtwork`; the list view is text-only and never
-  consults the lookup. A vertical `lib/controls` `ScrollBar` is drawn in
+  `tairix_icon::NoArtwork`; a list row carries the same classified kind in
+  its name cell, drawn as the built-in glyph, so a folder and a file are told
+  apart without the artwork lookup. `visible_range` is the one definition of
+  which entry indices are on screen — dispatching on the view mode over the
+  same list/grid geometry both painters use — so what a caller probes and what
+  it draws cannot disagree. A vertical `lib/controls` `ScrollBar` is drawn in
   a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
   routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
   keeps the selection visible, and `entry_index_at` is the shared item point
-  hit-test (`crumb_at` its path-bar counterpart). Above the path bar it draws
+  hit-test. Above the item view it draws
   the command toolbar (`chrome::TOOLBAR_COMMANDS` as a `lib/controls`
   `Toolbar` of themed `IconButton`s, disabled tools muted from the
   `ToolbarModel`); `toolbar_command_at` is that strip's hit-test, returning
@@ -563,7 +568,7 @@ can never diverge in navigation semantics, listing policy, or look.
   of window chrome here, so `toolbar_bounds` and the three hit-tests that
   invert it (`toolbar_command_at`, `manager_tool_at`, `manager_tool_rect`)
   take the **whole window**, while `content_area` — the window less the rail —
-  is what the path bar, the item view, the scrollbar, and every overlay
+  is what the item view, the scrollbar, and every overlay
   occupy. With no rail (the picker) `content_area` *is* the window, so that
   window is laid out exactly as it always was. Because a *write* action must never
   reach the read-only picker that shares this toolbar, the manager-only write
@@ -581,8 +586,8 @@ can never diverge in navigation semantics, listing policy, or look.
   Trash, a fact the file manager computes from `HOME` and threads in.
   `manager_tool_at` is their mirror
   hit-test, resolving only an *enabled* tool (fail closed), so the picker can
-  neither draw nor resolve a write tool. `chrome_height` (the toolbar strip
-  plus the path bar) is the one header offset the item views, the scrollbar
+  neither draw nor resolve a write tool. `chrome_height` (the toolbar strip)
+  is the one header offset the item views, the scrollbar
   gutter, and every hit-test share. `selection_rect` is
   `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
   an overlay (the in-place rename editor) sits exactly over it.
@@ -598,8 +603,8 @@ can never diverge in navigation semantics, listing policy, or look.
   row's uid/gid values editable, drawn only for a `CAP_FS_CHOWN` holder.
   When the chrome carries a places rail, `render` paints the rail down the
   leading edge first and lays everything else out inside `content_area`: the
-  toolbar, the path bar, the list or grid, and the scrollbar gutter are all
-  inset by the rail, and every hit-test (`toolbar_command_at`, `crumb_at`,
+  toolbar, the list or grid, and the scrollbar gutter are all
+  inset by the rail, and every hit-test (`toolbar_command_at`,
   `entry_index_at`, the scrollbar) resolves against that same inset area, with
   `sidebar_index_at` the rail's own mirror. With no rail `content_area` is the
   viewport unchanged, so a window without one is pixel-for-pixel what it was

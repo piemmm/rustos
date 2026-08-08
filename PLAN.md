@@ -3639,11 +3639,11 @@ transfer, landed in increments:
   size/date column formatting), **FM2b** (the icon-grid view, the runtime view
   toggle, and the drawn `ScrollBar`), **FM3** (the file-type icon classifier +
   drawn grid-tile glyphs), and **FM4a** (the engine navigation model — bounded
-  back/forward history + breadcrumb `navigate_to_depth`, all transactional and
-  fail-closed) are **done**, as are **FM5** (in-place rename — the first write),
-  **FM6a** (the activation decision), **FM6b's** and **FM7a's**/**FM7b's** pure
-  engine models, **FM4b's pure chrome model** plus its **drawn breadcrumb bar
-  and drawn clickable toolbar** (`Alt+←/→/↑`/`F5`), **FM8a** (the pure
+  back/forward history plus the `go_up`/`navigate_to` climb, all transactional
+  and fail-closed) are **done**, as are **FM5** (in-place rename — the first
+  write), **FM6a** (the activation decision), **FM6b's** and
+  **FM7a's**/**FM7b's** pure engine models, **FM4b's pure chrome model** plus
+  its **drawn clickable toolbar** (`Alt+←/→/↑`/`F5`), **FM8a** (the pure
   properties view model), and **FM8b's drawn read-only properties panel**
   (`render::draw_properties` — a shared `lib/controls::Panel` painting the
   `properties_rows` fields, opened by `Alt+Enter` / dismissed by `Escape`,
@@ -3653,6 +3653,13 @@ transfer, landed in increments:
   row via `render::draw_properties_editable`/`permission_cell_at`, committed
   through `Browser::set_mode_selected` over `fs_set_mode` under the user's own
   identity — the read-only picker never draws or resolves a toggle).
+  The manager's chrome carries the location in the **window title** rather than
+  a path bar: it opens on the icon grid, retitles over the window channel's
+  `SetTitle` whenever it moves, distinguishes an empty folder from a full one by
+  a bounded per-visible-row occupancy probe, and treats a *secondary* press on
+  the window's Close control as "leave this folder" — climbing to the parent and
+  closing only at the top (a parent it cannot list keeps the window open and
+  states the refusal).
   FM2/FM4/FM6/FM7/FM8 were each split (§2.19). FM4b's **drawn context menu**,
   all of FM7b's **app-side move/copy/paste/delete/new-folder verbs** (with
   interleaved progress + cancel), FM8b's **ownership editing**, and all of

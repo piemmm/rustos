@@ -50,7 +50,7 @@ use alloc::string::String;
 use tairix_abi::SYSTEM_SERVICE_STORE;
 use tairix_icon::{IconKind, IconRequest};
 
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{Entry, EntryKind, Occupancy};
 
 /// A content type TAIRiX recognises, named by its media type.
 ///
@@ -435,6 +435,27 @@ pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
         EntryKind::File => {
             media_for_name(entry.name()).unwrap_or(MediaType::ApplicationOctetStream)
         }
+    }
+}
+
+/// The icon drawn for a listed entry: its content-type glyph, refined by what
+/// the browser knows about a plain directory's contents.
+///
+/// A directory that has been probed and holds something draws
+/// [`IconKind::FolderFilled`]; every other case — empty, unprobed, or a probe
+/// that was refused — draws the plain [`IconKind::Folder`], so an unknown
+/// answer never claims contents. Files and bundles take their
+/// [`media_for_entry`] glyph unchanged.
+///
+/// This is the one place an entry becomes an icon: the grid tile and the list
+/// row both call it, so a row and a tile can never picture the same entry
+/// differently.
+#[must_use]
+pub fn icon_for_entry(entry: &Entry, parent: &[String]) -> IconKind {
+    if entry.is_directory() && matches!(entry.occupancy(), Occupancy::NonEmpty) {
+        IconKind::FolderFilled
+    } else {
+        media_for_entry(entry, parent).icon()
     }
 }
 

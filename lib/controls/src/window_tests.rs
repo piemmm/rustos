@@ -12,9 +12,10 @@
 //! corner, across dark/light/high-contrast and scale.
 
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::state::{
     AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
@@ -55,6 +56,12 @@ const PRESS: InputEvent = InputEvent::PointerPressed {
 };
 const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
+};
+const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Secondary,
+};
+const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+    button: PointerButton::Secondary,
 };
 
 fn furniture() -> WindowFurnitureState {
@@ -207,6 +214,42 @@ fn pointer_press_release_invokes() {
         control.on_pointer(&RELEASE, bounds),
         Some(WindowControlAction::Invoked(WindowControlKind::Close))
     );
+}
+
+#[test]
+fn a_secondary_press_reports_the_alternate_gesture_and_leaves_the_control_untouched() {
+    let theme = Theme::dark();
+    let mut control = WindowControl::new(WindowControlKind::Close);
+    let bounds = Rect::new(0, 0, 40, 40);
+    let _ = control.on_pointer(&moved(10, 10), bounds);
+    let before = render_control(&control, &theme, 40).pixels().to_vec();
+    assert_eq!(
+        control.on_pointer(&SECONDARY_PRESS, bounds),
+        Some(WindowControlAction::AlternateInvoked(
+            WindowControlKind::Close
+        ))
+    );
+    // No latch, no press wash: the button draws exactly as it did.
+    assert_eq!(control.state().pointer, PointerState::Hover);
+    assert_eq!(render_control(&control, &theme, 40).pixels(), &before[..]);
+    // Neither release fires the command, so one gesture cannot do both.
+    assert_eq!(control.on_pointer(&SECONDARY_RELEASE, bounds), None);
+    assert_eq!(control.on_pointer(&RELEASE, bounds), None);
+    // Off the control, a secondary press resolves nothing.
+    let _ = control.on_pointer(&moved(100, 100), bounds);
+    assert_eq!(control.on_pointer(&SECONDARY_PRESS, bounds), None);
+}
+
+#[test]
+fn a_secondary_press_on_a_denied_control_resolves_nothing() {
+    let mut control = WindowControl::new(WindowControlKind::Close);
+    control.set_state(ControlState {
+        authority: AuthorityState::Denied,
+        ..ControlState::default()
+    });
+    let bounds = Rect::new(0, 0, 40, 40);
+    let _ = control.on_pointer(&moved(10, 10), bounds);
+    assert_eq!(control.on_pointer(&SECONDARY_PRESS, bounds), None);
 }
 
 #[test]
@@ -401,6 +444,49 @@ fn press_on_drag_region_activates() {
 }
 
 #[test]
+fn a_secondary_press_over_a_control_reports_the_alternate_and_leaves_the_bar_alone() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    let bounds = title_bounds();
+    let close_rect = bar
+        .layout(bounds, Scale::ONE, &theme)
+        .controls
+        .iter()
+        .find(|(k, _)| *k == WindowControlKind::Close)
+        .expect("close")
+        .1;
+    let cx = close_rect.left() + half(close_rect.width);
+    let cy = close_rect.top() + half(close_rect.height);
+    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme);
+    assert_eq!(
+        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme),
+        Some(TitleBarEvent::AlternateControl(WindowControlKind::Close))
+    );
+    // The bar never activates or drags from it, and the release is inert.
+    assert_eq!(
+        bar.on_pointer(&SECONDARY_RELEASE, bounds, Scale::ONE, &theme),
+        None
+    );
+    assert_eq!(
+        bar.on_pointer(&moved(cx + 40, cy), bounds, Scale::ONE, &theme),
+        None
+    );
+    // Over the drag region a secondary press is unchanged: nothing at all.
+    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme);
+    assert_eq!(
+        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme),
+        None
+    );
+    // A primary press over the control still means the command.
+    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme);
+    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    assert_eq!(
+        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        Some(TitleBarEvent::Control(WindowControlKind::Close))
+    );
+}
+
+#[test]
 fn drag_begins_moves_and_ends() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
@@ -557,9 +643,127 @@ fn inactive_title_bar_reads_quieter() {
     inactive.set_title("Report");
     let mut a = Surface::new(300, 28).expect("surface");
     let mut b = Surface::new(300, 28).expect("surface");
-    active.render(&mut a, title_bounds(), Scale::ONE, &theme);
-    inactive.render(&mut b, title_bounds(), Scale::ONE, &theme);
+    active.render(&mut a, title_bounds(), Scale::ONE, &theme, None);
+    inactive.render(&mut b, title_bounds(), Scale::ONE, &theme, None);
     assert_ne!(a.pixels(), b.pixels());
+}
+
+/// A bar with no identity reserves nothing: its text region is the whole
+/// draggable region, and it draws exactly what it drew before identities
+/// existed.
+#[test]
+fn a_bar_without_an_identity_gives_the_whole_band_to_its_title() {
+    let theme = Theme::dark();
+    let bar = TitleBar::new(furniture());
+    let layout = bar.layout(title_bounds(), Scale::ONE, &theme);
+    assert_eq!(bar.identity(), None);
+    assert_eq!(layout.icon, Rect::EMPTY);
+    // The text starts at the band's inset, exactly where the drag region does.
+    let inset = i32::try_from(Scale::ONE.scale_length(theme.metrics().control_inset))
+        .expect("a small inset");
+    assert_eq!(layout.title.left(), title_bounds().left() + inset);
+    assert_eq!(layout.title.height, title_bounds().height);
+}
+
+/// An identity reserves a square slot at the leading edge of the drag region
+/// and the title text starts after it; the slot is the side the owner is told
+/// to rasterise at.
+#[test]
+fn an_identity_reserves_the_leading_slot_and_the_title_starts_after_it() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let plain = TitleBar::new(furniture());
+    let mut identified = TitleBar::new(furniture());
+    identified.set_identity(Some(IconKind::AppBundle));
+    assert_eq!(identified.identity(), Some(IconKind::AppBundle));
+
+    let bare = plain.layout(bounds, Scale::ONE, &theme);
+    let with = identified.layout(bounds, Scale::ONE, &theme);
+    let side = identified.icon_side(bare.title, Scale::ONE, &theme);
+    assert!(side > 0, "the band is tall enough for a slot");
+    assert_eq!(with.icon.width, side);
+    assert_eq!(with.icon.height, side);
+    assert_eq!(with.icon.left(), bare.title.left());
+    assert!(
+        with.title.left() > with.icon.right(),
+        "the text starts past the slot"
+    );
+    assert!(with.title.width < bare.title.width);
+    // The slot never reaches a control.
+    for (_, rect) in with.controls {
+        assert!(with.icon.intersection(&rect).is_empty());
+    }
+    // The icon is inert: the point over it still drags the window.
+    let over = Point::new(with.icon.left() + 1, with.icon.top() + 1);
+    assert_eq!(
+        identified.hit(bounds, Scale::ONE, &theme, over),
+        TitleHit::Drag
+    );
+}
+
+/// An identity draws: the owner's artwork when it has some, the built-in
+/// class glyph when it does not — never a blank slot.
+#[test]
+fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let paint = |bar: &TitleBar, artwork: Option<&Surface>| {
+        let mut surface = Surface::new(300, 28).expect("surface");
+        bar.render(&mut surface, bounds, Scale::ONE, &theme, artwork);
+        surface
+    };
+    let mut bar = TitleBar::new(furniture());
+    bar.set_title("Report");
+    let bare = paint(&bar, None);
+
+    bar.set_identity(Some(IconKind::AppBundle));
+    let glyph = paint(&bar, None);
+    assert_ne!(
+        bare.pixels(),
+        glyph.pixels(),
+        "the built-in glyph fills the slot"
+    );
+
+    let side = bar.icon_side(bounds, Scale::ONE, &theme);
+    let mut art = Surface::new(side, side).expect("artwork");
+    art.fill_rect(0, 0, side, side, Color::from(theme.palette().accent));
+    let drawn = paint(&bar, Some(&art));
+    assert_ne!(
+        glyph.pixels(),
+        drawn.pixels(),
+        "the owner's artwork replaces the glyph"
+    );
+    assert!(has_pixel(&drawn, premul(theme.palette().accent)));
+
+    // Artwork offered to a bar with no identity is ignored.
+    bar.set_identity(None);
+    assert_eq!(paint(&bar, Some(&art)).pixels(), bare.pixels());
+}
+
+/// A title too wide for its region ends in the shared elision mark rather
+/// than being cut mid-glyph, because titles carry paths.
+#[test]
+fn an_over_wide_title_ends_in_the_shared_mark() {
+    let theme = Theme::dark();
+    // A band only wide enough for the controls and a sliver of text.
+    let bounds = Rect::new(0, 0, 300, 28);
+    let mut bar = TitleBar::new(furniture());
+    bar.set_title("/Users/root/Documents/Projects/tairix/lib/controls/src/window.rs");
+    let mut long = Surface::new(300, 28).expect("surface");
+    bar.render(&mut long, bounds, Scale::ONE, &theme, None);
+
+    let font = crate::paint::role_font(&theme, Scale::ONE, TextRole::WindowTitle);
+    let width = bar.layout(bounds, Scale::ONE, &theme).title.width;
+    let (fitted, marked) = font.elide_to_width(bar.title(), width);
+    assert!(marked, "the title does not fit, so it is marked");
+    assert!(fitted.len() < bar.title().len());
+
+    // The mark is drawn: the same text without it paints different pixels.
+    let mut cut = Surface::new(300, 28).expect("surface");
+    let mut short = TitleBar::new(furniture());
+    short.set_title(fitted);
+    short.render(&mut cut, bounds, Scale::ONE, &theme, None);
+    assert_ne!(long.pixels(), cut.pixels());
 }
 
 // --- WindowFrame ----------------------------------------------------------
@@ -821,13 +1025,13 @@ fn the_rim_is_one_quiet_tone_and_the_title_carries_focus() {
     let mut frame = WindowFrame::new(furniture());
     frame.title_bar_mut().set_title("Documents");
     let mut active = Surface::new(300, 240).expect("surface");
-    frame.render(&mut active, bounds, Scale::ONE, &theme);
+    frame.render(&mut active, bounds, Scale::ONE, &theme, None);
 
     let mut inactive_furn = furniture();
     inactive_furn.activation = WindowActivationState::Inactive;
     frame.set_furniture(inactive_furn);
     let mut inactive = Surface::new(300, 240).expect("surface");
-    frame.render(&mut inactive, bounds, Scale::ONE, &theme);
+    frame.render(&mut inactive, bounds, Scale::ONE, &theme, None);
 
     // The rim is the same quiet neutral at either activation: the line the eye
     // reads a window's shape by does not change when focus moves elsewhere.
@@ -849,13 +1053,13 @@ fn attention_request_changes_rendering() {
     let bounds = frame_bounds();
     let mut frame = WindowFrame::new(furniture());
     let mut plain = Surface::new(300, 240).expect("surface");
-    frame.render(&mut plain, bounds, Scale::ONE, &theme);
+    frame.render(&mut plain, bounds, Scale::ONE, &theme, None);
 
     let mut attn = furniture();
     attn.activation = WindowActivationState::AttentionRequested;
     frame.set_furniture(attn);
     let mut attention = Surface::new(300, 240).expect("surface");
-    frame.render(&mut attention, bounds, Scale::ONE, &theme);
+    frame.render(&mut attention, bounds, Scale::ONE, &theme, None);
     assert_ne!(plain.pixels(), attention.pixels());
 }
 
@@ -871,7 +1075,7 @@ fn the_frame_paints_no_furniture_mark_inside_the_client() {
         let mut frame = WindowFrame::new(furn);
         frame.title_bar_mut().set_title("Documents");
         let mut surface = Surface::new(300, 240).expect("surface");
-        frame.render(&mut surface, bounds, Scale::ONE, &theme);
+        frame.render(&mut surface, bounds, Scale::ONE, &theme, None);
         surface
     };
     let resizable = paint(furniture());
@@ -1081,7 +1285,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
     let bounds = title_bounds();
     let paint = |bar: &TitleBar| {
         let mut surface = Surface::new(300, 28).expect("surface");
-        bar.render(&mut surface, bounds, Scale::ONE, &theme);
+        bar.render(&mut surface, bounds, Scale::ONE, &theme, None);
         surface.pixels().to_vec()
     };
 

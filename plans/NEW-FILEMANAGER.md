@@ -53,9 +53,9 @@ toolbar is *window* chrome: its band spans the full window width
 (`render::toolbar_bounds`, and the three hit-tests that invert it —
 `toolbar_command_at`, `manager_tool_at`, `manager_tool_rect` — take the
 window), and `render::sidebar_view` insets the places rail's top by that band,
-so the rail's first row top *is* the path bar's top and its rows share the
-`row_height` grid with the listing rows beside them. `content_area` keeps its
-meaning as the window less the rail — what the path bar, item view, scrollbar
+so the rail's first row top *is* the first listing row's top and its rows share
+the `row_height` grid with the listing rows beside them. `content_area` keeps
+its meaning as the window less the rail — what the item view, scrollbar
 and overlays occupy — so the picker (no rail, `content_area` == window) is
 laid out exactly as before. The manager opens on `ViewMode::Grid` (icons)
 with the toolbar toggle switching to the list; the engine default and the
@@ -139,8 +139,8 @@ launched apps (`spawn_app` → `spawn_with`), the prerequisite that lets the fil
 manager locate the per-user Trash. The aarch64 `autoload_input` QEMU vertical's
 tenth witness changed from `FsNodeMutated op=rmdir` to `op=rename` with a
 destination under `Library/Trash` (still gated after the FM9-b `fd_redeem`, so
-no earlier mutation can satisfy it — fail closed). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model, FM4b's
-drawn breadcrumb path bar + pointer routing, FM4b's drawn clickable toolbar +
+no earlier mutation can satisfy it — fail closed). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model,
+FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
 FM7b's pure delete model, FM7b's pure recursive-delete execution model
@@ -243,13 +243,10 @@ navigates by keyboard; the renderer-mirroring point hit-test
 
 FM2 was split (§2.19) into FM2a (the list item view) and FM2b (the icon-grid
 view, the runtime view toggle, and the drawn `ScrollBar`); both are done. FM4 is
-split the same way: **FM4a** (the engine navigation model — bounded back/forward
-history + breadcrumb navigation) is done; **FM4b** paints that model as drawn
-chrome. Its **breadcrumb path bar is now drawn and clickable**, with the app's
-pointer routing wired onto it (a primary-button press climbs a crumb via
-`navigate_to_depth` or selects an item via `select`) — landed now because its
-action (breadcrumb navigation) already exists (§2.4). Its **drawn clickable
-toolbar** is now done too — its commands (Back/Forward/Up/Refresh/ToggleView/
+split the same way: **FM4a** (the engine navigation model — the bounded
+back/forward history) is done; **FM4b** paints that model as drawn
+chrome. Its **drawn clickable
+toolbar** is done — its commands (Back/Forward/Up/Refresh/ToggleView/
 Sort) and their actions already exist, so it needs no speculative surface. The
 **drawn context menu is now done** — a secondary-button press paints the shared
 `ContextMenuModel` as a `lib/controls::Menu` routed to the existing
@@ -316,7 +313,7 @@ user pick any. See FM6b below. FM6b is complete.
 
 - **Coherent UI, zero bloat (§2.3, best-in-class mandate).** One window,
   one consistent layout, built entirely from `lib/controls` widgets over
-  the shared theme (`lib/theme`) — a toolbar, a path/breadcrumb bar, one
+  the shared theme (`lib/theme`) — a toolbar, one
   scrollable item view (list *or* icon-grid, a view toggle, not two
   code paths), a selection model, and a small honest set of operations.
   No ribbon, no property-sheet sprawl, no modal-dialog maze. Every action
@@ -462,16 +459,19 @@ one slot per kind indexed by the new `IconKind::index`, so adding a kind is a
 new `ICON_KINDS` entry rather than a new field (§2.2); `builtin()` stays
 `const`. The existing audio `Volume` glyph is left as-is: reusing an audio
 speaker for a *storage* volume would be a semantic defect, so a storage-volume
-icon is deferred to the stage that actually draws one (FM4 breadcrumb/root
-view), not forced onto the audio kind here.
+icon is deferred to the stage that actually draws one, not forced onto the
+audio kind here.
 
-Kind→icon is the shared `lib/browse::media` registry
-(`media_for_entry(entry, parent).icon()`): by `EntryKind` first
+Kind→icon is `lib/browse::media::icon_for_entry(entry, parent)`, the one
+classification both views draw through: the shared registry's glyph
+(`media_for_entry(entry, parent).icon()`) — by `EntryKind` first
 (directory→`inode/directory`→`Folder`, bundle→`application/x-tairix-service`
 under the system service store and `application/x-tairix-app` elsewhere), then
 a documented, ASCII-case-insensitive filename-extension table, with
 `application/octet-stream`→`File` as the fallback for an
-unknown/extensionless/dotfile name — one classification shared by manager and
+unknown/extensionless/dotfile name — except that a plain directory *known* to
+hold something takes `FolderFilled` (see *Folder occupancy* below). One
+classification shared by manager and
 picker, and the same one the "Open With…" association reads (§2.2). It is a
 display *hint* only; it gates no operation (authority stays in the VFS and the
 launcher, §4/§5.4). The
@@ -498,62 +498,81 @@ unknown/extensionless/dotfile/trailing-dot → generic, last-extension-wins).
 Docs: `docs/src/desktop/apps.md`,
 `plans/GUI-CONTROLS-DESIGN.md` §11.34, `lib/icon`/`lib/browse` README + rustdoc.
 
-### FM4a — the engine navigation model: history + breadcrumb `[x]`
+#### Folder occupancy — an empty folder is not a full one `[x]`
 
-Done. The host-testable navigation *model* the FM4b chrome will drive, added to
+Done. A folder that holds something draws `IconKind::FolderFilled` (a new
+built-in glyph plus the `folder-filled.svg` class master); an empty one keeps
+`Folder`. A directory's `size` is `0` and no VFS surface reports a child count,
+so occupancy is a separate read, and only a *known* answer changes the icon:
+
+- `Entry::occupancy()` is `Unprobed` / `Empty` / `NonEmpty` / `Indeterminate`
+  (refused or failed). Only `NonEmpty` fills the folder, so an unprobed or
+  unreadable one is the plain icon — fail closed, never a guess (§5.4).
+- `DirectorySource::has_children` is the probe; `VfsDirectorySource` answers it
+  by opening the directory, reading **one** maximal record, and closing —
+  never a listing, never a walk, so the cost does not grow with the child
+  count. The kernel packs a whole listing or refuses, so `BufferTooSmall` also
+  means occupied.
+- `Browser::resolve_occupancy(range)` answers only the caller's indices, and
+  only where an entry still needs one. The app passes `render::visible_range`,
+  the one definition of what is on screen, so a 100 000-entry directory probes
+  a screenful (§26). A refusal is recorded, never retried; a fresh listing
+  resets every answer, so a refresh re-probes.
+- The trait's default answers `NotImplemented` (read as `Indeterminate`). The
+  trusted picker takes that default deliberately: the cue adds nothing to
+  choosing a file, so it exercises no directory-read authority it does not
+  need.
+
+Host-tested in `lib/browse` (empty vs occupied in both views, a refusal probed
+exactly once, files and bundles never probed, a scroll-back issuing no second
+probe, a reload re-probing, and a 100 000-entry listing bounded by the visible
+window) and `lib/icon` (the new glyph and its shipped master). Docs:
+`docs/src/desktop/apps.md`, `docs/src/desktop/icons.md`, `docs/src/lib/icon.md`,
+`lib/browse`/`lib/icon` README + rustdoc.
+
+### FM4a — the engine navigation model: history `[x]`
+
+Done. The host-testable navigation *model* the FM4b chrome drives, added to
 `lib/browse::Browser` (§2.2 — the picker gets it for free):
 
 - **Navigation history**: a bounded back/forward stack (`go_back`/`go_forward`,
   with `can_go_back`/`can_go_forward` supplying the Back/Forward toolbar enable
-  state). Every fresh navigation — descend, climb, or a breadcrumb jump —
+  state). Every fresh navigation — descend, climb, or a jump to a location —
   records the directory it left on the back stack and clears the forward branch
   (standard browser semantics). The history is a bounded ring (`HISTORY_MAX`)
   that drops the *oldest* location rather than growing without bound: it is a
   UX convenience, not a hardware-scaled resource, so a deliberate defensive cap
   is the right shape (§24 — a bound, not a discovered capacity), and reaching
   it never fails a navigation.
-- **Breadcrumb navigation**: `navigate_to_depth(depth)` jumps to the ancestor
-  `depth` path components deep (`0` = root, `components().len()` = current = a
-  no-op, as is a depth past the end), the primitive the FM4b breadcrumb bar
-  will bind each clickable component to. Honours the storage-forest model — the
-  root view is whatever the source lists (the four view bindings), never a
-  fabricated POSIX tree (`docs/src/filesystem/drives.md`).
+- **Jump to a location**: `navigate_to(components)` reaches a directory that is
+  neither an ancestor nor a listed child (the Trash tool uses it). Honours the
+  storage-forest model — the root view is whatever the source lists (the four
+  view bindings), never a fabricated POSIX tree
+  (`docs/src/filesystem/drives.md`).
 - Every one of these is the same transactional, fail-closed navigation as
   descend/climb: the target is listed *before* any state *or history* changes,
   so a move to a directory that has become unreadable leaves the browser and
   its history exactly where they were (§5.4).
 - Host-tested in `lib/browse/src/tests.rs` (descend→back→forward, no-op on empty
-  history, `go_up` records history, fresh-navigation clears forward, breadcrumb
-  climb + current/past-end no-op, `go_back` transactional when the target
+  history, `go_up` records history, fresh-navigation clears forward,
+  `go_back` transactional when the target
   becomes unreadable, and the bounded drop-oldest cap); `MockFs` gained a
   read-count-driven `deny_after_first` to model a revoked directory without a
   test-only source accessor. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`.
 
-### FM4b — the drawn chrome: toolbar, breadcrumb bar, context menu `[x]`
+### FM4b — the drawn chrome: toolbar, context menu `[x]`
 
 The app frame, entirely `lib/controls`/`lib/browse::render` widgets over the
 theme, painting the FM4a model. **A drawn surface lands with the action it
 invokes** so no menu/toolbar entry is built ahead of the behaviour it calls
-(§2.4) — the breadcrumb path bar lands now (its navigation already exists), the
-toolbar and context menu with their verbs.
+(§2.4) — the toolbar and context menu land with their verbs.
 
-**The drawn, clickable breadcrumb path bar is done**: `lib/browse::breadcrumb`
-is the pure placement (`layout` + `crumb_at`) that positions the `chrome::breadcrumbs`
-crumbs left-to-right and **right-anchors** the strip so the current directory
-stays visible, clipping overflowing leading ancestors rather than dropping any
-crumb; it is font-agnostic (measured pixel widths) and shared by the painter
-and the hit-test (§2.2). `render::draw_path_bar` draws the crumbs (ancestors in
-the accent colour, the current directory solid and inert, muted separators) and
-`render::crumb_at` is the app-facing hit-test returning the clicked ancestor's
-`depth`. The `files.app` `Run` binary routes a primary-button `Pointer` press
-through `crumb_at`→`navigate_to_depth` (a path-bar crumb) or
-`entry_index_at`→`select` (an item), the same transactional navigation the
-keyboard drives (a refused re-listing leaves the browser put). Host-tested in
-`lib/browse` (layout fit/overflow right-anchor, `crumb_at` gaps / off-screen /
-out-of-range, empty, and the `render::crumb_at` mirror: root inert, ancestor
-navigable, current inert, path-bar-row guard). Docs: `docs/src/desktop/apps.md`,
-`lib/browse/README.md` + rustdoc.
+**There is no path bar.** The window title carries the current location
+(`plans/APPWIN.md`), so a band of the window restating it would be a second
+spelling of one fact (§2.2) and a row of listing the user does not get back.
+`chrome_height` is therefore the toolbar strip alone, and the item view starts
+directly beneath it.
 
 **The pure chrome model is done** (§2.19 — host-proven ahead of the drawn
 widgets, exactly as FM6a/FM6b/FM7a/FM7b's pure models landed): the
@@ -562,14 +581,10 @@ widgets, exactly as FM6a/FM6b/FM7a/FM7b's pure models landed): the
 Back/Forward/Up over `can_go_back`/`can_go_forward`/`!is_root`, the rest always
 available — plus the active view/sort so a tool renders disabled, not hidden,
 when it cannot apply; `TOOLBAR_COMMANDS` is the one command order the chrome
-iterates. `breadcrumbs` turns the root-first `Browser::components` into the
-ordered `Crumb`s of the path bar, each carrying the ancestor `depth` the drawn
-crumb binds to `navigate_to_depth` (`0` = root); the terminal crumb is the
-current directory (`is_current`), whose jump is the documented no-op.
+iterates.
 Host-tested in `lib/browse` (toolbar enable/disable at root / after descend /
-after go-back, the active-view/sort report, the `TOOLBAR_COMMANDS` order, the
-breadcrumb crumb list + depth + `is_current`, and a crumb depth climbing to its
-ancestor). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+after go-back, the active-view/sort report, and the `TOOLBAR_COMMANDS` order).
+Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 **The pure context-menu chrome model is done** (§2.19 — host-proven ahead of
 the drawn menu, exactly as `ToolbarModel` landed ahead of the drawn toolbar):
@@ -595,13 +610,13 @@ glyph from the new `ToolbarCommand::icon()` — six new `lib/icon::IconKind`
 glyphs NavBack/NavForward/NavUp/Refresh/ViewToggle/Sort), each enabled or
 disabled from `ToolbarModel` (muted, never hidden). `render::toolbar_command_at`
 is the strip's mirror hit-test returning **only an enabled command** (fail
-closed); the app routes a primary-button press through it, then the breadcrumb,
-then item selection. Both the click and the keyboard accelerators run through
+closed); the app routes a primary-button press through it, then item
+selection. Both the click and the keyboard accelerators run through
 the one shared read-only `chrome::apply_command(browser, cmd)` (Back/Forward/
 Up/Refresh + `ViewMode::toggled` / `SortMode::next`), so they cannot diverge
 and the picker can drive the same toolbar. Accelerators: **`Alt+←/→`**
 (Back/Forward), **`Alt+↑`** (Up), **`F5`** (Refresh). One `render::chrome_height`
-(toolbar strip + path bar) is the single header offset the item views, the
+(the toolbar strip) is the single header offset the item views, the
 scrollbar gutter, and every hit-test share (§2.2). Host-tested in `lib/browse`
 (`ViewMode::toggled`, the `SortMode::next` six-mode cycle, `ToolbarCommand::icon`
 distinctness, `apply_command` navigation/view/sort + fail-closed refresh, and
@@ -762,7 +777,7 @@ and a specific declaration outranking a generic one). Docs:
 dispatches a plain `Enter` on the selection through the shared
 `Browser::activate_selected` (the one dispatch-by-kind decision the trusted
 picker also acts on, §2.2): `Descended` reveals the selection and repaints (as
-a breadcrumb navigation does), and `LaunchBundle { path }` launches the
+any navigation does), and `LaunchBundle { path }` launches the
 `<Name>.app` bundle through the ordinary signed app-load gate — the manager's
 own `Launcher` spawns the bundle's own `Run` (`<path>/Run`, never a private
 path) via `tairix_rt::spawn`, under the launching user's identity, with the
@@ -1611,7 +1626,7 @@ drives it (§2.4).
   monotonic clock (`tairix_rt::clock_get`) at each primary press. Primary-press
   routing is factored into `apply_primary_press` (manager write tool → item
   single-select vs same-item double-**activate** via the shared `activate` →
-  read-only chrome) with `apply_chrome_press` the trimmed toolbar/crumb router;
+  read-only chrome) with `apply_chrome_press` the trimmed toolbar router;
   the tracker is `reset` on any tool or chrome press so a click through the
   chrome and back never mis-pairs. The freestanding binary builds and lints
   clean cross-compiled. Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md`
@@ -1637,7 +1652,7 @@ volume with an icon matching the **real** storage medium.
   rail's width (derived from the theme/font metrics, clamped to a third of
   the window), its row rectangles, its separator, and the hit-test that
   inverts them — shared by paint and hit-test, never computed twice. The
-  content area (toolbar, path bar, list/grid, scrollbar) is inset by the
+  content area (toolbar, list/grid, scrollbar) is inset by the
   rail; with no rail the frame is exactly what it was. Building it exposed
   and fixed a latent defect: `ListView`/`GridView`'s `index_at` were not
   origin-aware while their rect builders were, so both now invert through
@@ -1669,7 +1684,7 @@ volume with an icon matching the **real** storage medium.
 
 FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
 FM2a repaints the list, FM2b adds the icon grid). FM4a adds the engine
-navigation model (history + breadcrumb); FM4b paints the chrome and grows the
+navigation model (the history); FM4b paints the chrome and grows the
 context menu alongside the actions it invokes (FM5–FM8), so no menu entry is
 built ahead of its behaviour (§2.4). FM5 is the first write and the template for
 FM7. FM6a models the activation decision (host-proven); FM6b (launch/open) acts

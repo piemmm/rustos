@@ -115,6 +115,28 @@ impl TaskBridge {
         Some(window)
     }
 
+    /// Retitle `window`: relabel its taskbar entry and, when it wears the
+    /// window-manager frame, its title bar — both from this one call, so the
+    /// two can never show different names.
+    ///
+    /// A tracked window that carries no title bar (the session's own
+    /// undecorated trusted surfaces) still relabels on the bar: the entry is
+    /// the task's label, not the decoration's. Returns `false`, changing
+    /// nothing, when `window` is not tracked.
+    pub fn retitle(
+        &mut self,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+        window: WindowId,
+        title: &str,
+    ) -> bool {
+        let Some(task) = self.task_for(window) else {
+            return false;
+        };
+        compositor.set_window_title(window, title);
+        taskbar.tasks_mut().retitle(task, title)
+    }
+
     /// Close `window`: remove it from the compositor and its task from the bar,
     /// dropping focus if it held it.
     ///

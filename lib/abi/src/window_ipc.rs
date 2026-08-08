@@ -370,6 +370,25 @@ pub enum WindowRequest {
         /// Pixel encoding of the new frames.
         format: DisplayFormat,
     },
+    /// Retitle window `window_id`, replacing the title given at
+    /// [`Self::Create`] with `title`.
+    ///
+    /// A window's title is not fixed at birth: an app whose window shows a
+    /// changing subject — the folder a file manager is browsing, the
+    /// document an editor holds — names that subject in its title bar. The
+    /// session applies the new title to the window's chrome and to its
+    /// taskbar entry together, so the two can never disagree.
+    ///
+    /// The title is the same bounded, control-character-refusing
+    /// [`WindowTitle`] a `Create` carries, and the request acts only on a
+    /// window the caller owns.
+    SetTitle {
+        /// The caller's own window being retitled (from the `Create`
+        /// reply).
+        window_id: u64,
+        /// The window's new title.
+        title: WindowTitle,
+    },
     /// Ask the session to run its **trusted file picker** for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
     /// acceptance: the pick is asynchronous — the user browses in the
@@ -468,6 +487,8 @@ const OP_QUERY_DESKTOP: u16 = 9;
 const OP_SET_BACKDROP_BLUR: u16 = 10;
 /// Wire operation discriminant of [`WindowRequest::CreatePopup`].
 const OP_CREATE_POPUP: u16 = 11;
+/// Wire operation discriminant of [`WindowRequest::SetTitle`].
+const OP_SET_TITLE: u16 = 12;
 
 /// Byte offset, within the fixed frame, of a [`WindowRequest::CreatePopup`]
 /// operand tail that follows the shared frame-layout block: the parent
@@ -487,6 +508,14 @@ const POPUP_RESERVED_FROM: usize = POPUP_OFFSET_Y + 4;
 /// [`WindowRequest::DragOffer`], which carry an identical window id +
 /// path shape.
 const BUNDLE_PATH_OFFSET: usize = 18;
+
+/// Byte offset, within the fixed frame, of a [`WindowRequest::SetTitle`]
+/// title length, immediately after the window id it retitles.
+const SET_TITLE_LEN_OFFSET: usize = 16;
+/// Byte offset of a [`WindowRequest::SetTitle`] title's text.
+const SET_TITLE_TEXT_OFFSET: usize = SET_TITLE_LEN_OFFSET + 1;
+/// First reserved byte after a [`WindowRequest::SetTitle`] operand block.
+const SET_TITLE_RESERVED_FROM: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 
 impl WindowRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -516,6 +545,7 @@ impl WindowRequest {
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
             Self::Resize { .. } => OP_RESIZE,
+            Self::SetTitle { .. } => OP_SET_TITLE,
             Self::PinBundle { .. } => OP_PIN_BUNDLE,
             Self::DragOffer { .. } => OP_DRAG_OFFER,
             Self::DragWithdraw { .. } => OP_DRAG_WITHDRAW,
@@ -549,8 +579,7 @@ impl WindowRequest {
                     format,
                 }
                 .write_to(out);
-                out[41] = title.len;
-                out[42..42 + WINDOW_TITLE_MAX].copy_from_slice(&title.bytes);
+                encode_title(out, 41, &title);
                 out[42 + WINDOW_TITLE_MAX] = u8::from(resizable);
             }
             Self::CreatePopup {
@@ -614,6 +643,7 @@ impl WindowRequest {
                 }
                 .write_to(out);
             }
+            Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
             Self::PinBundle { window, path } | Self::DragOffer { window, path } => {
                 encode_bundle_path(out, window, &path);
             }
@@ -714,6 +744,7 @@ impl WindowRequest {
                     format: layout.format,
                 })
             }
+            OP_SET_TITLE => read_set_title(bytes),
             OP_PIN_BUNDLE => {
                 let (window, path) = read_bundle_path(bytes)?;
                 Ok(Self::PinBundle { window, path })
@@ -746,6 +777,37 @@ impl WindowRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode the operands of a [`WindowRequest::SetTitle`]: the window being
+/// retitled and its new title, validated by the same [`WindowTitle`] wire
+/// decode a `Create` title goes through, with the reserved tail required
+/// zero.
+fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    reserved_zero(bytes, SET_TITLE_RESERVED_FROM)?;
+    let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+    let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
+    title_bytes.copy_from_slice(&bytes[SET_TITLE_TEXT_OFFSET..SET_TITLE_RESERVED_FROM]);
+    let title = WindowTitle::from_wire(bytes[SET_TITLE_LEN_OFFSET], &title_bytes)?;
+    Ok(WindowRequest::SetTitle { window_id, title })
+}
+
+/// Write `title` into the fixed-width title field whose length byte sits at
+/// `len_at` and whose text follows it.
+///
+/// The one title encoding the create and retitle frames share, so the two
+/// cannot lay the same field out differently.
+fn encode_title(out: &mut [u8], len_at: usize, title: &WindowTitle) {
+    out[len_at] = title.len;
+    let text = len_at.saturating_add(1);
+    out[text..text.saturating_add(WINDOW_TITLE_MAX)].copy_from_slice(&title.bytes);
+}
+
+/// Encode the window id + title payload of [`WindowRequest::SetTitle`]
+/// (mirrors [`read_set_title`]).
+fn encode_set_title(out: &mut [u8; WindowRequest::WIRE_LEN], window_id: u64, title: &WindowTitle) {
+    put_u64(out, 8, window_id);
+    encode_title(out, SET_TITLE_LEN_OFFSET, title);
 }
 
 /// Encode the window id + bundle-path payload [`WindowRequest::PinBundle`]
@@ -1027,6 +1089,8 @@ const EV_RESIZED: u16 = 9;
 const EV_REDRAW_REQUESTED: u16 = 10;
 /// Wire event discriminant of [`WindowEvent::DesktopChanged`].
 const EV_DESKTOP_CHANGED: u16 = 11;
+/// Wire event discriminant of [`WindowEvent::AlternateCloseRequested`].
+const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -1090,6 +1154,25 @@ pub enum WindowEvent {
     /// window behind its back while the app lives.
     CloseRequested {
         /// The window the user asked to close.
+        window_id: u64,
+    },
+    /// The user made a **secondary** press on the window's title-bar close
+    /// control — a distinct request the owning app interprets for itself,
+    /// never a close.
+    ///
+    /// A primary press on the same control still means close
+    /// ([`Self::CloseRequested`]); this is the alternate gesture beside
+    /// it, for an app whose window has somewhere to *step back* to (a file
+    /// manager going up a folder, closing only at the top). An app with no
+    /// such notion ignores it, and the window stays exactly as it was: the
+    /// session neither closes nor changes the window on this event, and the
+    /// control's own drawn state is untouched by a secondary press.
+    ///
+    /// It reaches only the owning app. A window the session itself owns
+    /// (the trusted picker, the greeter) has no app to tell, so a secondary
+    /// press on its close control does nothing at all.
+    AlternateCloseRequested {
+        /// The window whose close control took the secondary press.
         window_id: u64,
     },
     /// The user chose a file in the session's trusted picker
@@ -1207,6 +1290,7 @@ impl WindowEvent {
             | Self::Key { window_id, .. }
             | Self::Pointer { window_id, .. }
             | Self::CloseRequested { window_id }
+            | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
             | Self::Minimized { window_id }
@@ -1247,6 +1331,9 @@ impl WindowEvent {
             }
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
+            }
+            Self::AlternateCloseRequested { .. } => {
+                put_u16(&mut out, 6, EV_ALTERNATE_CLOSE_REQUESTED);
             }
             Self::FilePicked { handle, .. } => {
                 put_u16(&mut out, 6, EV_FILE_PICKED);
@@ -1305,6 +1392,9 @@ impl WindowEvent {
         }
         let kind = read_u16(bytes, 6);
         let window_id = nonzero_window_id(read_u64(bytes, 8))?;
+        if let Some(event) = read_id_only_event(kind, window_id, bytes) {
+            return event;
+        }
         match kind {
             EV_FOCUS => {
                 event_reserved_zero(bytes, 17)?;
@@ -1344,10 +1434,6 @@ impl WindowEvent {
                     action,
                 })
             }
-            EV_CLOSE_REQUESTED => {
-                event_reserved_zero(bytes, 16)?;
-                Ok(Self::CloseRequested { window_id })
-            }
             EV_FILE_PICKED => {
                 event_reserved_zero(bytes, 24)?;
                 let handle = read_u64(bytes, 16);
@@ -1359,19 +1445,11 @@ impl WindowEvent {
                 }
                 Ok(Self::FilePicked { window_id, handle })
             }
-            EV_PICK_CANCELLED => {
-                event_reserved_zero(bytes, 16)?;
-                Ok(Self::PickCancelled { window_id })
-            }
             EV_SCROLLED => {
                 event_reserved_zero(bytes, 24)?;
                 let dx = read_i32(bytes, 16);
                 let dy = read_i32(bytes, 20);
                 Ok(Self::Scrolled { window_id, dx, dy })
-            }
-            EV_MINIMIZED => {
-                event_reserved_zero(bytes, 16)?;
-                Ok(Self::Minimized { window_id })
             }
             EV_RESIZED => {
                 event_reserved_zero(bytes, 24)?;
@@ -1386,10 +1464,6 @@ impl WindowEvent {
                     height_px,
                 })
             }
-            EV_REDRAW_REQUESTED => {
-                event_reserved_zero(bytes, 16)?;
-                Ok(Self::RedrawRequested { window_id })
-            }
             EV_DESKTOP_CHANGED => {
                 event_reserved_zero(bytes, 16 + DesktopInfo::WIRE_LEN)?;
                 let desktop = DesktopInfo::from_bytes_at(bytes, 16)?;
@@ -1398,6 +1472,28 @@ impl WindowEvent {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode an event whose whole payload is its window id, or `None` when
+/// `kind` names an event that carries more than that.
+///
+/// These share one frame shape byte for byte — the id, then a tail required
+/// zero — so they share one decoder and cannot drift apart in what they
+/// accept.
+fn read_id_only_event(
+    kind: u16,
+    window_id: u64,
+    bytes: &[u8],
+) -> Option<Result<WindowEvent, Errno>> {
+    let event = match kind {
+        EV_CLOSE_REQUESTED => WindowEvent::CloseRequested { window_id },
+        EV_ALTERNATE_CLOSE_REQUESTED => WindowEvent::AlternateCloseRequested { window_id },
+        EV_PICK_CANCELLED => WindowEvent::PickCancelled { window_id },
+        EV_MINIMIZED => WindowEvent::Minimized { window_id },
+        EV_REDRAW_REQUESTED => WindowEvent::RedrawRequested { window_id },
+        _ => return None,
+    };
+    Some(event_reserved_zero(bytes, 16).map(|()| event))
 }
 
 /// Refuse an event whose reserved tail (from `from` to the end of the
@@ -1413,10 +1509,10 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
-        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
-        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES,
-        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
+        WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
+        WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -1540,6 +1636,14 @@ mod tests {
                 height_px: 480,
                 stride_bytes: 2560,
                 format: DisplayFormat::Bgra8888,
+            },
+            WindowRequest::SetTitle {
+                window_id: 3,
+                title: WindowTitle::new("").expect("an empty title"),
+            },
+            WindowRequest::SetTitle {
+                window_id: 3,
+                title: WindowTitle::new(&"t".repeat(WINDOW_TITLE_MAX)).expect("the widest title"),
             },
             WindowRequest::PinBundle {
                 window: 5,
@@ -1713,6 +1817,52 @@ mod tests {
             dirty_tail[18 + path_len] = 1;
             assert_eq!(WindowRequest::from_bytes(&dirty_tail), Err(Errno::BadMagic));
         }
+    }
+
+    #[test]
+    fn set_title_refuses_a_zero_id_a_malformed_title_and_a_dirty_tail() {
+        let base = WindowRequest::SetTitle {
+            window_id: 9,
+            title: WindowTitle::new("Documents").expect("a valid title"),
+        }
+        .to_le_bytes();
+        let mut zero_id = base;
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        // A declared length past the fixed title block.
+        let mut over_len = base;
+        over_len[SET_TITLE_LEN_OFFSET] = u8::try_from(WINDOW_TITLE_MAX + 1).expect("fits a u8");
+        assert_eq!(
+            WindowRequest::from_bytes(&over_len),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A control character and invalid UTF-8 inside the declared text.
+        let mut control_char = base;
+        control_char[SET_TITLE_TEXT_OFFSET] = 0x1b;
+        assert_eq!(
+            WindowRequest::from_bytes(&control_char),
+            Err(Errno::OutOfRange)
+        );
+        let mut invalid_utf8 = base;
+        invalid_utf8[SET_TITLE_TEXT_OFFSET] = 0xFF;
+        assert_eq!(
+            WindowRequest::from_bytes(&invalid_utf8),
+            Err(Errno::OutOfRange)
+        );
+        // A dirty byte past the declared text, and past the whole block.
+        let title_len = usize::from(base[SET_TITLE_LEN_OFFSET]);
+        let mut dirty_title_tail = base;
+        dirty_title_tail[SET_TITLE_TEXT_OFFSET + title_len] = 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&dirty_title_tail),
+            Err(Errno::BadMagic)
+        );
+        let mut dirty_reserved = base;
+        dirty_reserved[SET_TITLE_RESERVED_FROM] = 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&dirty_reserved),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -2112,6 +2262,7 @@ mod tests {
                 action: PointerAction::Released(PointerButtonCode::Middle),
             },
             WindowEvent::CloseRequested { window_id: 4 },
+            WindowEvent::AlternateCloseRequested { window_id: 4 },
             WindowEvent::FilePicked {
                 window_id: 4,
                 handle: 7,
@@ -2235,6 +2386,9 @@ mod tests {
         let mut close = WindowEvent::CloseRequested { window_id: 4 }.to_le_bytes();
         close[16] = 1;
         assert_eq!(WindowEvent::from_bytes(&close), Err(Errno::BadMagic));
+        let mut alternate = WindowEvent::AlternateCloseRequested { window_id: 4 }.to_le_bytes();
+        alternate[16] = 1;
+        assert_eq!(WindowEvent::from_bytes(&alternate), Err(Errno::BadMagic));
         let mut redraw = WindowEvent::RedrawRequested { window_id: 4 }.to_le_bytes();
         redraw[WindowEvent::WIRE_LEN - 1] = 1;
         assert_eq!(WindowEvent::from_bytes(&redraw), Err(Errno::BadMagic));
