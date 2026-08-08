@@ -42,6 +42,7 @@ use tairix_greeter::{AuthSurface, Backdrop, EventContext, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};
 
 use crate::shell::DesktopShell;
+use crate::switchuser::park_within;
 
 /// What one input event did to the lock.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -126,7 +127,8 @@ impl ScreenLock {
         }
     }
 
-    /// Apply one input event — pointer or key — to the lock.
+    /// Apply one input event — pointer or key — to the lock, at monotonic
+    /// `now_ns`.
     ///
     /// Keys edit the password; `Enter` offers it to `verifier`. The pointer
     /// places the caret and selects within the field, and reaches nothing
@@ -138,6 +140,7 @@ impl ScreenLock {
     pub fn handle(
         &mut self,
         event: &InputEvent,
+        now_ns: u64,
         verifier: &mut dyn Verifier,
         shell: &DesktopShell,
         compositor: &mut Compositor,
@@ -158,9 +161,7 @@ impl ScreenLock {
                 scale,
                 theme,
                 verifier,
-                // A lock covers one named user and offers no chooser, so
-                // there is no selection to cross-fade and no clock to read.
-                now_ns: 0,
+                now_ns,
             },
         );
         if outcome.verified() {
@@ -171,6 +172,37 @@ impl ScreenLock {
             self.repaint(shell, compositor);
         }
         LockOutcome::Pending
+    }
+
+    /// Step the locked surface's motion to `now_ns`, repainting it when the
+    /// step changed what it draws.
+    ///
+    /// The embedder calls this on every wake while locked, and parks until
+    /// [`park_deadline_ns`](Self::park_deadline_ns). The surface is the same
+    /// engine the login screen animates, so the lock animates with it rather
+    /// than freezing whatever it was mid-way through. An unlocked screen, and
+    /// a surface with nothing in flight, do nothing here.
+    pub fn advance(&mut self, now_ns: u64, shell: &DesktopShell, compositor: &mut Compositor) {
+        let redraw = self
+            .engaged
+            .as_mut()
+            .is_some_and(|engaged| engaged.surface.advance(now_ns).redraw());
+        if redraw {
+            self.repaint(shell, compositor);
+        }
+    }
+
+    /// `park_ns` shortened to the locked surface's next animation frame, or
+    /// left exactly as it is when the screen is unlocked or nothing is in
+    /// flight — an idle lock screen arms no timer.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        park_within(
+            park_ns,
+            self.engaged
+                .as_ref()
+                .and_then(|engaged| engaged.surface.motion_due(now_ns)),
+        )
     }
 
     /// Take the lock down without verifying anybody.
@@ -251,6 +283,7 @@ impl LockedDrain {
         &mut self,
         lock: &mut ScreenLock,
         event: &InputEvent,
+        now_ns: u64,
         verifier: &mut dyn Verifier,
         shell: &DesktopShell,
         compositor: &mut Compositor,
@@ -258,7 +291,7 @@ impl LockedDrain {
         if self.unlocked {
             return;
         }
-        if lock.handle(event, verifier, shell, compositor) == LockOutcome::Unlocked {
+        if lock.handle(event, now_ns, verifier, shell, compositor) == LockOutcome::Unlocked {
             self.unlocked = true;
         }
     }

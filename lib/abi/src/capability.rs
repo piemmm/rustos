@@ -263,11 +263,18 @@ impl CapabilityId {
     /// serial UART on a debug build, the video console on release). This is
     /// **not** the hash-chained security audit log — that channel
     /// ([`AUDIT_WRITE`](Self::AUDIT_WRITE)) stays kernel-only, so a holder of
-    /// this capability can never write, forge, or truncate an audit entry. Emitting to the system console is privileged
-    /// rather than ambient (no ambient authority; —
-    /// capability checks before state touches): only trusted system services
-    /// (the device manager, login) are granted it, so an ordinary app cannot
-    /// scribble diagnostics onto the captured serial line.
+    /// this capability can never write, forge, or truncate an audit entry, and
+    /// the kernel attributes every record to the calling task, so one cannot
+    /// be mis-attributed. Emitting is capability-gated rather than ambient (no
+    /// ambient authority; capability checks before state touches), but it is
+    /// part of the interactive account baseline
+    /// (`tairix_users::SESSION_BASELINE`), not a service-only grant: a session
+    /// legitimately reports its own operational state. The accepted cost is
+    /// that any program a logged-in user runs may write to the machine-wide
+    /// diagnostic log — noise and provenance confusion are possible, and a
+    /// debug build's captured serial line is user-writable. A program still
+    /// receives it only if its own manifest requests it, intersected with the
+    /// account's ceiling.
     pub const LOG_EMIT: Self = Self(26);
     /// Publish a discovered child device node into the live hardware tree
     /// through the `hw_emit_node` syscall (`abi-v1` number 37).

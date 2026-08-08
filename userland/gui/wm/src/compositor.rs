@@ -32,7 +32,7 @@ use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache,
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{Color, Pixel};
+use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
@@ -110,6 +110,9 @@ pub struct Compositor {
     /// same rectangle (the pointer picking up a text or resize shape
     /// without moving) still repaints.
     cursor_replaced: bool,
+    /// How much of the composed screen reaches scan-out: [`u8::MAX`] is the
+    /// screen as composed, `0` is black (see [`set_reveal`](Compositor::set_reveal)).
+    reveal: u8,
     back: Surface,
     frame: Vec<u8>,
     /// Working buffers for a backdrop frost, owned by the compositor and
@@ -176,6 +179,7 @@ impl Compositor {
             cursor: None,
             cursor_on_screen: None,
             cursor_replaced: false,
+            reveal: u8::MAX,
             back,
             frame,
             blur_scratch: BlurScratch::new(),
@@ -198,6 +202,11 @@ impl Compositor {
     /// Served windows survive: they keep their positions and are clipped to
     /// whatever screen the new mode describes, so a session resumed onto a
     /// different monitor keeps its apps rather than losing them.
+    ///
+    /// The screen reveal ([`set_reveal`](Self::set_reveal)) carries over
+    /// untouched: a session fading in that changes mode mid-fade keeps
+    /// fading, and the whole-screen redraw below re-encodes every pixel at
+    /// the strength in force.
     ///
     /// Returns `false` — leaving the compositor exactly as it was, still
     /// able to draw the old mode — when the new one cannot be adopted: a
@@ -556,6 +565,35 @@ impl Compositor {
             return false;
         }
         self.background = background;
+        self.damage.add(self.screen_rect());
+        true
+    }
+
+    /// How much of the composed screen currently reaches scan-out:
+    /// [`u8::MAX`] for all of it, `0` for a black screen.
+    #[must_use]
+    pub const fn reveal(&self) -> u8 {
+        self.reveal
+    }
+
+    /// Scale every presented pixel towards black by `strength`, returning
+    /// whether it changed.
+    ///
+    /// [`u8::MAX`] presents the composed screen exactly as it is and costs
+    /// nothing; `0` presents black; between the two the screen appears
+    /// through it. This is how a session reveals its desktop from black
+    /// instead of snapping it on, and it is applied once, where a composed
+    /// pixel is encoded into the scan-out frame — the back buffer keeps the
+    /// true composed colour, so a frosted window's backdrop and a
+    /// multi-segment rectangle cannot be dimmed twice.
+    ///
+    /// A change repaints the whole screen because every pixel's presented
+    /// value changed; setting the strength already in force damages nothing.
+    pub fn set_reveal(&mut self, strength: u8) -> bool {
+        if strength == self.reveal {
+            return false;
+        }
+        self.reveal = strength;
         self.damage.add(self.screen_rect());
         true
     }
@@ -1515,9 +1553,11 @@ impl Compositor {
     /// one layer per visible window (its surface baked with that window's
     /// opacity and rounded-corner coverage), and the cursor on top, so the
     /// hardware result matches the software compositor pixel-for-pixel. If
-    /// the engine's [`AccelCaps`] cannot hold that many layers, or a layer
-    /// is larger than the engine can source, the whole frame is composited
-    /// in software and presented instead — never a partial hardware frame.
+    /// the engine's [`AccelCaps`] cannot hold that many layers, a layer
+    /// is larger than the engine can source, or a screen reveal
+    /// ([`set_reveal`](Self::set_reveal)) is in flight, the whole frame is
+    /// composited in software and presented instead — never a partial
+    /// hardware frame.
     ///
     /// # Errors
     ///
@@ -1551,10 +1591,17 @@ impl Compositor {
     }
 
     /// Encode the current scene as hardware layers, or `None` if the
-    /// engine's [`AccelCaps`] cannot serve it (the caller falls back to
-    /// software). `fallback` carries the furniture the cache would not
-    /// retain for this pass.
+    /// engine's [`AccelCaps`] cannot serve it, or a screen reveal
+    /// ([`set_reveal`](Self::set_reveal)) is in flight (the caller falls back
+    /// to software either way). `fallback` carries the furniture the cache
+    /// would not retain for this pass.
     fn encode_layers(&self, caps: &AccelCaps, fallback: &ChromeFallback) -> Option<Vec<LayerBuf>> {
+        // The engine scans a layer out as the driver was handed it, so
+        // nothing it composes passes through the reveal and the screen would
+        // appear at full strength while the fade ran.
+        if self.reveal != u8::MAX {
+            return None;
+        }
         let epoch = self.chrome_epoch();
         let max_layers = usize::try_from(caps.max_layers).unwrap_or(usize::MAX);
         let mut layers = Vec::new();
@@ -1714,6 +1761,12 @@ impl Compositor {
     /// writing the result to the back buffer and — when `encode` — to the
     /// encoded scan-out frame.
     ///
+    /// Encoding is the one point a composed pixel becomes a scan-out byte,
+    /// so it is also the one point the screen reveal
+    /// ([`set_reveal`](Self::set_reveal)) is applied. The back buffer keeps
+    /// the composed colour undimmed, which is what a continuing segment and
+    /// a frosted backdrop read.
+    ///
     /// `under` is what the layers are composed over: `Some(base)` starts
     /// from the root fill with the desktop layer beneath the windows, while
     /// `None` starts from whatever the back buffer already holds, which is
@@ -1749,12 +1802,14 @@ impl Compositor {
             windows,
             cursor,
             chrome,
+            reveal,
             back,
             frame,
             ..
         } = self;
         let stride = mode.stride_bytes as usize;
         let order = *order;
+        let reveal = *reveal;
         let windows: &[Window] = windows;
         // The cursor is the top-most layer, so only the segment that
         // finishes the rectangle draws it.
@@ -1820,7 +1875,7 @@ impl Compositor {
                     let acc =
                         compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
                     *dst = acc;
-                    *bytes = order.encode(acc);
+                    *bytes = order.encode(revealed(acc, reveal));
                 }
             } else {
                 for (dst, x) in back_row.iter_mut().zip(area.left()..area.right()) {
@@ -1917,6 +1972,25 @@ fn compose_pixel(
         }
     }
     acc
+}
+
+/// `pixel` as the screen reveal presents it: scaled towards black by
+/// `strength`, with alpha untouched so an opaque screen stays opaque and the
+/// premultiplied invariant (every channel `<= a`) still holds.
+///
+/// A fully-revealed screen returns the pixel itself, so a desktop that is not
+/// fading pays a compare and encodes exactly the bytes it always did.
+fn revealed(pixel: Pixel, strength: u8) -> Pixel {
+    if strength == u8::MAX {
+        return pixel;
+    }
+    let s = u32::from(strength);
+    Pixel {
+        r: div255(u32::from(pixel.r) * s),
+        g: div255(u32::from(pixel.g) * s),
+        b: div255(u32::from(pixel.b) * s),
+        a: pixel.a,
+    }
 }
 
 /// The desktop layer's pixel at screen column `x` on an already-resolved

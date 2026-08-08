@@ -1108,10 +1108,12 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
   - Hover and press take the shared pointer wash (`surface_hover` /
     `surface_pressed`) as a rounded panel across the whole tile.
   - **Selection frosts the tile's backdrop and fills the tile with the theme's
-    `selection_fill`** — its own accent at half opacity. What is blurred is the
-    *backdrop*: the pixels the tile covers — a window's surface, the desktop
-    wallpaper — are frosted by the scaled `selection_backdrop_blur` through the
-    one shared region frost, the same call the compositor frosts a window's
+    `selection_fill`** — its own accent at three tenths opacity, light because
+    the frost is what marks the item and the accent only tints it. What is
+    blurred is the *backdrop*: the pixels the tile covers — a window's surface,
+    the desktop wallpaper — are frosted by the scaled `selection_backdrop_blur`
+    through the one shared region frost, the same call the compositor frosts a
+    window's
     backdrop with, and the fill is then laid over them with a **crisp** edge,
     rounded like every other panel. Frost and fill are both confined to that
     one rounded shape, so nothing escapes the tile and no square edge shows

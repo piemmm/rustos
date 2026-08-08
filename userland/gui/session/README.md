@@ -224,6 +224,51 @@ feature; the pin drag source is the program-library popup instead (see
 *Pin service and window-channel bridge*, above), whose every row is a
 catalogued entry by construction.
 
+## Revealing the desktop on session start
+
+The login screen fades to black and exits, so the screen a session inherits
+is already dark. `SessionReveal` (`reveal.rs`) fades the desktop up out of
+it rather than snapping it on, driving the compositor's screen reveal from
+`0` to `u8::MAX` over the active theme's own `SessionFade` duration — no
+timing is spelled here.
+
+It is one `tairix_theme::Timeline` and nothing else, so both degenerate
+cases need no branch: a reduced-motion theme answers a zero duration, which
+starts settled and leaves the desktop simply revealed on its first frame
+with no extra present and no timer; and a clock that jumped backwards
+settles rather than stalling black. The fade begins at the session's first
+successful present, because the span is wall-clock and one begun over
+bring-up would spend itself on an empty screen.
+
+The run loop's existing park drives it: each wake steps the reveal, and the
+park is shortened to the fade's next frame through `park_within` — the one
+fold the lock screen uses too, so the two cannot round a deadline
+differently. With nothing animating the park is byte-for-byte the value the
+loop already carried, so an idle desktop arms no timer. Time alone finishes
+it, so a display that refuses a present mid-fade cannot strand the desktop
+dark and nothing retries.
+
+Reaching full strength is announced once per session as `DESKTOP_REVEALED`
+(message `DESKTOP_REVEALED_MESSAGE`), emitted after a present that reached
+the display — the witness that the desktop is *visible*, not merely
+presenting, since every frame before it is black to a degree. A
+reduced-motion theme is settled on its first frame, so its witness lands
+there; nothing is ever said twice. The desktop QEMU verticals gate their
+screendump on the rendered message, so it is defined once here and imported
+by `tools/xtask` rather than restated.
+
+Emitting it needs `CAP_LOG_EMIT`, which the bundle's manifest requests and
+the interactive-account ceiling carries (`tairix_users::SESSION_BASELINE`),
+so the intersection keeps it. The same grant is what finally lets the
+session's cache ledgers reach the log: they were wired to it long before any
+account could hold it, and were silently discarded until now.
+
+The screen lock is the login screen's own surface, and the session hands it
+the same real clock: `ScreenLock::handle` takes the instant, `advance` steps
+it on every wake, and `park_deadline_ns` folds what the surface asks for
+into the same park. A refused unlock therefore shakes as it does at login,
+and an idle lock screen arms no timer either.
+
 ## Presenting the taskbar through the window manager
 
 `TaskbarPresenter` joins the taskbar to the compositor. The taskbar paints a

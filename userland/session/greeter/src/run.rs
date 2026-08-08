@@ -17,8 +17,11 @@
 //! next thing that actually needs a repaint. An untouched login screen arms no
 //! timer at all and consumes no CPU.
 //!
-//! A verified secret exits `0` immediately; the authority is watching for that
-//! exit and starts the session itself. Everything else keeps asking.
+//! A verified secret fades the screen to black and then exits `0`; the
+//! authority is watching for that exit and starts the session itself, and the
+//! desktop comes up out of the same black. The fade is bounded and cannot
+//! fail: a lost seat, a refused present, or a stopped clock ends it early and
+//! the exit is still `0`. Everything else keeps asking.
 //!
 //! The shipped wallpaper is untrusted input, so it is decoded by re-entering
 //! this same binary as a capability-empty sandbox worker — never in the
@@ -536,7 +539,10 @@ mod program {
                 ended => ended,
             };
             match drained {
-                Drained::Verified => return 0,
+                Drained::Verified => {
+                    fade_out(screen, display, mode, set);
+                    return 0;
+                }
                 Drained::Lost => return fail(
                     EXIT_NO_SEAT,
                     "the seat stopped delivering readable input, so the screen is no longer ours",
@@ -561,10 +567,50 @@ mod program {
         }
     }
 
+    /// Take the screen to black, then let the caller leave.
+    ///
+    /// The desktop cannot appear until this process exits, so the screen goes
+    /// black first and the desktop comes up out of the same black. It is a
+    /// cosmetic step on an already-made decision, so every way it can go
+    /// wrong ends it rather than the login: the loop is bounded by the frames
+    /// the fade can ask for, a wait that fails or a seat that stops
+    /// delivering ends it, and a refused present is ignored like every other.
+    ///
+    /// The seat's channels are still drained, though nothing acts on them:
+    /// input left unread reads ready forever, and the park would return at
+    /// once instead of pacing the fade.
+    fn fade_out<D: Display, T: SessionTransport>(
+        screen: &mut LoginScreen<T>,
+        display: &mut D,
+        mode: &DisplayMode,
+        set: u64,
+    ) {
+        let opening = screen.begin_session_fade(tairix_rt::clock_get());
+        show(display, screen.frame(), opening);
+        for _ in 0..screen.session_fade_budget() {
+            let Some(due) = screen.session_fade_due(tairix_rt::clock_get()) else {
+                return;
+            };
+            if drain_keyboard(screen, display, mode) == Drained::Lost
+                || drain_pointer(screen, display, mode) == Drained::Lost
+            {
+                return;
+            }
+            let mut token = 0u64;
+            let woken = tairix_rt::waitset_wait(set, due, &mut token);
+            if woken < 0 && Errno::from_syscall(woken) != Errno::TimedOut {
+                return;
+            }
+            let darkened = screen.session_fade_step(tairix_rt::clock_get());
+            show(display, screen.frame(), darkened);
+        }
+    }
+
     /// The program's entry point.
     ///
-    /// Exit codes: `0` once a secret is verified, and otherwise the
-    /// bring-up code that names what was missing, each stated on `stderr`.
+    /// Exit codes: `0` once a secret is verified and the screen has faded to
+    /// black, and otherwise the bring-up code that names what was missing,
+    /// each stated on `stderr`.
     fn main() -> i32 {
         // The sandbox worker role first, before any seat work: decoding the
         // wallpaper re-enters this same binary with the reserved role

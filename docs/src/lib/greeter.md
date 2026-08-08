@@ -33,16 +33,95 @@ the secret and `Enter` offers it; the pointer places the caret within the field
 and reaches nothing else. `EventContext` carries the monotonic clock the surface
 times motion from.
 
-On the chooser, moving focus cross-fades the selection mark over the theme's
-`SelectionChange` duration (instant under reduced motion). `advance(now_ns)`
-steps a running fade and reports the union of the two tiles it touches;
-`motion_due(now_ns)` is the nanoseconds until the next fade frame, or `None`
-when nothing is animating so an idle embedder arms no timer.
-
 `render(screen, scale, theme, backdrop)` paints the whole frame and yields
 `None` — never a partial or empty frame — when a screen has no pixels or a
 surface could not be allocated, so an embedder that must cover the display
-fails closed on it.
+fails closed on it. It is a pure function of state the surface already holds:
+it reads no clock, so what is on screen is decided by `on_event` and `advance`
+and never by when the paint happened to run.
+
+## Motion
+
+Four animations, each one `tairix_theme::Timeline` over a duration the theme
+names. No timing is written down in this crate and no part of it keeps its own
+start stamp, span, or frame step — that arithmetic has one definition, in
+`lib/theme`, and this crate holds one timeline per concern so two that overlap
+both finish.
+
+| Animation | Theme duration | What moves |
+|-----------|----------------|------------|
+| selection cross-fade | `SelectionChange` | the mark dissolving between two tiles |
+| stage transition | `StageTransition` | the chosen disc travelling between chooser and prompt |
+| rejection shake | `AttemptRejected` | the prompt column swinging sideways |
+| fade to black | `SessionFade` | a veil closing over the whole screen |
+
+`advance(now_ns)` steps whatever is running, settles what has finished, and
+reports the union of what it touched. `motion_due(now_ns)` is the nanoseconds
+until the soonest next frame — the minimum over what is running — or `None`
+when nothing is, so an idle embedder arms no timer. Both fold every animation
+in *every* mode: the shake and the veil live in the prompt, and the desktop's
+lock is a surface that is only ever the prompt.
+
+### The stage transition
+
+Picking an account travels the chosen tile's monogram disc to where the
+prompt's disc sits, growing as it goes, while the other tiles dissolve and the
+prompt's name, pill, and notice come up. `Escape` runs the same transition the
+other way.
+
+It interpolates the **layout**, not two renders: the disc's rectangle and glyph
+size are interpolated between the two stages' own geometry, and every other
+element is drawn once at a strength applied to its own colour, which every fill
+and every glyph already honours. Cross-fading two screen-sized renders would
+cost a second frame buffer for a quarter of a second to reach the same picture;
+this costs one tile-sized scratch per chooser tile, and only while the
+transition runs.
+
+A single strength drives both the disc's position along that axis and its
+opacity, in both directions. That is what makes a mid-travel reversal turn
+round *where it is* rather than jumping to the mirror of it, and it is why both
+stages composite in a fixed order — ordering them by which one is arriving
+would swap them where they overlap and pop.
+
+### The rejection shake
+
+A refusal swings the prompt column — disc, name, and pill — sideways in a
+decaying oscillation of three cycles that comes to rest at exactly zero. The
+amplitude is authored in logical pixels, scaled once, and clamped to the room
+either side so nothing is drawn off the surface at any point.
+
+There is no float maths in a `no_std` kernel-adjacent crate, so the sine comes
+from a nine-entry quarter-period table in 1/255 units, linearly interpolated
+between samples and folded into the other three quadrants. A square wave would
+have been cheaper and would have read as a stutter rather than a shake.
+
+The damage is the union of the extreme positions the band reaches, never the
+screen. The refusal notice and the authority's cooldown are untouched; the
+shake is additional, which is why reduced motion — where there is no shake at
+all — still reports the refusal in full.
+
+### The fade to black
+
+`begin_session_fade(now_ns, theme)` lays a veil over the whole composed screen
+that darkens to opaque over `SessionFade`, and `session_fade_finished()` says
+when it has arrived. The embedder drives it, because the embedder is what knows
+the login is over; the surface is what paints. Once it starts, input is
+ignored: the decision is made, and a keystroke must not re-open the prompt.
+
+`session_fade_begun()` reports that state from the first veiled frame, for an
+embedder that draws a pointer over this surface: the veil is painted *into* the
+surface, so a cursor sampled on top of it afterwards would stay bright all the
+way down to black. A pointer is an affordance for a screen that is still
+answering, and this one is not, so it leaves with the screen rather than being
+dimmed by a second copy of the veil's arithmetic.
+
+### Reduced motion
+
+A reduced-motion theme reports zero for every duration, and a zero-duration
+`Timeline` starts already settled. Every animation above therefore becomes
+instant with no branch in this crate: the transition lands on its destination,
+the refusal shows its notice with no displacement, the veil is black at once,
+and nothing asks for a frame.
 
 ## The verdict seam
 
@@ -178,8 +257,9 @@ than per frame.
 
 Every `Outcome` reports the rectangle the next paint will change: the field for
 a keystroke, the block for a verdict, the two tiles a selection fade is leaving
-and arriving at, the chrome band for a clock tick, and the whole screen for a
-mode change or a first frame.
+and arriving at, the band a shake swings through, the chrome band for a clock
+tick, and the whole screen for a mode change, a running stage transition, a
+veil, or a first frame.
 An embedder presenting to a compositor or a display service therefore uploads a
 small rectangle for a keystroke instead of a screen. The reported rectangle is
 always a superset of what actually changes; the crate's tests assert that

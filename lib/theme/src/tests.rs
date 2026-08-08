@@ -3,9 +3,11 @@
 use alloc::string::String;
 
 use crate::motion::MotionInteraction;
+use crate::theme::SELECTION_ALPHA;
 use crate::{
     Appearance, Contrast, CursorKind, CursorSet, Density, FamilyKey, FontWeight, Fonts, Metrics,
     MotionTheme, Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
+    Timeline,
 };
 
 #[test]
@@ -104,25 +106,6 @@ fn accent_labels_stay_legible_on_the_accent_fill() {
 /// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
 fn luma(c: Rgba) -> u32 {
     (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
-}
-
-#[test]
-fn the_selection_fill_is_each_theme_s_own_accent_at_half_opacity() {
-    for theme in [Theme::dark(), Theme::light()] {
-        let p = theme.palette();
-        assert_eq!(
-            p.selection_fill.a,
-            128,
-            "{}: an opaque fill would hide what a selection sits on",
-            theme.name()
-        );
-        assert_eq!(
-            p.selection_fill.with_alpha(p.accent.a),
-            p.accent,
-            "{}: the fill is the theme's own accent, not a second hue",
-            theme.name()
-        );
-    }
 }
 
 #[test]
@@ -271,8 +254,105 @@ fn reduced_motion_collapses_every_duration_to_zero() {
         MotionInteraction::WindowActivate,
         MotionInteraction::WindowSizeTransition,
         MotionInteraction::ScrollbarWake,
+        MotionInteraction::SelectionChange,
+        MotionInteraction::StageTransition,
+        MotionInteraction::AttemptRejected,
+        MotionInteraction::SessionFade,
     ] {
         assert_eq!(reduced.duration(interaction), 0);
+    }
+}
+
+#[test]
+fn a_settled_timeline_is_complete_and_asks_for_no_wake() {
+    // Settled means finished, not pending: a reduced-motion theme answers zero
+    // for every duration, and the state it was animating towards must be what
+    // is drawn, with no timer armed to reach it.
+    for timeline in [
+        Timeline::SETTLED,
+        Timeline::default(),
+        Timeline::start(0, 0),
+    ] {
+        assert!(!timeline.running());
+        assert_eq!(timeline.progress(0), u8::MAX);
+        assert!(timeline.finished(0));
+        assert_eq!(timeline.next_frame_in(0), None);
+    }
+}
+
+#[test]
+fn a_timeline_runs_from_nothing_to_complete_over_its_span() {
+    const MS: u64 = 1_000_000;
+    let timeline = Timeline::start(5 * MS, 100);
+    assert!(timeline.running());
+    assert_eq!(timeline.progress(5 * MS), 0);
+    assert!(!timeline.finished(5 * MS));
+    // Half way through is half way along, within the rounding a byte allows.
+    let half = timeline.progress(55 * MS);
+    assert!((126..=129).contains(&half), "half way reads {half}");
+    assert_eq!(timeline.progress(105 * MS), u8::MAX);
+    assert!(timeline.finished(105 * MS));
+    assert!(timeline.finished(500 * MS));
+    // Never backwards: a frame can only ever be at least as far along as the
+    // one before it.
+    let mut last = 0;
+    for step in 0..=100 {
+        let now = timeline.progress((5 + step) * MS);
+        assert!(now >= last, "{step} ms went backwards");
+        last = now;
+    }
+}
+
+#[test]
+fn a_clock_that_jumped_backwards_settles_rather_than_stalling() {
+    // An instant before the start would otherwise read as "not begun" for as
+    // long as the clock stayed behind, freezing an animation on its first
+    // frame and holding a timer open.
+    const MS: u64 = 1_000_000;
+    let timeline = Timeline::start(100 * MS, 100);
+    assert_eq!(timeline.progress(40 * MS), u8::MAX);
+    assert!(timeline.finished(40 * MS));
+    assert_eq!(timeline.next_frame_in(40 * MS), None);
+}
+
+#[test]
+fn a_wake_is_the_nearer_of_the_frame_cadence_and_what_is_left() {
+    const MS: u64 = 1_000_000;
+    let timeline = Timeline::start(0, 1000);
+    // Early on, the cadence is what limits it.
+    assert_eq!(timeline.next_frame_in(0), Some(Timeline::FRAME_NS));
+    // Near the end, the remainder is: the last wake lands on the end rather
+    // than past it.
+    let remaining = 4 * MS;
+    assert_eq!(
+        timeline.next_frame_in(1000 * MS - remaining),
+        Some(remaining)
+    );
+    assert_eq!(timeline.next_frame_in(1000 * MS), None);
+}
+
+#[test]
+fn settling_a_running_timeline_stops_it() {
+    let mut timeline = Timeline::start(0, 500);
+    assert!(timeline.running());
+    timeline.settle();
+    assert_eq!(timeline, Timeline::SETTLED);
+    assert_eq!(timeline.next_frame_in(0), None);
+}
+
+#[test]
+fn a_selection_fill_only_tints_what_is_behind_it() {
+    // The frosted backdrop is what marks a selected item; the accent tints it.
+    // A fill this side of half opacity is deliberate, so both themes state it
+    // and neither may quietly become a block of colour.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_eq!(p.selection_fill, p.accent.with_alpha(SELECTION_ALPHA));
+        assert!(
+            u32::from(p.selection_fill.a) * 3 < u32::from(u8::MAX),
+            "{}: the selection fill covers rather than tints",
+            theme.name()
+        );
     }
 }
 
@@ -634,8 +714,42 @@ fn sample_theme(id: ThemeId) -> Theme {
             move_: String::from("c.move"),
             busy: String::from("c.busy"),
         },
-        MotionTheme::new([90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90]),
+        MotionTheme::new([
+            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900,
+        ]),
         Density::Normal,
         Contrast::Normal,
     )
+}
+
+#[test]
+fn easing_starts_and_ends_gently_but_still_spans_the_whole_range() {
+    const MS: u64 = 1_000_000;
+    let timeline = Timeline::start(0, 100);
+    assert_eq!(timeline.eased(0), 0);
+    assert_eq!(timeline.eased(100 * MS), u8::MAX);
+    // Half way along is half way through, within the step a byte's worth of
+    // linear progress rounds to, and the curve is symmetric about it.
+    let mid = timeline.eased(50 * MS);
+    assert!((125..=130).contains(&mid), "the midpoint reads {mid}");
+    for step in 0..=50 {
+        let early = u32::from(timeline.eased(step * MS));
+        let late = u32::from(timeline.eased((100 - step) * MS));
+        let sum = early + late;
+        assert!(
+            (252..=258).contains(&sum),
+            "{step} ms is not symmetric: {sum}"
+        );
+    }
+    // Slower than linear leaving, faster than linear arriving.
+    assert!(timeline.eased(20 * MS) < timeline.progress(20 * MS));
+    assert!(timeline.eased(80 * MS) > timeline.progress(80 * MS));
+    let mut last = 0;
+    for step in 0..=100 {
+        let now = timeline.eased(step * MS);
+        assert!(now >= last, "{step} ms eased backwards");
+        last = now;
+    }
+    // A settled timeline is complete on either curve.
+    assert_eq!(Timeline::SETTLED.eased(0), u8::MAX);
 }

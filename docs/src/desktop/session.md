@@ -670,6 +670,61 @@ surface leaves the on-screen window untouched rather than blanking the bar, a
 window the compositor no longer knows is re-created on the next present, and
 `teardown` removes every window so a session shutdown leaves nothing orphaned.
 
+## Revealing the desktop on session start
+
+The login screen fades to black and exits, so the screen a session inherits
+is already dark. `SessionReveal` fades the desktop up out of that black
+rather than snapping it on: it starts the compositor's [screen
+reveal](wm.md#screen-reveal) at `0` and walks it to `u8::MAX`.
+
+The span is the active theme's own `SessionFade` duration, read off the
+compositor's theme, so no timing is spelled in the session. Motion state is
+the shared `tairix_theme::Timeline` and nothing else, which is what makes
+the two degenerate cases free of any branch here:
+
+- **Reduced motion** answers a zero duration, which starts settled. The
+  desktop is simply fully revealed on its first frame — no extra present,
+  no timer.
+- **A clock that jumped backwards** settles rather than stalling black.
+
+The fade begins at the session's first successful present, not at bring-up:
+the span is wall-clock, and a fade started earlier would spend itself on a
+screen with nothing on it yet.
+
+It is driven by the run loop's existing park, never by a frame timer. Each
+wake steps the reveal to the current instant, and the park the loop was
+already going to use is shortened to the fade's next frame — `park_within`
+is the one fold both this and the lock screen use, so the two cannot round
+a deadline differently. **With nothing animating the park is byte-for-byte
+the value the loop already carried**, so an idle desktop arms no timer at
+all.
+
+Time alone drives it: reaching the end of the span reveals the screen fully
+and settles, whatever became of any frame presented on the way. A display
+that refuses a present mid-fade therefore cannot strand the desktop dark,
+and nothing retries.
+
+### The one-shot visible witness
+
+Reaching full strength is announced once per session as `DESKTOP_REVEALED`
+("desktop fully revealed on screen"), emitted after a present that reached
+the display. It marks the desktop *visible*, which "a frame was presented"
+no longer does: every frame before it is black to a degree, so an observer
+keyed on the first present cannot tell a revealing desktop from a blank
+screen. Under reduced motion the first frame is already at full strength
+and the witness lands there, so a consumer waiting on it never waits for a
+fade that will not happen. It is said once and never repeated.
+
+Its id and message are defined once beside the reveal and imported by the
+desktop QEMU verticals, which gate their screendump on the rendered text,
+so emitter and consumer cannot drift.
+
+Emitting it needs `CAP_LOG_EMIT`, which the bundle's manifest requests and
+the interactive-account ceiling carries, so the intersection keeps it. The
+same grant is what finally lets the session's cache ledgers reach the log:
+they were wired to it long before any account could hold it, and were
+silently discarded until now.
+
 ## The screen lock
 
 Choosing *Lock Screen* in the taskbar's [system quick-actions
@@ -720,6 +775,14 @@ reallocate and strand a copy of the secret in a freed block, and redacts
 itself in `Debug`. The erase is the workspace's single volatile
 `tairix_util::secret::wipe`, which an optimiser cannot delete as a store
 nobody reads back.
+
+The lock screen is the login screen's own surface, so it animates like it:
+the session hands it the real monotonic clock on every event and steps it
+with `ScreenLock::advance` on every wake, and `ScreenLock::park_deadline_ns`
+folds whatever the surface asks for into the loop's park through the same
+`park_within` the desktop's reveal uses. A refused unlock therefore shakes
+the question as it does at login. An idle lock screen asks for nothing and
+arms no timer.
 
 Whether the row is offered at all is the session's attestation: it tells the
 bar through `DesktopShell::set_lock_available` whether it runs on a console
@@ -1009,6 +1072,15 @@ keys); motion keeping the pointer in step; a window drag continuing while the
 pointer is over the bar; a capsule tap and hold each asking the session to
 open the Switchboard at their own section; and a release the bar does not
 claim ending the grab.
+
+It covers the desktop's reveal from black: the fade walking the theme's own
+session-fade span frame by frame to a fully revealed screen and then asking
+for nothing; an idle desktop — and an unengaged lock — leaving the park
+exactly the value it was handed; reduced motion revealing at once with no
+repaint and no timer; a display refusing a present mid-fade still reaching a
+fully revealed desktop; and a refused unlock animating on the session's
+clock, shortening the park while it runs and returning it untouched once it
+settles.
 
 It covers the library loader (`load_library`) and pin loader (`SessionPins`):
 absent stores silent and empty, parsed stores, the user overlay's per-field

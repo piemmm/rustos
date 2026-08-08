@@ -261,13 +261,17 @@ impl Theme {
 /// appearance, so the two variants share the token instead of restating it.
 const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 
-/// The opacity both built-in themes give their selection fill: half.
+/// The opacity both built-in themes give their selection fill: a little under
+/// a third.
 ///
 /// A selection marks an item without hiding it, so the surface or wallpaper
 /// under a selected tile still reads through the accent rather than being
-/// replaced by it. Each theme still authors its own fill colour and may tune
+/// replaced by it. It is this light because it is not doing the work alone:
+/// the backdrop beneath a selected item is frosted first, and that separation
+/// is what makes the item read as picked, leaving the accent to tint rather
+/// than to cover. Each theme still authors its own fill colour and may tune
 /// this.
-const SELECTION_ALPHA: u8 = 128;
+pub(crate) const SELECTION_ALPHA: u8 = 77;
 
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and
@@ -306,18 +310,21 @@ fn common_metrics() -> Metrics {
 /// (or a variant theme) via [`MotionTheme::with_reduced_motion`].
 fn common_motion() -> MotionTheme {
     MotionTheme::new([
-        100, // hover enter
-        95,  // hover exit
-        75,  // press compress
-        110, // release settle
-        210, // panel open
-        150, // menu open
-        150, // job progress pulse
-        220, // recovery latch reveal
-        115, // window activate
-        200, // window size transition
-        95,  // scrollbar wake
-        100, // selection change
+        100,  // hover enter
+        95,   // hover exit
+        75,   // press compress
+        110,  // release settle
+        210,  // panel open
+        150,  // menu open
+        150,  // job progress pulse
+        220,  // recovery latch reveal
+        115,  // window activate
+        200,  // window size transition
+        95,   // scrollbar wake
+        100,  // selection change
+        240,  // stage transition
+        420,  // attempt rejected
+        1000, // session fade
     ])
 }
 

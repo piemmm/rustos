@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Blue folder icon</title>
+  <desc id="desc">A flat blue folder icon for use in a file viewer to represent a directory.</desc>
+
+  <!-- Back / tab -->
+  <path d="M28 64C28 53.507 36.507 45 47 45H100.5C106.64 45 112.389 47.96 115.957 52.955L127.777 69.5H209C219.493 69.5 228 78.007 228 88.5V101H28V64Z"
+        fill="#3A86E8"/>
+
+  <!-- Front body -->
+  <path d="M28 91C28 80.507 36.507 72 47 72H209C219.493 72 228 80.507 228 91V192C228 202.493 219.493 211 209 211H47C36.507 211 28 202.493 28 192V91Z"
+        fill="#4C9AF0"/>
+
+  <!-- Flat top-plane accent for light separation; no shadow -->
+  <path d="M47 72H209C219.493 72 228 80.507 228 91V99H28V91C28 80.507 36.507 72 47 72Z"
+        fill="#65AAF5"/>
+</svg>

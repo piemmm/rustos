@@ -45,10 +45,17 @@ charter forbids.
 - `Chrome` — the clock, date, and host name drawn on the backdrop. Display
   text, bounded on the way in, never read back for authority.
 - `EventContext` — the screen rectangle, scale, theme, verifier, and monotonic
-  clock (`now_ns`) one event is answered against. The clock times the chooser's
-  selection cross-fade.
-- `AuthSurface::advance` / `motion_due` — step a running selection fade and ask
-  when the next frame is due. An idle surface returns no deadline.
+  clock (`now_ns`) one event is answered against. The clock times every
+  animation below; nothing here reads a clock of its own.
+- `AuthSurface::advance` / `motion_due` — step whatever is running and ask when
+  the next frame is due. Both fold every animation in every mode, and an idle
+  surface returns no deadline.
+- `AuthSurface::begin_session_fade` / `session_fade_finished` — start the veil
+  that takes a successful login to black, and ask whether it has arrived. The
+  embedder drives it, because the embedder is what decides the login is over.
+- `AuthSurface::session_fade_begun` — whether the screen has started leaving.
+  One definition, so the two things that must stop when it has — accepting
+  input, and drawing a pointer over the frame — cannot disagree.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
   colour, or a wallpaper the embedder has already decoded and fitted, under a
   scrim and a soft vertical wash of the desktop colour at each end, where the
@@ -98,10 +105,47 @@ charter forbids.
   a verdict, the two tiles a selection fade is leaving and arriving at, the
   chrome band for a clock tick — or `None` for "the whole screen" on a mode
   change and before the surface has been placed.
-- **The chooser selection mark cross-fades.** Moving focus starts a fade over
-  the theme's `SelectionChange` duration; reduced motion collapses that
-  duration to zero so the mark jumps. An idle surface arms no timer.
 - **Nothing here rate-limits or counts attempts**, deliberately. The authority
   behind the verifier owns that policy and audits every attempt against the
   account. `set_cooldown` *presents* what the authority reports and refuses to
   submit while it stands; it invents no budget and reads no clock.
+
+## Motion
+
+Four animations, each one `tairix_theme::Timeline` over a theme duration. No
+surface keeps its own start stamp, span, or frame step, and no duration is
+written down here. `advance` steps them and `motion_due` reports the soonest
+next frame — the minimum over whatever is running, in whatever mode, and `None`
+when nothing is, so an idle screen arms no timer.
+
+- **The selection cross-fade** (`SelectionChange`). Moving focus dissolves the
+  mark from the tile being left onto the one arriving.
+- **The stage transition** (`StageTransition`). Picking an account travels the
+  chosen tile's monogram disc to where the prompt's disc sits, growing as it
+  goes, while the other tiles dissolve and the prompt's name, pill, and notice
+  come up. It is the *layout* that is interpolated — the disc's rect and glyph
+  size, and a strength on every other element's own colour — not two
+  screen-sized renders cross-faded, so a transition costs one tile-sized
+  scratch per tile rather than a second screen. `Escape` runs the same
+  transition the other way. One strength drives both the disc's position and
+  its opacity, in both directions, so a travel turned round half-way turns
+  round *where it is* instead of jumping to the mirror of it.
+- **The rejection shake** (`AttemptRejected`). A refusal swings the prompt
+  column — disc, name, and pill — sideways in a decaying oscillation that
+  comes to rest at exactly zero. There is no float maths here, so the sine
+  comes from a nine-entry quarter-period integer table, interpolated and
+  mirrored into the other three quadrants. The damage is the union of the
+  extremes the band reaches, never the screen. The notice and the authority's
+  cooldown are unchanged; the shake is additional.
+- **The fade to black** (`SessionFade`). `begin_session_fade` lays a veil over
+  the whole composed screen that darkens to opaque, so an embedder can hand
+  over to whatever comes next with no cut. Input is ignored once it starts:
+  the decision is made, and a keystroke may not re-open the prompt.
+  `session_fade_begun` reports that from the first veiled frame, so an embedder
+  drawing a pointer over this surface stops drawing one — the veil is painted
+  into the surface, and a cursor sampled over it would stay bright all the way
+  down to black.
+
+Reduced motion sets each duration to zero, which a `Timeline` starts already
+settled — so every one of them becomes instant with no branch here, and the
+surface still reports the same notices and the same damage.

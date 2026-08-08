@@ -7,9 +7,13 @@
 //! of those, and there is no deadline at all when neither applies.
 
 use tairix_abi::time::{Duration64, Time64};
+use tairix_theme::Timeline;
 
 /// Nanoseconds in one second.
 const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// Milliseconds in one second, the unit a theme authors a duration in.
+const MILLIS_PER_SEC: u64 = 1_000;
 
 /// Seconds in one minute.
 const SECS_PER_MINUTE: i64 = 60;
@@ -70,6 +74,21 @@ pub fn park_timeout(now: Option<Time64>, cooldown_remaining: Duration64) -> u64 
         (Some(only), None) | (None, Some(only)) => only,
         (None, None) => FOREVER,
     }
+}
+
+/// The most frames an animation of `duration_ms` can ever need, at the
+/// frame cadence every animation shares.
+///
+/// What bounds a loop that presents an animation to its end: a clock that
+/// stopped, or a seat that reads ready forever, cannot then hold a finished
+/// login screen on the display. One more than the span divides into, so the
+/// frame that lands exactly on the end is still drawn.
+#[must_use]
+pub fn frame_budget(duration_ms: u16) -> u32 {
+    let span = u64::from(duration_ms).saturating_mul(NANOS_PER_SEC / MILLIS_PER_SEC);
+    u32::try_from(span / Timeline::FRAME_NS)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1)
 }
 
 /// Nanoseconds from `now` to the next whole minute.

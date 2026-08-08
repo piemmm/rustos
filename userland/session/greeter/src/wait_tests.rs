@@ -1,10 +1,26 @@
 use tairix_abi::time::{Duration64, Time64};
+use tairix_theme::Timeline;
 
-use super::{park_timeout, Cooldown, FOREVER, NANOS_PER_SEC};
+use super::{frame_budget, park_timeout, Cooldown, FOREVER, NANOS_PER_SEC};
 
 /// A wall time `secs` seconds and `nanos` nanoseconds past a minute boundary.
 fn past_the_minute(secs: i64, nanos: u32) -> Time64 {
     Time64::new(1_700_000_040 + secs, nanos).expect("a canonical nanosecond field")
+}
+
+#[test]
+fn a_frame_budget_covers_the_whole_span_and_one_frame_more() {
+    let a_second = frame_budget(1_000);
+    let cadences = u32::try_from(NANOS_PER_SEC / Timeline::FRAME_NS).expect("a small count");
+    assert_eq!(a_second, cadences + 1, "the frame on the end is drawn too");
+
+    // An animation the theme has done away with still leaves room for the
+    // one frame that draws its finished state.
+    assert_eq!(frame_budget(0), 1);
+
+    // The longest span a theme can author is still a bounded number of
+    // frames rather than an open loop.
+    assert!(frame_budget(u16::MAX) > a_second);
 }
 
 #[test]

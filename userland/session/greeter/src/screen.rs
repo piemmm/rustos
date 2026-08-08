@@ -19,7 +19,7 @@ use tairix_greeter::{
 };
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{MotionInteraction, Theme};
 use tairix_window::pointer_input_events;
 
 use crate::accounts::SessionTransport;
@@ -27,7 +27,7 @@ use crate::chrome::chrome;
 use crate::cursor::Cursor;
 use crate::frame::{Present, Scanout};
 use crate::verify::{Answer, SessionVerifier};
-use crate::wait::{park_timeout, Cooldown};
+use crate::wait::{frame_budget, park_timeout, Cooldown};
 
 /// What one round of the screen did.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -284,9 +284,11 @@ impl<T: SessionTransport> LoginScreen<T> {
 
     /// The relative nanosecond timeout for the next park.
     ///
-    /// The nearer of the existing clock/lockout deadline and any running
-    /// selection fade. When nothing is animating the timeout is exactly what
-    /// it was before motion existed — an idle screen still arms no timer.
+    /// The nearer of the existing clock/lockout deadline and whatever the
+    /// surface is animating — a selection mark crossing, a stage giving way,
+    /// a refused attempt shaking. When nothing is animating the timeout is
+    /// exactly what it was before motion existed: an idle screen still arms
+    /// no timer.
     #[must_use]
     pub fn park_timeout(&self, now_ns: u64, wall: Option<Time64>) -> u64 {
         let base = park_timeout(wall, self.cooldown.remaining(now_ns));
@@ -296,12 +298,64 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
+    /// Begin the fade to black the screen leaves through, and present its
+    /// first frame.
+    ///
+    /// Called once a secret has been accepted. The desktop cannot appear
+    /// until this process exits, so the screen goes black *before* it does
+    /// and the desktop comes up out of the same black — that is what makes
+    /// the handover read as one movement rather than two screens swapping.
+    /// The surface stops answering input from here on.
+    ///
+    /// [`Present::Nothing`] when the theme fades instantly: there is no frame
+    /// worth showing, so the caller leaves at once.
+    pub fn begin_session_fade(&mut self, now_ns: u64) -> Present {
+        let outcome = self.surface.begin_session_fade(now_ns, &self.theme);
+        if self.surface.session_fade_finished() {
+            return Present::Nothing;
+        }
+        self.present_for(Repaint::of(outcome))
+    }
+
+    /// Whether the screen has finished going black, so its owner may leave.
+    #[must_use]
+    pub fn session_fade_finished(&self) -> bool {
+        self.surface.session_fade_finished()
+    }
+
+    /// Nanoseconds until the fade's next frame, or `None` once it is over.
+    #[must_use]
+    pub fn session_fade_due(&self, now_ns: u64) -> Option<u64> {
+        if self.surface.session_fade_finished() {
+            return None;
+        }
+        self.surface.motion_due(now_ns)
+    }
+
+    /// Darken the fade to `now_ns` and present what changed.
+    pub fn session_fade_step(&mut self, now_ns: u64) -> Present {
+        let darkened = Repaint::of(self.surface.advance(now_ns));
+        self.present_for(darkened)
+    }
+
+    /// The most frames the fade can ever ask for.
+    ///
+    /// What bounds the loop that presents it: a stopped clock or a seat that
+    /// reads ready forever must not be able to strand a successful login on
+    /// a screen that never finishes leaving.
+    #[must_use]
+    pub fn session_fade_budget(&self) -> u32 {
+        frame_budget(self.theme.motion().duration(MotionInteraction::SessionFade))
+    }
+
     /// Move the pointer by `(dx, dy)` and report the pixels that owe a
     /// repaint: where the cursor was, unioned with where it now is, clipped
-    /// to the screen. `None` when the pointer did not move, or when there is
-    /// no cursor drawn to move.
+    /// to the screen. `None` when the pointer did not move, when there is no
+    /// cursor drawn to move, or once the screen is leaving and nothing is
+    /// drawn for it — the position is still tracked either way.
     fn move_pointer(&mut self, dx: i32, dy: i32) -> Option<Rect> {
         let screen = self.scanout.screen();
+        let drawn = self.draws_pointer();
         let was = self.cursor.at();
         let at = self.cursor.moved_by(dx, dy);
         if at == was {
@@ -310,8 +364,22 @@ impl<T: SessionTransport> LoginScreen<T> {
         let pointer = self.pointer.as_mut()?;
         let vacated = pointer.bounds();
         pointer.set_pointer(at);
+        if !drawn {
+            return None;
+        }
         let damage = vacated.union(&pointer.bounds()).intersection(&screen);
         (!damage.is_empty()).then_some(damage)
+    }
+
+    /// Whether the pointer is drawn over the frame at all.
+    ///
+    /// It stops the moment the screen begins leaving: a pointer is something
+    /// to point *with*, and the verdict is given, input is no longer
+    /// answered, and there is nothing left under the black to point at. It
+    /// goes with the screen it belonged to rather than staying bright over
+    /// it.
+    fn draws_pointer(&self) -> bool {
+        !self.surface.session_fade_begun()
     }
 
     /// One event through the surface, with any verdict it produced applied.
@@ -356,10 +424,15 @@ impl<T: SessionTransport> LoginScreen<T> {
 
     /// Copy `damage` of the painted surface into the frame with the pointer
     /// over it, rendering the surface first when nothing holds it.
+    ///
+    /// A screen that is leaving hands the composer no pointer, so the first
+    /// veiled frame — which covers the whole screen — is also the one that
+    /// paints the arrow out.
     fn compose(&mut self, damage: Option<Rect>) -> Present {
         if self.painted.is_none() {
             self.painted = self.render();
         }
+        let drawn = self.draws_pointer();
         let Self {
             scanout,
             pointer,
@@ -369,7 +442,8 @@ impl<T: SessionTransport> LoginScreen<T> {
         let Some(painted) = painted.as_ref() else {
             return Present::Nothing;
         };
-        scanout.compose(painted, pointer.as_ref(), damage)
+        let cursor = if drawn { pointer.as_ref() } else { None };
+        scanout.compose(painted, cursor, damage)
     }
 
     /// The surface as it now stands, with no cursor drawn into it, or `None`

@@ -67,20 +67,49 @@ every absence short of "there is no screen" is presented rather than fatal:
 | No trusted clock, or no host name | that line of chrome is empty. Never invented |
 | A zero-extent or unqueryable display mode | **fatal**: the reason is stated on `stderr`, the exit is non-zero, and the authority falls back to a text login |
 | The seat lease taken away | **fatal**: the seat reports a lost lease ready forever, so re-parking would spin a core. The reason is stated and the exit is non-zero |
+| Anything at all going wrong *during the closing fade* | the exit is still `0`: the login already succeeded, and a cosmetic step may not strand it |
 
 Every abnormal exit writes one concise reason to `stderr` before exiting; the
 reason never names an account or anything about a secret.
+
+## Leaving the screen
+
+A verified secret exits `0`, and the authority — watching for exactly that —
+starts the session itself. The desktop therefore cannot appear until this
+process is gone, which is why the fade to black is finished *before* the exit:
+the screen is already black when the desktop reveals from black over it, and
+there is no seam between the two.
+
+The loop that presents it is bounded and total. It starts the surface's veil,
+then parks on the wait set for each frame the timeline asks for, presents, and
+stops as soon as the veil has arrived. Every other way out ends it rather than
+the login: it is capped by a frame budget derived from the theme's own
+duration, so even a clock that stops leaves; a seat that stops delivering or a
+wait that fails returns at once; and a refused present is ignored, exactly as
+it is on any other frame. The caller exits `0` regardless.
+
+The seat is still drained each round, though nothing acts on what it holds:
+unread input reads ready forever, and the park would return immediately instead
+of pacing the fade. Input is *dropped*, not applied — the decision is made, and
+a keystroke must not re-open the prompt. The pointer goes with the screen for
+the same reason: it is an affordance for a screen that has stopped answering,
+so it is not drawn from the first veiled frame rather than left bright over the
+black. A reduced-motion theme leaves immediately, with no extra present at all.
 
 ## How it parks
 
 An idle login screen must consume no CPU. There is one wait set holding the
 seat's input, and the timeout is the *next* thing that actually needs a
 repaint — the next clock-minute boundary, the next one-second tick of a
-lockout while one is counting down, or the next frame of a running selection
-cross-fade, whichever is nearer. When none apply the wait has no timeout at
-all, so an untouched screen arms no timer. There is no poll loop and no yield.
-The fade's duration is theme data (`SelectionChange`); reduced motion makes it
-instant and leaves the idle timeout alone.
+lockout while one is counting down, or the next frame of a running animation,
+whichever is nearer. When none apply the wait has no timeout at all, so an
+untouched screen arms no timer. There is no poll loop and no yield.
+
+The surface animates four things — the chooser's selection mark, the travel
+between the chooser and the secret prompt, a shake on a refusal, and the fade
+to black on success — and reports the soonest frame any of them needs as one
+deadline. Every duration is theme data; a reduced-motion theme makes all four
+instant, which asks for no frames and leaves the idle timeout exactly as it is.
 
 A wake drains the whole burst the seat is holding before it presents: every
 record is applied, what each changed is merged into one rectangle, and the
@@ -109,6 +138,11 @@ countdown, a clock tick, a tile taking the focus, an arriving wallpaper — so a
 report sliding the pointer across an unchanged screen re-composes a
 cursor-sized patch of pixels that already exist and renders nothing at all.
 
+The one thing that stops it being drawn is the screen leaving. From the first
+veiled frame the composer is handed no cursor at all, and that frame covers the
+whole screen, so the arrow is painted out where it sat. The position is still
+tracked; a move nobody can see simply presents nothing.
+
 ## Untrusted input
 
 The shipped wallpaper is attacker-shaped data like any other image, so it is
@@ -131,12 +165,13 @@ malformed or oversize image is the flat desktop colour, not a crash.
   resolved for a scale.
 * `frame` — the surface-to-scan-out composition, the pointer sampled over it,
   and the merge that turns a drain's changes into one present.
-* `wait` — the lockout countdown and the park deadline.
+* `wait` — the lockout countdown, the park deadline, and the frame budget that
+  bounds the closing fade.
 * `screen` — `LoginScreen`, the whole flow over those seams.
 
 `src/run.rs` is the freestanding `Run` program: seat, frames, accounts, first
-paint, park. It is an inert stub on the host, so host tooling never links the
-userland runtime.
+paint, park, and the closing fade. It is an inert stub on the host, so host
+tooling never links the userland runtime.
 
 ## Why the freestanding build enables extra crate features
 

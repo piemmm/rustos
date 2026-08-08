@@ -49,6 +49,16 @@
 //! rounded-corner path. Composing the taskbar and window
 //! manager is the permitted `userland/gui/*` edge.
 //!
+//! # Revealing the desktop at session start
+//!
+//! The login screen fades to black before it exits, so a session starts on a
+//! dark screen. [`SessionReveal`] (the [`reveal`] module) fades the desktop up
+//! over it through the compositor's screen reveal, over the theme's own
+//! session-fade span, and folds its next frame into the embedder's park —
+//! settled, it asks for no wake at all. Reaching full strength is announced
+//! once as [`DESKTOP_REVEALED`], the witness that the desktop is visible
+//! rather than merely presented.
+//!
 //! # Routing live input to the taskbar and window manager
 //!
 //! A real input source produces one stream of pointer events, but the desktop
@@ -170,6 +180,7 @@ pub mod picker;
 pub mod pinboard;
 pub mod pins;
 pub mod presenter;
+pub mod reveal;
 pub mod seat;
 pub mod session;
 pub mod settings;
@@ -217,6 +228,10 @@ pub use pins::{
     PinService, ResolvedPin, SessionPins,
 };
 pub use presenter::TaskbarPresenter;
+pub use reveal::{
+    SessionReveal, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START,
+};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{

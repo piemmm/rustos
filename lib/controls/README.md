@@ -178,7 +178,7 @@ drawn behind the picture. What it blurs is the **backdrop**: the pixels the
 tile covers — a window's surface, the desktop wallpaper — are frosted by the
 scaled `selection_backdrop_blur` through `tairix_raster`'s one shared region
 frost, the same call the compositor frosts a window's backdrop with, and the
-theme's `selection_fill` — the accent at half opacity — is then laid over them
+theme's `selection_fill` — the accent at three tenths opacity — is then laid over them
 with a **crisp** edge, rounded like every other control plate. Frost and fill
 are confined to that one rounded shape, so nothing lands outside the tile's
 bounds and no square edge shows around the rounded fill. Softening the *fill*

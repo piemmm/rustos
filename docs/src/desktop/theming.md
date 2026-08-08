@@ -43,11 +43,13 @@ bundles, under a stable `ThemeId`:
     both appearances rather than trusting the authored numbers.
   - `selection_fill` is the plate a selected item is filled with — an icon tile
     in the file manager's grid, on the desktop's icon field, or on the login
-    chooser. It is each theme's own `accent` at half opacity (alpha `128`):
-    `#d1550f80` on dark, `#c8500c80` on light. Being translucent, what lies
+    chooser. It is each theme's own `accent` at three tenths opacity (alpha
+    `77`): `#d1550f4d` on dark, `#c8500c4d` on light. It is this light because
+    it is not doing the work alone — the backdrop beneath a selected item is
+    frosted by `selection_backdrop_blur` first, and that separation is what
+    marks the item, leaving the accent to tint rather than to cover. What lies
     behind the item — a window's surface, the wallpaper — still reads through
-    the selection instead of being replaced by a block of accent, and that
-    backdrop is frosted by `selection_backdrop_blur` first. It is
+    the selection instead of being replaced by a block of accent. It is
     authored per theme rather than derived from `accent` at the draw site, so
     a theme can tune the fill's weight against its own surfaces.
   - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
@@ -101,6 +103,16 @@ bundles, under a stable `ThemeId`:
   [Typography](#typography)), referencing faces under `/System/Fonts`.
 - `CursorSet` — one asset id per `CursorKind`, referencing assets under
   `/System/Graphics`.
+- `Timeline` — one animation in flight, and the single definition of how a
+  duration becomes frames. A surface starts one from the theme's duration for
+  the interaction it is beginning, asks how far through it is when it paints
+  (`progress` for a strength fade, `eased` for anything that travels), and asks
+  when to wake next (`next_frame_in`, the nearer of what remains and one frame
+  at 60 Hz). It reads no clock: the embedder passes the monotonic instant it
+  already holds, which is what lets a surface animate on the host with no
+  kernel. A zero duration starts *settled* — complete, with no wake asked for —
+  so reduced motion needs no second code path and an idle surface arms no
+  timer at all.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no
   control carries a private animation timing. It is a table indexed by the
   interaction rather than a field per interaction: the durations are all the
@@ -110,6 +122,14 @@ bundles, under a stable `ThemeId`:
     selection mark moves between items — the login chooser's account tiles,
     the file manager's grid, the desktop's icon field. The item being left
     decays while the item arrived at grows, so nothing jumps.
+  - `StageTransition` (`240` ms) is one whole view giving way to another: the
+    login screen stepping between the account chooser and the chosen account's
+    secret prompt, in either direction.
+  - `AttemptRejected` (`420` ms) is the thing an authority refused, shaken to
+    say so — the login screen's prompt when a secret is not accepted.
+  - `SessionFade` (`1000` ms) is a whole session's screen appearing or leaving:
+    the login screen fading to black once a secret is accepted, and the
+    desktop revealing from black over it.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

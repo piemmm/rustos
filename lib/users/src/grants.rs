@@ -33,6 +33,12 @@
 //! no-login account, to its dedicated per-service ceiling. An
 //! administrator administers the system; they do not impersonate its
 //! services.
+//!
+//! `CAP_LOG_EMIT` is the one capability that is both baseline and part of
+//! several per-service ceilings. It is not service-class: writing a
+//! diagnostic record about one's own program is something an ordinary
+//! session does, and a service ceiling lists it for the same reason an
+//! interactive one does, not as a privilege the service alone holds.
 
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
@@ -67,6 +73,21 @@ use tairix_caps::CapabilitySet;
 ///   interfaces) and `CAP_NET_RAW` (unmediated raw frames) are not
 ///   baseline. A program still only receives it if its own manifest
 ///   requests it, intersected with this ceiling.
+/// * `CAP_LOG_EMIT` — emit one bounded, kernel-validated diagnostic
+///   record through `log_emit`. It reaches the kernel's **diagnostic**
+///   sink only; the hash-chained security audit log stays kernel-only, so
+///   no program a user runs can forge, alter, or truncate an audit entry,
+///   and the kernel — never the caller — attributes each record to the
+///   calling task, so a record cannot be mis-attributed. The cost is
+///   real and is accepted deliberately: any program a logged-in user runs
+///   may now write to the machine-wide diagnostic log, so log noise and
+///   provenance confusion are possible, and on a debug build the captured
+///   serial line is user-writable. It is baseline anyway because a
+///   session — graphical or text — legitimately reports its own
+///   operational state, and a session that is built to log but structurally
+///   cannot is a program that fails silently. A program still only
+///   receives it if its own manifest requests it, intersected with this
+///   ceiling.
 ///
 /// Nothing else is baseline: self-scoped `sysinfo` queries, `stream_*` on
 /// inherited descriptors, lowering one's own resource limits, and
@@ -87,6 +108,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::INPUT_READ,
     CapabilityId::SHM,
     CapabilityId::NET,
+    CapabilityId::LOG_EMIT,
 ];
 
 /// The administrative set: the grants an administrator account carries on
@@ -322,7 +344,7 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 8);
+        assert_eq!(set.len(), 9);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
@@ -332,6 +354,7 @@ mod tests {
             CapabilityId::INPUT_READ,
             CapabilityId::SHM,
             CapabilityId::NET,
+            CapabilityId::LOG_EMIT,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the baseline");
         }
@@ -340,7 +363,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 25);
+        assert_eq!(set.len(), 26);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

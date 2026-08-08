@@ -263,9 +263,10 @@ fn advance_reports_animating_tile_damage_or_nothing() {
     assert_eq!(surface.motion_due(span_ns + 1), None);
 }
 
-/// Advancing outside the chooser mode does nothing.
+/// A question at rest asks for nothing: the seam folds every mode, so what
+/// makes it quiet here is that nothing is running, not the mode it is in.
 #[test]
-fn advance_outside_chooser_is_quiet() {
+fn advancing_a_resting_question_is_quiet() {
     let mut surface = AuthSurface::new("ann");
     let _ = render(&surface);
     assert!(!surface.advance(1_000).redraw());

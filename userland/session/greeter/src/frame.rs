@@ -59,7 +59,7 @@ impl Present {
 
 /// `damage` as a geometry rectangle, or `None` when its origin lies beyond
 /// the signed coordinate space a rectangle is expressed in.
-fn rect_of(damage: DamageRect) -> Option<Rect> {
+pub(crate) fn rect_of(damage: DamageRect) -> Option<Rect> {
     Some(Rect::new(
         i32::try_from(damage.x).ok()?,
         i32::try_from(damage.y).ok()?,

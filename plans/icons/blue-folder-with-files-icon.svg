@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Blue folder icon with files</title>
+  <desc id="desc">A flat blue folder icon for use in a file viewer, showing white paper files inside the folder.</desc>
+
+  <!-- Folder back and tab -->
+  <path d="M28 64C28 53.507 36.507 45 47 45H100.5C106.64 45 112.389 47.96 115.957 52.955L127.777 69.5H209C219.493 69.5 228 78.007 228 88.5V101H28V64Z"
+        fill="#3A86E8"/>
+
+  <!-- Papers inside the folder -->
+  <g>
+    <!-- Left paper -->
+    <g transform="translate(0 4) rotate(-4 81 96)">
+      <rect x="58" y="58" width="46" height="76" rx="5" fill="#FFFFFF" stroke="#CFE2FF" stroke-width="2"/>
+      <path d="M92 58L104 70V58H92Z" fill="#EAF3FF"/>
+      <path d="M92 58L104 70" fill="none" stroke="#CFE2FF" stroke-width="2" stroke-linejoin="round"/>
+    </g>
+
+    <!-- Center paper -->
+    <g>
+      <rect x="104" y="50" width="50" height="84" rx="5" fill="#FFFFFF" stroke="#CFE2FF" stroke-width="2"/>
+      <path d="M141 50L154 63V50H141Z" fill="#EAF3FF"/>
+      <path d="M141 50L154 63" fill="none" stroke="#CFE2FF" stroke-width="2" stroke-linejoin="round"/>
+    </g>
+
+    <!-- Right paper -->
+    <g transform="translate(0 4) rotate(4 175 96)">
+      <rect x="152" y="58" width="46" height="76" rx="5" fill="#FFFFFF" stroke="#CFE2FF" stroke-width="2"/>
+      <path d="M186 58L198 70V58H186Z" fill="#EAF3FF"/>
+      <path d="M186 58L198 70" fill="none" stroke="#CFE2FF" stroke-width="2" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <!-- Folder front body -->
+  <path d="M28 91C28 80.507 36.507 72 47 72H209C219.493 72 228 80.507 228 91V192C228 202.493 219.493 211 209 211H47C36.507 211 28 202.493 28 192V91Z"
+        fill="#4C9AF0"/>
+
+  <!-- Flat top accent -->
+  <path d="M47 72H209C219.493 72 228 80.507 228 91V99H28V91C28 80.507 36.507 72 47 72Z"
+        fill="#65AAF5"/>
+</svg>

@@ -218,6 +218,8 @@ Every account that may start an interactive session is granted at least:
 | `CAP_PROC_SPAWN` | "May run programs at all." What runs is bounded by the program registry / bundle store; the child is bounded by its own manifest ∩ this same ceiling. |
 | `CAP_CONSOLE_READ`, `CAP_CONSOLE_WRITE` | An interactive session's streams are console-backed; the fine authority stays the inherited descriptor table. |
 | `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM` | The graphical-session class (§4.6, `plans/DISPLAY.md` D7): acquiring a seat's exclusive revocable lease, draining the *owned* seat's input, and creating/granting the zero-copy frame region. A graphical login is an ordinary session; the kernel still owner-gates every acquire, drain, and present against the live lease, and every region against its owner. |
+| `CAP_NET` | Ordinary transport use: datagram sockets and originating/receiving traffic through the `netstack` socket surface (`plans/NETWORK.md` §0). The coarser `CAP_NET_ADMIN` (reconfiguring interfaces) and `CAP_NET_RAW` (unmediated frames) stay administrative. |
+| `CAP_LOG_EMIT` | One bounded, kernel-validated record on the **diagnostic** sink, attributed by the kernel — never the caller — to the calling task. It does *not* reach the hash-chained audit log, which stays kernel-only, so no user program can forge, alter, or truncate an audit entry. Baseline because a session legitimately reports its own operational state, and a program built to log that structurally cannot is a program that fails silently. Accepted cost: any program a logged-in user runs may write to the machine-wide diagnostic log, so noise and provenance confusion are possible, and a debug build's captured serial line is user-writable. |
 
 Nothing else is baseline. Self-scoped `sysinfo` queries, `resource_open` of
 `sys:*`, `stream_*` on inherited pipes/files, lowering one's own rlimits,
@@ -310,11 +312,14 @@ The graphical session changes no rule. The desktop-session service's
 manifest requests the graphical class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
 `CAP_SHM` — seat ownership and the zero-copy frame region per
 `plans/DISPLAY.md`) plus `CAP_PROC_SPAWN` for its taskbar launchers and
-program-library popup (`plans/NEW-TASKBAR.md`)
-and `CAP_FS_ACCESS` for the trusted picker and the catalog stores (each
-sized to an exercised
-code path per §4.5), the session baseline carries the same class so the
-intersection keeps it for every interactive account, and a desktop app is
+program-library popup (`plans/NEW-TASKBAR.md`),
+`CAP_FS_ACCESS` for the trusted picker and the catalog stores, and
+`CAP_LOG_EMIT` for its cache ledgers and the one-shot record marking the
+desktop fully revealed on screen (a framebuffer session's `stderr` is the
+video console, so a diagnostic written there would paint over the screen
+it describes) — each sized to an exercised code path per §4.5. The
+session baseline carries every one of them, so the intersection keeps
+them for every interactive account, and a desktop app is
 spawned like any other process and gets `AppInfo request ∩ user ceiling`;
 user-mediated file access beyond the app's own state flows through
 picker-issued one-shot descriptors, not class capabilities (`AGENTS.md`

@@ -79,24 +79,54 @@ Compromising it therefore yields a screen, not an account.
 5. **Paint the first frame** and audit `SCREEN_READY`.
 6. **Park.**
 
-A verified secret exits `0` immediately, which also releases the seat: the
-authority is watching for that exit and starts the session itself. Exiting
-rather than lingering is deliberate — the seat hand-off then has one
-mechanism (the kernel's reclaim on exit), no lease transfer is needed, and a
-login screen cannot hold the screen behind a running desktop. The release is
-owner-checked on every exit path, and a lease already lost refuses with a
-typed error that is ignored rather than escalated.
+A verified secret fades the screen to black and then exits `0`, which also
+releases the seat: the authority is watching for that exit and starts the
+session itself. Exiting rather than lingering is deliberate — the seat
+hand-off then has one mechanism (the kernel's reclaim on exit), no lease
+transfer is needed, and a login screen cannot hold the screen behind a
+running desktop. The release is owner-checked on every exit path, and a lease
+already lost refuses with a typed error that is ignored rather than
+escalated.
+
+## The fade to black
+
+Because the desktop cannot appear until this process is gone, the handover is
+seamless only if the screen is *already* black when it does: the surface's
+veil is run to completion **before** the exit, and the desktop reveals from
+black over the same second.
+
+The loop that presents it is bounded and total, because it is a cosmetic step
+on a decision already made and may never strand a successful login. It starts
+the veil, parks for each frame the timeline asks for, presents, and stops as
+soon as the veil has arrived. A frame budget derived from the theme's own
+duration caps it, so even a clock that stopped leaves; a seat that stops
+delivering or a wait that fails returns at once; a refused present is ignored
+exactly as on any other frame. Every one of those paths still exits `0`.
+
+The seat is drained each round but nothing is applied — unread input reads
+ready forever and would spin the park, and a keystroke must not re-open a
+prompt whose answer is already accepted. The pointer leaves with the screen for
+the same reason: it is an affordance for a screen that has stopped answering,
+so from the first veiled frame it is simply not drawn rather than left bright
+over the black. Under reduced motion the duration is zero, so the screen leaves
+immediately with no extra present.
 
 ## How it parks
 
 An idle login screen must consume nothing. There is one wait set, holding
 the seat's input, and its timeout is the *next* thing that actually needs a
 repaint: the next clock-minute boundary, the next one-second tick of a lockout while
-one is counting down, or the next frame of a running selection cross-fade,
-whichever is nearer. When none apply the wait has no timeout at all, so an
-untouched screen arms no timer and takes no interrupt. The fade duration is
-theme data and collapses under reduced motion; an idle screen is unchanged.
-There is no poll loop and no yield.
+one is counting down, or the next frame of a running animation, whichever is
+nearer. When none apply the wait has no timeout at all, so an untouched screen
+arms no timer and takes no interrupt. There is no poll loop and no yield.
+
+The surface animates four things — the chooser's selection mark, the travel
+between the chooser and the secret prompt, a shake on a refusal, and the fade
+to black on success — and reports the soonest frame any of them needs as one
+deadline. Every duration is theme data
+([`lib/greeter`](../lib/greeter.md#motion) has the design); a reduced-motion
+theme makes all four instant, asks for no frames, and leaves the idle timeout
+exactly as it is.
 
 A wake that finds nothing changed presents nothing, and every repaint
 presents only the damage rectangle the surface reported — the field for a
@@ -140,6 +170,15 @@ of pixels that already exist and renders nothing. Motion that does change
 something merges the two rectangles and pays exactly one render for the
 report, never one per surface event it expanded into.
 
+The one thing that stops it being drawn is the screen leaving. Because the
+veil is painted into the surface and the cursor is sampled over the top, a
+drawn arrow would stay at full brightness all the way down to black; so the
+screen hands the composer no cursor at all once the fade begins. That first
+veiled frame covers the whole screen, which is what paints the arrow out
+where it sat. Dimming it instead would have put a second copy of the veil's
+blend arithmetic on the raw scan-out bytes, and there is one definition of
+that. The position is still tracked; a move nobody can see presents nothing.
+
 ## The wallpaper is untrusted input
 
 The shipped wallpaper is attacker-shaped data like any other image, so it is
@@ -164,6 +203,7 @@ fatal:
 | A pointer that will not rasterise | no cursor is drawn, audited `POINTER_UNAVAILABLE`. The pointer still moves, still hit-tests, and the keyboard alone logs in regardless |
 | No trusted clock, or no host name | that line of chrome is empty. Never invented |
 | A refused, unqueryable, or zero-extent display mode; a refused frame region; a wait set that could not be built | **fatal** |
+| Anything going wrong during the closing fade | the exit is still `0` — the login succeeded, and a cosmetic step may not strand it |
 
 The fatal cases all mean the same thing: there are no pixels, or the only
 way to keep going would be to busy-poll. Each states its reason on `stderr`,
@@ -201,7 +241,12 @@ refusal becoming a countdown, an empty account list, the bounded and
 malformed paging walks, the park deadline (including an untouched screen
 arming no timer), the drawn pointer and its damage, the kept surface (a move
 that changes nothing renders once in total, and the frame it leaves is what
-a full repaint would have drawn), and the surface-to-scan-out composition.
+a full repaint would have drawn), the surface-to-scan-out composition, and
+the closing fade — that it darkens monotonically to black within its budget,
+that it ends on the clock and the budget alone so a stopped clock still lets
+the login leave, that input during it is ignored, that the pointer is gone
+from the first veiled frame and that frame repaints where it sat while an
+unveiled screen still draws it, and that reduced motion leaves at once.
 `tests/session_v1.rs`
 additionally wires the transport seam straight to the authority's own
 request handler — a test-only edge — so the two halves of one protocol are

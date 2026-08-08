@@ -7,17 +7,18 @@ use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::session_ipc::{SessionRequest, SessionVerdict};
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::Errno;
-use tairix_cursor::CursorImage;
+use tairix_cursor::{CursorImage, PlacedCursor};
+use tairix_display::ChannelOrder;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Verdict};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Pixel, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{MotionInteraction, Theme, Timeline};
 
 use super::LoginScreen;
 use crate::accounts::SessionTransport;
 use crate::cursor::pointer_image;
-use crate::frame::{Present, Scanout};
+use crate::frame::{rect_of, Present, Scanout};
 use crate::wait::FOREVER;
 
 const SECRET: &str = "open-sesame";
@@ -83,14 +84,54 @@ impl SessionTransport for Authority {
 }
 
 fn screen(accounts: Vec<AccountTile>, authority: Authority) -> LoginScreen<Authority> {
+    screen_in(accounts, authority, Theme::dark())
+}
+
+fn screen_in(
+    accounts: Vec<AccountTile>,
+    authority: Authority,
+    theme: Theme,
+) -> LoginScreen<Authority> {
     LoginScreen::new(
         Scanout::new(mode()).expect("a valid mode"),
-        Theme::dark(),
+        theme,
         Scale::ONE,
         "tairix".to_string(),
         accounts,
         authority,
     )
+}
+
+/// The shipped theme with reduced motion: every animation lands at once.
+fn still() -> Theme {
+    let base = Theme::dark();
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        base.contrast(),
+    )
+}
+
+/// A moment past every animation a round can have started.
+///
+/// A deadline assertion about the screen *at rest* is made here, so that
+/// picking an account or being refused — both of which animate — is over
+/// rather than still asking for frames.
+fn settled_ns() -> u64 {
+    let motion = Theme::dark().motion();
+    let longest = MotionInteraction::ALL
+        .iter()
+        .map(|interaction| u64::from(motion.duration(*interaction)))
+        .max()
+        .unwrap_or(0);
+    longest * 1_000_000 + 1
 }
 
 fn key(named: NamedKey) -> InputEvent {
@@ -134,12 +175,65 @@ fn moved_from(from: (i32, i32), to: (i32, i32)) -> PointerInput {
     }
 }
 
+/// How bright the frame's pixel at `(x, y)` is, summed over its three
+/// colour channels. The fourth byte is alpha, which is not colour.
+fn brightness(frame: &[u8], x: u32, y: u32) -> u32 {
+    pixel_at(frame, x, y)
+        .iter()
+        .take(3)
+        .map(|channel| u32::from(*channel))
+        .sum()
+}
+
 /// The four scan-out bytes of the frame at `(x, y)`.
 fn pixel_at(frame: &[u8], x: u32, y: u32) -> &[u8] {
     let stride = usize::try_from(mode().stride_bytes).expect("a small stride");
     let at = usize::try_from(y).expect("a small screen") * stride
         + usize::try_from(x).expect("a small screen") * 4;
     &frame[at..at + 4]
+}
+
+/// Every screen position where the frame differs from the kept surface's
+/// own pixel — everywhere the composer drew something over it.
+///
+/// The frame is that surface encoded for scan-out with the cursor sampled
+/// on top, so this is exactly the arrow's ink, and empty when no pointer is
+/// drawn. Only meaningful straight after a whole-screen composition: a
+/// frame composed within a damage rectangle is deliberately older than the
+/// surface outside it.
+fn drawn_over(login: &LoginScreen<Authority>) -> Vec<(i32, i32)> {
+    let order = ChannelOrder::for_format(mode().format).expect("a format the frame encodes");
+    let surface = login.painted.as_ref().expect("a surface is kept");
+    let frame = login.frame();
+    let mut found = Vec::new();
+    for y in 0..mode().height_px {
+        for x in 0..mode().width_px {
+            let Some(pixel) = surface.get(x, y) else {
+                continue;
+            };
+            if pixel_at(frame, x, y) != order.encode(pixel).as_slice() {
+                found.push((
+                    i32::try_from(x).expect("a small screen"),
+                    i32::try_from(y).expect("a small screen"),
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Whether `present` hands the display every pixel of `rect`.
+fn covers(present: Present, rect: Rect) -> bool {
+    match present {
+        Present::Nothing => false,
+        Present::Whole => true,
+        Present::Region(region) => {
+            let Some(region) = rect_of(region) else {
+                return false;
+            };
+            region.union(&rect) == region
+        }
+    }
 }
 
 /// Every screen position where `left` and `right` differ.
@@ -243,6 +337,261 @@ fn a_verified_secret_finishes_the_screen() {
     );
 }
 
+/// A verified secret takes the screen to black before the process leaves,
+/// so the desktop coming up out of the same black reads as one movement.
+#[test]
+fn a_verified_secret_fades_the_screen_to_black() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+
+    // Typing a secret takes longer than picking the account animates, so the
+    // screen the fade covers is a settled one.
+    let start = settled_ns();
+    login.refresh(start, None);
+
+    let opening = login.begin_session_fade(start);
+    assert_ne!(opening, Present::Nothing, "the fade has a first frame");
+    assert!(!login.session_fade_finished());
+
+    let (x, y) = (mode().width_px / 2, mode().height_px / 2);
+    let mut darkest = 3 * 255u32;
+    let mut now = start;
+    let mut frames = 0u32;
+    while let Some(due) = login.session_fade_due(now) {
+        frames += 1;
+        assert!(
+            frames <= login.session_fade_budget(),
+            "the fade asked for more frames than it can need"
+        );
+        now += due;
+        login.session_fade_step(now);
+        let sample = brightness(login.frame(), x, y);
+        assert!(sample <= darkest, "the veil lightened at frame {frames}");
+        darkest = sample;
+    }
+
+    assert!(login.session_fade_finished(), "the screen is black");
+    assert_eq!(darkest, 0, "and every channel of it is");
+    assert!(frames > 1, "it faded rather than cut, in {frames} frames");
+}
+
+/// The fade ends on the clock and its own budget alone.
+///
+/// Nothing about it reads the display's answer, so a present the display
+/// refuses cannot keep a successful login from leaving; and a clock that
+/// stopped, or a seat that reads ready forever, runs the budget out instead
+/// of spinning.
+#[test]
+fn the_fade_ends_on_the_clock_and_the_budget_alone() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+
+    // Every frame's present dropped on the floor, as a refusing display
+    // would leave it.
+    let _ = login.begin_session_fade(0);
+    let span = settled_ns();
+    let _ = login.session_fade_step(span);
+    assert!(
+        login.session_fade_finished(),
+        "the clock alone took it to black"
+    );
+    assert_eq!(
+        login.session_fade_due(span),
+        None,
+        "and it asks for no more"
+    );
+
+    let mut stuck = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    stuck.repaint();
+    let _ = stuck.begin_session_fade(0);
+    for _ in 0..stuck.session_fade_budget() {
+        let _ = stuck.session_fade_step(0);
+    }
+    assert!(
+        !stuck.session_fade_finished(),
+        "a clock that never advances never finishes the fade — the budget is\n         what lets the login leave anyway"
+    );
+}
+
+/// Once the screen has begun leaving, the decision is made: input is not
+/// answered, and nothing it would have changed is drawn.
+#[test]
+fn input_during_the_fade_is_ignored() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+    let _ = login.begin_session_fade(0);
+
+    for event in [key(NamedKey::Escape), typed('x'), key(NamedKey::Enter)] {
+        let step = login.on_input(&event, 0);
+        assert_eq!(
+            step.present,
+            Present::Nothing,
+            "{event:?} painted something"
+        );
+        assert!(!step.verified);
+        assert!(step.answer.is_none(), "{event:?} reached the authority");
+    }
+}
+
+/// A reduced-motion theme has nothing to fade: the screen leaves at once,
+/// with no extra frame presented.
+#[test]
+fn a_reduced_motion_fade_leaves_at_once() {
+    let mut login = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+
+    assert_eq!(login.begin_session_fade(0), Present::Nothing);
+    assert!(login.session_fade_finished());
+    assert_eq!(login.session_fade_due(0), None);
+}
+
+/// A verified screen, its pointer drawn and its whole frame composed, at
+/// the moment before it begins leaving.
+fn about_to_leave() -> (LoginScreen<Authority>, u64) {
+    let mut login = ready();
+    assert!(offer(&mut login, SECRET, 0).verified);
+    // Typing a secret takes longer than picking the account animates, so
+    // what the fade covers is a settled screen.
+    let start = settled_ns();
+    login.refresh(start, None);
+    login.repaint();
+    (login, start)
+}
+
+/// The pointer leaves with the screen it belonged to. From the first veiled
+/// frame nothing is drawn for it: the verdict is given, input is no longer
+/// answered, and a bright arrow over the black would point at nothing.
+#[test]
+fn the_pointer_is_gone_from_the_first_veiled_frame() {
+    let (mut login, start) = about_to_leave();
+    assert!(
+        !drawn_over(&login).is_empty(),
+        "the arrow is on the frame to begin with"
+    );
+
+    login.begin_session_fade(start);
+
+    assert_eq!(
+        drawn_over(&login),
+        Vec::new(),
+        "the veiled frame is the veiled surface and nothing over it"
+    );
+}
+
+/// The frame the pointer leaves on repaints where it sat, so no arrow can
+/// be left burned into the presented bytes.
+#[test]
+fn the_frame_the_pointer_leaves_on_repaints_where_it_sat() {
+    let (mut login, start) = about_to_leave();
+    let sat = cursor_rect(&arrow(), centre().0, centre().1).intersection(&login.screen());
+    assert!(!sat.is_empty(), "the arrow is on the screen");
+    let ink = drawn_over(&login);
+    let before = login.frame().to_vec();
+
+    let opening = login.begin_session_fade(start);
+
+    assert!(
+        covers(opening, sat),
+        "{opening:?} does not present the {sat:?} the arrow sat on"
+    );
+    // The veil opens fully transparent, so the only pixels this frame can
+    // change are the ones the arrow was inking — and it changes all of them.
+    assert_eq!(
+        differing(&before, login.frame()),
+        ink,
+        "the frame changed somewhere other than where the arrow was"
+    );
+}
+
+/// The pointer still tracks while the screen leaves; it is only not drawn.
+/// Nothing is presented for a move nobody can see.
+#[test]
+fn a_move_during_the_fade_presents_nothing_and_still_tracks_the_pointer() {
+    let (mut login, start) = about_to_leave();
+    login.begin_session_fade(start);
+    let veiled = login.frame().to_vec();
+
+    let corner = (30, 30);
+    let step = login.on_pointer(&moved_from(centre(), corner), start);
+
+    assert_eq!(step.present, Present::Nothing, "a move nobody can see");
+    assert_eq!(login.frame(), veiled.as_slice(), "and nothing was drawn");
+    assert_eq!(login.cursor.at(), Point::new(corner.0, corner.1));
+    assert_eq!(
+        login.pointer.as_ref().map(PlacedCursor::bounds),
+        Some(cursor_rect(&arrow(), corner.0, corner.1)),
+        "the artwork followed the position it is not drawn at"
+    );
+}
+
+/// Only the screen leaving hides the pointer. A screen animating for any
+/// other reason — a refused attempt shaking, a lockout counting down —
+/// draws it exactly where it sits, as it always did.
+#[test]
+fn an_unveiled_screen_still_draws_its_pointer() {
+    let mut login = ready();
+    let sits = cursor_rect(&arrow(), centre().0, centre().1);
+    let confined = |ink: &[(i32, i32)]| {
+        assert!(!ink.is_empty(), "the arrow is drawn");
+        for (x, y) in ink {
+            assert!(
+                sits.contains(Point::new(*x, *y)),
+                "({x}, {y}) is drawn outside the cursor at {sits:?}"
+            );
+        }
+    };
+    confined(&drawn_over(&login));
+
+    assert!(!offer(&mut login, "wrong", 0).verified);
+    login.refresh(Timeline::FRAME_NS, None);
+    login.repaint();
+    confined(&drawn_over(&login));
+}
+
+/// A reduced-motion theme has no veil to present, so the screen leaves on
+/// the frame it was already showing — pointer and all. There is no veiled
+/// frame for the arrow to be absent from.
+#[test]
+fn a_reduced_motion_fade_leaves_the_frame_as_it_was() {
+    let mut login = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+    login.set_pointer(arrow());
+    login.repaint();
+    assert!(offer(&mut login, SECRET, 0).verified);
+    login.repaint();
+    let showing = login.frame().to_vec();
+
+    assert_eq!(login.begin_session_fade(0), Present::Nothing);
+    assert_eq!(login.frame(), showing.as_slice());
+    assert!(
+        !drawn_over(&login).is_empty(),
+        "the arrow is still on the frame the screen leaves on"
+    );
+}
+
 #[test]
 fn a_refusal_puts_its_lockout_on_the_screen_and_keeps_asking() {
     let mut login = screen(
@@ -309,7 +658,7 @@ fn an_unreachable_authority_keeps_the_surface_alive() {
         "an unanswerable attempt is not a lockout"
     );
     assert_eq!(
-        login.park_timeout(0, None),
+        login.park_timeout(settled_ns(), None),
         FOREVER,
         "nothing is counting down, so nothing is armed"
     );
@@ -360,8 +709,13 @@ fn a_running_lockout_is_the_nearer_deadline() {
     let twenty_past = Time64::from_secs(1_700_000_060);
     assert_eq!(
         login.park_timeout(0, Some(twenty_past)),
+        Timeline::FRAME_NS,
+        "the refusal's shake is the nearest thing owing a frame"
+    );
+    assert_eq!(
+        login.park_timeout(settled_ns(), Some(twenty_past)),
         1_000_000_000,
-        "the lockout ticks before the minute turns"
+        "once it has settled, the lockout ticks before the minute turns"
     );
 }
 
@@ -455,12 +809,7 @@ fn presented(step: crate::Step) -> Rect {
     let Present::Region(region) = step.present else {
         panic!("a sub-screen change is a region present, got {step:?}");
     };
-    Rect::new(
-        i32::try_from(region.x).expect("on screen"),
-        i32::try_from(region.y).expect("on screen"),
-        region.width_px,
-        region.height_px,
-    )
+    rect_of(region).expect("a region on the screen")
 }
 
 #[test]

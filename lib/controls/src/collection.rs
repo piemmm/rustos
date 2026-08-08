@@ -1853,9 +1853,9 @@ impl Card {
 ///
 /// State is what makes a tile paint anything behind its picture:
 /// * the pointer wash while hovered or pressed, in the shared plate colours;
-/// * the selection fill, the palette's accent at half opacity over the whole
-///   tile, rounded like every other plate and feathered inward through the
-///   shared box blur, so a selected item is plainly the accent while the
+/// * the selection fill, the palette's accent at three tenths opacity over the
+///   whole tile, rounded like every other plate and laid crisply over a
+///   frosted backdrop, so a selected item is plainly the accent while the
 ///   surface or wallpaper under it still reads through — the pointer washes
 ///   are different colours entirely, so neither can imitate it. An owner
 ///   animating a selection draws the mark part-way through
@@ -2257,8 +2257,11 @@ fn plate_radius(scale: Scale, theme: &Theme) -> u32 {
 
 /// Paint the mark a selected [`IconTile`] wears: the pixels *behind* the tile
 /// frosted through the shared region blur, then the theme's selection fill —
-/// its accent at half opacity, scaled by `fade` — laid over them with a crisp,
-/// rounded edge.
+/// its accent at three tenths opacity, scaled by `fade` — laid over them with a
+/// crisp, rounded edge.
+///
+/// The frost is what marks the item; the fill only tints it, which is why the
+/// fill is as light as it is.
 ///
 /// This is the same effect, through the same filter, the compositor frosts a
 /// window's backdrop with: what the tile covers — a window's surface, the

@@ -528,7 +528,12 @@ fn moving_focus_cross_fades_the_selection_mark() {
     assert!(chooser.next_frame_in(1_000).is_some());
     assert_eq!(chooser.selection_fade(0), u8::MAX);
     assert_eq!(chooser.selection_fade(1), 0);
-    assert_eq!(chooser.next_frame_in(1_000), Some(span_ns / 8));
+    // The one frame cadence every animation shares, not a step this fade
+    // works out for itself.
+    assert_eq!(
+        chooser.next_frame_in(1_000),
+        Some(tairix_theme::Timeline::FRAME_NS)
+    );
 
     let mid = 1_000 + span_ns / 2;
     assert!(chooser.advance(mid));
@@ -619,7 +624,7 @@ fn the_fade_only_affects_the_transition_pixels() {
     direct.focus_on(1, 0, 0);
     let mut direct_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     direct_frame.fill(Color::from(theme.palette().desktop));
-    direct.render(&mut direct_frame, SCREEN, Scale::ONE, &theme);
+    direct.render(&mut direct_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
 
     // Animate to the same slot and settle.
     let mut faded = Chooser::new(accounts(&names));
@@ -631,12 +636,12 @@ fn the_fade_only_affects_the_transition_pixels() {
 
     let mut start_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     start_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut start_frame, SCREEN, Scale::ONE, &theme);
+    faded.render(&mut start_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
 
     faded.advance(span_ns / 2);
     let mut mid_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     mid_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut mid_frame, SCREEN, Scale::ONE, &theme);
+    faded.render(&mut mid_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
 
     assert!(
         !changed_pixels(&start_frame, &mid_frame).is_empty(),
@@ -646,7 +651,7 @@ fn the_fade_only_affects_the_transition_pixels() {
     faded.advance(span_ns);
     let mut end_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     end_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut end_frame, SCREEN, Scale::ONE, &theme);
+    faded.render(&mut end_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
 
     assert_eq!(
         end_frame, direct_frame,

@@ -31,8 +31,11 @@ the `lib/greeter` surface engine, the `greeter.app` service, the
 `session-v1` broker and graphical round in `login`, fast user switching on
 both sides, and the desktop's screen lock composing the same engine. A
 graphical login is now the **default** on hardware that can run one (G1),
-degrading to the text prompt otherwise. The docs and README matrix are
-current.
+degrading to the text prompt otherwise. The screen is animated throughout —
+the chooser's selection cross-fade, the stage transition to a chosen
+account's prompt, the shake on a refusal, and the fade to black that hands
+the seat to a desktop revealing from black over it (G2.1, G4.1). The docs and
+README matrix are current.
 
 **Remaining: the G7 QEMU verticals only.** No integration test yet boots a
 machine to the graphical login screen, authenticates, and switches accounts
@@ -303,22 +306,19 @@ login screen's — it opens on the chooser.
   screen is not a second visual vocabulary: the chosen account **frosts the
   wallpaper behind it** — the shared region frost the compositor blurs a
   window's backdrop with, at the theme's `selection_backdrop_blur` — and the
-  shared half-opaque accent is laid over that with a **crisp**, rounded edge.
+  shared accent, at three tenths opacity, is laid over that with a **crisp**,
+  rounded edge. The fill is that light because the frost is what marks the
+  tile; the accent only tints it.
   The blur belongs behind the mark, never on it: softening the fill itself
   leaves a smear with no shape of its own, and a selected tile draws no outline
   of any kind on top — neither the focus ring nor the pointer wash, both
   suppressed by the selection rather than by the mark's strength, so nothing
   flickers while the mark arrives. A long
   display name **wraps** rather than being cut — `System Administrator` reads
-  as itself, not as `System Admini`. The mark **cross-fades** as the chooser's
-  focus moves, over the theme's `SelectionChange` duration: the tile being
-  left decays while the tile arrived at grows — frost and colour together, so
-  a backdrop never snaps into focus ahead of the accent leaving it — and the
-  highlight never jumps. The fade rides the screen's existing park deadline —
-  one one-shot wake per
-  frame while it runs, none once it settles — so an idle login screen still
-  arms no timer, and a reduced-motion theme reports a zero duration and the
-  change lands at once. The tile's height is derived from the
+  as itself, not as `System Admini`. The mark **cross-fades** as focus moves —
+  the tile being left decays while the tile arrived at grows, frost and colour
+  together, so a backdrop never snaps into focus ahead of the accent leaving
+  it. The tile's height is derived from the
   control's own `label_lines`, not guessed: 154 logical pixels is the first
   height that holds three whole label lines at the reference density *and* at
   a doubled one, so a face wider than the test face still has somewhere for a
@@ -328,6 +328,38 @@ login screen's — it opens on the chooser.
   path. A tile draws a **monogram**, not an avatar: the system has no
   per-user avatar store, and an identifier nothing can resolve would be
   speculative surface.
+- **The screen's motion.** Four animations, every duration read from the
+  theme's `MotionInteraction` table and every one of them driven by the shared
+  `Timeline` — one definition of how a duration becomes frames, so no surface
+  keeps its own clock arithmetic and no two animations can ease differently by
+  accident. A *travelling* element takes the eased (smoothstep) progress; a
+  pure strength fade takes the linear one.
+  - The chooser's selection **cross-fade** (`SelectionChange`), above.
+  - The **stage transition** (`StageTransition`) between the chooser and the
+    chosen account's prompt, in **both** directions: the picked account's
+    monogram disc travels and scales from its tile to the prompt's disc, the
+    other tiles fade out, and the prompt's name, field and notice fade in. It
+    interpolates the *layout* — the disc's centre and radius, and a strength
+    per element — and draws one pass into the surface it already owns; a
+    cross-fade of two full renders would cost a second screen's worth of
+    memory for a quarter of a second and buy nothing.
+  - The **rejection shake** (`AttemptRejected`): a refused secret displaces the
+    prompt horizontally on a decaying oscillation that ends at exactly zero,
+    so the refusal is legible before the notice is read. It is *additional* to
+    the notice and the cooldown, never a replacement for either.
+  - The **fade to black** (`SessionFade`) on a verified secret, before the
+    process exits. The authority starts the session on that exit, so a screen
+    that has already gone black is what lets the desktop reveal from black
+    over it without a seam — and it is why the fade must complete first. It is
+    total: a lost display or a failed present still exits `0` promptly, because
+    a cosmetic fade may never strand a successful login. Input is ignored once
+    it begins; the decision is already made.
+
+  Each rides the screen's existing park deadline — one one-shot wake per frame
+  while something runs, none once everything settles — so an **idle** login
+  screen still arms no timer at all. A reduced-motion theme reports every
+  duration as zero, which the timeline reads as *settled*: each change lands
+  at once, with no second code path and no frame asked for.
 - **The wallpaper backdrop.** A second `Backdrop` case carrying an
   already-decoded, already-fitted image plus the alpha of its contrast
   scrim — the engine gains no decoder; decoding untrusted bytes is the
@@ -526,6 +558,30 @@ record, and never carried in a reply.
 `Authenticate` does **not** itself start anything: it returns a verdict. The
 authority starts the session on its own loop, so the greeter can never
 choose *which* program runs as the authenticated user.
+
+That ordering is also what makes the hand-over seamless. The greeter fades
+its screen to black and only then exits; the authority starts the desktop on
+that exit; the desktop **reveals from black** over the same `SessionFade`
+duration, applied by the compositor at the one point composed pixels become
+the scan-out frame. The two halves never negotiate — each simply animates its
+own second of the same continuous transition, which is why neither needs to
+know about the other. The reveal is why the compositor's hardware-layer path
+declines while it runs: a layer the display scans out directly never passes
+through the dimming, so an accelerated frame would appear at full brightness
+and lose the fade.
+
+The desktop announces itself visible once the reveal settles — one diagnostic
+record, emitted after a present that reached the display, and the witness a
+test keys on to photograph a screen that is actually showing something. The
+first presented frame can no longer serve as that witness: it is deliberately
+black, and black is indistinguishable from a blank screen. Emitting it needed
+`CAP_LOG_EMIT` in `SESSION_BASELINE`, since no interactive ceiling carried it
+and the kernel discarded every record a session wrote — which had also been
+losing the session's own cache ledgers, silently, since long before this. The
+widening is real and deliberate: any program a logged-in user runs may now
+write to the machine-wide **diagnostic** log. The audit log is a separate
+capability, stays kernel-only, and is attributed by the kernel rather than the
+caller, so none of this reaches it.
 
 ### G4.2 The round
 

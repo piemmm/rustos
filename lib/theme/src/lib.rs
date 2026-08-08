@@ -62,7 +62,7 @@ mod tests;
 pub use color::Rgba;
 pub use cursor::{CursorKind, CursorSet};
 pub use metrics::Metrics;
-pub use motion::{Contrast, Density, MotionInteraction, MotionTheme};
+pub use motion::{Contrast, Density, MotionInteraction, MotionTheme, Timeline};
 pub use palette::{Palette, SignalRole};
 pub use registry::{ThemeError, ThemeRegistry};
 pub use theme::{Appearance, Theme, ThemeId};

@@ -80,6 +80,23 @@ router**:
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
   slice index and a blend.
+- Screen reveal (`set_reveal`/`reveal`): the whole screen scaled toward
+  black, `u8::MAX` normal and `0` black, which is what the desktop session
+  fades in over on start-up. It is applied at the one step in
+  `compose_span` where a composited pixel becomes a scan-out byte, so every
+  present path dims each pixel exactly once; the back buffer deliberately
+  keeps the true composed colour, because a frosted window samples the
+  backdrop out of it and a blur-split rectangle re-reads it, and dimming
+  there would dim those pixels twice. Only `r`/`g`/`b` are scaled, through
+  the crate's own `div255`, so alpha and the premultiplied invariant are
+  untouched and the fade goes to black rather than to transparent. A full
+  reveal short-circuits, so an unfaded screen costs one comparison per
+  encoded pixel and is byte-identical to one that never heard of the
+  reveal. A change damages the whole screen, a repeat damages nothing, and
+  a mode change carries the strength over. `present_accelerated` takes its
+  software fallback while a reveal is in flight, because a hardware layer
+  is scanned out as the driver was handed it and would show at full
+  strength while the fade ran.
 - Popup surfaces need no compositor primitive of their own. An app-owned
   popup (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an
   ordinary undecorated window in that same flat z-order, placed by the
@@ -225,7 +242,13 @@ cargo test -p tairix-wm
 ```
 
 Headless tests against a virtual framebuffer cover premultiplied-alpha
-correctness (opaque and transparent edge cases), per-region alpha
+correctness (opaque and transparent edge cases), the screen reveal (a full
+reveal's frame byte-identical to one the reveal never touched, a half
+reveal scaling every composed pixel by the crate's own rounding while the
+back buffer keeps the true colour, a zero reveal presenting black, the
+premultiplied invariant at every strength, whole-screen damage on a change
+and none on a repeat, the layer path declining mid-fade and resuming after
+it, and a mode change keeping a fade in flight), per-region alpha
 blending, rounded-corner masking, z-order, window move/hide/remove with
 damage repaint, channel-order encoding, the present seam (no damage
 presents nothing, disjoint rectangles present individually, whole-screen

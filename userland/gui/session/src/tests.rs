@@ -5,16 +5,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
-use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
     CommandSection, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::{
-    AppInfoHeader, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_WIRE_MAX,
-    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+    AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC,
+    APPINFO_WIRE_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+    SYSCALL_TABLE_HASH_LEN,
 };
 use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
@@ -34,7 +36,9 @@ use tairix_taskbar::{
     TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
 };
 use tairix_taskpins::PinTarget;
-use tairix_theme::{Appearance, CursorKind, Metrics, Theme, ThemeError, ThemeId};
+use tairix_theme::{
+    Appearance, CursorKind, Metrics, MotionInteraction, Theme, ThemeError, ThemeId, Timeline,
+};
 use tairix_wm::{
     chrome_cache, cursor_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse,
     Key, NamedKey, Point, PointerButton, Rect, Scale, Surface, WindowActivationState, WindowChrome,
@@ -47,9 +51,10 @@ use crate::{
     ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, IconRasteriser,
     InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
     PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader, SessionFileWriter,
-    SessionInputResponse, SessionInputRouter, SessionPins, SessionWindows, ShellOutcome,
-    ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
-    TaskBridge, TaskbarPresenter, SWITCHBOARD_RUN_PATH,
+    SessionInputResponse, SessionInputRouter, SessionPins, SessionReveal, SessionWindows,
+    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -5139,20 +5144,30 @@ fn key_press(key: Key) -> InputEvent {
     }
 }
 
+/// The instant the lock tests that exercise event handling hand the lock.
+///
+/// They assert what a key or a click *does*, never how anything moves, so
+/// one named instant serves all of them; the motion tests below name their
+/// own so the arithmetic reads.
+const LOCK_EVENT_NS: u64 = 3_000_000_000;
+
 /// Type `password`'s characters into the lock one key at a time, then press
-/// Enter, returning the outcome of that final, submitting event.
+/// Enter, returning the outcome of that final, submitting event. Every key
+/// lands at `now_ns`, as one burst of typing does.
 fn submit(
     lock: &mut ScreenLock,
     password: &str,
+    now_ns: u64,
     unlocker: &mut dyn Verifier,
     shell: &DesktopShell,
     comp: &mut Compositor,
 ) -> LockOutcome {
     for ch in password.chars() {
-        lock.handle(&key_press(Key::Char(ch)), unlocker, shell, comp);
+        lock.handle(&key_press(Key::Char(ch)), now_ns, unlocker, shell, comp);
     }
     lock.handle(
         &key_press(Key::Named(NamedKey::Enter)),
+        now_ns,
         unlocker,
         shell,
         comp,
@@ -5248,7 +5263,14 @@ fn a_wrong_password_leaves_the_screen_locked() {
     assert!(lock.engage("ann", &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused]);
 
-    let outcome = submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
+    let outcome = submit(
+        &mut lock,
+        "wrong",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
 
     assert_eq!(outcome, LockOutcome::Pending);
     assert!(
@@ -5268,7 +5290,14 @@ fn an_unreachable_broker_leaves_the_screen_locked() {
     assert!(lock.engage("ann", &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Unreachable]);
 
-    let outcome = submit(&mut lock, "whatever", &mut unlocker, &shell, &mut comp);
+    let outcome = submit(
+        &mut lock,
+        "whatever",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
 
     assert_eq!(
         outcome,
@@ -5293,6 +5322,7 @@ fn a_correct_password_unlocks_the_screen_and_removes_the_lock_window() {
     let outcome = submit(
         &mut lock,
         "correct horse battery staple",
+        LOCK_EVENT_NS,
         &mut unlocker,
         &shell,
         &mut comp,
@@ -5314,7 +5344,14 @@ fn the_typed_password_is_offered_to_the_verifier_exactly_as_typed() {
     assert!(lock.engage("ann", &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
-    submit(&mut lock, "Hunter2!", &mut unlocker, &shell, &mut comp);
+    submit(
+        &mut lock,
+        "Hunter2!",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
 
     assert_eq!(unlocker.offered, vec![String::from("Hunter2!")]);
 }
@@ -5330,8 +5367,22 @@ fn the_password_is_erased_after_every_attempt() {
     assert!(lock.engage("ann", &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused, Verdict::Verified]);
 
-    submit(&mut lock, "wrong", &mut unlocker, &shell, &mut comp);
-    submit(&mut lock, "right", &mut unlocker, &shell, &mut comp);
+    submit(
+        &mut lock,
+        "wrong",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+    submit(
+        &mut lock,
+        "right",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
 
     assert_eq!(
         unlocker.offered,
@@ -5354,6 +5405,7 @@ fn no_key_dismisses_the_lock_without_a_verified_password() {
 
     lock.handle(
         &key_press(Key::Named(NamedKey::Escape)),
+        LOCK_EVENT_NS,
         &mut unlocker,
         &shell,
         &mut comp,
@@ -5362,6 +5414,7 @@ fn no_key_dismisses_the_lock_without_a_verified_password() {
 
     lock.handle(
         &key_press(Key::Named(NamedKey::Enter)),
+        LOCK_EVENT_NS,
         &mut unlocker,
         &shell,
         &mut comp,
@@ -5370,13 +5423,20 @@ fn no_key_dismisses_the_lock_without_a_verified_password() {
 
     lock.handle(
         &key_press(Key::Named(NamedKey::Tab)),
+        LOCK_EVENT_NS,
         &mut unlocker,
         &shell,
         &mut comp,
     );
     assert!(lock.is_locked(), "Tab does not unlock");
 
-    lock.handle(&key_press(Key::Char('x')), &mut unlocker, &shell, &mut comp);
+    lock.handle(
+        &key_press(Key::Char('x')),
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
     assert!(
         lock.is_locked(),
         "a printable key does not unlock by itself"
@@ -5391,7 +5451,13 @@ fn a_pointer_press_does_not_unlock_and_reaches_nothing_else() {
     assert!(lock.engage("ann", &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
 
-    let outcome = lock.handle(&PRIMARY_PRESS, &mut unlocker, &shell, &mut comp);
+    let outcome = lock.handle(
+        &PRIMARY_PRESS,
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
 
     assert_eq!(outcome, LockOutcome::Pending);
     assert!(lock.is_locked(), "a pointer press never unlocks the screen");
@@ -5483,7 +5549,7 @@ fn drain(
 ) -> LockedDrain {
     let mut drain = LockedDrain::new();
     for event in events {
-        drain.feed(lock, event, unlocker, shell, comp);
+        drain.feed(lock, event, LOCK_EVENT_NS, unlocker, shell, comp);
     }
     drain
 }
@@ -5607,7 +5673,13 @@ fn an_unengaged_lock_is_harmless() {
     let mut unlocker = ScriptedUnlocker::refusing();
 
     assert_eq!(
-        lock.handle(&PRIMARY_PRESS, &mut unlocker, &shell, &mut comp),
+        lock.handle(
+            &PRIMARY_PRESS,
+            LOCK_EVENT_NS,
+            &mut unlocker,
+            &shell,
+            &mut comp
+        ),
         LockOutcome::Pending
     );
     assert!(!lock.is_locked());
@@ -6780,4 +6852,380 @@ fn keep_popups_stacked_is_idle_with_no_popup_open() {
         "with no popup open the stack is left exactly as it was"
     );
     assert!(comp.window(parent).is_some());
+}
+
+// ---- the desktop's reveal from black ----
+
+/// The instant a test session starts. Well clear of zero, so anything that
+/// silently read an unset clock instead of this one could not pass by
+/// accident.
+const SESSION_START_NS: u64 = 9_000_000_000;
+
+/// A finite park some other part of the loop already asked for, so a test can
+/// show that a settled animation neither shortens it nor replaces it.
+const OTHER_PARK_NS: u64 = 7_000_000;
+
+/// A dark theme that animates nothing, for the reduced-motion path.
+fn still_dark() -> Theme {
+    let base = Theme::dark();
+    Theme::new(
+        ThemeId(101),
+        "Still Dark",
+        Appearance::Dark,
+        *base.palette(),
+        *base.metrics(),
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        base.contrast(),
+    )
+}
+
+/// Walk `timeline` exactly as the run loop does — waking only when it asks to
+/// — and collect the instants it wakes at. The last is its end, so a test
+/// reads its span off the theme instead of spelling a duration of its own.
+fn motion_wakes(timeline: Timeline, start_ns: u64) -> Vec<u64> {
+    let mut at = start_ns;
+    let mut wakes = Vec::new();
+    while let Some(delta) = timeline.next_frame_in(at) {
+        at = at.saturating_add(delta);
+        wakes.push(at);
+    }
+    wakes
+}
+
+/// The session fade `comp`'s own theme asks for, and the instants a loop
+/// driving it from [`SESSION_START_NS`] would wake at.
+fn session_fade(comp: &Compositor) -> (Timeline, Vec<u64>) {
+    let span = comp
+        .theme()
+        .motion()
+        .duration(MotionInteraction::SessionFade);
+    assert!(span > 0, "the shipped theme fades a session in");
+    let timeline = Timeline::start(SESSION_START_NS, span);
+    let wakes = motion_wakes(timeline, SESSION_START_NS);
+    assert!(!wakes.is_empty(), "a running fade wakes at least once");
+    (timeline, wakes)
+}
+
+/// A display that refuses every frame it is handed, so a test can prove a
+/// fade nobody could put on screen still ends fully revealed.
+struct RefusingDisplay {
+    mode: DisplayMode,
+    refusals: u32,
+}
+
+impl Display for RefusingDisplay {
+    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+        Ok(self.mode)
+    }
+
+    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+        self.refusals += 1;
+        Err(DriverError::Busy)
+    }
+
+    fn present_region(&mut self, _frame: &[u8], _damage: DamageRect) -> Result<(), DriverError> {
+        self.refusals += 1;
+        Err(DriverError::Busy)
+    }
+}
+
+/// Keeps every record it is handed, so a test can count the desktop's
+/// one-shot reveal witness and check the exact text a log consumer keys on.
+struct RecordingSink {
+    events: RefCell<Vec<(u32, String)>>,
+}
+
+impl RecordingSink {
+    fn new() -> Self {
+        Self {
+            events: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// How many reveal witnesses have been recorded, by id *and* rendered
+    /// text — the vertical keys on the text, so a test that ignored it could
+    /// pass while the gate it stands for never fired.
+    fn witnesses(&self) -> usize {
+        self.events
+            .borrow()
+            .iter()
+            .filter(|(id, message)| {
+                *id == DESKTOP_REVEALED.0 && message.as_str() == DESKTOP_REVEALED_MESSAGE
+            })
+            .count()
+    }
+}
+
+impl Sink for RecordingSink {
+    fn write_event(&self, event: &Event<'_>) {
+        self.events
+            .borrow_mut()
+            .push((event.id.0, String::from(event.message)));
+    }
+}
+
+#[test]
+fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
+    let mut comp = compositor();
+    let (reference, wakes) = session_fade(&comp);
+
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+
+    assert_eq!(
+        comp.reveal(),
+        0,
+        "the desktop starts from the black the login screen left behind"
+    );
+    assert_eq!(
+        reveal.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        Timeline::FRAME_NS,
+        "an indefinite park is bounded to the fade's next frame"
+    );
+
+    let mut shown = 0u8;
+    for at in &wakes {
+        let expected = reference.progress(*at);
+        assert_eq!(
+            reveal.advance(*at, &mut comp),
+            expected != shown,
+            "a step repaints exactly when the strength moved"
+        );
+        assert_eq!(comp.reveal(), expected, "at {at}");
+        shown = expected;
+    }
+
+    let end = wakes[wakes.len() - 1];
+    assert_eq!(
+        comp.reveal(),
+        u8::MAX,
+        "the fade ends on the fully composed desktop"
+    );
+    assert!(
+        !reveal.advance(end, &mut comp),
+        "a settled fade is no further work"
+    );
+    assert_eq!(
+        reveal.park_deadline_ns(end, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "and arms no further timer"
+    );
+}
+
+/// The whole point of folding rather than replacing: with nothing animating,
+/// the park is byte-for-byte the value the loop already carried.
+#[test]
+fn an_idle_desktop_parks_exactly_as_it_would_without_a_fade() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let end = wakes[wakes.len() - 1];
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    let lock = ScreenLock::new();
+
+    reveal.advance(end, &mut comp);
+
+    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+        assert_eq!(
+            reveal.park_deadline_ns(end, park),
+            park,
+            "a settled fade arms no timer"
+        );
+        assert_eq!(
+            lock.park_deadline_ns(end, park),
+            park,
+            "nor does an unengaged lock"
+        );
+    }
+}
+
+#[test]
+fn reduced_motion_shows_the_desktop_at_once_with_no_frame_and_no_timer() {
+    let mut comp = compositor();
+    assert!(comp.set_theme(still_dark()));
+    comp.composite();
+    assert!(!comp.has_damage(), "the theme switch is already drawn");
+
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+
+    assert_eq!(comp.reveal(), u8::MAX, "the desktop is simply there");
+    assert!(
+        !comp.has_damage(),
+        "nothing was dimmed, so nothing owes a repaint"
+    );
+    assert!(
+        !reveal.advance(SESSION_START_NS, &mut comp),
+        "and no frame is owed"
+    );
+    assert_eq!(
+        reveal.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "nor a timer"
+    );
+}
+
+/// The fade is driven by the clock, not by the screen: a display that refuses
+/// the frames cannot leave the desktop stranded dark.
+#[test]
+fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let mid = wakes[wakes.len() / 2];
+    let end = wakes[wakes.len() - 1];
+    let mut display = RefusingDisplay {
+        mode: comp.mode(),
+        refusals: 0,
+    };
+
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    reveal.advance(mid, &mut comp);
+    assert!(comp.reveal() < u8::MAX, "the fade is still in flight");
+    assert!(
+        comp.present(&mut display).is_err(),
+        "the display refuses the frame"
+    );
+    assert!(display.refusals > 0, "and really was asked for it");
+
+    assert!(reveal.advance(end, &mut comp));
+
+    assert_eq!(
+        comp.reveal(),
+        u8::MAX,
+        "time finishes the fade, never a present that succeeded"
+    );
+    assert_eq!(
+        reveal.park_deadline_ns(end, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "and it stops asking for frames"
+    );
+}
+
+/// The witness is the desktop being *visible*, not merely presented: every
+/// frame of the fade is black to a degree, so nothing is announced until the
+/// screen stands at full strength — and then only once.
+#[test]
+fn the_desktop_announces_itself_visible_once_the_fade_has_completed() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let sink = RecordingSink::new();
+
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    reveal.presented(&sink);
+    assert_eq!(
+        comp.reveal(),
+        0,
+        "the first frame is the black it starts on"
+    );
+    assert_eq!(sink.witnesses(), 0, "which nobody could see the desktop in");
+
+    for at in &wakes {
+        reveal.advance(*at, &mut comp);
+        reveal.presented(&sink);
+        assert_eq!(
+            sink.witnesses(),
+            usize::from(comp.reveal() == u8::MAX),
+            "announced exactly when the screen first stands at full strength, at {at}"
+        );
+    }
+
+    let end = wakes[wakes.len() - 1];
+    reveal.advance(end, &mut comp);
+    reveal.presented(&sink);
+    reveal.presented(&sink);
+    assert_eq!(
+        sink.witnesses(),
+        1,
+        "once per session, never once per frame"
+    );
+}
+
+/// A theme that reports a zero duration is fully revealed from its first
+/// frame, so its witness lands there rather than never — a consumer waiting
+/// on it would otherwise wait for ever.
+#[test]
+fn reduced_motion_announces_the_desktop_visible_on_its_first_frame() {
+    let mut comp = compositor();
+    assert!(comp.set_theme(still_dark()));
+    let sink = RecordingSink::new();
+
+    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    assert_eq!(comp.reveal(), u8::MAX, "nothing was dimmed");
+
+    reveal.presented(&sink);
+    assert_eq!(sink.witnesses(), 1, "so the desktop is visible at once");
+
+    reveal.presented(&sink);
+    assert_eq!(sink.witnesses(), 1, "and is still announced only once");
+}
+
+/// The witness's id sits inside the block this crate reserves, so it cannot
+/// collide with another subsystem's.
+#[test]
+fn the_reveal_witness_id_is_inside_the_sessions_reserved_range() {
+    assert!((DESKTOP_SESSION_RANGE_START..DESKTOP_SESSION_RANGE_END).contains(&DESKTOP_REVEALED.0));
+}
+
+/// The lock screen is the login screen's engine, so a refused unlock shakes
+/// the question and the lock folds that into the session's park.
+///
+/// This is also what proves the clock is really threaded: a surface handed a
+/// frozen zero would start the shake at zero, and by the instant the test
+/// asks it would already be long over and ask for nothing at all.
+#[test]
+fn a_refused_unlock_animates_on_the_sessions_clock() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage("ann", &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::refusing();
+    assert_eq!(
+        lock.park_deadline_ns(LOCK_EVENT_NS, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "an idle lock screen arms no timer"
+    );
+
+    submit(
+        &mut lock,
+        "wrong",
+        LOCK_EVENT_NS,
+        &mut unlocker,
+        &shell,
+        &mut comp,
+    );
+
+    assert!(
+        lock.park_deadline_ns(LOCK_EVENT_NS, NO_DEADLINE_NS) < NO_DEADLINE_NS,
+        "the refusal asks for a frame"
+    );
+    comp.composite();
+    let mut at = LOCK_EVENT_NS;
+    let mut frames = 0u32;
+    let mut repainted = false;
+    loop {
+        let due = lock.park_deadline_ns(at, NO_DEADLINE_NS);
+        if due == NO_DEADLINE_NS {
+            break;
+        }
+        assert!(due > 0, "a frame that is due now would spin the loop");
+        assert_eq!(
+            lock.park_deadline_ns(at, OTHER_PARK_NS),
+            OTHER_PARK_NS.min(due),
+            "an animating lock shortens a park it already has, never lengthens it"
+        );
+        at = at.saturating_add(due);
+        lock.advance(at, &shell, &mut comp);
+        repainted |= comp.has_damage();
+        frames += 1;
+        assert!(frames < 1_000, "the shake must end");
+    }
+
+    assert!(frames > 0, "the refusal really animated");
+    assert!(repainted, "and redrew the lock while it did");
+    assert!(lock.is_locked(), "a refusal never unlocks");
+    assert_eq!(
+        lock.park_deadline_ns(at, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "a settled lock screen is back to arming no timer"
+    );
 }

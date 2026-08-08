@@ -30,6 +30,24 @@ pub(crate) fn theme() -> Theme {
     Theme::dark()
 }
 
+/// The same theme with reduced motion: every duration collapses to zero, so
+/// each animation lands on its destination at once and arms no timer.
+pub(crate) fn still() -> Theme {
+    let base = theme();
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        *base.metrics(),
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion().with_reduced_motion(true),
+        base.density(),
+        base.contrast(),
+    )
+}
+
 pub(crate) fn key(key: Key) -> InputEvent {
     InputEvent::KeyPressed {
         key,
@@ -110,13 +128,24 @@ pub(crate) fn feed_at(
     verifier: &mut dyn Verifier,
     now_ns: u64,
 ) -> Outcome {
-    let theme = theme();
+    feed_in(surface, event, verifier, now_ns, &theme())
+}
+
+/// Apply one event on [`SCREEN`] at the unscaled density, timed at `now_ns`,
+/// in `theme` — which is what decides how long each animation runs.
+pub(crate) fn feed_in(
+    surface: &mut AuthSurface,
+    event: &InputEvent,
+    verifier: &mut dyn Verifier,
+    now_ns: u64,
+    theme: &Theme,
+) -> Outcome {
     surface.on_event(
         event,
         &mut EventContext {
             screen: SCREEN,
             scale: Scale::ONE,
-            theme: &theme,
+            theme,
             verifier,
             now_ns,
         },

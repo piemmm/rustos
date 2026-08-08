@@ -102,6 +102,7 @@ extern crate alloc;
 
 mod chooser;
 mod layout;
+mod motion;
 mod scrim;
 mod surface;
 
@@ -118,6 +119,8 @@ mod chooser_tests;
 mod cooldown_tests;
 #[cfg(test)]
 mod damage_tests;
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod scrim_tests;
 #[cfg(test)]

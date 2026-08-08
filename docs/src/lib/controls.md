@@ -231,7 +231,7 @@ What a selection blurs is the **backdrop**. The pixels the tile covers — a
 window's surface, the desktop wallpaper — are frosted by the scaled
 `selection_backdrop_blur` through `tairix_raster`'s one shared region frost, the
 same call the compositor frosts a window's backdrop with, and the theme's
-`selection_fill` — its accent at half opacity — is then laid over them with a
+`selection_fill` — its accent at three tenths opacity — is then laid over them with a
 **crisp** edge, rounded like every other control plate. Frost and fill are both
 confined to that one rounded shape, so nothing lands outside the tile and no
 square edge shows around the rounded fill. Softening the *fill* instead leaves a

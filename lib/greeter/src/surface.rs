@@ -20,6 +20,10 @@ use crate::chooser::{monogram_disc, monogram_of, AccountTile, Chooser, Step, OTH
 use crate::layout::{
     back_band, centre_on, chrome_band, chrome_bands, draw_centred, notice_band, Prompt, FIELD_WIDTH,
 };
+use crate::motion::{
+    at_strength, between_rects, fade, sooner, travelling_font, Changed, Shake, Stage, Toward, Veil,
+    VEIL,
+};
 
 /// Longest secret the surface will hold, in characters.
 ///
@@ -253,11 +257,9 @@ pub struct EventContext<'a> {
     pub theme: &'a Theme,
     /// Who decides whether a submitted secret belongs to the account.
     pub verifier: &'a mut dyn Verifier,
-    /// Monotonic nanoseconds the surface times its motion from.
-    ///
-    /// The only motion is the chooser's selection cross-fade, so a surface
-    /// built without accounts — a screen lock over one named user — never
-    /// reads it and has no clock to supply.
+    /// Monotonic nanoseconds the surface times its motion from: the chooser's
+    /// selection cross-fade, one stage giving way to another, and the shake
+    /// that answers a rejected attempt.
     pub now_ns: u64,
 }
 
@@ -322,6 +324,42 @@ pub struct AuthSurface {
     cooldown: Duration64,
     chrome: Chrome,
     placement: Cell<Option<Placement>>,
+    /// The chooser and the prompt trading places, while one is doing so.
+    stage: Option<Stage>,
+    /// The question shaking, while a rejected attempt is being answered.
+    shake: Option<Shake>,
+    /// The black the screen leaves through, once a secret is accepted.
+    veil: Option<Veil>,
+}
+
+/// How one stage is drawn this frame.
+///
+/// A settled stage is drawn at full strength with its own disc and no
+/// displacement, which is exactly what the fields below say; a stage giving
+/// way says so once here rather than threading four arguments through every
+/// part of the paint.
+#[derive(Copy, Clone)]
+struct Draw<'a> {
+    /// How much of its own opacity every element takes.
+    strength: u8,
+    /// The name under the disc.
+    heading: &'a str,
+    /// The line under the field.
+    notice: &'a str,
+    /// Whether this stage draws its own disc, or a travelling one carries it.
+    disc: bool,
+    /// How far the disc, the name, and the pill are displaced sideways.
+    offset: i32,
+}
+
+/// `rect` moved `by` pixels sideways.
+fn shifted(rect: Rect, by: i32) -> Rect {
+    Rect::new(
+        rect.origin.x.saturating_add(by),
+        rect.origin.y,
+        rect.width,
+        rect.height,
+    )
 }
 
 impl AuthSurface {
@@ -349,6 +387,9 @@ impl AuthSurface {
             cooldown: Duration64::ZERO,
             chrome: Chrome::default(),
             placement: Cell::new(None),
+            stage: None,
+            shake: None,
+            veil: None,
         }
     }
 
@@ -368,6 +409,9 @@ impl AuthSurface {
             cooldown: Duration64::ZERO,
             chrome: Chrome::default(),
             placement: Cell::new(None),
+            stage: None,
+            shake: None,
+            veil: None,
         }
     }
 
@@ -433,6 +477,11 @@ impl AuthSurface {
     /// and on every step back to the chooser, so no later branch can be the
     /// one that forgot.
     pub fn on_event(&mut self, event: &InputEvent, ctx: &mut EventContext<'_>) -> Outcome {
+        // Once the screen has begun leaving, the answer is already given and
+        // nothing may take it back.
+        if self.session_fade_begun() {
+            return Outcome::quiet();
+        }
         self.place(ctx.screen, ctx.scale, ctx.theme);
         match self.mode {
             Mode::Chooser => self.on_chooser_event(event, ctx),
@@ -464,21 +513,21 @@ impl AuthSurface {
         paint_backdrop(&mut surface, theme, backdrop);
         self.paint_chrome(&mut surface, screen, scale, theme);
 
-        match &self.mode {
-            Mode::Chooser => {
-                if let Some(chooser) = self.chooser.as_ref() {
-                    chooser.render(&mut surface, screen, scale, theme);
-                    draw_centred(
-                        &mut surface,
-                        chooser.hint_rect(screen, scale),
-                        &self.notice,
-                        BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
-                        theme.palette().on_surface_muted,
-                    );
-                }
-            }
-            Mode::Name(name) => self.paint_prompt(&mut surface, name, screen, scale, theme),
-            Mode::Secret => self.paint_prompt(&mut surface, &self.field, screen, scale, theme),
+        let offset = self.shake_offset(screen, scale, theme);
+        match self.stage {
+            Some(stage) => self.paint_stages(&mut surface, stage, screen, scale, theme, offset),
+            None => self.paint_settled(&mut surface, screen, scale, theme, offset),
+        }
+        if let Some(veil) = self.veil {
+            let (w, h) = (surface.width(), surface.height());
+            surface.fill_round_rect(
+                0,
+                0,
+                w,
+                h,
+                0,
+                Color::from(at_strength(VEIL, veil.strength())),
+            );
         }
         self.place(screen, scale, theme);
         Some(surface)
@@ -508,46 +557,138 @@ impl AuthSurface {
         )
     }
 
-    /// Advance a running selection fade and report the damage.
+    /// Step every running animation and report the damage.
     ///
-    /// Damage is the smallest rectangle containing the two animating tiles,
-    /// falling back to the recorded chooser rectangle, and to the whole
-    /// screen only when the surface has not been placed yet. Outside the
-    /// chooser mode this is a no-op.
+    /// A selection fade damages the tiles whose mark strength moved; a
+    /// rejected attempt's shake damages the band it displaces; a stage
+    /// transition and the session fade both cover the screen. A round that
+    /// moved nothing repaints nothing.
     pub fn advance(&mut self, now_ns: u64) -> Outcome {
-        if !matches!(self.mode, Mode::Chooser) {
+        let placed = self.placement.get();
+        let mut changed = self.advance_selection(now_ns, placed);
+
+        if let Some(mut stage) = self.stage {
+            let moved = stage.advance(now_ns);
+            self.stage = (!stage.finished(now_ns)).then_some(stage);
+            if moved {
+                changed = changed.merged(Changed::Whole);
+            }
+        }
+        // Nothing draws the chooser once the prompt has it, so a mark still
+        // crossing there is settled rather than left asking for frames.
+        if self.stage.is_none() && !matches!(self.mode, Mode::Chooser) {
+            if let Some(chooser) = self.chooser.as_mut() {
+                chooser.settle_selection();
+            }
+        }
+        if let Some(mut shake) = self.shake {
+            let moved = shake.advance(now_ns);
+            self.shake = (!shake.finished(now_ns)).then_some(shake);
+            if moved {
+                changed = changed.merged(match placed {
+                    Some(placed) => Changed::Region(shake_band(placed)),
+                    None => Changed::Whole,
+                });
+            }
+        }
+        if let Some(mut veil) = self.veil {
+            if veil.advance(now_ns) {
+                changed = changed.merged(Changed::Whole);
+            }
+            self.veil = Some(veil);
+        }
+
+        if !changed.moved() {
             return Outcome::quiet();
         }
-        let Some(chooser) = self.chooser.as_mut() else {
+        Outcome::changed(changed.damage())
+    }
+
+    /// Nanoseconds until the next animation frame, or `None` when nothing is
+    /// animating — including under reduced motion, which leaves every
+    /// duration at zero and so arms no timer at all.
+    #[must_use]
+    pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
+        let mut due = self.selection_due(now_ns);
+        if let Some(stage) = self.stage {
+            due = sooner(due, stage.next_frame_in(now_ns));
+        }
+        if let Some(shake) = self.shake {
+            due = sooner(due, shake.next_frame_in(now_ns));
+        }
+        if let Some(veil) = self.veil {
+            due = sooner(due, veil.next_frame_in(now_ns));
+        }
+        due
+    }
+
+    /// Begin the fade the screen leaves through, once a secret has been
+    /// accepted.
+    ///
+    /// The black runs to full over the theme's session-fade duration, and the
+    /// surface stops answering input the moment it begins: the decision is
+    /// made, and a keystroke must not take it back. An owner presents frames
+    /// while [`motion_due`](Self::motion_due) asks for them and leaves once
+    /// [`session_fade_finished`](Self::session_fade_finished) says so — which
+    /// a reduced-motion theme says immediately, with no frame to present.
+    ///
+    /// Beginning a fade already begun changes nothing.
+    pub fn begin_session_fade(&mut self, now_ns: u64, theme: &Theme) -> Outcome {
+        if self.veil.is_some() {
             return Outcome::quiet();
+        }
+        let duration = theme.motion().duration(MotionInteraction::SessionFade);
+        self.veil = Some(Veil::start(now_ns, duration));
+        Outcome::changed(None)
+    }
+
+    /// Whether the screen has begun leaving, from the first veiled frame on.
+    ///
+    /// An owner that draws a pointer over this surface stops drawing it from
+    /// here: a pointer is something to point *with*, and the screen has
+    /// stopped answering input, so an arrow left over the black points at
+    /// nothing. It leaves with the screen it belonged to.
+    #[must_use]
+    pub const fn session_fade_begun(&self) -> bool {
+        self.veil.is_some()
+    }
+
+    /// Whether the screen has finished going black, so its owner may leave.
+    ///
+    /// `false` until [`begin_session_fade`](Self::begin_session_fade) has been
+    /// called: a screen that never began leaving has not finished doing so.
+    #[must_use]
+    pub fn session_fade_finished(&self) -> bool {
+        self.veil.is_some_and(Veil::finished)
+    }
+
+    /// Step the chooser's selection cross-fade, if anything is drawing it.
+    fn advance_selection(&mut self, now_ns: u64, placed: Option<Placement>) -> Changed {
+        if !matches!(self.mode, Mode::Chooser) && self.stage.is_none() {
+            return Changed::Nothing;
+        }
+        let Some(chooser) = self.chooser.as_mut() else {
+            return Changed::Nothing;
         };
         // Capture the tiles before the step settles them away.
         let (slots, count) = chooser.animating_slots();
         if !chooser.advance(now_ns) {
-            return Outcome::quiet();
+            return Changed::Nothing;
         }
-        let damage = match self.placement.get() {
-            Some(placed) => {
-                if count > 0 {
-                    chooser
-                        .tile_bounds_of(&slots[..count], placed.screen, placed.scale)
-                        .or(Some(placed.chooser))
-                } else {
-                    chooser
-                        .fade_damage(placed.screen, placed.scale)
-                        .or(Some(placed.chooser))
-                }
-            }
-            None => None,
+        let Some(placed) = placed else {
+            return Changed::Whole;
         };
-        Outcome::changed(damage)
+        let tiles = if count > 0 {
+            chooser.tile_bounds_of(&slots[..count], placed.screen, placed.scale)
+        } else {
+            chooser.fade_damage(placed.screen, placed.scale)
+        };
+        Changed::Region(tiles.unwrap_or(placed.chooser))
     }
 
-    /// Nanoseconds until the next animation frame, or `None` when nothing is
-    /// animating — including outside the chooser and under reduced motion.
-    #[must_use]
-    pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
-        if !matches!(self.mode, Mode::Chooser) {
+    /// When the chooser's selection cross-fade next needs a frame.
+    fn selection_due(&self, now_ns: u64) -> Option<u64> {
+        if !matches!(self.mode, Mode::Chooser) && self.stage.is_none() {
             return None;
         }
         self.chooser.as_ref()?.next_frame_in(now_ns)
@@ -582,7 +723,7 @@ impl AuthSurface {
             _ => chooser.on_pointer(event, ctx.screen, ctx.scale, ctx.now_ns, duration_ms),
         };
         match chosen {
-            Some(slot) => self.choose(slot),
+            Some(slot) => self.choose(slot, ctx.now_ns, stage_ms(ctx.theme)),
             None if stirred => {
                 let damage = match self.placement.get() {
                     Some(placed) => chooser
@@ -601,7 +742,7 @@ impl AuthSurface {
     /// One event on the typed-login-name field.
     fn on_name_event(&mut self, event: &InputEvent, ctx: &mut EventContext<'_>) -> Outcome {
         if is_escape(event) {
-            return self.back_to_chooser();
+            return self.back_to_chooser(ctx.now_ns, stage_ms(ctx.theme));
         }
         let bounds = self.field_rect(ctx.screen, ctx.scale, ctx.theme);
         let (scale, theme) = (ctx.scale, ctx.theme);
@@ -637,7 +778,7 @@ impl AuthSurface {
     /// One event on the secret field.
     fn on_secret_event(&mut self, event: &InputEvent, ctx: &mut EventContext<'_>) -> Outcome {
         if is_escape(event) && self.chooser.is_some() {
-            return self.back_to_chooser();
+            return self.back_to_chooser(ctx.now_ns, stage_ms(ctx.theme));
         }
         let said = self.notice_rev;
         let (submitted, redraw) = if let InputEvent::KeyPressed { key, modifiers } = event {
@@ -668,7 +809,11 @@ impl AuthSurface {
                 action.is_some() || now != was || dragging,
             )
         };
-        if submitted && self.offer(&mut *ctx.verifier) {
+        let rejected_ms = ctx
+            .theme
+            .motion()
+            .duration(MotionInteraction::AttemptRejected);
+        if submitted && self.offer(&mut *ctx.verifier, ctx.now_ns, rejected_ms) {
             return Outcome {
                 redraw: true,
                 verified: true,
@@ -688,8 +833,10 @@ impl AuthSurface {
     }
 
     /// Act on the chooser tile at `slot`: an account leads straight to its
-    /// secret, the trailing `Other…` tile to a typed login name.
-    fn choose(&mut self, slot: usize) -> Outcome {
+    /// secret, the trailing `Other…` tile to a typed login name. The tile's
+    /// disc travels to the prompt's place as it goes.
+    fn choose(&mut self, slot: usize, now_ns: u64, duration_ms: u16) -> Outcome {
+        self.turn(slot, Toward::Prompt, now_ns, duration_ms);
         let picked = self
             .chooser
             .as_ref()
@@ -728,11 +875,13 @@ impl AuthSurface {
         Outcome::changed(None)
     }
 
-    /// Step back to the chooser, taking whatever was typed with it.
-    fn back_to_chooser(&mut self) -> Outcome {
-        if self.chooser.is_none() {
+    /// Step back to the chooser, taking whatever was typed with it. The
+    /// prompt's disc travels back to the tile it came from.
+    fn back_to_chooser(&mut self, now_ns: u64, duration_ms: u16) -> Outcome {
+        let Some(chooser) = self.chooser.as_ref() else {
             return Outcome::quiet();
-        }
+        };
+        self.turn(chooser.focus(), Toward::Chooser, now_ns, duration_ms);
         self.leave();
         self.account = String::new();
         self.mode = Mode::Chooser;
@@ -751,15 +900,35 @@ impl AuthSurface {
         self.cooldown = Duration64::ZERO;
     }
 
+    /// Begin — or turn round — the transition carrying `slot`'s disc.
+    ///
+    /// An in-flight travel of the same disc is reversed from where it had
+    /// reached rather than restarted, so a person who changes their mind
+    /// half-way sees the disc turn round instead of jump.
+    fn turn(&mut self, slot: usize, toward: Toward, now_ns: u64, duration_ms: u16) {
+        self.stage = match self.stage {
+            Some(running) if running.slot() == slot && running.toward() != toward => {
+                running.reverse(now_ns, duration_ms)
+            }
+            _ => Stage::start(slot, toward, now_ns, duration_ms),
+        };
+    }
+
     /// Offer the typed secret to `verifier` and record what came back.
     ///
     /// Returns whether the account was verified. The secret is erased before
     /// this returns, on every path — including the one where a live cooldown
     /// means it was never offered at all.
-    fn offer(&mut self, verifier: &mut dyn Verifier) -> bool {
+    ///
+    /// A rejected attempt — refused outright, or refused for a standing
+    /// lockout — shakes the question as well as saying so in the notice. An
+    /// authority that could not be reached refused nothing, so nothing
+    /// shakes.
+    fn offer(&mut self, verifier: &mut dyn Verifier, now_ns: u64, duration_ms: u16) -> bool {
         if self.is_cooling() {
             self.field.set_text("");
             self.show(cooldown_notice(self.cooldown), ValidationState::Invalid);
+            self.shake = Shake::start(now_ns, duration_ms);
             return false;
         }
         let verdict = verifier.verify(&self.account, self.field.text());
@@ -768,6 +937,7 @@ impl AuthSurface {
             Verdict::Verified => true,
             Verdict::Refused => {
                 self.show(REFUSED.to_string(), ValidationState::Invalid);
+                self.shake = Shake::start(now_ns, duration_ms);
                 false
             }
             Verdict::Unreachable => {
@@ -822,8 +992,175 @@ impl AuthSurface {
         }));
     }
 
+    /// Paint whichever body is up, at full strength.
+    fn paint_settled(
+        &self,
+        surface: &mut Surface,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        offset: i32,
+    ) {
+        let draw = Draw {
+            strength: u8::MAX,
+            heading: self.shown_heading(),
+            notice: &self.notice,
+            disc: true,
+            offset,
+        };
+        match &self.mode {
+            Mode::Chooser => {
+                self.paint_chooser(surface, screen, scale, theme, draw.strength, draw.notice);
+            }
+            Mode::Name(name) => self.paint_prompt(surface, name, screen, scale, theme, draw),
+            Mode::Secret => self.paint_prompt(surface, &self.field, screen, scale, theme, draw),
+        }
+    }
+
+    /// Paint both stages of a transition and the disc that travels between
+    /// them.
+    ///
+    /// Each stage is drawn once, at a strength, into the frame already being
+    /// painted — there is no second screen to cross-fade against. Only the
+    /// destination stage shows the live notice; the stage being left shows
+    /// its own resting line, because a transition is not the moment to read
+    /// a verdict.
+    ///
+    /// The order is the same whichever way the transition runs — chooser,
+    /// then prompt, then the disc over both. Ordering by which stage is
+    /// arriving would re-order the two where they overlap, and a travel
+    /// turned round half-way would pop.
+    fn paint_stages(
+        &self,
+        surface: &mut Surface,
+        stage: Stage,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        offset: i32,
+    ) {
+        let prompt_strength = stage.prompt_strength();
+        let field = match &self.mode {
+            Mode::Name(name) => name,
+            _ => &self.field,
+        };
+        self.paint_chooser(
+            surface,
+            screen,
+            scale,
+            theme,
+            u8::MAX - prompt_strength,
+            self.stage_notice(stage, Toward::Chooser),
+        );
+        self.paint_prompt(
+            surface,
+            field,
+            screen,
+            scale,
+            theme,
+            Draw {
+                strength: prompt_strength,
+                heading: self.stage_heading(stage.slot()),
+                notice: self.stage_notice(stage, Toward::Prompt),
+                disc: false,
+                offset,
+            },
+        );
+        self.paint_travelling_disc(surface, stage, screen, scale, theme, offset);
+    }
+
+    /// Paint the tile grid and its one hint line at `strength`.
+    fn paint_chooser(
+        &self,
+        surface: &mut Surface,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        strength: u8,
+        notice: &str,
+    ) {
+        let Some(chooser) = self.chooser.as_ref() else {
+            return;
+        };
+        if strength == 0 {
+            return;
+        }
+        chooser.render(surface, screen, scale, theme, strength);
+        draw_centred(
+            surface,
+            chooser.hint_rect(screen, scale),
+            notice,
+            BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
+            at_strength(theme.palette().on_surface_muted, strength),
+        );
+    }
+
+    /// Paint the disc on its way between the tile it was picked from and the
+    /// prompt's own place, growing as it goes.
+    ///
+    /// It carries the prompt's strength: it lifts off the tile whose own disc
+    /// is dissolving and settles as the prompt's, so exactly one disc is on
+    /// screen at either end of the travel.
+    fn paint_travelling_disc(
+        &self,
+        surface: &mut Surface,
+        stage: Stage,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        offset: i32,
+    ) {
+        let strength = stage.prompt_strength();
+        let Some(chooser) = self.chooser.as_ref() else {
+            return;
+        };
+        if strength == 0 {
+            return;
+        }
+        let Some(from) = chooser.tile_disc_rect(stage.slot(), screen, scale, theme) else {
+            return;
+        };
+        let rect = shifted(
+            between_rects(from, Prompt::new(screen, scale).disc, strength),
+            offset,
+        );
+        let (mark, fill, ink) = chooser.slot_disc(stage.slot(), theme);
+        let font = travelling_font(theme, scale, strength);
+        let Some(mut disc) = monogram_disc(mark, rect.width, font, (fill, ink)) else {
+            return;
+        };
+        fade(&mut disc, strength);
+        surface.blit(rect.origin.x, rect.origin.y, &disc);
+    }
+
+    /// The name a transition's prompt stage shows, taken from the tile the
+    /// disc belongs to so it is right whichever way the transition runs.
+    fn stage_heading(&self, slot: usize) -> &str {
+        match self.chooser.as_ref().and_then(|it| it.account(slot)) {
+            Some(account) => account.display_name(),
+            None => NAME_HEADING,
+        }
+    }
+
+    /// The line the `side` stage shows during `stage`: the live notice when
+    /// it is the destination, its own resting line when it is being left.
+    fn stage_notice(&self, stage: Stage, side: Toward) -> &str {
+        if stage.toward() == side {
+            return &self.notice;
+        }
+        match side {
+            Toward::Chooser => CHOOSE_HINT,
+            Toward::Prompt if self.stage_heading(stage.slot()) == NAME_HEADING => NAME_HINT,
+            Toward::Prompt => HINT,
+        }
+    }
+
     /// Paint the prompt: the account's disc, its name, the pill, and the one
     /// or two lines under them.
+    ///
+    /// The disc, the name, and the pill take the shake's displacement — they
+    /// are the question that was refused. The lines under them do not: the
+    /// answer has to stay still to be read.
     fn paint_prompt(
         &self,
         surface: &mut Surface,
@@ -831,22 +1168,36 @@ impl AuthSurface {
         screen: Rect,
         scale: Scale,
         theme: &Theme,
+        draw: Draw<'_>,
     ) {
+        if draw.strength == 0 {
+            return;
+        }
         let palette = theme.palette();
         let prompt = Prompt::new(screen, scale);
-        if let Some(disc) = self.disc(prompt.disc.width, scale, theme) {
-            surface.blit(prompt.disc.origin.x, prompt.disc.origin.y, &disc);
+        if draw.disc {
+            if let Some(disc) = self.disc(prompt.disc.width, scale, theme, draw.strength) {
+                let at = shifted(prompt.disc, draw.offset);
+                surface.blit(at.origin.x, at.origin.y, &disc);
+            }
         }
         draw_centred(
             surface,
-            prompt.name,
-            self.shown_heading(),
+            shifted(prompt.name, draw.offset),
+            draw.heading,
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
-            palette.on_surface,
+            at_strength(palette.on_surface, draw.strength),
         );
 
         let pill = self.field_rect(screen, scale, theme);
-        paint_pill(surface, field, pill, scale, theme);
+        paint_pill(
+            surface,
+            field,
+            shifted(pill, draw.offset),
+            scale,
+            theme,
+            draw.strength,
+        );
 
         let caption = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
         let Some(notice) = notice_band(prompt.block, pill, scale) else {
@@ -857,13 +1208,25 @@ impl AuthSurface {
         } else {
             palette.danger
         };
-        draw_centred(surface, notice, &self.notice, caption, ink);
+        draw_centred(
+            surface,
+            notice,
+            draw.notice,
+            caption,
+            at_strength(ink, draw.strength),
+        );
 
         if self.chooser.is_none() {
             return;
         }
         if let Some(back) = back_band(prompt.block, notice, scale) {
-            draw_centred(surface, back, BACK_HINT, caption, palette.on_surface_muted);
+            draw_centred(
+                surface,
+                back,
+                BACK_HINT,
+                caption,
+                at_strength(palette.on_surface_muted, draw.strength),
+            );
         }
     }
 
@@ -876,10 +1239,10 @@ impl AuthSurface {
         }
     }
 
-    /// The prompt's `side`×`side` disc: the chosen account's mark in the
-    /// accent, or the chooser's own trailing mark while a login name is
-    /// still being typed.
-    fn disc(&self, side: u32, scale: Scale, theme: &Theme) -> Option<Surface> {
+    /// The prompt's `side`×`side` disc at `strength`: the chosen account's
+    /// mark in the accent, or the chooser's own trailing mark while a login
+    /// name is still being typed.
+    fn disc(&self, side: u32, scale: Scale, theme: &Theme, strength: u8) -> Option<Surface> {
         let palette = theme.palette();
         let (mark, fill, ink) = match self.mode {
             Mode::Name(_) => (OTHER_MONOGRAM, palette.surface_raised, palette.on_surface),
@@ -889,12 +1252,26 @@ impl AuthSurface {
                 palette.on_accent,
             ),
         };
-        monogram_disc(
+        let mut disc = monogram_disc(
             mark,
             side,
             BitmapFont::for_role(theme.fonts(), TextRole::Display, scale),
             (fill, ink),
-        )
+        )?;
+        fade(&mut disc, strength);
+        Some(disc)
+    }
+
+    /// How far the question is displaced this frame, clamped to the room the
+    /// pill has either side of it.
+    fn shake_offset(&self, screen: Rect, scale: Scale, theme: &Theme) -> i32 {
+        let Some(shake) = self.shake else {
+            return 0;
+        };
+        let pill = self.field_rect(screen, scale, theme);
+        let left = u32::try_from(pill.origin.x.saturating_sub(screen.origin.x)).unwrap_or(0);
+        let right = u32::try_from(screen.right().saturating_sub(pill.right())).unwrap_or(0);
+        shake.offset(scale, (left, right))
     }
 
     /// Paint the clock, the date, and the host name at the top of the column.
@@ -937,6 +1314,22 @@ impl AuthSurface {
 #[must_use]
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect {
     Prompt::new(screen, scale).block
+}
+
+/// How long one stage transition runs in `theme`.
+fn stage_ms(theme: &Theme) -> u16 {
+    theme.motion().duration(MotionInteraction::StageTransition)
+}
+
+/// The band a rejected attempt's shake displaces: the disc, the name, and
+/// the pill.
+///
+/// Full width, because the name is centred across the screen rather than in
+/// the block, so every position the reach can take is already inside it.
+fn shake_band(placed: Placement) -> Rect {
+    let top = Prompt::new(placed.screen, placed.scale).disc.origin.y;
+    let height = u32::try_from(placed.field.bottom().saturating_sub(top)).unwrap_or(0);
+    Rect::new(placed.screen.origin.x, top, placed.screen.width, height)
 }
 
 /// Whether `event` is the Escape key going down.
@@ -1001,7 +1394,14 @@ fn paint_backdrop(surface: &mut Surface, theme: &Theme, backdrop: Backdrop<'_>) 
 /// that the shape was faked. The field is always focused here, so that edge
 /// is its focus indication too, and it takes the danger colour on a refusal
 /// exactly as the plate's own rim would have.
-fn paint_pill(surface: &mut Surface, field: &TextField, rect: Rect, scale: Scale, theme: &Theme) {
+fn paint_pill(
+    surface: &mut Surface,
+    field: &TextField,
+    rect: Rect,
+    scale: Scale,
+    theme: &Theme,
+    strength: u8,
+) {
     let (Ok(x), Ok(y)) = (u32::try_from(rect.origin.x), u32::try_from(rect.origin.y)) else {
         return;
     };
@@ -1015,7 +1415,7 @@ fn paint_pill(surface: &mut Surface, field: &TextField, rect: Rect, scale: Scale
     } else {
         palette.danger
     };
-    surface.fill_round_rect(x, y, w, h, h / 2, Color::from(edge));
+    surface.fill_round_rect(x, y, w, h, h / 2, Color::from(at_strength(edge, strength)));
 
     let Some(mut row) = Surface::new(w, h) else {
         return;
@@ -1032,6 +1432,7 @@ fn paint_pill(surface: &mut Surface, field: &TextField, rect: Rect, scale: Scale
         h - 2 * inset,
         (h - 2 * inset) / 2,
     );
+    fade(&mut row, strength);
     surface.blit(rect.origin.x, rect.origin.y, &row);
 }
 

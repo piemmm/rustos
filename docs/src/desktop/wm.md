@@ -22,8 +22,9 @@ The compositor turns a stack of windows into one scan-out frame:
    background, bottom-to-top in z-order, using the Porter–Duff *over*
    operator (`Pixel::over`). It returns the `DamageRegion` it actually
    recomposited (screen-clipped), which is what the present step moves.
-3. Each composited pixel is encoded into a byte frame laid out for the
-   active `DisplayMode` (`Rgba8888` or `Bgra8888`).
+3. Each composited pixel is scaled by the screen reveal (see
+   [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
+   for the active `DisplayMode` (`Rgba8888` or `Bgra8888`).
 4. `Compositor::present` hands the changed part of that frame to a
    `Display` driver.
 
@@ -45,6 +46,31 @@ dirty so the next composite repaints every pixel over it — windows and the
 cursor re-blend on top unchanged — and returns `false` without damaging
 anything when the colour is already in effect, so a caller can skip a
 redundant present.
+
+## Screen reveal
+
+`Compositor::set_reveal(strength)` scales the whole screen toward black:
+`u8::MAX` is the normal picture, `0` is black. It is what the desktop
+session fades in over on start-up (see [the session](session.md)), and
+nothing else in the compositor reads it.
+
+It is applied at exactly one point — the step in `compose_span` where a
+composited pixel becomes a scan-out byte — so every present path
+(`composite`, `present`, `present_region`, the accelerated path's software
+fallback) dims each pixel exactly once. The back buffer deliberately keeps
+the **true** composed colour: a frosted window samples the backdrop out of
+it, and a blur-split rectangle re-reads it for its second segment, so
+dimming the buffer instead would dim those pixels twice.
+
+The scaling reuses `div255`, multiplies only `r`/`g`/`b` and leaves alpha
+untouched, so the premultiplied invariant (`channel <= a`) holds at every
+strength and the screen fades to black rather than to transparent. A full
+reveal short-circuits to the pixel itself, so a screen nobody is fading
+costs one comparison per encoded pixel and is byte-identical to one that
+never heard of the reveal. Changing the strength damages the whole screen,
+because every presented pixel's value changed; setting the strength
+already in force damages nothing. A mode change carries the strength over,
+so a session that re-modes mid-fade keeps fading.
 
 ## The desktop layer
 
@@ -86,7 +112,12 @@ unconditionally (`Compositor::has_backdrop_blur`): a hardware layer is
 composed from its own pixels alone and cannot sample what is already
 behind it, so a scene with any visible frosted window has no layer
 encoding at all and goes through software rather than presenting a frame
-the frosting is missing from. The first driver to implement the seam is the
+the frosting is missing from. An **in-flight screen reveal** takes it too:
+the engine scans a layer out as the driver was handed it, so nothing it
+composes passes through the dimming and the screen would show at full
+strength while the fade ran. `encode_layers` therefore declines while
+`reveal() < u8::MAX` and resumes the moment the fade completes. The first
+driver to implement the seam is the
 Raspberry Pi VideoCore HVS plane compositor (see
 [Display drivers](../drivers/display.md)).
 
@@ -721,7 +752,13 @@ masking, z-order and raise, window move/hide/remove with damage repaint,
 channel-order encoding, the `Display` present seam, the desktop layer
 (drawing over the background and under every window, a smaller-than-screen
 layer leaving the background showing, and installing/replacing/clearing
-each damaging exactly its footprint), the accelerated
+each damaging exactly its footprint), the screen reveal (a full reveal's
+frame byte-identical to one the reveal never touched, a half reveal
+scaling every composed pixel by the crate's own rounding while the back
+buffer keeps the true colour, a zero reveal presenting black, the
+premultiplied invariant at every strength, whole-screen damage on a change
+and none on a repeat, the layer path declining mid-fade and resuming after
+it, and a mode change keeping a fade in flight), the accelerated
 layer-encoding present path (background + desktop + window layers,
 hidden-window omission, and the over-budget / over-size / backdrop-blur
 software fallbacks), the composited backdrop blur (a spread backdrop, a

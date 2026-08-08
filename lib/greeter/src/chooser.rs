@@ -11,9 +11,10 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{Rgba, TextRole, Theme, Timeline};
 
 use crate::layout::{centre_on, down, Column, CHOOSER_HINT_GAP, NOTICE_BAND, SIDE_MARGIN};
+use crate::motion::fade;
 
 /// The trailing tile that leads to a typed login name.
 pub(crate) const OTHER_LABEL: &str = "Other…";
@@ -43,15 +44,6 @@ pub(crate) const TILE_HEIGHT: u32 = 154;
 
 /// The gap between tiles in pixels at the reference density.
 pub(crate) const TILE_GAP: u32 = 12;
-
-/// Frames spanned by one selection cross-fade.
-///
-/// Eight frames over a hundred milliseconds reads as smooth without inventing
-/// a frame clock.
-const SELECTION_FADE_FRAMES: u64 = 8;
-
-/// Nanoseconds in one millisecond.
-const NANOS_PER_MS: u64 = 1_000_000;
 
 /// One selectable account on the chooser.
 ///
@@ -136,20 +128,16 @@ pub(crate) fn monogram_of(name: &str) -> char {
 ///
 /// One consumer only — this chooser — so it stays here rather than becoming
 /// shared surface.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct SelectionFade {
     /// Slot the mark is leaving, if any.
     leaving: Option<usize>,
     /// Slot the mark is arriving at.
     arriving: usize,
-    /// Monotonic time the transition started, in nanoseconds.
-    started_ns: u64,
-    /// How long the transition runs, in nanoseconds.
-    duration_ns: u64,
+    /// The span the mark crosses in.
+    timeline: Timeline,
     /// Strength of the arriving mark: `0` unmarked, [`u8::MAX`] full.
     arriving_fade: u8,
-    /// Whether a transition is currently running.
-    running: bool,
 }
 
 impl SelectionFade {
@@ -158,10 +146,8 @@ impl SelectionFade {
         Self {
             leaving: None,
             arriving: slot,
-            started_ns: 0,
-            duration_ns: 0,
+            timeline: Timeline::SETTLED,
             arriving_fade: u8::MAX,
-            running: false,
         }
     }
 
@@ -170,17 +156,17 @@ impl SelectionFade {
     /// A zero duration settles immediately: the new slot is full, the old is
     /// gone, and nothing is left running.
     fn start(&mut self, from: usize, to: usize, now_ns: u64, duration_ms: u16) {
-        let span_ns = u64::from(duration_ms).saturating_mul(NANOS_PER_MS);
-        if span_ns == 0 {
+        let timeline = Timeline::start(now_ns, duration_ms);
+        if !timeline.running() {
             *self = Self::settled_on(to);
             return;
         }
-        self.leaving = Some(from);
-        self.arriving = to;
-        self.started_ns = now_ns;
-        self.duration_ns = span_ns;
-        self.arriving_fade = 0;
-        self.running = true;
+        *self = Self {
+            leaving: Some(from),
+            arriving: to,
+            timeline,
+            arriving_fade: 0,
+        };
     }
 
     /// End the transition on `slot`: full mark, nothing leaving.
@@ -190,12 +176,12 @@ impl SelectionFade {
 
     /// Strength of the mark on `slot`.
     fn strength(&self, slot: usize, focus: usize) -> u8 {
-        if self.running {
+        if self.timeline.running() {
             if slot == self.arriving {
                 return self.arriving_fade;
             }
             if self.leaving == Some(slot) {
-                return u8::MAX.saturating_sub(self.arriving_fade);
+                return u8::MAX - self.arriving_fade;
             }
             return 0;
         }
@@ -209,23 +195,14 @@ impl SelectionFade {
     /// Recompute strengths from elapsed time. Returns whether anything
     /// changed. A clock that jumps backwards settles rather than misbehaving.
     fn advance(&mut self, now_ns: u64, focus: usize) -> bool {
-        if !self.running {
+        if !self.timeline.running() {
             return false;
         }
-        if now_ns < self.started_ns {
+        if self.timeline.finished(now_ns) {
             self.settle(focus);
             return true;
         }
-        let elapsed = now_ns.saturating_sub(self.started_ns);
-        if elapsed >= self.duration_ns {
-            self.settle(focus);
-            return true;
-        }
-        let progress = elapsed
-            .saturating_mul(u64::from(u8::MAX))
-            .checked_div(self.duration_ns)
-            .unwrap_or(u64::from(u8::MAX));
-        let fade = u8::try_from(progress.min(u64::from(u8::MAX))).unwrap_or(u8::MAX);
+        let fade = self.timeline.progress(now_ns);
         if fade == self.arriving_fade {
             return false;
         }
@@ -236,16 +213,7 @@ impl SelectionFade {
     /// Nanoseconds until the next fade frame, or `None` when nothing is
     /// animating.
     fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
-        if !self.running {
-            return None;
-        }
-        let elapsed = now_ns.saturating_sub(self.started_ns);
-        let remaining = self.duration_ns.saturating_sub(elapsed);
-        if remaining == 0 {
-            return Some(0);
-        }
-        let step = (self.duration_ns / SELECTION_FADE_FRAMES).max(1);
-        Some(remaining.min(step))
+        self.timeline.next_frame_in(now_ns)
     }
 }
 
@@ -316,7 +284,7 @@ impl Chooser {
         // a second move interrupts (those drop to zero instantly).
         let mut dirty = [from, slot, 0, 0];
         let mut n = 2usize;
-        if self.fade.running {
+        if self.fade.timeline.running() {
             if let Some(leaving) = self.fade.leaving {
                 if leaving != from && leaving != slot {
                     dirty[n] = leaving;
@@ -347,6 +315,14 @@ impl Chooser {
     #[must_use]
     pub(crate) fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
         self.fade.next_frame_in(now_ns)
+    }
+
+    /// Put the mark on the focused slot at once.
+    ///
+    /// For when nothing is drawing the chooser any more: a mark still
+    /// crossing would ask for frames of a tile nobody can see.
+    pub(crate) fn settle_selection(&mut self) {
+        self.fade.settle(self.focus);
     }
 
     /// The mark strength tile `slot` draws at: `0` unmarked, [`u8::MAX`] full.
@@ -381,7 +357,7 @@ impl Chooser {
     /// Empty when nothing is animating.
     #[must_use]
     pub(crate) fn animating_slots(&self) -> ([usize; 2], usize) {
-        if !self.fade.running {
+        if !self.fade.timeline.running() {
             return ([0, 0], 0);
         }
         let mut slots = [self.fade.arriving, 0];
@@ -567,34 +543,106 @@ impl Chooser {
         }
     }
 
-    /// Paint every tile on `screen`.
-    pub(crate) fn render(&self, surface: &mut Surface, screen: Rect, scale: Scale, theme: &Theme) {
+    /// The mark and the two colours tile `slot` wears: an account's monogram
+    /// on the accent, or the trailing tile's ellipsis on the quiet plate.
+    ///
+    /// One definition, so the disc a person picks is the disc that then
+    /// travels to the prompt and the disc the prompt settles on.
+    pub(crate) fn slot_disc(&self, slot: usize, theme: &Theme) -> (char, Rgba, Rgba) {
+        let palette = theme.palette();
+        match self.account(slot) {
+            Some(account) => (account.monogram(), palette.accent, palette.on_accent),
+            None => (OTHER_MONOGRAM, palette.surface_raised, palette.on_surface),
+        }
+    }
+
+    /// The square tile `slot` draws its disc in, in the paint's own geometry.
+    ///
+    /// The tile reports the side it reserves for a picture; the picture sits
+    /// at the top of the tile's content, centred across it, like every other
+    /// control's. `None` when the tile leaves no room for one.
+    pub(crate) fn tile_disc_rect(
+        &self,
+        slot: usize,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let bounds = self.tile_rect(slot, screen, scale)?;
+        let side = IconTile::icon_side(bounds, scale, theme);
+        if side == 0 {
+            return None;
+        }
+        let inset = scale.scale_length(theme.metrics().control_inset).max(1);
+        Some(Rect::new(
+            centre_on(bounds.origin.x, bounds.width, side),
+            down(bounds.origin.y, inset),
+            side,
+            side,
+        ))
+    }
+
+    /// Paint every tile on `screen` at `strength` of its own opacity.
+    ///
+    /// At full strength each tile is drawn straight into `surface`. A stage
+    /// transition giving the chooser up draws each tile once into a
+    /// tile-sized scratch instead and lays it over at that strength, which is
+    /// a tile's worth of pixels rather than a screen's.
+    pub(crate) fn render(
+        &self,
+        surface: &mut Surface,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        strength: u8,
+    ) {
+        if strength == 0 {
+            return;
+        }
         for slot in 0..self.slots() {
             let Some(bounds) = self.tile_rect(slot, screen, scale) else {
                 continue;
             };
-            let account = self.account(slot);
-            let tile = IconTile::new(
-                account.map_or(OTHER_LABEL, AccountTile::display_name),
-                IconKind::Generic,
-            )
-            .with_state(self.tile_state(slot))
-            .with_selection_fade(self.selection_fade(slot));
-            let palette = theme.palette();
-            let (monogram, disc, ink) = match account {
-                Some(account) => (account.monogram(), palette.accent, palette.on_accent),
-                None => (OTHER_MONOGRAM, palette.surface_raised, palette.on_surface),
-            };
-            let artwork = monogram_disc(
-                monogram,
-                IconTile::icon_side(bounds, scale, theme),
-                BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
-                (disc, ink),
-            );
-            tile.render(surface, bounds, scale, theme, artwork.as_ref());
-            if account.is_some_and(AccountTile::has_live_session) {
-                paint_live_badge(surface, bounds, scale, theme);
+            if strength == u8::MAX {
+                self.render_tile(surface, slot, bounds, scale, theme);
+                continue;
             }
+            let Some(mut scratch) = Surface::new(bounds.width, bounds.height) else {
+                continue;
+            };
+            let placed = Rect::new(0, 0, bounds.width, bounds.height);
+            self.render_tile(&mut scratch, slot, placed, scale, theme);
+            fade(&mut scratch, strength);
+            surface.blit(bounds.origin.x, bounds.origin.y, &scratch);
+        }
+    }
+
+    /// Paint tile `slot` at `bounds`.
+    fn render_tile(
+        &self,
+        surface: &mut Surface,
+        slot: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let account = self.account(slot);
+        let tile = IconTile::new(
+            account.map_or(OTHER_LABEL, AccountTile::display_name),
+            IconKind::Generic,
+        )
+        .with_state(self.tile_state(slot))
+        .with_selection_fade(self.selection_fade(slot));
+        let (monogram, disc, ink) = self.slot_disc(slot, theme);
+        let artwork = monogram_disc(
+            monogram,
+            IconTile::icon_side(bounds, scale, theme),
+            BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
+            (disc, ink),
+        );
+        tile.render(surface, bounds, scale, theme, artwork.as_ref());
+        if account.is_some_and(AccountTile::has_live_session) {
+            paint_live_badge(surface, bounds, scale, theme);
         }
     }
 

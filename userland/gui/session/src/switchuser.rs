@@ -49,6 +49,18 @@ use tairix_abi::{CapabilityId, Errno, Origin};
 /// The `waitset_wait` timeout meaning "no deadline: wake only on a member".
 pub const NO_DEADLINE_NS: u64 = u64::MAX;
 
+/// `park_ns` shortened to `due`, or left exactly as it is when nothing is
+/// due.
+///
+/// The one fold every animated surface's next frame goes through, so two
+/// animations cannot round or clamp the session's park differently, and a
+/// desktop with nothing in flight parks on precisely the deadline it would
+/// have had — an idle screen arms no timer.
+#[must_use]
+pub fn park_within(park_ns: u64, due: Option<u64>) -> u64 {
+    due.map_or(park_ns, |due| park_ns.min(due))
+}
+
 /// One `Background` request to the session authority.
 ///
 /// A synchronous `ipc_call` on the reserved session rendezvous in

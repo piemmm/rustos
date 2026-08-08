@@ -875,9 +875,13 @@ mod tests {
     // stores (CAP_FS_ACCESS — the session lists directories, reads the
     // program-library documents, and opens the user's chosen file under
     // its own identity, then delegates that one file one-shot over
-    // fd_grant; plans/CAPABILITY_USE.md CU6), and the command surface
+    // fd_grant; plans/CAPABILITY_USE.md CU6), the command surface
     // (CAP_CONSOLE_WRITE — the short help on stdout and the fail-loud
-    // teardown reasons on stderr). Binding the seat-scoped window
+    // teardown reasons on stderr), and its diagnostic voice
+    // (CAP_LOG_EMIT — the cache ledgers and the one-shot record marking
+    // the desktop fully revealed on screen; a framebuffer session's fd 2
+    // is the video console, so a diagnostic written there would paint
+    // over the very screen it describes). Binding the seat-scoped window
     // rendezvous needs no capability: the kernel authorises it by the
     // session's live seat lease. It ships purely as a discovered
     // on-disk bundle — the boot floor never grows — so no
@@ -890,6 +894,7 @@ mod tests {
         CapabilityId::PROC_SPAWN,
         CapabilityId::FS_ACCESS,
         CapabilityId::CONSOLE_WRITE,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The RAID array administration tool `mdadm` (plans/FIX-IO.md IO6f):

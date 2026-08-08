@@ -980,14 +980,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `Errno` register convention: `Ok(0)` once the record is accepted,
         // else `-errno` for a malformed record.
         ret: AbiType::Errno,
-        // Emitting a diagnostic record to the system console log is a
-        // privileged grant (`CAP_LOG_EMIT`), held only by trusted system
-        // services so an ordinary app cannot scribble on the captured serial
-        // line. NOT audited per call: this is
-        // the diagnostic log, not the hash-chained security audit log, and a
-        // service emits records at volume — auditing each one would drown the
-        // audit log; a refused capability is
-        // audited by the dispatcher regardless.
+        // Emitting a diagnostic record to the system console log is
+        // capability-gated (`CAP_LOG_EMIT`) but part of the interactive
+        // account baseline, so an ordinary session can report its own
+        // operational state; the kernel attributes each record to the calling
+        // task. NOT audited per call: this is the diagnostic log, not the
+        // hash-chained security audit log, and a caller emits records at
+        // volume — auditing each one would drown the audit log; a refused
+        // capability is audited by the dispatcher regardless.
         required_capability: Some(CapabilityId::LOG_EMIT),
         audit: false,
     },

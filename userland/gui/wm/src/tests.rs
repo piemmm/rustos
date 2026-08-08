@@ -7,7 +7,7 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::DriverError;
 
-use crate::color::{Color, Pixel};
+use crate::color::{div255, Color, Pixel};
 use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
@@ -4399,4 +4399,190 @@ fn a_mode_that_cannot_be_drawn_is_refused_and_leaves_the_compositor_intact() {
     assert_eq!(c.mode(), mode(16, 16));
     assert_eq!(c.frame().len(), 16 * 4 * 16);
     assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+}
+
+// ---- screen reveal ---------------------------------------------------
+
+/// A 16×12 scene taking every path a composed pixel has to the scan-out
+/// frame: the root fill, a desktop layer, an opaque window, a frosted one
+/// (whose rectangle is composed in two segments, the second continuing over
+/// the first's blurred result), a translucent one, and the cursor on top.
+fn revealable_scene() -> Compositor {
+    let mut c = new_compositor(mode(16, 12), BLUE).expect("compositor");
+    c.set_desktop(opaque(16, 12, GREEN));
+    c.add_window(Point::new(1, 1), opaque(6, 6, RED));
+    let glass = c.add_window(Point::new(4, 2), clear(8, 8));
+    assert!(c.set_backdrop_blur(glass, 2));
+    let sheer = c.add_window(Point::new(9, 5), opaque(5, 5, RED));
+    assert!(c.set_opacity(sheer, 128));
+    c.set_cursor(solid_cursor(4, GREEN), Point::new(11, 7));
+    c.composite();
+    c
+}
+
+/// Every scan-out pixel of `c` in row-major order.
+fn frame_pixels(c: &Compositor) -> alloc::vec::Vec<[u8; 4]> {
+    let info = c.mode();
+    (0..info.height_px)
+        .flat_map(|y| (0..info.width_px).map(move |x| (x, y)))
+        .map(|(x, y)| frame_pixel(c, x, y))
+        .collect()
+}
+
+#[test]
+fn a_fully_revealed_screen_is_the_frame_the_compositor_always_produced() {
+    let untouched = revealable_scene();
+    let mut revealed = revealable_scene();
+
+    // The strength already in force: no pixel changes and no frame is owed,
+    // so a desktop that never fades pays nothing for the reveal at all.
+    assert!(!revealed.set_reveal(u8::MAX));
+    assert!(!revealed.has_damage());
+    assert_eq!(revealed.frame(), untouched.frame());
+}
+
+#[test]
+fn a_completed_reveal_restores_every_byte_of_the_frame() {
+    let untouched = revealable_scene();
+    let mut fading = revealable_scene();
+
+    assert!(fading.set_reveal(0));
+    fading.composite();
+    assert!(fading.set_reveal(96));
+    fading.composite();
+    assert!(fading.set_reveal(u8::MAX));
+    fading.composite();
+
+    assert_eq!(
+        fading.frame(),
+        untouched.frame(),
+        "the dimming never touched the composed colour it was applied to"
+    );
+}
+
+#[test]
+fn a_half_reveal_scales_every_composed_pixel_towards_black() {
+    let lit = frame_pixels(&revealable_scene());
+    let mut c = revealable_scene();
+
+    assert!(c.set_reveal(128));
+    c.composite();
+
+    for (i, (dim, lit)) in frame_pixels(&c).iter().zip(&lit).enumerate() {
+        let expected = [
+            div255(u32::from(lit[0]) * 128),
+            div255(u32::from(lit[1]) * 128),
+            div255(u32::from(lit[2]) * 128),
+            lit[3],
+        ];
+        assert_eq!(*dim, expected, "pixel {i}");
+    }
+    // Applied on the way out, so the composed colour a later frame blends
+    // against — a frosted backdrop, a continuing segment — is undimmed.
+    assert_eq!(
+        c.back_buffer().get(0, 0),
+        revealable_scene().back_buffer().get(0, 0)
+    );
+}
+
+#[test]
+fn a_reveal_of_zero_presents_a_black_screen() {
+    let mut c = revealable_scene();
+
+    assert!(c.set_reveal(0));
+    c.composite();
+
+    for (i, pixel) in frame_pixels(&c).iter().enumerate() {
+        assert_eq!(
+            *pixel,
+            [0, 0, 0, 255],
+            "pixel {i} is black and still opaque"
+        );
+    }
+}
+
+#[test]
+fn the_premultiplied_invariant_holds_at_every_reveal_strength() {
+    let mut c = revealable_scene();
+    let mut previous = frame_pixels(&c);
+
+    for strength in [192u8, 128, 64, 1, 0] {
+        assert!(c.set_reveal(strength));
+        c.composite();
+        let now = frame_pixels(&c);
+        for (i, (pixel, was)) in now.iter().zip(&previous).enumerate() {
+            let [red, green, blue, alpha] = *pixel;
+            assert_eq!(
+                alpha, was[3],
+                "pixel {i}: alpha is not the reveal's to scale"
+            );
+            assert!(
+                red <= alpha && green <= alpha && blue <= alpha,
+                "pixel {i} left premultiplied range at {strength}"
+            );
+            assert!(
+                red <= was[0] && green <= was[1] && blue <= was[2],
+                "pixel {i} brightened as the screen darkened at {strength}"
+            );
+        }
+        previous = now;
+    }
+}
+
+#[test]
+fn changing_the_reveal_repaints_the_whole_screen_and_repeating_it_repaints_nothing() {
+    let mut c = revealable_scene();
+    assert!(!c.has_damage());
+
+    // Every pixel's presented value changed, so every pixel is owed.
+    assert!(c.set_reveal(64));
+    assert_eq!(composite_checked(&mut c).bounds(), c.screen_rect());
+
+    assert!(!c.set_reveal(64));
+    assert!(!c.has_damage());
+}
+
+#[test]
+fn the_hardware_layer_path_declines_while_a_reveal_is_in_flight() {
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    let mut display = MockAccel::new(mode(16, 16), generous_caps());
+
+    assert!(c.set_reveal(128));
+    c.present_accelerated(&mut display).expect("present");
+
+    assert!(
+        display.layers.is_empty(),
+        "a layer the engine scans out directly would skip the dimming"
+    );
+    assert_eq!(display.software_frame.len(), 16 * 16 * 4);
+    assert_eq!(
+        frame_pixel(&c, 4, 4),
+        [div255(255 * 128), 0, 0, 255],
+        "the software fallback carried the reveal"
+    );
+
+    assert!(c.set_reveal(u8::MAX));
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(
+        display.layers.len(),
+        2,
+        "background + window once the fade is over"
+    );
+}
+
+#[test]
+fn a_mode_change_keeps_a_reveal_in_flight() {
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    assert!(c.set_reveal(0));
+
+    assert!(c.set_mode(mode(24, 20)));
+
+    assert_eq!(
+        c.reveal(),
+        0,
+        "a session that re-modes mid-fade keeps fading"
+    );
+    c.composite();
+    assert_eq!(frame_pixel(&c, 20, 18), [0, 0, 0, 255]);
 }

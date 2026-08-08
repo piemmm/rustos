@@ -610,20 +610,30 @@ const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
 /// the bundle a graphical login also spawns).
 /// Pinned against the fixture credentials below so the dialogue and the
 /// planted account cannot drift; a renamed bundle makes the vertical
-/// time out loudly at the `FIRST_PRESENT` gate, never pass on the wrong
-/// exchange.
+/// time out loudly at the [`AUTOLOAD_DESKTOP_REVEALED_MARKER`] gate, never
+/// pass on the wrong exchange.
 const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
 
-/// Serial marker after which the autoload vertical takes its screendump
-/// **and** injects the mouse motion: the display service's one-shot
-/// `FIRST_PRESENT` log record — the witness that the desktop session's
-/// composited frame reached the scan-out surface. Imported from the
-/// driver crate's own definition, so the emitter and this consumer can
-/// never drift. Keying both the dump and the pointer on it makes the
-/// chain strictly ordered: present → verified dump → mouse motion → the
-/// guest's `kind=pointer` witness → PASS — a run can neither pass
-/// without presenting nor exit before the host holds the pixels.
-const AUTOLOAD_FIRST_PRESENT_MARKER: &str = tairix_drv_display_framebuffer::FIRST_PRESENT_MESSAGE;
+/// Serial marker after which the desktop verticals take their screendump
+/// **and** inject the mouse motion: the session's one-shot
+/// `DESKTOP_REVEALED` log record — the witness that a composited frame at
+/// full reveal strength reached the display. Imported from the session
+/// crate's own definition, so the emitter and this consumer can never
+/// drift.
+///
+/// The display service's first-present record is deliberately *not* the
+/// gate: a session starts on the black the login screen left behind and
+/// reveals itself over the theme's fade, so its first presented frame is
+/// black by design and indistinguishable from a blank screen. A dump taken
+/// there could no longer tell a composited desktop from no desktop at all.
+///
+/// Keying both the dump and the pointer on it makes the chain strictly
+/// ordered: visible desktop → verified dump → mouse motion → the guest's
+/// `kind=pointer` witness → PASS — a run can neither pass without showing
+/// the desktop nor exit before the host holds the pixels. It also puts
+/// every later stage after the fade, so the dumps that sample wallpaper
+/// beside a served window measure the desktop rather than the fade.
+const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_REVEALED_MESSAGE;
 
 /// `true` if `text` begins with `prefix`.
 const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
@@ -5315,8 +5325,8 @@ static TESTS: &[QemuTest] = &[
     // started exactly the way a user starts it from the command line.
     //
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
-    // click-through: the display service's one-shot `FIRST_PRESENT`
-    // witness keys the first screendump (the dark composited desktop) and
+    // click-through: the session's one-shot `DESKTOP_REVEALED` witness
+    // keys the first screendump (the dark composited desktop) and
     // the click on the taskbar's permanent Files button (the guest applies
     // injected events strictly in device order, so the button click needs
     // no extra gate); the spawned files bundle creates its window over the
@@ -5407,7 +5417,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[
             ScreendumpPlan {
-                marker: AUTOLOAD_FIRST_PRESENT_MARKER,
+                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
                 suffix: "desktop",
                 assert: assert_dark_desktop_screendump,
@@ -5479,7 +5489,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[
             ScreendumpPlan {
-                marker: AUTOLOAD_FIRST_PRESENT_MARKER,
+                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
                 suffix: "bare-bar",
                 assert: assert_bare_bar_dark_screendump,
@@ -7379,7 +7389,7 @@ fn pin_slot_glyph_share(
 }
 
 /// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **first**
-/// dump, taken on the desktop's first composited frame: the dark-theme
+/// dump, taken on the first fully-revealed desktop frame: the dark-theme
 /// session has composited its own wallpaper, and the bar's first pin slot
 /// is nothing but the bar's own fill. That is the baseline the second dump
 /// is read against — the strip is provably empty before the script pins
@@ -7617,8 +7627,8 @@ fn assert_desktop_beside_window(
 ///
 /// The guest applies injected events strictly in device order and the bar
 /// model updates synchronously on each press, so every step up to and
-/// including the Switchboard capsule keys on the display service's
-/// `FIRST_PRESENT` witness alone — none of them depends on state an
+/// including the Switchboard capsule keys on the session's
+/// `DESKTOP_REVEALED` witness alone — none of them depends on state an
 /// earlier step created, and the capsule's own rectangle is independent of
 /// the pin strip's length.
 ///
@@ -7796,7 +7806,7 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
         ready_occurrences: 1,
         action,
     };
-    let ready = AUTOLOAD_FIRST_PRESENT_MARKER;
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let click = |marker: &str, button: MouseButton, from: Point, to: Point| {
         [
             step(marker, move_by(from, to)),
@@ -7887,7 +7897,7 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 ///
 /// Step gating: the guest processes injected events strictly in device
 /// order and the bar model updates synchronously on the press, so the
-/// Files-button click keys on the display service's `FIRST_PRESENT`
+/// Files-button click keys on the session's `DESKTOP_REVEALED`
 /// witness alone (the runner already held it back until the first dump
 /// verified). The in-window click waits for the reserved window
 /// endpoint's first *reply* (the create round-trip completed, so the
@@ -8032,14 +8042,14 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // `kind=pointer` delivery witness; the button click needs no
         // extra gate — the guest applies the injected events strictly in
         // order and the bar model updates synchronously on the press.
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, pin),
+        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, pin),
         step(
-            AUTOLOAD_FIRST_PRESENT_MARKER,
+            AUTOLOAD_DESKTOP_REVEALED_MARKER,
             1,
             move_by(Point::ORIGIN, files_button),
         ),
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, press),
-        step(AUTOLOAD_FIRST_PRESENT_MARKER, 1, release),
+        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, press),
+        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, release),
         // The spawned app's window frame has been mapped — its window is
         // created and sits at the first cascade slot — so click its body;
         // the session delivers `Focus` + `Pressed` to that window, which is

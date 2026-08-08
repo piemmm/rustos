@@ -6073,8 +6073,10 @@ here.
   surface or the desktop wallpaper, blurred by the scaled
   `selection_backdrop_blur` (19 logical px, three tenths of the widest window
   backdrop blur) through the same `frost_region` the compositor frosts a window
-  with — and the theme's `selection_fill`, its own accent at half opacity, is
-  laid over that with a **crisp** edge, rounded like every other plate. Frost
+  with — and the theme's `selection_fill`, its own accent at three tenths
+  opacity, is laid over that with a **crisp** edge, rounded like every other
+  plate. The fill is that light because the frost is what marks the item; the
+  accent only tints it. Frost
   and fill are confined to that one rounded shape, so nothing escapes the tile's
   bounds and no square edge shows around the rounded fill. Softening the *fill*
   instead leaves a smear with no shape of its own: the blur belongs behind the
@@ -6086,7 +6088,7 @@ here.
   arms no timer and a reduced-motion theme settles the change at once. The
   strength scales the frost and the fill together, so a backdrop never snaps
   into focus ahead of the colour leaving it. The name
-  keeps the ordinary foreground, which is the ink that reads over a half-opaque
+  keeps the ordinary foreground, which is the ink that reads over a part-opaque
   tint; the on-accent inversion and the crisp opaque panel belong to a
   high-contrast theme, where a selected tile frosts nothing and does not fade.
   A **selected** tile draws neither the focus ring nor the pointer wash,
@@ -6097,6 +6099,47 @@ here.
   `IconTile::label_lines` exposes that budget so an owner sizes a tile from
   the render's own geometry — which is how the greeter's tile is 132 × 154
   (three whole lines at 100% *and* 200%), not a guess.
+- **The login-to-desktop transition is animated end to end**, off one shared
+  primitive: `tairix_theme::Timeline` — start from the theme's duration, read
+  `progress` (linear) or `eased` (smoothstep, for anything that travels), read
+  `next_frame_in` to know when to wake. It reads no clock; the embedder passes
+  the monotonic instant it already holds. A zero duration starts *settled*, so
+  reduced motion needs no second code path and an idle surface arms no timer at
+  all. Four new/rehomed animations, every duration theme data
+  (`MotionInteraction`): the chooser's `SelectionChange` cross-fade (100 ms,
+  re-expressed on the timeline, its hand-rolled clock arithmetic deleted); a
+  `StageTransition` (240 ms) that carries the picked account's monogram from
+  its tile to the prompt's disc while the other tiles fade out and the prompt
+  fades in, in **both** directions, interpolating the *layout* rather than
+  cross-fading two screen-sized renders; an `AttemptRejected` (420 ms) decaying
+  shake on a refused secret, ending at exactly zero offset, *additional* to the
+  notice and cooldown; and a `SessionFade` (1000 ms) that fades the login
+  screen to black **before** it exits and reveals the desktop from black
+  afterwards. The reveal is one `Compositor` property applied where composed
+  pixels become the scan-out frame, so no pixel can reach the display
+  undimmed — and `encode_layers` declines while it runs, because a hardware
+  layer the display scans out directly would never pass through it. The greeter
+  fade is total: a lost display or a failed present still exits `0`, because a
+  cosmetic fade may never strand a successful login.
+- **`CAP_LOG_EMIT` is now part of `SESSION_BASELINE`.** The desktop announces
+  itself visible once the reveal completes — a one-shot diagnostic record the
+  QEMU verticals key their screendump on, because the first presented frame is
+  now deliberately black and can no longer witness "the composited desktop
+  reached scan-out". No interactive ceiling carried `CAP_LOG_EMIT`, so the
+  kernel discarded every record a session emitted. The cost is stated rather
+  than glossed: any program a logged-in user runs may now write to the
+  machine-wide **diagnostic** log, so log noise and provenance confusion are
+  possible. The hash-chained audit log is a separate capability and stays
+  kernel-only, and the kernel — never the caller — attributes each record, so
+  nothing here lets a user program forge, alter, or truncate an audit entry.
+- **Fixed in passing:** the desktop's screen lock was handing the shared
+  authentication surface a frozen clock (`now_ns: 0`), silently settling every
+  animation it has; it now runs on the session's real monotonic clock, so the
+  lock screen animates like the login screen it shares an engine with. And the
+  session had been built to log since long before this work — it passes a log
+  sink into its cache ledgers — while structurally unable to: every one of
+  those records was discarded, silently, because the write path is best-effort.
+  The grant above is what makes them arrive.
 - **Remaining: G7.1** — the QEMU verticals (boot to the greeter,
   authenticate onto the desktop, log out, switch accounts). Staged
   separately: no integration test drives a graphical userland under QEMU

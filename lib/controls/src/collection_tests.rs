@@ -1437,7 +1437,7 @@ fn a_resting_tile_paints_no_plate_over_what_lies_behind_it() {
 
 /// Hover, selection, and press are three different marks: the pointer washes
 /// are crisp plates in the shared plate colours, selection is the accent at
-/// half opacity over a frosted backdrop, and each keeps its own ink. A pointer
+/// three tenths opacity over a frosted backdrop, and each keeps its own ink. A pointer
 /// can never imitate selection, because no pointer state is ever the accent.
 #[test]
 fn hover_selection_and_press_paint_distinct_marks() {

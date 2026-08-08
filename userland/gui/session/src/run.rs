@@ -116,9 +116,9 @@ mod program {
         LockedDrain, OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu,
         PinboardMenuOutcome, PinboardStore, PinboardStoreError, ResolvedPin, ScreenLock,
         SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
-        SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
-        USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        SessionPins, SessionReveal, SessionWindows, ShellWindowHost, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -295,9 +295,10 @@ mod program {
     /// every real caller (a fail-closed memory bound).
     const PINBOARD_CAPACITY: usize = 4;
 
-    /// The audit sink every cache in this session records through. The shared
-    /// cache constructors take a `'static` borrow, and the runtime sink is a
-    /// unit value that owns nothing.
+    /// The sink this session records through — every cache's audit trail and
+    /// the desktop's one-shot reveal witness. The shared cache constructors
+    /// take a `'static` borrow, and the runtime sink is a unit value that
+    /// owns nothing.
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
@@ -643,6 +644,7 @@ mod program {
     /// the shared [`LockedDrain`] rule, which states why.
     fn drain_locked(
         lock: &mut ScreenLock,
+        now_ns: u64,
         pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
         keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
         unlocker: &mut dyn Verifier,
@@ -653,14 +655,16 @@ mod program {
         loop {
             match pointer.poll() {
                 Ok(None) => break,
-                Ok(Some(event)) => drain.feed(lock, &event, unlocker, shell, compositor),
+                Ok(Some(event)) => drain.feed(lock, &event, now_ns, unlocker, shell, compositor),
                 Err(_) => return Drained::Faulted,
             }
         }
         loop {
             match keyboard.poll_record() {
                 Ok(None) => break,
-                Ok(Some((event, _))) => drain.feed(lock, &event, unlocker, shell, compositor),
+                Ok(Some((event, _))) => {
+                    drain.feed(lock, &event, now_ns, unlocker, shell, compositor);
+                }
                 Err(_) => return Drained::Faulted,
             }
         }
@@ -681,6 +685,21 @@ mod program {
         }
     }
 
+    /// Step everything the session animates to `now_ns`, so the frame
+    /// presented next carries it: the desktop's reveal from black at session
+    /// start, and the locked screen's own surface. Both are idle once nothing
+    /// is in flight, which is what leaves an idle desktop's park indefinite.
+    fn animate(
+        reveal: &mut SessionReveal,
+        lock: &mut ScreenLock,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) {
+        reveal.advance(now_ns, compositor);
+        lock.advance(now_ns, shell, compositor);
+    }
+
     /// Present the composited damage through the remote display, mapping a
     /// refusal onto the session's exit codes. The service refuses a caller
     /// whose lease is no longer live (`SeatRevoked` from the kernel's
@@ -692,16 +711,24 @@ mod program {
     /// A background session owns no frame ring, presents nothing, and
     /// answers `Ok`: it has given the screen to somebody else, which is not
     /// a failure.
+    ///
+    /// A frame that did reach the display is where the desktop's one-shot
+    /// reveal witness is announced, so the record can only follow pixels
+    /// this session actually put on the screen.
     fn present(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
+        reveal: &mut SessionReveal,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
         };
         match compositor.present(display) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                reveal.presented(&LOG_SINK);
+                Ok(())
+            }
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
                 shell.teardown(compositor);
                 Err(fail(
@@ -1276,7 +1303,13 @@ mod program {
         shell.present(&mut compositor);
         shell.present_desktop(&mut compositor, &desktop);
         shell.refresh_cursor(&mut compositor);
-        if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
+        // The login screen faded to black before it exited, so the desktop
+        // comes up over a dark screen and reveals itself rather than
+        // snapping on. Begun here, with the first frame composed and about
+        // to be shown: begun any earlier, the fade would spend itself on
+        // bring-up with nothing on screen yet.
+        let mut reveal = SessionReveal::begin(tairix_rt::clock_get(), &mut compositor);
+        if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
             return code;
         }
 
@@ -1533,15 +1566,25 @@ mod program {
         let mut token = 0u64;
         loop {
             // The park stays indefinite: a cache-report change the rate
-            // limiter is holding back only ever *tightens* the wait to the
-            // moment it may be sent, and folds back to indefinite once it
-            // has gone out. The desktop never polls for anything.
+            // limiter is holding back, an animation frame the session owes,
+            // only ever *tighten* the wait to the moment the work is due, and
+            // fold back to indefinite once it is done. The desktop never
+            // polls for anything.
             //
-            // A background session has no deadline at all, not even that
-            // one: it draws nothing, so a held-back report has nothing to
-            // report and a timer would wake a core for no work.
-            let timeout_ns =
-                switch.park_deadline_ns(tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX));
+            // A background session has no deadline at all, not even those:
+            // it draws nothing, so a held-back report has nothing to report,
+            // nothing it animates is on screen, and a timer would wake a core
+            // for no work.
+            let timeout_ns = {
+                let now_ns = tairix_rt::clock_get();
+                switch.park_deadline_ns(lock.park_deadline_ns(
+                    now_ns,
+                    reveal.park_deadline_ns(
+                        now_ns,
+                        tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                    ),
+                ))
+            };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
             if waited != 0 {
                 if Errno::from_syscall(waited) != Errno::TimedOut {
@@ -1551,9 +1594,19 @@ mod program {
                 }
                 // No member woke, so `token` still names the *previous*
                 // wake's source and dispatching on it would block in a
-                // `call_recv` with nothing to receive. The held-back report
-                // is the only bounded wait this loop arms: send it and park
-                // again.
+                // `call_recv` with nothing to receive. Only what this loop
+                // armed the deadline for is owed: the next frame of whatever
+                // is animating, and the held-back report.
+                animate(
+                    &mut reveal,
+                    &mut lock,
+                    &shell,
+                    &mut compositor,
+                    tairix_rt::clock_get(),
+                );
+                if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
+                    return code;
+                }
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
@@ -1901,8 +1954,12 @@ mod program {
                 // the taskbar, or a served application while the screen is
                 // secured. This is the routing half of the lock; the
                 // full-screen surface only hides the session.
+                // One wake is one instant here too: the whole drained batch
+                // reaches the surface against the clock read once, so the
+                // motion it times cannot step mid-batch.
                 if drain_locked(
                     &mut lock,
+                    tairix_rt::clock_get(),
                     &mut pointer,
                     &mut keyboard,
                     &mut BrokerUnlocker,
@@ -2144,10 +2201,20 @@ mod program {
             // this wake, the lock goes back on top before the frame is
             // shown. Idle when the screen is not locked.
             lock.keep_topmost(&mut compositor);
+            // Whatever is animating steps to the instant this frame is
+            // actually shown at, not to when the wake arrived, so the work
+            // this wake did does not age the frame.
+            animate(
+                &mut reveal,
+                &mut lock,
+                &shell,
+                &mut compositor,
+                tairix_rt::clock_get(),
+            );
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
             // copies only that region.
-            if let Err(code) = present(&mut shell, &mut compositor, &mut display) {
+            if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
                 return code;
             }
             // The wake is fully handled and its frame is on screen: report

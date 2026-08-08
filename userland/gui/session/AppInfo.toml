@@ -25,10 +25,19 @@
 # endpoint is called, never bound, and binding the seat-scoped window
 # rendezvous is authorised by the session's kernel-attested live seat
 # lease, not a capability.
+#
+# CAP_LOG_EMIT is the session's diagnostic voice: the cache ledgers it
+# registers and the one-shot record marking the desktop fully revealed go
+# to the system diagnostic sink, which is where a headless operator reads
+# them — standard error is the seat's own console, so it lands on the very
+# screen the session is drawing. It is the diagnostic sink only; the
+# hash-chained audit trail stays kernel-side and no user record can reach
+# it. The interactive-account ceiling carries LOG_EMIT
+# (tairix_users::SESSION_BASELINE), so the intersection keeps it.
 id = "os.tairix.desktop"
 name = "desktop"
 version = "0.1.0"
 kind = "application"
-capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE"]
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "desktop.png"

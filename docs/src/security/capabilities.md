@@ -124,13 +124,29 @@ nothing else — without any new capability entering the vocabulary.
 
 Every account that may start an interactive session is granted at least
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
-`CAP_CONSOLE_WRITE`, and the graphical-session class — `CAP_DISPLAY`,
-`CAP_INPUT_READ`, and `CAP_SHM`, so a graphical login is an ordinary
-session, not an administrative act; real reach stays per-inode,
-per-descriptor, and per-lease (the kernel owner-gates every seat
-acquire, input drain, and present against the live lease, and every
-shared-memory region against its owner). An
-administrator is an account whose grant additionally includes the
+`CAP_CONSOLE_WRITE`, `CAP_NET` (ordinary transport traffic through the
+socket surface; the coarser `CAP_NET_ADMIN` and `CAP_NET_RAW` are not
+baseline), `CAP_LOG_EMIT`, and the graphical-session class —
+`CAP_DISPLAY`, `CAP_INPUT_READ`, and `CAP_SHM`, so a graphical login is
+an ordinary session, not an administrative act; real reach stays
+per-inode, per-descriptor, and per-lease (the kernel owner-gates every
+seat acquire, input drain, and present against the live lease, and every
+shared-memory region against its owner).
+
+`CAP_LOG_EMIT` is baseline because a session legitimately reports its own
+operational state, and a program built to log that structurally cannot is
+a program that fails silently. It grants one bounded, kernel-validated
+record on the **diagnostic** sink, attributed by the kernel — never by the
+caller — to the calling task. It does **not** reach the hash-chained
+security audit log, which stays kernel-only, so no program a user runs can
+forge, alter, or truncate an audit entry. The cost is accepted
+deliberately: any program a logged-in user runs may write to the
+machine-wide diagnostic log, so log noise and provenance confusion are
+possible, and on a debug build the captured serial line is user-writable.
+A program still receives it only if its own manifest requests it,
+intersected with the account ceiling.
+
+An administrator is an account whose grant additionally includes the
 administrative capabilities (`CAP_USER_ADMIN`, `CAP_FS_CHOWN` — the
 `chown(2)` privilege to reassign a file's owner, `CAP_FS_MOUNT`,
 `CAP_SYSTEM_POWER` — the authority to shut down or restart the machine,
@@ -189,8 +205,11 @@ baseline is a **ceiling**, never a program's manifest: the shell
 requests its own exercised set (`SHELL_MANIFEST` — the console pair,
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`), the desktop session requests the
 graphical class plus `CAP_PROC_SPAWN` (its taskbar launchers and
-program-library popup) and
-`CAP_FS_ACCESS` (its trusted file picker and the catalog stores), and every
+program-library popup), `CAP_FS_ACCESS` (its trusted file picker and the
+catalog stores), and `CAP_LOG_EMIT` (its cache ledgers and the one-shot
+record marking the desktop fully revealed — a framebuffer session's
+`stderr` is the video console, so a diagnostic written there would paint
+over the screen it describes), and every
 program's manifest is sized to every gated syscall the program has
 a code path to issue — **including capability-gated optional features
 that degrade gracefully when the intersection strips them** — and to
