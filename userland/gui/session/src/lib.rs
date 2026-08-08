@@ -175,6 +175,7 @@ pub mod session;
 pub mod settings;
 pub mod shell;
 pub mod switchboard;
+pub mod switchuser;
 pub mod tasks;
 pub mod vigil;
 pub mod windows;
@@ -183,6 +184,8 @@ pub mod windows;
 mod desktop_tests;
 #[cfg(test)]
 mod holdback_tests;
+#[cfg(test)]
+mod switchuser_tests;
 #[cfg(test)]
 mod tests;
 
@@ -224,6 +227,10 @@ pub use switchboard::{
     deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,
     serve_switchboard_request, OwnerWindow, SwitchboardMailbox, SwitchboardOutcome,
     SwitchboardRefusal, SwitchboardServe,
+};
+pub use switchuser::{
+    ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
+    NO_DEADLINE_NS,
 };
 pub use tasks::TaskBridge;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};

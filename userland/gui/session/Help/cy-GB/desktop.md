@@ -15,10 +15,9 @@ cyfansoddol — y rheolwr ffenestri a'r bar tasgau — nes i'r sesiwn ddod
 i ben. Mae'r gorchymyn yn dychwelyd pan ddaw'r sesiwn bwrdd gwaith i
 ben.
 
-Mae'r un bwrdd gwaith yn cychwyn yn awtomatig ar ôl dilysu pan fydd y
-gweinyddwr wedi ffurfweddu mewngofnodi graffigol
-(`configure os.loginType graphical`); mae'r gorchymyn hwn yn ei
-gychwyn ar alw o gragen destun.
+Mae'r un bwrdd gwaith yn cychwyn yn awtomatig ar ôl dilysu: mewngofnodi
+graffigol (`os.loginType`) yw'r rhagosodiad ar beiriant sy'n gallu ei
+redeg. Mae'r gorchymyn hwn yn ei gychwyn ar alw o gragen destun.
 
 Pan nad oes gwasanaeth arddangos yn rhedeg, neu pan fo sesiwn arall
 eisoes yn dal y sedd, mae'r gorchymyn yn methu gan ysgrifennu ei reswm

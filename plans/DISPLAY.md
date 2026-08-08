@@ -617,8 +617,8 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     the bare command word `desktop` to it, and a graphical login spawns
     the same bundle — one bundle, one spelling.
   - Session selection is system policy, never a per-login prompt: login
-    starts the account's shell unless `os.loginType graphical` is
-    configured (`lib/sysconfig`) *and* the per-round probe holds — a
+    starts the desktop when `os.loginType` is `graphical` (`lib/sysconfig`,
+    the default) *and* the per-round probe holds — a
     read-only `fs_open` of `DESKTOP_SESSION_PATH`
     (`tairix_login::session`, the one spelling of
     `/System/Applications/desktop.app/Run`) plus one `Query` `ipc_call` to the

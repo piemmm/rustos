@@ -29,10 +29,10 @@
 //!   pointer and the focused window, raises and focuses the window
 //!   under a primary press (*click-to-activate*), and drives
 //!   interactive window move-grabs.
-//! - **Pointer cursor overlay** ([`cursor`]): a scalable, colourful,
-//!   replaceable [`CursorImage`](tairix_cursor::CursorImage) from
-//!   `lib/cursor`, composited as the top-most layer so its hotspot
-//!   tracks the pointer.
+//! - **Pointer cursor overlay**: a scalable, colourful, replaceable
+//!   [`CursorImage`](tairix_cursor::CursorImage) from `lib/cursor`, placed
+//!   by its [`PlacedCursor`](tairix_cursor::PlacedCursor) and composited as
+//!   the top-most layer so its hotspot tracks the pointer.
 //! - **Cursor selection** ([`select`]): the [`CursorController`]
 //!   chooses the [`CursorKind`](tairix_theme::CursorKind) from live
 //!   interaction state (move-grab, the window under the pointer, the
@@ -58,7 +58,6 @@ pub mod chrome;
 pub mod color;
 pub mod compositor;
 pub mod corner;
-pub mod cursor;
 pub mod damage;
 pub mod geometry;
 pub mod input;
@@ -74,7 +73,6 @@ pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
 pub use compositor::Compositor;
 pub use corner::Corners;
-pub use cursor::CursorLayer;
 pub use damage::DamageRegion;
 pub use geometry::{Point, Rect, Scale};
 pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};

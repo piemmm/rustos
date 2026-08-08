@@ -26,11 +26,11 @@ requires write access to `/System/Settings` — an ordinary account can
 read the settings but not change them.
 
 - `os.loginType` — `text` or `graphical`: which session type the login
-  service starts for an authenticated user. `text` (the default) starts
-  the account's shell — the desktop can still be started on demand with
-  the `desktop` command; `graphical` starts the desktop session
-  directly after authentication when a desktop is installed, degrading
-  to text when none is.
+  service starts for an authenticated user. `graphical` (the default)
+  starts the desktop session directly after authentication, degrading
+  to the text login on a machine that cannot run one; `text` starts the
+  account's shell — the desktop can still be started on demand with the
+  `desktop` command.
 - `cache.all` — `on` or `off`: the master caching switch. `on` (the
   default) lets each cache class below follow its own setting; `off`
   is a ceiling that disables every memory cache regardless of the

@@ -243,7 +243,11 @@ section is the source of truth for the task model.
 
 **Synchronous on the caller (fail-fast, fail-closed).** The `spawn`
 handler does only manifest-independent work whose cost is bounded and does
-not touch the program's bytes: the `CAP_PROC_SPAWN` check, the path
+not touch the program's bytes: the spawn-capability check (a coarse
+"holds one of the two" refusal first, then `CAP_SANDBOX_SPAWN` **or**
+`CAP_PROC_SPAWN` for a canonical parser-sandbox block and
+`CAP_PROC_SPAWN` for anything else, once the staged attach block reveals
+the mode), the path
 copy-in and `@self` substitution, attach/standard-stream resolution, the
 kernel-attested credential (`resolve_spawn_credential`), the process
 identity (`proc_id`, name, spawn path), and the **syntactic** resolution

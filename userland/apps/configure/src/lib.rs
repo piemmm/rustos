@@ -377,7 +377,7 @@ mod tests {
         run(Command::List, None, &store, &NoHelp, &output).expect("lists");
         assert_eq!(
             output.text(),
-            "os.loginType text\n\
+            "os.loginType graphical\n\
              cache.all on\n\
              cache.filesystem auto\n\
              cache.block auto\n\

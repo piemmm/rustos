@@ -78,6 +78,10 @@ tairix-qemu = { path = "../qemu", version = "=0.0.0" }
 # the account database format's own bound, so production validation and the
 # QEMU script cannot drift.
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
+# The autoload vertical's planted `system.conf` is rendered by the boot-time
+# configuration engine itself, so the planted document and the grammar the
+# guest parses share one definition rather than a literal kept here.
+tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
 
 # The QEMU netstack verticals' host-side link peer: the same pure
 # `lib/net` protocol engine the guest's netstack drives, run by the

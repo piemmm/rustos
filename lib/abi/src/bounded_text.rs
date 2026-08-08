@@ -133,6 +133,18 @@ impl<const MIN: usize, const MAX: usize> BoundedText<MIN, MAX> {
     }
 }
 
+impl<const MAX: usize> BoundedText<0, MAX> {
+    /// The empty field, available only where the bounds admit one.
+    ///
+    /// A `const` so a fixed-width frame can initialise an array of records
+    /// before decoding fills it, without a fallible constructor in a path
+    /// that cannot fail.
+    pub(crate) const EMPTY: Self = Self {
+        bytes: [0; MAX],
+        len: 0,
+    };
+}
+
 impl<const MIN: usize, const MAX: usize> core::fmt::Debug for BoundedText<MIN, MAX> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("BoundedText").field(&self.as_str()).finish()

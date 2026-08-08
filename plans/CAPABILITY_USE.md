@@ -61,7 +61,11 @@ vocabulary the rest of the plan uses.
 2. **Class capabilities (`CAP_*`)** — the coarse "may use this subsystem at
    all" gates (`lib/abi/src/capability.rs`): `CAP_FS_ACCESS` admits a caller
    to the filesystem syscalls, `CAP_PROC_SPAWN` to `spawn`, and so on. They
-   are checked at dispatch, before any state is touched, and they confer no
+   are checked before any state is touched — at dispatch, or as the
+   handler's first act where *which* capability is required depends on the
+   request's own content (`stream_write`'s console arm; `spawn`, which a
+   canonical parser-sandbox block lets the narrow `CAP_SANDBOX_SPAWN`
+   admit and anything else needs `CAP_PROC_SPAWN` for) — and they confer no
    reach by themselves.
 3. **Fine-grained authority** — the actual reach over any one object:
    the per-inode owner/mode/ACL/`required_cap` model for files
@@ -246,7 +250,8 @@ baseline plus this administrative set — the "administrative capability
 ceiling a bring-up session needs" its rustdoc already promises. Driver-class
 (`CAP_MEM_DMA`, `CAP_IRQ_BIND`, `CAP_MMIO_MAP`, `CAP_HW_EMIT`, …) and
 service-class (`CAP_SPAWN_AS_USER`, `CAP_USERS_READ`,
-`CAP_SYSINFO_INTROSPECT`, `CAP_INPUT_INJECT`, …) capabilities are **never**
+`CAP_SYSINFO_INTROSPECT`, `CAP_INPUT_INJECT`, `CAP_SANDBOX_SPAWN`, …)
+capabilities are **never**
 part of an *interactive* account ceiling: they belong to the specific system
 program whose manifest requests them — and, through that service's own
 no-login account (`plans/USERS.md`), to its dedicated per-service ceiling

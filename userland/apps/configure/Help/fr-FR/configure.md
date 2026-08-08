@@ -27,12 +27,12 @@ canonique et exige le droit d'écriture sur `/System/Settings` — un
 compte ordinaire peut lire les paramètres mais pas les changer.
 
 - `os.loginType` — `text` ou `graphical` : le type de session que le
-  service de connexion lance pour un utilisateur authentifié. `text`
-  (la valeur par défaut) lance le shell du compte — le bureau peut
-  toujours être lancé à la demande avec la commande `desktop` ;
-  `graphical` lance directement la session de bureau après
-  l'authentification quand un bureau est installé, et se replie sur le
-  texte sinon.
+  service de connexion lance pour un utilisateur authentifié.
+  `graphical` (la valeur par défaut) lance directement la session de
+  bureau après l'authentification, et se replie sur la connexion texte
+  sur une machine qui ne peut en exécuter aucune ; `text` lance le shell
+  du compte — le bureau peut toujours être lancé à la demande avec la
+  commande `desktop`.
 - `cache.all` — `on` ou `off` : le commutateur de cache principal. `on`
   (la valeur par défaut) laisse chaque classe de cache ci-dessous
   suivre son propre réglage ; `off` est un plafond qui désactive tout

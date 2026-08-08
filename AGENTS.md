@@ -631,7 +631,8 @@ tairix/
 │   │   ├── appmgr/      # Application bundle loader.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
-│   │   └── login/       # Text + graphical login (graphical falls back to text).
+│   │   ├── login/       # Session authority: text login + the graphical round.
+│   │   └── greeter/     # Graphical login screen (falls back to the text login).
 │   ├── shell/           # Command-line shells.
 │   │   └── shell/       # Default POSIX-ish shell with job control.
 │   ├── gui/             # Graphical desktop components.

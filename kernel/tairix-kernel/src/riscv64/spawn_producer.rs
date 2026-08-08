@@ -49,7 +49,7 @@ use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddres
 use tairix_arch_riscv64::userentry::UserMode;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, SpawnRequest,
+    ImageBuildCtx, KernelStack, SpawnMode, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
@@ -277,6 +277,7 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         let entry = unsafe {
             spawn_image(
                 &spawn_layout::SpawnAuthority,
+                SpawnMode::General,
                 ctx.audit(),
                 &mut space,
                 &physmap,

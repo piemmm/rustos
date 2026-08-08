@@ -71,6 +71,8 @@ for filesystems, the feature section below.
 | Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
+| Graphical login screen (`greeter.app`) | ◐ | ◐ | ▢ | ▢ |
+| Fast user switching (concurrent desktop sessions) | ◐ | ◐ | ▢ | ▢ |
 | Block storage | ✓ virtio | ✓ virtio + eMMC + USB | ✓ virtio | — |
 | Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio | ✓ virtio | — |
@@ -187,6 +189,7 @@ design; rows that depend on the MMU or on backing storage are `—` on
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |
 | Zero-on-free of secrets (§4) | Secret recovery from reused memory | ✓ | ✓ | ✓ | ✓ |
 | Re-authenticated screen lock (§5.4, §10) | Unattended-session takeover at the keyboard | ✓ | ✓ | ✓ | ✓ |
+| Login screen split from the session authority (§4, §5.2) | Compromised login surface reading credentials or starting a session | ✓ | ✓ | ✓ | ✓ |
 | Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |

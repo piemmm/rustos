@@ -4996,6 +4996,8 @@ fn escape_dismisses_the_system_menu_without_acting() {
 fn keyboard_navigation_reaches_every_row_and_enter_activates_the_highlighted_one() {
     let mut bar = bar_with_task_shell();
     bar.set_tray_summary(Some(power_capable_summary()));
+    // Every row of the table offered, so the walk really does visit them all.
+    bar.set_switch_user_available(true);
     let mut input = TaskbarInput::new();
     open_system_menu(&mut input, &mut bar);
 
@@ -5035,6 +5037,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
         // actionable and reports nothing; the light row above it is.
         TaskbarResponse::Ignored,
         TaskbarResponse::LockSession,
+        TaskbarResponse::SwitchUser,
         TaskbarResponse::LogOut,
         TaskbarResponse::ConfirmSystemPower {
             action: tairix_abi::PowerAction::Restart,
@@ -5053,6 +5056,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
         let mut bar = bar_with_task_shell();
         bar.set_tray_summary(Some(power_capable_summary()));
         bar.set_lock_available(true);
+        bar.set_switch_user_available(true);
         let mut input = TaskbarInput::new();
         open_system_menu(&mut input, &mut bar);
         assert_eq!(
@@ -5167,6 +5171,51 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
         choose_row(&mut input, &mut bar, 5),
         TaskbarResponse::LockSession
     );
+}
+
+#[test]
+fn the_switch_user_row_is_absent_until_the_session_can_be_resumed() {
+    // Nothing attested: a desktop with no wake mailbox cannot be resumed,
+    // so the row is left out rather than offered and then refused.
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    open_system_menu(&mut input, &mut bar);
+
+    let items = bar.menu().control().items();
+    assert_eq!(items.len(), crate::system::ROWS.len() - 1);
+    assert!(items.iter().all(|item| item.label() != "Switch User…"));
+    // The rows below it close up, and the command mapping closes up with
+    // them, so nothing below is reachable at a stale index.
+    assert_eq!(items[5].label(), "Lock Screen");
+    assert_eq!(items[6].label(), "Log Out");
+    assert_eq!(choose_row(&mut input, &mut bar, 6), TaskbarResponse::LogOut);
+
+    // The session attests it bound the mailbox, and the row appears.
+    bar.close_menu();
+    bar.set_switch_user_available(true);
+    open_system_menu(&mut input, &mut bar);
+
+    let item = &bar.menu().control().items()[6];
+    assert_eq!(item.label(), "Switch User…");
+    assert!(item.state().is_actionable());
+    assert_eq!(item.reason(), None);
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 6),
+        TaskbarResponse::SwitchUser
+    );
+}
+
+#[test]
+fn attesting_the_wake_mailbox_latches_only_the_menu_surface() {
+    let mut bar = bar_with_task_shell();
+    let _ = bar.take_repaint();
+
+    bar.set_switch_user_available(true);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
+
+    // Re-attesting the same answer changes no pixel anywhere.
+    bar.set_switch_user_available(true);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
 }
 
 #[test]

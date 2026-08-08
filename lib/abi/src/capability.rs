@@ -588,6 +588,22 @@ impl CapabilityId {
     /// auditing otherwise.
     pub const STORAGE_ADMIN: Self = Self(42);
 
+    /// Spawn a **canonical parser sandbox** — and nothing else.
+    ///
+    /// Admits exactly one shape of `spawn`: a child the kernel itself brands
+    /// capability-empty, with no credential switch and no console inherit.
+    /// Every other spawn still needs [`PROC_SPAWN`](Self::PROC_SPAWN), which
+    /// subsumes this one — a principal that may start *any* process may
+    /// obviously start a restricted one.
+    ///
+    /// It exists so a principal that must decode untrusted input in an
+    /// isolated worker — the graphical login screen rasterising the shipped
+    /// wallpaper — need not hold the far broader authority to start a general
+    /// process. The handler checks it only once it has decoded the attach
+    /// block and knows the request is that canonical shape; a caller holding
+    /// neither capability is refused before the block is even staged.
+    pub const SANDBOX_SPAWN: Self = Self(43);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -640,6 +656,7 @@ impl CapabilityId {
         (Self::PROC_CONTROL, "CAP_PROC_CONTROL"),
         (Self::SYSTEM_POWER, "CAP_SYSTEM_POWER"),
         (Self::STORAGE_ADMIN, "CAP_STORAGE_ADMIN"),
+        (Self::SANDBOX_SPAWN, "CAP_SANDBOX_SPAWN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -775,6 +792,8 @@ mod tests {
         assert_eq!(CapabilityId::FS_CHOWN.as_u16(), 39);
         assert_eq!(CapabilityId::PROC_CONTROL.as_u16(), 40);
         assert_eq!(CapabilityId::SYSTEM_POWER.as_u16(), 41);
+        assert_eq!(CapabilityId::STORAGE_ADMIN.as_u16(), 42);
+        assert_eq!(CapabilityId::SANDBOX_SPAWN.as_u16(), 43);
     }
 
     #[test]
@@ -800,6 +819,10 @@ mod tests {
         assert_eq!(CapabilityId::MEM_PIN.name(), Some("CAP_MEM_PIN"));
         assert_eq!(CapabilityId::PROC_CONTROL.name(), Some("CAP_PROC_CONTROL"));
         assert_eq!(CapabilityId::SYSTEM_POWER.name(), Some("CAP_SYSTEM_POWER"));
+        assert_eq!(
+            CapabilityId::SANDBOX_SPAWN.name(),
+            Some("CAP_SANDBOX_SPAWN")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -810,11 +833,24 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=41 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=43 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=41 {
+        for raw in 1..=43 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
+        }
+        // …and the assigned range stops there: the next id is free, so a new
+        // capability cannot silently reuse one.
+        assert_eq!(CapabilityId::from_raw(44).expect("in range").name(), None);
+    }
+
+    #[test]
+    fn assigned_ids_are_unique() {
+        for (i, &(cap, name)) in CapabilityId::NAMED.iter().enumerate() {
+            for &(other, other_name) in &CapabilityId::NAMED[i + 1..] {
+                assert_ne!(cap, other, "{name} and {other_name} share an id");
+                assert_ne!(name, other_name, "{name} is spelled twice");
+            }
         }
     }
 

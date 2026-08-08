@@ -148,7 +148,8 @@ use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
-    admit_errno, AdmitError, ImageBuildCtx, ProgramRegistry, EMPTY_PROGRAM_REGISTRY,
+    admit_errno, may_spawn_any_mode, AdmitError, ImageBuildCtx, ProgramRegistry, SpawnMode,
+    EMPTY_PROGRAM_REGISTRY,
 };
 use crate::spawn_services::installed_spawn_services;
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
@@ -3257,6 +3258,22 @@ where
         }
     }
 
+    /// Record a refused `spawn` on the audit trail, naming which
+    /// fail-closed branch refused it.
+    ///
+    /// `cause` is a stable kernel-chosen string, never caller data.
+    fn audit_spawn_denied(&self, cause: &'static str) {
+        crate::audit::emit(
+            self.audit,
+            Level::Warn,
+            AuditEvent::ProcessSpawnDenied,
+            &[Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str(cause),
+            }],
+        );
+    }
+
     /// Resolve the child's kernel-attested credential (uid + group set +
     /// capability ceiling) for `spawn`, never a caller-supplied value.
     ///
@@ -3292,15 +3309,7 @@ where
             ));
         }
         if !caller.caps.has(CapabilityId::SPAWN_AS_USER) {
-            crate::audit::emit(
-                self.audit,
-                Level::Warn,
-                AuditEvent::ProcessSpawnDenied,
-                &[Field {
-                    key: "cause",
-                    value: tairix_log::FieldValue::Str("spawn_as_user_denied"),
-                }],
-            );
+            self.audit_spawn_denied("spawn_as_user_denied");
             return Err(Errno::PermissionDenied);
         }
         let (primary_gid, supplementary_gids, ceiling) =
@@ -4854,8 +4863,18 @@ where
         strings: u64,
         strings_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
-        // is non-null (`UserPtr`). Bound the staged path so a hostile
+        // Which authority this spawn needs depends on its attach block, so
+        // the dispatcher attaches no blanket gate and the decision is taken
+        // here in two steps. First the coarse one, ahead of every action: a
+        // caller that could not spawn in *any* mode is refused before a byte
+        // of the request is staged.
+        if !may_spawn_any_mode(caller.caps) {
+            self.audit_spawn_denied("no_spawn_capability");
+            return Err(Errno::PermissionDenied);
+        }
+
+        // The dispatcher already checked that `path` is non-null
+        // (`UserPtr`). Bound the staged path so a hostile
         // `path_len` cannot force an arbitrarily large kernel allocation; an over-long or empty path cannot name a
         // registered program, so it fails closed with `NotFound`.
         if path_len == 0 || path_len > SPAWN_PATH_MAX {
@@ -4866,6 +4885,19 @@ where
         // blocks *before* touching any further state (fail closed on a
         // malformed shape — a refused block wires nothing).
         let attach = self.stage_spawn_attach(caller, attach, attach_len)?;
+
+        // Now the block's mode is known, take the precise decision — still
+        // before any descriptor is resolved or any page table touched. A
+        // canonical parser sandbox is admitted by the narrow
+        // `CAP_SANDBOX_SPAWN` or by `CAP_PROC_SPAWN`; anything else needs
+        // `CAP_PROC_SPAWN`, so a principal granted only the sandbox
+        // authority cannot start a general process.
+        let mode = SpawnMode::of_attach(attach.is_sandbox());
+        if !mode.admits(caller.caps) {
+            self.audit_spawn_denied("proc_spawn_required");
+            return Err(Errno::PermissionDenied);
+        }
+
         let strings_buf = self.stage_spawn_strings(caller, strings, strings_len)?;
 
         // Resolve the child's standard descriptors — the console table the
@@ -4973,8 +5005,8 @@ where
         // which builds a fresh hardware-isolated address space and admits
         // it as a runnable process through `ctx`, returning the new PID.
         // The default `NULL_PROCESS_SPAWN` fails closed with
-        // `NotImplemented`. The producer re-asserts the
-        // `CAP_PROC_SPAWN` gate inside `spawn_image` and audits the
+        // `NotImplemented`. The producer re-asserts this same mode gate
+        // inside `spawn_image` and audits the
         // decision; the child receives only its manifest∩user-grant
         // authority.
         // Record the new child against the spawning caller so a later
@@ -17516,6 +17548,178 @@ mod tests {
         ] {
             assert_eq!(child_streams.mode(fd), StreamMode::Closed);
         }
+    }
+
+    /// The narrow `CAP_SANDBOX_SPAWN` admits a canonical parser sandbox —
+    /// the login screen decoding its untrusted wallpaper away from the
+    /// address space that owns the seat — without the far broader
+    /// `CAP_PROC_SPAWN`.
+    #[test]
+    fn a_sandbox_only_caller_may_spawn_a_parser_sandbox() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::SANDBOX_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("the narrow capability admits a parser sandbox");
+        let guard = table.read();
+        let record = guard.caps_for(SecTaskId(pid)).expect("child record");
+        assert!(record.is_sandboxed());
+        assert!(record.effective().is_empty());
+    }
+
+    /// …and nothing else. A general spawn from that same caller is refused
+    /// before any child exists, so the login screen still cannot start the
+    /// session it authenticates for.
+    #[test]
+    fn a_sandbox_only_caller_may_not_spawn_a_general_process() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::SANDBOX_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let before = sched.live_task_count();
+        // No attach block at all is the plainest general spawn there is.
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sched.live_task_count(),
+            before,
+            "no child was admitted on the denied path"
+        );
+        assert!(sink
+            .event_ids()
+            .contains(&AuditEvent::ProcessSpawnDenied.id().0));
+    }
+
+    /// A caller holding neither spawn capability is refused outright, and
+    /// the refusal lands before the attach block is even staged.
+    #[test]
+    fn a_caller_holding_neither_spawn_capability_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::LOG_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let before = sched.live_task_count();
+        // A hostile attach pointer proves the refusal precedes staging: an
+        // unreadable block would otherwise fault first.
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                0xdead_0000,
+                SPAWN_ATTACH_LEN,
+                0,
+                0
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(sched.live_task_count(), before);
+        assert!(sink
+            .event_ids()
+            .contains(&AuditEvent::ProcessSpawnDenied.id().0));
     }
 
     /// The reserved `@self` token re-spawns the **caller's own program**

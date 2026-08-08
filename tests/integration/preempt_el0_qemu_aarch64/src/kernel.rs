@@ -24,7 +24,7 @@ use tairix_fdt::Fdt;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_kthread, spawn_user_kthread, RescheduleAction,
-    SpawnRequest, Yielder,
+    SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -265,6 +265,7 @@ fn build_el0_space(image: &LoadImage) -> (u64, tairix_arch_api::UserEntry) {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

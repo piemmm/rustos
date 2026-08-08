@@ -948,6 +948,8 @@ name = "tairix-display"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-geometry",
+ "tairix-raster",
  "tairix-rt",
 ]
 
@@ -1456,12 +1458,40 @@ dependencies = [
 name = "tairix-greeter"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-icon",
  "tairix-input",
  "tairix-raster",
  "tairix-theme",
+]
+
+[[package]]
+name = "tairix-greeter-service"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-browse",
+ "tairix-caps",
+ "tairix-cursor",
+ "tairix-display",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-greeter",
+ "tairix-input",
+ "tairix-log",
+ "tairix-login",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-users",
+ "tairix-util",
+ "tairix-wallpaper",
+ "tairix-window",
 ]
 
 [[package]]
@@ -4923,6 +4953,7 @@ dependencies = [
  "tairix-abi",
  "tairix-controls",
  "tairix-cursor",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-input",
@@ -4979,6 +5010,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-switchboard",
+ "tairix-sysconfig",
  "tairix-syshelp",
  "tairix-taskbar",
  "tairix-terminal",

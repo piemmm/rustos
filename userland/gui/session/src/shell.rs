@@ -973,6 +973,36 @@ impl DesktopShell {
         self.present(compositor);
     }
 
+    /// Attest to the taskbar whether this session can step aside for another
+    /// user, so the system menu's *Switch User…* row exists only where the
+    /// session could really be resumed afterwards.
+    ///
+    /// Only the embedder knows: the answer turns on whether it holds the
+    /// wake mailbox a session authority resumes this desktop through. The
+    /// bar leaves the row out until told otherwise, so a session that never
+    /// calls this offers no switch rather than a one-way trip to the login
+    /// screen.
+    pub fn set_switch_user_available(&mut self, compositor: &mut Compositor, available: bool) {
+        self.session
+            .taskbar_mut()
+            .set_switch_user_available(available);
+        self.present(compositor);
+    }
+
+    /// Re-lay the bar for an output whose extent changed under the session,
+    /// and repaint every surface the desktop owns over the new screen.
+    ///
+    /// The compositor must already have adopted the new mode: the desktop's
+    /// icons and the bar are placed against the extent it reports, so laying
+    /// them out first would place them on the old screen. Used when a
+    /// session that stepped aside comes back to a display the next account
+    /// re-moded.
+    pub fn set_output_layout(&mut self, config: TaskbarConfig, compositor: &mut Compositor) {
+        self.session.taskbar_mut().set_config(config);
+        self.present(compositor);
+        self.refresh_cursor(compositor);
+    }
+
     /// Show, raise, and focus the running task shown as `window`, restoring
     /// it if it was minimised — how the embedder brings an already-open
     /// window forward instead of launching a second copy (the Files button's

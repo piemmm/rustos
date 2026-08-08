@@ -1,119 +1,38 @@
-//! Unit tests for the authentication surface.
+//! Unit tests for the authentication surface's secret prompt.
 //!
 //! These cover the state machine (typing, submission, the erasure of the
 //! secret on every verdict, the wordings), the modality property that only a
 //! verified secret concludes the surface, the one geometry definition that
-//! paint and hit test share, and the render's degraded paths.
+//! paint and hit test share, and the render's degraded paths. The chooser has
+//! its own file, as do the cooldown and chrome updates, the scrim, and the
+//! damage report.
 
 use alloc::string::String;
 use alloc::vec;
-use alloc::vec::Vec;
 
-use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::Surface;
+use tairix_geometry::{Rect, Scale};
+use tairix_input::{Key, NamedKey};
 use tairix_theme::Theme;
 
+use crate::chooser::AccountTile;
+use crate::layout::{chrome_band, chrome_bands, notice_band, Prompt};
 use crate::surface::{
-    panel_rect, AuthSurface, Backdrop, EventContext, Outcome, Verdict, Verifier, HINT,
-    MAX_PASSWORD, PANEL_HEIGHT, PANEL_WIDTH, REFUSED, UNNAMED_ACCOUNT, UNREACHABLE,
+    panel_rect, AuthSurface, Backdrop, Chrome, Verdict, HINT, MAX_PASSWORD, REFUSED,
+    UNNAMED_ACCOUNT, UNREACHABLE,
+};
+use crate::testkit::{
+    centre, changed_pixels, contrast_in, feed, key, moved, named, painted, render, render_in,
+    separation, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
-const PRESS: InputEvent = InputEvent::PointerPressed {
-    button: PointerButton::Primary,
-};
-
-const RELEASE: InputEvent = InputEvent::PointerReleased {
-    button: PointerButton::Primary,
-};
-
-/// A screen comfortably larger than the panel, so the centring is visible
-/// rather than clamped.
-const SCREEN: Rect = Rect::new(0, 0, 1000, 600);
-
-fn theme() -> Theme {
-    Theme::dark()
-}
-
-fn key(key: Key) -> InputEvent {
-    InputEvent::KeyPressed {
-        key,
-        modifiers: Modifiers::default(),
+/// A dressed clock block, so a test that cares where the chrome lands has
+/// something for it to draw.
+fn chrome() -> Chrome {
+    Chrome {
+        clock: "09:41".into(),
+        date: "Friday 7 August".into(),
+        host: "tairix".into(),
     }
-}
-
-fn moved(x: i32, y: i32) -> InputEvent {
-    InputEvent::PointerMoved {
-        to: Point::new(x, y),
-    }
-}
-
-/// The centre of `rect`, as a pointer position.
-fn centre(rect: Rect) -> InputEvent {
-    moved(
-        rect.origin.x + i32::try_from(rect.width / 2).expect("test rectangles are small"),
-        rect.origin.y + i32::try_from(rect.height / 2).expect("test rectangles are small"),
-    )
-}
-
-/// A [`Verifier`] answering from a scripted list of verdicts, oldest first,
-/// and recording every secret it was offered — so a test can assert both
-/// what was typed and what came back for it. Offered past the end of the
-/// script, it refuses.
-#[derive(Default)]
-struct Scripted {
-    answers: Vec<Verdict>,
-    offered: Vec<String>,
-}
-
-impl Scripted {
-    fn new(mut answers: Vec<Verdict>) -> Self {
-        answers.reverse();
-        Self {
-            answers,
-            offered: Vec::new(),
-        }
-    }
-
-    fn refusing() -> Self {
-        Self::new(Vec::new())
-    }
-}
-
-impl Verifier for Scripted {
-    fn verify(&mut self, secret: &str) -> Verdict {
-        self.offered.push(String::from(secret));
-        self.answers.pop().unwrap_or(Verdict::Refused)
-    }
-}
-
-/// Apply one event on [`SCREEN`] at the unscaled density.
-fn feed(surface: &mut AuthSurface, event: &InputEvent, verifier: &mut dyn Verifier) -> Outcome {
-    let theme = theme();
-    surface.on_event(
-        event,
-        &mut EventContext {
-            screen: SCREEN,
-            scale: Scale::ONE,
-            theme: &theme,
-            verifier,
-        },
-    )
-}
-
-/// Type `secret` one key at a time, then press Enter, returning the outcome
-/// of that final, submitting event.
-fn submit(surface: &mut AuthSurface, secret: &str, verifier: &mut dyn Verifier) -> Outcome {
-    for ch in secret.chars() {
-        feed(surface, &key(Key::Char(ch)), verifier);
-    }
-    feed(surface, &key(Key::Named(NamedKey::Enter)), verifier)
-}
-
-fn render(surface: &AuthSurface) -> Surface {
-    surface
-        .render(SCREEN, Scale::ONE, &theme(), Backdrop::Desktop)
-        .expect("a 1000x600 frame")
 }
 
 #[test]
@@ -127,6 +46,31 @@ fn typing_builds_the_secret_and_enter_offers_it_once_exactly_as_typed() {
     assert_eq!(verifier.offered, vec![String::from("Hunter2!")]);
 }
 
+/// The account the surface is asking about reaches the authority with the
+/// secret, so a verifier that checks a named account checks the right one.
+#[test]
+fn the_account_being_asked_for_reaches_the_verifier() {
+    let mut surface = AuthSurface::new("ann");
+    let mut verifier = Scripted::refusing();
+
+    submit(&mut surface, "x", &mut verifier);
+
+    assert_eq!(verifier.accounts, vec![String::from("ann")]);
+    assert_eq!(surface.selected_account(), Some("ann"));
+}
+
+/// A name the embedder could not resolve is still a question about somebody,
+/// so the placeholder heading is what the authority is asked about.
+#[test]
+fn an_unnamed_account_is_asked_about_under_the_placeholder() {
+    let mut surface = AuthSurface::new("");
+    let mut verifier = Scripted::refusing();
+
+    submit(&mut surface, "x", &mut verifier);
+
+    assert_eq!(verifier.accounts, vec![String::from(UNNAMED_ACCOUNT)]);
+}
+
 /// Editing keys reach the field, so the secret offered is the one on screen
 /// at the moment Enter is pressed rather than everything ever typed.
 #[test]
@@ -137,11 +81,7 @@ fn backspace_edits_the_secret_before_it_is_offered() {
     for ch in "Hunterx".chars() {
         feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
     }
-    feed(
-        &mut surface,
-        &key(Key::Named(NamedKey::Backspace)),
-        &mut verifier,
-    );
+    feed(&mut surface, &named(NamedKey::Backspace), &mut verifier);
     submit(&mut surface, "2", &mut verifier);
 
     assert_eq!(verifier.offered, vec![String::from("Hunter2")]);
@@ -155,12 +95,7 @@ fn every_key_asks_for_a_repaint() {
     let mut verifier = Scripted::refusing();
 
     assert!(feed(&mut surface, &key(Key::Char('a')), &mut verifier).redraw());
-    assert!(feed(
-        &mut surface,
-        &key(Key::Named(NamedKey::Home)),
-        &mut verifier
-    )
-    .redraw());
+    assert!(feed(&mut surface, &named(NamedKey::Home), &mut verifier).redraw());
 }
 
 /// The field is bounded so its buffer is reserved once and never grown; a
@@ -186,11 +121,7 @@ fn the_secret_is_erased_after_every_verdict() {
         let mut verifier = Scripted::new(vec![verdict]);
 
         submit(&mut surface, "secret", &mut verifier);
-        feed(
-            &mut surface,
-            &key(Key::Named(NamedKey::Enter)),
-            &mut verifier,
-        );
+        feed(&mut surface, &named(NamedKey::Enter), &mut verifier);
 
         assert_eq!(
             verifier.offered,
@@ -252,9 +183,9 @@ fn no_event_concludes_the_surface_without_a_verified_verdict() {
     let mut verifier = Scripted::refusing();
 
     for event in [
-        key(Key::Named(NamedKey::Escape)),
-        key(Key::Named(NamedKey::Enter)),
-        key(Key::Named(NamedKey::Tab)),
+        named(NamedKey::Escape),
+        named(NamedKey::Enter),
+        named(NamedKey::Tab),
         key(Key::Char('x')),
         centre(surface.field_rect(SCREEN, Scale::ONE, &theme())),
         PRESS,
@@ -265,6 +196,25 @@ fn no_event_concludes_the_surface_without_a_verified_verdict() {
             "{event:?} concluded the surface without a verified secret"
         );
     }
+}
+
+/// A screen lock has no chooser to step back to, so Escape is inert: it
+/// leaves the surface where it is, still asking about the same account, with
+/// what was typed still in the field.
+#[test]
+fn a_surface_with_no_chooser_ignores_escape() {
+    let mut surface = AuthSurface::new("ann");
+    let mut verifier = Scripted::refusing();
+    for ch in "half".chars() {
+        feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
+    }
+
+    let outcome = feed(&mut surface, &named(NamedKey::Escape), &mut verifier);
+
+    assert!(!outcome.verified());
+    assert_eq!(surface.selected_account(), Some("ann"));
+    submit(&mut surface, "", &mut verifier);
+    assert_eq!(verifier.offered, vec![String::from("half")]);
 }
 
 /// Only a submission asks the authority at all, so an authority that would
@@ -279,57 +229,130 @@ fn only_a_submission_reaches_the_authority() {
     }
 
     assert!(verifier.offered.is_empty(), "nothing was ever offered");
-    assert!(feed(
-        &mut surface,
-        &key(Key::Named(NamedKey::Enter)),
-        &mut verifier
-    )
-    .verified());
+    assert!(feed(&mut surface, &named(NamedKey::Enter), &mut verifier).verified());
 }
 
+/// The composition is one centred column: chrome, then the disc, the name,
+/// and the prompt block, each below the last and none overlapping its
+/// neighbour, at the reference density and at twice it alike.
 #[test]
-fn the_panel_is_centred_horizontally_and_a_third_of_the_way_down() {
-    let rect = panel_rect(SCREEN, Scale::ONE);
+fn the_column_is_a_centred_stack_at_every_density() {
+    let screen = Rect::new(0, 0, 1400, 1100);
+    let surface = AuthSurface::new("ann");
 
-    assert_eq!(
-        rect,
-        Rect::new(
-            i32::try_from((SCREEN.width - PANEL_WIDTH) / 2).expect("a small screen"),
-            i32::try_from((SCREEN.height - PANEL_HEIGHT) / 3).expect("a small screen"),
-            PANEL_WIDTH,
-            PANEL_HEIGHT,
-        )
-    );
+    for percent in [100, 200] {
+        let scale = Scale::from_percent(percent).expect("a supported density");
+        let prompt = Prompt::new(screen, scale);
+        let chrome = chrome_band(screen, scale);
+        let block = panel_rect(screen, scale);
+        let field = surface.field_rect(screen, scale, &theme());
+
+        for part in [prompt.disc, block, field] {
+            let left = part.origin.x - screen.origin.x;
+            let right = screen.right() - part.right();
+            assert!(
+                (left - right).abs() <= 1,
+                "{part:?} is off centre at {percent}%"
+            );
+        }
+        assert!(
+            chrome.bottom() <= prompt.disc.origin.y,
+            "chrome at {percent}%"
+        );
+        assert!(
+            prompt.disc.bottom() <= prompt.name.origin.y,
+            "disc at {percent}%"
+        );
+        assert!(prompt.name.bottom() <= block.origin.y, "name at {percent}%");
+        assert!(field.bottom() <= block.bottom(), "field at {percent}%");
+        assert!(block.bottom() <= screen.bottom(), "block at {percent}%");
+    }
 }
 
-/// A screen smaller than the panel gets the whole screen: a prompt that
-/// refused to draw on a small display would be one that did not ask.
+/// Every length is authored in logical pixels and converted through the one
+/// shared scale, so a denser output gets a proportionally larger column.
 #[test]
-fn the_panel_clamps_to_a_screen_smaller_than_itself() {
-    let small = Rect::new(0, 0, 100, 50);
-
-    assert_eq!(panel_rect(small, Scale::ONE), small);
-}
-
-/// The panel is authored in logical pixels and converted through the one
-/// shared scale, so a denser output gets a proportionally larger prompt.
-#[test]
-fn the_panel_grows_with_the_desktop_scale() {
-    let double = Scale::from_percent(200).expect("200% is in range");
+fn the_column_grows_with_the_desktop_scale() {
     let screen = Rect::new(0, 0, 2000, 1200);
+    let double = Scale::from_percent(200).expect("200% is in range");
 
-    let rect = panel_rect(screen, double);
+    let single = panel_rect(screen, Scale::ONE);
+    let doubled = panel_rect(screen, double);
 
-    assert_eq!(rect.width, PANEL_WIDTH * 2);
-    assert_eq!(rect.height, PANEL_HEIGHT * 2);
+    assert_eq!(doubled.width, single.width * 2);
+    assert_eq!(doubled.height, single.height * 2);
     assert_eq!(
-        rect.origin.x,
-        i32::try_from((2000 - rect.width) / 2).expect("a small screen")
+        Prompt::new(screen, double).disc.width,
+        Prompt::new(screen, Scale::ONE).disc.width * 2
     );
-    assert_eq!(
-        rect.origin.y,
-        i32::try_from((1200 - rect.height) / 3).expect("a small screen")
-    );
+}
+
+/// A screen too small for the whole column still gets a prompt that fits on
+/// it: one that refused to draw, or ran off the edge, would be one that did
+/// not ask.
+#[test]
+fn a_small_screen_still_gets_a_usable_prompt() {
+    let small = Rect::new(0, 0, 640, 480);
+    let surface = AuthSurface::new("ann");
+    let block = panel_rect(small, Scale::ONE);
+    let field = surface.field_rect(small, Scale::ONE, &theme());
+
+    assert!(block.right() <= small.right() && block.bottom() <= small.bottom());
+    assert!(field.right() <= small.right() && field.bottom() <= small.bottom());
+    assert!(field.width > 0 && field.height > 0);
+
+    let frame = surface
+        .render(small, Scale::ONE, &theme(), Backdrop::Desktop)
+        .expect("a frame on a small screen");
+    assert!(painted(&frame, field), "the field drew nothing");
+}
+
+/// The clock is present, or absent, for a given screen and density alone —
+/// never because of which body is up. A screen that gains or loses its clock
+/// when an account is picked is one that appears to jump.
+#[test]
+fn the_chrome_is_the_same_whichever_body_is_up() {
+    let tiles = vec![
+        AccountTile::new("Ann", "ann"),
+        AccountTile::new("Bob", "bob"),
+        AccountTile::new("Cai", "cai"),
+    ];
+    let short = Rect::new(0, 0, 640, 400);
+
+    for screen in [SCREEN, short] {
+        for percent in [100, 200] {
+            let scale = Scale::from_percent(percent).expect("a supported density");
+            let band = chrome_band(screen, scale);
+            let mut chooser = AuthSurface::with_accounts(tiles.clone());
+            chooser.set_chrome(chrome());
+            let mut prompt = AuthSurface::new("ann");
+            prompt.set_chrome(chrome());
+
+            let shown = |surface: &AuthSurface| {
+                let frame = surface
+                    .render(screen, scale, &theme(), Backdrop::Desktop)
+                    .expect("a frame");
+                painted(&frame, band)
+            };
+            assert_eq!(
+                shown(&chooser),
+                shown(&prompt),
+                "{screen:?} at {percent}% disagreed about the chrome"
+            );
+            assert_eq!(band.height > 0, shown(&prompt), "{screen:?} at {percent}%");
+        }
+    }
+}
+
+/// A screen narrower than the block clamps it rather than letting it run off
+/// the edge.
+#[test]
+fn the_prompt_block_never_grows_past_the_screen() {
+    let tiny = Rect::new(0, 0, 100, 50);
+
+    let block = panel_rect(tiny, Scale::ONE);
+
+    assert!(block.width <= tiny.width && block.height <= tiny.height);
 }
 
 #[test]
@@ -358,23 +381,14 @@ fn the_painted_field_is_the_rectangle_the_pointer_is_tested_against() {
     feed(&mut surface, &key(Key::Char('a')), &mut verifier);
     let after = render(&surface);
 
-    let mut changed = 0_u32;
-    for y in 0..SCREEN.height {
-        for x in 0..SCREEN.width {
-            if before.get(x, y) == after.get(x, y) {
-                continue;
-            }
-            changed += 1;
-            assert!(
-                field.contains(Point::new(
-                    i32::try_from(x).expect("a small screen"),
-                    i32::try_from(y).expect("a small screen")
-                )),
-                "the keystroke painted ({x}, {y}), outside the hit-tested field"
-            );
-        }
+    let changed = changed_pixels(&before, &after);
+    assert!(!changed.is_empty(), "the keystroke painted nothing at all");
+    for pixel in changed {
+        assert!(
+            field.contains(pixel),
+            "the keystroke painted {pixel:?}, outside the hit-tested field"
+        );
     }
-    assert!(changed > 0, "the keystroke painted nothing at all");
 }
 
 /// A pointer is only inside the field where the hit test says it is: a
@@ -402,10 +416,69 @@ fn only_a_pointer_within_the_field_rect_reaches_the_field() {
 fn an_empty_account_heads_the_surface_with_the_placeholder() {
     let empty = render(&AuthSurface::new(""));
     let placeholder = render(&AuthSurface::new(UNNAMED_ACCOUNT));
-    let named = render(&AuthSurface::new("ann"));
+    let named_account = render(&AuthSurface::new("ann"));
 
     assert_eq!(empty, placeholder);
-    assert_ne!(empty, named);
+    assert_ne!(empty, named_account);
+}
+
+/// Every part of the column actually puts marks inside its own band. A
+/// geometry the paint does not honour reads correctly in the arithmetic and
+/// draws a blank screen.
+#[test]
+fn every_part_of_the_column_paints_inside_its_own_band() {
+    let mut surface = AuthSurface::new("Ann Example");
+    surface.set_chrome(chrome());
+    let prompt = Prompt::new(SCREEN, Scale::ONE);
+    let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
+    let notice = notice_band(prompt.block, field, Scale::ONE).expect("room for the notice");
+    let [clock, date, host] = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE);
+    let frame = render(&surface);
+
+    for (band, part) in [
+        (clock, "clock"),
+        (date, "date"),
+        (host, "host"),
+        (prompt.disc, "disc"),
+        (prompt.name, "name"),
+        (field, "field"),
+        (notice, "notice"),
+    ] {
+        assert!(painted(&frame, band), "the {part} drew nothing in {band:?}");
+    }
+}
+
+/// The column reads against its own backdrop on both themes: the ink reaches
+/// at least half the separation the theme itself promises against the ground
+/// behind it. A build that draws no glyphs fails here rather than passing
+/// quietly with an empty screen.
+#[test]
+fn the_column_reads_against_its_backdrop_on_both_themes() {
+    for active in [Theme::dark(), Theme::light()] {
+        let mut surface = AuthSurface::new("Ann Example");
+        surface.set_chrome(chrome());
+        let prompt = Prompt::new(SCREEN, Scale::ONE);
+        let field = surface.field_rect(SCREEN, Scale::ONE, &active);
+        let notice = notice_band(prompt.block, field, Scale::ONE).expect("room for the notice");
+        let clock = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE)[0];
+        let frame = render_in(&surface, &active);
+        let palette = active.palette();
+
+        for (band, ink, part) in [
+            (clock, palette.on_surface, "clock"),
+            (prompt.name, palette.on_surface, "name"),
+            (notice, palette.on_surface_muted, "notice"),
+            (field, palette.rim_active, "field"),
+        ] {
+            let promised = separation(ink, palette.desktop);
+            let reached = contrast_in(&frame, band);
+            assert!(
+                reached * 2 >= promised,
+                "the {part} reached {reached} of the {promised} {} promises",
+                active.name()
+            );
+        }
+    }
 }
 
 #[test]

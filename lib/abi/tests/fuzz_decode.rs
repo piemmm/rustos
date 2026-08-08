@@ -50,6 +50,10 @@ use tairix_abi::service_control::{
     decode_reply as decode_service_control_reply, ServiceControlRequest,
     REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
 };
+use tairix_abi::session_ipc::{
+    decode_account_page, encode_account_page, SessionRequest, SessionVerdict, SESSION_MAX_REPLY,
+    SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
+};
 use tairix_abi::switchboard_ipc::{
     decode_publish_reply, CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest,
     TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
@@ -101,6 +105,38 @@ fn exercise_elevate(bytes: &[u8]) {
         let redecoded = ElevateReply::decode(&buf[..len])
             .expect("round-trip of an accepted reply must succeed");
         assert_eq!(reply, redecoded);
+    }
+}
+
+/// Drive the `session-v1` graphical-login decoders on `bytes` (one arm of
+/// [`exercise`]): the request, the account page, and the verdict each
+/// round-trip through their encoder; everything else refuses cleanly.
+fn exercise_session_ipc(bytes: &[u8]) {
+    if let Ok(request) = SessionRequest::decode(bytes) {
+        let mut buf = [0u8; SESSION_MAX_REQUEST];
+        let len = request
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted request must succeed");
+        let redecoded = SessionRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(page) = decode_account_page(bytes) {
+        let mut buf = [0u8; SESSION_MAX_REPLY];
+        let len = encode_account_page(&mut buf, page.total(), page.offset(), page.accounts())
+            .expect("round-trip encode of an accepted page must succeed");
+        let redecoded =
+            decode_account_page(&buf[..len]).expect("round-trip of an accepted page must succeed");
+        assert_eq!(page, redecoded);
+    }
+    if let Ok(verdict) = SessionVerdict::decode(bytes) {
+        let mut buf = [0u8; SESSION_VERDICT_LEN];
+        let len = verdict
+            .encode(&mut buf)
+            .expect("round-trip encode of an accepted verdict must succeed");
+        let redecoded = SessionVerdict::decode(&buf[..len])
+            .expect("round-trip of an accepted verdict must succeed");
+        assert_eq!(verdict, redecoded);
     }
 }
 
@@ -533,6 +569,7 @@ fn exercise(bytes: &[u8]) {
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
     exercise_elevate(bytes);
+    exercise_session_ipc(bytes);
     if let Ok(time) = Time64::from_bytes(bytes) {
         let redecoded = Time64::from_bytes(&time.to_le_bytes())
             .expect("round-trip of an accepted instant must succeed");

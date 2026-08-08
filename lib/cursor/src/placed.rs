@@ -1,31 +1,28 @@
-//! The compositor's pointer-cursor overlay.
+//! Placing a rasterised cursor on screen and sampling it.
 //!
-//! The cursor is the top-most layer of the scene: it is composited over
-//! every window so it is always visible. The cursor *artwork* is not the
-//! window manager's concern — it is a scalable, colourful, replaceable
-//! [`CursorImage`] produced by `lib/cursor`. This
-//! module only places that image on screen and samples it during
-//! recomposition.
-//!
-//! [`CursorImage`]: tairix_cursor::CursorImage
+//! [`CursorImage`] is artwork; where it goes is [`PlacedCursor`]. Every
+//! surface that draws a pointer — the compositor's top-most overlay, the
+//! login screen's own frame — places it the same way, so the hotspot lands
+//! on the pointer in exactly one definition rather than one per screen.
 
-use tairix_cursor::CursorImage;
+use tairix_geometry::{Point, Rect};
+use tairix_raster::color::Pixel;
+use tairix_raster::Surface;
 
-use crate::color::Pixel;
-use crate::geometry::{Point, Rect};
+use crate::raster::CursorImage;
 
 /// A rasterised cursor positioned on screen.
 ///
-/// The stored [`origin`](Self::bounds) is the image's top-left corner,
-/// derived from the pointer position by subtracting the image's hotspot, so
-/// the hotspot lands exactly on the pointer.
+/// The stored origin is the image's top-left corner, derived from the
+/// pointer position by subtracting the image's hotspot, so the hotspot
+/// lands exactly on the pointer.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CursorLayer {
+pub struct PlacedCursor {
     image: CursorImage,
     origin: Point,
 }
 
-impl CursorLayer {
+impl PlacedCursor {
     /// Place `image` so its hotspot sits at `pointer`.
     #[must_use]
     pub fn new(image: CursorImage, pointer: Point) -> Self {
@@ -38,10 +35,15 @@ impl CursorLayer {
         self.origin = top_left(&self.image, pointer);
     }
 
-    /// Replace the cursor artwork, keeping the hotspot at `pointer`.
-    pub fn set_image(&mut self, image: CursorImage, pointer: Point) {
-        self.origin = top_left(&image, pointer);
-        self.image = image;
+    /// Composite this cursor onto `target` at its placed position.
+    ///
+    /// The blend is `lib/raster`'s one premultiplied sprite path, so a
+    /// transparent-background cursor lands without a rectangular halo, and a
+    /// cursor overhanging an edge draws the part that fits. A screen that
+    /// composites the cursor pixel by pixel alongside other layers samples it
+    /// through [`sample_row`](Self::sample_row) instead.
+    pub fn draw(&self, target: &mut Surface) {
+        target.blit(self.origin.x, self.origin.y, self.image.surface());
     }
 
     /// The screen rectangle the cursor currently covers.
@@ -58,8 +60,8 @@ impl CursorLayer {
     /// This cursor's local row for screen row `y`, or `None` when the row
     /// falls outside its image.
     ///
-    /// The composite hot loop calls this once per dirty screen row rather
-    /// than re-deriving the image-local `y` for every column in it.
+    /// A draw loop calls this once per dirty screen row rather than
+    /// re-deriving the image-local `y` for every column in it.
     #[must_use]
     pub fn local_row(&self, y: i32) -> Option<u32> {
         let ly = u32::try_from(y.checked_sub(self.origin.y)?).ok()?;
@@ -74,8 +76,8 @@ impl CursorLayer {
     /// nothing there (outside its image, or a transparent pixel within it).
     ///
     /// This is [`Self::sample_local`] with the row already resolved to an
-    /// image-local `y`, so the composite hot loop pays that conversion once
-    /// per row instead of once per pixel.
+    /// image-local `y`, so a draw loop pays that conversion once per row
+    /// instead of once per pixel.
     #[must_use]
     pub fn sample_row(&self, x: i32, ly: u32) -> Option<Pixel> {
         let lx = u32::try_from(x.checked_sub(self.origin.x)?).ok()?;
@@ -83,7 +85,7 @@ impl CursorLayer {
     }
 
     /// The premultiplied cursor pixel at *image-local* `(lx, ly)`, or
-    /// `None` outside the image or where it draws nothing. The
+    /// `None` outside the image or where it draws nothing. A
     /// hardware-layer present path bakes the cursor into a layer through
     /// this, addressed in the image's own coordinate space.
     #[must_use]
@@ -101,3 +103,7 @@ fn top_left(image: &CursorImage, pointer: Point) -> Point {
         pointer.y.saturating_sub(hotspot.y),
     )
 }
+
+#[cfg(test)]
+#[path = "placed_tests.rs"]
+mod tests;

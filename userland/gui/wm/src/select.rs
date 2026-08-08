@@ -1,10 +1,11 @@
 //! Choosing the pointer cursor from live interaction state.
 //!
 //! The cursor *artwork* (a scalable, colourful, replaceable vector cursor)
-//! lives in `lib/cursor`; the compositor ([`crate::cursor`]) only blits the
-//! rasterised image. This module is the missing middle: it decides **which**
-//! [`CursorKind`] the desktop should show given what the user is doing, then
-//! turns that choice into pixels and hands them to the compositor.
+//! and its placement both live in `lib/cursor`; the compositor only blits
+//! the rasterised image. This module is the missing middle: it decides
+//! **which** [`CursorKind`] the desktop should show given what the user is
+//! doing, then turns that choice into pixels and hands them to the
+//! compositor.
 //!
 //! # The policy
 //!

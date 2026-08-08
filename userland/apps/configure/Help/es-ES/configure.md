@@ -26,11 +26,12 @@ forma canónica y requiere acceso de escritura a `/System/Settings`: una
 cuenta ordinaria puede leer los ajustes pero no cambiarlos.
 
 - `os.loginType` — `text` o `graphical`: qué tipo de sesión inicia el
-  servicio de inicio de sesión para un usuario autenticado. `text` (el
-  valor por defecto) inicia el shell de la cuenta — el escritorio puede
-  iniciarse bajo demanda con el comando `desktop`; `graphical` inicia
-  directamente la sesión de escritorio tras la autenticación cuando hay
-  un escritorio instalado, y recurre al texto cuando no lo hay.
+  servicio de inicio de sesión para un usuario autenticado. `graphical`
+  (el valor por defecto) inicia directamente la sesión de escritorio
+  tras la autenticación, y recurre al inicio de sesión de texto en una
+  máquina que no puede ejecutar ninguna; `text` inicia el shell de la
+  cuenta — el escritorio puede iniciarse bajo demanda con el comando
+  `desktop`.
 - `cache.all` — `on` u `off`: el conmutador maestro de caché. `on` (el
   valor por defecto) deja que cada clase de caché de abajo siga su
   propio ajuste; `off` es un techo que desactiva toda caché en memoria

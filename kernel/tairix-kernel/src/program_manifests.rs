@@ -529,6 +529,45 @@ mod tests {
     }
 
     #[test]
+    fn greeter_manifest_is_pinned() {
+        assert_eq!(
+            set(GREETER_REQUEST),
+            set(&[
+                CapabilityId::DISPLAY,
+                CapabilityId::INPUT_READ,
+                CapabilityId::SHM,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::SANDBOX_SPAWN,
+                CapabilityId::CONSOLE_WRITE,
+                CapabilityId::LOG_EMIT,
+            ])
+        );
+    }
+
+    /// The login screen may draw and read one seat and nothing more: it
+    /// holds no credential store, starts no process, and serves nothing, so
+    /// compromising it yields a screen rather than an account.
+    #[test]
+    fn the_greeter_can_neither_read_a_credential_nor_start_a_session() {
+        let greeter = set(GREETER_REQUEST);
+        // Decoding the untrusted wallpaper away from the seat is the only
+        // spawn it may make, and that child is capability-empty.
+        assert!(greeter.contains(CapabilityId::SANDBOX_SPAWN));
+        for withheld in [
+            CapabilityId::USERS_READ,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ] {
+            assert!(!greeter.contains(withheld), "{withheld:?} must stay off");
+        }
+        // The authority it calls holds exactly the two it must not.
+        let login = set(LOGIN_MANIFEST);
+        assert!(login.contains(CapabilityId::USERS_READ));
+        assert!(login.contains(CapabilityId::SPAWN_AS_USER));
+    }
+
+    #[test]
     fn ps_manifest_is_pinned() {
         assert_eq!(
             set(PS_MANIFEST),
@@ -768,7 +807,7 @@ mod tests {
 
     /// The store-only account-administration tools' expected request:
     /// console write for their output, the administrative gate the
-    /// `users_admin` syscall demands, and the filesystem gate their
+    /// `usine admin` syscall demands, and the filesystem gate their
     /// short-help read needs. No console-read: they never prompt. They
     /// ship purely as discovered on-disk bundles — the boot floor never
     /// grows — so no `spawn_layout` row or manifest constant exists for
@@ -927,7 +966,7 @@ mod tests {
     // list the read-only shipped wallpaper store and read the launching
     // user's own pinboard settings document, `CAP_SHM` to create and grant
     // the zero-copy window frame region the desktop session maps, and
-    // `CAP_PROC_SPAWN` to host its own thumbnail-rendering sandbox worker (a
+    // `CAP_PROC_SPAWN` to  fra its own thumbnail-rendering sandbox worker (a
     // restricted spawn of this same binary in its worker role, which the
     // kernel brands capability-empty, so an untrusted wallpaper never
     // decodes in the chooser's own address space). It requests no authority
@@ -1026,6 +1065,36 @@ mod tests {
         CapabilityId::SYSTEM_POWER,
     ];
 
+    // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
+    // `CAP_DISPLAY` holds the seat's lease and configures the display
+    // service while the login screen is up, `CAP_INPUT_READ` drains that
+    // seat's keyboard and pointer, `CAP_SHM` creates and grants the
+    // double-buffered frame region, `CAP_FS_ACCESS` reads the wallpaper
+    // master under the read-only `/System/Graphics/Wallpapers`,
+    // `CAP_SANDBOX_SPAWN` decodes those untrusted bytes in a
+    // capability-empty worker rather than in the address space that owns
+    // the seat, `CAP_CONSOLE_WRITE` states an abnormal exit's reason on
+    // fd 2, and `CAP_LOG_EMIT` carries its audit records. It stops there
+    // because the greeter draws and types but never decides: no
+    // `CAP_USERS_READ` (it sees only the names the authority publishes),
+    // no `CAP_PROC_SPAWN`/`CAP_SPAWN_AS_USER` (the sandbox authority
+    // admits only a canonical parser child, so it cannot start the session
+    // it authenticates for), and no `CAP_IPC_BIND_PRIVILEGED` (it serves
+    // nothing and is only ever a client). The effective set is this
+    // request intersected with the account's `GREETER_CEILING`, which
+    // carries exactly the same seven. Launched from its on-disk bundle by
+    // the login authority, never as an embedded spawn-floor program, so
+    // the list lives only in this pin.
+    const GREETER_REQUEST: &[CapabilityId] = &[
+        CapabilityId::DISPLAY,
+        CapabilityId::INPUT_READ,
+        CapabilityId::SHM,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::LOG_EMIT,
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -1061,6 +1130,7 @@ mod tests {
             ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
             ("fontd", ProgramKind::Service, FONTD_MANIFEST),
             ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
+            ("greeter", ProgramKind::Service, GREETER_REQUEST),
             ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("host", ProgramKind::Command, HOST_TOOL_REQUEST),

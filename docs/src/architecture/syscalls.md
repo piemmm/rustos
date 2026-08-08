@@ -65,7 +65,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
 |  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
 |  11 | `stream_write` | `u32 fd`, `user_ptr`, `len`             | `u64`   | — (console arm: `CAP_CONSOLE_WRITE`) | no |
-|  12 | `spawn`        | `user_ptr` (path), `len`, `u64 attach`, `len` | `u64` (pid) | `CAP_PROC_SPAWN` | yes |
+|  12 | `spawn`        | `user_ptr` (path), `len`, `u64 attach`, `len` | `u64` (pid) | — (sandbox arm: `CAP_SANDBOX_SPAWN` or `CAP_PROC_SPAWN`; otherwise `CAP_PROC_SPAWN`) | yes |
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`, `u64 timeout_ns` | `u64` | — (console arm: `CAP_CONSOLE_READ`) | no |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
@@ -322,15 +322,18 @@ volume-wide, so a resource-backed descriptor fails closed (`OutOfRange`).
 ### Capability matrix
 
 The dispatcher consults `kernel/sec`'s `TaskCapabilities::has` against
-the syscall's `required_capability` before any handler runs. The matrix
-is exhaustive — anything not listed below is ungated:
+the syscall's `required_capability` before any handler runs. Where *which*
+capability is required depends on the request's own content the entry is
+marked "checked in-handler", and the handler checks it before touching
+state. The matrix is exhaustive — anything not listed below is ungated:
 
 | Capability         | Syscalls gated by it       |
 | ------------------ | -------------------------- |
 | `CAP_USER_ADMIN`   | `cap_revoke`, `users_admin` |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
 | `CAP_CONSOLE_WRITE`| `stream_write` (console-backed descriptors only, checked in-handler), `console_count` |
-| `CAP_PROC_SPAWN`   | `spawn`                    |
+| `CAP_PROC_SPAWN`   | `spawn` (checked in-handler: required by every non-sandbox spawn, and admits a sandbox spawn too) |
+| `CAP_SANDBOX_SPAWN`| `spawn` (checked in-handler: canonical parser-sandbox blocks only) |
 | `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground` |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |

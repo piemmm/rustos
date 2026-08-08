@@ -308,7 +308,7 @@ impl BarMenu {
                 },
                 MENU_PIN_ROW,
             ) => MenuChoice::PinEntry(entry),
-            (MenuSubject::System { .. }, row) => match system::action_at(row) {
+            (MenuSubject::System { permits }, row) => match system::action_at(permits, row) {
                 Some(action) => MenuChoice::System(action),
                 None => return MenuOutcome::Dismissed,
             },

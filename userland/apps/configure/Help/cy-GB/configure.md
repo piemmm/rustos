@@ -27,11 +27,10 @@ cyffredin ddarllen y gosodiadau ond nid eu newid.
 
 - `os.loginType` — `text` neu `graphical`: pa fath o sesiwn y mae'r
   gwasanaeth mewngofnodi yn ei chychwyn i ddefnyddiwr wedi'i ddilysu.
-  Mae `text` (y rhagosodiad) yn cychwyn cragen y cyfrif — gellir dal i
-  gychwyn y bwrdd gwaith ar alw gyda'r gorchymyn `desktop`; mae
-  `graphical` yn cychwyn y sesiwn bwrdd gwaith yn uniongyrchol ar ôl
-  dilysu pan fo bwrdd gwaith wedi'i osod, gan ddisgyn yn ôl i destun
-  pan nad oes un.
+  Mae `graphical` (y rhagosodiad) yn cychwyn y sesiwn bwrdd gwaith yn
+  uniongyrchol ar ôl dilysu, gan ddisgyn yn ôl i'r mewngofnodi testun ar
+  beiriant na all redeg un; mae `text` yn cychwyn cragen y cyfrif —
+  gellir dal i gychwyn y bwrdd gwaith ar alw gyda'r gorchymyn `desktop`.
 - `cache.all` — `on` neu `off`: y prif switsh storio dros dro. Mae
   `on` (y rhagosodiad) yn gadael i bob dosbarth storfa isod ddilyn ei
   osodiad ei hun; mae `off` yn nenfwd sy'n analluogi pob storfa gof

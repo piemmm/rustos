@@ -6,8 +6,8 @@ the desktop's parts together. The crate also ships the `Run` binary of the
 `desktop` **application** (`desktop.app` in the system application store,
 `AGENTS.md` §16.8): a shell user starts the desktop by typing `desktop` — the
 application store is on the fixed lookup prefix, so the bare word resolves
-without any `PATH` entry — and a login configured with
-`os.loginType graphical` spawns the same bundle directly after
+without any `PATH` entry — and the default graphical login
+(`os.loginType graphical`) spawns the same bundle directly after
 authentication — one bundle, one spelling. The command's grammar is closed
 (`src/cli.rs`): bare `desktop` starts the session, the reserved `-h`/`-?`
 switches serve its own `Help/` documents, anything else is a usage error.
@@ -593,6 +593,31 @@ the real seams end to end:
   above: a refused event is held and its destination watched for room, and
   the loop's room-wake arm sends what is owed and tears down any owner a
   send proves gone.
+- **Fast user switching** (`switchuser`, `plans/NEW-DESKTOP-LOGIN.md` G5).
+  Before the first frame the session binds its wake mailbox
+  (`session_wake_endpoint(own_pid)`) and joins it to the wait-set for the
+  process's whole life; a refused bind is stated and non-fatal — the desktop
+  simply runs as one that cannot be switched away from, and the *Switch
+  User…* row is left out. Stepping aside asks the authority **first**
+  (`SessionRequest::Background` on `SESSION_ENDPOINT`) and gives the screen
+  up only on `Accepted`: a refusal, an undecodable reply, and a transport
+  failure are one answer — stay exactly as we are, and say so. On acceptance
+  the frame ring is dropped, its region unmapped, the seat's wait-set member
+  withdrawn (so the next account's typing cannot wake a parked desktop into
+  a spin) and the lease released, in that order; the rest of the drained
+  batch is discarded and the kernel purges what is still queued. While
+  background the session presents nothing, drains no seat input, and parks
+  with **no deadline at all** (`SwitchUser::park_deadline_ns`) — apps keep
+  running and their window calls keep being served. A `Foreground` wake
+  re-acquires the seat, re-queries the mode (it may have changed), rebuilds
+  the frame region for it, has the compositor adopt it
+  (`Compositor::set_mode`), re-lays the bar, wallpaper, icons, and pointer
+  rectangle, and repaints the whole screen; any step refusing ends the
+  session with its reason. A `SessionWake::End` ends it cleanly. Every wake
+  is honoured only from a kernel-attested sender on this session's own
+  console holding `CAP_IPC_BIND_PRIVILEGED` — the authority's account is a
+  configured one, so the check is the capability and the console, never a
+  guessed uid — and anything else is dropped with its reason stated.
 - The binary branches into the **worker-role** at the very start of `main`:
   if re-entered with the reserved role argument it serves as the parser-sandbox
   icon-rasterisation service and nothing else, using its own image as the

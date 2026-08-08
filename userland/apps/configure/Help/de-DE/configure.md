@@ -29,11 +29,12 @@ Schreibzugriff auf `/System/Settings` — ein gewöhnliches Konto kann die
 Einstellungen lesen, aber nicht ändern.
 
 - `os.loginType` — `text` oder `graphical`: welchen Sitzungstyp der
-  Anmeldedienst für einen authentifizierten Benutzer startet. `text`
-  (die Vorgabe) startet die Shell des Kontos — der Desktop lässt sich
-  weiterhin bei Bedarf mit dem Befehl `desktop` starten; `graphical`
-  startet nach der Authentifizierung direkt die Desktop-Sitzung, sofern
-  ein Desktop installiert ist, und fällt andernfalls auf Text zurück.
+  Anmeldedienst für einen authentifizierten Benutzer startet.
+  `graphical` (die Vorgabe) startet nach der Authentifizierung direkt
+  die Desktop-Sitzung und fällt auf die Textanmeldung zurück, wenn die
+  Maschine keine ausführen kann; `text` startet die Shell des Kontos —
+  der Desktop lässt sich weiterhin bei Bedarf mit dem Befehl `desktop`
+  starten.
 - `cache.all` — `on` oder `off`: der Haupt-Caching-Schalter. `on` (die
   Vorgabe) lässt jede Cache-Klasse unten ihrer eigenen Einstellung
   folgen; `off` ist eine Obergrenze, die jeden Speicher-Cache

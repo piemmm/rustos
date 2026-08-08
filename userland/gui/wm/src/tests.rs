@@ -4334,3 +4334,69 @@ fn the_accelerated_scene_carries_the_desktop_layer_beneath_the_windows() {
     let win = &display.layers[2];
     assert_eq!((win.width, win.height, win.dst_x, win.dst_y), (4, 4, 2, 2));
 }
+
+#[test]
+fn a_new_mode_is_adopted_whole_and_keeps_the_served_windows() {
+    // A desktop resumed onto a different monitor keeps its apps.
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    c.composite();
+
+    assert!(c.set_mode(mode(32, 24)));
+
+    assert_eq!(c.mode(), mode(32, 24));
+    assert_eq!(c.screen_rect(), Rect::new(0, 0, 32, 24));
+    assert_eq!(c.frame().len(), 32 * 4 * 24);
+    assert!(c.window(win).is_some(), "the served window survives");
+    // The whole new screen is damaged, so the first frame after a re-mode is
+    // complete rather than a patch of the old one.
+    let damage = c.composite();
+    assert_eq!(damage.bounds(), Rect::new(0, 0, 32, 24));
+    assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 30, 22), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_window_outside_the_smaller_new_screen_is_clipped_not_lost() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(20, 20), opaque(8, 8, RED));
+
+    assert!(c.set_mode(mode(16, 16)));
+
+    assert!(c.window(win).is_some());
+    c.composite();
+    assert_eq!(frame_pixel(&c, 15, 15), [0, 0, 255, 255]);
+}
+
+#[test]
+fn re_adopting_the_same_mode_costs_nothing_and_changes_nothing() {
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    c.composite();
+
+    assert!(c.set_mode(mode(16, 16)));
+
+    // No damage was raised, so an unchanged mode does not force a full
+    // repaint of a screen that already holds the right pixels.
+    assert!(c.composite().bounds().is_empty());
+}
+
+#[test]
+fn a_mode_that_cannot_be_drawn_is_refused_and_leaves_the_compositor_intact() {
+    let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
+    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    c.composite();
+
+    // A stride too small for one scanline, and an extent with no pixels:
+    // both leave the old mode in force rather than half-adopting one the
+    // compositor would scan out as garbage.
+    let short_stride = DisplayMode {
+        stride_bytes: 8,
+        ..mode(16, 16)
+    };
+    assert!(!c.set_mode(short_stride));
+    assert!(!c.set_mode(mode(0, 16)));
+
+    assert_eq!(c.mode(), mode(16, 16));
+    assert_eq!(c.frame().len(), 16 * 4 * 16);
+    assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+}

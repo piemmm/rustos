@@ -379,14 +379,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Len,
         ],
         ret: AbiType::U64,
-        // Spawning a process materialises a new principal and hands it
-        // the CPU, so it is privileged rather than ambient (no ambient authority). It is a security-relevant state
-        // change — a new process appears — so unlike the high-volume
-        // data movers it IS audited per call; the
-        // `ProcessSpawn*` events the spawn caller already emits cover the
-        // decision, and the dispatcher's per-call record attributes the
-        // request to the caller.
-        required_capability: Some(CapabilityId::PROC_SPAWN),
+        // Which authority a spawn needs depends on its attach block, which
+        // only the handler decodes: a canonical parser-sandbox block needs
+        // `CAP_SANDBOX_SPAWN`, every other spawn needs `CAP_PROC_SPAWN`
+        // (which subsumes the narrow one). The dispatcher therefore applies
+        // no blanket gate — the `fs_read`/`CAP_FS_ACCESS` precedent
+        // `stream_write` follows — and the handler refuses a caller holding
+        // neither before it stages the block. Spawning is still a
+        // security-relevant state change, so unlike the high-volume data
+        // movers it IS audited per call; the `ProcessSpawn*` events the
+        // spawn path emits cover the decision, and the dispatcher's per-call
+        // record attributes the request to the caller.
+        required_capability: None,
         audit: true,
     },
     SyscallSpec {
@@ -2842,10 +2846,13 @@ mod tests {
         let pipe_create = spec_for(SyscallNumber::PIPE_CREATE).unwrap();
         assert_eq!(pipe_create.required_capability, None);
         assert!(!pipe_create.audit, "pipe_create must not audit per call");
-        // spawn is gated on CAP_PROC_SPAWN and audited per call — a new
-        // process is a security-relevant state change.
+        // spawn carries no dispatcher gate: the authority it needs depends on
+        // its attach block, which only the handler decodes (a canonical
+        // parser-sandbox block needs CAP_SANDBOX_SPAWN, every other spawn
+        // needs CAP_PROC_SPAWN). It is still audited per call — a new process
+        // is a security-relevant state change.
         let spawn = spec_for(SyscallNumber::SPAWN).unwrap();
-        assert_eq!(spawn.required_capability, Some(CapabilityId::PROC_SPAWN));
+        assert_eq!(spawn.required_capability, None);
         assert!(spawn.audit, "spawn must be audited");
         // mem_map / mem_unmap grow and shrink the caller's OWN
         // hardware-isolated address space, so they are the unprivileged

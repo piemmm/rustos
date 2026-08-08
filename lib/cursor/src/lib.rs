@@ -20,9 +20,10 @@
 //!
 //! [`CursorTheme`] binds one [`VectorCursor`] to each [`CursorKind`];
 //! [`CursorRegistry`] holds the available sets and the active one and lets
-//! the running system swap the whole pointer look at runtime. The window
-//! manager resolves a kind to a cursor, rasterises it at the display scale,
-//! and blits the resulting [`CursorImage`] so its hotspot tracks the pointer.
+//! the running system swap the whole pointer look at runtime. A screen
+//! resolves a kind to a cursor, rasterises it at the display scale, and
+//! places the resulting [`CursorImage`] as a [`PlacedCursor`], which puts
+//! the hotspot on the pointer and samples the artwork for a draw loop.
 //!
 //! ```
 //! use tairix_cursor::{CursorRegistry, CursorImage};
@@ -46,6 +47,7 @@
 extern crate alloc;
 
 pub mod load;
+pub mod placed;
 pub mod raster;
 pub mod registry;
 pub mod svg;
@@ -56,6 +58,7 @@ pub mod vector;
 mod tests;
 
 pub use load::{CursorAssetSource, CURSOR_KINDS};
+pub use placed::PlacedCursor;
 pub use raster::CursorImage;
 pub use registry::{CursorRegistry, CursorRegistryError, CursorSetId};
 pub use svg::decode as decode_svg;

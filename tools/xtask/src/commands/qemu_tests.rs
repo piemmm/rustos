@@ -604,10 +604,10 @@ const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
 /// The login + desktop-command dialogue the autoload vertical types at
 /// the seat keyboard: the fixture account's username and password
 /// (`root`/`root`), then the `desktop` command word at the text shell's
-/// prompt — login has no session selector (`os.loginType` defaults to
-/// text), so the authenticated session is the shell and the desktop is
-/// started exactly as a user starts it, by typing `desktop` (the system
-/// app store's `desktop.app`, the bundle a graphical login also spawns).
+/// prompt — the disk plants `os.loginType text`, so the authenticated
+/// session is the shell and the desktop is started exactly as a user
+/// starts it, by typing `desktop` (the system app store's `desktop.app`,
+/// the bundle a graphical login also spawns).
 /// Pinned against the fixture credentials below so the dialogue and the
 /// planted account cannot drift; a renamed bundle makes the vertical
 /// time out loudly at the `FIRST_PRESENT` gate, never pass on the wrong
@@ -5309,7 +5309,7 @@ static TESTS: &[QemuTest] = &[
     // D7d-2 grows the run into the desktop launch: after the unlock, the
     // second typed step (keyed on the `UsersDbLoaded` serial witness)
     // types the fixture account's `root`/`root` at login's video-console
-    // prompt — `os.loginType` defaults to text, so login drops to the
+    // prompt — the disk plants `os.loginType text`, so login drops to the
     // account's shell — and then the `desktop` command word, which the
     // shell resolves in the system application store and spawns: the desktop is
     // started exactly the way a user starts it from the command line.
@@ -6465,8 +6465,9 @@ fn library_plant(
 /// captures the set by value without borrowing the build context.
 #[derive(Copy, Clone)]
 pub(crate) struct StoreSet {
-    /// The application/service bundles the encrypted-root plants lay on the
-    /// read-only `/System` volume.
+    /// The application/service bundles the encrypted-root, ping, and autoload
+    /// plants lay on the read-only `/System` volume; the autoload set
+    /// additionally carries a planted `system.conf` asking for the text login.
     apps: &'static [AppStoreFile],
     /// The memsoak-augmented application set the memory-stability vertical
     /// plants.
@@ -6526,9 +6527,13 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     // build.
     let profile = tairix_mkimage::ImageProfile::Debug;
     let apps = match t.fs_disk {
-        FsDisk::EncryptedRootDisk | FsDisk::AutoloadRootDisk | FsDisk::PingRootDisk => {
+        FsDisk::EncryptedRootDisk | FsDisk::PingRootDisk => {
             super::image_apps::app_store_files(ctx, arch, profile)?
         }
+        // The autoload disk brings up a display, so it would meet the
+        // graphical login screen; its scripts drive a shell, so it plants a
+        // store asking for the text prompt outright.
+        FsDisk::AutoloadRootDisk => super::image_apps::autoload_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let apps_with_memsoak = match t.fs_disk {

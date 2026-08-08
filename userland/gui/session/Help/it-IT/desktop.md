@@ -15,10 +15,10 @@ il desktop composito — il gestore delle finestre e la barra delle
 applicazioni — finché la sessione non termina. Il comando ritorna
 quando la sessione del desktop termina.
 
-Lo stesso desktop parte automaticamente dopo l'autenticazione quando
-l'amministratore ha configurato un accesso grafico
-(`configure os.loginType graphical`); questo comando lo avvia su
-richiesta da una shell testuale.
+Lo stesso desktop parte automaticamente dopo l'autenticazione: un
+accesso grafico (`os.loginType`) è il valore predefinito su una macchina
+in grado di eseguirlo. Questo comando lo avvia su richiesta da una shell
+testuale.
 
 Quando nessun servizio di visualizzazione è in esecuzione, o un'altra
 sessione detiene già la postazione, il comando fallisce scrivendo il

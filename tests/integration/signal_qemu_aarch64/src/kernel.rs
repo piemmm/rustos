@@ -37,7 +37,7 @@ use tairix_kernel_core::{
     drain_pending_foreground, install_foreground_signal, intake_enable, intake_take,
     reschedule_current, spawn_image, spawn_user_kthread, ConsoleDevice, ConsoleInput,
     KernelProcessSignal, KernelProcessWait, ProcessSignal, ProcessWait, RescheduleAction,
-    SpawnRequest, Yielder, NULL_CONSOLE, NULL_CONSOLE_READ,
+    SpawnMode, SpawnRequest, Yielder, NULL_CONSOLE, NULL_CONSOLE_READ,
 };
 use tairix_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
@@ -460,6 +460,7 @@ fn build_el0_space(
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

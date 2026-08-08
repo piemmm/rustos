@@ -18,7 +18,7 @@ use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use tairix_kernel_core::{spawn_image, MemMap, SpawnRequest};
+use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
     PhysAddr, UserStack,
@@ -473,6 +473,7 @@ fn run_round_trip() -> ! {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

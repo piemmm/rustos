@@ -45,6 +45,11 @@ pub use tairix_abi::font_ipc::FamilyKey;
 /// never a new size literal at a draw site.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TextRole {
+    /// A whole-screen display readout — the one line a full-screen surface is
+    /// built around, such as the clock on the lock and login screens. Several
+    /// times body size, so it dominates the screen at a glance from across a
+    /// room rather than merely leading a panel.
+    Display,
     /// A panel or dialog heading — the largest text in a surface.
     Heading,
     /// The primary line of a list item, task, or job: an app or file name.
@@ -68,7 +73,8 @@ pub enum TextRole {
 impl TextRole {
     /// Every role, in descending nominal size — the order the ladder is
     /// authored and tested in.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
+        Self::Display,
         Self::Heading,
         Self::ItemTitle,
         Self::WindowTitle,
@@ -87,14 +93,15 @@ impl TextRole {
     /// miss.
     const fn index(self) -> usize {
         match self {
-            Self::Heading => 0,
-            Self::ItemTitle => 1,
-            Self::WindowTitle => 2,
-            Self::Body => 3,
-            Self::Metric => 4,
-            Self::Caption => 5,
-            Self::SectionHeader => 6,
-            Self::Monospace => 7,
+            Self::Display => 0,
+            Self::Heading => 1,
+            Self::ItemTitle => 2,
+            Self::WindowTitle => 3,
+            Self::Body => 4,
+            Self::Metric => 5,
+            Self::Caption => 6,
+            Self::SectionHeader => 7,
+            Self::Monospace => 8,
         }
     }
 }
@@ -138,7 +145,15 @@ struct Rung {
 /// The percentages are measured from the reference boards, where a button
 /// label, an item title, and its detail line sit within one point of each
 /// other and the weight — not the size — carries most of the hierarchy.
-const LADDER: [Rung; 8] = [
+const LADDER: [Rung; 9] = [
+    // The one deliberate break from that tight cluster: a screen-filling
+    // readout carries its hierarchy on size alone, and stays regular-weight so
+    // it reads light rather than heavy at that size.
+    Rung {
+        role: TextRole::Display,
+        percent: 250,
+        weight: FontWeight::Regular,
+    },
     Rung {
         role: TextRole::Heading,
         percent: 133,
@@ -191,7 +206,7 @@ pub struct Fonts {
     ui_family: FamilyKey,
     monospace_family: FamilyKey,
     base_size_px: u16,
-    specs: [FontSpec; 8],
+    specs: [FontSpec; 9],
 }
 
 impl Fonts {
@@ -204,8 +219,9 @@ impl Fonts {
 
     /// The largest base size a ladder may be authored at, in logical pixels.
     ///
-    /// The tallest rung is a third larger again; this bound keeps even that
-    /// rung within the rasteriser's cell-height ceiling at a high DPI scale.
+    /// The tallest rung ([`TextRole::Display`]) is two and a half times the
+    /// base; this bound keeps even that rung within the rasteriser's
+    /// cell-height ceiling at a high DPI scale.
     pub const MAX_BASE_SIZE_PX: u16 = 96;
 
     /// The ladder for `base_size_px` logical pixels of body text, drawn in

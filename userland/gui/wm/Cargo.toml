@@ -20,6 +20,11 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # once in `lib/geometry` and re-exported here, so the taskbar and apps — which
 # may not depend on the window manager — reuse the same vocabulary (§2.2).
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The scan-out encode: how large a frame is, which byte order the format
+# wants, and whether damage is a sub-region. Shared with the graphical login
+# screen, which may not depend on the window manager, so the pixel-exact
+# answers have one definition rather than two that can drift.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The shared desktop theme definition (§10): the compositor sources its
 # root background colour, and windows their corner radii, from the active
 # theme. `lib/theme` is the single source the taskbar and apps read too, so

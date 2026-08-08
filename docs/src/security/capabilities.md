@@ -14,8 +14,10 @@ revoked across a real session. The staged build plan behind this page is
 2. **Class capabilities (`CAP_*`)** — the coarse "may use this subsystem
    at all" gates (`lib/abi/src/capability.rs`): `CAP_FS_ACCESS` admits a
    caller to the filesystem syscalls, `CAP_PROC_SPAWN` to `spawn`, and so
-   on. They are checked at dispatch, before any state is touched, and
-   confer no reach by themselves.
+   on. They are checked before any state is touched — at dispatch, or as
+   the handler's first act where *which* capability is required depends on
+   the request's own content (`stream_write`'s console arm, `spawn`'s
+   sandbox mode) — and confer no reach by themselves.
 3. **Fine-grained authority** — the actual reach over any one object: the
    per-inode owner/mode/ACL/`required_cap` model for files, per-resource
    device grants for drivers, the per-fd descriptor table for streams. A
@@ -75,6 +77,17 @@ Both shapes ride on `SpawnCredential`: the ceiling is an immutable
 kernel-side snapshot on the task record, never a caller-supplied value,
 so delegation can only narrow. Every derivation emits the
 `TaskCapabilitiesDerived` audit event carrying the derived count.
+
+*Which* capability admits the spawn at all is decided by the attach block
+rather than at dispatch. A caller holding neither `CAP_PROC_SPAWN` nor the
+narrow `CAP_SANDBOX_SPAWN` is refused before any work; then a canonical
+parser-sandbox block (capability-empty child, no credential switch, no
+console inherit) is admitted by *either*, while every other spawn requires
+`CAP_PROC_SPAWN`. The narrow capability lets a principal decode untrusted
+input in an isolated worker without also holding the authority to start a
+general process — the graphical login screen holds it and nothing else
+does, because `CAP_PROC_SPAWN` already subsumes it
+([The parser sandbox](./sandbox.md)).
 
 The one **object-grained** delegation beside spawn is the user-mediated
 file hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,

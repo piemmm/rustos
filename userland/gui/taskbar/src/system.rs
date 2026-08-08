@@ -15,7 +15,10 @@
 //! Nothing here holds or checks authority. A row renders permitted only
 //! because a process that *does* hold the authority attested to it, and a
 //! row whose backing is absent renders non-actionable with a stated reason
-//! rather than being offered and then failing.
+//! rather than being offered and then failing. The one exception is a
+//! command the machine does not *have* — fast user switching on a desktop
+//! no session authority started — where there is no refusal to explain and
+//! the row is left out entirely ([`SystemRow::offered_by`]).
 
 use tairix_controls::{ActivityState, AuthorityState, ControlRole, ControlState, MenuItem};
 use tairix_theme::Appearance;
@@ -37,6 +40,9 @@ pub enum SystemAction {
     /// Secure the screen behind this user's password, leaving the session
     /// and everything running in it untouched.
     Lock,
+    /// Step this session aside so somebody else can log in, leaving it live
+    /// and resumable.
+    SwitchUser,
     /// End this desktop session and return to the login prompt.
     LogOut,
     /// Restart the machine.
@@ -59,6 +65,21 @@ pub struct SystemRow {
     pub role: ControlRole,
 }
 
+impl SystemRow {
+    /// Whether `permits` offers this row at all.
+    ///
+    /// Only [`SystemAction::SwitchUser`] is conditional, and it is absent
+    /// rather than refused: switching away needs a session authority to
+    /// step aside *to* and to be woken back by, and a desktop with none has
+    /// no such facility to explain the absence of. Every other row is a
+    /// thing this desktop plainly can do, so a missing backing is stated as
+    /// a reason on a rendered row instead.
+    #[must_use]
+    pub const fn offered_by(&self, permits: SystemPermits) -> bool {
+        !matches!(self.action, SystemAction::SwitchUser) || permits.switch_user_available
+    }
+}
+
 /// The catalog identifier of the terminal bundle the *Task Shell* row
 /// launches.
 ///
@@ -75,7 +96,8 @@ pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
 /// changing how it looks, then securing, leaving, or stopping it. The two
 /// power rows are destructive and confirmed; nothing above them is. Locking
 /// heads the last group because it is the one way out of the session that
-/// keeps the session — everything below it ends work in progress.
+/// keeps the session, and switching away follows it as the other —
+/// everything below them ends work in progress.
 pub const ROWS: &[SystemRow] = &[
     SystemRow {
         action: SystemAction::About,
@@ -111,6 +133,12 @@ pub const ROWS: &[SystemRow] = &[
         action: SystemAction::Lock,
         label: "Lock Screen",
         group_break: true,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
+        action: SystemAction::SwitchUser,
+        label: "Switch User…",
+        group_break: false,
         role: ControlRole::Neutral,
     },
     SystemRow {
@@ -163,6 +191,7 @@ pub const REASON_NO_UNLOCK_PROMPT: &str = "This session has no password prompt t
 /// told. Every field defaults to the refusing answer, so a menu built
 /// before anything has been attested offers nothing it cannot deliver.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Independent yes/no attestations, one per backing; naming each is the clarity.
 pub struct SystemPermits {
     /// The appearance the desktop is showing right now, so the matching row
     /// is marked as the one in use.
@@ -177,18 +206,32 @@ pub struct SystemPermits {
     /// screen — that is, whether it runs on a console whose login
     /// supervisor can be asked to re-verify the signed-in user.
     pub lock_available: bool,
+    /// Whether this session can step aside for another user — that is,
+    /// whether it holds the wake mailbox a session authority would resume
+    /// it through.
+    pub switch_user_available: bool,
+}
+
+/// The rows `permits` offers, in [`ROWS`] order.
+///
+/// The one filter both the rendered rows and the row → command mapping read,
+/// so a hidden row can never still be clickable at its old index.
+fn offered(permits: SystemPermits) -> impl Iterator<Item = &'static SystemRow> {
+    ROWS.iter().filter(move |row| row.offered_by(permits))
 }
 
 /// Build the menu's rows for `permits`.
 ///
-/// Every row in [`ROWS`] is rendered, in order: a command whose backing is
-/// missing is shown non-actionable with the reason stated, never hidden and
-/// never silently offered. Hiding it would leave the user guessing why the
-/// desktop cannot do something it plainly should; offering it would promise
-/// an action that cannot happen.
+/// Every offered row is rendered, in [`ROWS`] order: a command whose
+/// backing is missing is shown non-actionable with the reason stated, never
+/// hidden and never silently offered. Hiding it would leave the user
+/// guessing why the desktop cannot do something it plainly should; offering
+/// it would promise an action that cannot happen. A facility the machine
+/// does not have at all ([`SystemRow::offered_by`]) is the exception and is
+/// not rendered.
 #[must_use]
 pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
-    ROWS.iter()
+    offered(permits)
         .map(|row| {
             let item = MenuItem::new(row.label)
                 .with_group_break(row.group_break)
@@ -216,9 +259,13 @@ pub fn rows(permits: SystemPermits) -> alloc::vec::Vec<MenuItem> {
         .collect()
 }
 
-/// The command the row at `index` asks for, or `None` for an index the
-/// table does not name (fail closed — never guess at a command).
+/// The command the row at `index` of the menu built for `permits` asks for,
+/// or `None` for an index that menu does not name (fail closed — never guess
+/// at a command).
+///
+/// Indexed over the rows `permits` actually offers, exactly as [`rows`]
+/// renders them, so a row left out shifts the commands below it here too.
 #[must_use]
-pub fn action_at(index: usize) -> Option<SystemAction> {
-    ROWS.get(index).map(|row| row.action)
+pub fn action_at(permits: SystemPermits, index: usize) -> Option<SystemAction> {
+    offered(permits).nth(index).map(|row| row.action)
 }

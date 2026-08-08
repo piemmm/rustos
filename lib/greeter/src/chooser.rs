@@ -1,0 +1,460 @@
+//! The account chooser: the tiles a login screen offers, the one grid
+//! geometry its paint and its hit test share, and the focus model that keeps
+//! it operable with no pointer at all.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use tairix_controls::{ControlState, FocusState, IconTile, PointerState, SelectionState};
+use tairix_font::BitmapFont;
+use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::IconKind;
+use tairix_input::{InputEvent, PointerButton};
+use tairix_raster::{Color, Surface};
+use tairix_theme::{Rgba, TextRole, Theme};
+
+use crate::layout::{centre_on, down, Column, CHOOSER_HINT_GAP, NOTICE_BAND, SIDE_MARGIN};
+
+/// The trailing tile that leads to a typed login name.
+pub(crate) const OTHER_LABEL: &str = "Other…";
+
+/// The mark on the trailing tile's disc — the ellipsis its label ends with.
+///
+/// It wears a disc like every account so it reads as a peer of them rather
+/// than as a leftover, in the quiet plate colours rather than the accent, so
+/// it is still plainly not one of the listed people.
+pub(crate) const OTHER_MONOGRAM: char = '\u{2026}';
+
+/// The monogram drawn for an account whose name yields no character.
+pub(crate) const FALLBACK_MONOGRAM: char = '?';
+
+/// One tile's width in pixels at the reference density.
+pub(crate) const TILE_WIDTH: u32 = 132;
+
+/// One tile's height in pixels at the reference density: the monogram disc
+/// and the name under it.
+pub(crate) const TILE_HEIGHT: u32 = 148;
+
+/// The gap between tiles in pixels at the reference density.
+pub(crate) const TILE_GAP: u32 = 12;
+
+/// One selectable account on the chooser.
+///
+/// It carries only what is drawn. There is no credential material here, no
+/// capability set, and no home path: an unauthenticated screen is shown this
+/// list, so anything it holds is something an onlooker can read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountTile {
+    display_name: String,
+    login_name: String,
+    live: bool,
+}
+
+impl AccountTile {
+    /// A tile for `login_name`, labelled `display_name`.
+    ///
+    /// An empty display name falls back to the login name, so an account the
+    /// authority could not describe still reads as itself rather than as a
+    /// blank tile.
+    #[must_use]
+    pub fn new(display_name: &str, login_name: &str) -> Self {
+        let shown = if display_name.is_empty() {
+            login_name
+        } else {
+            display_name
+        };
+        Self {
+            display_name: shown.to_string(),
+            login_name: login_name.to_string(),
+            live: false,
+        }
+    }
+
+    /// This tile marked as already having a session running behind the login
+    /// screen, which the chooser badges.
+    #[must_use]
+    pub fn with_live_session(mut self, live: bool) -> Self {
+        self.live = live;
+        self
+    }
+
+    /// The name shown on the tile.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// The login name a secret is asked for once this tile is chosen.
+    #[must_use]
+    pub fn login_name(&self) -> &str {
+        &self.login_name
+    }
+
+    /// Whether this account already has a session running.
+    #[must_use]
+    pub fn has_live_session(&self) -> bool {
+        self.live
+    }
+
+    /// The character on the tile's disc: the first of the shown name,
+    /// uppercased, or a fallback glyph when there is no name at all.
+    #[must_use]
+    pub fn monogram(&self) -> char {
+        monogram_of(&self.display_name)
+    }
+}
+
+/// The disc mark for `name`: its first character uppercased, or
+/// [`FALLBACK_MONOGRAM`] when there is nothing to take one from.
+///
+/// Shared by the chooser's tiles and the prompt's larger disc, so the person
+/// sees the same mark before and after picking an account. A scalar whose
+/// uppercase form is several characters (`ß`) contributes the first of them,
+/// since only one is drawn.
+pub(crate) fn monogram_of(name: &str) -> char {
+    name.chars().next().map_or(FALLBACK_MONOGRAM, |ch| {
+        ch.to_uppercase().next().unwrap_or(ch)
+    })
+}
+
+/// The chooser's tiles and where the keyboard is.
+///
+/// Slot `accounts.len()` is the `Other…` tile: it is always present and
+/// always last, so an account the authority did not list — or a machine with
+/// no accounts to list at all — is still reachable by typing a name.
+pub(crate) struct Chooser {
+    accounts: Vec<AccountTile>,
+    focus: usize,
+    armed: Option<usize>,
+    pointer: Point,
+}
+
+impl Chooser {
+    pub(crate) fn new(accounts: Vec<AccountTile>) -> Self {
+        Self {
+            accounts,
+            focus: 0,
+            armed: None,
+            pointer: Point::ORIGIN,
+        }
+    }
+
+    /// The tiles, `Other…` included.
+    pub(crate) fn slots(&self) -> usize {
+        self.accounts.len().saturating_add(1)
+    }
+
+    /// The slot the keyboard is on.
+    pub(crate) fn focus(&self) -> usize {
+        self.focus
+    }
+
+    /// The account at `slot`, or `None` for the `Other…` tile.
+    pub(crate) fn account(&self, slot: usize) -> Option<&AccountTile> {
+        self.accounts.get(slot)
+    }
+
+    /// Move the keyboard on by `step` slots, wrapping at both ends so a
+    /// keyboard-only user never falls off the end of the row.
+    pub(crate) fn move_focus(&mut self, step: Step) -> bool {
+        let slots = self.slots();
+        let next = match step {
+            Step::Next => self.focus.saturating_add(1) % slots,
+            Step::Previous => self.focus.checked_sub(1).unwrap_or(slots - 1),
+        };
+        self.focus_on(next)
+    }
+
+    /// Put the keyboard on `slot`, ignoring a slot that does not exist.
+    pub(crate) fn focus_on(&mut self, slot: usize) -> bool {
+        if slot >= self.slots() || slot == self.focus {
+            return false;
+        }
+        self.focus = slot;
+        true
+    }
+
+    /// How many tiles sit in one row on `screen`, never fewer than one.
+    ///
+    /// As many as the screen holds inside its side margins, so the accounts
+    /// stay one centred row and wrap into a grid only when they must.
+    fn columns(&self, screen: Rect, scale: Scale) -> usize {
+        let gap = scale.scale_length(TILE_GAP);
+        let stride = scale.scale_length(TILE_WIDTH).saturating_add(gap).max(1);
+        let room = screen
+            .width
+            .saturating_sub(scale.scale_length(SIDE_MARGIN).saturating_mul(2));
+        let fits = room.saturating_add(gap) / stride;
+        usize::try_from(fits).unwrap_or(1).clamp(1, self.slots())
+    }
+
+    /// The tile grid's own width and height on `screen`.
+    fn grid_size(&self, screen: Rect, scale: Scale) -> (u32, u32) {
+        let columns = self.columns(screen, scale);
+        let rows = self.slots().div_ceil(columns);
+        let gap = scale.scale_length(TILE_GAP);
+        (
+            span(columns, scale.scale_length(TILE_WIDTH), gap).min(screen.width),
+            span(rows, scale.scale_length(TILE_HEIGHT), gap).min(screen.height),
+        )
+    }
+
+    /// The whole chooser body: the grid and the hint line under it, which is
+    /// what the shared column centres in the space below the chrome.
+    pub(crate) fn body_height(&self, screen: Rect, scale: Scale) -> u32 {
+        self.grid_size(screen, scale)
+            .1
+            .saturating_add(scale.scale_length(CHOOSER_HINT_GAP))
+            .saturating_add(scale.scale_length(NOTICE_BAND))
+    }
+
+    /// The rectangle the whole grid covers on `screen`.
+    ///
+    /// The one definition of where the chooser is: the paint, the pointer hit
+    /// test, and the damage report all read it, so they cannot drift apart.
+    pub(crate) fn bounds(&self, screen: Rect, scale: Scale) -> Rect {
+        let (w, h) = self.grid_size(screen, scale);
+        let column = Column::new(screen, scale, self.body_height(screen, scale));
+        Rect::new(
+            centre_on(screen.origin.x, screen.width, w),
+            column.body_top,
+            w,
+            h,
+        )
+    }
+
+    /// The full-width band the chooser's one hint line sits in, under the
+    /// grid.
+    pub(crate) fn hint_rect(&self, screen: Rect, scale: Scale) -> Rect {
+        let grid = self.bounds(screen, scale);
+        Rect::new(
+            screen.origin.x,
+            down(
+                down(grid.origin.y, grid.height),
+                scale.scale_length(CHOOSER_HINT_GAP),
+            ),
+            screen.width,
+            scale.scale_length(NOTICE_BAND),
+        )
+    }
+
+    /// Where tile `slot` sits on `screen`, or `None` for a slot the chooser
+    /// does not have. A short final row is centred under the ones above it.
+    pub(crate) fn tile_rect(&self, slot: usize, screen: Rect, scale: Scale) -> Option<Rect> {
+        let slots = self.slots();
+        if slot >= slots {
+            return None;
+        }
+        let columns = self.columns(screen, scale);
+        let grid = self.bounds(screen, scale);
+        let tile_w = scale.scale_length(TILE_WIDTH);
+        let tile_h = scale.scale_length(TILE_HEIGHT);
+        let gap = scale.scale_length(TILE_GAP);
+        let row = slot / columns;
+        let column = slot % columns;
+        let row_w = span(
+            slots.saturating_sub(row * columns).min(columns),
+            tile_w,
+            gap,
+        );
+        let stride = |steps: usize, extent: u32| {
+            u32::try_from(steps)
+                .unwrap_or(0)
+                .saturating_mul(extent.saturating_add(gap))
+        };
+        Some(Rect::new(
+            advance(
+                centre_on(grid.origin.x, grid.width, row_w),
+                stride(column, tile_w),
+            ),
+            advance(grid.origin.y, stride(row, tile_h)),
+            tile_w,
+            tile_h,
+        ))
+    }
+
+    /// The slot under `point`, tested against the very rectangles the paint
+    /// draws into.
+    pub(crate) fn hit(&self, point: Point, screen: Rect, scale: Scale) -> Option<usize> {
+        (0..self.slots()).find(|&slot| {
+            self.tile_rect(slot, screen, scale)
+                .is_some_and(|rect| rect.contains(point))
+        })
+    }
+
+    /// Track the pointer and report the slot a completed primary click
+    /// activated.
+    ///
+    /// A press arms the tile under the pointer and a release over that same
+    /// tile activates it, so a press that slides off before it is let go
+    /// chooses nothing.
+    pub(crate) fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        screen: Rect,
+        scale: Scale,
+    ) -> (Option<usize>, bool) {
+        match event {
+            InputEvent::PointerMoved { to } => {
+                self.pointer = *to;
+                let over = self.hit(*to, screen, scale);
+                (None, over.is_some_and(|slot| self.focus_on(slot)))
+            }
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            } => {
+                self.armed = self.hit(self.pointer, screen, scale);
+                if let Some(slot) = self.armed {
+                    self.focus_on(slot);
+                }
+                (None, self.armed.is_some())
+            }
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => {
+                let armed = self.armed.take();
+                let over = self.hit(self.pointer, screen, scale);
+                let chosen = armed.filter(|slot| Some(*slot) == over);
+                (chosen, armed.is_some())
+            }
+            _ => (None, false),
+        }
+    }
+
+    /// Paint every tile on `screen`.
+    pub(crate) fn render(&self, surface: &mut Surface, screen: Rect, scale: Scale, theme: &Theme) {
+        for slot in 0..self.slots() {
+            let Some(bounds) = self.tile_rect(slot, screen, scale) else {
+                continue;
+            };
+            let account = self.account(slot);
+            let tile = IconTile::new(
+                account.map_or(OTHER_LABEL, AccountTile::display_name),
+                IconKind::Generic,
+            )
+            .with_state(self.tile_state(slot));
+            let palette = theme.palette();
+            let (monogram, disc, ink) = match account {
+                Some(account) => (account.monogram(), palette.accent, palette.on_accent),
+                None => (OTHER_MONOGRAM, palette.surface_raised, palette.on_surface),
+            };
+            let artwork = monogram_disc(
+                monogram,
+                IconTile::icon_side(bounds, scale, theme),
+                BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
+                (disc, ink),
+            );
+            tile.render(surface, bounds, scale, theme, artwork.as_ref());
+            if account.is_some_and(AccountTile::has_live_session) {
+                paint_live_badge(surface, bounds, scale, theme);
+            }
+        }
+    }
+
+    /// The composed state tile `slot` draws in.
+    fn tile_state(&self, slot: usize) -> ControlState {
+        let focused = slot == self.focus();
+        ControlState::idle()
+            .with_selection(if focused {
+                SelectionState::Selected
+            } else {
+                SelectionState::Unselected
+            })
+            .with_pointer(if self.armed == Some(slot) {
+                PointerState::Pressed
+            } else {
+                PointerState::None
+            })
+            .with_focus(FocusState {
+                focused,
+                in_focus_field: true,
+            })
+    }
+}
+
+/// Which way [`Chooser::move_focus`] takes the keyboard.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Step {
+    /// On to the following slot, wrapping back to the first.
+    Next,
+    /// Back to the preceding slot, wrapping round to the last.
+    Previous,
+}
+
+/// The extent `count` tiles of `tile` pixels separated by `gap` cover.
+fn span(count: usize, tile: u32, gap: u32) -> u32 {
+    let count = u32::try_from(count).unwrap_or(0);
+    count
+        .saturating_mul(tile)
+        .saturating_add(count.saturating_sub(1).saturating_mul(gap))
+}
+
+/// `origin` moved on by `offset` pixels.
+fn advance(origin: i32, offset: u32) -> i32 {
+    origin.saturating_add(i32::try_from(offset).unwrap_or(i32::MAX))
+}
+
+/// A `side`×`side` disc bearing `monogram`, in the `(fill, ink)` colours the
+/// caller chose.
+///
+/// The one disc definition the chooser's tiles and the prompt's larger disc
+/// share, so the mark a person picks is the mark they then see. The caller
+/// chooses the text role `font` comes from, since a tile's disc and the
+/// prompt's larger one carry the mark at different sizes. Produced at exactly
+/// the side asked for, so it can never be scaled or cropped by whatever
+/// places it. `None` when there is no room for a picture at all, which leaves
+/// an icon tile drawing its fallback glyph.
+pub(crate) fn monogram_disc(
+    monogram: char,
+    side: u32,
+    font: BitmapFont,
+    (fill, ink): (Rgba, Rgba),
+) -> Option<Surface> {
+    if side == 0 {
+        return None;
+    }
+    let mut disc = Surface::new(side, side)?;
+    disc.fill_round_rect(0, 0, side, side, side / 2, Color::from(fill));
+
+    let mut encoded = [0u8; 4];
+    let text = &*monogram.encode_utf8(&mut encoded);
+    let width = font.text_width(text).min(side);
+    let height = font.line_height().min(side);
+    font.draw_text(
+        &mut disc,
+        i32::try_from((side - width) / 2).unwrap_or(0),
+        i32::try_from((side - height) / 2).unwrap_or(0),
+        text,
+        Color::from(ink),
+    );
+    Some(disc)
+}
+
+/// Mark a tile whose account already has a session running, in the tile
+/// vocabulary's own top-trailing signal corner.
+fn paint_live_badge(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let size = scale
+        .scale_length(theme.metrics().bead_size)
+        .max(3)
+        .min(bounds.width)
+        .min(bounds.height);
+    let Ok(x) = u32::try_from(bounds.origin.x) else {
+        return;
+    };
+    let Ok(y) = u32::try_from(bounds.origin.y) else {
+        return;
+    };
+    let bx = x
+        .saturating_add(bounds.width)
+        .saturating_sub(size)
+        .saturating_sub(pad);
+    surface.fill_round_rect(
+        bx,
+        y.saturating_add(pad),
+        size,
+        size,
+        size / 2,
+        Color::from(theme.palette().success),
+    );
+}

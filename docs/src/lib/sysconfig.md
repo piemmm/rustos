@@ -33,7 +33,7 @@ account can read the settings but not change them.
 
 | Key               | Values               | Consumer                                                        |
 |-------------------|----------------------|-----------------------------------------------------------------|
-| `os.loginType`    | `text` \| `graphical` | `login`: the boot-default session type (`text` keeps the prompt; `graphical` starts the desktop directly when one is available, degrading to text otherwise) |
+| `os.loginType`    | `text` \| `graphical` | `login`: the boot-default session type (`graphical`, the default, starts the desktop directly, degrading to the text prompt on a machine that cannot run one; `text` keeps the prompt) |
 | `cache.all`       | `on` \| `off`         | the kernel cache-admission control: the master caching switch / ceiling |
 | `cache.filesystem`| `auto` \| `off`       | the kernel filesystem cache (`kernel/core::fs::CachedFs`) |
 | `cache.block`     | `auto` \| `off`       | the kernel whole-disk block cache (`kernel/tairix-kernel::block_cache`) |

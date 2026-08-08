@@ -36,12 +36,14 @@ pub mod client;
 pub mod framebuffer;
 #[cfg(feature = "rt")]
 pub mod rt;
+pub mod scanout;
 pub mod server;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
 #[cfg(feature = "rt")]
 pub use rt::{RtShmMapper, RtShmRegion};
+pub use scanout::{scanout_len, sub_screen_damage, ChannelOrder};
 pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
 
 use tairix_abi::{DriverError, Errno};

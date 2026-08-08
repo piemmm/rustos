@@ -165,6 +165,7 @@ members = [
     "userland/system/init",
     "userland/system/appmgr",
     "userland/system/installer",
+    "userland/session/greeter",
     "userland/session/login",
     "userland/shell/elsh",
     "userland/shell/log",

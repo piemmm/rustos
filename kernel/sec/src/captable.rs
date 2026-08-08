@@ -919,6 +919,15 @@ impl TaskCapabilities {
     }
 }
 
+/// The task's effective set, read through the ABI-level query seam so a
+/// capability rule defined once (the spawn-mode gate in `kernel/core`) can be
+/// applied to a live caller without naming this type.
+impl tairix_abi::CapabilityQuery for TaskCapabilities {
+    fn holds(&self, cap: tairix_abi::CapabilityId) -> bool {
+        self.has(cap)
+    }
+}
+
 /// Per-task capability registry — the `TaskId → TaskCapabilities` lookup
 /// the syscall dispatcher consults to recover a caller's effective
 /// capability set after the per-CPU current-task slot

@@ -22,7 +22,8 @@ use tairix_arch_riscv64::{
 };
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
+    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
+    Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -269,6 +270,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

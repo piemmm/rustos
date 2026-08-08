@@ -15,9 +15,9 @@ gestionnaire de fenêtres et la barre des tâches — jusqu'à la fin de la
 session. La commande rend la main quand la session de bureau se
 termine.
 
-Le même bureau démarre automatiquement après l'authentification quand
-l'administrateur a configuré une connexion graphique
-(`configure os.loginType graphical`) ; cette commande le démarre à la
+Le même bureau démarre automatiquement après l'authentification : une
+connexion graphique (`os.loginType`) est la valeur par défaut sur une
+machine capable d'en exécuter une. Cette commande le démarre à la
 demande depuis un shell texte.
 
 Quand aucun service d'affichage ne tourne, ou qu'une autre session

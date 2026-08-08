@@ -21,7 +21,8 @@ use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
 use tairix_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
+    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
+    Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -300,6 +301,7 @@ fn run_resume() -> ! {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

@@ -4,9 +4,8 @@
 //! turned into a running session. The loop **fails closed**: it launches a session only when a user authenticates *and* their
 //! session starts, and it bounds the number of attempts so a stuck console
 //! can never spin forever. Which session runs is system policy, never a
-//! per-login prompt: the text shell by default, the graphical desktop when
-//! the administrator configured `os.loginType graphical` *and* a graphical
-//! session is available.
+//! per-login prompt: the graphical desktop by default when a graphical
+//! session is available, otherwise the account's text shell.
 
 use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -35,13 +34,13 @@ pub struct LoginConfig<'a> {
     pub graphical_available: bool,
     /// The administrator-configured session type (`os.loginType` in the
     /// system-configuration store, read by the binary after the root
-    /// unlock). [`SessionKind::Text`] — the default — starts the
-    /// authenticated account's shell; [`SessionKind::Graphical`] starts
-    /// the desktop directly after authentication — but only when
+    /// unlock). [`SessionKind::Graphical`] — the default — starts the
+    /// desktop directly after authentication, but only when
     /// [`graphical_available`](Self::graphical_available) holds, so a
-    /// graphical default on a headless system degrades to text, never an
-    /// error. There is no per-login prompt: a shell user starts the
-    /// desktop on demand with the `desktop` command.
+    /// headless system degrades to text, never an error;
+    /// [`SessionKind::Text`] starts the authenticated account's shell.
+    /// There is no per-login prompt: a shell user starts the desktop on
+    /// demand with the `desktop` command.
     pub session_default: SessionKind,
     /// Seam that presents the login screen and reads the user's input.
     pub view: &'a dyn LoginView,

@@ -5123,7 +5123,9 @@ impl ScriptedUnlocker {
 }
 
 impl Verifier for ScriptedUnlocker {
-    fn verify(&mut self, password: &str) -> Verdict {
+    /// The account name is ignored here as it is in the running desktop: the
+    /// lock re-authenticates the caller the kernel attests to.
+    fn verify(&mut self, _account: &str, password: &str) -> Verdict {
         self.offered.push(String::from(password));
         self.answers.pop().unwrap_or(Verdict::Refused)
     }
@@ -6422,19 +6424,6 @@ fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() 
     assert_eq!(comp.window_count(), before);
 }
 
-/// The pixel a window's retained content holds at `point`, for asserting
-/// what a repaint actually laid out rather than merely that it ran.
-fn pixel_at(comp: &Compositor, id: WindowId, point: Point) -> tairix_raster::Pixel {
-    let content = comp
-        .window(id)
-        .expect("the window is presented")
-        .content()
-        .expect("content is retained");
-    let x = u32::try_from(point.x).expect("the probe is on-surface");
-    let y = u32::try_from(point.y).expect("the probe is on-surface");
-    content.get(x, y).expect("the probe is within the surface")
-}
-
 /// Every session-owned surface reads the compositor's density rather than
 /// hard-coding its own, so a change to it is reflected in what each one
 /// lays out at its next repaint — not just that a repaint ran.
@@ -6481,26 +6470,49 @@ fn session_surfaces_adapt_to_display_scale() {
     );
 
     // 3. The lock's window is always the whole screen, so the density
-    // shows up in what gets laid out *inside* it instead: the panel
-    // grows enough to newly cover a point that was bare desktop
-    // background at the reference density.
+    // shows up in what gets laid out *inside* it instead. Asserted on the
+    // laid-out extent and on the whole rendered surface rather than on one
+    // chosen coordinate, which a later layout change could silently make
+    // meaningless.
     let mut lock = ScreenLock::new();
     assert!(lock.engage("user", &shell, &mut comp));
     let lock_id = locked_window(&comp);
-    let probe = Point::new(20, 200);
+    let screen = comp.screen_rect();
+
+    let block_100 = tairix_greeter::panel_rect(screen, Scale::ONE);
+    let block_200 = tairix_greeter::panel_rect(screen, scale_200);
+    assert!(
+        block_200.width > block_100.width && block_200.height > block_100.height,
+        "the prompt block is authored in logical pixels, so it grows with the density"
+    );
 
     assert!(comp.set_scale(Scale::ONE));
     lock.repaint(&shell, &mut comp);
-    let pixel_100 = pixel_at(&comp, lock_id, probe);
+    let frame_100 = lock_surface(&comp, lock_id);
 
     assert!(comp.set_scale(scale_200));
     lock.repaint(&shell, &mut comp);
-    let pixel_200 = pixel_at(&comp, lock_id, probe);
+    let frame_200 = lock_surface(&comp, lock_id);
 
     assert_ne!(
-        pixel_100, pixel_200,
-        "the panel's laid-out extent reaches this point only at the higher density"
+        frame_100, frame_200,
+        "the density reaches the pixels the lock actually paints"
     );
+}
+
+/// Every pixel `id`'s retained content holds, so a test can compare two
+/// renders whole instead of guessing a coordinate that discriminates them.
+fn lock_surface(comp: &Compositor, id: WindowId) -> Vec<tairix_raster::Pixel> {
+    let content = comp
+        .window(id)
+        .expect("the window is presented")
+        .content()
+        .expect("content is retained");
+    let width = content.width();
+    (0..content.height())
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .map(|(x, y)| content.get(x, y).expect("the walk stays on-surface"))
+        .collect()
 }
 
 /// `desktop_info` answers with the compositor's own screen rectangle,

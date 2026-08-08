@@ -69,7 +69,10 @@ pub enum DbLoad {
 /// `run_round` runs one prompt → authenticate → launch round against the
 /// supplied authenticator and returns `true` to open another round or
 /// `false` when the console is dead and the supervisor should return
-/// (PID 1 relaunches `login`).
+/// (PID 1 relaunches `login`). It also receives the round's database, so a
+/// graphical round can list the machine's login-able accounts for the
+/// login screen without a second read; [`None`] on a round with no
+/// database, whose deny-all authenticator refuses every credential anyway.
 ///
 /// A [`DbLoad::Present`] round wires a [`UsersAuthenticator`]; a
 /// [`DbLoad::Absent`] round wires the fail-closed [`DenyAll`]. Reloading per round — rather than once at process start — is
@@ -80,7 +83,7 @@ pub fn supervise<L, W, R>(mut load_db: L, mut wait: W, mut run_round: R)
 where
     L: FnMut() -> DbLoad,
     W: FnMut(),
-    R: FnMut(&dyn Authenticator) -> bool,
+    R: FnMut(&dyn Authenticator, Option<&UsersDb>) -> bool,
 {
     let deny = DenyAll;
     loop {
@@ -91,12 +94,12 @@ where
             // task off the run queue.
             DbLoad::Pending => wait(),
             DbLoad::Present(db) => {
-                if !run_round(&UsersAuthenticator::new(&db)) {
+                if !run_round(&UsersAuthenticator::new(&db), Some(&db)) {
                     return;
                 }
             }
             DbLoad::Absent => {
-                if !run_round(&deny) {
+                if !run_round(&deny, None) {
                     return;
                 }
             }
@@ -161,7 +164,7 @@ mod tests {
                 }
             },
             || waits.set(waits.get() + 1),
-            |authenticator| {
+            |authenticator, _db| {
                 let accepted = authenticator
                     .authenticate(&Credentials {
                         username: "root",
@@ -189,7 +192,7 @@ mod tests {
         supervise(
             || DbLoad::Absent,
             || waits.set(waits.get() + 1),
-            |authenticator| {
+            |authenticator, _db| {
                 denied.set(
                     authenticator
                         .authenticate(&Credentials {
@@ -225,7 +228,7 @@ mod tests {
                 }
             },
             || {},
-            |authenticator| {
+            |authenticator, _db| {
                 let round = calls.get();
                 calls.set(round + 1);
                 let accepted = authenticator
@@ -241,6 +244,41 @@ mod tests {
         assert_eq!(outcomes.into_inner(), vec![false, true]);
     }
 
+    /// The round is handed the same database its authenticator verifies
+    /// against, so a graphical round lists exactly the accounts that round
+    /// could authenticate — never a separately-read, possibly stale one.
+    #[test]
+    fn the_round_receives_the_database_it_authenticates_against() {
+        let seen = RefCell::new(vec![]);
+        supervise(
+            || DbLoad::Present(db()),
+            || {},
+            |_authenticator, database| {
+                seen.borrow_mut()
+                    .push(database.map(|db| db.records().len()));
+                false
+            },
+        );
+        assert_eq!(seen.into_inner(), vec![Some(1)]);
+    }
+
+    /// A round with no database is told so, rather than being handed an
+    /// invented empty one it could not tell apart from a real machine with
+    /// no accounts.
+    #[test]
+    fn a_round_with_no_database_is_handed_none() {
+        let seen = RefCell::new(vec![]);
+        supervise(
+            || DbLoad::Absent,
+            || {},
+            |_authenticator, database| {
+                seen.borrow_mut().push(database.is_some());
+                false
+            },
+        );
+        assert_eq!(seen.into_inner(), vec![false]);
+    }
+
     /// A console that dies on its first round returns immediately without
     /// reloading again — `init` is the relaunch path, not a spin here.
     #[test]
@@ -253,7 +291,7 @@ mod tests {
                 DbLoad::Absent
             },
             || {},
-            |_authenticator| {
+            |_authenticator, _db| {
                 rounds.set(rounds.get() + 1);
                 false
             },

@@ -63,14 +63,43 @@ rather than crashing (`AGENTS.md` §2.9). See
 [SVG asset decoding](./svg-assets.md). The built-in set remains the
 always-present fallback.
 
+## Placing one on screen
+
+A `CursorImage` is artwork; where it goes is a `PlacedCursor`. It stores the
+image's top-left corner as the pointer position minus the hotspot, so the
+hotspot lands exactly on the pointer, and it answers the two questions a
+screen has about a drawn cursor: `bounds()` — the rectangle it covers, for
+damage — and how to get its pixels, either `draw`n onto a `lib/raster`
+`Surface` in one blit or sampled a row at a time (`local_row` / `sample_row`)
+by a compositor blending it alongside other layers.
+
+This lives in `lib/cursor` rather than in the window manager because it has
+two consumers that may not depend on one another (`AGENTS.md` §17.3 / §2.2):
+the compositor, and the graphical login screen
+(`userland/session/greeter`), which is a `userland/session/*` crate and so is
+forbidden a `userland/gui/*` edge.
+
 ## In the compositor
 
 The window manager owns the active `CursorRegistry`. It resolves a
 `CursorKind` to a `VectorCursor`, rasterises it at the display scale once, and
-composites the resulting `CursorImage` as the top-most overlay so the hotspot
+composites the resulting `PlacedCursor` as the top-most overlay so the hotspot
 tracks the pointer. Moving the pointer marks the cursor's old and new
 rectangles dirty, so only those pixels are recomposited (the same damage model
 the window stack uses), and hiding the cursor restores the pixels beneath it.
+
+## On the login screen
+
+The greeter has no compositor and no cursor sets on disk yet, so it takes the
+built-in `Arrow`, rasterises it once at start-up for the active
+`tairix_geometry::Scale`, and blends the `PlacedCursor` over each painted
+frame before it is scanned out — the pointer is therefore always on top of
+everything the authentication surface drew. Motion damages the union of the
+cursor's old and new rectangles clipped to the screen, so a mouse move never
+costs a whole-screen present and never leaves a cursor painted where it no
+longer is. An arrow that will not rasterise costs the *drawing* only: the
+pointer still moves and still hit-tests, the event is logged, and the screen
+stays usable (`AGENTS.md` §2.9).
 
 ## Choosing the shape from interaction state
 

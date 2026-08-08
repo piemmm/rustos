@@ -57,6 +57,7 @@ pub mod rxe;
 pub mod seat;
 pub mod service;
 pub mod service_control;
+pub mod session_ipc;
 pub mod stdinfo;
 pub mod switchboard_ipc;
 pub mod syscall;

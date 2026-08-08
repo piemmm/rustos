@@ -80,12 +80,17 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+    use tairix_abi::driver::display::DisplayMode;
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
     use tairix_abi::input::KeyInput;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::session_ipc::{
+        session_wake_endpoint, SessionRequest, SessionVerdict, SessionWake, SESSION_ENDPOINT,
+        SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
+    };
     use tairix_abi::switchboard_ipc::{
         command_endpoint_for, encode_publish_reply, CommandSection, SwitchboardCommand,
         SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
@@ -100,6 +105,7 @@ mod program {
         association_from_appinfo, AppAssociation, DirectorySource, VfsDirectorySource,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::{
         build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
         open_tray, parse, reap_launched, relay_power, serve_pinboard_apply,
@@ -210,6 +216,17 @@ mod program {
     /// into one frame while the service scans out the other.
     const FRAME_COUNT: u32 = 2;
 
+    /// Exit code when a resumed session could not take its screen back: the
+    /// seat, the mode, the frame region, or the compositor's adoption of the
+    /// new mode refused. Reserved, so the supervisor can tell a desktop that
+    /// came back blind from one that was logged out of.
+    const EXIT_RESUME_FAILED: i32 = 102;
+
+    /// Exit code when the session authority went away while this session was
+    /// parked in the background: nothing can resume it, so it ends cleanly
+    /// rather than being stranded invisible.
+    const EXIT_AUTHORITY_GONE: i32 = 103;
+
     /// The wait-set token of the session's `SeatInput` member.
     const SEAT_TOKEN: u64 = 1;
 
@@ -246,6 +263,17 @@ mod program {
     /// destination its events anyway, so which one drained is not worth
     /// distinguishing.
     const HOLDBACK_TOKEN: u64 = 8;
+
+    /// The wait-set token of this session's fast-user-switching wake
+    /// mailbox: the session authority telling a background desktop it is the
+    /// foreground one again, or that it must end.
+    const WAKE_TOKEN: u64 = 9;
+
+    /// Queued-wake capacity of the mailbox. The authority sends one wake per
+    /// switch and the loop drains it on the very next turn, so a handful of
+    /// slots outlasts any legitimate burst and bounds what an unattested
+    /// sender can queue before the kernel refuses it.
+    const WAKE_CAPACITY: usize = 4;
 
     /// Outstanding-call capacity of the window endpoint (a fail-closed
     /// memory bound): every app calls synchronously, so a small queue
@@ -576,7 +604,11 @@ mod program {
     struct BrokerUnlocker;
 
     impl Verifier for BrokerUnlocker {
-        fn verify(&mut self, password: &str) -> Verdict {
+        /// The account name the surface offers is ignored: the broker
+        /// re-reads the caller's identity from the kernel and checks the
+        /// password against that uid, so naming an account here could only
+        /// ever ask for one this process is not.
+        fn verify(&mut self, _account: &str, password: &str) -> Verdict {
             match tairix_rt::elevate(&ElevateRequest::Verify { password }) {
                 Ok(ElevateReply::Verified) => Verdict::Verified,
                 Ok(ElevateReply::Refused(_)) => Verdict::Refused,
@@ -656,11 +688,18 @@ mod program {
     /// so a lost seat is observed here exactly as on a drain. Any refusal
     /// ends the session, so the shell's disposable-UI caches are wiped
     /// before the exit code is returned.
+    ///
+    /// A background session owns no frame ring, presents nothing, and
+    /// answers `Ok`: it has given the screen to somebody else, which is not
+    /// a failure.
     fn present(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        display: &mut RemoteDisplay<'_, RtDisplayTransport>,
+        display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
     ) -> Result<(), i32> {
+        let Some(display) = display.as_mut() else {
+            return Ok(());
+        };
         match compositor.present(display) {
             Ok(()) => Ok(()),
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
@@ -840,19 +879,52 @@ mod program {
         }
     }
 
-    /// Bring the desktop up and run it until the seat is lost or a fault
-    /// ends it. Split from `main` so every exit path after the acquire
-    /// flows back through the one owner-checked `display_release`.
-    #[allow(clippy::too_many_lines)] // One linear bring-up + serve loop; splitting it would scatter the lease lifecycle.
-    fn session() -> i32 {
-        // --- Display bring-up: query → shared frames → grant → configure.
+    /// The shared frame region the display service scans out of, kept so a
+    /// session that steps aside can give it back and a resumed one can be
+    /// handed a region shaped for the mode now in force.
+    struct FrameRegion {
+        base: usize,
+        total: usize,
+    }
+
+    impl FrameRegion {
+        /// One frame's bytes, which is what the desktop's cache budgets are
+        /// derived from.
+        const fn frame_len(&self) -> usize {
+            self.total / FRAME_COUNT as usize
+        }
+
+        /// Give the mapping back to the kernel.
+        ///
+        /// The caller must already have dropped the [`RemoteDisplay`] that
+        /// borrowed it, so no ring can name these bytes afterwards.
+        fn unmap(self) {
+            let _ = tairix_rt::shm_unmap(self.base as u64, self.total);
+        }
+    }
+
+    /// The taskbar layout for an output of this mode.
+    ///
+    /// One definition, read by the first bring-up and by a resume onto a
+    /// screen the next account re-moded, so the bar cannot come back laid
+    /// out differently from how it started.
+    fn bar_config(mode: &DisplayMode) -> TaskbarConfig {
+        TaskbarConfig::bottom_bar(mode.width_px, mode.height_px)
+    }
+
+    /// Create the shared frame region for `mode`, grant it to the display
+    /// service, configure the service over it, and answer the ring the
+    /// session presents through together with the region to give back.
+    ///
+    /// The one place frames are established: the first bring-up and every
+    /// resume come here, so neither can size, grant, or configure a region
+    /// the other would not. A refusal after the region exists unmaps it
+    /// before returning, so a failed attempt leaves nothing mapped.
+    fn establish_frames(
+        mode: &DisplayMode,
+    ) -> Result<(RemoteDisplay<'static, RtDisplayTransport>, FrameRegion), (i32, &'static str)>
+    {
         let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
-        let Ok(mode) = client.query() else {
-            return fail(
-                EXIT_NO_DISPLAY,
-                "display service unreachable or refused the mode query",
-            );
-        };
         // The region holds FRAME_COUNT frames back to back, each shaped
         // exactly as the queried mode; the arithmetic is checked so a
         // hostile or corrupt mode can never size a short region.
@@ -860,45 +932,206 @@ mod program {
             .checked_mul(u64::from(mode.height_px))
             .and_then(|bytes| usize::try_from(bytes).ok())
         else {
-            return fail(EXIT_BAD_MODE, "frame geometry overflows");
+            return Err((EXIT_BAD_MODE, "frame geometry overflows"));
         };
         let Some(total) = frame_len.checked_mul(FRAME_COUNT as usize) else {
-            return fail(EXIT_BAD_MODE, "frame geometry overflows");
+            return Err((EXIT_BAD_MODE, "frame geometry overflows"));
         };
         if frame_len == 0 {
-            return fail(EXIT_BAD_MODE, "queried mode is zero-sized");
+            return Err((EXIT_BAD_MODE, "queried mode is zero-sized"));
         }
         let mut region_id: u64 = 0;
         let base = tairix_rt::shm_create(total, &mut region_id);
         if base < 0 {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        }
-        let grant = tairix_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
-        if grant < 1 {
-            return fail(EXIT_NO_FRAMES, "frame region grant refused");
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        if client.configure(grant as u64, FRAME_COUNT, &mode).is_err() {
-            return fail(EXIT_NO_DISPLAY, "display service refused the configure");
+            return Err((EXIT_NO_FRAMES, "shared frame region refused"));
         }
         let Ok(base) = usize::try_from(base) else {
-            return fail(
+            return Err((
                 EXIT_NO_FRAMES,
                 "frame region base outside the address width",
+            ));
+        };
+        let region = FrameRegion { base, total };
+        let grant = tairix_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
+        if grant < 1 {
+            region.unmap();
+            return Err((EXIT_NO_FRAMES, "frame region grant refused"));
+        }
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        if client.configure(grant as u64, FRAME_COUNT, mode).is_err() {
+            region.unmap();
+            return Err((EXIT_NO_DISPLAY, "display service refused the configure"));
+        }
+        // SAFETY: the kernel mapped exactly `total` zeroed bytes read/write
+        // into this process at `base` (`shm_create` maps the length it was
+        // asked for), and nothing aliases them. The mapping outlives every
+        // use of this slice: the only `shm_unmap` is `FrameRegion::unmap`,
+        // whose contract is that the `RemoteDisplay` borrowing these bytes
+        // has already been dropped, which is why the borrow may be `'static`
+        // here. The display service maps the same frames read-only for its
+        // blit, and the protocol serialises access: this session is parked
+        // in its present call while the service reads, so the two never race
+        // on the presented bytes.
+        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+        let Ok(display) = RemoteDisplay::new(client, *mode, frames, FRAME_COUNT) else {
+            region.unmap();
+            return Err((EXIT_BAD_MODE, "queried mode rejected by the frame ring"));
+        };
+        Ok((display, region))
+    }
+
+    /// The step-aside request over the reserved session rendezvous.
+    ///
+    /// The frame is bodyless and carries no identity: the authority attests
+    /// the caller from the kernel and honours the request only from the
+    /// session it records as the foreground one.
+    struct RtSessionAuthority;
+
+    impl SessionAuthority for RtSessionAuthority {
+        fn request_background(&mut self) -> Result<SessionVerdict, Errno> {
+            let mut request = [0u8; SESSION_MAX_REQUEST];
+            let len = SessionRequest::Background.encode(&mut request)?;
+            let mut reply = [0u8; SESSION_VERDICT_LEN];
+            let got = tairix_rt::ipc_call(SESSION_ENDPOINT, &request[..len], &mut reply)
+                .map_err(Errno::from_syscall)?;
+            SessionVerdict::decode(&reply[..got])
+        }
+    }
+
+    /// The session's ownership of the screen, as the switch drives it: the
+    /// frame ring and its region, the compositor and the surfaces laid out
+    /// over the mode, and the wait-set the seat member belongs to.
+    struct SessionScreen<'a, S: DirectorySource> {
+        display: &'a mut Option<RemoteDisplay<'static, RtDisplayTransport>>,
+        region: &'a mut Option<FrameRegion>,
+        compositor: &'a mut Compositor,
+        shell: &'a mut DesktopShell,
+        desktop: &'a Desktop<S>,
+        pinboard: &'a mut PinboardPanel,
+        set: u64,
+    }
+
+    impl<S: DirectorySource> SeatPresentation for SessionScreen<'_, S> {
+        fn suspend(&mut self) {
+            // The ring goes before the region it borrows, and the seat's
+            // wait-set member goes with them: a parked session must not be
+            // woken by the next account's typing, and ignoring such a wake
+            // instead would spin on a member that stays ready.
+            *self.display = None;
+            if let Some(region) = self.region.take() {
+                region.unmap();
+            }
+            let _ = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Del,
+                WaitSourceKind::SeatInput,
+                SEAT_PRIMARY,
+                SEAT_TOKEN,
+            );
+        }
+
+        fn release_seat(&mut self) {
+            let _ = tairix_rt::display_release(SEAT_PRIMARY);
+        }
+
+        fn acquire_seat(&mut self) -> Result<(), Errno> {
+            let taken = tairix_rt::display_acquire(SEAT_PRIMARY);
+            if taken < 1 {
+                return Err(Errno::from_syscall(taken));
+            }
+            if tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::SeatInput,
+                SEAT_PRIMARY,
+                SEAT_TOKEN,
+            ) != 0
+            {
+                let _ = tairix_rt::display_release(SEAT_PRIMARY);
+                return Err(Errno::SeatRevoked);
+            }
+            Ok(())
+        }
+
+        fn query_mode(&mut self) -> Result<DisplayMode, Errno> {
+            DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query()
+        }
+
+        fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
+            let (ring, region) = establish_frames(&mode).map_err(|_| Errno::DeviceFault)?;
+            *self.display = Some(ring);
+            *self.region = Some(region);
+            // The compositor adopts the mode before anything is laid out
+            // against it: the bar and the icons are placed on the extent it
+            // reports. A mode it cannot take leaves it untouched, and the
+            // session ends rather than showing a screen it cannot draw.
+            if !self.compositor.set_mode(mode) {
+                return Err(Errno::NotSupported);
+            }
+            self.shell
+                .set_output_layout(bar_config(&mode), self.compositor);
+            prepare_wallpaper(self.pinboard, self.shell, self.desktop, self.compositor);
+            self.shell.present_desktop(self.compositor, self.desktop);
+            Ok(())
+        }
+
+        fn repaint_all(&mut self, _mode: DisplayMode) -> Result<(), Errno> {
+            let Some(display) = self.display.as_mut() else {
+                return Err(Errno::NotConnected);
+            };
+            self.compositor
+                .present(display)
+                .map_err(|_| Errno::DeviceFault)
+        }
+    }
+
+    /// Bring the desktop up and run it until the seat is lost or a fault
+    /// ends it. Split from `main` so every exit path after the acquire
+    /// flows back through the one owner-checked `display_release`.
+    #[allow(clippy::too_many_lines)] // One linear bring-up + serve loop; splitting it would scatter the lease lifecycle.
+    fn session() -> i32 {
+        // The session's own kernel-attested identity, read before anything
+        // else: the window engine stamps it into every create reply, the
+        // wake mailbox below is addressed by its pid, and a session that
+        // cannot learn who it is must not serve windows apps cannot
+        // authenticate (fail closed).
+        let Ok(self_origin) = tairix_rt::self_origin() else {
+            return fail(EXIT_NO_WINDOW_ENDPOINT, "session identity unavailable");
+        };
+        // Bind the fast-user-switching wake mailbox before the first frame,
+        // so a session is resumable from the moment it can be switched away
+        // from. The id is derived from this session's own pid and is
+        // unreserved, so anyone may send to it — every message is attested
+        // against the authority when it is drained. A refused bind is not
+        // fatal: the desktop runs as a session that simply cannot be
+        // switched away from, and says so by leaving the row out.
+        let wake = session_wake_endpoint(self_origin.pid());
+        let bound = !tairix_abi::ipc::is_reserved_endpoint(wake)
+            && tairix_rt::port_bind(wake, SESSION_WAKE_LEN, WAKE_CAPACITY) == 0;
+        if !bound {
+            io::write_stderr_line(
+                "desktop: session wake mailbox refused; this session cannot switch user",
+            );
+        }
+        let mut switch = SwitchUser::new(bound.then_some(wake), self_origin.console());
+
+        // --- Display bring-up: query → shared frames → grant → configure.
+        let Ok(mode) = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query() else {
+            return fail(
+                EXIT_NO_DISPLAY,
+                "display service unreachable or refused the mode query",
             );
         };
-        // SAFETY: the kernel mapped at least `total` zeroed bytes read/write
-        // into this process at `base` (`shm_create` maps the exact length it
-        // was asked for) and the mapping stays live for the life of the
-        // process — nothing below unmaps or aliases it. The display service
-        // maps the same frames read-only for its blit, and the protocol
-        // serialises access: this session is parked in its present call
-        // while the service reads, so the two never race on the presented
-        // bytes.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
-        let Ok(mut display) = RemoteDisplay::new(client, mode, frames, FRAME_COUNT) else {
-            return fail(EXIT_BAD_MODE, "queried mode rejected by the frame ring");
+        let (display, region) = match establish_frames(&mode) {
+            Ok(established) => established,
+            Err((code, reason)) => return fail(code, reason),
         };
+        let frame_len = region.frame_len();
+        // Held as options so a resume can drop the ring, give the region
+        // back, and build both again for the mode then in force — there is
+        // no second bring-up path.
+        let mut display = Some(display);
+        let mut region = Some(region);
 
         // --- Desktop bring-up: the shell, the compositor over the active
         // theme's desktop colour, and the two live seat input sources with
@@ -915,7 +1148,7 @@ mod program {
         // bring-up with no cached cursor, glyph, or icon artwork.
         let _ = tairix_procinfo::pressure::refresh();
         let mut shell = DesktopShell::new(
-            TaskbarConfig::bottom_bar(mode.width_px, mode.height_px),
+            bar_config(&mode),
             SEAT_PRIMARY,
             frame_len,
             tairix_rt::pressure::gauge(),
@@ -1205,17 +1438,25 @@ mod program {
         if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             return fail(EXIT_WAIT_FAILED, "memory-pressure wait refused");
         }
+        // The wake mailbox joins for the session's whole life, foreground or
+        // background: it is the only member a switched-away desktop waits
+        // on, so a bind that succeeded and a member that did not join would
+        // park it forever. A session that never bound has no member, and
+        // offers no switch.
+        if let Some(wake) = switch.wake_endpoint() {
+            if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, wake, WAKE_TOKEN)
+                != 0
+            {
+                return fail(EXIT_WAIT_FAILED, "session wake mailbox wait refused");
+            }
+        }
 
         // The window channel's server state: the engine, the session-side
         // window table, the kernel-attested caller identity, the app-ward
         // event sink, and the focused served window the routing mirrors.
         // The engine stamps this session's own kernel-attested identity
         // into every create reply, so apps can authenticate the sender of
-        // each later event; a session that cannot learn its own identity
-        // must not serve windows apps cannot authenticate (fail closed).
-        let Ok(self_origin) = tairix_rt::self_origin() else {
-            return fail(EXIT_NO_WINDOW_ENDPOINT, "session identity unavailable");
-        };
+        // each later event.
         let mut server = WindowServer::new(RtShmMapper, self_origin.proc_id());
         let mut windows = SessionWindows::new();
         let mut identity = RtWindowIdentity::new();
@@ -1284,6 +1525,10 @@ mod program {
             &mut compositor,
             elevate_endpoint(self_origin.console()).is_ok(),
         );
+        // Offer the Switch User row only where this session really could be
+        // resumed: the wake mailbox bound. Without it the row is absent
+        // rather than refused — there is no authority to explain.
+        shell.set_switch_user_available(&mut compositor, switch.is_available());
 
         let mut token = 0u64;
         loop {
@@ -1291,7 +1536,12 @@ mod program {
             // limiter is holding back only ever *tightens* the wait to the
             // moment it may be sent, and folds back to indefinite once it
             // has gone out. The desktop never polls for anything.
-            let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
+            //
+            // A background session has no deadline at all, not even that
+            // one: it draws nothing, so a held-back report has nothing to
+            // report and a timer would wake a core for no work.
+            let timeout_ns =
+                switch.park_deadline_ns(tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX));
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
             if waited != 0 {
                 if Errno::from_syscall(waited) != Errno::TimedOut {
@@ -1573,6 +1823,76 @@ mod program {
                 if desktop.relist(tairix_rt::clock_get()) {
                     shell.present_desktop(&mut compositor, &desktop);
                 }
+            } else if token == WAKE_TOKEN {
+                // The session authority speaking to this desktop: it is the
+                // foreground session again, or the authority is going away
+                // and a session it can no longer reach must not be left
+                // stranded. The sender is the kernel's account of who sent
+                // it, never a claim on the wire; a message from anyone else,
+                // or one that does not decode, is dropped with its reason
+                // stated and acted on by nothing.
+                let Some(wake) = switch.wake_endpoint() else {
+                    continue;
+                };
+                let mut message = [0u8; SESSION_WAKE_LEN];
+                let mut sender = [0u8; ORIGIN_WIRE_LEN];
+                let Ok(len) = tairix_rt::ipc_recv(wake, &mut message, &mut sender) else {
+                    continue;
+                };
+                let Ok(origin) = Origin::from_bytes(&sender) else {
+                    io::write_stderr_line("desktop: dropped an unattested session wake");
+                    continue;
+                };
+                match switch.classify(&message[..len], &origin) {
+                    Ok(SessionWake::Foreground) => {
+                        let mut screen = SessionScreen {
+                            display: &mut display,
+                            region: &mut region,
+                            compositor: &mut compositor,
+                            shell: &mut shell,
+                            desktop: &desktop,
+                            pinboard: &mut pinboard,
+                            set,
+                        };
+                        let mode = match switch.resume(&mut screen) {
+                            Ok(mode) => mode,
+                            Err(failure) => {
+                                let _ = writeln!(
+                                    Stderr,
+                                    "desktop: {} ({:?})",
+                                    failure.reason(),
+                                    failure.errno()
+                                );
+                                shell.teardown(&mut compositor);
+                                return EXIT_RESUME_FAILED;
+                            }
+                        };
+                        // The pointer is clamped to the screen, so it is
+                        // rebuilt for the mode now in force rather than left
+                        // on the one this session came up with.
+                        let screen_rect = Rect::new(0, 0, mode.width_px, mode.height_px);
+                        let Ok(rebuilt) =
+                            DeviceInputSource::new(pointer.into_channel(), screen_rect)
+                        else {
+                            shell.teardown(&mut compositor);
+                            return fail(
+                                EXIT_RESUME_FAILED,
+                                "the resumed mode has no pointer surface",
+                            );
+                        };
+                        pointer = rebuilt;
+                    }
+                    Ok(SessionWake::End) => {
+                        io::write_stderr_line(
+                            "desktop: the login service is going away; ending this session",
+                        );
+                        shell.teardown(&mut compositor);
+                        return EXIT_AUTHORITY_GONE;
+                    }
+                    Err(refusal) => {
+                        let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
+                    }
+                }
             } else if token == SEAT_TOKEN && lock.is_locked() {
                 // Locked: the seat's events belong to the lock and to
                 // nothing else. They are drained straight out of the
@@ -1630,6 +1950,10 @@ mod program {
                     Ok(outcomes) => outcomes,
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 };
+                // Set once the session has given the screen up: what is left
+                // of this batch, and everything still queued behind it, is
+                // input for a seat this desktop no longer owns.
+                let mut stepped_aside = false;
                 for outcome in outcomes {
                     route_desktop(
                         &outcome,
@@ -1641,7 +1965,7 @@ mod program {
                         &mut associations,
                         now_ns,
                     );
-                    if route_outcome(
+                    match route_outcome(
                         outcome,
                         None,
                         &mut focused,
@@ -1660,13 +1984,32 @@ mod program {
                         &mut switchboard_pid,
                         &mut pending_open,
                         &mut associations,
-                    ) == Routed::EndSession
-                    {
-                        shell.teardown(&mut compositor);
-                        return EXIT_LOGGED_OUT;
+                    ) {
+                        Routed::Continue => {}
+                        Routed::EndSession => {
+                            shell.teardown(&mut compositor);
+                            return EXIT_LOGGED_OUT;
+                        }
+                        Routed::SwitchUser => {
+                            stepped_aside = step_aside(
+                                &mut switch,
+                                SessionScreen {
+                                    display: &mut display,
+                                    region: &mut region,
+                                    compositor: &mut compositor,
+                                    shell: &mut shell,
+                                    desktop: &desktop,
+                                    pinboard: &mut pinboard,
+                                    set,
+                                },
+                            );
+                            if stepped_aside {
+                                break;
+                            }
+                        }
                     }
                 }
-                loop {
+                while !stepped_aside {
                     match keyboard.poll_record() {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
@@ -1681,7 +2024,7 @@ mod program {
                                 &mut associations,
                                 now_ns,
                             );
-                            if route_outcome(
+                            match route_outcome(
                                 outcome,
                                 Some(record),
                                 &mut focused,
@@ -1700,14 +2043,35 @@ mod program {
                                 &mut switchboard_pid,
                                 &mut pending_open,
                                 &mut associations,
-                            ) == Routed::EndSession
-                            {
-                                shell.teardown(&mut compositor);
-                                return EXIT_LOGGED_OUT;
+                            ) {
+                                Routed::Continue => {}
+                                Routed::EndSession => {
+                                    shell.teardown(&mut compositor);
+                                    return EXIT_LOGGED_OUT;
+                                }
+                                Routed::SwitchUser => {
+                                    stepped_aside = step_aside(
+                                        &mut switch,
+                                        SessionScreen {
+                                            display: &mut display,
+                                            region: &mut region,
+                                            compositor: &mut compositor,
+                                            shell: &mut shell,
+                                            desktop: &desktop,
+                                            pinboard: &mut pinboard,
+                                            set,
+                                        },
+                                    );
+                                }
                             }
                         }
                         Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                     }
+                }
+                if stepped_aside {
+                    // The screen belongs to somebody else now: nothing this
+                    // wake read is applied any further, and nothing is drawn.
+                    continue;
                 }
                 // A window restored from the taskbar (or otherwise shown
                 // again) whose content was released while it was hidden
@@ -2274,6 +2638,31 @@ mod program {
         /// The user asked to log out. The loop unwinds so the one
         /// owner-checked release runs and the login supervisor prompts again.
         EndSession,
+        /// The user asked to switch to another account. The loop asks the
+        /// session authority and, only if it accepts, gives up the screen —
+        /// the session itself keeps running, so nothing unwinds here.
+        SwitchUser,
+    }
+
+    /// Ask the authority to record this session as background and, only on
+    /// its acceptance, give the screen up through `screen`.
+    ///
+    /// Answers whether the session is now background. A refusal — the
+    /// authority said no, could not be reached, or answered something that
+    /// is not a verdict — is stated to the user and changes nothing: the
+    /// desktop keeps the seat and keeps drawing.
+    fn step_aside<S: DirectorySource>(
+        switch: &mut SwitchUser,
+        screen: SessionScreen<'_, S>,
+    ) -> bool {
+        let mut screen = screen;
+        match switch.step_aside(&mut RtSessionAuthority, &mut screen) {
+            Ok(()) => true,
+            Err(refusal) => {
+                let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
+                false
+            }
+        }
     }
 
     /// Route one shell outcome onward: mirror focus changes and pointer
@@ -2787,6 +3176,15 @@ mod program {
                 if !lock.engage(account, shell, compositor) {
                     io::write_stderr_line("desktop: could not lock the screen; it is still open");
                 }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::SwitchUser) => {
+                // Step aside for another account. The prompt goes down
+                // first: an unanswered question must not be left on a screen
+                // that is about to belong to somebody else. The switch
+                // itself is the loop's, which owns the frame region the
+                // session gives back.
+                confirm.abandon(shell, compositor);
+                return Routed::SwitchUser;
             }
             ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
                 // The user asked for the session to end: take the prompt down

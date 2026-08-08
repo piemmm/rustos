@@ -14,10 +14,9 @@ to the display service, and runs the compositing desktop — the window
 manager and the taskbar — until the session ends. The command returns
 when the desktop session ends.
 
-The same desktop starts automatically after authentication when the
-administrator configured a graphical login
-(`configure os.loginType graphical`); this command starts it on demand
-from a text shell.
+The same desktop starts automatically after authentication: a graphical
+login (`os.loginType`) is the default on a machine that can run one.
+This command starts it on demand from a text shell.
 
 When no display service is running, or another session already holds
 the seat, the command fails with its reason on standard error — it

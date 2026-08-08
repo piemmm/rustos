@@ -104,6 +104,17 @@ owns:
   secondary press on a pin or a library entry opens this menu. Choosing a row
   reports a typed `TaskbarResponse` (`ActivatePin`, `Unpin`, `PinEntry`, or
   `LibraryLaunch`); the session performs the action.
+- **The system menu** — the start-menu session controls, whose shape is the
+  one ordered `system::ROWS` table (inspect the machine, change how it looks,
+  then secure, leave, or stop it). The bar holds none of that authority: it
+  renders what the session attested through `SystemPermits`, so a row whose
+  backing is missing is shown non-actionable with its reason rather than
+  offered and then failing. *Switch User…* is the one exception and is
+  **absent** rather than refused: a desktop whose session authority never
+  gave it a wake mailbox cannot be resumed, so there is no facility to
+  explain the absence of (`set_switch_user_available`, `plans/NEW-DESKTOP-LOGIN.md`
+  G5). Both the rendered rows and the row → command mapping read the same
+  filter, so a hidden row can never stay clickable at its old index.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).

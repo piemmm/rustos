@@ -19,12 +19,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode,
 };
 use tairix_abi::DriverError;
+use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 
 use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
-use tairix_cursor::CursorImage;
+use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_input::{InputEvent, Key};
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
@@ -33,7 +34,6 @@ use crate::blur;
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
-use crate::cursor::CursorLayer;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
 use crate::surface::Surface;
@@ -50,13 +50,6 @@ use crate::window::{Window, WindowId, WindowRow};
 /// every healthy frame, so it allocates nothing at all, and when it does
 /// fill it holds only the windows covering the damage.
 type ChromeFallback = Vec<(WindowId, WindowChrome)>;
-
-/// Scan-out channel order for a supported [`DisplayFormat`].
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ChannelOrder {
-    Rgba,
-    Bgra,
-}
 
 /// A software compositing window manager surface.
 ///
@@ -99,7 +92,7 @@ pub struct Compositor {
     /// nothing in the ordinary z-order can end up beneath it by accident.
     desktop: Option<Surface>,
     windows: Vec<Window>,
-    cursor: Option<CursorLayer>,
+    cursor: Option<PlacedCursor>,
     /// The screen rectangle the cursor covered as of the last
     /// [`composite`](Self::composite), or `None` if it was hidden then.
     /// [`composite`](Self::composite) diffs the *current* cursor state
@@ -164,13 +157,13 @@ impl Compositor {
         chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
         pressure: &'static (dyn PressureGauge + 'static),
     ) -> Option<Self> {
-        let order = channel_order(mode.format)?;
+        let order = ChannelOrder::for_format(mode.format)?;
         let background = Color {
             a: 255,
             ..background
         };
         let back = Surface::filled(mode.width_px, mode.height_px, background.premultiply())?;
-        let frame = scanout_frame(&mode)?;
+        let frame = vec![0u8; scanout_len(&mode)?];
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
@@ -201,6 +194,53 @@ impl Compositor {
     #[must_use]
     pub const fn mode(&self) -> DisplayMode {
         self.mode
+    }
+
+    /// Adopt a new display mode, rebuilding the back buffer and scan-out
+    /// frame for it and marking the whole screen for redraw.
+    ///
+    /// Served windows survive: they keep their positions and are clipped to
+    /// whatever screen the new mode describes, so a session resumed onto a
+    /// different monitor keeps its apps rather than losing them.
+    ///
+    /// Returns `false` — leaving the compositor exactly as it was, still
+    /// able to draw the old mode — when the new one cannot be adopted: a
+    /// pixel format with no software encoding, a stride too small for one
+    /// scanline, or buffers that could not be allocated. The caller decides
+    /// what to do about a display it cannot draw; a half-adopted mode would
+    /// scan out garbage.
+    pub fn set_mode(&mut self, mode: DisplayMode) -> bool {
+        if mode == self.mode {
+            return true;
+        }
+        let Some(order) = ChannelOrder::for_format(mode.format) else {
+            return false;
+        };
+        let Some(frame_len) = scanout_len(&mode) else {
+            return false;
+        };
+        let Some(back) =
+            Surface::filled(mode.width_px, mode.height_px, self.background.premultiply())
+        else {
+            return false;
+        };
+        let mut frame = Vec::new();
+        if frame.try_reserve_exact(frame_len).is_err() {
+            return false;
+        }
+        frame.resize(frame_len, 0);
+        self.mode = mode;
+        self.order = order;
+        self.back = back;
+        self.frame = frame;
+        // The blur scratch is sized per use; dropping it now returns the old
+        // screen's worth of pixels rather than carrying them until the next
+        // blurred frame.
+        self.blur_pixels = Vec::new();
+        self.blur_aux = Vec::new();
+        self.damage.clear();
+        self.damage.add(self.screen_rect());
+        true
     }
 
     /// The whole-screen rectangle.
@@ -1169,7 +1209,7 @@ impl Compositor {
     /// shape without moving, and those pixels differ however identical the
     /// rectangle is.
     pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) {
-        self.cursor = Some(CursorLayer::new(image, pointer));
+        self.cursor = Some(PlacedCursor::new(image, pointer));
         self.cursor_replaced = true;
     }
 
@@ -1198,7 +1238,7 @@ impl Compositor {
     /// The screen rectangle the cursor currently covers, if one is shown.
     #[must_use]
     pub fn cursor_bounds(&self) -> Option<Rect> {
-        self.cursor.as_ref().map(CursorLayer::bounds)
+        self.cursor.as_ref().map(PlacedCursor::bounds)
     }
 
     /// Whether any pixels are pending recomposition — either an explicitly
@@ -1597,7 +1637,7 @@ impl Compositor {
                 let col = usize::try_from(lx).ok()?;
                 let offset = (row * w + col) * 4;
                 if let Some(slot) = pixels.get_mut(offset..offset + 4) {
-                    slot.copy_from_slice(&encode_pixel(self.order, pixel));
+                    slot.copy_from_slice(&self.order.encode(pixel));
                 }
             }
         }
@@ -1785,7 +1825,7 @@ impl Compositor {
                     let acc =
                         compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
                     *dst = acc;
-                    *bytes = encode_pixel(order, acc);
+                    *bytes = order.encode(acc);
                 }
             } else {
                 for (dst, x) in back_row.iter_mut().zip(area.left()..area.right()) {
@@ -1905,7 +1945,7 @@ fn compose_pixel(
     x: i32,
     desktop_row: Option<&[Pixel]>,
     rows: &[WindowRow<'_>],
-    cursor: Option<(&CursorLayer, u32)>,
+    cursor: Option<(&PlacedCursor, u32)>,
 ) -> Pixel {
     let mut acc = under;
     if let Some(src) = desktop_pixel(desktop_row, x) {
@@ -2039,60 +2079,3 @@ impl LayerBuf {
 /// capping a pathological scattered-damage frame at one round trip
 /// instead of dozens.
 pub const MAX_PRESENT_REGIONS: usize = 8;
-
-/// Convert composited damage `bounds` into the [`DamageRect`] a
-/// [`Display::present_region`] call carries, or `None` when the full
-/// [`Display::present`] path should run instead: a bounds covering the
-/// whole screen, or (defensively; every caller already screen-clips and
-/// skips empty rectangles) a degenerate empty one. The bounds are already
-/// clipped to the screen, so the coordinate conversions cannot fail; a
-/// rectangle that nevertheless does not fit falls back to the full
-/// present rather than presenting a wrong region.
-fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect> {
-    if bounds.is_empty() {
-        return None;
-    }
-    let damage = DamageRect {
-        x: u32::try_from(bounds.left()).ok()?,
-        y: u32::try_from(bounds.top()).ok()?,
-        width_px: bounds.width,
-        height_px: bounds.height,
-    };
-    if damage.covers(mode) {
-        return None;
-    }
-    Some(damage)
-}
-
-/// Allocate a zeroed scan-out frame for `mode`, or `None` if its size
-/// overflows `usize` or its stride is too small for one scanline.
-fn scanout_frame(mode: &DisplayMode) -> Option<Vec<u8>> {
-    let min_stride = mode.width_px.checked_mul(mode.format.bytes_per_pixel())?;
-    if mode.stride_bytes < min_stride || mode.width_px == 0 || mode.height_px == 0 {
-        return None;
-    }
-    let len = u64::from(mode.stride_bytes).checked_mul(u64::from(mode.height_px))?;
-    let len = usize::try_from(len).ok()?;
-    Some(vec![0u8; len])
-}
-
-/// Map a [`DisplayFormat`] to its [`ChannelOrder`], or `None` for a
-/// format this software compositor does not encode (it fails closed at
-/// [`Compositor::new`] rather than guessing a byte order).
-fn channel_order(format: DisplayFormat) -> Option<ChannelOrder> {
-    match format {
-        DisplayFormat::Rgba8888 => Some(ChannelOrder::Rgba),
-        DisplayFormat::Bgra8888 => Some(ChannelOrder::Bgra),
-        _ => None,
-    }
-}
-
-/// Encode one premultiplied pixel into the four scan-out bytes for
-/// `order`. The screen is opaque, so the premultiplied channels equal
-/// their straight-alpha form.
-fn encode_pixel(order: ChannelOrder, pixel: Pixel) -> [u8; 4] {
-    match order {
-        ChannelOrder::Rgba => [pixel.r, pixel.g, pixel.b, pixel.a],
-        ChannelOrder::Bgra => [pixel.b, pixel.g, pixel.r, pixel.a],
-    }
-}

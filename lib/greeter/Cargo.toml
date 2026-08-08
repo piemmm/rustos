@@ -1,6 +1,6 @@
 [package]
 name = "tairix-greeter"
-description = "TAIRiX shared authentication-surface engine: the one panel, masked field, wording, geometry, and verdict state machine behind every place TAIRiX asks a user to prove who they are at the screen (plans/NEW-DESKTOP-LOGIN.md G2)."
+description = "TAIRiX shared authentication-surface engine: the one account chooser, panel, masked field, wording, geometry, backdrop, cooldown, and verdict state machine behind every place TAIRiX asks a user to prove who they are at the screen (plans/NEW-DESKTOP-LOGIN.md G2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The one OS duration type (`Duration64`). The cooldown the authority hands
+# over is a span of time like any other, so it is spelled in the ABI's 64-bit
+# duration; a millisecond integer of this crate's own would be a second
+# definition of what a span of time is.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # Shared logical geometry (`Rect`/`Scale`): the panel and the field are
 # authored in logical pixels and converted through the one shared scale.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
@@ -21,6 +26,13 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # length and the volatile wipe on discard are that crate's one
 # implementation; this engine adds no second copy of either.
 tairix-controls = { path = "../controls", version = "=0.0.0" }
+# The shared text rasteriser. The clock, date, and host name on the backdrop
+# and an account's monogram are drawn through it at a themed role, so no text
+# here picks a face of its own.
+tairix-font = { path = "../font", version = "=0.0.0" }
+# The glyph vocabulary an account tile falls back to when it has no monogram
+# to draw.
+tairix-icon = { path = "../icon", version = "=0.0.0" }
 # The shared pointer/keyboard vocabulary the embedder drains into the
 # surface; the same events the window manager routes.
 tairix-input = { path = "../input", version = "=0.0.0" }

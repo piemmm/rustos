@@ -96,10 +96,10 @@ tests assert a minimum luma separation from the accent fill.
 ## Typography
 
 A theme sizes text by the **job** it does, never by the widget that draws it.
-`TextRole` is a closed set — `Heading`, `ItemTitle`, `WindowTitle`, `Body`,
-`Metric`, `Caption`, `SectionHeader`, `Monospace` — and `Fonts::spec(role)` is
-a constant-time array read, so a text draw can neither miss a lookup nor
-invent a size literal at the call site.
+`TextRole` is a closed set — `Display`, `Heading`, `ItemTitle`, `WindowTitle`,
+`Body`, `Metric`, `Caption`, `SectionHeader`, `Monospace` — and
+`Fonts::spec(role)` is a constant-time array read, so a text draw can neither
+miss a lookup nor invent a size literal at the call site.
 
 Every role's size is a percentage of one authored base (body) size, measured
 from the design boards, so a theme states *one* number and the whole desktop's
@@ -107,6 +107,7 @@ type scales together (`AGENTS.md` §2.2):
 
 | Role | Size | Weight |
 | --- | --- | --- |
+| `Display` | 250% | Regular |
 | `Heading` | 133% | Medium |
 | `ItemTitle` | 113% | Medium |
 | `WindowTitle` | 100% | Medium |
@@ -119,6 +120,13 @@ type scales together (`AGENTS.md` §2.2):
 The boards carry their hierarchy with a deliberately *tight* size ladder and a
 rising weight — a detail line sits within a point of the title above it, and a
 column header is smaller but bold — so weight, not size, does most of the work.
+`Display` is the one deliberate exception: it is the rung for a *single*
+dominant line on a full screen of its own — the login and lock screens' clock —
+and is light rather than heavy, because at that size weight would shout. It has
+no place in a window's chrome. Its 250% is the largest multiple that still
+rasterises at the maximum authored base under a doubled density; a taller rung
+would silently clamp.
+
 The built-ins author the base at 18 logical pixels; `Fonts::ladder` clamps an
 authored base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so a theme can
 neither author text below the rasteriser's legibility floor nor above its

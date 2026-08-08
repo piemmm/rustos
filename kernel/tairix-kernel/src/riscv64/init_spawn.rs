@@ -46,7 +46,7 @@ use tairix_arch_riscv64::paging::{
 };
 use tairix_arch_riscv64::userentry::UserMode;
 use tairix_kernel_core::{
-    spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
+    spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnMode, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack,
@@ -234,6 +234,7 @@ impl InitSpawn for RiscvInitSpawn {
         let Ok(entry) = (unsafe {
             spawn_image(
                 &spawn_layout::SpawnAuthority,
+                SpawnMode::General,
                 ctx.audit(),
                 &mut space,
                 &physmap,

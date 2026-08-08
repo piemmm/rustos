@@ -16,12 +16,15 @@ This crate is pure theme *data*. A `Theme` is a table of:
   consumes (`AGENTS.md` §2.2).
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing
   faces under `/System/Fonts`. A theme sizes text by the *job* it does
-  (`Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`, `Caption`,
-  `SectionHeader`, `Monospace`), and every role's size is a percentage of one
-  authored base size measured from the design boards, so a theme states one
-  number and the whole scale follows (`AGENTS.md` §2.2). `Fonts::ladder`
-  clamps that base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so text can be
-  neither too small to read nor too large to rasterise (`AGENTS.md` §5.4).
+  (`Display`, `Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`,
+  `Caption`, `SectionHeader`, `Monospace`), and every role's size is a
+  percentage of one authored base size measured from the design boards, so a
+  theme states one number and the whole scale follows (`AGENTS.md` §2.2).
+  `Fonts::ladder` clamps that base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`,
+  so text can be neither too small to read nor too large to rasterise
+  (`AGENTS.md` §5.4). `Display` is the top rung — the single dominant line on
+  a screen of its own, such as the login and lock screens' clock — and is the
+  one deliberate break from the tight ladder the other roles keep.
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
   under `/System/Graphics`.
 

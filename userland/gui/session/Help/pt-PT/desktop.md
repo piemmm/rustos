@@ -15,9 +15,9 @@ o gestor de janelas e a barra de tarefas — até a sessão terminar. O
 comando regressa quando a sessão do ambiente de trabalho termina.
 
 O mesmo ambiente de trabalho arranca automaticamente após a
-autenticação quando o administrador configurou um início de sessão
-gráfico (`configure os.loginType graphical`); este comando inicia-o a
-pedido a partir de uma shell de texto.
+autenticação: um início de sessão gráfico (`os.loginType`) é a
+predefinição numa máquina que o consiga executar. Este comando inicia-o
+a pedido a partir de uma shell de texto.
 
 Quando nenhum serviço de ecrã está em execução, ou outra sessão já
 detém o posto, o comando falha escrevendo o motivo na saída de erro

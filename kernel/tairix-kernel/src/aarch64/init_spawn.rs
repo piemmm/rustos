@@ -35,7 +35,7 @@ use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_api::EnterUser;
 use tairix_kernel_core::{
-    spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
+    spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnMode, SpawnRequest,
 };
 use tairix_kernel_mem::{
     AddressSpace, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack, VirtAddr,
@@ -234,6 +234,7 @@ impl InitSpawn for Aarch64InitSpawn {
         let Ok(entry) = (unsafe {
             spawn_image(
                 &spawn_layout::SpawnAuthority,
+                SpawnMode::General,
                 ctx.audit(),
                 &mut space,
                 &physmap,

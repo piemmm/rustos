@@ -27,11 +27,11 @@ conta comum pode ler as opções mas não alterá-las.
 
 - `os.loginType` — `text` ou `graphical`: o tipo de sessão que o
   serviço de início de sessão inicia para um utilizador autenticado.
-  `text` (a omissão) inicia a shell da conta — o ambiente de trabalho
-  pode ainda ser iniciado a pedido com o comando `desktop`; `graphical`
-  inicia diretamente a sessão de ambiente de trabalho após a
-  autenticação quando existe um instalado, recuando para texto quando
-  não existe.
+  `graphical` (a omissão) inicia diretamente a sessão de ambiente de
+  trabalho após a autenticação, recuando para o início de sessão em
+  texto numa máquina que não consegue executar uma; `text` inicia a
+  shell da conta — o ambiente de trabalho pode ainda ser iniciado a
+  pedido com o comando `desktop`.
 - `cache.all` — `on` ou `off`: o comutador principal da cache. `on` (a
   omissão) deixa cada classe de cache abaixo seguir a sua própria
   opção; `off` é um teto que desativa toda a cache em memória

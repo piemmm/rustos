@@ -29,7 +29,7 @@ use tairix_fdt::Fdt;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, KernelProcessWait, ProcessWait,
-    RescheduleAction, SpawnRequest, Yielder,
+    RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
@@ -336,6 +336,7 @@ fn build_el0_space(pool: &'static PageTablePool, rxe: &[u8]) -> (u64, tairix_arc
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

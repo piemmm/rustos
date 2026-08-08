@@ -289,6 +289,115 @@ impl Surface {
         }
     }
 
+    /// Composite a vertical linear gradient over `[x, x+w) × [y, y+h)`,
+    /// ramping from `top` on the rectangle's first row to `bottom` on its
+    /// last.
+    ///
+    /// This is the shared gradient wash: the legibility gradient a
+    /// full-screen surface lays over a wallpaper so its text survives a
+    /// bright picture, and the soft shading a large plate carries. Both the
+    /// colour and the alpha are interpolated in straight-alpha form and
+    /// premultiplied per row, so a ramp that fades out keeps its hue all the
+    /// way down instead of darkening as it goes.
+    ///
+    /// The ramp is evaluated in the rectangle's own coordinates, so a
+    /// rectangle the surface bounds or the clip window cut short shows the
+    /// part of the ramp that survives rather than a re-scaled one. Each row
+    /// is one span fill or one blend pass, so the cost is the clipped area.
+    /// A zero-size rectangle draws nothing, and a one-row rectangle is `top`.
+    pub fn fill_vertical_gradient(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        top: Color,
+        bottom: Color,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let last = h - 1;
+        for row in self.clip.rows(y, h) {
+            let source = lerp_color(top, bottom, row - y, last).premultiply();
+            // A premultiplied pixel of zero alpha is all zeroes, so `over`
+            // would leave every destination pixel exactly as it found it.
+            if source.a == 0 {
+                continue;
+            }
+            if let Some((_, span)) = self.row_span_mut(row, x, w) {
+                composite_span(span, source);
+            }
+        }
+    }
+
+    /// Confine the surface to the rounded rectangle `[x, x+w) × [y, y+h)`
+    /// with corner `radius`: every pixel outside it becomes fully
+    /// transparent, and one straddling a corner arc keeps the fraction of
+    /// its alpha the arc covers.
+    ///
+    /// This is how *already-painted* content takes a rounded shape — the
+    /// compositor's window-corner mask, or a control assembled from parts
+    /// that must end up inside one rounded silhouette. Filling a rounded
+    /// rectangle in a background colour over the same content cannot do it:
+    /// that leaves an opaque frame where a mask leaves a transparent one.
+    /// The edge comes from the same [`round_rect_coverage`] a fill uses, so a
+    /// masked shape and a filled one round identically.
+    ///
+    /// An over-large radius is clamped to half the shorter side, so a radius
+    /// of half the height yields a stadium and one of half of both yields a
+    /// circle. A zero-size rectangle clears the surface, which is what
+    /// confining content to nothing means.
+    pub fn mask_to_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32) {
+        let radius = radius.min(w / 2).min(h / 2);
+        let (width, height) = (self.width, self.height);
+        let right = x.saturating_add(w).min(width);
+        let bottom = y.saturating_add(h);
+        for row in self.clip.rows(0, height) {
+            if row < y || row >= bottom {
+                self.clear_span(row, 0, width);
+                continue;
+            }
+            self.clear_span(row, 0, x.min(width));
+            self.clear_span(row, right, width - right);
+
+            let local_y = row - y;
+            if !in_corner_band(local_y, h, radius) {
+                continue;
+            }
+            let Some((first, span)) = self.row_span_mut(row, x, w) else {
+                continue;
+            };
+            // As in `fill_round_rect`: the drawn columns as the rectangle
+            // sees them, so a clipped span still keeps the whole shape's arcs.
+            let lead = first - x;
+            let Ok(drawn) = u32::try_from(span.len()) else {
+                continue;
+            };
+            let left_end = radius.saturating_sub(lead).min(drawn);
+            let right_start = (w - radius).saturating_sub(lead).min(drawn).max(left_end);
+            let (left, rest) = span.split_at_mut(left_end as usize);
+            let (_, right_band) = rest.split_at_mut((right_start - left_end) as usize);
+            mask_coverage_span(left, lead..lead + left_end, local_y, w, h, radius);
+            mask_coverage_span(
+                right_band,
+                lead + right_start..lead + drawn,
+                local_y,
+                w,
+                h,
+                radius,
+            );
+        }
+    }
+
+    /// Make `[x, x+w)` of row `y` fully transparent, within the surface
+    /// bounds and the active clip window.
+    fn clear_span(&mut self, y: u32, x: u32, w: u32) {
+        if let Some((_, span)) = self.row_span_mut(y, x, w) {
+            span.fill(Pixel::TRANSPARENT);
+        }
+    }
+
     /// Fill an anti-aliased polygon onto this surface, compositing `color`
     /// over the existing pixels through the premultiplied-alpha
     /// [`Pixel::over`] path.
@@ -676,6 +785,47 @@ fn composite_span(span: &mut [Pixel], source: Pixel) {
     }
     for dst in span.iter_mut() {
         *dst = source.over(*dst);
+    }
+}
+
+/// `from` at `step` zero and `to` at `step` `last`, interpolated per channel
+/// in straight-alpha form. A `last` of zero is a one-step ramp: `from`.
+fn lerp_color(from: Color, to: Color, step: u32, last: u32) -> Color {
+    if last == 0 {
+        return from;
+    }
+    let lerp = |a: u8, b: u8| {
+        let weighted = u32::from(a) * (last - step) + u32::from(b) * step;
+        u8::try_from(weighted / last).unwrap_or(u8::MAX)
+    };
+    Color::rgba(
+        lerp(from.r, to.r),
+        lerp(from.g, to.g),
+        lerp(from.b, to.b),
+        lerp(from.a, to.a),
+    )
+}
+
+/// Scale one corner span's alpha by each pixel's anti-aliased rounded-rect
+/// coverage, so what was painted there survives only as far as the arc
+/// reaches.
+///
+/// `columns` are the span pixels' x coordinates local to the rectangle,
+/// paired one for one with `span`, and `local_y` is its row.
+fn mask_coverage_span(
+    span: &mut [Pixel],
+    columns: Range<u32>,
+    local_y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+) {
+    for (local_x, dst) in columns.zip(span.iter_mut()) {
+        let coverage = round_rect_coverage(local_x, local_y, w, h, radius);
+        if coverage == 255 {
+            continue;
+        }
+        *dst = dst.scale_alpha(coverage);
     }
 }
 

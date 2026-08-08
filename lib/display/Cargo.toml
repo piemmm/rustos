@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The scan-out encode names the geometry and pixel types its two consumers
+# (the compositor and the graphical login screen) already speak.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+tairix-raster = { path = "../raster", version = "=0.0.0" }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 
 [features]

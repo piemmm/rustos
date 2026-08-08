@@ -143,6 +143,7 @@ pub struct Taskbar {
     clock: Clock,
     tray: SwitchboardTray,
     lock_available: bool,
+    switch_user_available: bool,
     repaint: TaskbarRepaint,
 }
 
@@ -177,6 +178,7 @@ impl Taskbar {
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
             lock_available: false,
+            switch_user_available: false,
             repaint: TaskbarRepaint::NONE,
         }
     }
@@ -437,6 +439,23 @@ impl Taskbar {
         }
     }
 
+    /// Adopt the session's attestation that it can step aside for another
+    /// user, so the *Switch User…* row exists only where switching really
+    /// works.
+    ///
+    /// The bar cannot know this either: it depends on the session holding
+    /// the mailbox an authority resumes it through, which only the session
+    /// can establish. It defaults to refusing, so a bar that was never told
+    /// offers no switch at all rather than one that would strand the user
+    /// on a login screen with no way back. Only the system menu renders it,
+    /// and only while open, so a change latches that surface alone.
+    pub fn set_switch_user_available(&mut self, available: bool) {
+        if self.switch_user_available != available {
+            self.switch_user_available = available;
+            self.repaint |= TaskbarRepaint::MENU;
+        }
+    }
+
     /// Latch the surfaces a tray-capsule change alters: the bar always (the
     /// capsule's badge, label, and furniture live there), and the readout
     /// too while it is currently expanded, since it renders the same derived
@@ -683,6 +702,7 @@ impl Taskbar {
             task_shell_installed: EntryId::new(system::TASK_SHELL_BUNDLE)
                 .is_ok_and(|id| self.library.catalog().entry(&id).is_some()),
             lock_available: self.lock_available,
+            switch_user_available: self.switch_user_available,
         };
         self.menu.open(MenuSubject::System { permits }, anchor);
         self.repaint |= TaskbarRepaint::MENU;

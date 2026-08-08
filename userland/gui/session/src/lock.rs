@@ -33,8 +33,10 @@
 //! [`Verifier`] is the per-console elevation broker — the login supervisor
 //! that started this session — which attests the caller's identity from the
 //! kernel, checks the password against *that* uid, and audits the decision.
-//! A refusal, a transport failure, a broker that is not there, and a reply it
-//! cannot parse are all the same answer: still locked.
+//! It therefore ignores the account name the surface offers it: the only
+//! identity it will ever check is this process's own. A refusal, a transport
+//! failure, a broker that is not there, and a reply it cannot parse are all
+//! the same answer: still locked.
 
 use tairix_greeter::{AuthSurface, Backdrop, EventContext, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};

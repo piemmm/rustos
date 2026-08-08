@@ -2845,10 +2845,10 @@ added to the file-map verticals.
 - `userland/shell/elsh`: POSIX-ish shell with job control and a small builtin set.
 - `userland/session/login`: text login that authenticates against `kernel/sec`
   and spawns a shell or a graphical session. Which session runs is system
-  policy, never a per-login prompt: the account's shell by default, the
-  desktop when `os.loginType graphical` is configured *and* a graphical
-  session is available (degrading to text otherwise); a shell user starts
-  the desktop on demand with the `desktop` command app.
+  policy, never a per-login prompt: the desktop whenever `os.loginType` is
+  `graphical` — the default — *and* a graphical session is available,
+  degrading to the account's shell otherwise; a shell user starts the
+  desktop on demand with the `desktop` command app.
   The console presentation is the full-screen curses view
   (`tairix_login::view::CursesView` over `lib/curses`): top bar with
   hostname/OS-version/clock, centred bordered login box, red running
@@ -2903,8 +2903,9 @@ added to the file-map verticals.
   hash discipline; served by `userland/system/sysinfod`.
 - `userland/system/init` (PID 1, dependency-ordered service manager + reaper +
   manifest capability granting), `userland/shell/elsh` (POSIX-ish, job
-  control), `userland/session/login` (shell by default; the desktop when
-  `os.loginType graphical` is configured and a graphical session exists).
+  control), `userland/session/login` (the desktop when `os.loginType` is
+  `graphical` — the default — and a graphical session exists; the
+  account's shell otherwise).
 - Core CLI utilities each as their own `userland/apps/` crate (`ls`/`cp`/`mv`/
   `rm`/`cat`/`ps`/`mount`/`chmod`/`chown`/`useradd`/`groupadd`/`setcap`/
   `getcap`/`sysinfo`); `ps`/`mount`/`sysinfo` are sysinfo-API clients (no
@@ -3540,8 +3541,9 @@ transfer, landed in increments:
   launch) is done — D7 is complete:** the desktop is the `desktop`
   application in the system application store (`desktop.app`, the
   `userland/gui/session` `Run` binary) — typed as a bare command word at
-  the shell, and spawned directly by login when `os.loginType graphical`
-  is configured (`lib/sysconfig`) *and* the per-round probe holds (a
+  the shell, and spawned directly by login when `os.loginType` is
+  `graphical` (`lib/sysconfig`, the default) *and* the per-round probe
+  holds (a
   read-only `fs_open` of the bundle's `Run` path — login's manifest
   carries `CAP_FS_ACCESS` for exactly this — plus one `Query` `ipc_call`
   to the reserved `DISPLAY_ENDPOINT`); there is no per-login session
@@ -5952,12 +5954,13 @@ desktop session work (CU6).
 
 ## NEW-DESKTOP-LOGIN — the graphical login screen and session switching (`plans/NEW-DESKTOP-LOGIN.md`)
 
-**Status: in progress.** How a machine reaches a *logged-in* state: the
-boot-time text-vs-graphical decision, the first-class graphical login
-screen (the *greeter*), the session authority that owns authentication and
-session lifetime, and macOS-style fast user switching between concurrently
-live desktop sessions on one seat. The plan is binding and carries the
-design; only status lives here.
+**Status: in progress — G1–G7 done, only the G7.1 QEMU verticals remain.**
+How a machine reaches a *logged-in* state: the boot-time text-vs-graphical
+decision, the first-class graphical login screen (the *greeter*), the
+session authority that owns authentication and session lifetime, and
+macOS-style fast user switching between concurrently live desktop sessions
+on one seat. The plan is binding and carries the design; only status lives
+here.
 
 - **G1 — the boot session decision.** `lib/supervisor`'s `continue`
   takes an optional `text` | `gui` operand (`console` / `graphical` /
@@ -5970,22 +5973,97 @@ design; only status lives here.
   `tairix_rt::boot_session()` failing closed to `BootSession::Unset`.
   `login` combines it with the stored `os.loginType` through the one
   `effective_session_kind` precedence — the operator's one-boot choice
-  wins, else the store, else text — and still degrades to text when no
-  graphical session is available.
+  wins, else the store, else the compiled default — and still degrades to
+  text when no graphical session is available.
+  **The compiled default is `graphical`:** hardware that can run a
+  graphical login gets one unconfigured, and `SystemConfig::default()
+  .login_type` is the single definition every unlearnable-store path
+  (absent, unreadable, non-UTF-8, unparseable) resolves through, so the
+  default cannot be flipped in one place and ignored in another. The
+  degradation to text is what makes that safe and its tests are
+  load-bearing; a QEMU vertical that wants the text prompt on drawable
+  hardware plants an `os.loginType text` document rendered by the
+  configuration engine itself rather than relying on a default.
 - **G2/G6 — one authentication surface.** **`lib/greeter`** (new `lib/*`
   crate, registered in `AGENTS.md` §3) owns the full-screen "prove who you
   are, at the screen" surface: the `AuthSurface` state machine, the one
-  `panel_rect`/`field_rect` geometry both paint and hit-test read, the
-  wording, the bounded secret and its wipe on every terminal transition,
-  and the render over a caller-supplied `Backdrop`. Authentication itself
+  `layout` geometry both paint and hit-test read, the wording, the bounded
+  secret and its wipe on every terminal transition, and the render over a
+  caller-supplied `Backdrop`. The screen is one centred column — clock,
+  date and host name above a monogram disc, the account's name, a pill
+  secret field, and one notice line — every length authored logical and
+  converted through `Scale` exactly once, with the chrome's presence a
+  function of the screen and density alone so it cannot appear or vanish
+  between choosing an account and typing. Authentication itself
   stays with the embedder through the `Verifier`/`Verdict` seam, so the
   engine takes no ABI or IPC dependency. The desktop session's screen lock
   composes it and keeps only its embedder duties (the compositor window,
   `keep_topmost`, `LockedDrain`, the elevation-broker `Verifier`).
-- **Remaining: G3** (the `greeter.app` service bundle and its service
-  account), **G4** (the `session-v1` broker in `login` and the graphical
-  round), **G5** (fast user switching: session table, wake port, switch
-  away/back), **G7** (docs, README matrix, QEMU verticals).
+- **G4 — `session-v1` and the session authority.**
+  `tairix_abi::session_ipc` is the reserved rendezvous `login` binds and
+  the three requests it answers: paged `Accounts` (display name, login
+  name, live flag — nothing a tile does not draw), `Authenticate`
+  (a verdict; it starts nothing), and `Background` (G5). Placement (the
+  attested console) is checked before any state, then a per-request
+  identity rule — the greeter's uid for the first two, the uid owning the
+  foreground session for the third. Every refusal is byte-identical and
+  carries only the remaining cooldown, an unauthorised or undecodable
+  request gets a well-formed empty page rather than an errno, and the
+  request buffer holding the secret is wiped on every path.
+  `login` gained the `AttemptBudget` (per login name, monotonic, three
+  free attempts then 5 s doubling to a 5-minute cap, over a bounded
+  16-entry table that evicts only expired entries), the graphical round
+  (spawn the greeter as its own account on login's own console, serve
+  `session-v1` from the same wait-set, three consecutive greeter failures
+  degrade the round to text), and the availability probe extended to the
+  greeter bundle.
+- **G3 — `greeter.app`.** `userland/session/greeter`, planted at
+  `/System/Services/greeter.app` by bundle discovery, running as the new
+  dedicated `greeter` service account (uid 16, `GREETER_CEILING`). It
+  draws and types; it never decides: seven capabilities, and deliberately
+  no `CAP_USERS_READ`, no `CAP_PROC_SPAWN`/`CAP_SPAWN_AS_USER`, and no
+  privileged bind — compromising it yields a screen, not an account. It
+  owns the seat, composes `lib/greeter`, decodes its wallpaper in a
+  capability-empty sandbox worker, draws the pointer through the hoisted
+  `tairix_cursor::PlacedCursor`, presents only the damage rectangle, and
+  parks with no timer at all when nothing is counting down.
+- **`CAP_SANDBOX_SPAWN` (new, id 43).** Isolating untrusted input must not
+  cost the authority to start a general process, so the narrow capability
+  admits *only* a canonical parser sandbox — a child the kernel brands
+  capability-empty, with no credential switch or console inherit. `spawn`'s
+  dispatcher gate therefore moves into the handler, which alone decodes the
+  attach block: a coarse "holds one of the two" refusal before any staging,
+  then sandbox ⇒ either capability, anything else ⇒ `CAP_PROC_SPAWN`, with
+  `SpawnMode::admits` the one definition and both refusals audited before a
+  page table exists. Granted to the greeter alone; every other sandbox user
+  already holds the broad capability that subsumes it.
+- **G5 — fast user switching.** `login` keeps the live-session table (one
+  `Foreground` at most, the wake mailbox *derived* from the session's task
+  id, never stored); a desktop steps aside with `Background` and is
+  resumed through `SessionWake::Foreground`, re-acquiring the seat and
+  re-moding the compositor (`Compositor::set_mode`, new) for a display
+  mode that may have changed. If the authority itself exits it drains the
+  table newest-first with `SessionWake::End`, so a background session is
+  never orphaned unreachable. The desktop offers it as `Switch User…`,
+  absent rather than broken when the mailbox could not be bound.
+- **Shared, not duplicated:** the scan-out encode (frame length, channel
+  order, damage-vs-whole-frame) moved out of the window manager into
+  `lib/display::scanout`, and cursor *placement* (origin = pointer −
+  hotspot, sampling under a screen row) out of it into
+  `tairix_cursor::PlacedCursor` — so the compositor and the login screen
+  share one pixel-exact definition of each, and `userland/session/*` needs
+  no forbidden edge into the window manager to draw a pointer.
+- **Remaining: G7.1** — the QEMU verticals (boot to the greeter,
+  authenticate onto the desktop, log out, switch accounts). Staged
+  separately: no integration test drives a graphical userland under QEMU
+  yet, so this needs a display-and-input guest harness that is a
+  deliverable in its own right and will serve every graphical vertical,
+  not only this one. **The gap is not theoretical:** the first real boot to
+  this screen showed no wallpaper, no text, and no pointer while every
+  crate was host-green, because a capability refusal, an unlinked glyph
+  transport, and an undrawn cursor are all invisible to a host render test.
+  The first vertical must therefore assert on content — text present, the
+  wallpaper drawn, a pointer visible — not merely that a frame arrived.
 
 ---
 

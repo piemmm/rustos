@@ -2,12 +2,11 @@
 //!
 //! `tairix-login` authenticates a user against `kernel/sec` and launches a
 //! session on their behalf. Which session runs is **system policy, never a
-//! per-login prompt**: the authenticated account's text shell by default,
-//! or the graphical desktop when the administrator configured
-//! `os.loginType graphical` (`lib/sysconfig`) *and* a graphical session is
-//! available. When it is not, the configured graphical default degrades to
-//! text — never crashed, never errored — and a shell user starts the
-//! desktop on demand with the `desktop` command. Installed to
+//! per-login prompt**: the graphical desktop by default
+//! (`os.loginType graphical`, `lib/sysconfig`) when a graphical session is
+//! available, otherwise the authenticated account's text shell — never
+//! crashed, never errored — and a shell user starts the desktop on demand
+//! with the `desktop` command. Installed to
 //! `/System/Services/login.app/Run`.
 //!
 //! # What this crate is
@@ -60,6 +59,19 @@
 //!   same broker answers a caller's own verify-only re-authentication
 //!   request — the primitive a graphical session's screen lock needs,
 //!   without a second authenticator anywhere in the tree.
+//! * [`broker`](mod@broker) — [`handle_session_request`], the `session-v1`
+//!   broker the **graphical** login screen drives
+//!   (`plans/NEW-DESKTOP-LOGIN.md` G4): the same authenticator again, the
+//!   [`SessionDirectory`] the chooser is drawn from and the presenting
+//!   session steps aside through, and one reasonless refusal for every
+//!   failure.
+//! * [`budget`](mod@budget) — [`AttemptBudget`], the per-account,
+//!   monotonic-clock-driven guess meter a refusal's cooldown is reported
+//!   from.
+//! * [`table`](mod@table) — [`LiveSessions`], the record of which accounts
+//!   have a live desktop session and which one of them holds the seat, plus
+//!   [`end_live_sessions()`], the drain that ends them all when the
+//!   authority exits and its wake mailboxes go with it.
 //! * [`supervise`](mod@supervise) — [`supervise()`], the per-round
 //!   database-reload loop that keeps a `login` spawned before the encrypted
 //!   root is unlocked from caching a stale "no database" answer.
@@ -80,6 +92,8 @@
 extern crate alloc;
 
 pub mod auth;
+pub mod broker;
+pub mod budget;
 pub(crate) mod decfmt;
 pub mod elevate;
 pub mod error;
@@ -87,16 +101,21 @@ pub mod events;
 pub mod login;
 pub mod session;
 pub mod supervise;
+pub mod table;
 pub mod view;
 
 pub use auth::{DenyAll, UsersAuthenticator};
+pub use broker::{handle_session_request, DbAccounts, SessionDirectory, SessionReply};
+pub use budget::AttemptBudget;
 pub use elevate::{handle_elevate_request, ElevateLauncher};
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{
-    effective_session_kind, session_environment, session_program, AuthenticatedUser, Authenticator,
-    Credentials, Gid, LoginView, SessionKind, SessionLauncher, SessionOutcome, Uid,
-    DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH,
+    configured_session_kind, effective_session_kind, session_environment, session_program,
+    AuthenticatedUser, Authenticator, ConfigStore, Credentials, Gid, LoginView, SessionKind,
+    SessionLauncher, SessionOutcome, Uid, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH,
+    GREETER_SERVICE_PATH,
 };
 pub use supervise::{supervise, DbLoad};
+pub use table::{end_live_sessions, LiveSession, LiveSessions, SessionWaker};
 pub use view::{ConsoleMode, CursesView, LoginStatus, StatusSource};

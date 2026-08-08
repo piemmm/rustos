@@ -268,9 +268,15 @@ pub trait SyscallHandlers {
     /// Spawn a new process from the embedded program named by the
     /// absolute path `(path, path_len)`, returning the new process's PID.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::PROC_SPAWN`], that `path` is non-null, and that
-    /// `path_len` fits in `usize`. The implementation copies the path in
+    /// The dispatcher has already checked that `path` is non-null and that
+    /// `path_len` fits in `usize`, but attaches **no** capability gate: which
+    /// authority a spawn needs depends on the attach block only this
+    /// implementation decodes. It must therefore refuse a caller holding
+    /// neither [`CapabilityId::PROC_SPAWN`] nor
+    /// [`CapabilityId::SANDBOX_SPAWN`] before staging anything, and then,
+    /// once the block is parsed, admit a canonical parser-sandbox spawn on
+    /// either capability and every other spawn on
+    /// [`CapabilityId::PROC_SPAWN`] alone. The implementation copies the path in
     /// through the validated `copy_from_user` boundary, looks it up in the kernel's embedded-program registry,
     /// builds a fresh hardware-isolated address space for it,
     /// registers it as a runnable process, and returns its PID; the
@@ -4678,7 +4684,6 @@ mod tests {
                 CapabilityId::USER_ADMIN,
                 CapabilityId::IRQ_BIND,
                 CapabilityId::CONSOLE_WRITE,
-                CapabilityId::PROC_SPAWN,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::USERS_READ,
                 CapabilityId::INPUT_INJECT,
@@ -4726,6 +4731,42 @@ mod tests {
                 AbiType::Len => 64,
                 AbiType::I32 | AbiType::Unit | AbiType::Errno => 0,
             };
+        }
+    }
+
+    #[test]
+    fn spawn_reaches_its_handler_without_a_dispatcher_capability() {
+        // The graphical login screen holds only the narrow sandbox
+        // authority; a blanket dispatcher gate on CAP_PROC_SPAWN used to
+        // refuse its wallpaper decode before the handler could see that the
+        // request was a parser sandbox. The gate now belongs to the handler,
+        // which decodes the attach block and applies the precise rule, so
+        // the dispatcher must let both of these through.
+        for held in [
+            &[CapabilityId::SANDBOX_SPAWN][..],
+            // …and a caller holding neither reaches it too: the handler
+            // refuses that one itself, before staging anything.
+            &[][..],
+        ] {
+            let sink = RecordingSink::new();
+            let caps = build_caps(held, &sink);
+            let ctx = CallerContext {
+                task_id: TaskId(7),
+                caps: &caps,
+            };
+            let h = MockHandlers::default();
+            let d = Dispatcher::new(&h, &sink);
+
+            let spec = spec_for(SyscallNumber::SPAWN).unwrap();
+            let mut args = RawArgs::ZERO;
+            populate_valid_args(spec, &mut args);
+            assert!(d
+                .dispatch(&ctx, SyscallNumber::SPAWN.as_u16(), args)
+                .is_ok());
+            assert_eq!(h.last(), Some("spawn"));
+            assert!(!sink
+                .ids()
+                .contains(&AuditEvent::SyscallPermissionDenied.id().0));
         }
     }
 

@@ -1,0 +1,126 @@
+[package]
+name = "tairix-greeter-service"
+description = "TAIRiX graphical login screen: the seat-owning greeter.app service that paints lib/greeter's authentication surface and relays every verdict decision to the session authority over session-v1 (plans/NEW-DESKTOP-LOGIN.md G3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-fontd`. Host
+# tooling builds only the engine *library*, so the host test build never
+# pulls the userland runtime's `_start` / `#[global_allocator]` /
+# `panic_impl`.
+[features]
+default = ["program"]
+program = [
+    "dep:tairix-rt",
+    "dep:tairix-sandbox",
+    "dep:tairix-procinfo",
+    "dep:tairix-font",
+]
+
+# The package is both the `tairix-greeter-service` engine library (the
+# host-testable account paging, verdict relay, chrome, damage encoding, and
+# park scheduling) and the `Run` entry-point binary planted at
+# `/System/Services/greeter.app/Run`. The binary is a freestanding pure-Rust
+# program on the native Tier-1 targets and an inert host stub elsewhere (see
+# `src/run.rs`).
+[[bin]]
+name = "tairix-greeter-service-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen `session-v1` wire surface (`SESSION_ENDPOINT`, `SessionRequest`,
+# `decode_account_page`, `SessionVerdict`), the `Duration64` cooldown span,
+# the display mode/damage geometry, and the seat input record vocabulary.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared authentication surface this service paints: the account chooser,
+# the panel, the masked field, the wording, and the verdict state machine. The
+# greeter adds no second login surface.
+tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
+# Shared logical geometry (`Rect`/`Scale`): the surface is placed and hit-
+# tested in logical pixels through the one shared scale.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The one definition of how composited pixels become scan-out bytes
+# (`ChannelOrder`, `scanout_len`, `sub_screen_damage`) and, in the `Run`
+# binary, the session half of the `DISPLAY_ENDPOINT` protocol. The greeter
+# hand-rolls neither.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+# The premultiplied-alpha `Surface` the authentication surface renders into
+# and the frame encoder scans out from.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The shared design tokens. The login screen reads the same theme registry the
+# desktop does, so the screen a user unlocks into matches the one they typed on.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The routing input vocabulary the surface answers events in.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The shared pointer artwork and its placement: the screen rasterises the
+# arrow once for the active scale and blends the `PlacedCursor` over its own
+# frame, the same hotspot-relative placement the compositor draws with.
+tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
+# The one shared wire->routing input translation (`key_input_event`,
+# `pointer_input_events`). Every consumer of the shared control family crosses
+# that boundary through this definition; the greeter adds no private copy.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The shared calendar conversion behind the backdrop's clock and date, so the
+# login screen and the file manager never disagree about a civil day.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The volatile erase applied to the request buffer that carried a password.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The shipped wallpaper master's location and the byte bound an untrusted
+# image is read under.
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# Structured audit records with stable event ids.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The `Run` binary's freestanding dependencies: pulled in only for the
+# bare-metal targets the program is built for. On the host the binary is an
+# inert stub and none of these are linked.
+[target.'cfg(target_os = "none")'.dependencies]
+# The userland runtime: `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, and the seat / shared-memory / wait-set / IPC / clock
+# syscall wrappers.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The parser-sandbox seam and its wallpaper render service: the untrusted
+# image is decoded in a capability-empty re-entry of this binary, never in the
+# address space that owns the seat.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+# The System Information client the host name on the backdrop is read through.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+# Not named in this crate's code: it turns on the font client's production
+# `ipc_call` transport for the whole program, so the text `lib/greeter` draws
+# reaches `fontd`. Without it every glyph request fails closed and the login
+# screen renders no text at all. Host tests inject the mock transport instead,
+# which is why the base build stays feature-free.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", optional = true, features = [
+    "rt",
+] }
+
+[dev-dependencies]
+# The surface's host tests draw text, so they inject the shared solid test
+# transport rather than reaching for a running font service.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
+    "test-util",
+] }
+# TEST-ONLY EDGE. `tests/session_v1.rs` wires this crate's transport seam
+# straight to the authority's `handle_session_request`, so the two halves of
+# one protocol are proven against each other rather than each against its own
+# mock. At run time they are separate processes sharing only the `lib/abi` wire
+# types, and nothing outside `tests/` may reach for this.
+tairix-login = { path = "../login", version = "=0.0.0", default-features = false }
+# The greeter service account's attested uid, which the authority checks every
+# request against. Test-only: the greeter itself never reads the user database.
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The capability set an authenticated identity carries, for the fixture
+# authenticator the end-to-end test injects.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

@@ -253,10 +253,14 @@ fn the_ladder_derives_every_role_from_one_base_size() {
     // Body is the base by definition, so a theme authors one number.
     assert_eq!(fonts.spec(TextRole::Body).size_px, 18);
     // The boards' ladder is tight but strictly ordered around the base.
+    assert!(fonts.spec(TextRole::Display).size_px > fonts.spec(TextRole::Heading).size_px);
     assert!(fonts.spec(TextRole::Heading).size_px > fonts.spec(TextRole::ItemTitle).size_px);
     assert!(fonts.spec(TextRole::ItemTitle).size_px > fonts.spec(TextRole::Body).size_px);
     assert!(fonts.spec(TextRole::Body).size_px > fonts.spec(TextRole::Caption).size_px);
     assert!(fonts.spec(TextRole::Caption).size_px > fonts.spec(TextRole::SectionHeader).size_px);
+    // The display rung breaks out of the cluster: a screen-filling readout is
+    // dominant, not merely one step up from a panel heading.
+    assert!(fonts.spec(TextRole::Display).size_px >= fonts.spec(TextRole::Body).size_px * 2);
     // Every rung is legible: no role rounds away to nothing.
     for role in TextRole::ALL {
         assert!(fonts.spec(role).size_px >= 1, "{role:?} rounded to zero");
@@ -272,6 +276,9 @@ fn the_ladder_carries_the_boards_weights_and_families() {
     // text stays regular.
     assert_eq!(fonts.spec(TextRole::Heading).weight, FontWeight::Medium);
     assert_eq!(fonts.spec(TextRole::ItemTitle).weight, FontWeight::Medium);
+    // The display rung is the exception: at that size a medium weight reads
+    // heavy, so it states its hierarchy on size alone.
+    assert_eq!(fonts.spec(TextRole::Display).weight, FontWeight::Regular);
     assert_eq!(fonts.spec(TextRole::WindowTitle).weight, FontWeight::Medium);
     assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::Bold);
     assert_eq!(fonts.spec(TextRole::Metric).weight, FontWeight::Bold);
@@ -334,6 +341,18 @@ fn an_out_of_range_base_size_is_clamped_rather_than_accepted() {
     assert_eq!(
         Fonts::ladder(key("s"), key("m"), u16::MAX).base_size_px(),
         Fonts::MAX_BASE_SIZE_PX
+    );
+}
+
+#[test]
+fn the_tallest_rung_survives_the_largest_base_at_a_high_dpi_scale() {
+    // The bound on the base size exists so the ladder's tallest rung still
+    // rasterises whole at a doubled density instead of being clamped short.
+    let fonts = Fonts::ladder(key("s"), key("m"), Fonts::MAX_BASE_SIZE_PX);
+    let tallest = u32::from(fonts.spec(TextRole::Display).size_px);
+    assert!(
+        tallest * 2 <= 512,
+        "tallest rung {tallest} outgrows the ceiling"
     );
 }
 

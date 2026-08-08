@@ -769,3 +769,130 @@ fn wipe_clears_every_pixel() {
     surface.wipe();
     assert!(surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
 }
+
+// ---- vertical gradient ----------------------------------------------
+
+#[test]
+fn a_vertical_gradient_ramps_from_the_top_colour_to_the_bottom_one() {
+    let mut s = Surface::new(1, 5).expect("allocates");
+    s.fill_vertical_gradient(0, 0, 1, 5, RED, BLUE);
+
+    // The ends are exactly the authored colours, so a caller's chosen stops
+    // survive the ramp rather than being approached.
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 4), Some(BLUE.premultiply()));
+    // In between the ramp is monotone in both channels.
+    for y in 1..5 {
+        let above = s.get(0, y - 1).expect("in bounds");
+        let here = s.get(0, y).expect("in bounds");
+        assert!(here.r < above.r, "red rose at row {y}");
+        assert!(here.b > above.b, "blue fell at row {y}");
+    }
+}
+
+#[test]
+fn a_gradient_that_fades_out_keeps_its_hue_all_the_way_down() {
+    // Interpolating premultiplied instead of straight alpha would drag the
+    // colour toward black as the alpha fell; the hue must stay put.
+    let white = Color::rgb(255, 255, 255);
+    let mut s = Surface::new(1, 5).expect("allocates");
+    s.fill_vertical_gradient(0, 0, 1, 5, white, Color::rgba(255, 255, 255, 0));
+
+    let mut previous = 255;
+    for y in 0..4 {
+        let pixel = s.get(0, y).expect("in bounds");
+        assert!(pixel.a < previous || y == 0, "alpha rose at row {y}");
+        previous = pixel.a;
+        assert_eq!(pixel.unpremultiply(), Color::rgba(255, 255, 255, pixel.a));
+    }
+    assert_eq!(s.get(0, 4), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_one_row_gradient_is_the_top_colour_and_an_empty_one_draws_nothing() {
+    let mut s = Surface::new(1, 1).expect("allocates");
+    s.fill_vertical_gradient(0, 0, 1, 1, RED, BLUE);
+    assert_eq!(s.get(0, 0), Some(RED.premultiply()));
+
+    let mut empty = Surface::new(2, 2).expect("allocates");
+    empty.fill_vertical_gradient(0, 0, 0, 2, RED, BLUE);
+    empty.fill_vertical_gradient(0, 0, 2, 0, RED, BLUE);
+    assert!(empty.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_clipped_gradient_keeps_the_ramp_the_whole_rectangle_would_have_had() {
+    let mut whole = Surface::new(1, 6).expect("allocates");
+    whole.fill_vertical_gradient(0, 0, 1, 6, RED, BLUE);
+
+    let mut clipped = Surface::new(1, 6).expect("allocates");
+    clipped.with_clip(0, 2, 1, 2, |s| {
+        s.fill_vertical_gradient(0, 0, 1, 6, RED, BLUE);
+    });
+    for y in 2..4 {
+        assert_eq!(clipped.get(0, y), whole.get(0, y), "row {y} re-scaled");
+    }
+    assert_eq!(clipped.get(0, 1), Some(Pixel::TRANSPARENT));
+    assert_eq!(clipped.get(0, 4), Some(Pixel::TRANSPARENT));
+}
+
+// ---- rounded-rect mask ----------------------------------------------
+
+#[test]
+fn masking_to_a_rectangle_clears_everything_outside_it() {
+    let mut s = Surface::new(8, 8).expect("allocates");
+    s.fill(RED);
+    s.mask_to_round_rect(2, 2, 4, 4, 0);
+
+    for y in 0..8 {
+        for x in 0..8 {
+            let inside = (2..6).contains(&x) && (2..6).contains(&y);
+            let expected = if inside {
+                RED.premultiply()
+            } else {
+                Pixel::TRANSPARENT
+            };
+            assert_eq!(s.get(x, y), Some(expected), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_mask_rounds_through_the_same_coverage_a_fill_does() {
+    // A masked shape and a filled one must have identical edges, or content
+    // rounded after the fact would not sit inside the shape drawn for it.
+    let mut s = Surface::new(9, 7).expect("allocates");
+    s.fill(RED);
+    s.mask_to_round_rect(0, 0, 9, 7, 3);
+
+    for y in 0..7 {
+        for x in 0..9 {
+            let coverage = round_rect_coverage(x, y, 9, 7, 3);
+            assert_eq!(s.get(x, y).expect("in bounds").a, coverage, "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn masking_to_half_the_height_yields_a_stadium() {
+    let mut s = Surface::new(12, 6).expect("allocates");
+    s.fill(RED);
+    s.mask_to_round_rect(0, 0, 12, 6, 3);
+
+    // The waist reaches both ends — the arc is tangent there, so that pixel
+    // is nearly, not exactly, whole — while the corners are cut away and the
+    // middle is untouched.
+    assert!(s.get(0, 3).expect("in bounds").a > 200);
+    assert!(s.get(11, 3).expect("in bounds").a > 200);
+    assert_eq!(s.get(6, 3), Some(RED.premultiply()));
+    assert_eq!(s.get(0, 0), Some(Pixel::TRANSPARENT));
+    assert_eq!(s.get(11, 5), Some(Pixel::TRANSPARENT));
+}
+
+#[test]
+fn masking_to_nothing_clears_the_surface() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.fill(RED);
+    s.mask_to_round_rect(1, 1, 0, 0, 0);
+    assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}

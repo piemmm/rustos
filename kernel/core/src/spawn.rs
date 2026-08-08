@@ -18,8 +18,8 @@
 //!
 //! Spawning a program is privileged: it materialises a new principal's
 //! address space and hands it the CPU. [`spawn_and_enter`] therefore
-//! requires the caller to hold [`CapabilityId::PROC_SPAWN`] and fails closed
-//! (no ambient authority; — fail closed) — the check
+//! requires the caller to satisfy the requested [`SpawnMode`] and fails
+//! closed (no ambient authority; — fail closed) — the check
 //! happens *before* `build_process_image` touches any page table. The hosted
 //! program still receives only the capabilities its own signed manifest
 //! requests intersected with its user's grants; this gate
@@ -392,8 +392,8 @@ pub trait InitSpawnCtx {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpawnCallerError {
-    /// The caller does not hold [`CapabilityId::PROC_SPAWN`]; no address
-    /// space was built (fail closed).
+    /// The caller holds no capability admitting the requested
+    /// [`SpawnMode`]; no address space was built (fail closed).
     Denied,
     /// Building the process image failed (see [`SpawnError`]); the partially
     /// built address space is discarded by the caller.
@@ -427,6 +427,57 @@ pub struct SpawnRequest<'a> {
     pub canary: u64,
 }
 
+/// Which authority a spawn needs — the one definition of the rule, shared by
+/// the `spawn` syscall handler and the image builder so the two can never
+/// disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMode {
+    /// An ordinary spawn: a child that runs with its own credential,
+    /// descriptors, and manifest∩grant authority.
+    General,
+    /// A canonical parser sandbox: a child the kernel brands
+    /// capability-empty, with no credential switch and no console inherit,
+    /// so untrusted input is decoded outside the caller's address space.
+    ParserSandbox,
+}
+
+impl SpawnMode {
+    /// The mode a parsed attach block asks for.
+    #[must_use]
+    pub const fn of_attach(is_sandbox: bool) -> Self {
+        if is_sandbox {
+            Self::ParserSandbox
+        } else {
+            Self::General
+        }
+    }
+
+    /// Whether `caps` may spawn in this mode.
+    ///
+    /// `CAP_PROC_SPAWN` admits both modes: a principal that may start *any*
+    /// process may obviously start a restricted one, so the broad capability
+    /// subsumes the narrow `CAP_SANDBOX_SPAWN` rather than sitting beside it.
+    #[must_use]
+    pub fn admits(self, caps: &dyn CapabilityQuery) -> bool {
+        match self {
+            Self::General => caps.holds(CapabilityId::PROC_SPAWN),
+            Self::ParserSandbox => {
+                caps.holds(CapabilityId::SANDBOX_SPAWN) || caps.holds(CapabilityId::PROC_SPAWN)
+            }
+        }
+    }
+}
+
+/// Whether `caps` may spawn in *any* mode — the coarse gate the `spawn`
+/// handler applies before it stages or parses the caller's attach block, so a
+/// principal that could not spawn at all is refused before any work is done.
+///
+/// Derived from [`SpawnMode::admits`], never a second copy of the rule.
+#[must_use]
+pub fn may_spawn_any_mode(caps: &dyn CapabilityQuery) -> bool {
+    SpawnMode::General.admits(caps) || SpawnMode::ParserSandbox.admits(caps)
+}
+
 /// A stable `&'static str` naming a [`SpawnError`] for the audit `cause`
 /// field. The audit record never formats untrusted data; it names which
 /// closed-fail branch the builder took.
@@ -449,9 +500,10 @@ const fn spawn_error_cause(error: SpawnError) -> &'static str {
 ///
 /// The call:
 ///
-/// 1. checks `caps` holds [`CapabilityId::PROC_SPAWN`], failing closed with
-///    [`SpawnCallerError::Denied`] and an [`AuditEvent::ProcessSpawnDenied`]
-///    record if not — *before* any page table is touched;
+/// 1. checks `caps` satisfies `mode` ([`SpawnMode::admits`]), failing closed
+///    with [`SpawnCallerError::Denied`] and an
+///    [`AuditEvent::ProcessSpawnDenied`] record if not — *before* any page
+///    table is touched;
 /// 2. calls [`build_process_image`] to materialise the user address space in
 ///    `space`, emitting [`AuditEvent::ProcessSpawnFailed`] and returning
 ///    [`SpawnCallerError::Build`] on failure;
@@ -477,6 +529,7 @@ const fn spawn_error_cause(error: SpawnError) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn spawn_and_enter<P, A, E>(
     caps: &dyn CapabilityQuery,
+    mode: SpawnMode,
     audit: &dyn Sink,
     enter: &E,
     space: &mut AddressSpace<P>,
@@ -495,7 +548,7 @@ where
     // entered once `space` is active and the trap path installed) is upheld
     // by this function's own identical safety contract, discharged by the
     // `enter_user` call below.
-    let entry = unsafe { spawn_image(caps, audit, space, physmap, request, alloc_frame)? };
+    let entry = unsafe { spawn_image(caps, mode, audit, space, physmap, request, alloc_frame)? };
 
     // SAFETY: the function's own safety contract requires `space` to be the
     // active address space with the trap path installed. `spawn_image`
@@ -532,8 +585,10 @@ where
 ///
 /// Returns [`SpawnCallerError::Denied`] when the capability check fails and
 /// [`SpawnCallerError::Build`] when image construction fails.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn spawn_image<P, A>(
     caps: &dyn CapabilityQuery,
+    mode: SpawnMode,
     audit: &dyn Sink,
     space: &mut AddressSpace<P>,
     physmap: &dyn PhysMap,
@@ -545,7 +600,7 @@ where
     A: FnMut() -> Option<Frame>,
 {
     // Step 2 — capability check before any state touch.
-    if !caps.holds(CapabilityId::PROC_SPAWN) {
+    if !mode.admits(caps) {
         emit(audit, AuditEvent::ProcessSpawnDenied, Level::Error, &[]);
         return Err(SpawnCallerError::Denied);
     }
@@ -1124,9 +1179,15 @@ mod tests {
             // SAFETY: building the image is safe; the returned `UserEntry`
             // is dropped, never entered, on the host.
             unsafe {
-                spawn_image(&caps, sink, &mut space, simmap, &req, || {
-                    frames.alloc().ok()
-                })
+                spawn_image(
+                    &caps,
+                    SpawnMode::General,
+                    sink,
+                    &mut space,
+                    simmap,
+                    &req,
+                    || frames.alloc().ok(),
+                )
             }
             .expect("image builds");
             assert!(frames.free_frames() < before, "the build consumed frames");
@@ -1172,13 +1233,131 @@ mod tests {
         // never-entering port is never invoked and the (inactive) host
         // address space is never entered.
         let result = unsafe {
-            spawn_and_enter(&caps, sink, &NeverEnter, &mut space, &physmap, &req, || {
-                None
-            })
+            spawn_and_enter(
+                &caps,
+                SpawnMode::General,
+                sink,
+                &NeverEnter,
+                &mut space,
+                &physmap,
+                &req,
+                || None,
+            )
         };
         assert_eq!(result.err(), Some(SpawnCallerError::Denied));
         // Nothing was mapped: the check fails closed before building.
         assert_eq!(space.mapped_pages(), 0);
+        let ids = sink.event_ids();
+        assert!(ids.contains(&AuditEvent::ProcessSpawnDenied.id().0));
+        assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
+    }
+
+    /// A frame allocator over exactly the window [`sim`] describes, so a
+    /// build draws frames that `PhysMap` can translate.
+    fn frames_over_sim() -> FrameAllocator {
+        let mut map = BootMemoryMap::new();
+        map.push(MemoryRegion {
+            kind: RegionKind::Usable,
+            start: PhysAddr::new((PAGE_SIZE * 16) as u64),
+            length: (64 * PAGE_SIZE) as u64,
+        });
+        FrameAllocator::new(&map).expect("allocator")
+    }
+
+    #[test]
+    fn the_spawn_mode_rule_is_the_narrow_capability_plus_subsumption() {
+        let nothing = Granted(&[]);
+        let narrow = Granted(&[CapabilityId::SANDBOX_SPAWN]);
+        let broad = Granted(&[CapabilityId::PROC_SPAWN]);
+
+        assert!(!SpawnMode::General.admits(&nothing));
+        assert!(!SpawnMode::ParserSandbox.admits(&nothing));
+        assert!(!may_spawn_any_mode(&nothing));
+
+        // The narrow capability buys a parser sandbox and nothing else.
+        assert!(SpawnMode::ParserSandbox.admits(&narrow));
+        assert!(!SpawnMode::General.admits(&narrow));
+        assert!(may_spawn_any_mode(&narrow));
+
+        // The broad one subsumes it.
+        assert!(SpawnMode::ParserSandbox.admits(&broad));
+        assert!(SpawnMode::General.admits(&broad));
+        assert!(may_spawn_any_mode(&broad));
+
+        assert_eq!(SpawnMode::of_attach(true), SpawnMode::ParserSandbox);
+        assert_eq!(SpawnMode::of_attach(false), SpawnMode::General);
+    }
+
+    #[test]
+    fn a_parser_sandbox_spawn_is_admitted_by_either_capability() {
+        set_max_level(Level::Trace);
+        for caps in [
+            Granted(&[CapabilityId::SANDBOX_SPAWN]),
+            Granted(&[CapabilityId::PROC_SPAWN]),
+        ] {
+            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let (bytes, image) = tiny_image();
+            let simmap = sim();
+            let frames = frames_over_sim();
+            let mut space = host_space();
+            let req = request(&image, &bytes, 2);
+
+            // SAFETY: building the image is safe; the returned `UserEntry`
+            // is dropped, never entered, on the host.
+            let entry = unsafe {
+                spawn_image(
+                    &caps,
+                    SpawnMode::ParserSandbox,
+                    sink,
+                    &mut space,
+                    &simmap,
+                    &req,
+                    || frames.alloc().ok(),
+                )
+            };
+            assert!(entry.is_ok(), "the sandbox spawn is admitted");
+            let ids = sink.event_ids();
+            assert!(ids.contains(&AuditEvent::ProcessSpawned.id().0));
+            assert!(!ids.contains(&AuditEvent::ProcessSpawnDenied.id().0));
+        }
+    }
+
+    #[test]
+    fn a_general_spawn_from_a_sandbox_only_caller_is_denied_and_touches_no_state() {
+        // The property the narrow capability exists for: it buys an
+        // isolated decode worker, never the authority to start a process.
+        set_max_level(Level::Trace);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let (bytes, image) = tiny_image();
+        let simmap = sim();
+        let frames = frames_over_sim();
+        let free_before = frames.free_frames();
+        let mut space = host_space();
+        let caps = Granted(&[CapabilityId::SANDBOX_SPAWN]);
+        let req = request(&image, &bytes, 2);
+
+        // SAFETY: the deny path returns before `enter_user`, so the
+        // never-entering port is never invoked and the (inactive) host
+        // address space is never entered.
+        let result = unsafe {
+            spawn_and_enter(
+                &caps,
+                SpawnMode::General,
+                sink,
+                &NeverEnter,
+                &mut space,
+                &simmap,
+                &req,
+                || frames.alloc().ok(),
+            )
+        };
+        assert_eq!(result.err(), Some(SpawnCallerError::Denied));
+        assert_eq!(space.mapped_pages(), 0, "no address space was built");
+        assert_eq!(
+            frames.free_frames(),
+            free_before,
+            "no page table was touched"
+        );
         let ids = sink.event_ids();
         assert!(ids.contains(&AuditEvent::ProcessSpawnDenied.id().0));
         assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
@@ -1199,9 +1378,16 @@ mod tests {
         // SAFETY: `build_process_image` fails before the function reaches
         // `enter_user`, so the never-entering port is never invoked.
         let result = unsafe {
-            spawn_and_enter(&caps, sink, &NeverEnter, &mut space, &physmap, &req, || {
-                None
-            })
+            spawn_and_enter(
+                &caps,
+                SpawnMode::General,
+                sink,
+                &NeverEnter,
+                &mut space,
+                &physmap,
+                &req,
+                || None,
+            )
         };
         assert_eq!(
             result.err(),

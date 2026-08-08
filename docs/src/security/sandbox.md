@@ -13,8 +13,9 @@ replacement) builds on this primitive and is staged in
 
 A spawn becomes a sandbox spawn by setting `SPAWN_FLAG_SANDBOX` in the
 `SpawnAttach` block's `flags` word (`lib/abi/src/process.rs`; C callers
-use `TAIRIX_SPAWN_FLAG_SANDBOX`). The flag can only ever *narrow* the child,
-so requesting it needs no capability.
+use `TAIRIX_SPAWN_FLAG_SANDBOX`). The flag can only ever *narrow* the
+child, so the flag itself costs no authority — but the spawn still needs
+one of the two spawn capabilities below.
 
 A sandbox block is canonical only when nothing ambient can flow into the
 child, and `SpawnAttach::parse` refuses any other shape fail-closed —
@@ -30,6 +31,36 @@ encoder:
   console index would attach console-backed streams, which a sandbox
   never receives.
 - **No reserved flag bits.** Any undefined `flags` bit refuses the block.
+
+## Which capability admits the spawn
+
+`spawn` carries no dispatcher-level capability, because the authority a
+spawn needs depends on the attach block that only the handler decodes
+(the same shape as `stream_write`'s console arm). The handler checks it in
+two steps, both before any address space exists:
+
+1. **Coarse, first statement.** A caller holding neither
+   `CAP_SANDBOX_SPAWN` nor `CAP_PROC_SPAWN` is refused before the path is
+   bounded, the attach block staged, or a descriptor resolved.
+2. **Precise, once the mode is known.** A canonical sandbox block is
+   admitted by **either** capability; every other spawn requires
+   `CAP_PROC_SPAWN`.
+
+`CAP_SANDBOX_SPAWN` exists so that a principal which must decode
+untrusted input away from its own address space does not also have to
+hold the authority to start a general process. The graphical login screen
+is the motivating holder: it decodes the wallpaper in a capability-empty
+worker, and a compromise of it still cannot start the session it
+authenticates for. `CAP_PROC_SPAWN` subsumes the narrow one — a principal
+that may start *any* process may obviously start a restricted one — so no
+existing holder of the broad capability needs it as well.
+
+Both refusals fail closed with the same audited `ProcessSpawnDenied`
+record and build no page table, so a `CAP_SANDBOX_SPAWN`-only caller that
+asks for a general child leaves nothing behind but the audit entry. The
+rule has one definition — `SpawnMode::admits` in
+`kernel/core/src/spawn.rs` — read by both the syscall handler and the
+image builder.
 
 ## What the kernel enforces
 

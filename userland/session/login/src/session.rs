@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{BootSession, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_sysconfig::{LoginType, SystemConfig};
 
 pub use tairix_users::{Gid, Uid};
 
@@ -135,6 +136,17 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
 /// path, so the two can never name different bundles.
 pub const DESKTOP_SESSION_PATH: &str = "/System/Applications/desktop.app/Run";
 
+/// Absolute path of the graphical login screen's `Run` binary — the
+/// service the authority starts as the `greeter` account when a graphical
+/// login round begins (`plans/NEW-DESKTOP-LOGIN.md` G3). It draws the login
+/// screen and asks the authority's `session-v1` endpoint; it can neither
+/// read the user database nor start a process.
+///
+/// One OS-wide spelling, matching the bundle the image plants under
+/// `/System/Services`: the launcher spawns this path and the availability
+/// probe checks the same one, so the two can never name different bundles.
+pub const GREETER_SERVICE_PATH: &str = "/System/Services/greeter.app/Run";
+
 /// Absolute path of the sandboxed OS font service (`fontd`) `Run` binary —
 /// the service the graphical desktop draws text through (`FONT_ENDPOINT`,
 /// `plans/FONT-SERVICE.md`). login starts it (as the `fontd` service
@@ -187,6 +199,56 @@ impl SessionKind {
             Self::Text => "text",
             Self::Graphical => "graphical",
         }
+    }
+}
+
+/// What a round learned about the system-configuration store.
+///
+/// The two absences are different facts and must not be collapsed: a
+/// machine that simply carries no configuration has told us to use the
+/// engine's default, whereas a store whose volume is not up yet has told us
+/// nothing at all.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConfigStore<'a> {
+    /// The store's own location was reachable. `Some` carries the document
+    /// found there; `None` means the location exists but holds no
+    /// configuration.
+    Reachable(Option<&'a [u8]>),
+    /// The store's location could not be reached, so nothing was read.
+    Unreachable,
+}
+
+/// The administrator-configured boot-default session kind for one round.
+///
+/// A reachable store decides: its document if it parses, otherwise the
+/// configuration engine's own default ([`SystemConfig::default`]), so the
+/// default has exactly one definition and login cannot drift from
+/// `configure`. The store is untrusted input — the bounded, fail-closed
+/// engine parse is the only decoder, and a malformed document never breaks
+/// a login.
+///
+/// An **unreachable** store decides nothing, and the round must not pretend
+/// otherwise. Assuming the compiled default there would silently override
+/// an administrator who had configured the opposite, purely because their
+/// volume had not finished mounting — so the round runs the text prompt,
+/// which is always available and never contradicts a stored choice, and
+/// re-reads on the next round once the volume is up.
+///
+/// The result is only a *request*: the caller still intersects it with what
+/// this round can actually start, which degrades a graphical answer to
+/// [`SessionKind::Text`] rather than erroring.
+#[must_use]
+pub fn configured_session_kind(store: ConfigStore<'_>) -> SessionKind {
+    let ConfigStore::Reachable(document) = store else {
+        return SessionKind::Text;
+    };
+    let config = document
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+        .and_then(|text| SystemConfig::parse(text).ok())
+        .unwrap_or_default();
+    match config.login_type {
+        LoginType::Text => SessionKind::Text,
+        LoginType::Graphical => SessionKind::Graphical,
     }
 }
 
@@ -335,8 +397,8 @@ pub trait SessionLauncher {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_session_kind, session_environment, AuthenticatedUser, Gid, SessionKind, Uid,
-        DEFAULT_LANG, DEFAULT_PATH, DEFAULT_TERM,
+        configured_session_kind, effective_session_kind, session_environment, AuthenticatedUser,
+        ConfigStore, Gid, SessionKind, Uid, DEFAULT_LANG, DEFAULT_PATH, DEFAULT_TERM,
     };
     use alloc::string::ToString;
     use alloc::vec::Vec;
@@ -432,5 +494,84 @@ mod tests {
                 configured
             );
         }
+    }
+
+    #[test]
+    fn a_stored_login_type_decides_the_configured_kind() {
+        assert_eq!(
+            configured_session_kind(ConfigStore::Reachable(Some(b"os.loginType text\n"))),
+            SessionKind::Text
+        );
+        assert_eq!(
+            configured_session_kind(ConfigStore::Reachable(Some(b"os.loginType graphical\n"))),
+            SessionKind::Graphical
+        );
+    }
+
+    /// A store login could not learn a type from must resolve to the
+    /// configuration engine's own default, never to a second idea of what
+    /// the default is: rendering that default and parsing it back must give
+    /// the same answer as having no store at all.
+    #[test]
+    fn an_unlearnable_store_resolves_to_the_engine_default() {
+        let rendered = tairix_sysconfig::SystemConfig::default().render();
+        let engine_default =
+            configured_session_kind(ConfigStore::Reachable(Some(rendered.as_bytes())));
+        for document in [
+            None,
+            Some(&b""[..]),
+            Some(&[0xff, 0xfe][..]),
+            Some(&b"os.loginType desktop\n"[..]),
+            Some(&b"os.notAKey graphical\n"[..]),
+            Some(&b"os.loginType text\nos.loginType graphical\n"[..]),
+        ] {
+            assert_eq!(
+                configured_session_kind(ConfigStore::Reachable(document)),
+                engine_default
+            );
+        }
+    }
+
+    /// The boot default a machine with no store gets today. Flipping it is
+    /// a deliberate change to how every fresh installation boots, so it is
+    /// pinned here as well as in the configuration engine.
+    #[test]
+    fn a_machine_with_no_store_boots_graphical() {
+        assert_eq!(
+            configured_session_kind(ConfigStore::Reachable(None)),
+            SessionKind::Graphical
+        );
+    }
+
+    /// A round that could not reach the store must not act as though the
+    /// machine had no configuration. Before this distinction existed, a
+    /// volume that had not finished mounting read as "no store", which
+    /// silently promoted the round to the compiled default and overrode an
+    /// administrator who had configured the text prompt.
+    #[test]
+    fn an_unreachable_store_never_asserts_the_compiled_default() {
+        assert_eq!(
+            configured_session_kind(ConfigStore::Unreachable),
+            SessionKind::Text
+        );
+        // The whole point of the two states: they must not agree while the
+        // compiled default is graphical.
+        assert_ne!(
+            configured_session_kind(ConfigStore::Unreachable),
+            configured_session_kind(ConfigStore::Reachable(None))
+        );
+    }
+
+    /// An unreachable store withholds a *default*, never an administrator's
+    /// explicit choice: the operator's one-boot Supervisor override still
+    /// wins, so `continue gui` reaches a desktop even on the very first
+    /// round after boot.
+    #[test]
+    fn a_supervisor_choice_survives_an_unreachable_store() {
+        let withheld = configured_session_kind(ConfigStore::Unreachable);
+        assert_eq!(
+            effective_session_kind(BootSession::Graphical, withheld),
+            SessionKind::Graphical
+        );
     }
 }

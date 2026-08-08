@@ -26,11 +26,11 @@ forma canonica e richiede l'accesso in scrittura a `/System/Settings`:
 un account ordinario può leggere le impostazioni ma non cambiarle.
 
 - `os.loginType` — `text` o `graphical`: quale tipo di sessione il
-  servizio di accesso avvia per un utente autenticato. `text` (il
-  predefinito) avvia la shell dell'account — il desktop può comunque
-  essere avviato su richiesta con il comando `desktop`; `graphical`
-  avvia direttamente la sessione desktop dopo l'autenticazione quando
-  un desktop è installato, ripiegando sul testo quando non lo è.
+  servizio di accesso avvia per un utente autenticato. `graphical` (il
+  predefinito) avvia direttamente la sessione desktop dopo
+  l'autenticazione, ripiegando sull'accesso testuale su una macchina che
+  non può eseguirne una; `text` avvia la shell dell'account — il desktop
+  può comunque essere avviato su richiesta con il comando `desktop`.
 - `cache.all` — `on` o `off`: l'interruttore principale della cache.
   `on` (il predefinito) lascia che ogni classe di cache sottostante
   segua la propria impostazione; `off` è un tetto che disabilita ogni

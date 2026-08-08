@@ -21,7 +21,7 @@ use tairix_fdt::Fdt;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
-    RescheduleAction, SpawnRequest, Yielder,
+    RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
@@ -200,6 +200,7 @@ fn build_el0_space(
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

@@ -55,11 +55,24 @@ This crate owns:
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
+  fill per row. Interpolation is in *straight* alpha and premultiplied per
+  row, so a ramp that fades out keeps its hue instead of being dragged toward
+  black. The ramp is evaluated in the rectangle's own coordinates, so a
+  clipped gradient shows the band the whole rectangle would have had rather
+  than a re-scaled one.
+- `Surface::mask_to_round_rect` — confine content already painted on a surface
+  to a rounded shape: everything outside is cleared and corner pixels are
+  scaled by the shared coverage. This is what a *fill* cannot do — a rounded
+  fill over the corners would leave an opaque frame, not a transparent one —
+  so a control that draws its own square plate can be reshaped into a stadium
+  after the fact (`lib/greeter`'s secret pill).
 - `round_rect_coverage` — the single anti-aliased rounded-rectangle coverage
   definition, supersampled with a fast interior path so its own cost is the
-  corner area, not the whole rectangle. The window manager's corner mask and
-  `Surface::fill_round_rect`'s Reactive Alloy control plates both round
-  through this one function, so the two never drift apart (`AGENTS.md` §2.2).
+  corner area, not the whole rectangle. The window manager's corner mask,
+  `Surface::fill_round_rect`'s Reactive Alloy control plates, and the mask
+  above all round through this one function, so they never drift apart
+  (`AGENTS.md` §2.2).
 - `resample` / `resample_rows` — the single image resampler the whole desktop
   scales through: the icon pipeline fitting a bundle's artwork into a slot and
   the wallpaper pipeline placing a photograph onto a screen are the same

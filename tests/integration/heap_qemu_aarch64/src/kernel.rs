@@ -24,7 +24,9 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_kalloc::FreeListAllocator;
-use tairix_kernel_core::{spawn_image, spawn_user_kthread, MemMap, SpawnRequest, Yielder};
+use tairix_kernel_core::{
+    spawn_image, spawn_user_kthread, MemMap, SpawnMode, SpawnRequest, Yielder,
+};
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
     PhysAddr, UserStack,
@@ -421,6 +423,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

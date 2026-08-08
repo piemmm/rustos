@@ -19,6 +19,13 @@ so the same definition is
 - `vector` — `Vertex`, `Shape`, `VectorCursor`: the vector representation.
 - `raster` — `VectorCursor::rasterise` → `CursorImage` (a `lib/raster`
   `Surface` plus the hotspot in pixel coordinates).
+- `placed` — `PlacedCursor`: a `CursorImage` put somewhere. It stores the
+  image's top-left corner as the pointer minus the hotspot, reports its
+  `bounds()` for damage, `draw`s itself onto a `lib/raster` `Surface`, and
+  samples per row (`local_row` / `sample_row` / `sample_local`) for a
+  compositor blending it alongside other layers. Every screen that shows a
+  pointer places it through this, so "the hotspot lands on the pointer" has
+  one definition (`AGENTS.md` §2.2).
 - `theme` — `CursorTheme`: one `VectorCursor` per `tairix_theme::CursorKind`,
   plus the built-in default set (light body over dark outline, two-tone busy
   disc).
@@ -47,8 +54,11 @@ depending on one another (`AGENTS.md` §17.4). It is `no_std`,
 `#![forbid(unsafe_code)]`, and owns no colour arithmetic of its own.
 
 The window manager resolves a `CursorKind` to a `VectorCursor`, rasterises it
-at the display scale, and composites the resulting `CursorImage` over the
-desktop so the hotspot tracks the pointer.
+at the display scale, and composites the resulting `PlacedCursor` over the
+desktop so the hotspot tracks the pointer. The graphical login screen
+(`userland/session/greeter`) draws its pointer through the same `PlacedCursor`
+without depending on the window manager — which is exactly why the placement
+lives here and not in the compositor (`AGENTS.md` §17.3).
 
 ## Stability
 

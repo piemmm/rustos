@@ -23,10 +23,11 @@
 //! single value from that key's closed value set. Keys may appear at most
 //! once. The registry today:
 //!
-//! * `os.loginType` — `text` (default) or `graphical`: which session type
-//!   the login service offers as the boot default (`plans/DISPLAY.md` D7d;
-//!   a graphical default still degrades to text when no desktop session is
-//!   installed — never an error).
+//! * `os.loginType` — `text` or `graphical` (default): which session type
+//!   the login service offers as the boot default (`plans/DISPLAY.md` D7d).
+//!   The graphical default still degrades to the text prompt on a machine
+//!   that cannot run one — no live display service, no desktop bundle, or
+//!   no login-screen bundle — never an error.
 //! * `cache.all` — `on` (default) or `off`: the master caching switch. `off`
 //!   is a ceiling that disables every SMARTRAM cache regardless of the
 //!   per-class settings below.
@@ -105,14 +106,15 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// (`os.loginType`). System policy, never a per-login prompt.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum LoginType {
-    /// The text login: the authenticated account's shell — the default,
-    /// and the value an absent store implies. A shell user starts the
-    /// desktop on demand with the `desktop` command.
-    #[default]
+    /// The text login: the authenticated account's shell. A shell user
+    /// starts the desktop on demand with the `desktop` command.
     Text,
-    /// The graphical login: an authenticated user's session starts the
-    /// desktop directly when one is installed (degrading to text when
-    /// none is — never an error).
+    /// The graphical login — the default, and the value an absent store
+    /// implies: an authenticated user's session starts the desktop
+    /// directly. A machine that cannot run one (no live display service,
+    /// no desktop bundle, or no login-screen bundle) degrades to the text
+    /// prompt — never an error.
+    #[default]
     Graphical,
 }
 
@@ -520,12 +522,12 @@ pub struct SystemConfig {
 }
 
 impl Default for SystemConfig {
-    /// The configuration an **absent** store implies: text login, every
-    /// cache enabled, both address families enabled, IPv6 privacy addresses
-    /// off, and the `auto` SYN-cookie policy. Written by hand because the
-    /// per-field defaults are not uniform (IPv6 privacy and TCP keepalive
-    /// default *off* while the family switches default *on*), so a blanket
-    /// derive would be wrong.
+    /// The configuration an **absent** store implies: graphical login,
+    /// every cache enabled, both address families enabled, IPv6 privacy
+    /// addresses off, and the `auto` SYN-cookie policy. Written by hand
+    /// because the per-field defaults are not uniform (IPv6 privacy and TCP
+    /// keepalive default *off* while the family switches default *on*), so
+    /// a blanket derive would be wrong.
     fn default() -> Self {
         Self {
             login_type: LoginType::default(),
@@ -725,7 +727,10 @@ mod tests {
     #[test]
     fn an_empty_store_is_the_default_configuration() {
         assert_eq!(SystemConfig::parse(""), Ok(SystemConfig::default()));
-        assert_eq!(SystemConfig::default().login_type, LoginType::Text);
+        // A machine that can run a desktop boots to one; login degrades to
+        // the text prompt on one that cannot.
+        assert_eq!(SystemConfig::default().login_type, LoginType::Graphical);
+        assert_eq!(SystemConfig::default().get(Key::LoginType), "graphical");
     }
 
     #[test]

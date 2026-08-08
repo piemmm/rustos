@@ -14,7 +14,7 @@ use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use tairix_kernel_core::{spawn_and_enter, SpawnRequest};
+use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level, Sink};
@@ -300,6 +300,7 @@ fn run_round_trip() -> ! {
     let outcome = unsafe {
         spawn_and_enter(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &UserMode::new(),
             &mut space,

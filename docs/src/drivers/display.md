@@ -140,6 +140,26 @@ and its unit tests live in `lib/display`
 (`lib/display/tests/framebuffer.rs`); the QEMU verticals below drive
 that same shared engine.
 
+#### The client side of a present
+
+`lib/display` also owns the three pixel-exact decisions every program
+that presents has to get right, in `tairix_display::scanout`: how many
+bytes a frame is for a given mode (`scanout_len`, refusing a zero
+extent, a stride too short for one scanline, or a size that overflows),
+which byte order the mode's format wants (`ChannelOrder::for_format`,
+refusing a format it has no software encoding for rather than guessing
+and rendering the screen in false colour), and whether a damage
+rectangle is a sub-region or the whole frame (`sub_screen_damage`,
+falling back to a full present rather than presenting a wrong region).
+
+They live here because getting any of them wrong is visible on the
+whole screen, and two programs need them: the compositing window
+manager, and the graphical login screen — which may not depend on the
+window manager. What is deliberately *not* shared is the composition
+itself: a compositor blending many windows through a back buffer and a
+login screen blitting one surface are different loops, and both encode
+their result through the one `ChannelOrder::encode`.
+
 #### QEMU integration vertical
 
 `tests/integration/framebuffer_display_qemu_riscv64`

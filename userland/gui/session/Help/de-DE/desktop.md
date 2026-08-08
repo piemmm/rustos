@@ -15,10 +15,10 @@ komponierenden Desktop aus — den Fenstermanager und die Taskleiste —
 bis die Sitzung endet. Der Befehl kehrt zurück, wenn die
 Desktop-Sitzung endet.
 
-Derselbe Desktop startet automatisch nach der Anmeldung, wenn der
-Administrator eine grafische Anmeldung konfiguriert hat
-(`configure os.loginType graphical`); dieser Befehl startet ihn auf
-Wunsch aus einer Text-Shell.
+Derselbe Desktop startet automatisch nach der Anmeldung: eine grafische
+Anmeldung (`os.loginType`) ist die Vorgabe auf einer Maschine, die eine
+ausführen kann. Dieser Befehl startet ihn auf Wunsch aus einer
+Text-Shell.
 
 Läuft kein Anzeigedienst, oder hält bereits eine andere Sitzung den
 Arbeitsplatz, schlägt der Befehl fehl und schreibt seinen Grund auf die

@@ -54,6 +54,12 @@ tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # dead store an optimiser may delete, which would leave the credential in
 # memory exactly where the code claims it is gone.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one system-configuration store engine (`lib/sysconfig`): the single
+# definition of the `os.loginType` boot default — including the session type
+# an absent or unparsable store implies, which `configured_session_kind`
+# resolves to rather than spelling a second time. The same engine the
+# `configure` command writes with, so producer and consumer never diverge.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and
@@ -63,12 +69,6 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-# The one system-configuration store engine (`lib/sysconfig`): the `Run`
-# binary re-reads the administrator's `os.loginType` boot default through
-# it each round — the same engine the `configure` command writes with, so
-# producer and consumer can never diverge. Freestanding-only: the pure
-# login library takes the parsed default through `LoginConfig`.
-tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # The production System Information transport (`IpcTransport`), enabled
 # through `tairix-procinfo`'s own `program` feature: the full-screen view's
 # status bars query `sysinfod` for the machine identity, memory figures,

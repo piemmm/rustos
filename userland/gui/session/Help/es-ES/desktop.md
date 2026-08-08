@@ -15,10 +15,10 @@ compositado — el gestor de ventanas y la barra de tareas — hasta que la
 sesión termina. El comando retorna cuando la sesión de escritorio
 termina.
 
-El mismo escritorio se inicia automáticamente tras la autenticación
-cuando el administrador configuró un inicio de sesión gráfico
-(`configure os.loginType graphical`); este comando lo inicia bajo
-demanda desde un shell de texto.
+El mismo escritorio se inicia automáticamente tras la autenticación: un
+inicio de sesión gráfico (`os.loginType`) es el valor por omisión en una
+máquina que pueda ejecutarlo. Este comando lo inicia bajo demanda desde
+un shell de texto.
 
 Cuando no hay ningún servicio de pantalla en ejecución, o cuando otra
 sesión ya posee el puesto, el comando falla escribiendo su motivo en la

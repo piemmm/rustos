@@ -12,7 +12,7 @@ use tairix_arch_aarch64::{
     userentry::UserMode, SERIAL_SINK,
 };
 use tairix_kalloc::FreeListAllocator;
-use tairix_kernel_core::{spawn_and_enter, SpawnRequest};
+use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -242,6 +242,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let outcome = unsafe {
         spawn_and_enter(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &UserMode::new(),
             &mut space,

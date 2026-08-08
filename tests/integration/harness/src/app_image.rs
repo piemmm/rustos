@@ -737,6 +737,7 @@ mod tests {
                 "files",
                 "fontd",
                 "fstree",
+                "greeter",
                 "groupadd",
                 "head",
                 "host",
@@ -795,6 +796,7 @@ mod tests {
             [
                 "devmgr",
                 "fontd",
+                "greeter",
                 "login",
                 "netstack",
                 "seatmgr",

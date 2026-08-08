@@ -233,6 +233,31 @@ pub const FONTD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `greeter` service account's grant ceiling: draw the graphical login
+/// screen on one seat and read that seat's input — nothing that could reach
+/// an account.
+///
+/// Deliberately the smallest ceiling of any service. It holds no
+/// `CAP_USERS_READ` (it cannot open the credential store), no
+/// `CAP_SPAWN_AS_USER` or `CAP_PROC_SPAWN` (it cannot start a process), and
+/// no `CAP_IPC_BIND_PRIVILEGED` (it cannot claim a reserved rendezvous — it
+/// only *calls* the authority's). `CAP_FS_ACCESS` reaches the wallpaper and
+/// theme assets under the read-only `/System`, still authorised per-inode
+/// under the greeter's own attested identity. Those assets are untrusted
+/// input, so `CAP_SANDBOX_SPAWN` lets it decode them in a capability-empty
+/// worker rather than in the address space that owns the seat — a canonical
+/// parser sandbox and nothing else, so "it cannot start a process" still
+/// holds. Compromising it yields a screen, not an account.
+pub const GREETER_CEILING: &[CapabilityId] = &[
+    CapabilityId::DISPLAY,
+    CapabilityId::INPUT_READ,
+    CapabilityId::SHM,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::CONSOLE_WRITE,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::SANDBOX_SPAWN,
+];
+
 /// The `login` service account's grant ceiling: run the prompt on the
 /// console, read the user database, and drop the authenticated session
 /// into the target account — the instructive shape: it holds
@@ -352,11 +377,30 @@ mod tests {
         assert_eq!(NETSTACK_CEILING.len(), 4);
         assert_eq!(SEATMGR_CEILING.len(), 3);
         assert_eq!(LOGIN_CEILING.len(), 9);
+        assert_eq!(GREETER_CEILING.len(), 7);
         let devmgr = capability_set(DEVMGR_CEILING);
         let sysinfod = capability_set(SYSINFOD_CEILING);
         let netstack = capability_set(NETSTACK_CEILING);
         let seatmgr = capability_set(SEATMGR_CEILING);
         let login = capability_set(LOGIN_CEILING);
+        let greeter = capability_set(GREETER_CEILING);
+        // The login screen draws and reads one seat; it can neither read a
+        // credential, start a process, nor serve a reserved rendezvous, so
+        // compromising it yields a screen rather than an account.
+        assert!(greeter.contains(CapabilityId::DISPLAY));
+        assert!(greeter.contains(CapabilityId::INPUT_READ));
+        // It decodes the untrusted wallpaper in an isolated worker, so it
+        // holds the narrow sandbox-spawn authority — which admits only a
+        // capability-empty parser child, never a general process.
+        assert!(greeter.contains(CapabilityId::SANDBOX_SPAWN));
+        for cap in [
+            CapabilityId::USERS_READ,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ] {
+            assert!(!greeter.contains(cap), "{cap:?} must stay off the greeter");
+        }
         // The capability that defines each service stays that service's
         // alone.
         assert!(devmgr.contains(CapabilityId::DRV_LOAD));
@@ -377,7 +421,7 @@ mod tests {
         }
         assert!(login.contains(CapabilityId::SPAWN_AS_USER));
         assert!(login.contains(CapabilityId::USERS_READ));
-        for other in [&devmgr, &sysinfod, &netstack, &seatmgr] {
+        for other in [&devmgr, &sysinfod, &netstack, &seatmgr, &greeter] {
             assert!(!other.contains(CapabilityId::SPAWN_AS_USER));
             assert!(!other.contains(CapabilityId::USERS_READ));
         }

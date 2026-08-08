@@ -177,6 +177,12 @@ pub enum TaskbarResponse {
     /// until the signed-in user is re-verified; the session and everything
     /// running in it keep running untouched.
     LockSession,
+    /// *Switch User…* was chosen. The embedder asks the session authority
+    /// to record it as background and, only once that is granted, gives up
+    /// the screen so the login screen can come back up; everything in the
+    /// session keeps running and is resumed when the user returns. A
+    /// refusal leaves the session exactly as it is, and is reported.
+    SwitchUser,
     /// *Log Out* was chosen. The embedder ends this desktop session
     /// cleanly; the login supervisor that started it prompts again.
     LogOut,
@@ -676,6 +682,7 @@ impl TaskbarInput {
             },
             SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
             SystemAction::Lock => TaskbarResponse::LockSession,
+            SystemAction::SwitchUser => TaskbarResponse::SwitchUser,
             SystemAction::LogOut => TaskbarResponse::LogOut,
             SystemAction::Restart => TaskbarResponse::ConfirmSystemPower {
                 action: PowerAction::Restart,

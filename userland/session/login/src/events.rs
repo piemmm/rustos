@@ -63,16 +63,59 @@ pub const VERIFY_GRANTED: EventId = EventId(10_012);
 /// attested uid with no account, a failed re-authentication, or an
 /// unattested caller (cause never disclosed to the caller, only audited).
 pub const VERIFY_REFUSED: EventId = EventId(10_013);
+/// A `session-v1` authentication from the graphical login screen succeeded.
+/// Nothing has been started yet: the authority acts on its own loop.
+pub const SESSION_AUTH_GRANTED: EventId = EventId(10_014);
+/// A `session-v1` authentication was refused — a wrong password, an unknown
+/// or locked account, no database, or an account still inside its attempt
+/// cooldown. The reply carries no reason; only this record distinguishes a
+/// live cooldown from an adjudicated failure, and never which of the
+/// credential faults it was.
+pub const SESSION_AUTH_REFUSED: EventId = EventId(10_015);
+/// A `session-v1` request was not served at all: a caller that is not the
+/// greeter service account on this console, or a frame that did not decode.
+pub const SESSION_REQUEST_REFUSED: EventId = EventId(10_016);
+/// A page of the machine's login-able accounts was disclosed to the
+/// graphical login screen. Names are not secret, but who asked for them
+/// and when is worth an audit record.
+pub const SESSION_ACCOUNTS_SENT: EventId = EventId(10_017);
+/// The reserved `session-v1` endpoint could not be bound, so no graphical
+/// login screen can be served; the round degrades to the text login rather
+/// than claiming a rendezvous nothing answers.
+pub const SESSION_ENDPOINT_UNAVAILABLE: EventId = EventId(10_018);
+/// A greeter exited without an accepted verdict (it failed to start, was
+/// dismissed, or died); the authority starts a fresh one.
+pub const GREETER_FAILED: EventId = EventId(10_019);
+/// Consecutive greeter failures exhausted the graphical round's budget, so
+/// this round runs the text login instead. A broken login screen can never
+/// leave the machine impossible to log in to.
+pub const GREETER_DEGRADED: EventId = EventId(10_020);
+/// An authenticated account's existing desktop session was brought back to
+/// the foreground through its wake mailbox, rather than a second desktop
+/// being started for it.
+pub const SESSION_RESUMED: EventId = EventId(10_021);
+/// The presenting desktop session gave up the screen and is now recorded as
+/// a background one: it keeps running and stays resumable, and the login
+/// screen comes back up. Honoured only from the session that held the
+/// screen, so this record names the uid the kernel attested.
+pub const SESSION_BACKGROUNDED: EventId = EventId(10_022);
+/// A live desktop session was told to end because the authority itself is
+/// exiting. Nothing would ever wake a background session again once the
+/// authority is gone, so every entry is ended rather than stranded.
+pub const SESSION_ENDED_ON_EXIT: EventId = EventId(10_023);
 
 #[cfg(test)]
 mod tests {
     use super::{
         AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
-        FONTD_STARTED, FONTD_UNAVAILABLE, LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START,
-        SESSION_ENDED, SESSION_LAUNCH_FAILED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
+        FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED, LOCKED_OUT,
+        LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED,
+        SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
+        SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
+        SESSION_RESUMED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 13] = [
+    const ALL: [u32; 23] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -86,6 +129,16 @@ mod tests {
         FONTD_UNAVAILABLE.0,
         VERIFY_GRANTED.0,
         VERIFY_REFUSED.0,
+        SESSION_AUTH_GRANTED.0,
+        SESSION_AUTH_REFUSED.0,
+        SESSION_REQUEST_REFUSED.0,
+        SESSION_ACCOUNTS_SENT.0,
+        SESSION_ENDPOINT_UNAVAILABLE.0,
+        GREETER_FAILED.0,
+        GREETER_DEGRADED.0,
+        SESSION_RESUMED.0,
+        SESSION_BACKGROUNDED.0,
+        SESSION_ENDED_ON_EXIT.0,
     ];
 
     #[test]

@@ -23,7 +23,7 @@ use tairix_arch_riscv64::{
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_kthread, spawn_user_kthread, RescheduleAction,
-    SpawnRequest, Yielder,
+    SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -268,6 +268,7 @@ fn build_user_space(image: &LoadImage) -> (u64, UserEntry) {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,

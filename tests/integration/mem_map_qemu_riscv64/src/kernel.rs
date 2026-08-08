@@ -15,7 +15,7 @@ use tairix_arch_riscv64::{
     SERIAL_SINK,
 };
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-use tairix_kernel_core::{spawn_image, MemMap, SpawnRequest};
+use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
     PhysAddr, UserStack,
@@ -410,6 +410,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     let entry = match unsafe {
         spawn_image(
             &SpawnAuthority,
+            SpawnMode::General,
             &SERIAL_SINK,
             &mut space,
             &physmap,
