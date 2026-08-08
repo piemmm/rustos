@@ -388,7 +388,7 @@ fn scratch_free_bytes(scratch: &str) -> Option<u64> {
     let mut best: Option<(usize, u64)> = None;
     let walk = for_each_mount(&transport, |record| {
         if let Ok(target) = core::str::from_utf8(record.target_bytes()) {
-            let better = best.map_or(true, |(len, _)| target.len() >= len);
+            let better = best.is_none_or(|(len, _)| target.len() >= len);
             if better && path_covers(target, scratch) {
                 let usage = record.usage();
                 let free = u64::from(usage.block_size).saturating_mul(usage.avail_blocks);

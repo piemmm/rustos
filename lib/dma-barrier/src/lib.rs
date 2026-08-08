@@ -45,6 +45,10 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+// Every function here is a single barrier instruction, so a call sequence
+// around it would cost several times the barrier itself: the inline is a
+// requirement, not a hint (Linux spells the same thing `__always_inline`).
+#![allow(clippy::inline_always)]
 
 /// Order writes to device-shared memory before a following MMIO store.
 ///

@@ -134,7 +134,7 @@ fn clear_cpu_buffers() {
         unsafe {
             core::arch::asm!(
                 "verw word ptr [{sel}]",
-                sel = in(reg) &selector,
+                sel = in(reg) &raw const selector,
                 options(readonly, nostack),
             );
         }

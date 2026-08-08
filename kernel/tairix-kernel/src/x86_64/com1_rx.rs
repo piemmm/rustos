@@ -57,6 +57,10 @@ use tairix_sync::{InterruptControl, IrqSafeSpinLock};
 /// on the lock its own interrupted mainline holds. It masks through the port's
 /// one masking primitive, so the discipline is defined once; the token exists
 /// only because a `fn` pointer cannot carry the state type.
+///
+/// Dropping the token loses the saved interrupt state, so it must be paired
+/// with [`kalloc_irq_restore`].
+#[must_use]
 pub fn kalloc_irq_disable() -> usize {
     <RflagsIrqControl as InterruptControl>::disable().as_token()
 }

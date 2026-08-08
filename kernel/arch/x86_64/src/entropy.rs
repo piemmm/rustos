@@ -88,16 +88,16 @@ mod hw {
     pub(super) fn fill(out: &mut [u8]) -> Result<(), EntropyError> {
         // CPUID is universal on x86_64, side-effect-free, and requires no
         // target feature, so these intrinsics are safe to call directly.
-        let leaf1_ecx = core::arch::x86_64::__cpuid(CPUID_LEAF_FEATURES).ecx;
+        let features_ecx = core::arch::x86_64::__cpuid(CPUID_LEAF_FEATURES).ecx;
         let max_leaf = core::arch::x86_64::__cpuid(0).eax;
-        let leaf7_ebx = if max_leaf >= CPUID_LEAF_EXTENDED_FEATURES {
+        let extended_ebx = if max_leaf >= CPUID_LEAF_EXTENDED_FEATURES {
             core::arch::x86_64::__cpuid_count(CPUID_LEAF_EXTENDED_FEATURES, 0).ebx
         } else {
             0
         };
 
-        let use_rdseed = leaf7_ebx & EBX_RDSEED_BIT != 0;
-        let use_rdrand = leaf1_ecx & ECX_RDRAND_BIT != 0;
+        let use_rdseed = extended_ebx & EBX_RDSEED_BIT != 0;
+        let use_rdrand = features_ecx & ECX_RDRAND_BIT != 0;
         if !use_rdseed && !use_rdrand {
             return Err(EntropyError::Unavailable);
         }

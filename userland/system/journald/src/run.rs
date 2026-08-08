@@ -182,7 +182,7 @@ mod program {
     /// clock is the ordering authority, never the wall clock — SYSLOG §5.1).
     fn read_clock() -> Clock {
         let monotonic = Duration64::from_nanos(tairix_rt::clock_get());
-        let wall = tairix_rt::wall_time().unwrap_or_else(|_| WallClockReading::UNSET);
+        let wall = tairix_rt::wall_time().unwrap_or(WallClockReading::UNSET);
         Clock { monotonic, wall }
     }
 
@@ -211,17 +211,15 @@ mod program {
         // The per-boot id likewise binds the genesis; it is minted early in
         // boot, so a failure here means the random subsystem never seeded and
         // the service fails closed (PID 1 relaunches).
-        let boot_id = match tairix_rt::boot_id() {
-            Ok(id) => id,
-            Err(_) => return 3,
+        let Ok(boot_id) = tairix_rt::boot_id() else {
+            return 3;
         };
 
         // The journal's own attested origin, for the trusted records it authors
         // itself (the `security` spoof-notes). Read from the kernel, never
         // self-claimed.
-        let own_origin = match tairix_rt::self_origin() {
-            Ok(origin) => origin,
-            Err(_) => return 4,
+        let Ok(own_origin) = tairix_rt::self_origin() else {
+            return 4;
         };
 
         // The log-attestation key seals `audit`/`security` segments. It is
@@ -294,13 +292,13 @@ mod program {
         let mut reply_buf = [0u8; LOG_INGRESS_REPLY_LEN];
         loop {
             let mut ticket: u64 = 0;
-            let request_len =
-                match tairix_rt::call_recv(LOG_INGRESS_ENDPOINT, &mut request, &mut ticket) {
-                    Ok(len) => len,
-                    // A transient recv error (e.g. an oversize request left
-                    // queued) must not kill the server; drop it and continue.
-                    Err(_) => continue,
-                };
+            // A transient recv error (e.g. an oversize request left queued)
+            // must not kill the server; drop it and continue.
+            let Ok(request_len) =
+                tairix_rt::call_recv(LOG_INGRESS_ENDPOINT, &mut request, &mut ticket)
+            else {
+                continue;
+            };
 
             // Attest the caller. A failure to read the peer origin is
             // fail-closed: reply an error rather than admitting an unattested

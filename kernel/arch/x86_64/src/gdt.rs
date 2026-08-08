@@ -654,7 +654,7 @@ impl PerCpuGdt {
                 // Load TR last; lgdt does not implicitly touch it.
                 "mov ax, {tss:x}",
                 "ltr ax",
-                gdtr = in(reg) &gdtr,
+                gdtr = in(reg) &raw const gdtr,
                 kds = in(reg) sel.kernel_ds,
                 kcs = in(reg) u64::from(sel.kernel_cs),
                 tss = in(reg) sel.tss,

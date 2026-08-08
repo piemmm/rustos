@@ -227,6 +227,55 @@ pub fn short_content_hash<'a>(bytes: &[u8], out: &'a mut [u8; 12]) -> &'a str {
     core::str::from_utf8(out).unwrap_or("")
 }
 
+/// Buffer length [`format_grouped_hex`] renders into: `0x`, sixteen hex
+/// digits, and the three `_` separators between the four digit groups.
+pub const GROUPED_HEX_LEN: usize = 2 + 16 + 3;
+
+/// Render `value` as a Rust hexadecimal literal with `_` between each group
+/// of four digits (`0x0010_0000_0000`), into `out`.
+///
+/// The build script emits Rust source the crate `include!`s, and generated
+/// source is linted like any other: a bare `{value:#x}` there trips the
+/// "long literal lacking separators" lint at the *include site*, where it
+/// cannot be fixed. Grouping at the point of emission keeps the generated
+/// file idiomatic on its own terms, instead of stamping a blanket lint
+/// exemption into it that would also hide a future real finding in the same
+/// file. Leading all-zero groups are dropped, but never the last one, so
+/// zero renders as `0x0000`. Alloc-free, like [`short_content_hash`], so it
+/// compiles into the `no_std` crate's host test build as well as the `std`
+/// build script.
+pub fn format_grouped_hex(value: u64, out: &mut [u8; GROUPED_HEX_LEN]) -> &str {
+    let mut digits = [b'0'; 16];
+    for (i, slot) in digits.iter_mut().enumerate() {
+        let nibble = ((value >> ((15 - i) * 4)) & 0xf) as u8;
+        *slot = match nibble {
+            0..=9 => b'0' + nibble,
+            _ => b'a' + (nibble - 10),
+        };
+    }
+    // Whole groups only: every emitted group is four digits wide, which is
+    // exactly the shape the lint accepts.
+    let mut first = 0;
+    while first + 4 < digits.len() && digits[first..first + 4] == [b'0'; 4] {
+        first += 4;
+    }
+
+    out[0] = b'0';
+    out[1] = b'x';
+    let mut len = 2;
+    for group in digits[first..].as_chunks::<4>().0 {
+        if len > 2 {
+            out[len] = b'_';
+            len += 1;
+        }
+        out[len..len + 4].copy_from_slice(group);
+        len += 4;
+    }
+    // Every byte written above is ASCII, so the prefix is valid UTF-8; fall
+    // back to the empty string rather than panicking if that were broken.
+    core::str::from_utf8(&out[..len]).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +411,64 @@ mod tests {
         // a refactor cannot silently shift the id.
         let mut buf = [0u8; 12];
         assert_eq!(short_content_hash(b"", &mut buf), "9ce484222325");
+    }
+
+    #[test]
+    fn grouped_hex_literals_are_separated_every_four_digits() {
+        let mut buf = [0u8; GROUPED_HEX_LEN];
+        // The user-image bias the generator emits: the regression this
+        // helper exists for, a bare `0x1000000000` in generated source.
+        assert_eq!(
+            format_grouped_hex(0x10_0000_0000, &mut buf),
+            "0x0010_0000_0000"
+        );
+        // Leading all-zero groups are dropped so the literal stays short…
+        assert_eq!(format_grouped_hex(0x1234, &mut buf), "0x1234");
+        assert_eq!(format_grouped_hex(0x1_2345, &mut buf), "0x0001_2345");
+        // …but never the last group, so zero is still a literal.
+        assert_eq!(format_grouped_hex(0, &mut buf), "0x0000");
+        // Full width round-trips every nibble.
+        assert_eq!(
+            format_grouped_hex(u64::MAX, &mut buf),
+            "0xffff_ffff_ffff_ffff"
+        );
+        assert_eq!(
+            format_grouped_hex(0x0123_4567_89ab_cdef, &mut buf),
+            "0x0123_4567_89ab_cdef"
+        );
+    }
+
+    #[test]
+    fn grouped_hex_output_parses_back_to_the_value_it_rendered() {
+        // The generated file is compiled, so the rendering must be a Rust
+        // literal that means exactly the value asked for — a separator in
+        // the wrong place would silently change a mapped base address.
+        for value in [
+            0,
+            1,
+            0xffff,
+            0x1_0000,
+            0x10_0000_0000,
+            0xdead_beef_cafe_f00d,
+            u64::MAX,
+        ] {
+            let mut buf = [0u8; GROUPED_HEX_LEN];
+            let rendered = format_grouped_hex(value, &mut buf);
+            let mut parsed: u64 = 0;
+            for digit in rendered.trim_start_matches("0x").bytes() {
+                if digit == b'_' {
+                    continue;
+                }
+                let nibble = char::from(digit).to_digit(16).expect("hex digit");
+                parsed = (parsed << 4) | u64::from(nibble);
+            }
+            assert_eq!(parsed, value, "{rendered}");
+            // Every group is exactly four digits — the shape the
+            // separator lint accepts without complaint.
+            for group in rendered.trim_start_matches("0x").split('_') {
+                assert_eq!(group.len(), 4, "{rendered}");
+            }
+        }
     }
 
     #[test]

@@ -123,12 +123,12 @@ struct Waits {
 impl Waits {
     /// Mint the wait-set. The kernel reclaims it when this process exits.
     fn create() -> Result<Self, Errno> {
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return Err(tairix_rt::errno_from_raw(set));
-        }
+        let raw = tairix_rt::waitset_create();
+        let Ok(set) = u64::try_from(raw) else {
+            return Err(tairix_rt::errno_from_raw(raw));
+        };
         Ok(Self {
-            set: set as u64,
+            set,
             observing: false,
         })
     }

@@ -62,7 +62,7 @@ mod program {
     };
     use tairix_log::{log, Event, Field, Level};
     use tairix_rt::LogSink;
-    use tairix_util::fmt::{format_hex_u64, format_usize};
+    use tairix_util::fmt::{format_hex_u64, format_u64, format_usize};
 
     /// Buffer the catalogue and each `Load` reply are received into, sized to
     /// the endpoint's `DRIVER_STORE_MAX_REPLY` so a full catalogue is never
@@ -132,7 +132,7 @@ mod program {
             // lowered. Routed through the kernel diagnostic
             // log, never `stderr`.
             let mut gen = [0u8; 16];
-            let mut count = [0u8; 12];
+            let mut count = [0u8; 20];
             log(
                 &LogSink,
                 &Event {
@@ -149,8 +149,8 @@ mod program {
                         },
                         Field {
                             key: "nodes",
-                            value: tairix_log::FieldValue::Str(format_usize(
-                                header.node_count() as usize,
+                            value: tairix_log::FieldValue::Str(format_u64(
+                                header.node_count(),
                                 &mut count,
                             )),
                         },
@@ -274,7 +274,7 @@ mod program {
         }
     }
 
-    /// The ipc_call reply buffer a config read frames into: the reply header
+    /// The `ipc_call` reply buffer a config read frames into: the reply header
     /// plus the larger of the two config engines' document ceilings, so
     /// either whitelisted file fits in one bounded read. A document longer
     /// than its engine's ceiling could never parse anyway, so the buffer is
@@ -306,6 +306,9 @@ mod program {
         let n = StoreRequest::ReadConfig { which }
             .encode(&mut request)
             .ok()?;
+        // Deliberately on the stack: this runs before the root unlock, so the
+        // heap's producer is not up yet. The spawn stack sizing covers it.
+        #[allow(clippy::large_stack_arrays)]
         let mut reply = [0u8; STORE_CONFIG_REPLY_LEN];
         let len = tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, &request[..n], &mut reply).ok()?;
         let bytes = decode_config_reply(&reply[..len]).ok()?;
@@ -390,6 +393,7 @@ mod program {
         // would be a scaling cliff. The stack sizing
         // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers this 64 KiB
         // reply buffer comfortably.
+        #[allow(clippy::large_stack_arrays)]
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
         match tairix_devmgr::run(
             &mut RtTreeService,

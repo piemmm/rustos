@@ -669,6 +669,8 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// masked (the PE masked them on exception entry).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt(cpu: CpuId) {
+    use tairix_arch_api::Timer;
+
     // Clear the fired one-shot's timer condition so the line deasserts;
     // the scheduler re-arms a fresh one-shot on its next dispatch.
     disarm();
@@ -693,7 +695,6 @@ pub(crate) fn on_timer_interrupt(cpu: CpuId) {
         // `init_local_preempt`, so the low 32 bits are the whole value.
         #[allow(clippy::cast_possible_truncation)]
         let recorded_cpu = recorded as u32;
-        use tairix_arch_api::Timer;
         crate::timer_hal::TimerHal::new().dispatch_tick(recorded_cpu);
     }
 }

@@ -61,10 +61,14 @@ mod program {
     };
 
     /// The expected first-register value (pinned by the consuming build, else
-    /// the default).
-    #[allow(clippy::cast_possible_truncation)]
+    /// the default). A pin too wide for the register is a wiring defect, so
+    /// the high bytes must be zero or the default stands — never a truncated
+    /// magic that could not match whatever the device reports.
     const MAGIC: u32 = match option_env!("TAIRIX_MMIO_MAGIC") {
-        Some(s) => parse_u64(s.as_bytes(), DEFAULT_MAGIC as u64) as u32,
+        Some(s) => match parse_u64(s.as_bytes(), DEFAULT_MAGIC as u64).to_le_bytes() {
+            [a, b, c, d, 0, 0, 0, 0] => u32::from_le_bytes([a, b, c, d]),
+            _ => DEFAULT_MAGIC,
+        },
         None => DEFAULT_MAGIC,
     };
 
@@ -155,12 +159,13 @@ mod program {
         //    the base VA of that sub-region. A negative result is the
         //    `-errno` the kernel returned (a refused or unresolved grant, or
         //    a sub-region escaping it).
-        let base = tairix_rt::mmio_map(GRANT_HANDLE, 0, (REG_OFFSET + 4) as usize);
-        if base < 0 {
+        let Ok(window_len) = usize::try_from(REG_OFFSET + 4) else {
             return FAIL_MAP;
-        }
-        #[allow(clippy::cast_sign_loss)] // `base >= 0` checked above; it is a user VA.
-        let reg = (base as u64 + REG_OFFSET) as *const u32;
+        };
+        let Ok(base) = u64::try_from(tairix_rt::mmio_map(GRANT_HANDLE, 0, window_len)) else {
+            return FAIL_MAP;
+        };
+        let reg = (base + REG_OFFSET) as *const u32;
 
         // 2. Read the device's first register through the mapped window. The
         //    read is `volatile` so the compiler cannot elide the access to the
@@ -181,12 +186,14 @@ mod program {
         //    (`plans/PI.md` 5d-0-ii (c)): ask the kernel to choose a base for
         //    two anonymous pages, prove they are genuine writable RAM by
         //    round-tripping a sentinel, then release them.
-        let placed = tairix_rt::mem_map(MEM_MAP_LEN, tairix_abi::MapFlags::empty(), 0);
-        if placed < 0 {
+        let Ok(placed) = u64::try_from(tairix_rt::mem_map(
+            MEM_MAP_LEN,
+            tairix_abi::MapFlags::empty(),
+            0,
+        )) else {
             return FAIL_MEM_MAP;
-        }
-        #[allow(clippy::cast_sign_loss)] // `placed >= 0` checked above; it is a user VA.
-        let cell = placed as u64 as *mut u64;
+        };
+        let cell = placed as *mut u64;
         // SAFETY: `mem_map` returned the base of `MEM_MAP_LEN` bytes of mapped,
         //    zeroed, USER-writable anonymous memory in this process's own
         //    address space, so `cell` is a valid, writable, in-bounds pointer
@@ -199,7 +206,7 @@ mod program {
         if read_back != MEM_SENTINEL {
             return FAIL_MEM_RW;
         }
-        if tairix_rt::mem_unmap(placed as u64, MEM_MAP_LEN) < 0 {
+        if tairix_rt::mem_unmap(placed, MEM_MAP_LEN) < 0 {
             return FAIL_MEM_UNMAP;
         }
 
@@ -210,12 +217,14 @@ mod program {
         //    device-visible base (unused here — the device-address copy-out is
         //    host-proven; this vertical proves the carve mechanism on metal).
         let mut device: u64 = 0;
-        let dma = tairix_rt::dma_alloc(DMA_GRANT_HANDLE, DMA_ALLOC_LEN, &mut device);
-        if dma < 0 {
+        let Ok(dma) = u64::try_from(tairix_rt::dma_alloc(
+            DMA_GRANT_HANDLE,
+            DMA_ALLOC_LEN,
+            &mut device,
+        )) else {
             return FAIL_DMA_ALLOC;
-        }
-        #[allow(clippy::cast_sign_loss)] // `dma >= 0` checked above; it is a user VA.
-        let dma_cell = dma as u64 as *mut u64;
+        };
+        let dma_cell = dma as *mut u64;
         // SAFETY: `dma_alloc` returned the base of `DMA_ALLOC_LEN` bytes of
         //    mapped, zeroed, USER-writable coherent DMA memory in this
         //    process's own address space, so `dma_cell` is a valid, writable,

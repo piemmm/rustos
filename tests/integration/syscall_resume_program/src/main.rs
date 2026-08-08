@@ -15,14 +15,17 @@ mod program {
     /// Sentinel the test kernel returns from the ordinary syscall.
     const EXPECTED_READING: u64 = 0x51a7_c011_71a0_0001;
 
+    /// Exit code reported when the syscall's result did not survive the
+    /// suspend/resume round trip.
+    const FAIL_STALE_RESULT: i32 = 1;
+
     /// Issue the ordinary syscall and report whether its result survived the
     /// scheduler round trip.
     fn main() -> i32 {
         if tairix_rt::clock_get() == EXPECTED_READING {
-            0
-        } else {
-            1
+            return 0;
         }
+        FAIL_STALE_RESULT
     }
 
     tairix_rt::entry!(main);

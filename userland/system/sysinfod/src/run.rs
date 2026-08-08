@@ -103,7 +103,7 @@ mod program {
     fn read_list(domain: IntrospectDomain, record_len: usize) -> Result<Vec<u8>, Errno> {
         let mut out = Vec::new();
         // Read a healthy number of records per call to bound the syscall count.
-        let per_call = 64usize.max(1);
+        let per_call: usize = 64;
         let mut scratch = alloc::vec![0u8; per_call * record_len];
         let mut offset: u64 = 0;
         loop {
@@ -288,21 +288,21 @@ mod program {
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceFactsRecord>, Errno> {
-            page_netstack(NetstackFactsPage)
+            page_netstack(&NetstackFactsPage)
         }
 
         fn net_interface_state(
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceStateRecord>, Errno> {
-            page_netstack(NetstackStatePage)
+            page_netstack(&NetstackStatePage)
         }
 
         fn net_interface_counters(
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceCountersRecord>, Errno> {
-            page_netstack(NetstackCountersPage)
+            page_netstack(&NetstackCountersPage)
         }
 
         fn net_interface_rates(
@@ -310,19 +310,19 @@ mod program {
             _caller: &Caller,
             window: Duration64,
         ) -> Result<Vec<NetInterfaceRatesRecord>, Errno> {
-            page_netstack(NetstackRatesPage { window })
+            page_netstack(&NetstackRatesPage { window })
         }
 
         fn net_sockets(&self, _caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno> {
-            page_netstack(NetstackSocketsPage)
+            page_netstack(&NetstackSocketsPage)
         }
 
         fn net_bond_members(&self, _caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno> {
-            page_netstack(NetstackBondMembersPage)
+            page_netstack(&NetstackBondMembersPage)
         }
 
         fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetResolverServer>, Errno> {
-            page_netstack(NetstackResolverServersPage)
+            page_netstack(&NetstackResolverServersPage)
         }
 
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
@@ -356,11 +356,11 @@ mod program {
         }
 
         fn raid_arrays(&self, _caller: &Caller) -> Result<Vec<RaidArrayRecord>, Errno> {
-            page_raid(RaidArraysPage)
+            page_raid(&RaidArraysPage)
         }
 
         fn raid_members(&self, _caller: &Caller) -> Result<Vec<RaidMemberRecord>, Errno> {
-            page_raid(RaidMembersPage)
+            page_raid(&RaidMembersPage)
         }
 
         fn resource_limits(
@@ -516,7 +516,7 @@ mod program {
     /// narrowing already happened in the dispatcher before this runs. A
     /// system without a running `netstack` fails closed with the
     /// transport's typed error, never a fabricated empty table.
-    fn page_netstack<P: NetstackPage>(page: P) -> Result<Vec<P::Record>, Errno> {
+    fn page_netstack<P: NetstackPage>(page: &P) -> Result<Vec<P::Record>, Errno> {
         let mut records = Vec::new();
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let mut offset: u32 = 0;
@@ -594,7 +594,7 @@ mod program {
     /// already passed in the dispatcher before this runs. A machine with no
     /// running array composer fails closed with the transport's typed
     /// error, never a fabricated empty table.
-    fn page_raid<P: RaidPage>(page: P) -> Result<Vec<P::Record>, Errno> {
+    fn page_raid<P: RaidPage>(page: &P) -> Result<Vec<P::Record>, Errno> {
         let mut records = Vec::new();
         let mut request = [0u8; RAID_CONTROL_MAX_REQUEST];
         let mut reply = [0u8; RAID_CONTROL_MAX_REPLY];
@@ -657,13 +657,12 @@ mod program {
         let mut reply = [0u8; SYSINFO_MAX_REPLY];
         loop {
             let mut ticket: u64 = 0;
-            let request_len =
-                match tairix_rt::call_recv(SYSINFO_ENDPOINT, &mut request, &mut ticket) {
-                    Ok(len) => len,
-                    // A transient recv error (e.g. an oversize request left
-                    // queued) must not kill the server; drop it and continue.
-                    Err(_) => continue,
-                };
+            // A transient recv error (e.g. an oversize request left queued)
+            // must not kill the server; drop it and continue.
+            let Ok(request_len) = tairix_rt::call_recv(SYSINFO_ENDPOINT, &mut request, &mut ticket)
+            else {
+                continue;
+            };
 
             // Attest the caller. A failure to read the peer origin is
             // fail-closed: reply an error rather than serving an unattested

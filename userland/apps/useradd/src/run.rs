@@ -104,12 +104,9 @@ mod program {
             report_usage();
             return 2;
         };
-        let command = match parse(&arguments) {
-            Ok(command) => command,
-            Err(_) => {
-                report_usage();
-                return 2;
-            }
+        let Ok(command) = parse(&arguments) else {
+            report_usage();
+            return 2;
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let db = UsersAdminDb::new(&RtChannel, &RtEntropy);

@@ -659,8 +659,10 @@ impl SecondaryBringup for Aarch64Arch {
             match started {
                 Ok(()) => Ok(()),
                 Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
-                Err(crate::smp::StartCpuError::NoEntryInstalled)
-                | Err(crate::smp::StartCpuError::NoAffinityTable) => Err(SmpError::NotReady),
+                Err(
+                    crate::smp::StartCpuError::NoEntryInstalled
+                    | crate::smp::StartCpuError::NoAffinityTable,
+                ) => Err(SmpError::NotReady),
                 Err(crate::smp::StartCpuError::Psci(status)) => {
                     Err(SmpError::StartRejected(i64::from(status)))
                 }
@@ -704,6 +706,7 @@ impl SecondaryBringup for Aarch64Arch {
 /// spin (measure, don't guess). It reads one
 /// architectural register with no side effects and grants no authority.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
 pub fn read_cntpct() -> u64 {
     let ticks: u64;
     // SAFETY: `CNTPCT_EL0` is the unprivileged physical counter; reading
@@ -726,6 +729,7 @@ pub fn read_cntpct() -> u64 {
 /// read identically across two adjacent calls. Mirrors the gating in
 /// the x86_64 and riscv64 backends.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
 pub fn read_cntpct() -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -812,7 +816,7 @@ pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
     unsafe {
         core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
     }
-    let line = crate::paging::dcache_line_bytes(ctr) as usize;
+    let line = crate::paging::dcache_line_bytes(ctr);
     let end = start.saturating_add(len);
     let mut addr = start & !(line - 1);
     while addr < end {
@@ -851,7 +855,7 @@ pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
 ///
 /// The sequence: clean each data-cache line in range to the point of
 /// unification (`dc cvau`), a `dsb ish` so those cleans complete, invalidate
-/// each instruction-cache line to the PoU (`ic ivau`), a second `dsb ish`, and
+/// each instruction-cache line to the `PoU` (`ic ivau`), a second `dsb ish`, and
 /// an `isb` so the PE re-fetches. `ic ivau` acts on the physical line the VA
 /// resolves to (ARMv8 IC-by-VA is PoU/PA-effective), so cleaning through the
 /// kernel direct-map alias correctly covers the code the process will fetch at
@@ -869,8 +873,8 @@ pub fn sync_instruction_cache_range(start: usize, len: usize) {
     unsafe {
         core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
     }
-    let dline = crate::paging::dcache_line_bytes(ctr) as usize;
-    let iline = crate::paging::icache_line_bytes(ctr) as usize;
+    let dline = crate::paging::dcache_line_bytes(ctr);
+    let iline = crate::paging::icache_line_bytes(ctr);
     let end = start.saturating_add(len);
     // Clean the data cache to the PoU so the writes reach the level the
     // instruction fetch reads from.
@@ -927,12 +931,10 @@ pub fn sync_instruction_cache_range(_start: usize, _len: usize) {}
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn uptime_ms() -> u64 {
-    let freq = read_cntfrq();
-    if freq == 0 {
-        0
-    } else {
-        read_cntpct().saturating_mul(1_000) / freq
-    }
+    read_cntpct()
+        .saturating_mul(1_000)
+        .checked_div(read_cntfrq())
+        .unwrap_or(0)
 }
 
 /// Host substitute for [`uptime_ms`]: the strictly-increasing host

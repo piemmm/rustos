@@ -140,12 +140,9 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let command = match parse(&arguments) {
-            Ok(command) => command,
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
-            }
+        let Ok(command) = parse(&arguments) else {
+            write_stderr_line(USAGE);
+            return 2;
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The `TERM` preference decides the colour depth of `--color` output.
@@ -156,9 +153,7 @@ mod program {
         // `iso` date styles' recent/old window. An unset or unreadable clock
         // reads as the epoch, so every stamp renders in the "old" long form
         // rather than a guessed-at "recent" time — never a fabricated now.
-        let now = tairix_rt::wall_time()
-            .map(|reading| reading.time())
-            .unwrap_or(Time64::UNIX_EPOCH);
+        let now = tairix_rt::wall_time().map_or(Time64::UNIX_EPOCH, |reading| reading.time());
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(

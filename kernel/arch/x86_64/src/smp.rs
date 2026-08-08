@@ -707,12 +707,11 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
         return Err(StartCpuError::NoEntryInstalled);
     }
 
-    let mut frame = match TrampolineFrame::new(trampoline_frame_mut()) {
-        Ok(frame) => frame,
-        // The frame address/size are compile-time constants that always
-        // satisfy the installer; treat any rejection as out-of-range
-        // rather than panicking.
-        Err(_) => return Err(StartCpuError::CpuIdOutOfRange),
+    // The frame address/size are compile-time constants that always satisfy
+    // the installer; treat any rejection as out-of-range rather than
+    // panicking.
+    let Ok(mut frame) = TrampolineFrame::new(trampoline_frame_mut()) else {
+        return Err(StartCpuError::CpuIdOutOfRange);
     };
     if frame.install(trampoline_payload()).is_err() {
         return Err(StartCpuError::CpuIdOutOfRange);
@@ -724,11 +723,10 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
     unsafe {
         core::arch::asm!("mov {x}, cr3", x = out(reg) cr3, options(nostack, preserves_flags));
     }
-    let slot = match ApBootSlot::new(cr3, stack_top, entry_addr as u64, cpu) {
-        Ok(slot) => slot,
-        // `stack_top` is 16-byte aligned by construction; a misalignment
-        // would be an internal invariant break, not a caller error.
-        Err(_) => return Err(StartCpuError::CpuIdOutOfRange),
+    // `stack_top` is 16-byte aligned by construction; a misalignment would be
+    // an internal invariant break, not a caller error.
+    let Ok(slot) = ApBootSlot::new(cr3, stack_top, entry_addr as u64, cpu) else {
+        return Err(StartCpuError::CpuIdOutOfRange);
     };
     frame.write_slot(&slot);
 

@@ -279,7 +279,7 @@ pub fn page_fault_isr_addr() -> u64 {
 /// `[%rsp + 8]` at the faulting `rip`. The stub saves the 15
 /// architectural GPRs in the [`crate::interrupts::SavedRegs`] order
 /// (the same order `define_isr!` pins), marshals `(error_code, CR2,
-/// rip, &frame.rip)` into the SysV argument registers, and calls
+/// rip, &frame.rip)` into the `SysV` argument registers, and calls
 /// [`tairix_arch_x86_64_page_fault_dispatch`]. The dispatcher *returns
 /// only when the fault was dealt with* — a resolved ring-3 demand-paging
 /// fault (the frame's untouched `RIP` re-runs the faulting instruction,
@@ -299,7 +299,7 @@ pub fn page_fault_isr_addr() -> u64 {
 /// a stack switch (ring 3 -> RSP0), so after the error code + 5-word
 /// frame (48 bytes) `%rsp` is 16-aligned on entry, and after the 15 GPR
 /// pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it so
-/// the `call` lands the SysV callee with `%rsp ≡ 8 (mod 16)` after its
+/// the `call` lands the `SysV` callee with `%rsp ≡ 8 (mod 16)` after its
 /// return-address push — the System V AMD64 §3.2.2 entry state.
 ///
 /// # Safety
@@ -448,7 +448,7 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
             // 15-GPR `SavedRegs` block on this kernel stack; it is valid for
             // the duration of the call.
             let user_frame = unsafe { user_register_frame(saved, rip, user_rsp) };
-            let resolved = resolver(faulting_addr, is_write(error_code), &user_frame);
+            let resolved = resolver(faulting_addr, is_write(error_code), &raw const user_frame);
             // SAFETY: as above — the matching swap restoring the user GS
             // the `iretq` (or the fatal path) proceeds under.
             unsafe {

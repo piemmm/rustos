@@ -475,7 +475,7 @@ pub fn current_cpu_id_from_lapic() -> u32 {
 /// Drive the installed ring-3 preemption callback iff the interrupted
 /// context was ring 3.
 ///
-/// The single "check need_resched on interrupt-return-to-ring-3" site,
+/// The single "check `need_resched` on interrupt-return-to-ring-3" site,
 /// shared by the LAPIC-timer ISR (a quantum expiry or a reschedule IPI)
 /// and the external-IRQ ISR (a device interrupt that woke a
 /// higher-priority task), so the logic lives in exactly one place. The

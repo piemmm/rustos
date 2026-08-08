@@ -200,13 +200,13 @@ mod program {
     /// momentarily-full send buffer with a one-shot park rather than a spin.
     fn send_all(socket: SocketId, set: u64) -> Result<(), &'static str> {
         let mut chunk = [0u8; SEND_CHUNK];
-        let mut sent = 0usize;
-        while sent < TRANSFER_BYTES {
-            let len = core::cmp::min(SEND_CHUNK, TRANSFER_BYTES - sent);
-            fill_chunk(sent, &mut chunk[..len]);
+        let mut sent_bytes = 0usize;
+        while sent_bytes < TRANSFER_BYTES {
+            let len = core::cmp::min(SEND_CHUNK, TRANSFER_BYTES - sent_bytes);
+            fill_chunk(sent_bytes, &mut chunk[..len]);
             match stream_send(socket, &chunk[..len]) {
                 Ok(0) => park(set, RETRY_PARK_NANOS),
-                Ok(accepted) => sent += accepted as usize,
+                Ok(accepted) => sent_bytes += accepted as usize,
                 Err(_) => return Err("tcpecho: stream_send refused"),
             }
         }
@@ -273,11 +273,9 @@ mod program {
         if tairix_rt::port_bind(DELIVER_PORT, DELIVER_MAX_PAYLOAD, DELIVER_CAPACITY) < 0 {
             return Err("tcpecho: delivery port bind refused");
         }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return Err("tcpecho: wait-set create refused");
-        }
-        let set = set as u64;
+        };
         // Register the delivery port so a blocking receive parks on the
         // wait-set until the stack posts an event, rather than polling.
         if tairix_rt::waitset_ctl(
@@ -326,12 +324,13 @@ mod program {
     /// Render the `TCPECHO PASS <bytes> bytes` report line into `buf`,
     /// allocation-free, returning the written text.
     fn format_pass(buf: &mut [u8; 64]) -> &str {
-        let mut w = Cursor { buf, len: 0 };
         use core::fmt::Write as _;
+
+        let mut w = Cursor { buf, len: 0 };
         // Bounded, well-formed input — the marker plus a small integer — so a
         // formatting overflow is impossible; if it somehow occurred the text
         // is simply the marker, still a valid PASS line.
-        let _ = write!(w, "{PASS_MARKER} {TRANSFER_BYTES} bytes\n");
+        let _ = writeln!(w, "{PASS_MARKER} {TRANSFER_BYTES} bytes");
         let len = w.len;
         core::str::from_utf8(&w.buf[..len]).unwrap_or(PASS_MARKER)
     }

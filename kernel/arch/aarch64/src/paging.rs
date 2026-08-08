@@ -648,7 +648,7 @@ pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
         core::arch::asm!("mrs {ctr}, CTR_EL0", ctr = out(reg) ctr,
             options(nomem, nostack, preserves_flags));
     }
-    let line = dcache_line_bytes(ctr);
+    let line = dcache_line_bytes(ctr) as u64;
     // Sweep from the line-aligned base so the first partial line is
     // covered too.
     let mut addr = base & !(line - 1);
@@ -711,7 +711,7 @@ pub(crate) fn take_recorded_poc_sweeps() -> std::vec::Vec<(u64, u64)> {
 /// host-unit-tested; the freestanding cache-maintenance sweep
 /// ([`clean_invalidate_range_to_poc`]) feeds it the live register.
 #[must_use]
-pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
+pub const fn dcache_line_bytes(ctr_el0: u64) -> usize {
     4 << ((ctr_el0 >> 16) & 0xF)
 }
 
@@ -724,7 +724,7 @@ pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
 /// the I- and D-cache minimum line sizes can differ, and `ic ivau` /
 /// `dc cvau` must each step by their own line.
 #[must_use]
-pub const fn icache_line_bytes(ctr_el0: u64) -> u64 {
+pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
     4 << (ctr_el0 & 0xF)
 }
 
@@ -913,7 +913,7 @@ impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
     /// pool's addresses would then shadow the real descriptors on real
     /// silicon (cache-less QEMU cannot show it). The same residue
     /// hazard is why Linux's `head.S` invalidates its idmap tables to
-    /// PoC before `__enable_mmu`. Fail-closed: the whole fixed-size
+    /// `PoC` before `__enable_mmu`. Fail-closed: the whole fixed-size
     /// pool is swept (one pass over 64 KiB at boot — off every hot
     /// path), not just the slots handed out so far.
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -2029,7 +2029,7 @@ fn set_af_if_clear(leaf: &mut u64, vaddr: u64) -> bool {
 /// Reactivate `root_phys` as the active stage-1 EL1&0 translation root
 /// (reprogram `TTBR0_EL1`) on a CPU whose MMU is already enabled.
 ///
-/// This is the SP2b user-kthread `pre_resume` primitive (`plans/SPAWN.md`
+/// This is the `SP2b` user-kthread `pre_resume` primitive (`plans/SPAWN.md`
 /// SP2): immediately before the kernel `eret`s back into a user task's
 /// EL0, that task's own page-table root must be installed so its
 /// translations — and only its — are in force, keeping sibling processes

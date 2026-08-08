@@ -88,29 +88,10 @@ const PHYSMAP_SPAN: u64 = 1 << 30;
 /// — the same window PID 1 uses.
 const IDENTITY_GIB: usize = 4;
 
-/// Base of a spawned child's device-window virtual region
-/// (`plans/PI.md` 5d-0-ii (b′)): the retained [`LiveSpace`]'s
-/// [`tairix_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
-/// guard-bracketed window out of `[MMIO_WINDOW_BASE, MMIO_WINDOW_BASE +
-/// MMIO_WINDOW_PAGES·4 KiB)`.
-const MMIO_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
-/// Base of a spawned child's non-`FIXED` anonymous-heap virtual region
-/// (`plans/PI.md` 5d-0-ii (c)): the retained [`LiveSpace`]'s
-/// [`tairix_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
-/// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + anon_window_pages·4 KiB)`,
-/// where the page count scales with discovered RAM (the window is the
-/// topmost user region so it has room to grow up to `super::USER_VA_TOP`).
-const ANON_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
-/// Base of a spawned child's guarded DMA-buffer virtual region
-/// (`plans/PI.md` 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
-/// [`tairix_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
-/// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
-const DMA_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
-/// Base of a spawned child's cross-process shared-memory virtual region:
-/// the retained [`LiveSpace`]'s shared-window allocator maps each granted
-/// `shm_map` region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
-/// SHARED_WINDOW_PAGES * 4 KiB)`.
-const SHARED_WINDOW_BASE: u64 = CHILD_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
+/// A spawned child's four fixed guarded-window bases (`plans/PI.md`
+/// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
+/// [`LiveSpace`]'s window allocators are configured with.
+const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -373,7 +354,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer. The `LiveSpace` composes the audited
         // anonymous-map mechanism (over the kernel's `'static` frame
         // allocator) and the guarded device-window allocator (over the
-        // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
+        // `[WINDOWS.mmio, …)` region); it carries the *same* arch space
         // the snapshot above was frozen from, and zeroes anonymous frames
         // through a fresh higher-half [`DirectPhysMap`] identical to the one
         // the image build used (both the low identity and the higher-half
@@ -385,20 +366,20 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
-                    ANON_WINDOW_BASE,
+                    WINDOWS.anon,
                     super::USER_VA_TOP,
                 );
                 LiveSpace::new(
                     space,
                     DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN),
                     static_frames,
-                    VirtAddr::new(MMIO_WINDOW_BASE),
+                    VirtAddr::new(WINDOWS.mmio),
                     spawn_layout::MMIO_WINDOW_PAGES,
-                    VirtAddr::new(ANON_WINDOW_BASE),
+                    VirtAddr::new(WINDOWS.anon),
                     windows.anon_pages,
-                    VirtAddr::new(DMA_WINDOW_BASE),
+                    VirtAddr::new(WINDOWS.dma),
                     spawn_layout::DMA_WINDOW_PAGES,
-                    VirtAddr::new(SHARED_WINDOW_BASE),
+                    VirtAddr::new(WINDOWS.shared),
                     spawn_layout::SHARED_WINDOW_PAGES,
                     VirtAddr::new(windows.file_base),
                     windows.file_pages,

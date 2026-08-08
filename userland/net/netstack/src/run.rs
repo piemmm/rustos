@@ -93,6 +93,11 @@ mod program {
     /// device-channel endpoint block's width (a fixed shared-resource bound,
     /// not a scaling capacity: it sizes the notify-port id space and the
     /// slot table, both bounded by the endpoint block itself).
+    // The ABI states the block width as a `u64` id count and an array length
+    // must be `usize`; `TryFrom` is not usable in constant position, so the
+    // conversion cannot be spelled checked here. The block is 16 ids wide, so
+    // it fits every supported pointer width.
+    #[allow(clippy::cast_possible_truncation)]
     const MAX_CHANNELS: usize = NET_CHANNEL_ENDPOINT_COUNT as usize;
 
     /// Slots the notify port queues: the driver rings a single coalescing
@@ -173,14 +178,17 @@ mod program {
 
     /// The monotonic clock as the engine's `now`.
     fn now() -> Duration64 {
-        let nanos = tairix_rt::clock_get();
-        // Both components are in range by construction: secs fits i64
-        // (u64 ns / 1e9 < i64::MAX) and the remainder is < 1e9.
-        Duration64::new(
-            (nanos / 1_000_000_000) as i64,
-            (nanos % 1_000_000_000) as u32,
-        )
-        .unwrap_or_default()
+        Duration64::from_nanos(tairix_rt::clock_get())
+    }
+
+    /// A span as whole nanoseconds. A negative span is not a reachable
+    /// deadline, so it reads as zero, and the widening saturates rather than
+    /// wrapping past `u64::MAX`.
+    fn span_nanos(span: Duration64) -> u64 {
+        u64::try_from(span.secs())
+            .unwrap_or(0)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::from(span.subsec_nanos()))
     }
 
     /// Nanoseconds from `now` until the engines' earliest deadline —
@@ -198,12 +206,9 @@ mod program {
             (Some(d), None) | (None, Some(d)) => d,
             (None, None) => return u64::MAX,
         };
-        let current = now();
-        let deadline_ns =
-            deadline.secs().max(0) as u64 * 1_000_000_000 + u64::from(deadline.subsec_nanos());
-        let now_ns =
-            current.secs().max(0) as u64 * 1_000_000_000 + u64::from(current.subsec_nanos());
-        deadline_ns.saturating_sub(now_ns).max(1)
+        span_nanos(deadline)
+            .saturating_sub(span_nanos(now()))
+            .max(1)
     }
 
     /// Bind the endpoint and serve requests for the life of the service.
@@ -228,11 +233,11 @@ mod program {
             // registry): fail closed; PID 1 supervises and relaunches.
             return 1;
         }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
+        // A negative return is the `-errno` encoding; a non-negative one is
+        // the minted handle.
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return 1;
-        }
-        let set = set as u64;
+        };
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -435,11 +440,10 @@ mod program {
         reply: &mut [u8],
     ) {
         let mut ticket: u64 = 0;
-        let request_len = match tairix_rt::call_recv(NETSTACK_ENDPOINT, request, &mut ticket) {
-            Ok(len) => len,
-            // A transient recv error (e.g. an oversize request left
-            // queued) must not kill the server; drop it and continue.
-            Err(_) => return,
+        // A transient recv error (e.g. an oversize request left queued) must
+        // not kill the server; drop it and continue.
+        let Ok(request_len) = tairix_rt::call_recv(NETSTACK_ENDPOINT, request, &mut ticket) else {
+            return;
         };
         let Some(caller) = attest(NETSTACK_ENDPOINT, ticket, origin_buf) else {
             return;
@@ -661,10 +665,9 @@ mod program {
         reply: &mut [u8],
     ) {
         let mut ticket: u64 = 0;
-        let request_len = match tairix_rt::call_recv(NETSTACK_SOCKET_ENDPOINT, request, &mut ticket)
-        {
-            Ok(len) => len,
-            Err(_) => return,
+        let Ok(request_len) = tairix_rt::call_recv(NETSTACK_SOCKET_ENDPOINT, request, &mut ticket)
+        else {
+            return;
         };
         let Some(caller) = attest(NETSTACK_SOCKET_ENDPOINT, ticket, origin_buf) else {
             return;
@@ -813,13 +816,21 @@ mod program {
         // Create and map the shared frame region (owner mapping), then mint
         // the driver's grant handle for it.
         let mut region_id = 0u64;
-        let base = tairix_rt::shm_create(region_len, &mut region_id);
-        if base < 0 {
-            return Err(errno_from(base));
-        }
+        let created = tairix_rt::shm_create(region_len, &mut region_id);
+        // A negative return is the `-errno` encoding; a non-negative one is
+        // this process's mapped base address.
+        let Ok(base) = u64::try_from(created) else {
+            return Err(errno_from(created));
+        };
+        // A base the pointer width cannot hold is refused and the mapping
+        // released, never truncated into a wild pointer.
+        let Ok(base_addr) = usize::try_from(base) else {
+            let _ = tairix_rt::shm_unmap(base, region_len);
+            return Err(Errno::OutOfRange);
+        };
         // SAFETY: `shm_create` mapped exactly `region_len` bytes of zeroed,
         // cacheable, RW (non-executable), guard-bracketed memory into this
-        // process at `base`, owned by this process. Nothing else in this
+        // process at `base_addr`, owned by this process. Nothing else in this
         // address space aliases the region, so a single exclusive
         // `&'static mut [u8]` over exactly `region_len` bytes is sound; it
         // lives as long as the channel (the whole service lifetime) and is
@@ -827,46 +838,43 @@ mod program {
         // driver maps the same frames through its own grant and never
         // touches ring bytes across a `Service` doorbell.
         let region: &'static mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(base as usize as *mut u8, region_len) };
+            unsafe { core::slice::from_raw_parts_mut(base_addr as *mut u8, region_len) };
 
-        let grant = tairix_rt::shm_grant(region_id, endpoint_id);
-        if grant < 0 {
-            let _ = tairix_rt::shm_unmap(base as u64, region_len);
-            return Err(errno_from(grant));
-        }
+        let granted = tairix_rt::shm_grant(region_id, endpoint_id);
+        // A negative return is the `-errno` encoding; a non-negative one is
+        // the minted grant handle.
+        let Ok(grant) = u64::try_from(granted) else {
+            let _ = tairix_rt::shm_unmap(base, region_len);
+            return Err(errno_from(granted));
+        };
 
         // Bind the notify mailbox the driver rings on receive. Its id is
         // the non-reserved, per-(pid, slot) `notify_endpoint_for` name, so
         // the bind needs no privilege and cannot collide.
         let notify = notify_endpoint_for(pid, index as u64);
         if tairix_rt::port_bind(notify, NET_CHANNEL_NOTIFY_LEN, NOTIFY_CAPACITY) != 0 {
-            let _ = tairix_rt::shm_unmap(base as u64, region_len);
+            let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(Errno::AlreadyExists);
         }
 
         // Attach hands the region and notify port to the driver; on refusal
         // the mapping is released (the driver never saw a usable channel).
-        let client = match NetChannelClient::attach(
-            transport,
-            region,
-            geometry,
-            FRAME_CLASS,
-            grant as u64,
-            notify,
-        ) {
-            Ok(client) => client,
-            Err(err) => {
-                let _ = tairix_rt::shm_unmap(base as u64, region_len);
-                return Err(err);
-            }
-        };
+        let client =
+            match NetChannelClient::attach(transport, region, geometry, FRAME_CLASS, grant, notify)
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    let _ = tairix_rt::shm_unmap(base, region_len);
+                    return Err(err);
+                }
+            };
 
         // Join the notify port to the wait set before adding the interface,
         // so a failure to add the interface only has to undo the membership.
         let token = CHANNEL_TOKEN_BASE + index as u64;
         if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, notify, token) != 0 {
             let _ = client.detach();
-            let _ = tairix_rt::shm_unmap(base as u64, region_len);
+            let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(Errno::DeviceFault);
         }
 
@@ -887,7 +895,7 @@ mod program {
             let _ =
                 tairix_rt::waitset_ctl(set, WaitSetOp::Del, WaitSourceKind::Port, notify, token);
             let _ = client.detach();
-            let _ = tairix_rt::shm_unmap(base as u64, region_len);
+            let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(err);
         }
 

@@ -426,7 +426,7 @@ impl Idt {
         unsafe {
             core::arch::asm!(
                 "lidt [{p}]",
-                p = in(reg) &ptr,
+                p = in(reg) &raw const ptr,
                 options(readonly, nostack, preserves_flags),
             );
         }

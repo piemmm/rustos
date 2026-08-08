@@ -52,7 +52,7 @@ ask — never wave the failure through as transient, load, or environment.
 | Step          | What it does                                                |
 | ------------- | ----------------------------------------------------------- |
 | `fmt`         | `cargo fmt --all -- --check`                                |
-| `clippy`      | `cargo clippy --workspace --all-targets -- -D warnings`     |
+| `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
 | `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test])                          |
@@ -62,6 +62,41 @@ ask — never wave the failure through as transient, load, or environment.
 | `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
+
+## `clippy` lints every target, not just the host
+
+A host-only `cargo clippy --workspace --all-targets` lints almost none of the
+code that actually ships. A kernel subsystem, an architecture backend, a
+driver, a system service and an application body are compiled only when their
+crate is built for a bare-metal triple — most of them behind the `freestanding`
+cfg each crate's `build.rs` sets when the target OS is `none`, whose host arm is
+an inert stub. The image and QEMU stages then compile those bodies but never
+lint them, so a lint in shipped code could not fail CI.
+
+`clippy` therefore runs the same `-D warnings` pass once per target:
+
+| Pass | What it covers |
+| ---- | -------------- |
+| host | `--workspace --all-targets`, including every unit-test target |
+| each of the three freestanding Tier-1 triples, **once per stratum** | `kernel/*`, then `lib/*`, then `drivers/*` + `userland/*` — every workspace member the image pipeline cross-compiles, less host-only `tools/*`, less `tests/*`, and less a foreign `kernel/arch/<other>` |
+| `wasm32-unknown-unknown` | `kernel/arch/wasm32` + `kernel/arch/api` (the only product code the browser target builds), and the browser verticals |
+
+Every selection is *derived* — from the workspace member list and the wasm
+vertical table — so a new crate or vertical is linted without being added to a
+second list. `--all-targets` is absent from the target passes because a
+bare-metal target has no test harness to link one against; the host pass covers
+those.
+
+The enrolled **QEMU guests** under `tests/integration/` are test support rather
+than product and are deliberately *not* in this gate; that gap is staged in
+`.junie/next-ai-codereview.md`.
+
+The stratum split is load-bearing, not cosmetic. Cargo unifies features across
+every package named in one invocation, so naming the kernel binary alongside
+the userland programs turns on the `program` features of their shared
+dependencies and links `lib/rt`'s `#[global_allocator]` and `#[panic_handler]`
+into the kernel — a duplicate `panic_impl` lang item. The image pipeline builds
+the kernel and the programs separately for the same reason.
 
 ## Every step is time-limited
 

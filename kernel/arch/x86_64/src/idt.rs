@@ -127,7 +127,11 @@ pub unsafe fn init(pf: PageFaultHandler) -> &'static Idt {
             limit: IDT_LIMIT,
             base: core::ptr::addr_of!(IDT.entries) as u64,
         };
-        core::arch::asm!("lidt [{ptr}]", ptr = in(reg) &ptr, options(nostack, preserves_flags));
+        core::arch::asm!(
+            "lidt [{ptr}]",
+            ptr = in(reg) &raw const ptr,
+            options(nostack, preserves_flags),
+        );
 
         &*core::ptr::addr_of!(IDT)
     }

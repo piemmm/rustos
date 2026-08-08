@@ -35,6 +35,12 @@ the next context can continue. The loop ends when no violations remain.
 - **This is not a comment refactor.** Comment "waffle" reduction is owned by
   `plans/WAFFLE.md`; do not conflate the two. CODEVERIFY targets *defects and
   bad code*, not comment style.
+- **The gate lints bare-metal code, so the lint-catchable classes need no
+  manual hunt.** `cargo xtask clippy` runs `-D warnings` for the host *and*
+  once per Tier-1 target, so a `freestanding` body is linted rather than only
+  compiled (`docs/src/contributing.md`). Scan for what a lint cannot see —
+  wrong invariants, ambient authority, duplication, dead code — not for what
+  the gate already rejects.
 
 ## 1. What counts as a violation (the hunt checklist)
 

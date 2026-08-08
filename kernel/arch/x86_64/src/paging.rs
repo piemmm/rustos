@@ -59,6 +59,12 @@ pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
 /// `KERNEL_VMA_BASE` in `linker.ld` and the literal in `boot.s`.
 pub const KERNEL_VMA_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
+/// Physical-address field of a page-table entry (bits 51:12).
+///
+/// Masking an entry with this recovers the child table's — or the mapped
+/// page's — physical address without the flag and attribute bits.
+const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
 /// Page-table entry flags actually used here.
 pub mod flags {
     /// Entry is present.
@@ -88,6 +94,35 @@ pub mod flags {
     /// have enabled NXE first. Used to mark writable user data and
     /// read-only user data non-executable (W^X).
     pub const NO_EXECUTE: u64 = 1 << 63;
+}
+
+/// Leaf permissions and memory attributes one 4 KiB mapping walk applies.
+///
+/// Grouped into a named value so the walk is steered by labelled fields
+/// rather than a row of positional booleans at each call site.
+#[derive(Clone, Copy)]
+struct LeafPolicy {
+    writable: bool,
+    user: bool,
+    no_execute: bool,
+    memory_attrs: u64,
+}
+
+impl LeafPolicy {
+    /// The page-table entry flag word this policy maps to.
+    fn pte_flags(self) -> u64 {
+        let mut bits = flags::PRESENT;
+        if self.writable {
+            bits |= flags::WRITABLE;
+        }
+        if self.user {
+            bits |= flags::USER;
+        }
+        if self.no_execute {
+            bits |= flags::NO_EXECUTE;
+        }
+        bits | self.memory_attrs
+    }
 }
 
 /// One page-table page: 512 × u64, naturally aligned.
@@ -339,7 +374,6 @@ impl AddressSpace {
         let i3 = ((vaddr >> 30) & 0x1FF) as usize;
         let i2 = ((vaddr >> 21) & 0x1FF) as usize;
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-        const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
         let e4 = self.pml4[i4];
         if e4 & flags::PRESENT == 0 {
             return false;
@@ -384,7 +418,17 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, false, false, 0)
+        self.map_4k_inner(
+            frames,
+            vaddr,
+            paddr,
+            LeafPolicy {
+                writable,
+                user: false,
+                no_execute: false,
+                memory_attrs: 0,
+            },
+        )
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible**:
@@ -403,7 +447,17 @@ impl AddressSpace {
         paddr: u64,
         writable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, true, false, 0)
+        self.map_4k_inner(
+            frames,
+            vaddr,
+            paddr,
+            LeafPolicy {
+                writable,
+                user: true,
+                no_execute: false,
+                memory_attrs: 0,
+            },
+        )
     }
 
     /// Map `paddr` at `vaddr` (4 KiB granularity) **user-accessible** with
@@ -427,13 +481,23 @@ impl AddressSpace {
         writable: bool,
         executable: bool,
     ) -> Option<()> {
-        self.map_4k_inner(frames, vaddr, paddr, writable, true, !executable, 0)
+        self.map_4k_inner(
+            frames,
+            vaddr,
+            paddr,
+            LeafPolicy {
+                writable,
+                user: true,
+                no_execute: !executable,
+                memory_attrs: 0,
+            },
+        )
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
     /// [`Self::map_4k_user`] (one definition).
     ///
-    /// When `user` is set, [`flags::USER`] is OR-ed into the leaf and
+    /// When `leaf.user` is set, [`flags::USER`] is OR-ed into the leaf and
     /// into each intermediate entry on the walk; a kernel mapping leaves
     /// every level without the bit, so ring 3 cannot reach it.
     fn map_4k_inner(
@@ -441,25 +505,12 @@ impl AddressSpace {
         frames: &'static dyn PageTableFrames,
         vaddr: u64,
         paddr: u64,
-        writable: bool,
-        user: bool,
-        no_execute: bool,
-        memory_attrs: u64,
+        leaf: LeafPolicy,
     ) -> Option<()> {
         assert_eq!(vaddr & 0xFFF, 0, "vaddr must be page-aligned");
         assert_eq!(paddr & 0xFFF, 0, "paddr must be page-aligned");
 
-        let mut flags_ = flags::PRESENT;
-        if writable {
-            flags_ |= flags::WRITABLE;
-        }
-        if user {
-            flags_ |= flags::USER;
-        }
-        if no_execute {
-            flags_ |= flags::NO_EXECUTE;
-        }
-        flags_ |= memory_attrs;
+        let flags_ = leaf.pte_flags();
 
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
         let i3 = ((vaddr >> 30) & 0x1FF) as usize;
@@ -467,11 +518,11 @@ impl AddressSpace {
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
 
         let pdpt = ensure_child(self.pml4, i4, frames)?;
-        if user {
+        if leaf.user {
             self.pml4[i4] |= flags::USER;
         }
         let pd = ensure_child(pdpt, i3, frames)?;
-        if user {
+        if leaf.user {
             pdpt[i3] |= flags::USER;
         }
 
@@ -482,7 +533,7 @@ impl AddressSpace {
             return None;
         }
         let pt = ensure_child(pd, i2, frames)?;
-        if user {
+        if leaf.user {
             pd[i2] |= flags::USER;
         }
         pt[i1] = paddr | flags_;
@@ -542,7 +593,6 @@ impl AddressSpace {
     /// never left describing a *different* mapping.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
@@ -841,10 +891,12 @@ impl MmuAddressSpace for AddressSpace {
                 frames,
                 vaddr,
                 paddr,
-                writable,
-                user,
-                !executable,
-                memory_attrs,
+                LeafPolicy {
+                    writable,
+                    user,
+                    no_execute: !executable,
+                    memory_attrs,
+                },
             );
             // Alignment and prior-mapping are ruled out, so the only
             // remaining failure is page-table-pool exhaustion.
@@ -865,7 +917,6 @@ impl MmuAddressSpace for AddressSpace {
         // `map_page`; on the host it is unreachable.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
             let i4 = ((vaddr >> 39) & 0x1FF) as usize;
             let i3 = ((vaddr >> 30) & 0x1FF) as usize;
             let i2 = ((vaddr >> 21) & 0x1FF) as usize;
@@ -923,7 +974,6 @@ impl MmuAddressSpace for AddressSpace {
         }
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
             let i4 = ((vaddr >> 39) & 0x1FF) as usize;
             let i3 = ((vaddr >> 30) & 0x1FF) as usize;
             let i2 = ((vaddr >> 21) & 0x1FF) as usize;
@@ -986,7 +1036,6 @@ impl MmuAddressSpace for AddressSpace {
         }
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
             let i4 = ((vaddr >> 39) & 0x1FF) as usize;
             let i3 = ((vaddr >> 30) & 0x1FF) as usize;
             let i2 = ((vaddr >> 21) & 0x1FF) as usize;
@@ -1101,7 +1150,6 @@ impl MmuAddressSpace for AddressSpace {
                 return;
             }
             let frames = self.frames;
-            const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
             // A four-level hierarchy rooted at the PML4: a present PML4
             // entry always points at a PDPT; a present PDPT/PD entry
             // without `HUGE` points at the next table; PT (depth 3)
@@ -1232,7 +1280,6 @@ fn shatter_huge_into(
     sub_shift: u32,
     keep_huge: bool,
 ) {
-    const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
     let sub_size = 1u64 << sub_shift;
     // The parent block spans 512 sub-entries; align the base to that span
     // so PAT / reserved bits below the parent page size are discarded.
@@ -1264,7 +1311,7 @@ fn ensure_child(
     if entry & flags::PRESENT != 0 {
         // Existing child — recover the `&mut` from the physical address.
         // Identity mapping makes phys = virt here.
-        let phys = entry & 0x000F_FFFF_FFFF_F000;
+        let phys = entry & ADDR_MASK;
         // SAFETY: every entry that has PRESENT set was inserted below (or
         // by `new_identity_first_32mib`) with a physical address that came
         // from a `TableFrame`, so the round-trip is valid; identity

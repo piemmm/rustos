@@ -110,8 +110,10 @@ mod program {
         // shortfall is a wiring defect the vertical must surface, never a
         // silently sent reply.
         let mut grant_buf = [0u8; GrantedResource::WIRE_LEN];
+        // A negative return is the `-errno`, so compare in the length domain:
+        // anything but exactly one whole record is the shortfall.
         let read = tairix_rt::resource_grants(&mut grant_buf);
-        if read != GrantedResource::WIRE_LEN as i64 {
+        if usize::try_from(read) != Ok(GrantedResource::WIRE_LEN) {
             return 14;
         }
         let Ok(grant) = GrantedResource::from_bytes(&grant_buf) else {

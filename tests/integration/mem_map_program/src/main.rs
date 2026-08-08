@@ -46,7 +46,7 @@ mod program {
 
     /// Default region length (two pages) when the consuming build did not pin
     /// one through `TAIRIX_MEM_MAP_LEN`.
-    const DEFAULT_REGION_LEN: usize = 2 * 4096;
+    const DEFAULT_REGION_LEN: u64 = 2 * 4096;
 
     /// Virtual base the region is mapped at. The consuming vertical's build
     /// script sets `TAIRIX_MEM_MAP_ADDR` (decimal) so the program and the
@@ -57,8 +57,10 @@ mod program {
     };
 
     /// Length in bytes of the region, pinned by `TAIRIX_MEM_MAP_LEN` (decimal).
-    const REGION_LEN: usize = match option_env!("TAIRIX_MEM_MAP_LEN") {
-        Some(s) => parse_u64(s.as_bytes(), DEFAULT_REGION_LEN as u64) as usize,
+    /// Narrowed to the pointer-width length the map syscall takes once, at
+    /// the head of [`main`].
+    const REGION_LEN: u64 = match option_env!("TAIRIX_MEM_MAP_LEN") {
+        Some(s) => parse_u64(s.as_bytes(), DEFAULT_REGION_LEN),
         None => DEFAULT_REGION_LEN,
     };
 
@@ -106,9 +108,10 @@ mod program {
     }
 
     /// The byte written at offset `i` of the region: a simple position-keyed
-    /// pattern so a stuck or aliased byte is caught by the read-back.
+    /// pattern (over the offset's low byte) so a stuck or aliased byte is
+    /// caught by the read-back.
     const fn pattern_byte(i: usize) -> u8 {
-        ((i as u8) ^ 0xA5).wrapping_add(0x11)
+        (i.to_le_bytes()[0] ^ 0xA5).wrapping_add(0x11)
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -116,20 +119,30 @@ mod program {
     /// any `return` here is observed by the kernel as an `exit` (a failure,
     /// since the success path is the deliberate fault that never returns).
     fn main() -> i32 {
-        // 1. Map a fresh anonymous RW region at exactly REGION_VA.
-        let base = tairix_rt::mem_map(REGION_LEN, MapFlags::FIXED, REGION_VA);
-        if base < 0 || base as u64 != REGION_VA {
+        // A pinned length that does not fit this target's address space is a
+        // wiring defect the map could never honour: refuse it, never truncate.
+        let Ok(region_len) = usize::try_from(REGION_LEN) else {
+            return FAIL_MAP;
+        };
+
+        // 1. Map a fresh anonymous RW region at exactly REGION_VA. A negative
+        //    result is the `-errno` the kernel returned.
+        let Ok(base) = u64::try_from(tairix_rt::mem_map(region_len, MapFlags::FIXED, REGION_VA))
+        else {
+            return FAIL_MAP;
+        };
+        if base != REGION_VA {
             return FAIL_MAP;
         }
         let region = REGION_VA as *mut u8;
 
         // 2a. Write the pattern across the whole region.
         let mut i = 0usize;
-        while i < REGION_LEN {
+        while i < region_len {
             // SAFETY: `mem_map` just returned REGION_VA as the base of a
-            // REGION_LEN-byte RW|USER region in this process's own address
+            // `region_len`-byte RW|USER region in this process's own address
             // space, so `region.add(i)` is a valid, writable, in-bounds
-            // pointer for `i < REGION_LEN` (the kernel
+            // pointer for `i < region_len` (the kernel
             // validated and installed the mapping).
             unsafe {
                 region.add(i).write_volatile(pattern_byte(i));
@@ -139,7 +152,7 @@ mod program {
 
         // 2b. Read it back and verify — proves the pages are real RW memory.
         let mut i = 0usize;
-        while i < REGION_LEN {
+        while i < region_len {
             // SAFETY: as above; the region is mapped READ|WRITE|USER and the
             // index is in bounds.
             let got = unsafe { region.add(i).read_volatile() };
@@ -150,7 +163,7 @@ mod program {
         }
 
         // 3. Release the region.
-        if tairix_rt::mem_unmap(REGION_VA, REGION_LEN) != 0 {
+        if tairix_rt::mem_unmap(REGION_VA, region_len) != 0 {
             return FAIL_UNMAP;
         }
 

@@ -517,7 +517,7 @@ pub fn mcfg_first_ecam(bytes: &[u8]) -> Option<EcamAllocation> {
 pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
     // SAFETY: forwarded — caller's contract pins the tables into the
     // identity-mapped window.
-    unsafe { locate_sdt(rsdp, &MADT_SIGNATURE) }
+    unsafe { locate_sdt(rsdp, MADT_SIGNATURE) }
 }
 
 /// Locate the MCFG (PCI Express memory-mapped configuration space
@@ -542,7 +542,7 @@ pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
 pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
     // SAFETY: forwarded — caller's contract pins the tables into the
     // identity-mapped window.
-    unsafe { locate_sdt(rsdp, &MCFG_SIGNATURE) }
+    unsafe { locate_sdt(rsdp, MCFG_SIGNATURE) }
 }
 
 /// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
@@ -556,7 +556,7 @@ pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
 /// See [`locate_madt`].
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
-unsafe fn locate_sdt(rsdp: &Rsdp, signature: &[u8; 4]) -> Option<&'static [u8]> {
+unsafe fn locate_sdt(rsdp: &Rsdp, signature: [u8; 4]) -> Option<&'static [u8]> {
     if rsdp.xsdt_address != 0 {
         // SAFETY: forwarded — caller's contract pins the address into
         // the identity-mapped window.
@@ -576,7 +576,7 @@ unsafe fn locate_sdt(rsdp: &Rsdp, signature: &[u8; 4]) -> Option<&'static [u8]> 
 /// identity-mapped 0..4 GiB window.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
-unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
+unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: [u8; 4]) -> Option<&'static [u8]> {
     // SAFETY: caller's contract — `xsdt_phys` is identity-mapped.
     let len = unsafe { read_phys_u32(xsdt_phys + 4) } as usize;
     if len < ACPI_SDT_HEADER_LEN {
@@ -588,7 +588,7 @@ unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: &[u8; 4]) -> Option<&'s
         let entry =
             unsafe { read_phys_u64(xsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 8) };
         // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_sdt_at(entry, signature) } {
+        if let Some(bytes) = unsafe { try_sdt_at(entry, &signature) } {
             return Some(bytes);
         }
     }
@@ -604,7 +604,7 @@ unsafe fn locate_sdt_via_xsdt(xsdt_phys: u64, signature: &[u8; 4]) -> Option<&'s
 /// identity-mapped 0..4 GiB window.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
-unsafe fn locate_sdt_via_rsdt(rsdt_phys: u64, signature: &[u8; 4]) -> Option<&'static [u8]> {
+unsafe fn locate_sdt_via_rsdt(rsdt_phys: u64, signature: [u8; 4]) -> Option<&'static [u8]> {
     // SAFETY: caller's contract.
     let len = unsafe { read_phys_u32(rsdt_phys + 4) } as usize;
     if len < ACPI_SDT_HEADER_LEN {
@@ -617,7 +617,7 @@ unsafe fn locate_sdt_via_rsdt(rsdt_phys: u64, signature: &[u8; 4]) -> Option<&'s
             read_phys_u32(rsdt_phys + ACPI_SDT_HEADER_LEN as u64 + (i as u64) * 4)
         });
         // SAFETY: caller's contract.
-        if let Some(bytes) = unsafe { try_sdt_at(entry, signature) } {
+        if let Some(bytes) = unsafe { try_sdt_at(entry, &signature) } {
             return Some(bytes);
         }
     }

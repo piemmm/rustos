@@ -537,16 +537,12 @@ mod program {
     /// engine; the usage banner is the fallback when no document serves.
     fn short_help() -> i32 {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        match own_short_help(&BundleHelp::new("fstree"), locale, "fstree") {
-            Some(bytes) => {
-                let _ = Stdout.write_all(&bytes);
-                0
-            }
-            None => {
-                write_stderr_line(USAGE);
-                2
-            }
-        }
+        let Some(bytes) = own_short_help(&BundleHelp::new("fstree"), locale, "fstree") else {
+            write_stderr_line(USAGE);
+            return 2;
+        };
+        let _ = Stdout.write_all(&bytes);
+        0
     }
 
     fn main() -> i32 {
@@ -590,8 +586,7 @@ mod program {
         // cannot be served shows the key line alone — never embedded text.
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let help_text = own_short_help(&BundleHelp::new("fstree"), locale, "fstree")
-            .map(|bytes| plain_help_text(&bytes))
-            .unwrap_or_else(|| String::from(USAGE));
+            .map_or_else(|| String::from(USAGE), |bytes| plain_help_text(&bytes));
 
         // Size the screen from the console the kernel gave us, falling
         // back to the conventional 80×24 when the kernel cannot attest

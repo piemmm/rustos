@@ -115,7 +115,7 @@ mod kernel {
 
     /// Base pointer of [`FRAMEBUFFER`].
     fn framebuffer_ptr() -> *mut u8 {
-        core::ptr::addr_of_mut!(FRAMEBUFFER) as *mut u8
+        core::ptr::addr_of_mut!(FRAMEBUFFER).cast::<u8>()
     }
 
     /// "Physical" base address of [`FRAMEBUFFER`] — in the WASM model
@@ -188,7 +188,10 @@ mod kernel {
             if phys_base < self.base || end > surface_end {
                 return Err(MmioMapError::Unsupported);
             }
-            let offset = (phys_base - self.base) as usize;
+            // Inside the surface (checked above), so the offset is a real
+            // index into it; a width this target cannot express is not.
+            let offset =
+                usize::try_from(phys_base - self.base).map_err(|_| MmioMapError::InvalidRegion)?;
             // SAFETY: `offset + len <= FB_BYTES` (checked above), so the
             // pointer addresses bytes wholly inside the live `FRAMEBUFFER`
             // static; `base` is 4096-aligned and the surface outlives the

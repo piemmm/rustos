@@ -371,6 +371,7 @@ mod metal {
     /// no mailbox and no ramfb device, no attached display, a rejected
     /// or malformed firmware answer — the UART keeps the console (fail
     /// closed).
+    #[must_use]
     pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
         match find_mailbox(fdt) {
             Some(mailbox) => configure_mailbox(mailbox),
@@ -446,7 +447,7 @@ mod metal {
     /// the `qemu,fw-cfg-mmio` node, and — only if the `etc/ramfb` item
     /// exists (QEMU was started with `-device ramfb`) — point the
     /// device's scan-out at the statically-reserved surface and publish
-    /// the console. Fail closed on any miss (no fw_cfg node, no ramfb
+    /// the console. Fail closed on any miss (no `fw_cfg` node, no ramfb
     /// device, a failed transfer): the UART keeps the console.
     fn configure_ramfb(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
         let dma = MmioDma::from_dtb(fdt).ok()?;

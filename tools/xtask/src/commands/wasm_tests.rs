@@ -52,6 +52,15 @@ const VERTICALS: &[Vertical] = &[
     },
 ];
 
+/// The wasm32 verticals and the triple they build for.
+///
+/// The lint gate (`super::target_clippy`) reads the same enrolment table the
+/// build reads, so a newly enrolled vertical is linted without being listed
+/// twice.
+pub fn packages() -> (&'static str, Vec<&'static str>) {
+    (WASM_TARGET, VERTICALS.iter().map(|v| v.package).collect())
+}
+
 /// Check the browser toolchain is present and build every wasm32
 /// vertical once.
 ///

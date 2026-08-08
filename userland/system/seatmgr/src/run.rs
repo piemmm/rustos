@@ -112,13 +112,12 @@ mod program {
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         loop {
             let mut ticket: u64 = 0;
-            let request_len =
-                match tairix_rt::call_recv(SEATMGR_ENDPOINT, &mut request, &mut ticket) {
-                    Ok(len) => len,
-                    // A transient recv error (e.g. an oversize request left
-                    // queued) must not kill the server; drop it and continue.
-                    Err(_) => continue,
-                };
+            // A transient recv error (e.g. an oversize request left queued)
+            // must not kill the server; drop it and continue.
+            let Ok(request_len) = tairix_rt::call_recv(SEATMGR_ENDPOINT, &mut request, &mut ticket)
+            else {
+                continue;
+            };
 
             // Attest the requester. A failure to read the peer origin is
             // fail-closed: reply an error rather than serving an unattested

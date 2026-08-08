@@ -87,10 +87,9 @@ impl RtDnsTransport {
             return Err(Errno::AddressInUse);
         }
         let set = tairix_rt::waitset_create();
-        if set < 0 {
+        let Ok(set) = u64::try_from(set) else {
             return Err(Errno::from_syscall(set));
-        }
-        let set = set as u64;
+        };
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,

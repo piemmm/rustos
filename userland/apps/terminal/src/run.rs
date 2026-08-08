@@ -47,6 +47,7 @@
 mod program {
     extern crate alloc;
 
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -383,11 +384,14 @@ mod program {
     }
 
     /// Which overlay is open.
+    ///
+    /// The sheet dwarfs the menu, so it is boxed: an [`Overlay`] costs the
+    /// same either way, and the one allocation happens when Settings opens.
     enum Content {
         /// The right-click context menu.
         Menu(ContextMenu),
         /// The settings sheet.
-        Sheet(Settings),
+        Sheet(Box<Settings>),
     }
 
     /// The one open overlay and the popup window it is drawn in.
@@ -420,6 +424,15 @@ mod program {
         /// The popup-local viewport the overlay occupies.
         fn viewport(&self) -> Rect {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
+        }
+
+        /// Close the popup and release its frame region.
+        ///
+        /// Consuming the overlay is what makes `present_overlay`'s raw frame
+        /// access sound: no one can hold an overlay whose region is gone.
+        fn close(self, client: &mut WindowClient<RtWindowTransport>) {
+            let _ = client.close(self.window);
+            let _ = tairix_rt::shm_unmap(self.base as u64, self.len);
         }
     }
 
@@ -497,8 +510,9 @@ mod program {
             /// Where the press that asked for it landed.
             at: Point,
         },
-        /// The settings sheet, at its own preferred size.
-        Sheet(Settings),
+        /// The settings sheet, at its own preferred size. Boxed, and moved
+        /// straight into [`Content::Sheet`], so the sheet is allocated once.
+        Sheet(Box<Settings>),
     }
 
     /// The offset that centres an `inner` extent within an `outer` one,
@@ -574,16 +588,10 @@ mod program {
         };
         if present_overlay(&overlay, theme, scale, client).is_err() {
             report("overlay present refused; not shown");
-            close_popup(client, overlay);
+            overlay.close(client);
             return None;
         }
         Some(overlay)
-    }
-
-    /// Close `overlay`'s popup and release its frame region.
-    fn close_popup(client: &mut WindowClient<RtWindowTransport>, overlay: Overlay) {
-        let _ = client.close(overlay.window);
-        let _ = tairix_rt::shm_unmap(overlay.base as u64, overlay.len);
     }
 
     /// Draw `overlay` into its popup's frame and present the whole popup.
@@ -632,6 +640,8 @@ mod program {
         font: BitmapFont,
         /// The colours the screen is painted with.
         painted: Painted,
+        /// The desktop scale everything above was sized at.
+        scale: Scale,
         /// The animation step the effects are drawn at.
         phase: Phase,
         /// The persistence state the phosphor effect carries between frames.
@@ -651,6 +661,7 @@ mod program {
                     theme,
                     profile.effects.background_alpha(),
                 ),
+                scale: desktop.scale(),
                 phase: Phase::default(),
                 afterglow: Afterglow::new(),
             }
@@ -678,7 +689,6 @@ mod program {
         terminal: &Terminal<S>,
         profile: &Profile,
         look: &mut Look,
-        scale: Scale,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
@@ -695,7 +705,7 @@ mod program {
             &mut surface,
             &mut look.afterglow,
             look.phase,
-            scale.percent(),
+            look.scale.percent(),
         );
         for (i, pixel) in surface.pixels().iter().enumerate() {
             let color = pixel.unpremultiply();
@@ -895,7 +905,6 @@ mod program {
             &terminal,
             &profile,
             &mut look,
-            desktop.scale(),
             &mut client,
             window,
             frames,
@@ -930,7 +939,6 @@ mod program {
                         &terminal,
                         &profile,
                         &mut look,
-                        desktop.scale(),
                         &mut client,
                         window,
                         frames,
@@ -962,7 +970,7 @@ mod program {
                     // second one over it.
                     if overlay.as_ref().is_some_and(|open| open.dismissed) {
                         if let Some(open) = overlay.take() {
-                            close_popup(&mut client, open);
+                            open.close(&mut client);
                         }
                     }
                     match outcome {
@@ -985,7 +993,7 @@ mod program {
                                 window,
                                 server,
                                 event_endpoint,
-                                OverlayRequest::Sheet(Settings::new(&profile)),
+                                OverlayRequest::Sheet(Box::new(Settings::new(&profile))),
                                 &mode,
                                 theme,
                                 &desktop,
@@ -1007,7 +1015,6 @@ mod program {
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                desktop.scale(),
                                 &mut client,
                                 window,
                                 frames,
@@ -1034,7 +1041,6 @@ mod program {
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                desktop.scale(),
                                 &mut client,
                                 window,
                                 frames,
@@ -1115,7 +1121,6 @@ mod program {
                                     &terminal,
                                     &profile,
                                     &mut look,
-                                    desktop.scale(),
                                     &mut client,
                                     window,
                                     frames,
@@ -1143,7 +1148,6 @@ mod program {
                                 &terminal,
                                 &profile,
                                 &mut look,
-                                desktop.scale(),
                                 &mut client,
                                 window,
                                 frames,
@@ -1163,7 +1167,7 @@ mod program {
                             // region). The pty master drops with this process,
                             // so the shell observes end-of-file and exits.
                             if let Some(open) = overlay.take() {
-                                close_popup(&mut client, open);
+                                open.close(&mut client);
                             }
                             let _ = client.close(window);
                             return 0;
@@ -1179,7 +1183,6 @@ mod program {
                             &terminal,
                             &profile,
                             &mut look,
-                            desktop.scale(),
                             &mut client,
                             window,
                             frames,
@@ -1225,7 +1228,6 @@ mod program {
                         &terminal,
                         &profile,
                         &mut look,
-                        desktop.scale(),
                         &mut client,
                         window,
                         frames,

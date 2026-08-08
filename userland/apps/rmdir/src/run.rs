@@ -33,7 +33,7 @@ mod program {
     use tairix_abi::{Errno, UnlinkFlags};
     use tairix_help::BundleHelp;
     use tairix_rmdir::{parse, run, Filesystem, Output, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The production [`Filesystem`] over the directory-only `fs_unlink`.
     struct RtFilesystem;
@@ -62,8 +62,11 @@ mod program {
     }
 
     /// Report a usage error: the banner on the standard error stream.
+    ///
+    /// Written verbatim: the banner already ends in a newline, and GNU
+    /// `rmdir` does not follow it with a blank line.
     fn report_usage() {
-        write_stderr_line(USAGE);
+        let _ = Stderr.write_all(USAGE.as_bytes());
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -79,12 +82,9 @@ mod program {
             report_usage();
             return 2;
         };
-        let command = match parse(&arguments) {
-            Ok(command) => command,
-            Err(_) => {
-                report_usage();
-                return 2;
-            }
+        let Ok(command) = parse(&arguments) else {
+            report_usage();
+            return 2;
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         // The tool's own bundle's `Help/` tree, read through the shared

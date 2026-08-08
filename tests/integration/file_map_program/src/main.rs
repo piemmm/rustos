@@ -69,13 +69,13 @@ mod program {
     const INTERIOR_OFFSET: u64 = parse_u64(req_env(option_env!("TAIRIX_FM_INTERIOR_OFFSET")));
 
     /// Expected fixture byte at offset `0`.
-    const BYTE_FIRST: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_FIRST"))) as u8;
+    const BYTE_FIRST: u8 = req_byte(parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_FIRST"))));
 
     /// Expected fixture byte at [`INTERIOR_OFFSET`].
-    const BYTE_INTERIOR: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_INTERIOR"))) as u8;
+    const BYTE_INTERIOR: u8 = req_byte(parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_INTERIOR"))));
 
     /// Expected fixture byte at `FILE_LEN - 1` (the straddle page).
-    const BYTE_LAST: u8 = parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_LAST"))) as u8;
+    const BYTE_LAST: u8 = req_byte(parse_u64(req_env(option_env!("TAIRIX_FM_BYTE_LAST"))));
 
     /// The pinned environment variable's bytes. An absent variable is a
     /// build wiring defect — the consuming vertical's build script is the
@@ -87,6 +87,15 @@ mod program {
             Some(s) => s.as_bytes(),
             None => panic!("TAIRIX_FM_* geometry must be pinned by the consuming build script"),
         }
+    }
+
+    /// The pinned value as the single byte it must be. A wider value is a
+    /// build wiring defect like an absent variable, so fail the build loudly
+    /// rather than bake a truncated byte the fixture could never match; the
+    /// bound makes the low-byte read exact.
+    const fn req_byte(value: u64) -> u8 {
+        assert!(value <= 0xFF, "TAIRIX_FM_BYTE_* value must be one byte");
+        value.to_le_bytes()[0]
     }
 
     /// Parse `bytes` as a non-negative decimal `u64` at compile time. Any
@@ -127,18 +136,15 @@ mod program {
     /// The `verify` role body. Returns `0` on success or a distinct
     /// diagnostic exit code per failure site.
     fn verify() -> i32 {
-        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
-        if fd < 0 {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
             return 20;
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let fd = fd as u32;
+        };
         let base = tairix_rt::file_map(fd, 0, FILE_LEN);
         if base <= 0 {
             return 21;
         }
-        #[allow(clippy::cast_sign_loss)]
-        let base = base as u64;
+        // Checked positive above: the syscall returned a user VA.
+        let base = base.cast_unsigned();
         // The mapping's identity snapshot must survive the descriptor: close
         // it before any page is faulted in.
         if tairix_rt::fs_close(fd) != 0 {
@@ -180,12 +186,10 @@ mod program {
             // page has not been touched, so the kernel copy-in takes the
             // fault this probe exists to prove resolvable.
             unsafe { core::slice::from_raw_parts((base + PATH_OFFSET) as *const u8, FILE_PATH.len()) };
-        let fd2 = tairix_rt::fs_open(path_in_map, OpenFlags::READ);
-        if fd2 < 0 {
+        let Ok(fd2) = u32::try_from(tairix_rt::fs_open(path_in_map, OpenFlags::READ)) else {
             return 27;
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        if tairix_rt::fs_close(fd2 as u32) != 0 {
+        };
+        if tairix_rt::fs_close(fd2) != 0 {
             return 28;
         }
         if tairix_rt::file_unmap(base, FILE_LEN) != 0 {
@@ -198,17 +202,15 @@ mod program {
     /// read must fault-kill the task (exit 139); every return here is a
     /// distinct failure the parent will surface.
     fn wild() -> i32 {
-        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
-        if fd < 0 {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
             return 40;
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let base = tairix_rt::file_map(fd as u32, 0, FILE_LEN);
+        };
+        let base = tairix_rt::file_map(fd, 0, FILE_LEN);
         if base <= 0 {
             return 41;
         }
-        #[allow(clippy::cast_sign_loss)]
-        let base = base as u64;
+        // Checked positive above: the syscall returned a user VA.
+        let base = base.cast_unsigned();
         if tairix_rt::file_unmap(base, FILE_LEN) != 0 {
             return 42;
         }
@@ -224,17 +226,15 @@ mod program {
     /// to it. File mappings are read-only, so the write must fault-kill the
     /// task (exit 139) — never resolve, and never spin retrying.
     fn store() -> i32 {
-        let fd = tairix_rt::fs_open(FILE_PATH, OpenFlags::READ);
-        if fd < 0 {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
             return 50;
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let base = tairix_rt::file_map(fd as u32, 0, FILE_LEN);
+        };
+        let base = tairix_rt::file_map(fd, 0, FILE_LEN);
         if base <= 0 {
             return 51;
         }
-        #[allow(clippy::cast_sign_loss)]
-        let base = base as u64;
+        // Checked positive above: the syscall returned a user VA.
+        let base = base.cast_unsigned();
         // Fault the page resident first, so the store below exercises the
         // resident-page write-fault gate, not the not-yet-backed path.
         // SAFETY: offset 0 is inside the live mapping.
@@ -253,12 +253,12 @@ mod program {
     /// with `expected`. Returns `0` on success or `fail_code` on any
     /// mismatch or syscall failure.
     fn run_child(path: &[u8], expected: i32, fail_code: i32) -> i32 {
-        let pid = tairix_rt::spawn(path);
+        let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
+            return fail_code;
+        };
         if pid <= 0 {
             return fail_code;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = pid as i32;
         let mut code = 0i32;
         if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;

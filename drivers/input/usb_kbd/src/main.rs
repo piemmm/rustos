@@ -245,6 +245,9 @@ mod program {
         /// data buffer (`RtDriverHost::map_shared`). The host-controller driver
         /// maps the same frames and writes each report here before replying.
         shm_base: u64,
+        /// This driver's read view of those same frames, built once at
+        /// start-up over the verified mapping.
+        shm: &'static [u8],
         /// Diagnostic: the raw byte count the most recent interrupt-IN URB
         /// reported as transferred, *before* it is clamped to the shared
         /// buffer. Captured so the pump-error path can report the exact
@@ -265,39 +268,34 @@ mod program {
 
     impl ReportSource for UrbReportSource {
         fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
+            // The URB's length field is 32-bit; a report buffer that does not
+            // fit it could not be described, so refuse rather than truncate.
+            let request_len =
+                u32::try_from(REPORT_BUF_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
             // Submit the interrupt-IN URB and block until the HCD delivers a
             // report into the shared buffer; a transport/controller fault is a
             // non-fatal poll error the service loop retries.
-            let transferred = match self.client.interrupt_in(
-                INTERRUPT_ENDPOINT,
-                self.shm_base,
-                REPORT_BUF_LEN as u32,
-            ) {
-                Ok(transferred) => transferred,
-                Err(err) => {
-                    log_hex_event(
-                        USB_KBD_URB_ERROR,
-                        Level::Warn,
-                        "usb-keyboard: interrupt-in URB completion carried an error",
-                        "errno_hex",
-                        err as u64,
-                    );
-                    return Err(super::transport_error(err));
-                }
-            };
-            let n = (transferred as usize).min(REPORT_BUF_LEN).min(buf.len());
-            // SAFETY: `RtDriverHost::map_shared` mapped the granted shared
-            // region RW into this process at `shm_base`, `main` verified the
-            // kernel-reported length holds at least `REPORT_BUF_LEN` bytes
-            // before constructing this source, and that mapping outlives
-            // this read.
+            let transferred =
+                match self
+                    .client
+                    .interrupt_in(INTERRUPT_ENDPOINT, self.shm_base, request_len)
+                {
+                    Ok(transferred) => transferred,
+                    Err(err) => {
+                        log_hex_event(
+                            USB_KBD_URB_ERROR,
+                            Level::Warn,
+                            "usb-keyboard: interrupt-in URB completion carried an error",
+                            "errno_hex",
+                            err as u64,
+                        );
+                        return Err(super::transport_error(err));
+                    }
+                };
+            let n = (transferred as usize).min(self.shm.len()).min(buf.len());
             // The HCD's write to the same frames happens-before this read: the
-            // URB reply we just received is the kernel's release of that write.
-            // We read only `n ≤ REPORT_BUF_LEN` bytes, wholly in-bounds.
-            let shm = unsafe {
-                core::slice::from_raw_parts(self.shm_base as usize as *const u8, REPORT_BUF_LEN)
-            };
-            buf[..n].copy_from_slice(&shm[..n]);
+            // URB reply just received is the kernel's release of that write.
+            buf[..n].copy_from_slice(&self.shm[..n]);
             self.last_transferred = transferred;
             log_hex_event(
                 USB_KBD_REPORT,
@@ -308,6 +306,24 @@ mod program {
             );
             Ok(Some(n))
         }
+    }
+
+    /// This driver's read view of the granted shared report buffer, or `None`
+    /// when the kernel-reported mapping cannot hold one boot report or its
+    /// base does not fit this target's address space (a mis-provisioned node,
+    /// refused before any read is built over it).
+    fn shared_report_view(shm_base: u64, shm_len: usize) -> Option<&'static [u8]> {
+        if shm_len < REPORT_BUF_LEN {
+            return None;
+        }
+        let base = usize::try_from(shm_base).ok()?;
+        // SAFETY: `RtDriverHost::map_shared` mapped the granted shared region
+        // RW into this process at `shm_base` for `shm_len` bytes and that
+        // mapping is never unmapped, so a shared `&'static [u8]` over exactly
+        // `REPORT_BUF_LEN` of those bytes is in-bounds and lives as long as
+        // the process. The HCD writes the same frames in its own address
+        // space; that cross-process sharing is synchronised by the URB reply.
+        Some(unsafe { core::slice::from_raw_parts(base as *const u8, REPORT_BUF_LEN) })
     }
 
     /// A [`ConsoleSink`] that injects each decoded keyboard record into the
@@ -374,15 +390,12 @@ mod program {
             "endpoint_hex",
             endpoint,
         );
-        // The kernel reports the mapped region's true length; a region too
-        // small for one boot report is a mis-provisioned node refused here,
-        // before any shared-buffer read is built over it.
         let Ok((shm_base, shm_len)) = host.map_shared() else {
             return EXIT_NO_TRANSPORT;
         };
-        if shm_len < REPORT_BUF_LEN {
+        let Some(shm) = shared_report_view(shm_base, shm_len) else {
             return EXIT_NO_TRANSPORT;
-        }
+        };
         log_hex_event(
             USB_KBD_SETUP,
             Level::Info,
@@ -394,6 +407,7 @@ mod program {
         let source = UrbReportSource {
             client: UrbClient::new(IpcUrbCall { endpoint }),
             shm_base,
+            shm,
             last_transferred: 0,
         };
         let mut keyboard = BootKeyboard::new(source);

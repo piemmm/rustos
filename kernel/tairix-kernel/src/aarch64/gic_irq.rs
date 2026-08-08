@@ -686,8 +686,8 @@ fn drain_uart_locked() {
     crate::console_uart::drain_fifo_into_console(
         console,
         queue,
-        |buf| tairix_arch_aarch64::serial::read_console_bytes(buf),
-        || tairix_arch_aarch64::serial::clear_rx_interrupt(),
+        tairix_arch_aarch64::serial::read_console_bytes,
+        tairix_arch_aarch64::serial::clear_rx_interrupt,
         || {
             if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
                 let _ = GIC_IRQ_CONTROLLER.mask(intid);

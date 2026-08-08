@@ -36,6 +36,7 @@ mod sbom;
 mod seed;
 mod spec_review;
 mod supply_chain;
+mod target_clippy;
 mod wasm_tests;
 
 /// One sanctioned developer workflow.
@@ -171,7 +172,9 @@ impl Command {
                 "Remove superseded build-script output to reclaim target/ disk space."
             }
             Command::Test => "Run host-side unit and integration tests.",
-            Command::Clippy => "Run clippy across the workspace with warnings denied.",
+            Command::Clippy => {
+                "Run clippy with warnings denied, for the host and every Tier-1 target."
+            }
             Command::Fmt => "Check formatting (`--fix` to apply).",
             Command::DocsCheck => "Build rustdoc and the mdBook with link checking.",
             Command::AbiCheck => "Verify generated ABI artefacts match their source of truth.",
@@ -685,6 +688,12 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     })
 }
 
+/// Lint the workspace for the host, then once per freestanding Tier-1 target.
+///
+/// The host pass alone lints almost none of the shipped code: a kernel,
+/// driver, service or application body is compiled only when its crate is
+/// built for a bare-metal triple, so the target passes are what make this gate
+/// cover the system rather than its host stubs (see [`target_clippy`]).
 fn run_clippy(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let mut cmd = ctx.cargo();
     cmd.args([
@@ -697,7 +706,8 @@ fn run_clippy(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         "warnings",
     ]);
     cmd.args(args);
-    ctx.run("clippy", cmd)
+    ctx.run("clippy (host)", cmd)?;
+    target_clippy::run(ctx, args)
 }
 
 fn run_fmt(ctx: &Context, args: &[OsString]) -> Result<(), String> {

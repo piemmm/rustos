@@ -56,6 +56,7 @@ use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, Secondar
 use tairix_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, guard_arena_pool_capacity,
     identity_device_mask, identity_ram_mask, ram_gigapages, AddressSpace, PageTablePool,
+    GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
@@ -328,70 +329,9 @@ pub fn boot(
         crate::aarch64::gic_irq::kalloc_irq_restore,
     );
 
-    // P2 + P3, *before* the MMU comes on: point the console at the UART
-    // and the GICv2 driver at the GICD/GICC bases the firmware tree
-    // describes. Both walks early-return at their matched node
-    // (`tairix_arch_aarch64::fdt::scan_translated`), so they are safe
-    // MMU-off (`plans/PI.md` watch-out); a null, unreadable, or
-    // incomplete tree leaves the `virt` defaults in place (fail closed). They must run *before* the identity map is
-    // built, because the discovered bases decide which gigapages the map
-    // types Device: on the Pi 4 the PL011/GIC-400 live in gigapage 3
-    // while the kernel image at `0x8_0000` must keep gigapage 0 Normal —
-    // executable — or the instruction fetch after `switch` faults with
-    // the vectors not yet installed (the `virt`-only "GiB 0 Device"
-    // assumption this replaces).
-    let early = configure_mmio_from_dtb(dtb);
-    let (console_base, _) = console::current();
-    let (gicd_base, gicc_base) = gic::current();
-    // The mailbox doorbell the video console rang is an MMIO window the
-    // identity map must type Device like the UART and GIC (on the Pi 4
-    // they all share gigapage 3, but the mask is derived from facts,
-    // never assumed). With no video console the console base stands in
-    // as a harmless duplicate input.
-    let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
-    // The BCM2711 PCIe root complex's controller register block and its
-    // outbound MMIO window (where the enumerated VL805 BAR lives) are MMIO
-    // the autoloaded user-space PCIe bus driver (`drivers/bus/pcie_brcm`) maps
-    // through `mmio_map` from its node's grants, so their gigapages must be
-    // typed Device like the UART/GIC. Derived from the discovered
-    // `brcm,bcm2711-pcie` node, never assumed; with no such node (the QEMU
-    // `virt` shape) the console base stands in as a harmless duplicate input.
-    let (pcie_regs, pcie_outbound) = early
-        .pcie
-        .map_or((console_base as u64, console_base as u64), |p| {
-            (p.regs_phys, p.outbound_cpu_base)
-        });
-    let device_mask = identity_device_mask(
-        &[
-            console_base as u64,
-            gicd_base as u64,
-            gicc_base as u64,
-            video_doorbell,
-            pcie_regs,
-            pcie_outbound,
-        ],
-        kernel_start_addr(),
-        kernel_end_addr(),
-    );
-    configure_device_gigapages(device_mask);
-    // RAM gigapage mask from the facts in hand pre-MMU: the kernel
-    // image's own extent, the firmware DTB blob, and the firmware
-    // scan-out surface. Every other non-Device gigapage stays *invalid*
-    // in the identity map — on real silicon a Normal write-back
-    // executable mapping of unbacked address space invites the core's
-    // speculative fetches into windows nothing answers, which wedged
-    // the metal Pi 4B at the instant translation enabled while QEMU
-    // (which answers every address) stayed green. The post-MMU
-    // `/memory` discovery widens this mask below.
-    let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
-    configure_ram_gigapages(identity_ram_mask(&[
-        (
-            kernel_start_addr(),
-            kernel_end_addr().saturating_sub(kernel_start_addr()),
-        ),
-        (dtb, early.dtb_len),
-        (fb_base, fb_len),
-    ]));
+    // P2 + P3: discover the board's MMIO and type the identity map's
+    // gigapages from it, both before translation is enabled.
+    let (early, device_mask) = configure_identity_typing(dtb);
 
     // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
@@ -408,112 +348,14 @@ pub fn boot(
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
 
-    // The framebuffer console renders through a borrowed character-cell grid
-    // so it can save the primary screen and restore it when a full-screen
-    // program (top, an editor) leaves the alternate screen. Those grids could
-    // not be allocated during the pre-MMU display discovery — the heap needs
-    // the cacheable identity map the MMU just enabled — so attach them now,
-    // sized to the discovered geometry and leaked to `'static` (the console
-    // lives as long as the kernel, exactly like the per-CPU arch storage).
-    // With no display discovered `text_cell_count` is `None`, so this is a
-    // no-op and the UART keeps the console (fail closed).
+    // The screen grids need the heap the cacheable identity map just made
+    // usable, so they are attached here rather than at display discovery.
     if mmu_on {
-        if let Some(cells) = video::text_cell_count() {
-            let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
-            let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
-            video::attach_console(Box::leak(main), Box::leak(alt));
-        }
+        attach_video_console_grids();
     }
 
-    // Log the discovered PCIe root-complex windows once, post-MMU. The
-    // windows themselves reach the autoloaded user-space PCIe bus driver as
-    // resource grants on the discovered `brcm,bcm2711-pcie` hardware-tree
-    // node (emitted by `FdtDiscovery`), not through any kernel-side stash:
-    // `devmgr` autoloads `drivers/bus/pcie_brcm`, which maps the register
-    // window with `mmio_map` and drives the chain (`plans/PI.md` P10 D5d). This log is purely a metal diagnostic.
     if let Some(pcie) = early.pcie {
-        // A metal capture then shows exactly which BCM2711 PCIe root-complex
-        // register block and inbound/outbound apertures the discovered node
-        // carries, so a silent keyboard can be bisected against the hardware
-        // actually found rather than guessed at. Allocation-free hex
-        // rendering on the boot stack, exactly like the consolidated boot
-        // line below (the log path never allocates or
-        // panics).
-        let mut regs_base_buf = [0u8; 16];
-        let mut regs_len_buf = [0u8; 16];
-        let mut aperture_top_buf = [0u8; 16];
-        let mut inbound_size_buf = [0u8; 16];
-        let mut inbound_pcie_buf = [0u8; 16];
-        let mut outbound_cpu_buf = [0u8; 16];
-        let mut outbound_pcie_buf = [0u8; 16];
-        let mut outbound_size_buf = [0u8; 16];
-        log(
-            log_sink,
-            &Event {
-                level: Level::Info,
-                id: KERNEL_PCIE_DISCOVERED,
-                message:
-                    "aarch64: discovered brcm,bcm2711-pcie root complex (vl805 usb host bridge)",
-                fields: &[
-                    Field {
-                        key: "regs_base_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.regs_phys,
-                            &mut regs_base_buf,
-                        )),
-                    },
-                    Field {
-                        key: "regs_len_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.regs_len,
-                            &mut regs_len_buf,
-                        )),
-                    },
-                    Field {
-                        key: "dma_aperture_top_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.dma_aperture_top,
-                            &mut aperture_top_buf,
-                        )),
-                    },
-                    Field {
-                        key: "inbound_size_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.inbound_size,
-                            &mut inbound_size_buf,
-                        )),
-                    },
-                    Field {
-                        key: "inbound_pcie_base_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.inbound_pcie_base,
-                            &mut inbound_pcie_buf,
-                        )),
-                    },
-                    Field {
-                        key: "outbound_cpu_base_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.outbound_cpu_base,
-                            &mut outbound_cpu_buf,
-                        )),
-                    },
-                    Field {
-                        key: "outbound_pcie_base_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.outbound_pcie_base,
-                            &mut outbound_pcie_buf,
-                        )),
-                    },
-                    Field {
-                        key: "outbound_size_hex",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(
-                            pcie.outbound_size,
-                            &mut outbound_size_buf,
-                        )),
-                    },
-                ],
-            },
-        );
+        log_pcie_discovery(log_sink, &pcie);
     }
 
     // Discover the rest of the board from the firmware device tree: the
@@ -521,159 +363,24 @@ pub fn boot(
     // P5) — full-tree walks that need the MMU on. A null, unreadable, or
     // incomplete tree leaves the `virt` defaults in place (fail closed).
     let discovered = configure_from_dtb(dtb);
-    // Widen the RAM gigapage mask with the discovered `/memory` windows
-    // — a walk that is only safe post-MMU — so later-built process
-    // spaces map every window, and install the widened gigapages
-    // into the *live* boot space (an invalid→valid L1 update, no TLB
-    // shootdown needed) before the allocator touches the windows.
-    //
-    // The windows are first clipped out of Device-typed gigapages: the
-    // identity map types memory at 1 GiB granularity and Device wins for
-    // a shared gigapage (the Pi 4's below-4 GiB window ends inside the
-    // gigapage holding its UART/GIC/PCIe), so RAM there would be mapped
-    // Device — atomics on it are unpredictable — and must never reach
-    // the mask or the allocator. Reclaiming those bytes needs
-    // 2 MiB-granular identity typing (`plans/APPS.md` I4 follow-up).
-    //
-    // The installed-RAM total is taken from the *raw* discovered windows
-    // before that clip (clipped bytes are real installed RAM the identity
-    // map merely cannot use) — the figure the ungated `boot_facts_get`
-    // syscall reports.
+    // The installed-RAM total is taken from the *raw* discovered windows,
+    // before the Device clip below drops the bytes the identity map cannot
+    // use — the figure the ungated `boot_facts_get` syscall reports.
     let installed_memory_bytes = discovered
         .ram_windows
         .iter()
         .fold(0u64, |sum, &(_, size)| sum.saturating_add(size));
     let ram_windows =
-        crate::mem_map::clip_windows_to_normal_ram(&discovered.ram_windows, &device_mask);
-    if !ram_windows.is_empty() {
-        let window_mask = identity_ram_mask(&ram_windows);
-        let mut merged = ram_gigapages();
-        for (word, add) in merged.iter_mut().zip(window_mask) {
-            *word |= add;
-        }
-        configure_ram_gigapages(merged);
-        if let Some(space) = boot_space.as_mut() {
-            for &(ram_base, ram_size) in &ram_windows {
-                let Some(last_byte) = (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1))
-                else {
-                    continue;
-                };
-                let mut gigapage = ram_base >> 30;
-                while gigapage <= (last_byte >> 30) {
-                    space.ensure_identity_gigapage(gigapage << 30);
-                    gigapage += 1;
-                }
-            }
-        }
-    }
+        widen_ram_gigapages(&discovered.ram_windows, &device_mask, boot_space.as_mut());
 
-    // Construct the architecture handle — the single
-    // concrete-arch selection point for the kernel image. The counter
-    // frequency seeds the handle's monotonic clock and (at P4) the live
-    // timer interval; it is the board's device-tree `clock-frequency`
-    // override when present, else the `CNTFRQ_EL0` register value
-    // (`discovered.timer_hz`).
-    let counter_hz = discovered.timer_hz;
-    // Dense `CpuId` → `MPIDR_EL1` map from the discovered `/cpus` list,
-    // validated and ordered with the running boot core at dense id 0
-    // (a malformed list fails closed to a single-CPU boot). Every per-CPU backing —
-    // the arch handle's slots, the preemption slices, the secondary
-    // stacks, and the scheduler's run queues — is sized from this one
-    // list, exactly to the machine (no compile-time core ceiling).
-    let cpu_mpidrs =
-        match crate::cpu_topology::order_cpus(&discovered.cpu_mpidrs, smp::current_affinity()) {
-            Ok(cpus) => cpus,
-            Err(crate::cpu_topology::CpuTopologyError::AllocationFailed) => {
-                serial::beacon("pi-boot: CPU topology allocation FAILED, parking");
-                halt_current_cpu()
-            }
-            Err(crate::cpu_topology::CpuTopologyError::TooManyCpus) => {
-                serial::beacon("pi-boot: CPU topology exceeds CpuId, parking");
-                halt_current_cpu()
-            }
-        };
-    smp::install_current_cpu_index(BOOT_CPU);
-    let arch = build_arch_handle(&cpu_mpidrs, counter_hz);
-    // Discover each core's static class (`capacity-dmips-mhz`) so the
-    // scheduler can place background work on efficiency cores. A
-    // full-tree walk — safe here, post-MMU; a missing/malformed tree
-    // leaves the homogeneous Performance default.
-    if mmu_on && dtb != 0 {
-        // SAFETY: `dtb` is the firmware pointer `Fdt::from_ptr` validated
-        // for the walks above (magic + `totalsize` bounds); the MMU is on,
-        // so a whole-tree traversal is safe.
-        if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
-            arch.classify_from_fdt(&fdt);
-            // Capture the firmware-provided boot seed (`/chosen/rng-seed`) so
-            // `kernel_core::kernel_main` can fold it into the CSPRNG seed. On
-            // an emulated cortex-a72 (no `FEAT_RNG`) with a deterministic
-            // cycle counter this is the only usable entropy source, so
-            // without it the reserve — and ramzip's sealing key with it —
-            // would never seed. Input material only, XOR-mixed and DRBG-
-            // conditioned kernel-side; never trusted alone.
-            if let Some(seed) = fdt.chosen_rng_seed() {
-                tairix_kernel_core::random::capture_boot_entropy_seed(seed);
-            }
-            // Discover each CPU's CoreSight external-debug component
-            // (`arm,coresight-cpu-debug`) so the lockup watchdog can read a
-            // hard-wedged core's PC over that non-maskable channel — the one
-            // live observation a GIC-400 (secure-world FIQ) leaves reachable
-            // (`plans/WATCHDOG.md`). The debug bases are discovered from the
-            // tree, never a board constant. A base is installed only when its
-            // window is *already* device-mapped, so a read on the lockup path
-            // can never fault; a component in an unmapped gigapage, or a tree
-            // with no debug nodes (QEMU `virt`, the stock Pi 4 firmware DTB),
-            // installs nothing and the sampler reports `Unsupported` (fail
-            // closed, the buddy detector runs unchanged). Debug-diagnostics
-            // only: the sole reader is the feature-gated hard-lockup `live_pc`
-            // capture, so a shippable image does no debug-store discovery.
-            #[cfg(feature = "watchdog-diagnostics")]
-            install_debug_component_bases(&fdt, &cpu_mpidrs);
-        }
-    }
-    // Install the secondary-start mechanism the firmware tree declares
-    // (`plans/PI.md` P5), never an assumed one (no `cfg(board)` fork):
-    // a `/psci` node selects PSCI `CPU_ON` over its conduit (`hvc` at
-    // EL2-hosted, `smc` at EL3-hosted — the Pi 4 with `armstub8.bin`),
-    // and a PSCI-less tree whose cpu nodes declare
-    // `enable-method = "spin-table"` (the Pi 4's stock firmware)
-    // selects the spin-table release over the declared per-CPU
-    // `cpu-release-addr` words, aligned to the dense ids. A tree that
-    // declares neither leaves the mechanism unset, and bring-up fails
-    // closed at the start site rather than guessing.
-    let (arch, smp_start_method) = match discovered.psci_method {
-        Some(method) => (
-            arch.with_secondary_start(SecondaryStart::Psci(method)),
-            "psci",
-        ),
-        None => {
-            let release_addrs = match crate::cpu_topology::align_release_addrs(
-                &cpu_mpidrs,
-                &discovered.cpu_spin_releases,
-            ) {
-                Ok(addrs) => addrs,
-                Err(_) => {
-                    serial::beacon("pi-boot: spin-table map allocation FAILED, parking");
-                    halt_current_cpu()
-                }
-            };
-            if release_addrs.iter().any(|&addr| addr != 0) {
-                let release_addrs: &'static [u64] = Box::leak(release_addrs.into_boxed_slice());
-                (
-                    arch.with_secondary_start(SecondaryStart::SpinTable { release_addrs }),
-                    "spin_table",
-                )
-            } else {
-                (arch, "none")
-            }
-        }
-    };
+    let (arch, cpu_mpidrs) = build_cpu_topology_and_arch(&discovered, dtb, mmu_on);
+    let (arch, smp_start_method) = select_secondary_start(arch, &discovered, &cpu_mpidrs);
 
     // Sanity-check that the constructed handle reports the boot CPU, and
     // that the generic-timer frequency is usable. A zero frequency would
     // make the monotonic clock unusable.
     let boot_cpu_ok = arch.current_cpu() == BOOT_CPU;
-    let timer_present = counter_hz != 0;
+    let timer_present = discovered.timer_hz != 0;
 
     // Stage the secondary bring-up (stacks + entry + the dense-id →
     // affinity table the spin-table trampoline recovers identity from)
@@ -684,26 +391,9 @@ pub fn boot(
     let smp_prepared = mmu_on && prepare_secondary_bringup(&cpu_mpidrs);
 
     // P6c-1: translate the firmware-discovered `/memory` windows into the
-    // canonical physical-memory map `kernel_core::kernel_main` consumes.
-    // An absent or malformed discovery fails closed to a status string
-    // rather than a panic; the map is retained (not
-    // just measured) so it can be moved into the `BootInfo` hand-off.
-    let mut layout_result: Result<crate::mem_map::MemoryLayout, &'static str> =
-        if ram_windows.is_empty() {
-            Err("no_memory_window")
-        } else {
-            build_memory_map(&ram_windows, kernel_end_addr()).map_err(|err| err.as_str())
-        };
-    // Reserve the firmware device-tree blob out of the usable window so
-    // neither the frame allocator nor the early-boot RAM self-test (which
-    // zeroes every usable byte) clobbers the tree the later root-storage
-    // bind and device discovery still re-parse. The QEMU `virt`/Pi firmware
-    // lands the blob high in RAM, above the kernel image the map already
-    // reserves, so without this it sits in usable memory (fail closed: an
-    // absent tree reserves nothing).
-    if let Ok(layout) = &mut layout_result {
-        crate::mem_map::reserve_blob_frames(&mut layout.map, dtb, early.dtb_len);
-    }
+    // canonical physical-memory map `kernel_core::kernel_main` consumes,
+    // with the firmware blob reserved out of it.
+    let layout_result = build_boot_memory_layout(&ram_windows, dtb, early.dtb_len);
     let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
         Ok(layout) => {
             let (usable, reserved) = region_byte_totals(&layout.map);
@@ -752,126 +442,29 @@ pub fn boot(
 
     let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
 
-    let level = if ready { Level::Info } else { Level::Warn };
-
-    // Stack buffers for the allocation-free hex rendering of the discovered
-    // byte counts; they must outlive the `fields` slice handed to `log`.
-    let mut usable_buf = [0u8; 16];
-    let mut reserved_buf = [0u8; 16];
-    let usable_hex = format_hex_u64(usable_bytes, &mut usable_buf);
-    let reserved_hex = format_hex_u64(reserved_bytes, &mut reserved_buf);
-    // Low word of the Device gigapage mask (gigapages 0..64 — both
-    // supported boards keep all their MMIO below 64 GiB), recorded so a
-    // metal bring-up log shows which gigapages the identity map typed
-    // Device (`virt`: 0x1; Pi 4: 0x8).
-    let mut device_mask_buf = [0u8; 16];
-    let device_mask_hex = format_hex_u64(device_mask[0], &mut device_mask_buf);
-    // The generic-timer counter rate (Hz) every `busy_delay_us` settle
-    // is measured against (`CNTFRQ_EL0` unless the tree overrode it). A
-    // value far from the board crystal (the Pi 4's 54 MHz =
-    // `0x337_f980`) means firmware mis-programmed `CNTFRQ_EL0`, which
-    // stretches every bring-up settle delay proportionally — the
-    // measurement that quantifies the multi-second PCIe link-training
-    // pause (measure, don't guess).
-    let mut timer_hz_buf = [0u8; 16];
-    let timer_hz_hex = format_hex_u64(discovered.timer_hz, &mut timer_hz_buf);
-    // The dense CPU count every per-CPU structure was sized from — on a
-    // Pi 4 the four `/cpus` cores; `1` when discovery failed closed.
-    let mut cpu_count_buf = [0u8; 12];
-    let cpu_count_str = tairix_util::fmt::format_usize(cpu_mpidrs.len(), &mut cpu_count_buf);
-
-    log(
+    log_boot_line(
         log_sink,
-        &Event {
-            level,
-            id: KERNEL_BOOT_AARCH64_REACHED,
-            message: "tairix-kernel aarch64 (raspberry pi 4): reached stage-p1 boot init point",
-            fields: &[
-                Field {
-                    key: "boot_cpu_ok",
-                    value: tairix_log::FieldValue::Str(yes_no(boot_cpu_ok)),
-                },
-                Field {
-                    key: "timer_present",
-                    value: tairix_log::FieldValue::Str(yes_no(timer_present)),
-                },
-                Field {
-                    key: "dtb_present",
-                    value: tairix_log::FieldValue::Str(yes_no(dtb != 0)),
-                },
-                Field {
-                    key: "console_discovered",
-                    value: tairix_log::FieldValue::Str(yes_no(early.console)),
-                },
-                Field {
-                    key: "gic_discovered",
-                    value: tairix_log::FieldValue::Str(yes_no(early.gic)),
-                },
-                Field {
-                    key: "video_console",
-                    value: tairix_log::FieldValue::Str(yes_no(early.video.is_some())),
-                },
-                Field {
-                    key: "device_gigapages_hex",
-                    value: tairix_log::FieldValue::Str(device_mask_hex),
-                },
-                Field {
-                    key: "ram_discovered",
-                    value: tairix_log::FieldValue::Str(yes_no(!ram_windows.is_empty())),
-                },
-                Field {
-                    key: "mem_map_built",
-                    value: tairix_log::FieldValue::Str(yes_no(mem_map_built)),
-                },
-                Field {
-                    key: "mem_map_status",
-                    value: tairix_log::FieldValue::Str(mem_status),
-                },
-                Field {
-                    key: "usable_bytes_hex",
-                    value: tairix_log::FieldValue::Str(usable_hex),
-                },
-                Field {
-                    key: "reserved_bytes_hex",
-                    value: tairix_log::FieldValue::Str(reserved_hex),
-                },
-                Field {
-                    key: "timer_hz_from_tree",
-                    value: tairix_log::FieldValue::Str(yes_no(discovered.timer_hz_from_tree)),
-                },
-                Field {
-                    key: "timer_hz_hex",
-                    value: tairix_log::FieldValue::Str(timer_hz_hex),
-                },
-                Field {
-                    key: "smp_start_method",
-                    value: tairix_log::FieldValue::Str(smp_start_method),
-                },
-                Field {
-                    key: "cpu_count",
-                    value: tairix_log::FieldValue::Str(cpu_count_str),
-                },
-                Field {
-                    key: "smp_prepared",
-                    value: tairix_log::FieldValue::Str(yes_no(smp_prepared)),
-                },
-                Field {
-                    key: "mmu_enabled",
-                    value: tairix_log::FieldValue::Str(yes_no(mmu_on)),
-                },
-                Field {
-                    key: "guard_arena_prepared",
-                    value: tairix_log::FieldValue::Str(yes_no(arena_prepared)),
-                },
-                Field {
-                    key: "next_stage",
-                    value: tairix_log::FieldValue::Str("pi_p6c3_spawn_init_el0"),
-                },
-                Field {
-                    key: "build_id",
-                    value: tairix_log::FieldValue::Str(KERNEL_BUILD_ID),
-                },
-            ],
+        &BootStatus {
+            level: if ready { Level::Info } else { Level::Warn },
+            boot_cpu_ok: yes_no(boot_cpu_ok),
+            timer_present: yes_no(timer_present),
+            dtb_present: yes_no(dtb != 0),
+            console_discovered: yes_no(early.console),
+            gic_discovered: yes_no(early.gic),
+            video_console: yes_no(early.video.is_some()),
+            device_gigapages: device_mask[0],
+            ram_discovered: yes_no(!ram_windows.is_empty()),
+            mem_map_built: yes_no(mem_map_built),
+            mem_status,
+            usable_bytes,
+            reserved_bytes,
+            timer_hz_from_tree: yes_no(discovered.timer_hz_from_tree),
+            timer_hz: discovered.timer_hz,
+            smp_start_method,
+            cpu_count: cpu_mpidrs.len(),
+            smp_prepared: yes_no(smp_prepared),
+            mmu_enabled: yes_no(mmu_on),
+            guard_arena_prepared: yes_no(arena_prepared),
         },
     );
 
@@ -903,6 +496,445 @@ pub fn boot(
     // The handover was rejected (see the boot-log line's fields for which
     // check failed); park fail-closed.
     halt_current_cpu()
+}
+
+/// Point the console and the GICv2 driver at the bases the firmware tree
+/// describes, then install the identity map's Device and RAM gigapage
+/// typing derived from them; returns the discovery and the Device mask.
+///
+/// Runs entirely pre-MMU, and must: the discovered bases decide which
+/// gigapages the map types Device, and on the Pi 4 the PL011/GIC-400 live
+/// in gigapage 3 while the kernel image at `0x8_0000` must keep gigapage 0
+/// Normal — executable — or the instruction fetch after `switch` faults
+/// with the vectors not yet installed. Every other non-Device gigapage
+/// stays *invalid*: on real silicon a Normal write-back executable mapping
+/// of unbacked address space invites speculative fetches into windows
+/// nothing answers, which wedged the metal Pi 4B at the instant
+/// translation enabled while QEMU (which answers every address) stayed
+/// green. A null, unreadable, or incomplete tree leaves the `virt`
+/// defaults in place (fail closed); a facility with no discovered base
+/// contributes the console base as a harmless duplicate input.
+fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_WORDS]) {
+    let early = configure_mmio_from_dtb(dtb);
+    let (console_base, _) = console::current();
+    let (distributor_base, cpu_interface_base) = gic::current();
+    let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
+    // The BCM2711 PCIe root complex's register block and outbound window
+    // (where the enumerated VL805 BAR lives) are mapped by the autoloaded
+    // user-space bus driver, so they must be typed Device like the UART/GIC.
+    let (pcie_regs, pcie_outbound) = early
+        .pcie
+        .map_or((console_base as u64, console_base as u64), |p| {
+            (p.regs_phys, p.outbound_cpu_base)
+        });
+    let device_mask = identity_device_mask(
+        &[
+            console_base as u64,
+            distributor_base as u64,
+            cpu_interface_base as u64,
+            video_doorbell,
+            pcie_regs,
+            pcie_outbound,
+        ],
+        kernel_start_addr(),
+        kernel_end_addr(),
+    );
+    configure_device_gigapages(device_mask);
+    let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
+    configure_ram_gigapages(identity_ram_mask(&[
+        (
+            kernel_start_addr(),
+            kernel_end_addr().saturating_sub(kernel_start_addr()),
+        ),
+        (dtb, early.dtb_len),
+        (fb_base, fb_len),
+    ]));
+    (early, device_mask)
+}
+
+/// Attach the framebuffer console's primary and alternate character-cell
+/// grids, sized to the discovered geometry and leaked for the kernel's
+/// lifetime.
+///
+/// Callable only once the MMU is on: the grids need the heap, which needs
+/// the cacheable identity map. With no display discovered this is a no-op
+/// and the UART keeps the console (fail closed).
+fn attach_video_console_grids() {
+    if let Some(cells) = video::text_cell_count() {
+        let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+        let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+        video::attach_console(Box::leak(main), Box::leak(alt));
+    }
+}
+
+/// Record the discovered PCIe root-complex windows once, post-MMU.
+///
+/// Purely a metal diagnostic: the windows themselves reach the autoloaded
+/// user-space bus driver as resource grants on the discovered
+/// `brcm,bcm2711-pcie` hardware-tree node, not through any kernel-side
+/// stash (`plans/PI.md` P10 D5d). A capture then shows which register
+/// block and inbound/outbound apertures were found, so a silent keyboard
+/// can be bisected against the hardware actually present rather than
+/// guessed at. Allocation-free hex rendering on the caller's stack.
+fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::PcieDiscovery) {
+    let mut regs_base_buf = [0u8; 16];
+    let mut regs_len_buf = [0u8; 16];
+    let mut aperture_top_buf = [0u8; 16];
+    let mut inbound_size_buf = [0u8; 16];
+    let mut inbound_pcie_buf = [0u8; 16];
+    let mut outbound_cpu_buf = [0u8; 16];
+    let mut outbound_pcie_buf = [0u8; 16];
+    let mut outbound_size_buf = [0u8; 16];
+    log(
+        log_sink,
+        &Event {
+            level: Level::Info,
+            id: KERNEL_PCIE_DISCOVERED,
+            message: "aarch64: discovered brcm,bcm2711-pcie root complex (vl805 usb host bridge)",
+            fields: &[
+                Field {
+                    key: "regs_base_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.regs_phys,
+                        &mut regs_base_buf,
+                    )),
+                },
+                Field {
+                    key: "regs_len_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.regs_len,
+                        &mut regs_len_buf,
+                    )),
+                },
+                Field {
+                    key: "dma_aperture_top_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.dma_aperture_top,
+                        &mut aperture_top_buf,
+                    )),
+                },
+                Field {
+                    key: "inbound_size_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.inbound_size,
+                        &mut inbound_size_buf,
+                    )),
+                },
+                Field {
+                    key: "inbound_pcie_base_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.inbound_pcie_base,
+                        &mut inbound_pcie_buf,
+                    )),
+                },
+                Field {
+                    key: "outbound_cpu_base_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.outbound_cpu_base,
+                        &mut outbound_cpu_buf,
+                    )),
+                },
+                Field {
+                    key: "outbound_pcie_base_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.outbound_pcie_base,
+                        &mut outbound_pcie_buf,
+                    )),
+                },
+                Field {
+                    key: "outbound_size_hex",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        pcie.outbound_size,
+                        &mut outbound_size_buf,
+                    )),
+                },
+            ],
+        },
+    );
+}
+
+/// Widen the RAM gigapage mask with the post-MMU-discovered `/memory`
+/// windows and install the widened typing into the live `boot_space`,
+/// returning the windows the allocator may use.
+///
+/// The windows are first clipped out of Device-typed gigapages: the
+/// identity map types memory at 1 GiB granularity and Device wins for a
+/// shared gigapage (the Pi 4's below-4 GiB window ends inside the gigapage
+/// holding its UART/GIC/PCIe), so RAM there would be mapped Device —
+/// atomics on it are unpredictable — and must never reach the mask or the
+/// allocator. Reclaiming those bytes needs 2 MiB-granular identity typing
+/// (`plans/APPS.md` I4 follow-up). Installing into the live space is an
+/// invalid→valid L1 update, so it needs no TLB shootdown, and it happens
+/// before the allocator touches the windows.
+fn widen_ram_gigapages(
+    discovered_windows: &[(u64, u64)],
+    device_mask: &[u64; GIGAPAGE_MASK_WORDS],
+    boot_space: Option<&mut AddressSpace>,
+) -> Vec<(u64, u64)> {
+    let ram_windows = crate::mem_map::clip_windows_to_normal_ram(discovered_windows, device_mask);
+    if ram_windows.is_empty() {
+        return ram_windows;
+    }
+    let window_mask = identity_ram_mask(&ram_windows);
+    let mut merged = ram_gigapages();
+    for (word, add) in merged.iter_mut().zip(window_mask) {
+        *word |= add;
+    }
+    configure_ram_gigapages(merged);
+    if let Some(space) = boot_space {
+        for &(ram_base, ram_size) in &ram_windows {
+            let Some(last_byte) = (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1))
+            else {
+                continue;
+            };
+            let mut gigapage = ram_base >> 30;
+            while gigapage <= (last_byte >> 30) {
+                space.ensure_identity_gigapage(gigapage << 30);
+                gigapage += 1;
+            }
+        }
+    }
+    ram_windows
+}
+
+/// Build the [`Aarch64Arch`] handle — the single concrete-arch selection
+/// point for the kernel image — and the dense `CpuId` → `MPIDR_EL1` map it
+/// is sized from, then classify each core from the firmware tree.
+///
+/// Every per-CPU backing (the handle's slots, the preemption slices, the
+/// secondary stacks, the scheduler's run queues) is sized from that one
+/// validated list, exactly to the machine — no compile-time core ceiling.
+/// A malformed `/cpus` list falls back closed to a single-CPU map; an
+/// allocation failure or a topology wider than `CpuId` parks fail-closed.
+/// The core-class walk (`capacity-dmips-mhz`) lets the scheduler place
+/// background work on efficiency cores; a missing or malformed tree leaves
+/// the homogeneous Performance default.
+fn build_cpu_topology_and_arch(
+    discovered: &Discovered,
+    dtb: u64,
+    mmu_on: bool,
+) -> (Aarch64Arch, Vec<u64>) {
+    let cpu_mpidrs =
+        match crate::cpu_topology::order_cpus(&discovered.cpu_mpidrs, smp::current_affinity()) {
+            Ok(cpus) => cpus,
+            Err(crate::cpu_topology::CpuTopologyError::AllocationFailed) => {
+                serial::beacon("pi-boot: CPU topology allocation FAILED, parking");
+                halt_current_cpu()
+            }
+            Err(crate::cpu_topology::CpuTopologyError::TooManyCpus) => {
+                serial::beacon("pi-boot: CPU topology exceeds CpuId, parking");
+                halt_current_cpu()
+            }
+        };
+    smp::install_current_cpu_index(BOOT_CPU);
+    let arch = build_arch_handle(&cpu_mpidrs, discovered.timer_hz);
+    if mmu_on && dtb != 0 {
+        // SAFETY: `dtb` is the firmware pointer `Fdt::from_ptr` validated
+        // for the pre-MMU walks (magic + `totalsize` bounds); the MMU is on,
+        // so a whole-tree traversal is safe.
+        if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
+            arch.classify_from_fdt(&fdt);
+            // The firmware boot seed is the only usable entropy source on an
+            // emulated cortex-a72 (no `FEAT_RNG`, deterministic cycle
+            // counter), so without it the CSPRNG would never seed. Input
+            // material only, XOR-mixed and DRBG-conditioned kernel-side.
+            if let Some(seed) = fdt.chosen_rng_seed() {
+                tairix_kernel_core::random::capture_boot_entropy_seed(seed);
+            }
+            // CoreSight external debug is the one live observation a GIC-400
+            // (secure-world FIQ) leaves reachable for a hard-wedged core
+            // (`plans/WATCHDOG.md`). A base is installed only when its window
+            // is *already* device-mapped, so a read on the lockup path can
+            // never fault; with none discovered the sampler reports
+            // `Unsupported` and the buddy detector runs unchanged.
+            #[cfg(feature = "watchdog-diagnostics")]
+            install_debug_component_bases(&fdt, &cpu_mpidrs);
+        }
+    }
+    (arch, cpu_mpidrs)
+}
+
+/// Install the secondary-start mechanism the firmware tree declares
+/// (`plans/PI.md` P5), never an assumed one (no `cfg(board)` fork).
+///
+/// A `/psci` node selects PSCI `CPU_ON` over its conduit (`hvc` at
+/// EL2-hosted, `smc` at EL3-hosted — the Pi 4 with `armstub8.bin`); a
+/// PSCI-less tree whose cpu nodes declare `enable-method = "spin-table"`
+/// (the Pi 4's stock firmware) selects the spin-table release over the
+/// declared per-CPU `cpu-release-addr` words, aligned to the dense ids. A
+/// tree that declares neither leaves the mechanism unset, and bring-up
+/// fails closed at the start site rather than guessing.
+fn select_secondary_start(
+    arch: Aarch64Arch,
+    discovered: &Discovered,
+    cpu_mpidrs: &[u64],
+) -> (Aarch64Arch, &'static str) {
+    if let Some(method) = discovered.psci_method {
+        return (
+            arch.with_secondary_start(SecondaryStart::Psci(method)),
+            "psci",
+        );
+    }
+    let Ok(release_addrs) =
+        crate::cpu_topology::align_release_addrs(cpu_mpidrs, &discovered.cpu_spin_releases)
+    else {
+        serial::beacon("pi-boot: spin-table map allocation FAILED, parking");
+        halt_current_cpu()
+    };
+    if release_addrs.iter().any(|&addr| addr != 0) {
+        let release_addrs: &'static [u64] = Box::leak(release_addrs.into_boxed_slice());
+        (
+            arch.with_secondary_start(SecondaryStart::SpinTable { release_addrs }),
+            "spin_table",
+        )
+    } else {
+        (arch, "none")
+    }
+}
+
+/// Translate the discovered RAM windows into the canonical physical-memory
+/// map, with the firmware device-tree blob reserved out of it.
+///
+/// An absent or malformed discovery fails closed to a status string rather
+/// than a panic. The blob must be reserved because the QEMU `virt`/Pi
+/// firmware lands it high in RAM, above the kernel image the map already
+/// reserves: left usable, the frame allocator or the early-boot RAM
+/// self-test (which zeroes every usable byte) would clobber the tree the
+/// later root-storage bind and device discovery re-parse. An absent tree
+/// reserves nothing.
+fn build_boot_memory_layout(
+    ram_windows: &[(u64, u64)],
+    dtb: u64,
+    dtb_len: u64,
+) -> Result<crate::mem_map::MemoryLayout, &'static str> {
+    if ram_windows.is_empty() {
+        return Err("no_memory_window");
+    }
+    let mut layout = build_memory_map(ram_windows, kernel_end_addr())
+        .map_err(crate::mem_map::MemoryMapError::as_str)?;
+    crate::mem_map::reserve_blob_frames(&mut layout.map, dtb, dtb_len);
+    Ok(layout)
+}
+
+/// The consolidated aarch64 boot line's report, rendered by [`boot`] so
+/// the fields it logs are one record rather than a wall of arguments.
+///
+/// Each verdict is already the `yes`/`no` string it is logged as; the
+/// numeric facts stay numbers and are hex-rendered into
+/// [`log_boot_line`]'s own stack buffers.
+struct BootStatus {
+    /// `Info` on a sound hand-off, `Warn` when a check failed.
+    level: Level,
+    /// The constructed arch handle reports the boot CPU.
+    boot_cpu_ok: &'static str,
+    /// The generic-timer frequency is non-zero, so the monotonic clock is
+    /// usable.
+    timer_present: &'static str,
+    /// Firmware handed over a device-tree pointer.
+    dtb_present: &'static str,
+    /// A console UART was found in the tree.
+    console_discovered: &'static str,
+    /// A GICv2-class interrupt controller was found in the tree.
+    gic_discovered: &'static str,
+    /// The framebuffer boot console came up.
+    video_console: &'static str,
+    /// Low word of the Device gigapage mask (gigapages 0..64 — both
+    /// supported boards keep their MMIO below 64 GiB), so a metal capture
+    /// shows what the identity map typed Device (`virt`: 0x1; Pi 4: 0x8).
+    device_gigapages: u64,
+    /// At least one usable `/memory` window survived the Device clip.
+    ram_discovered: &'static str,
+    /// The physical-memory map was built.
+    mem_map_built: &'static str,
+    /// Stable cause string when it was not.
+    mem_status: &'static str,
+    /// Usable bytes in the built map.
+    usable_bytes: u64,
+    /// Reserved bytes in the built map.
+    reserved_bytes: u64,
+    /// The counter rate came from the tree rather than `CNTFRQ_EL0`.
+    timer_hz_from_tree: &'static str,
+    /// The generic-timer counter rate every `busy_delay_us` settle is
+    /// measured against. A value far from the board crystal (the Pi 4's
+    /// 54 MHz = `0x337_f980`) means firmware mis-programmed `CNTFRQ_EL0`,
+    /// which stretches every bring-up settle proportionally.
+    timer_hz: u64,
+    /// Which secondary-start mechanism the tree selected.
+    smp_start_method: &'static str,
+    /// Dense CPU count every per-CPU structure was sized from.
+    cpu_count: usize,
+    /// Secondary bring-up staged successfully.
+    smp_prepared: &'static str,
+    /// Stage-1 translation is on.
+    mmu_enabled: &'static str,
+    /// The kthread-stack guard arena was re-expressed at 4 KiB
+    /// granularity over the boot tables.
+    guard_arena_prepared: &'static str,
+}
+
+/// Emit the one consolidated aarch64 boot line.
+///
+/// Allocation-free: every numeric field is hex-rendered into a stack
+/// buffer that outlives the borrowed `fields` slice.
+fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
+    let mut usable_buf = [0u8; 16];
+    let mut reserved_buf = [0u8; 16];
+    let mut device_mask_buf = [0u8; 16];
+    let mut timer_hz_buf = [0u8; 16];
+    let mut cpu_count_buf = [0u8; 12];
+    // Every field of this line is a string, so they are listed as pairs
+    // and mapped into the borrowed slice `log` renders.
+    let pairs = [
+        ("boot_cpu_ok", status.boot_cpu_ok),
+        ("timer_present", status.timer_present),
+        ("dtb_present", status.dtb_present),
+        ("console_discovered", status.console_discovered),
+        ("gic_discovered", status.gic_discovered),
+        ("video_console", status.video_console),
+        (
+            "device_gigapages_hex",
+            format_hex_u64(status.device_gigapages, &mut device_mask_buf),
+        ),
+        ("ram_discovered", status.ram_discovered),
+        ("mem_map_built", status.mem_map_built),
+        ("mem_map_status", status.mem_status),
+        (
+            "usable_bytes_hex",
+            format_hex_u64(status.usable_bytes, &mut usable_buf),
+        ),
+        (
+            "reserved_bytes_hex",
+            format_hex_u64(status.reserved_bytes, &mut reserved_buf),
+        ),
+        ("timer_hz_from_tree", status.timer_hz_from_tree),
+        (
+            "timer_hz_hex",
+            format_hex_u64(status.timer_hz, &mut timer_hz_buf),
+        ),
+        ("smp_start_method", status.smp_start_method),
+        (
+            "cpu_count",
+            tairix_util::fmt::format_usize(status.cpu_count, &mut cpu_count_buf),
+        ),
+        ("smp_prepared", status.smp_prepared),
+        ("mmu_enabled", status.mmu_enabled),
+        ("guard_arena_prepared", status.guard_arena_prepared),
+        ("next_stage", "pi_p6c3_spawn_init_el0"),
+        ("build_id", KERNEL_BUILD_ID),
+    ];
+    let fields = pairs.map(|(key, value)| Field {
+        key,
+        value: tairix_log::FieldValue::Str(value),
+    });
+    log(
+        log_sink,
+        &Event {
+            level: status.level,
+            id: KERNEL_BOOT_AARCH64_REACHED,
+            message: "tairix-kernel aarch64 (raspberry pi 4): reached stage-p1 boot init point",
+            fields: &fields,
+        },
+    );
 }
 
 /// Leak a zeroed `&'static [AtomicU64]` of `count` slots for the arch
@@ -946,48 +978,54 @@ fn build_arch_handle(cpu_mpidrs: &[u64], counter_hz: u64) -> Aarch64Arch {
         serial::beacon("pi-boot: core-class slots allocation FAILED, parking");
         halt_current_cpu()
     };
-    match Aarch64Arch::with_cpu_slices(
+    Aarch64Arch::with_cpu_slices(
         cpu_to_mpidr,
         host_ipi_count,
         core_classes,
         BOOT_CPU,
         counter_hz,
         cpu_mpidrs,
-    ) {
-        Some(arch) => arch,
-        None => {
-            serial::beacon("pi-boot: arch handle construction FAILED, parking");
-            halt_current_cpu()
-        }
-    }
+    )
+    .unwrap_or_else(|| {
+        serial::beacon("pi-boot: arch handle construction FAILED, parking");
+        halt_current_cpu()
+    })
 }
 
 /// Leak a zeroed secondary-stack region of `count` slots (one per dense
 /// CPU id; slot 0 belongs to the never-started boot CPU).
 ///
-/// Allocated zeroed straight from the global allocator — never built on
-/// the boot stack, whose budget a 64 KiB-per-slot array would blow — and
-/// leaked for the kernel's lifetime, exactly as the `smp.s` trampoline
-/// requires. An impossible layout or an out-of-memory boot heap parks
-/// fail-closed: without stacks no secondary may ever be started.
+/// Zeroed in place in the heap — never built on the boot stack, whose
+/// budget a 64 KiB-per-slot array would blow — and leaked for the kernel's
+/// lifetime, exactly as the `smp.s` trampoline requires. An out-of-memory
+/// boot heap parks fail-closed: without stacks no secondary may ever be
+/// started.
 fn leak_zeroed_secondary_stacks(count: usize) -> &'static [smp::SecondaryStack] {
-    let Ok(layout) = core::alloc::Layout::array::<smp::SecondaryStack>(count) else {
-        serial::beacon("pi-boot: secondary stack layout FAILED, parking");
-        halt_current_cpu()
-    };
-    // SAFETY: `layout` is non-zero-sized (count >= 2 when called — a
-    // single-CPU boot never reaches here) and well-formed per the check
-    // above; `alloc_zeroed` returns either null (handled) or a block of
-    // `layout`'s size and alignment.
-    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<smp::SecondaryStack>();
-    if ptr.is_null() {
+    // Reserving as `Vec<SecondaryStack>` makes the block's 16-byte stack
+    // alignment a property of the allocation itself rather than of a
+    // byte-pointer cast, and keeps the out-of-memory path a value.
+    let mut stacks: Vec<smp::SecondaryStack> = Vec::new();
+    if stacks.try_reserve_exact(count).is_err() {
         serial::beacon("pi-boot: secondary stack allocation FAILED, parking");
         halt_current_cpu()
     }
-    // SAFETY: `ptr` addresses `count` properly-aligned `SecondaryStack`
-    // slots, all zero — a valid bit pattern for the plain byte arrays
-    // they are — and the allocation is never freed (leaked to `'static`).
-    unsafe { core::slice::from_raw_parts(ptr, count) }
+    let spare = stacks.spare_capacity_mut();
+    let spare_bytes = core::mem::size_of_val(spare);
+    let spare_start = spare.as_mut_ptr().cast::<u8>();
+    // SAFETY: `spare_start`/`spare_bytes` describe exactly `stacks`' own
+    // uninitialised capacity, which the reservation above made at least
+    // `count` slots long; all-zero is a valid `SecondaryStack` (a plain byte
+    // array), so writing zeros over it initialises every slot `set_len`
+    // then exposes. Zeroing in place never materialises a 64 KiB value on
+    // the boot stack, whose budget that would blow.
+    unsafe {
+        core::ptr::write_bytes(spare_start, 0, spare_bytes);
+        stacks.set_len(count);
+    }
+    // Leaked, not boxed: the `smp.s` trampoline reads the region with the
+    // MMU off for the kernel's lifetime, and leaking the reservation as-is
+    // avoids a shrink-to-fit copy of the whole stack pool.
+    Vec::leak(stacks)
 }
 
 /// Stage the multi-core bring-up: size and publish the secondary stack

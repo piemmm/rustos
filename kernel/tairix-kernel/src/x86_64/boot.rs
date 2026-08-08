@@ -128,10 +128,6 @@ const BOOT_CPUS: usize = 1;
 #[repr(C, align(16))]
 struct KernelStack([u8; KERNEL_STACK_BYTES]);
 
-impl KernelStack {
-    const ZERO: Self = Self([0; KERNEL_STACK_BYTES]);
-}
-
 /// Per-CPU kernel stack pool, sized to the [`BOOT_CPUS`] this binary
 /// brings up (the BSP). A future AP-bring-up commit sizes it from the
 /// -discovered CPU count rather than re-introducing
@@ -141,10 +137,8 @@ impl KernelStack {
 /// in `README.md` as the per-CPU bootstrap-stack arena. Access is
 /// exclusively through [`kernel_stack_top`], which derives a
 /// disjoint pointer per `cpu_index`.
-static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] = {
-    const Z: KernelStack = KernelStack::ZERO;
-    [Z; BOOT_CPUS]
-};
+static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] =
+    [const { KernelStack([0; KERNEL_STACK_BYTES]) }; BOOT_CPUS];
 
 /// Per-CPU GDT/IDT/IST arena the arch crate's [`percpu`] entry points
 /// index, sized to [`BOOT_CPUS`] and published once by [`try_boot`]
@@ -823,6 +817,11 @@ fn try_boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> Result<BootInfo<'static, BinArch>, BootError> {
+    // The arch handle borrows its per-CPU bookkeeping from this
+    // process-static backing; `boot` runs once, so a
+    // single `static` is sound and needs no allocator.
+    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
+
     // The shared BSP/board bring-up: per-CPU tables, `#PF` + user-copy
     // entries, NXE, park root, LAPIC calibration, memory map + guard
     // arena, MADT, dispatch callback + user-fault resolver, `syscall`/TSS
@@ -843,10 +842,6 @@ fn try_boot(
     let binding = crate::root_storage::resolve_root_block_driver(board.tree, log_sink);
     crate::unlock_service::record_boot(binding, 0, board.tree);
 
-    // The arch handle borrows its per-CPU bookkeeping from this
-    // process-static backing; `boot` runs once, so a
-    // single `static` is sound and needs no allocator.
-    static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let arch = X86_64Arch::new(&ARCH_STORAGE, 0, board.bsp_lapic_id, &board.cpu_to_lapic)
         .map_err(|_| BootError::ArchInit)?;
     let BspBringUp {
@@ -1282,14 +1277,16 @@ unsafe fn enable_nxe() {
             options(nostack, preserves_flags),
         );
     }
-    let efer = (((hi as u64) << 32) | lo as u64) | EFER_NXE;
+    let efer = ((u64::from(hi) << 32) | u64::from(lo)) | EFER_NXE;
     // SAFETY: writing `IA32_EFER` back with only bit 11 newly set is the
-    // documented enable sequence; `SCE`/`LME`/`LMA` are preserved.
+    // documented enable sequence; `SCE`/`LME`/`LMA` are preserved. `wrmsr`
+    // takes the 64-bit value as the `EDX:EAX` pair, so the masked low word
+    // and the shifted high word are the encoding, not a narrowing.
     unsafe {
         core::arch::asm!(
             "wrmsr",
             in("ecx") IA32_EFER,
-            in("eax") efer as u32,
+            in("eax") (efer & 0xffff_ffff) as u32,
             in("edx") (efer >> 32) as u32,
             options(nostack, preserves_flags),
         );

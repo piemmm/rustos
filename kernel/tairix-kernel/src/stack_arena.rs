@@ -720,6 +720,47 @@ impl ArenaShrink for RetainShrink {
 ))]
 pub(crate) static KTHREAD_STACK_ARENA: StackArena = StackArena::new();
 
+/// Build a task's kernel stack out of [`KTHREAD_STACK_ARENA`] with its
+/// guard page unmapped in `arch` — the caller's *own* page-table root — so
+/// an overrun takes a synchronous fault instead of corrupting the
+/// lower-addressed neighbour.
+///
+/// `arch` must not yet be the active root: `split_block` only adds table
+/// levels reproducing the existing translation, so applying it before the
+/// switch disturbs no live access and needs no TLB maintenance.
+/// `identity_limit` bounds a chained block to the window every space the
+/// task runs under identity-maps.
+///
+/// With no arena region available, or a split/unmap the space refused,
+/// this falls back to a heap-backed software-canary
+/// [`tairix_kernel_core::BoxStack`] rather than ever handing back an
+/// unguarded stack. Every port's PID 1 spawn seam calls this, so the guard
+/// derivation is one definition and cannot diverge per architecture.
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
+pub(crate) fn guarded_kernel_stack<A: tairix_arch_api::mmu::AddressSpace>(
+    arch: &mut A,
+    frames: &FrameAllocator,
+    identity_limit: u64,
+) -> alloc::boxed::Box<dyn KernelStack + Send> {
+    use alloc::boxed::Box;
+
+    let grow = FrameArenaGrow::new(frames, identity_limit);
+    let Some(stack) = KTHREAD_STACK_ARENA.alloc(&grow, &IdentityBlockStore) else {
+        return Box::new(tairix_kernel_core::BoxStack::new());
+    };
+    let guard = stack.guard_page();
+    match arch
+        .split_block(guard)
+        .and_then(|()| arch.unmap(guard).map(|_| ()))
+    {
+        Ok(()) => Box::new(stack),
+        Err(_) => Box::new(tairix_kernel_core::BoxStack::new()),
+    }
+}
+
 /// The live `'static` [`FrameAllocator`] reclamation returns idle chained
 /// blocks to, published once on the first runtime spawn
 /// ([`publish_reclaim_frames`]). A region freed before any allocator is

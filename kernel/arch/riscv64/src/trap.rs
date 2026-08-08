@@ -576,7 +576,7 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
                     // asm vector passed, which now saves the callee-saved
                     // set (incl. s0=fp) as well as the caller-saved GPRs.
                     let user_frame = unsafe { user_register_frame(frame) };
-                    if resolver(stval, write_fault, &user_frame) {
+                    if resolver(stval, write_fault, &raw const user_frame) {
                         return;
                     }
                 }

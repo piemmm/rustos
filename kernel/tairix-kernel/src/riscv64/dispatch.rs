@@ -83,8 +83,9 @@ pub extern "C" fn production_dispatch(
 // The callback must stay a bare safe `extern "C" fn` to match the arch
 // port's `UserFaultResolveFn` type; the raw-pointer deref happens only
 // inside the guarded `unsafe` block below, whose SAFETY note carries the
-// trap-handler-upheld contract. — the deref is contained and justified.
+// trap-handler-upheld contract.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[must_use]
 pub extern "C" fn production_user_fault(
     stval: u64,
     write: bool,

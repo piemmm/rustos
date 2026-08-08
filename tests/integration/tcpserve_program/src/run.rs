@@ -333,11 +333,9 @@ mod program {
         if tairix_rt::port_bind(CONN_PORT, DELIVER_MAX_PAYLOAD, DELIVER_CAPACITY) < 0 {
             return Err("tcpserve: connection delivery port bind refused");
         }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return Err("tcpserve: wait-set create refused");
-        }
-        let set = set as u64;
+        };
         for (port, token) in [(LISTEN_PORT, LISTEN_TOKEN), (CONN_PORT, CONN_TOKEN)] {
             if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, port, token) != 0 {
                 return Err("tcpserve: wait-set port registration refused");
@@ -379,12 +377,13 @@ mod program {
     /// Render the `TCPSERVE PASS <bytes> bytes` report line into `buf`,
     /// allocation-free, returning the written text.
     fn format_pass(buf: &mut [u8; 64]) -> &str {
-        let mut w = Cursor { buf, len: 0 };
         use core::fmt::Write as _;
+
+        let mut w = Cursor { buf, len: 0 };
         // Bounded, well-formed input — the marker plus a small integer — so a
         // formatting overflow is impossible; if it somehow occurred the text
         // is simply the marker, still a valid PASS line.
-        let _ = write!(w, "{PASS_MARKER} {TRANSFER_BYTES} bytes\n");
+        let _ = writeln!(w, "{PASS_MARKER} {TRANSFER_BYTES} bytes");
         let len = w.len;
         core::str::from_utf8(&w.buf[..len]).unwrap_or(PASS_MARKER)
     }

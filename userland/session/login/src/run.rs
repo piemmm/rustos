@@ -136,7 +136,7 @@ mod program {
     /// audited loudly and login proceeds (fail loud, degrade gracefully,
     /// `AGENTS.md` §2.24): desktop text simply will not render until a font
     /// service is up.
-    fn ensure_fontd(sink: &LogSink) {
+    fn ensure_fontd(sink: LogSink) {
         if FONTD_STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -158,7 +158,7 @@ mod program {
             )
         };
         tairix_log::log(
-            sink,
+            &sink,
             &tairix_log::Event {
                 level,
                 id,
@@ -431,7 +431,7 @@ mod program {
         /// (the poster's `ipc_call` observes its error); a reply failure is
         /// dropped likewise — the decision and its audit record already
         /// stand.
-        fn serve_elevate(&self, endpoint: u64, authenticator: &dyn Authenticator, sink: &LogSink) {
+        fn serve_elevate(&self, endpoint: u64, authenticator: &dyn Authenticator, sink: LogSink) {
             let mut request = [0u8; ELEVATE_MAX_REQUEST];
             let mut ticket = 0u64;
             let Ok(len) = tairix_rt::call_recv_nonblock(endpoint, &mut request, &mut ticket) else {
@@ -446,7 +446,7 @@ mod program {
                 self.own_console,
                 authenticator,
                 &RtElevateLauncher,
-                sink,
+                &sink,
             );
             wipe(&mut request);
             let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
@@ -474,7 +474,7 @@ mod program {
             directory: &mut dyn SessionDirectory,
             authenticator: &dyn Authenticator,
             budget: &mut AttemptBudget,
-            sink: &LogSink,
+            sink: LogSink,
         ) -> Watch {
             let mut request = [0u8; SESSION_MAX_REQUEST];
             let mut ticket = 0u64;
@@ -493,7 +493,7 @@ mod program {
                 authenticator,
                 budget,
                 monotonic_now(),
-                sink,
+                &sink,
                 &mut reply,
             );
             wipe(&mut request);
@@ -522,7 +522,7 @@ mod program {
             directory: &mut dyn SessionDirectory,
             authenticator: &dyn Authenticator,
             budget: &mut AttemptBudget,
-            sink: &LogSink,
+            sink: LogSink,
         ) {
             if let Some(endpoint) = self.session {
                 // No child is under supervision here, so a step-aside
@@ -749,7 +749,7 @@ mod program {
     struct RtLauncher<'a> {
         server: Option<&'a ConsoleServer>,
         authenticator: &'a dyn Authenticator,
-        sink: &'a LogSink,
+        sink: LogSink,
     }
 
     impl SessionLauncher for RtLauncher<'_> {
@@ -843,7 +843,7 @@ mod program {
         server: &'a ConsoleServer,
         session_endpoint: u64,
         authenticator: &'a dyn Authenticator,
-        sink: &'a LogSink,
+        sink: LogSink,
     }
 
     impl GraphicalRound<'_> {
@@ -999,29 +999,28 @@ mod program {
                     return;
                 }
             }
-            let pid = match resumed {
-                Some(pid) => pid,
-                None => {
-                    let Ok(pid) = spawn_session(user, SessionKind::Graphical) else {
-                        self.audit(
-                            Level::Warn,
-                            events::SESSION_LAUNCH_FAILED,
-                            "desktop session could not be started",
-                            &user.username,
-                        );
-                        return;
-                    };
-                    // The resume branch above owns the case where an entry
-                    // already exists, so this insert cannot collide.
-                    let _ = live.insert(&user.username, user.uid.0, u64::from(pid.unsigned_abs()));
+            let pid = if let Some(pid) = resumed {
+                pid
+            } else {
+                let Ok(pid) = spawn_session(user, SessionKind::Graphical) else {
                     self.audit(
-                        Level::Info,
-                        events::SESSION_STARTED,
-                        "desktop session started",
+                        Level::Warn,
+                        events::SESSION_LAUNCH_FAILED,
+                        "desktop session could not be started",
                         &user.username,
                     );
-                    pid
-                }
+                    return;
+                };
+                // The resume branch above owns the case where an entry
+                // already exists, so this insert cannot collide.
+                let _ = live.insert(&user.username, user.uid.0, u64::from(pid.unsigned_abs()));
+                self.audit(
+                    Level::Info,
+                    events::SESSION_STARTED,
+                    "desktop session started",
+                    &user.username,
+                );
+                pid
             };
             let watched = {
                 let mut accounts = DbAccounts::new(db, &mut *live);
@@ -1062,7 +1061,7 @@ mod program {
         /// Record one round decision, naming the account it concerns.
         fn audit(&self, level: Level, id: EventId, message: &str, user: &str) {
             log(
-                self.sink,
+                &self.sink,
                 &Event {
                     level,
                     id,
@@ -1093,7 +1092,7 @@ mod program {
     /// allocation: everything on the path to the first prompt must be
     /// allocation-free, because the userland heap is backed by the
     /// `mem_map` syscall whose production producer is still staged
-    /// (`plans/SPAWN.md` SP5b) — a pre-prompt allocation would fail and the
+    /// (`plans/SPAWN.md` `SP5b`) — a pre-prompt allocation would fail and the
     /// console would never reach `login:`. The pending and absent paths
     /// allocate nothing; parsing a *successfully delivered* database
     /// allocates, which is only reachable once the encrypted root that
@@ -1103,6 +1102,9 @@ mod program {
     /// unlock kthread mounts the root — is picked up by the next round
     /// instead of a stale answer being cached for the process's lifetime.
     fn load_users_db() -> DbLoad {
+        // Deliberately on the stack, as the rustdoc above explains: this runs
+        // before the heap's producer exists. The spawn stack sizing covers it.
+        #[allow(clippy::large_stack_arrays)]
         let mut buf = [0u8; MAX_DB_LEN];
         // The wrapper returns the raw `-errno` on failure; `WouldBlock` is the only one that means "retry", every
         // other refusal fails closed to the deny-all prompt.
@@ -1252,7 +1254,7 @@ mod program {
         db: Option<&UsersDb>,
         live: &mut LiveSessions,
         budget: &mut AttemptBudget,
-        sink: &LogSink,
+        sink: LogSink,
     ) -> bool {
         let launcher = RtLauncher {
             server,
@@ -1302,7 +1304,7 @@ mod program {
             view,
             authenticator,
             launcher: &launcher,
-            sink,
+            sink: &sink,
         });
         match login.run() {
             // A finished session or an exhausted attempt budget both loop
@@ -1338,14 +1340,14 @@ mod program {
         let server = ConsoleServer::bind();
         if server.as_ref().and_then(|server| server.elevate).is_none() {
             unavailable(
-                &sink,
+                sink,
                 events::ELEVATE_UNAVAILABLE,
                 "elevation endpoint unavailable; sessions run without a broker",
             );
         }
         if server.as_ref().and_then(|server| server.session).is_none() {
             unavailable(
-                &sink,
+                sink,
                 events::SESSION_ENDPOINT_UNAVAILABLE,
                 "session endpoint unavailable; rounds use the text login",
             );
@@ -1371,8 +1373,7 @@ mod program {
         // from the console stream; a console that cannot report one gets
         // the classic 80×25 rather than no login at all.
         let size = tairix_rt::terminal_size(1)
-            .map(|s| Size::new(s.rows(), s.cols()))
-            .unwrap_or(Size::new(25, 80));
+            .map_or(Size::new(25, 80), |s| Size::new(s.rows(), s.cols()));
         let screen = Screen::new(StreamTty, TermType::Xterm256Color, size);
         let view = CursesView::new(screen, RtStatusSource, RtConsoleMode);
         supervise(
@@ -1388,7 +1389,7 @@ mod program {
                     db,
                     &mut live,
                     &mut budget,
-                    &sink,
+                    sink,
                 )
             },
         );
@@ -1399,9 +1400,9 @@ mod program {
     }
 
     /// Audit a rendezvous this process could not bind.
-    fn unavailable(sink: &LogSink, id: EventId, message: &str) {
+    fn unavailable(sink: LogSink, id: EventId, message: &str) {
         log(
-            sink,
+            &sink,
             &Event {
                 level: Level::Warn,
                 id,

@@ -29,8 +29,8 @@ use tairix_abi::{CapabilityId, CapabilityQuery, LoadImage};
 use tairix_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use tairix_kernel_core::EmbeddedProgram;
-use tairix_kernel_core::{ProgramRegistry, StackSpan};
-use tairix_kernel_mem::{derive_user_layout, UserLayout};
+use tairix_kernel_core::{ProgramRegistry, SpawnRequest, StackSpan};
+use tairix_kernel_mem::{derive_user_layout, UserLayout, UserStack};
 
 use crate::program_manifests::INIT_MANIFEST;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
@@ -150,7 +150,7 @@ pub use crate::spawn_paths::{
 /// exercises. The rationale for every list lives on the manifest constant
 /// it names.
 ///
-/// These rows are the x86_64/riscv64 boot floor: on the aarch64 production
+/// These rows are the `x86_64`/`riscv64` boot floor: on the aarch64 production
 /// build the registry below is empty and every one of these programs is
 /// spawned from its verified on-disk `/System` store bundle instead
 /// (`plans/APPS.md` deliverable 8).
@@ -306,6 +306,7 @@ pub const INIT_ARGS: &[&[u8]] = &[b"init"];
 /// authority: the child PID 1 launches receives only *its own*
 /// manifest∩user-grant set, never `init`'s. The set
 /// is identical across the ports, so it is built here once.
+#[must_use]
 pub fn init_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     for cap in INIT_MANIFEST {
@@ -326,9 +327,11 @@ pub const USER_STACK_RESERVE_PAGES: u64 =
     tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES / tairix_kernel_mem::PAGE_SIZE as u64;
 
 // The default stack policy must be a whole number of pages, or the span
-// derivation above would silently round it down.
+// derivation above would silently round it down: the page count must
+// multiply back to exactly the byte policy.
 const _: () = assert!(
-    tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES % tairix_kernel_mem::PAGE_SIZE as u64 == 0
+    USER_STACK_RESERVE_PAGES * tairix_kernel_mem::PAGE_SIZE as u64
+        == tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES
 );
 
 /// Eagerly committed user stack pages at the top of the reserved span
@@ -392,6 +395,54 @@ pub fn stack_span(layout: &UserLayout) -> Option<StackSpan> {
     StackSpan::new(layout.stack_reserve_base, layout.stack_base, top)
 }
 
+/// PID 1's spawn request and the stack span the admission path records,
+/// derived from its parsed image through [`user_layout`]/[`stack_span`].
+///
+/// Every port's `init_spawn` seam builds exactly this from its own
+/// generated `rxe` fixture, so the placement, the committed page count,
+/// the argument vector and the canary are one definition rather than a
+/// copy per architecture that could drift.
+///
+/// Fails closed with `None` — the caller refuses the spawn and the boot
+/// path parks — when the image does not fit below the device window or the
+/// span arithmetic is malformed.
+#[must_use]
+pub fn init_request<'a>(
+    image: &'a LoadImage,
+    image_bytes: &'a [u8],
+    bias: u64,
+) -> Option<(SpawnRequest<'a>, StackSpan)> {
+    let layout = user_layout(image, bias)?;
+    let span = stack_span(&layout)?;
+    let request = SpawnRequest {
+        image,
+        image_bytes,
+        bias,
+        stack: UserStack {
+            base: layout.stack_base,
+            page_count: USER_STACK_COMMIT_PAGES,
+        },
+        start_block_base: layout.block_base,
+        args: INIT_ARGS,
+        env: &[],
+        canary: INIT_CANARY,
+    };
+    Some((request, span))
+}
+
+/// Reserved virtual span of each fixed guarded window, in pages (1 GiB).
+///
+/// The span is expressed in pages because that is what the window
+/// allocators are configured in; the byte offsets below are derived from
+/// it ([`WINDOW_SPAN`]) rather than the reverse, so no byte count is ever
+/// narrowed to a page count and the three fixed windows cannot drift into
+/// overlapping one another.
+const WINDOW_SPAN_PAGES: usize = 0x4000_0000 / tairix_kernel_mem::PAGE_SIZE;
+
+/// [`WINDOW_SPAN_PAGES`] in bytes — the stride between consecutive window
+/// offsets.
+const WINDOW_SPAN: u64 = (WINDOW_SPAN_PAGES * tairix_kernel_mem::PAGE_SIZE) as u64;
+
 /// Offset of the device-window virtual region above the image bias
 /// (`plans/PI.md` 5d-0-ii (b′)): placed 1 GiB above the image bias — far
 /// clear of the program image, stack, and startup block, and the lowest of
@@ -401,7 +452,7 @@ pub fn stack_span(layout: &UserLayout) -> Option<StackSpan> {
 /// `mmio_map` device window out of this region, so the offset — shared by
 /// each port's `init_spawn` and `spawn_producer` — is
 /// one value, not a per-port copy.
-pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
+pub const MMIO_WINDOW_OFFSET: u64 = WINDOW_SPAN;
 
 /// Pages backing the device-window region: the window's full reserved
 /// virtual span (1 GiB, up to the DMA window above it). The span is the
@@ -409,8 +460,7 @@ pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 /// with actual use, so a task mapping a few register blocks pays bytes
 /// while a display service can map a whole multi-megabyte scan-out
 /// surface out of the same window.
-pub const MMIO_WINDOW_PAGES: usize =
-    ((DMA_WINDOW_OFFSET - MMIO_WINDOW_OFFSET) / tairix_kernel_mem::PAGE_SIZE as u64) as usize;
+pub const MMIO_WINDOW_PAGES: usize = WINDOW_SPAN_PAGES;
 
 /// Offset of the guarded DMA-buffer virtual window above the image bias
 /// (`plans/PI.md` 5d-0-ii (c) DMA half): placed 2 GiB above the bias — above
@@ -419,7 +469,7 @@ pub const MMIO_WINDOW_PAGES: usize =
 /// guard-bracketed buffer out of `[bias + DMA_WINDOW_OFFSET, … +
 /// DMA_WINDOW_PAGES·4 KiB)`. One value shared by every port for the same
 /// reason as [`MMIO_WINDOW_OFFSET`].
-pub const DMA_WINDOW_OFFSET: u64 = 0x8000_0000;
+pub const DMA_WINDOW_OFFSET: u64 = MMIO_WINDOW_OFFSET + WINDOW_SPAN;
 
 /// Pages backing the DMA-buffer window: the window's full reserved
 /// virtual span (1 GiB, up to the shared-memory window above it), like
@@ -432,8 +482,7 @@ pub const DMA_WINDOW_OFFSET: u64 = 0x8000_0000;
 /// (1 MiB) ceiling was a capacity defect: it held ~7 of the ~68 KiB
 /// per-device USB regions, so a 13-device enclosure exhausted it
 /// mid-walk and the whole port was skipped.
-pub const DMA_WINDOW_PAGES: usize =
-    ((SHARED_WINDOW_OFFSET - DMA_WINDOW_OFFSET) / tairix_kernel_mem::PAGE_SIZE as u64) as usize;
+pub const DMA_WINDOW_PAGES: usize = WINDOW_SPAN_PAGES;
 
 /// Offset of the cross-process shared-memory virtual window above the image
 /// bias: placed 3 GiB above the bias — above the DMA window (which spans
@@ -442,15 +491,14 @@ pub const DMA_WINDOW_PAGES: usize =
 /// `shm_create` / `shm_map` syscalls map a granted shared region out of
 /// `[bias + SHARED_WINDOW_OFFSET, ... + SHARED_WINDOW_PAGES * 4 KiB)`. One
 /// value shared by every port for the same reason as [`MMIO_WINDOW_OFFSET`].
-pub const SHARED_WINDOW_OFFSET: u64 = 0xC000_0000;
+pub const SHARED_WINDOW_OFFSET: u64 = DMA_WINDOW_OFFSET + WINDOW_SPAN;
 
 /// Pages backing the shared-memory window: the window's full reserved
 /// virtual span (1 GiB, up to the anonymous-heap window above it). Like
 /// [`MMIO_WINDOW_PAGES`] the span is the structural bound and the window
 /// map grows its bookkeeping lazily, so a granted full-screen frame
 /// region maps out of the same window a small URB buffer does.
-pub const SHARED_WINDOW_PAGES: usize =
-    ((ANON_WINDOW_OFFSET - SHARED_WINDOW_OFFSET) / tairix_kernel_mem::PAGE_SIZE as u64) as usize;
+pub const SHARED_WINDOW_PAGES: usize = WINDOW_SPAN_PAGES;
 
 /// Offset of the non-`FIXED` anonymous-heap virtual window above the image
 /// bias (`plans/PI.md` 5d-0-ii (c)): placed 4 GiB above the bias — the
@@ -467,7 +515,48 @@ pub const SHARED_WINDOW_PAGES: usize =
 /// reservations land in the window from there up to the user-VA ceiling.
 /// One value shared by every port for the same reason as
 /// [`MMIO_WINDOW_OFFSET`].
-pub const ANON_WINDOW_OFFSET: u64 = 0x1_0000_0000;
+pub const ANON_WINDOW_OFFSET: u64 = SHARED_WINDOW_OFFSET + WINDOW_SPAN;
+
+// The four window offsets are the user address-space layout every port
+// maps against: pin their exact values so deriving them from the shared
+// span can never silently move a window onto its neighbour.
+const _: () = assert!(MMIO_WINDOW_OFFSET == 0x4000_0000);
+const _: () = assert!(DMA_WINDOW_OFFSET == 0x8000_0000);
+const _: () = assert!(SHARED_WINDOW_OFFSET == 0xC000_0000);
+const _: () = assert!(ANON_WINDOW_OFFSET == 0x1_0000_0000);
+
+/// The four fixed guarded-window bases of an image relocated at one bias,
+/// as [`window_bases`] derives them.
+pub struct WindowBases {
+    /// Device window the [`tairix_kernel_mem::MmioWindowMap`] hands each
+    /// `mmio_map` a guard-bracketed region out of.
+    pub mmio: u64,
+    /// Guarded DMA-buffer window each `dma_alloc` carve comes from.
+    pub dma: u64,
+    /// Cross-process shared-memory window each granted `shm_map` lands in.
+    pub shared: u64,
+    /// Topmost window: the non-`FIXED` anonymous-heap region `mem_map`
+    /// places out of, whose page count scales with discovered RAM and
+    /// above which the file-mapping reservations run to the user-VA
+    /// ceiling ([`crate::user_windows::user_windows`]).
+    pub anon: u64,
+}
+
+/// The four window bases for an image relocated at `bias`.
+///
+/// Every port's `init_spawn` and `spawn_producer` seam binds this to a
+/// `const` for its own bias, so the bases are one derivation instead of a
+/// copy per file that could drift; a bias so high the windows would wrap is
+/// a build error rather than a silently wrapped address.
+#[must_use]
+pub const fn window_bases(bias: u64) -> WindowBases {
+    WindowBases {
+        mmio: bias + MMIO_WINDOW_OFFSET,
+        dma: bias + DMA_WINDOW_OFFSET,
+        shared: bias + SHARED_WINDOW_OFFSET,
+        anon: bias + ANON_WINDOW_OFFSET,
+    }
+}
 
 /// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;

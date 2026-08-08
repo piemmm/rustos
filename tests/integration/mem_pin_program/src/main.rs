@@ -74,6 +74,13 @@ mod program {
         Some(acc)
     }
 
+    /// Parse a decimal byte-count argument as the pointer-width length the
+    /// map syscall takes, or `None` when it is malformed or larger than this
+    /// target's address space can express (fail closed — never truncated).
+    fn parse_len(bytes: &[u8]) -> Option<usize> {
+        usize::try_from(parse_u64(bytes)?).ok()
+    }
+
     /// The `deny` role body: with no `CAP_MEM_PIN` the pin must be refused
     /// by the dispatcher gate, while the ungated unpin still answers
     /// success (it only narrows the caller's own state).
@@ -93,10 +100,10 @@ mod program {
         let Some(bound) = tairix_rt::arg(2).and_then(parse_u64) else {
             return 30;
         };
-        let Some(within) = tairix_rt::arg(3).and_then(parse_u64) else {
+        let Some(within) = tairix_rt::arg(3).and_then(parse_len) else {
             return 31;
         };
-        let Some(over) = tairix_rt::arg(4).and_then(parse_u64) else {
+        let Some(over) = tairix_rt::arg(4).and_then(parse_len) else {
             return 32;
         };
         let Ok(limit) = ResourceLimit::new(bound, bound) else {
@@ -115,11 +122,11 @@ mod program {
         }
         // Past the budget: refused closed by the bound, before the
         // producer is reached.
-        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) != neg(Errno::OutOfRange) {
+        if tairix_rt::mem_map(over, MapFlags::empty(), 0) != neg(Errno::OutOfRange) {
             return 37;
         }
         // Inside the budget: a genuine mapping.
-        if tairix_rt::mem_map(within as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(within, MapFlags::empty(), 0) < 0 {
             return 38;
         }
         if tairix_rt::mem_unpin() != 0 {
@@ -127,7 +134,7 @@ mod program {
         }
         // Unpinned, the same request must now reach the producer and
         // succeed — the bound binds exactly while pinned.
-        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(over, MapFlags::empty(), 0) < 0 {
             return 40;
         }
         0
@@ -137,10 +144,10 @@ mod program {
     /// starts unpinned (the mark is never inherited), so a map past the
     /// parent's pinned budget must succeed.
     fn child() -> i32 {
-        let Some(over) = tairix_rt::arg(2).and_then(parse_u64) else {
+        let Some(over) = tairix_rt::arg(2).and_then(parse_len) else {
             return 50;
         };
-        if tairix_rt::mem_map(over as usize, MapFlags::empty(), 0) < 0 {
+        if tairix_rt::mem_map(over, MapFlags::empty(), 0) < 0 {
             return 51;
         }
         0
@@ -232,7 +239,9 @@ mod program {
             #[cfg(not(mem_pin_aarch64))]
             let result = ipc_roundtrip(round);
             if result != 0 {
-                return result as i32;
+                // Every round code is small by construction; one that is not
+                // an exit code at all is itself a failure worth reporting.
+                return i32::try_from(result).unwrap_or(65);
             }
             // Leave a bounded observation window in EL0 after each reply so
             // the kernel chassis can attest which CPU resumed this task.
@@ -251,12 +260,12 @@ mod program {
     /// exited with `0`. Returns `0` on success or `fail_code` (+1/+2) on a
     /// spawn, wait, or exit-code failure.
     fn run_child(path: &[u8], fail_code: i32) -> i32 {
-        let pid = tairix_rt::spawn(path);
+        let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
+            return fail_code;
+        };
         if pid <= 0 {
             return fail_code;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = pid as i32;
         let mut code = 0i32;
         if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;

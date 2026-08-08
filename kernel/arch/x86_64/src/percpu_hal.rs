@@ -85,9 +85,11 @@ impl PerCpu for PerCpuStorage {
     unsafe fn write_self_base(&self, base: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            #[allow(clippy::cast_possible_truncation)]
-            let lo = base as u32;
-            let hi = (base >> 32) as u32;
+            // `wrmsr` takes the 64-bit base as two 32-bit halves in
+            // `edx:eax` (Intel SDM Vol 2B §4.3); the masks split it exactly.
+            let base = base as u64;
+            let lo = (base & 0xFFFF_FFFF) as u32;
+            let hi = ((base >> 32) & 0xFFFF_FFFF) as u32;
             // SAFETY: `wrmsr` writes `edx:eax` to the MSR named in `ecx`.
             // `IA32_GS_BASE` accepts any canonical 64-bit base; the trait's
             // safety contract requires the caller to run this on the CPU

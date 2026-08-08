@@ -45,8 +45,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use build_support::{
-    is_freestanding, kernel_isa, linker_script_for, KERNEL_DRIVER_SIGNING_SEED,
-    SYSTEM_APP_SIGNING_SEED,
+    format_grouped_hex, is_freestanding, kernel_isa, linker_script_for, GROUPED_HEX_LEN,
+    KERNEL_DRIVER_SIGNING_SEED, SYSTEM_APP_SIGNING_SEED,
 };
 use tairix_itest_harness::USER_IMAGE_BIAS;
 
@@ -314,9 +314,11 @@ fn emit_user_bias() {
          /// the one workspace relocation bias (`tairix_itest_harness::USER_IMAGE_BIAS`)\n\
          /// every embedded and on-disk `Run` rxe is relocated for.\n",
     );
+    let mut bias = [0u8; GROUPED_HEX_LEN];
     let _ = writeln!(
         out,
-        "pub const CHILD_USER_BIAS: u64 = {USER_IMAGE_BIAS:#x};"
+        "pub const CHILD_USER_BIAS: u64 = {};",
+        format_grouped_hex(USER_IMAGE_BIAS, &mut bias)
     );
     let path = PathBuf::from(&out_dir).join("user_bias.rs");
     fs::write(&path, out).expect("write user_bias fixture");
@@ -850,7 +852,12 @@ fn write_fixture(path: &Path, program: &Program, rxe: &[u8]) {
         "/// Virtual base the `{}` image is mapped at.",
         program.pkg
     );
-    let _ = writeln!(out, "pub const {prefix}_USER_BIAS: u64 = {USER_BIAS:#x};");
+    let mut bias = [0u8; GROUPED_HEX_LEN];
+    let _ = writeln!(
+        out,
+        "pub const {prefix}_USER_BIAS: u64 = {};",
+        format_grouped_hex(USER_BIAS, &mut bias)
+    );
     let _ = writeln!(
         out,
         "/// The converted `rxe` image of the `{}` `Run` program.",

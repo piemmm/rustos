@@ -15,8 +15,8 @@ use tairix_caps::CapabilitySet;
 use tairix_drv_storage_usb_msd::bot::{Bot, MsdTransport};
 use tairix_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
 use tairix_drv_storage_usb_msd::desc::{
-    configuration_total_length, find_storage_interface, StorageProtocol, UasEndpoints,
-    CONFIGURATION_HEADER_LEN,
+    configuration_total_length, find_storage_interface, StorageInterface, StorageProtocol,
+    UasEndpoints, CONFIGURATION_HEADER_LEN,
 };
 use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, ServeBuffers};
 use tairix_drv_storage_usb_msd::scsi::{
@@ -400,10 +400,9 @@ fn bind_blk_endpoint(block_base: u64, lun: u8) -> Option<u64> {
 /// the shm id forwarded as the node's grant.
 fn create_window() -> Option<(&'static mut [u8], u64)> {
     let mut shm_id = 0u64;
-    let base = tairix_rt::shm_create(BLK_DATA_LEN, &mut shm_id);
-    if base < 0 {
-        return None;
-    }
+    // A negative return is the errno and a base this pointer width cannot hold
+    // is equally unusable: either way there is no window.
+    let base = usize::try_from(tairix_rt::shm_create(BLK_DATA_LEN, &mut shm_id)).ok()?;
     // SAFETY: `shm_create` mapped `BLK_DATA_LEN` bytes of zeroed,
     // cacheable, RW (non-executable) memory into this process at `base`
     // and returned that base. The region is owned by this process for the
@@ -411,7 +410,7 @@ fn create_window() -> Option<(&'static mut [u8], u64)> {
     // this address space aliases it, so a single exclusive `&mut [u8]`
     // over exactly the requested length is sound. The consumer maps the
     // same frames through its own inherited grant.
-    let window = unsafe { core::slice::from_raw_parts_mut(base as usize as *mut u8, BLK_DATA_LEN) };
+    let window = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, BLK_DATA_LEN) };
     Some((window, shm_id))
 }
 
@@ -425,12 +424,8 @@ fn emit_lun_node(endpoint: u64, shm_id: u64) -> Option<u32> {
     node.push_match_key(key).ok()?;
     node.push_resource(HwResource::endpoint(endpoint)).ok()?;
     node.push_resource(HwResource::shared(shm_id)).ok()?;
-    let emit = tairix_rt::hw_emit_node(&node);
-    if emit < 0 {
-        return None;
-    }
-    #[allow(clippy::cast_sign_loss)] // `emit >= 0` is the assigned node id.
-    Some(emit as u32)
+    // A negative return is the errno; anything else is the assigned node id.
+    u32::try_from(tairix_rt::hw_emit_node(&node)).ok()
 }
 
 /// Bring one LUN up: identity, the bounded ready drain, geometry, and
@@ -632,30 +627,29 @@ fn ancestor_status(self_node: Option<u32>) -> BlkStatus {
     }
 }
 
-/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
-/// is set up and routes its return value through the `exit` syscall.
+/// Map the two transport grants the matched interface node carried: the URB
+/// call endpoint's id and the shared bulk data buffer.
 ///
-/// On success this never returns: the block-service loop runs for the
-/// life of the device, and a detach exits `0` so `devmgr` reloads the
-/// driver cleanly on re-plug.
-fn main() -> i32 {
+/// `Err` is the exit code the entry point returns. A buffer too small for one
+/// bulk chunk, or a base this pointer width cannot hold, is a mis-provisioned
+/// node refused here, before any slice is built over it.
+fn map_urb_transport() -> Result<(u64, &'static mut [u8]), i32> {
     // No MMIO/DMA grants to map, so no coherency shim is needed.
     let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
-        return EXIT_NO_HOST;
+        return Err(EXIT_NO_HOST);
     };
-    // The matched interface node carried two transport grants: the URB
-    // call endpoint (its id) and the shared data buffer (mapped here).
     let Some(endpoint) = host.endpoint_grant() else {
-        return EXIT_NO_TRANSPORT;
+        return Err(EXIT_NO_TRANSPORT);
     };
-    // The kernel reports the mapped region's true length; a buffer too
-    // small for one bulk chunk is a mis-provisioned node refused here,
-    // before any slice is built over it.
+    // The kernel reports the mapped region's true length.
     let Ok((shm_base, shm_len)) = host.map_shared() else {
-        return EXIT_NO_TRANSPORT;
+        return Err(EXIT_NO_TRANSPORT);
+    };
+    let Ok(base) = usize::try_from(shm_base) else {
+        return Err(EXIT_NO_TRANSPORT);
     };
     if shm_len < BULK_BUF_LEN {
-        return EXIT_NO_TRANSPORT;
+        return Err(EXIT_NO_TRANSPORT);
     }
     // SAFETY: `map_shared` mapped the HCD-created shared URB data buffer
     // into this process at `shm_base`, and the kernel-reported length was
@@ -665,41 +659,66 @@ fn main() -> i32 {
     // this address space aliases it, so a single exclusive `&mut [u8]`
     // over the buffer is sound. The HCD writes it only while serving this
     // driver's own blocking URB calls.
-    let shm =
-        unsafe { core::slice::from_raw_parts_mut(shm_base as usize as *mut u8, BULK_BUF_LEN) };
+    let shm = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, BULK_BUF_LEN) };
+    Ok((endpoint, shm))
+}
 
-    // Learn the interface number and bulk endpoint pair from the device's
-    // own configuration descriptor (never assumed): header first for the
-    // total length, then the full stream, parsed in place from the shared
-    // buffer the control-IN landed it in.
-    let mut client = UrbClient::new(IpcUrbCall {
-        endpoint,
-        disconnected: false,
-    });
-    let header_len = CONFIGURATION_HEADER_LEN as u32;
-    let Ok(n) = client.control_in(get_configuration_setup(header_len as u16), 0, header_len) else {
-        return EXIT_BRINGUP_FAILED;
+/// Learn the interface number and transport endpoints from the device's own
+/// configuration descriptor (never assumed): header first for the total
+/// length, then the full stream, parsed in place from the shared buffer the
+/// control-IN landed it in.
+///
+/// `Err` is the exit code the entry point returns.
+fn discover_storage_interface(
+    client: &mut UrbClient<IpcUrbCall>,
+    shm: &[u8],
+) -> Result<StorageInterface, i32> {
+    // `wLength` is 16-bit on the wire; refuse rather than truncate.
+    let Ok(header_len) = u16::try_from(CONFIGURATION_HEADER_LEN) else {
+        return Err(EXIT_BRINGUP_FAILED);
+    };
+    let Ok(n) = client.control_in(get_configuration_setup(header_len), 0, header_len.into()) else {
+        return Err(EXIT_BRINGUP_FAILED);
     };
     let Ok(total) = configuration_total_length(&shm[..(n as usize).min(shm.len())]) else {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     };
     // A configuration stream larger than the shared buffer cannot be
     // fetched over this transport; refuse the device rather than parse a
     // truncated stream.
     let Ok(total_u16) = u16::try_from(total) else {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     };
     if total > shm.len() {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     }
     let Ok(n) = client.control_in(get_configuration_setup(total_u16), 0, total_u16.into()) else {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     };
     if (n as usize) < total {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     }
-    let Ok(interface) = find_storage_interface(&shm[..total]) else {
-        return EXIT_BRINGUP_FAILED;
+    find_storage_interface(&shm[..total]).map_err(|_| EXIT_BRINGUP_FAILED)
+}
+
+/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
+/// is set up and routes its return value through the `exit` syscall.
+///
+/// On success this never returns: the block-service loop runs for the
+/// life of the device, and a detach exits `0` so `devmgr` reloads the
+/// driver cleanly on re-plug.
+fn main() -> i32 {
+    let (endpoint, shm) = match map_urb_transport() {
+        Ok(transport) => transport,
+        Err(code) => return code,
+    };
+    let mut client = UrbClient::new(IpcUrbCall {
+        endpoint,
+        disconnected: false,
+    });
+    let interface = match discover_storage_interface(&mut client, shm) {
+        Ok(interface) => interface,
+        Err(code) => return code,
     };
 
     // Build the wire transport the interface's protocol byte named and run
@@ -780,30 +799,25 @@ fn main() -> i32 {
     }
 }
 
-/// Bring every unit of the brought-up device online and serve block
-/// requests for the life of the device: the one bring-up + serve body
-/// every wire transport runs.
+/// Bring every unit of the brought-up device online and publish one storage
+/// node per ready LUN.
 ///
-/// `disconnected` observes the transport's vanished-endpoint state (the
-/// HCD retracted the interface — the device was unplugged), so the serve
-/// loop can retract the LUN nodes and exit `0` for a clean reload on
-/// re-plug.
-fn run_device<T, F>(mut scsi: ScsiDevice<T>, urb_endpoint: u64, disconnected: F) -> i32
-where
-    T: ScsiTransport,
-    F: Fn(&ScsiDevice<T>) -> bool,
-{
-    // Bring every unit up; publish one storage node per ready LUN.
+/// `Err` is the exit code the caller returns: no unit could be brought up, or
+/// a service resource a ready unit needs was refused.
+fn publish_luns<T: ScsiTransport>(
+    scsi: &mut ScsiDevice<T>,
+    urb_endpoint: u64,
+) -> Result<[Option<LunServe>; MAX_LUNS], i32> {
     let Ok(lun_count) = scsi.lun_count() else {
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     };
     let Some(blk_block) = blk_block_for(urb_endpoint) else {
-        return EXIT_NO_SERVICE;
+        return Err(EXIT_NO_SERVICE);
     };
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
     let mut published = 0usize;
     for lun in 0..lun_count {
-        let state = match bring_up_lun(&mut scsi, lun) {
+        let state = match bring_up_lun(scsi, lun) {
             Ok(Some(state)) => state,
             Ok(None) => continue,
             Err(err) => {
@@ -818,13 +832,13 @@ where
             }
         };
         let Some(blk_endpoint) = bind_blk_endpoint(blk_block, lun) else {
-            return EXIT_NO_SERVICE;
+            return Err(EXIT_NO_SERVICE);
         };
         let Some((window, shm_id)) = create_window() else {
-            return EXIT_NO_SERVICE;
+            return Err(EXIT_NO_SERVICE);
         };
         let Some(node_id) = emit_lun_node(blk_endpoint, shm_id) else {
-            return EXIT_NO_SERVICE;
+            return Err(EXIT_NO_SERVICE);
         };
         log_hex_event(
             MSD_LUN_READY,
@@ -851,18 +865,16 @@ where
             "count_hex",
             u64::from(lun_count),
         );
-        return EXIT_BRINGUP_FAILED;
+        return Err(EXIT_BRINGUP_FAILED);
     }
+    Ok(luns)
+}
 
-    // The serve wait-set: one member per published LUN endpoint, token =
-    // LUN number.
-    let set = tairix_rt::waitset_create();
-    if set < 0 {
-        retract_all(&luns);
-        return EXIT_NO_SERVICE;
-    }
-    #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
-    let set = set as u64;
+/// The serve wait-set: one member per published LUN endpoint, token = LUN
+/// number. [`None`] means the device cannot be served.
+fn join_serve_set(luns: &[Option<LunServe>]) -> Option<u64> {
+    // A negative return is the errno; anything else is the wait-set handle.
+    let set = u64::try_from(tairix_rt::waitset_create()).ok()?;
     for (lun, serve) in luns.iter().enumerate() {
         let Some(serve) = serve else { continue };
         let ret = tairix_rt::waitset_ctl(
@@ -873,11 +885,33 @@ where
             lun as u64,
         );
         if ret != 0 {
-            retract_all(&luns);
-            return EXIT_NO_SERVICE;
+            return None;
         }
     }
+    Some(set)
+}
 
+/// Bring every unit of the brought-up device online and serve block
+/// requests for the life of the device: the one bring-up + serve body
+/// every wire transport runs.
+///
+/// `disconnected` observes the transport's vanished-endpoint state (the
+/// HCD retracted the interface — the device was unplugged), so the serve
+/// loop can retract the LUN nodes and exit `0` for a clean reload on
+/// re-plug.
+fn run_device<T, F>(mut scsi: ScsiDevice<T>, urb_endpoint: u64, disconnected: F) -> i32
+where
+    T: ScsiTransport,
+    F: Fn(&ScsiDevice<T>) -> bool,
+{
+    let luns = match publish_luns(&mut scsi, urb_endpoint) {
+        Ok(luns) => luns,
+        Err(code) => return code,
+    };
+    let Some(set) = join_serve_set(&luns) else {
+        retract_all(&luns);
+        return EXIT_NO_SERVICE;
+    };
     log(
         &LogSink,
         &Event {
@@ -887,7 +921,22 @@ where
             fields: &[],
         },
     );
+    serve_requests(scsi, luns, set, urb_endpoint, disconnected)
+}
 
+/// Serve the published LUNs until the device detaches (exit `0`) or the
+/// service path fails closed.
+fn serve_requests<T, F>(
+    mut scsi: ScsiDevice<T>,
+    mut luns: [Option<LunServe>; MAX_LUNS],
+    set: u64,
+    urb_endpoint: u64,
+    disconnected: F,
+) -> i32
+where
+    T: ScsiTransport,
+    F: Fn(&ScsiDevice<T>) -> bool,
+{
     // The shared BOT transport is the fault domain of this device's LUNs: a
     // transport-wide reset (the recovery ladder's data-path scrub, a port
     // reset, a bus blip) hits every unit at once, so it is one recovery
@@ -960,83 +1009,22 @@ where
         // stream to a healthy unit.
         let domain_poll_before = domain.state();
         note_domain_edge(domain_poll_before, domain.poll(now_ns), domain_owner);
-        let index = usize::try_from(token).unwrap_or(MAX_LUNS);
-        let Some(serve) = luns.get_mut(index).and_then(Option::as_mut) else {
+        // The token a member was added under is its LUN number.
+        let Ok(lun) = u8::try_from(token) else {
             continue;
         };
-        let mut request = [0u8; BLK_REQUEST_LEN];
-        let mut ticket = 0u64;
-        // Non-blocking: this wait-set serves every LUN's endpoint, and the
-        // queued call the wake reported may have been cancelled by its
-        // poster's exit — parking here would starve the other LUNs.
-        let Ok(n) = tairix_rt::call_recv_nonblock(serve.endpoint, &mut request, &mut ticket) else {
+        let Some(serve) = luns.get_mut(usize::from(lun)).and_then(Option::as_mut) else {
             continue;
         };
-        let lun = index as u8;
-        let read_only = serve.state.write_protected;
-        let mut reply = [0u8; BLK_COMPLETION_LEN];
-        // Snapshot the unit's health before serving so the outcome's effect on
-        // it is one auditable edge (Degraded/Recovering/Recovered, or a
-        // fail-closed) rather than silent.
-        let before_health = serve.health.state();
-        // Snapshot the shared-transport domain too: serving folds the unit's
-        // own outcome with what the transport imposes and may recover the
-        // whole device when a unit demonstrates the transport is back, so that
-        // is one auditable device-wide edge as well.
-        let domain_before = domain.state();
-        let len = {
-            let mut block = LunBlock::new(&mut scsi, lun, serve.state);
-            let mut recovery = LunRecovery {
-                health: &mut serve.health,
-                domain: &mut domain,
-            };
-            serve_lun_with_domain(
-                &mut block,
-                read_only,
-                ServeBuffers {
-                    request: &request[..n],
-                    window: serve.window,
-                    reply: &mut reply,
-                },
-                &mut recovery,
-                now_ns,
-                // Consulted only on the recovery path (a stall the device did
-                // not answer definitively), so a healthy transfer never reads
-                // the tree: report what this LUN's interior fault-domain
-                // ancestors currently impose.
-                || ancestor_status(self_node),
-            )
-        };
-        let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
-        note_health_edge(before_health, serve.health.state(), serve.node_id);
-        note_domain_edge(domain_before, domain.state(), domain_owner);
-        // Drive the bounded recovery-escalation ladder from the unit's health.
-        // A unit that just answered normally re-arms the ladder; a `Recovering`
-        // unit escalates — a first gentle retry, then a data-path reset (this
-        // driver's one recovery mechanism: clear the bulk pipes) — to try to
-        // bring it back before its grace window is left to fail it closed. The
-        // ladder bounds how often the reset is taken, so a wedged unit is never
-        // reset forever, and the reset is only ever issued for a unit already
-        // being answered reissuably, so head-of-line freedom holds.
-        let health_state = serve.health.state();
-        if serve.ladder.next_action(health_state) == RecoveryAction::Reset {
-            // The scrub clears the *shared* bulk pipes, so it is a
-            // transport-wide event: open (or continue) the one shared recovery
-            // window over the whole device before touching the transport, so a
-            // sibling LUN's next request is held reissuable under it rather
-            // than surfacing as an independent failure.
-            let domain_before = domain.state();
-            domain.quiesce(now_ns);
-            note_domain_edge(domain_before, domain.state(), domain_owner);
-            scsi.scrub_window();
-            log_hex_event(
-                MSD_RECOVERY_RESET,
-                Level::Warn,
-                "usb-msd: escalating a data-path reset to recover a stalling LUN",
-                "lun_hex",
-                u64::from(lun),
-            );
-        }
+        serve_ready_lun(
+            &mut scsi,
+            serve,
+            lun,
+            &mut domain,
+            domain_owner,
+            self_node,
+            now_ns,
+        );
         // A vanished URB endpoint means the HCD retracted the interface:
         // the device is gone. Retract the LUN nodes and exit cleanly so a
         // re-plug re-enumerates and reloads this driver.
@@ -1053,6 +1041,94 @@ where
             retract_all(&luns);
             return 0;
         }
+    }
+}
+
+/// Serve the one queued request a ready LUN woke the set for: receive it, run
+/// the transfer under the unit's health and the device-wide fault domain,
+/// reply, and drive the bounded recovery-escalation ladder from the outcome.
+///
+/// A wake whose queued call its poster already cancelled simply returns.
+fn serve_ready_lun<T: ScsiTransport>(
+    scsi: &mut ScsiDevice<T>,
+    serve: &mut LunServe,
+    lun: u8,
+    domain: &mut FaultDomain,
+    domain_owner: u32,
+    self_node: Option<u32>,
+    now_ns: u64,
+) {
+    let mut request = [0u8; BLK_REQUEST_LEN];
+    let mut ticket = 0u64;
+    // Non-blocking: this wait-set serves every LUN's endpoint, and the
+    // queued call the wake reported may have been cancelled by its
+    // poster's exit — parking here would starve the other LUNs.
+    let Ok(n) = tairix_rt::call_recv_nonblock(serve.endpoint, &mut request, &mut ticket) else {
+        return;
+    };
+    let read_only = serve.state.write_protected;
+    let mut reply = [0u8; BLK_COMPLETION_LEN];
+    // Snapshot the unit's health before serving so the outcome's effect on
+    // it is one auditable edge (Degraded/Recovering/Recovered, or a
+    // fail-closed) rather than silent.
+    let before_health = serve.health.state();
+    // Snapshot the shared-transport domain too: serving folds the unit's
+    // own outcome with what the transport imposes and may recover the
+    // whole device when a unit demonstrates the transport is back, so that
+    // is one auditable device-wide edge as well.
+    let domain_before = domain.state();
+    let len = {
+        let mut block = LunBlock::new(scsi, lun, serve.state);
+        let mut recovery = LunRecovery {
+            health: &mut serve.health,
+            domain: &mut *domain,
+        };
+        serve_lun_with_domain(
+            &mut block,
+            read_only,
+            ServeBuffers {
+                request: &request[..n],
+                window: serve.window,
+                reply: &mut reply,
+            },
+            &mut recovery,
+            now_ns,
+            // Consulted only on the recovery path (a stall the device did
+            // not answer definitively), so a healthy transfer never reads
+            // the tree: report what this LUN's interior fault-domain
+            // ancestors currently impose.
+            || ancestor_status(self_node),
+        )
+    };
+    let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
+    note_health_edge(before_health, serve.health.state(), serve.node_id);
+    note_domain_edge(domain_before, domain.state(), domain_owner);
+    // Drive the bounded recovery-escalation ladder from the unit's health.
+    // A unit that just answered normally re-arms the ladder; a `Recovering`
+    // unit escalates — a first gentle retry, then a data-path reset (this
+    // driver's one recovery mechanism: clear the bulk pipes) — to try to
+    // bring it back before its grace window is left to fail it closed. The
+    // ladder bounds how often the reset is taken, so a wedged unit is never
+    // reset forever, and the reset is only ever issued for a unit already
+    // being answered reissuably, so head-of-line freedom holds.
+    let health_state = serve.health.state();
+    if serve.ladder.next_action(health_state) == RecoveryAction::Reset {
+        // The scrub clears the *shared* bulk pipes, so it is a
+        // transport-wide event: open (or continue) the one shared recovery
+        // window over the whole device before touching the transport, so a
+        // sibling LUN's next request is held reissuable under it rather
+        // than surfacing as an independent failure.
+        let domain_before = domain.state();
+        domain.quiesce(now_ns);
+        note_domain_edge(domain_before, domain.state(), domain_owner);
+        scsi.scrub_window();
+        log_hex_event(
+            MSD_RECOVERY_RESET,
+            Level::Warn,
+            "usb-msd: escalating a data-path reset to recover a stalling LUN",
+            "lun_hex",
+            u64::from(lun),
+        );
     }
 }
 

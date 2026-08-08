@@ -243,12 +243,9 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let command = match parse(&arguments) {
-            Ok(command) => command,
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
-            }
+        let Ok(command) = parse(&arguments) else {
+            write_stderr_line(USAGE);
+            return 2;
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
         let path = tairix_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());

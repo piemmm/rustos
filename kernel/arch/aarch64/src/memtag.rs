@@ -146,7 +146,7 @@ impl MemoryTagging for MemoryTags {
 #[target_feature(enable = "mte")]
 unsafe fn store_allocation_tags(base: *mut u8, len: usize, tag: MemTag) {
     // MTE carries the logical tag in pointer bits [59:56].
-    let tag_bits = ((tag.value() as u64) & 0xF) << 56;
+    let tag_bits = (u64::from(tag.value()) & 0xF) << 56;
     let mut addr = base as u64;
     let end = addr.wrapping_add(len as u64);
     while addr < end {

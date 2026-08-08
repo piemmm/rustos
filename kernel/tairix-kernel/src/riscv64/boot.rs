@@ -282,12 +282,13 @@ impl KernelArch for RiscvBinArch {
         // The riscv64 `rdcycle` core-clock counter over the `rdtime` /
         // `timebase-frequency` reference: the kernel's per-CPU estimator
         // divides the two counters' deltas to report the live "cpu MHz".
-        // Publish the discovered `timebase-frequency` (there is no CSR that
-        // reports it) so the ratio has its scale; the handle itself is a
-        // stateless `const` value, so a `'static` reference to it is sound.
-        tairix_arch_riscv64::coreclock::set_reference_hz(self.arch.timebase_hz());
+        // The handle is a stateless `const` value, so a `'static` reference
+        // to it is sound.
         const CLOCK: tairix_arch_riscv64::coreclock::CoreClockCounter =
             tairix_arch_riscv64::coreclock::CoreClockCounter::new();
+        // There is no CSR reporting the reference rate, so publish the
+        // discovered `timebase-frequency` to give the ratio its scale.
+        tairix_arch_riscv64::coreclock::set_reference_hz(self.arch.timebase_hz());
         Some(&CLOCK)
     }
 
@@ -996,6 +997,10 @@ pub fn try_boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> Result<BootInfo<'static, RiscvBinArch>, BootError> {
+    // Single-hart boot slice: one per-CPU slot, owned by an
+    // allocator-free `static` backing.
+    static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
+
     if hartid != u64::from(BOOT_CPU) {
         return Err(BootError::UnexpectedHart);
     }
@@ -1065,9 +1070,6 @@ pub fn try_boot(
 
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.
-    // Single-hart boot slice: one per-CPU slot, owned by an
-    // allocator-free `static` backing.
-    static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let cpu_name = fdt
         .boot_cpu_compatible()
         .and_then(tairix_arch_riscv64::cpuname::name_for_compatible)

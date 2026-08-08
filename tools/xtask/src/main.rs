@@ -29,7 +29,12 @@
 //!   flaky tests, defaulting to one run; `--soak` (tuned by `--secs N`)
 //!   instead repeats it for a wall-clock budget (24 h by default), which the
 //!   nightly `soak` workflow uses to run the tests repeatedly for 24 h
-//! - `clippy`       — `cargo clippy --workspace --all-targets -- -D warnings`
+//! - `clippy`       — `-D warnings` for the host
+//!   (`--workspace --all-targets`) **and once per Tier-1 target**: the three
+//!   freestanding triples over the cross-compiled product tree, each QEMU
+//!   triple over its guests (which lints the payload programs they embed), and
+//!   `wasm32` over the browser verticals. A host-only pass lints none of the
+//!   `freestanding` bodies that actually ship — see `commands::target_clippy`
 //! - `fmt`          — `cargo fmt --all -- --check` (pass `--fix` to apply)
 //! - `docs-check`   — rustdoc (deny warnings) + mdBook build + link check
 //! - `abi-check`    — verifies the generated kernel syscall table matches

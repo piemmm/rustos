@@ -84,8 +84,7 @@ mod program {
     #[inline(never)]
     fn burn(frames: u64, seed: u64) -> u64 {
         let mut buf = [0u8; FRAME_BYTES];
-        let lo = seed as u8;
-        let hi = (seed >> 8) as u8;
+        let [lo, hi, ..] = seed.to_le_bytes();
         // SAFETY: both writes land inside `buf`, a live local array.
         unsafe {
             core::ptr::write_volatile(buf.as_mut_ptr(), lo);
@@ -181,12 +180,12 @@ mod program {
     /// with `expected`. Returns `0` on success or `fail_code` on any
     /// mismatch or syscall failure.
     fn run_child(path: &[u8], expected: i32, fail_code: i32) -> i32 {
-        let pid = tairix_rt::spawn(path);
+        let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
+            return fail_code;
+        };
         if pid <= 0 {
             return fail_code;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = pid as i32;
         let mut code = 0i32;
         if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;

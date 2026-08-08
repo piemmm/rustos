@@ -9,10 +9,11 @@
 //! transfer's bytes in. Two users of that window at once would overwrite each
 //! other's staged bytes and read back another extent's data — silent
 //! corruption, not a fault. So the two phases are strictly ordered here: the
-//! whole device is probed, the transport is **dropped**, and only then is the
-//! first volume attached. Dropping the client consumes the window borrow, so
-//! the compiler, not a convention, is what stops a later probe read from
-//! racing the kernel (`plans/FIX-IO.md`).
+//! whole device is probed by [`probe_device`], which owns the transport for
+//! its whole life, and only then is the first volume attached. The window
+//! borrow therefore ends with that call, so the compiler, not a convention,
+//! is what stops a later probe read from racing the kernel
+//! (`plans/FIX-IO.md`).
 
 extern crate alloc;
 
@@ -26,7 +27,7 @@ use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
-use tairix_drv_storage_volmgr::plan::{plan_volumes, VolumePlan};
+use tairix_drv_storage_volmgr::plan::{plan_volumes, PlanSummary, VolumePlan};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
@@ -240,56 +241,44 @@ fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errn
     Err(last)
 }
 
-/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
-/// is set up and routes its return value through the `exit` syscall.
+/// Probe the whole served device, returning its plans and the pass summary,
+/// or the exit code to fail closed with.
 ///
-/// Run-to-completion: probe, attach, report, exit `0`. The kernel owns
-/// every published mount from attach onward, so nothing here needs to
-/// outlive the job; a re-plug re-discovers the node and reloads this
-/// driver afresh.
-fn main() -> i32 {
-    // No MMIO/DMA grants to map, so no coherency shim is needed.
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
-        return EXIT_NO_HOST;
-    };
-    // The matched storage node carried two transport grants: the blkio
-    // call endpoint (its id) and the shared data window (mapped here; its
-    // region id rides in every attach request the kernel re-checks
-    // against this task's grants).
-    let Some(endpoint) = host.endpoint_grant() else {
-        return EXIT_NO_TRANSPORT;
-    };
-    let Some(window_id) = host
-        .resources()
-        .find(|resource| resource.kind() == Some(HwResourceKind::Shared))
-        .map(tairix_abi::hwtree::HwResource::base)
-    else {
-        return EXIT_NO_TRANSPORT;
-    };
-    // The kernel reports the mapped region's true length; a window too
-    // small for the blkio data protocol is a mis-provisioned node refused
-    // here, before any slice is built over it.
+/// The blkio client — and with it the exclusive borrow of the shared data
+/// window — is created and consumed entirely inside this call, so the
+/// compiler, not a convention, is what stops a probe read from following the
+/// caller's first attach (see the module docs).
+fn probe_device<S: tairix_drvrt::GrantSyscalls>(
+    host: &RtDriverHost<S>,
+    endpoint: u64,
+) -> Result<(Vec<VolumePlan>, PlanSummary), i32> {
+    // The kernel reports the mapped window's true base and length; a window
+    // too small for the blkio data protocol, or a base this target cannot
+    // address, is a mis-provisioned node refused before any slice is built
+    // over it.
     let Ok((window_base, window_len)) = host.map_shared() else {
-        return EXIT_NO_TRANSPORT;
+        return Err(EXIT_NO_TRANSPORT);
+    };
+    let Ok(base) = usize::try_from(window_base) else {
+        return Err(EXIT_NO_TRANSPORT);
     };
     if window_len < BLK_DATA_LEN {
-        return EXIT_NO_TRANSPORT;
+        return Err(EXIT_NO_TRANSPORT);
     }
     // SAFETY: `map_shared` mapped the serving driver's shared data window
-    // into this process at `window_base`, and the kernel-reported length
-    // was verified above to hold at least `BLK_DATA_LEN` bytes (the one
-    // length both sides build from). The mapping
-    // lives for the rest of this process and nothing else in this address
-    // space aliases it, so a single exclusive `&mut [u8]` over the buffer
-    // is sound. The serving driver writes it only while serving this
-    // process's own blocking blkio calls.
-    let window =
-        unsafe { core::slice::from_raw_parts_mut(window_base as usize as *mut u8, BLK_DATA_LEN) };
+    // into this process at `window_base`, and the kernel-reported length was
+    // verified above to hold at least `BLK_DATA_LEN` bytes (the one length
+    // both sides build from). The mapping lives for the rest of this process
+    // and nothing else in this address space aliases it — this is the
+    // program's only window slice, built here once — so the exclusive
+    // `&mut [u8]` is sound. The serving driver writes it only while serving
+    // this process's own blocking blkio calls.
+    let window = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, BLK_DATA_LEN) };
 
     // The one wait-set this program's block transport parks its replies on.
     // The kernel reclaims it when this process exits.
     let Ok(waitset) = u64::try_from(tairix_rt::waitset_create()) else {
-        return EXIT_NO_WAITSET;
+        return Err(EXIT_NO_WAITSET);
     };
     let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint, waitset), window)
     {
@@ -302,19 +291,17 @@ fn main() -> i32 {
                 "errno_hex",
                 err as u64,
             );
-            return EXIT_DEVICE_FAILED;
+            return Err(EXIT_DEVICE_FAILED);
         }
     };
 
-    // Phase 1 — probe. The sink only records; nothing is attached while
-    // this driver is still reading the device through the shared window
-    // (see the module docs). The plan count is bounded by the device's own
-    // validated partition table, and the list grows to fit it rather than
-    // capping at a hand-picked constant.
+    // The sink only records; nothing is attached while this driver is still
+    // reading the device through the shared window. The plan count is
+    // bounded by the device's own validated partition table, and the list
+    // grows to fit it rather than capping at a hand-picked constant.
     let mut plans: Vec<VolumePlan> = Vec::new();
-    let summary = plan_volumes(&mut client, |plan| plans.push(*plan));
-    let summary = match summary {
-        Ok(summary) => summary,
+    match plan_volumes(&mut client, |plan| plans.push(*plan)) {
+        Ok(summary) => Ok((plans, summary)),
         Err(err) => {
             log_hex_event(
                 VOLMGR_DEVICE_FAILED,
@@ -323,20 +310,18 @@ fn main() -> i32 {
                 "errno_hex",
                 err as u64,
             );
-            return EXIT_DEVICE_FAILED;
+            Err(EXIT_DEVICE_FAILED)
         }
-    };
+    }
+}
 
-    // Hand the device over: dropping the client releases the window borrow,
-    // so no probe read can follow — the kernel's mounts have the staging
-    // buffer to themselves from here on.
-    drop(client);
-
-    // Phase 2 — attach. A refusal is logged per volume and is never fatal
-    // to the sibling volumes on the same device (fail only the affected
-    // volume).
+/// Attach every planned volume, returning how many the kernel published.
+///
+/// A refusal is logged per volume and is never fatal to the sibling volumes
+/// on the same device: only the affected volume fails.
+fn attach_all(endpoint: u64, window_id: u64, plans: &[VolumePlan]) -> u64 {
     let mut attached = 0u64;
-    for plan in &plans {
+    for plan in plans {
         match attach_plan(endpoint, window_id, plan) {
             Ok(()) => {
                 attached += 1;
@@ -359,6 +344,44 @@ fn main() -> i32 {
             }
         }
     }
+    attached
+}
+
+/// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
+/// is set up and routes its return value through the `exit` syscall.
+///
+/// Run-to-completion: probe, attach, report, exit `0`. The kernel owns
+/// every published mount from attach onward, so nothing here needs to
+/// outlive the job; a re-plug re-discovers the node and reloads this
+/// driver afresh.
+fn main() -> i32 {
+    // No MMIO/DMA grants to map, so no coherency shim is needed.
+    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        return EXIT_NO_HOST;
+    };
+    // The matched storage node carried two transport grants: the blkio
+    // call endpoint (its id) and the shared data window (mapped by the probe;
+    // its region id rides in every attach request the kernel re-checks
+    // against this task's grants).
+    let Some(endpoint) = host.endpoint_grant() else {
+        return EXIT_NO_TRANSPORT;
+    };
+    let Some(window_id) = host
+        .resources()
+        .find(|resource| resource.kind() == Some(HwResourceKind::Shared))
+        .map(tairix_abi::hwtree::HwResource::base)
+    else {
+        return EXIT_NO_TRANSPORT;
+    };
+
+    // Phase 1 — probe, then Phase 2 — attach. The order is the module's
+    // corruption guarantee: the probe's window borrow is gone before the
+    // kernel's mounts get the staging buffer to themselves.
+    let (plans, summary) = match probe_device(&host, endpoint) {
+        Ok(probed) => probed,
+        Err(exit) => return exit,
+    };
+    let attached = attach_all(endpoint, window_id, &plans);
 
     if summary.raid_members > 0 {
         log_hex_event(

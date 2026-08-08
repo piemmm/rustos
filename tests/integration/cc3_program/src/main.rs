@@ -54,31 +54,34 @@ mod program {
 
     /// Program entry point, called by crt0 once the C runtime is set up.
     ///
-    /// Parses `argv[1]` as a non-negative decimal integer and returns it as
-    /// the program's exit code. crt0 routes the return value through the
-    /// `exit` syscall.
+    /// Parses the C argument vector's `[1]` entry as a non-negative decimal
+    /// integer and returns it as the program's exit code. crt0 routes the
+    /// return value through the `exit` syscall.
     ///
     /// # Safety
     ///
-    /// `argv` must be a valid NULL-terminated array of at least `argc`
-    /// NUL-terminated C strings, as crt0 guarantees by construction.
+    /// `arg_vector` must be a valid NULL-terminated array of at least
+    /// `arg_count` NUL-terminated C strings, as crt0 guarantees by
+    /// construction.
     #[no_mangle]
     pub unsafe extern "C" fn main(
-        argc: c_int,
-        argv: *const *const c_char,
+        arg_count: c_int,
+        arg_vector: *const *const c_char,
         _envp: *const *const c_char,
     ) -> c_int {
-        if argc < 2 || argv.is_null() {
+        if arg_count < 2 || arg_vector.is_null() {
             return EXIT_MISSING_ARG;
         }
-        // SAFETY: the caller guarantees `argv[1]` is a valid C string pointer
-        // (`argc >= 2`); `argv` is a readable array of `argc` pointers.
-        let arg1 = unsafe { *argv.add(1) };
-        if arg1.is_null() {
+        // SAFETY: the caller guarantees entry `[1]` is a valid C string
+        // pointer (`arg_count >= 2`); the vector is a readable array of
+        // `arg_count` pointers.
+        let decimal_arg = unsafe { *arg_vector.add(1) };
+        if decimal_arg.is_null() {
             return EXIT_MISSING_ARG;
         }
-        // SAFETY: `arg1` is a NUL-terminated C string by crt0's contract.
-        match unsafe { parse_decimal(arg1) } {
+        // SAFETY: `decimal_arg` is a NUL-terminated C string by crt0's
+        // contract.
+        match unsafe { parse_decimal(decimal_arg) } {
             Some(value) => value,
             None => EXIT_BAD_ARG,
         }
@@ -92,13 +95,17 @@ mod program {
     ///
     /// `s` must point at a NUL-terminated, readable C string.
     unsafe fn parse_decimal(s: *const c_char) -> Option<c_int> {
+        // C's `char` signedness is target-dependent, so scan the string as
+        // the raw bytes it is rather than through `c_char`.
+        let bytes = s.cast::<u8>();
         let mut acc: i32 = 0;
         let mut seen = false;
         let mut i = 0usize;
         loop {
             // SAFETY: the caller guarantees `s` is NUL-terminated, so the scan
-            // stops at or before the terminator; each read is in bounds.
-            let byte = unsafe { *s.add(i) } as u8;
+            // stops at or before the terminator; each read is in bounds, and a
+            // `u8` read of a `c_char` byte has the same layout and alignment.
+            let byte = unsafe { *bytes.add(i) };
             if byte == 0 {
                 break;
             }

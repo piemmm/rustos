@@ -60,8 +60,8 @@ use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_raid::{
     assemble_array, handle_control, read_superblock, Admission, ArrayHealthEvent, ArrayRuntime,
-    ComposerAction, ControlAudit, ControlEffects, LiveArrays, MaintenanceStep, MemberRegistry,
-    ServiceError,
+    Assembled, ComposerAction, ControlAudit, ControlEffects, LiveArrays, MaintenanceStep,
+    MemberRegistry, ServiceError,
 };
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -1005,6 +1005,27 @@ impl Composer {
         // The resources come first: they are what a failed attempt must be
         // able to hand back, and assembling before them would leave a composed
         // array (holding its members' devices) to be dropped and rebuilt.
+        let Some((resources, node)) = self.claim_resources(array_uuid, now_ns) else {
+            return;
+        };
+        let Some(assembled) = self.assemble(array_uuid, now_wall, now_ns) else {
+            self.pending = Some(resources);
+            return;
+        };
+        self.publish(assembled, resources, &node, array_uuid, now_ns);
+    }
+
+    /// Claim the endpoint and data window a ready array will be served
+    /// through, and the node that names them.
+    ///
+    /// [`None`] backs the registry off: the resources could not be created, or
+    /// they exist but the node describing them could not be built, in which
+    /// case they are held for the next attempt rather than stranded.
+    fn claim_resources(
+        &mut self,
+        array_uuid: [u8; 16],
+        now_ns: u64,
+    ) -> Option<(PendingResources, HwNode)> {
         let Some(resources) = self.take_resources() else {
             self.registry.note_assembly_failed(array_uuid, now_ns);
             log_hex_event(
@@ -1014,79 +1035,75 @@ impl Composer {
                 "array_hex",
                 self.arrays.len() as u64,
             );
-            return;
+            return None;
         };
-        let PendingResources {
-            endpoint,
-            window_id,
-            window_base,
-        } = resources;
-        // SAFETY: `window_base` addresses the `BLK_DATA_LEN` cacheable RW bytes
-        // `create_array_window` minted and mapped for this array, and the
-        // mapping lives for the rest of this process. The region is reached
-        // only through `pending`/`arrays`, each of which holds it at most once,
-        // so this is the only slice over it.
-        let window =
-            unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
-        let Some(node) = build_array_node(endpoint, window_id) else {
-            self.pending = Some(PendingResources {
-                endpoint,
-                window_id,
-                window_base,
-            });
+        let Some(node) = build_array_node(resources.endpoint, resources.window_id) else {
+            self.pending = Some(resources);
             self.registry.note_assembly_failed(array_uuid, now_ns);
-            return;
+            return None;
         };
+        Some((resources, node))
+    }
 
-        // Split the borrow into disjoint fields: assembly reads the registry's
-        // candidates and reconnects each member from `members` at once, then
-        // the registry is updated once assembly is done.
-        let Self {
-            registry,
-            members,
-            arrays,
-            set,
-            member_set,
-            pending,
-            ..
-        } = self;
-        let member_set = *member_set;
-
-        // Give the resources back on every failure below, so a publish that
-        // cannot finish costs nothing that cannot be retried.
-        let mut hand_back = || {
-            *pending = Some(PendingResources {
-                endpoint,
-                window_id,
-                window_base,
-            });
+    /// Compose the array from the members the registry holds, reconnecting
+    /// each one's device as assembly asks for it.
+    ///
+    /// [`None`] has already backed the registry off; the caller still owns the
+    /// resources and hands them back.
+    fn assemble(
+        &mut self,
+        array_uuid: [u8; 16],
+        now_wall: Time64,
+        now_ns: u64,
+    ) -> Option<Assembled<RemoteBlock<'static, RtBlkCall>>> {
+        let Some(identity) = self.registry.identity(array_uuid) else {
+            self.registry.note_assembly_failed(array_uuid, now_ns);
+            return None;
         };
-
-        let Some(identity) = registry.identity(array_uuid) else {
-            hand_back();
-            registry.note_assembly_failed(array_uuid, now_ns);
-            return;
-        };
-        let outcome = assemble_array(identity, registry.candidates(), now_wall, |tag| {
+        let member_set = self.member_set;
+        let members = &self.members;
+        let outcome = assemble_array(identity, self.registry.candidates(), now_wall, |tag| {
             members
                 .get(tag)
                 .and_then(|held| connect_member(held, member_set))
         });
         let Ok(assembled) = outcome else {
-            hand_back();
-            registry.note_assembly_failed(array_uuid, now_ns);
+            self.registry.note_assembly_failed(array_uuid, now_ns);
             log_hex_event(
                 RAID_ARRAY_FAILED,
                 Level::Warn,
                 "raid: array could not be assembled; backing off",
                 "members_hex",
-                members.len() as u64,
+                self.members.len() as u64,
             );
-            return;
+            return None;
         };
-        let Ok(node_id) = u32::try_from(tairix_rt::hw_emit_node(&node)) else {
-            hand_back();
-            registry.note_assembly_failed(array_uuid, now_ns);
+        Some(assembled)
+    }
+
+    /// Publish a composed array: emit its node, build the runtime that serves
+    /// it, and put it on the wait-set.
+    ///
+    /// Every failure hands the resources back and backs the registry off, so a
+    /// publish that cannot finish costs nothing that cannot be retried.
+    fn publish(
+        &mut self,
+        assembled: Assembled<RemoteBlock<'static, RtBlkCall>>,
+        resources: PendingResources,
+        node: &HwNode,
+        array_uuid: [u8; 16],
+        now_ns: u64,
+    ) {
+        // The fields are copies; the pair itself is what a failure below hands
+        // back, so the next attempt reuses the same bound endpoint and region.
+        let PendingResources {
+            endpoint,
+            window_id,
+            window_base,
+        } = resources;
+        let Ok(node_id) = u32::try_from(tairix_rt::hw_emit_node(node)) else {
+            self.pending = Some(resources);
+            self.registry.note_assembly_failed(array_uuid, now_ns);
             log_hex_event(
                 RAID_ARRAY_FAILED,
                 Level::Warn,
@@ -1106,7 +1123,7 @@ impl Composer {
             );
         }
         let resumed = assembled.resume.progress.is_active();
-        let runtime = match ArrayRuntime::new(
+        let Ok(runtime) = ArrayRuntime::new(
             assembled.identity,
             assembled.array,
             endpoint,
@@ -1114,24 +1131,21 @@ impl Composer {
             node_id,
             assembled.resume,
             now_ns,
-        ) {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                // The node is already published but nothing will serve it, so
-                // withdraw it rather than leave the volume manager driving an
-                // endpoint with no server behind it.
-                let _ = tairix_rt::hw_remove_node(node_id, tairix_abi::HwRemoveFlags::empty());
-                hand_back();
-                registry.note_assembly_failed(array_uuid, now_ns);
-                log_hex_event(
-                    RAID_ARRAY_FAILED,
-                    Level::Warn,
-                    "raid: array runtime could not be built; backing off",
-                    "endpoint_hex",
-                    endpoint,
-                );
-                return;
-            }
+        ) else {
+            // The node is already published but nothing will serve it, so
+            // withdraw it rather than leave the volume manager driving an
+            // endpoint with no server behind it.
+            let _ = tairix_rt::hw_remove_node(node_id, tairix_abi::HwRemoveFlags::empty());
+            self.pending = Some(resources);
+            self.registry.note_assembly_failed(array_uuid, now_ns);
+            log_hex_event(
+                RAID_ARRAY_FAILED,
+                Level::Warn,
+                "raid: array runtime could not be built; backing off",
+                "endpoint_hex",
+                endpoint,
+            );
+            return;
         };
         if resumed {
             log_hex_event(
@@ -1142,10 +1156,17 @@ impl Composer {
                 endpoint,
             );
         }
-        registry.note_composed(array_uuid, &assembled.slots);
-        arrays.push(LiveArray { runtime, window });
+        self.registry.note_composed(array_uuid, &assembled.slots);
+        // SAFETY: `window_base` addresses the `BLK_DATA_LEN` cacheable RW bytes
+        // `create_array_window` minted and mapped for this array, and the
+        // mapping lives for the rest of this process. The region is reached
+        // only through `pending`/`arrays`, each of which holds it at most once,
+        // so this is the only slice over it.
+        let window =
+            unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
+        self.arrays.push(LiveArray { runtime, window });
         let _ = tairix_rt::waitset_ctl(
-            *set,
+            self.set,
             WaitSetOp::Add,
             WaitSourceKind::Endpoint,
             endpoint,

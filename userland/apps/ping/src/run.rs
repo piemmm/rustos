@@ -103,11 +103,10 @@ mod program {
             if tairix_rt::port_bind(DELIVER_PORT, SocketEcho::MAX_WIRE_LEN, DELIVER_CAPACITY) < 0 {
                 return Err(PingError::Socket(Errno::AddressInUse));
             }
-            let set = tairix_rt::waitset_create();
-            if set < 0 {
+            // A negative result is the kernel's `-errno`, never a handle.
+            let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
                 return Err(PingError::Socket(Errno::NotImplemented));
-            }
-            let set = set as u64;
+            };
             if tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Add,
@@ -263,13 +262,7 @@ mod program {
             Command::Help => run(command, locale, &mut NoNet, &help, &RtOutput, &RtErrors),
         };
         match result {
-            Ok(summary) => {
-                if is_help || summary.any_received() {
-                    0
-                } else {
-                    1
-                }
-            }
+            Ok(summary) => i32::from(!is_help && !summary.any_received()),
             Err(err) => {
                 write_stderr_line(&format!("ping: {err}"));
                 2

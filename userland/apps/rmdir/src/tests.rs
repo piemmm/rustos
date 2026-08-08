@@ -368,6 +368,17 @@ fn help_falls_back_to_the_usage_banner() {
     assert_eq!(out.text.borrow().as_str(), USAGE);
 }
 
+/// The banner is complete as written, so a consumer emits it verbatim.
+///
+/// The usage-error path used to hand it to the line-appending stderr writer,
+/// which followed it with a blank line GNU `rmdir` never prints while the
+/// help path above wrote the same constant unchanged.
+#[test]
+fn the_usage_banner_ends_in_exactly_one_newline() {
+    assert!(USAGE.ends_with('\n'));
+    assert!(!USAGE.ends_with("\n\n"));
+}
+
 /// Every locale's `OPTIONS` section documents exactly the switches this
 /// parser accepts (`plans/APPS.md` §3.1): the flag tokens are
 /// language-neutral, so each translated document must carry the same keys

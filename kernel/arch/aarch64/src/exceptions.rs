@@ -721,10 +721,11 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // the leaf is not a cleared-AF leaf (`set_accessed_flag_in_active`
         // returns `false`), the fault was something else and falls through
         // to the resolver / fatal path unchanged (fail closed).
-        if crate::fault::is_abort(esr) && crate::fault::is_access_flag_fault(esr) {
-            if crate::paging::set_accessed_flag_in_active(read_far()) {
-                return;
-            }
+        if crate::fault::is_abort(esr)
+            && crate::fault::is_access_flag_fault(esr)
+            && crate::paging::set_accessed_flag_in_active(read_far())
+        {
+            return;
         }
 
         // Every data abort from EL0 is offered to the installed resolver
@@ -755,7 +756,7 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
                 if resolver(
                     read_far(),
                     crate::fault::is_write_data_abort(esr),
-                    &user_frame,
+                    &raw const user_frame,
                 ) {
                     return;
                 }
@@ -806,7 +807,7 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
 /// This is the one fatal tail every unhandled/unresolved exception path
 /// funnels into. A user task's own bad instruction (an illegal encoding, an
 /// alignment fault, a store to a non-executable page, an EL0-sourced
-/// SError) must cost only that task: parking the whole CPU here — with
+/// `SError`) must cost only that task: parking the whole CPU here — with
 /// interrupts masked, forever — escalated a one-task fault into a
 /// system-wide hard lockup (the Cortex-A72 boot wedge). For a lower-EL
 /// exception (`kind >= LOWER_SYNC`) it hands the running task to the
@@ -838,7 +839,7 @@ fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
             // returns here (control switches to the dispatcher); a return
             // means the exception could not be attributed to a running task,
             // so fall through to the unrecoverable path below.
-            let _ = terminate(read_elr(), &user_frame);
+            let _ = terminate(read_elr(), &raw const user_frame);
         }
     }
     // A same-EL (kernel) exception, or a lower-EL one with no task to
