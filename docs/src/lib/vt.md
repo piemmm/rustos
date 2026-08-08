@@ -15,7 +15,7 @@ Stability tier: **experimental** (the surface grows stage by stage under
 
 | Module | Contents |
 |--------|----------|
-| `control` | The C0/C1 control bytes, the CSI/OSC/DCS introducers, the final bytes, and the DEC private-mode numbers, as typed constants — plus the read-line-discipline erase vocabulary (`is_line_erase`, recognising Backspace `BS` or Delete `DEL`, and the `ERASE_ECHO` `BS SP BS` rub-out) the kernel console echo and a reader's line buffer share so they never disagree on which byte erases (`AGENTS.md` §2.2). |
+| `control` | The C0/C1 control bytes, the CSI/OSC/DCS introducers, the final bytes, and the DEC private-mode numbers, as typed constants — plus the read-line-discipline erase vocabulary (`is_line_erase`, recognising Backspace `BS` or Delete `DEL`, and the `ERASE_ECHO` `BS SP BS` rub-out) the kernel console echo and a reader's line buffer share so they never disagree on which byte erases (`AGENTS.md` §2.2), and `SESSION_RESET` — the one definition of what to ask a terminal whose screen we do *not* own to discard at a session boundary (leave the alternate screen, erase the display, erase the saved scrollback, home, plain pen), which the kernel writes to a byte-stream console on `terminal_purge`. |
 | `color` | `BasicColor` (the 16 ANSI colours, palette index `0..=15`) and `Color` (the default, the 16 basic colours, the 256-colour palette, and 24-bit truecolour). |
 | `attr` | `Sgr` (one Select Graphic Rendition operation), the single `write_params`/`decode_params` SGR table both the emitter and parser use, and `Attributes` (the folded rendition state of a cell). |
 | `cell` | `Cell` — a glyph plus its `Attributes`, the shared screen-cell representation. |

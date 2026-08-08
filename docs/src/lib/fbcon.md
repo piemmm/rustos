@@ -98,6 +98,16 @@ continuation cell stays blank. It is a full terminal:
   live insertion point on the framebuffer console.
 - `Cell` — the character cell (`tairix_vt::Cell`), re-exported so a caller can
   size and blank the grid buffers.
+- `purge(pixels)` — the session boundary: discard everything a finished
+  session left on the console. Stronger than `clear`, which blanks only the
+  grid being shown: a purge blanks **both** grids, so text a program left on
+  the screen it was not using cannot be revealed by whoever comes next, drops
+  a partly received escape sequence so the next session's first bytes cannot
+  complete a prefix the last one held, and returns every other piece of screen
+  state (cursor, pen, scroll region, saved cursors) to its initial value — a
+  purged console is indistinguishable from one nobody has used. A hidden
+  console purges its retained state and paints nothing, so the purge is what
+  the next `show` reveals. The kernel drives it from `terminal_purge`.
 - `hide()` / `show(pixels)` / `is_visible()` — give the scan-out surface up to
   another presenter and take it back. `show` fills the surface (blanking the
   margins outside the cell grid, which a cell flush never covers) and then

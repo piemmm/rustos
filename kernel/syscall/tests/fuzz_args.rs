@@ -184,6 +184,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn terminal_purge(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,

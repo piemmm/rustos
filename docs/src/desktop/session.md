@@ -106,7 +106,7 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
   which is how the embedder resolves pin views without borrowing the shell
   three times.
 - The same cache answers the bar's `IconArtwork` lookup (through
-  `IconArtworkSource`) for the shipped raster masters under
+  `IconArtworkSource`) for the shipped class masters under
   `/System/Graphics/Icons`, so the launcher buttons, a pin, a running task,
   and a library row all draw out of one store and one budget.
 

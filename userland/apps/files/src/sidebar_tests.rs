@@ -14,7 +14,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_abi::Errno;
-use tairix_browse::render::{content_area, sidebar_view, toolbar_command_at};
+use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
 use tairix_browse::{Browser, DirectorySource, Entry, Places, SidebarView, ToolbarCommand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
@@ -182,7 +182,11 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
 fn a_press_beyond_the_rail_is_left_to_the_view_below() {
     let mut browser = browser();
     let mut places = places();
-    let just_outside = Point::new(i32::try_from(rail(&places).width()).unwrap_or(0), 4);
+    // Level with a drawn row, one pixel past the rail's trailing edge.
+    let just_outside = Point::new(
+        i32::try_from(rail(&places).width()).unwrap_or(0),
+        row_centre(&places, 0).y,
+    );
 
     assert!(route(&mut browser, &mut places, &press(just_outside)).is_none());
     // Nothing about the rail moved, and the browser stayed put.
@@ -407,34 +411,34 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     let browser = browser();
     let places = places();
     let theme = Theme::dark();
-    let viewport = content_area(WINDOW, Scale::ONE, &theme, Some(&places));
 
     assert!(is_refresh_request(
         &browser,
         Scale::ONE,
         &theme,
-        viewport,
+        WINDOW,
         &named(NamedKeyCode::F5)
     ));
     assert!(!is_refresh_request(
         &browser,
         Scale::ONE,
         &theme,
-        viewport,
+        WINDOW,
         &named(NamedKeyCode::Enter)
     ));
 
     // A press on the toolbar's Refresh control is the same request. The
-    // control's position is read from the same layout the toolbar was drawn
-    // with, so the test cannot drift from the painted chrome.
+    // toolbar is window chrome, so the control's position is read from the
+    // whole window — the band it was drawn across — and the test cannot drift
+    // from the painted chrome.
     let mut refresh = None;
     let mut other = None;
-    let right = viewport.origin.x + i32::try_from(viewport.width).unwrap_or(0);
-    let bottom = viewport.origin.y + i32::try_from(viewport.height).unwrap_or(0);
-    for y in viewport.origin.y..bottom {
-        for x in viewport.origin.x..right {
+    let right = WINDOW.origin.x + i32::try_from(WINDOW.width).unwrap_or(0);
+    let bottom = WINDOW.origin.y + i32::try_from(WINDOW.height).unwrap_or(0);
+    for y in WINDOW.origin.y..bottom {
+        for x in WINDOW.origin.x..right {
             let point = Point::new(x, y);
-            match toolbar_command_at(&browser, Scale::ONE, &theme, viewport, point) {
+            match toolbar_command_at(&browser, Scale::ONE, &theme, WINDOW, point) {
                 Some(ToolbarCommand::Refresh) if refresh.is_none() => refresh = Some(point),
                 Some(command) if command != ToolbarCommand::Refresh && other.is_none() => {
                     other = Some(point);
@@ -448,18 +452,24 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     }
     let refresh = refresh.expect("the toolbar carries a Refresh command");
     let other = other.expect("the toolbar carries more than one enabled command");
+    // The two routers are disjoint: the toolbar owns its band outright, so the
+    // press that refreshes is never also a press on a place.
+    assert_eq!(
+        sidebar_index_at(WINDOW, Scale::ONE, &theme, Some(&places), refresh),
+        None
+    );
     assert!(is_refresh_request(
         &browser,
         Scale::ONE,
         &theme,
-        viewport,
+        WINDOW,
         &press(refresh)
     ));
     assert!(!is_refresh_request(
         &browser,
         Scale::ONE,
         &theme,
-        viewport,
+        WINDOW,
         &press(other)
     ));
     // A motion over Refresh is not a request; only a press is.
@@ -467,7 +477,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         &browser,
         Scale::ONE,
         &theme,
-        viewport,
+        WINDOW,
         &motion(refresh)
     ));
 }

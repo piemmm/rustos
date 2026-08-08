@@ -2,12 +2,13 @@
 //!
 //! [`IconKind`] and [`builtin_icon`](crate::builtin_icon) give the desktop a
 //! *total* set of scalable vector glyphs — every kind always draws something.
-//! On top of that floor this module adds the preferred tiers: pre-rasterised
-//! raster **artwork**, shipped under `/System/Graphics/Icons` as one
-//! `<asset-id>.png` per kind, and above it the icon a thing carries of its
-//! *own* — an application bundle's `Resources/` master, named by its signed
-//! manifest. A draw site states both in one [`IconRequest`] and the answer
-//! resolves in one order: the thing's own icon, then its kind's shipped
+//! On top of that floor this module adds the preferred tiers: the shipped
+//! **class artwork** under `/System/Graphics/Icons`, as either an
+//! `<asset-id>.png` raster master or an `<asset-id>.svg` vector one, and above
+//! it the icon a thing carries of its *own* — an application bundle's
+//! `Resources/` master, named by its signed manifest. A draw site states both
+//! in one [`IconRequest`] and the answer resolves in one order: the thing's
+//! own icon, then its class's raster artwork, then its class's vector
 //! artwork, then the built-in glyph. Resolution is therefore total however
 //! much of it is missing, and the order lives here rather than being
 //! re-decided by each surface.
@@ -77,20 +78,31 @@ pub const MAX_ARTWORK_SIDE: u32 = 2048;
 /// refusing it.
 pub const MIN_ARTWORK_SIDE: u32 = 256;
 
+/// Extension of a raster class master, the format the class tier prefers.
+const RASTER_SUFFIX: &str = ".png";
+
+/// Extension of a vector class master, the format the class tier falls back
+/// to.
+const VECTOR_SUFFIX: &str = ".svg";
+
 /// The on-disk path of the vector asset for `kind` (`<ICONS_DIR>/<id>.svg`).
 #[must_use]
 pub fn icon_vector_path(kind: IconKind) -> String {
-    format!("{ICONS_DIR}/{}.svg", kind.asset_id())
+    format!("{ICONS_DIR}/{}{VECTOR_SUFFIX}", kind.asset_id())
 }
 
 /// The on-disk path of the raster artwork for `kind` (`<ICONS_DIR>/<id>.png`).
 #[must_use]
 pub fn icon_artwork_path(kind: IconKind) -> String {
-    format!("{ICONS_DIR}/{}.png", kind.asset_id())
+    format!("{ICONS_DIR}/{}{RASTER_SUFFIX}", kind.asset_id())
 }
 
 /// Whether `name` is a legal shipped-artwork file name: a known
-/// [`IconKind::asset_id`] followed by `.png`, and nothing else.
+/// [`IconKind::asset_id`] followed by `.png` or `.svg`, and nothing else.
+///
+/// Both class formats are legal because both tiers of
+/// [`ArtworkCache::artwork`] read from this one directory; which of the two a
+/// kind ships is the artwork's business, not the name check's.
 ///
 /// Used by the image build to refuse an asset the desktop could never
 /// resolve. The identity check is exact — a name that decodes to a kind whose
@@ -100,7 +112,9 @@ pub fn icon_artwork_path(kind: IconKind) -> String {
 /// would not later map back to the same kind.
 #[must_use]
 pub fn artwork_kind_for_file(name: &str) -> Option<IconKind> {
-    let stem = name.strip_suffix(".png")?;
+    let stem = name
+        .strip_suffix(RASTER_SUFFIX)
+        .or_else(|| name.strip_suffix(VECTOR_SUFFIX))?;
     let kind = IconKind::for_asset(stem);
     (kind.asset_id() == stem).then_some(kind)
 }
@@ -184,6 +198,43 @@ impl<'a> IconRequest<'a> {
     #[must_use]
     pub const fn icon_kind(&self) -> IconKind {
         self.kind
+    }
+
+    /// The candidates this request resolves through, in the order they are
+    /// tried. The one statement of the desktop's icon-resolution order.
+    fn tiers(self) -> impl Iterator<Item = Tier<'a>> {
+        [
+            self.own.map(Tier::Own),
+            Some(Tier::Raster(self.kind)),
+            Some(Tier::Vector(self.kind)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+/// One candidate in the resolution order.
+///
+/// Held as the kind rather than as a built path so a tier that is never
+/// reached never formats one.
+enum Tier<'a> {
+    /// The thing's own icon.
+    Own(OwnIcon<'a>),
+    /// The class's shipped raster master.
+    Raster(IconKind),
+    /// The class's shipped vector master.
+    Vector(IconKind),
+}
+
+impl Tier<'_> {
+    /// The cache slot this candidate occupies.
+    fn cache_key(self) -> ArtworkKey {
+        match self {
+            Self::Own(OwnIcon::Asset(path)) => ArtworkKey::Asset(String::from(path)),
+            Self::Own(OwnIcon::Bundle(dir)) => ArtworkKey::Bundle(String::from(dir)),
+            Self::Raster(kind) => ArtworkKey::Asset(icon_artwork_path(kind)),
+            Self::Vector(kind) => ArtworkKey::Asset(icon_vector_path(kind)),
+        }
     }
 }
 
@@ -289,20 +340,11 @@ pub fn artwork_cache(
 /// two apart in the key type says so rather than relying on it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtworkKey {
-    /// An asset file read directly: a shipped `<asset-id>.png`, or an icon
-    /// path the caller had already resolved.
+    /// An asset file read directly: a shipped `<asset-id>.png` or
+    /// `<asset-id>.svg`, or an icon path the caller had already resolved.
     Asset(String),
     /// An application-bundle directory, resolved through its own manifest.
     Bundle(String),
-}
-
-impl ArtworkKey {
-    /// The path this key names.
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Asset(path) | Self::Bundle(path) => path,
-        }
-    }
 }
 
 /// The outcome of building one cache slot.
@@ -411,6 +453,10 @@ impl ArtworkCache {
     /// tile — resolves identically. A bundle's own icon is read and decoded
     /// exactly like a shipped asset: bounded, sandboxed by the injected
     /// rasteriser, and accepted only as exactly the pixels asked for.
+    ///
+    /// Each tier it reaches leaves a retained outcome behind, refusal
+    /// included, so a kind that ships no artwork at all costs one read per
+    /// class format once and none thereafter.
     pub fn artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
         &mut self,
         reader: &mut R,
@@ -418,21 +464,21 @@ impl ArtworkCache {
         request: IconRequest<'_>,
         side: u32,
     ) -> Option<&Surface> {
-        if let Some(own) = request.own {
-            let key = (own.cache_key(), side);
-            match self.build_slot(&key, || render_own(reader, rasteriser, own, side)) {
-                Slot::Served => return self.borrow_slot(&key),
-                // Nothing is being retained, so the kind tier could only
+        let mut served = None;
+        for tier in request.tiers() {
+            let key = (tier.cache_key(), side);
+            match self.build_slot(&key, || render_key(reader, rasteriser, &key.0, side)) {
+                Slot::Served => {
+                    served = Some(key);
+                    break;
+                }
+                // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode.
                 Slot::Closed => return None,
                 Slot::Empty => {}
             }
         }
-        let key = (ArtworkKey::Asset(icon_artwork_path(request.kind)), side);
-        let _ = self.build_slot(&key, || {
-            render_icon(reader, rasteriser, key.0.as_str(), side)
-        });
-        self.borrow_slot(&key)
+        self.borrow_slot(&served?)
     }
 
     /// Build `key`'s slot once (a refusal is retained as an empty slot), and
@@ -462,26 +508,18 @@ impl ArtworkCache {
     }
 }
 
-impl OwnIcon<'_> {
-    /// The cache slot this icon source occupies.
-    fn cache_key(self) -> ArtworkKey {
-        match self {
-            Self::Asset(path) => ArtworkKey::Asset(String::from(path)),
-            Self::Bundle(dir) => ArtworkKey::Bundle(String::from(dir)),
-        }
-    }
-}
-
-/// Read, rasterise, and verify a thing's own icon (the cache-miss path).
-fn render_own<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
+/// Read, rasterise, and verify whatever one cache slot names (the cache-miss
+/// path). A bundle resolves its manifest first; every other key is an asset
+/// path already.
+fn render_key<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
     reader: &mut R,
     rasteriser: &mut D,
-    own: OwnIcon<'_>,
+    key: &ArtworkKey,
     side: u32,
 ) -> Option<Surface> {
-    match own {
-        OwnIcon::Asset(path) => render_icon(reader, rasteriser, path, side),
-        OwnIcon::Bundle(dir) => {
+    match key {
+        ArtworkKey::Asset(path) => render_icon(reader, rasteriser, path, side),
+        ArtworkKey::Bundle(dir) => {
             let path = bundle_icon_path(reader, dir)?;
             render_icon(reader, rasteriser, &path, side)
         }

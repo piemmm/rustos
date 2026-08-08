@@ -197,6 +197,9 @@ const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 /// `stream_input_mode` syscall number (as above).
 const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
 
+/// `terminal_purge` syscall number (as above).
+const NUM_TERMINAL_PURGE: u64 = SyscallNumber::TERMINAL_PURGE.as_u16() as u64;
+
 /// `key_inject` syscall number (as above).
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 
@@ -536,6 +539,35 @@ pub fn set_input_mode(mode: InputMode) -> i64 {
             [u64::from(STDIN), u64::from(mode.as_u32()), 0, 0, 0, 0],
         )
     };
+    ret as i64
+}
+
+/// Discard everything a finished session left on the terminal behind standard
+/// input (`SyscallNumber::TERMINAL_PURGE`), returning the raw signed register
+/// (`0` on success, else `-errno`).
+///
+/// The session boundary of a shared terminal: the caller has just watched a
+/// session end on this terminal and is about to hand it to whoever comes next,
+/// so nothing the session left — the retained screen (including the one it was
+/// not showing), the scrollback of a remote emulator, the keystrokes it typed
+/// ahead but never read — may still be there. The read line discipline returns
+/// to [`InputMode::Cooked`], so the next reader starts from the interactive
+/// default.
+///
+/// Requires `CAP_CONSOLE_READ` **and** `CAP_CONSOLE_WRITE` (the purge discards
+/// queued input as well as retained output) and, like every other terminal
+/// control, admits only the terminal's controlling owner. A build with no
+/// console wired, or an fd 0 that is not a readable stream, fails closed with
+/// `-errno`; the wrapper surfaces it verbatim so the caller decides how to
+/// react — a purge it could not perform is a fact its caller must see, never
+/// one to swallow.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn purge_terminal() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates both capabilities and resolves fd 0
+    // before touching any state.
+    let ret = unsafe { raw_syscall(NUM_TERMINAL_PURGE, [u64::from(STDIN), 0, 0, 0, 0, 0]) };
     ret as i64
 }
 

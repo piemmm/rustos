@@ -32,7 +32,11 @@ draw site always gets something:
    monochrome silhouette can.
 2. **Vector SVG (next).** The scalable `<asset-id>.svg` source under the same
    directory (`icon_vector_path(kind)`), decoded into a `VectorIcon` through
-   the SVG-first loader.
+   the SVG-first loader. A kind ships **one** class master, in whichever of
+   the two formats suits its artwork — the folder is vector, the illustrative
+   file-class and disk pictures are raster. Shipping one id in both formats is
+   a packaging defect the image build refuses, because the raster tier would
+   always win and the vector could never be selected.
 3. **Built-in glyph (always last).** `builtin_icon(kind, colour)` — the
    monochrome vector silhouette compiled into the crate. This tier can never
    be absent, so the desktop always shows a meaningful icon even with no
@@ -50,10 +54,11 @@ rather than a bare placeholder.
 
 ## The `artwork` layer
 
-The `artwork` module turns tier 1 into drawable pixels for the two processes
-that need it — the desktop session and the file manager — through injected
-seams, so the crate stays `no_std` and the untrusted decode never runs in this
-library or in the renderer that consumes it (`AGENTS.md` §19.5):
+The `artwork` module turns those on-disk tiers into drawable pixels for the
+two processes that need it — the desktop session and the file manager —
+through injected seams, so the crate stays `no_std` and the untrusted decode
+never runs in this library or in the renderer that consumes it
+(`AGENTS.md` §19.5):
 
 - `ArtworkReader` reads an asset's bytes (a capability-gated filesystem read
   in production); a missing or refused asset is `None`, never fatal.
@@ -71,10 +76,11 @@ library or in the renderer that consumes it (`AGENTS.md` §19.5):
   sandboxed rasteriser bounds its decode by the first, and the image build
   refuses a first-party raster master that fails either, an icon of either
   format that will not decode, and one that decodes but draws nothing.
-- `artwork_kind_for_file(name)` accepts exactly `<asset-id>.png` for a known
-  kind and refuses anything else (an unknown id, a wrong extension, an empty
-  name, or a directory-bearing path-traversal attempt), so the image build can
-  reject an asset the desktop could never resolve.
+- `artwork_kind_for_file(name)` accepts exactly `<asset-id>.png` or
+  `<asset-id>.svg` for a known kind — both, because both class tiers read the
+  one directory — and refuses anything else (an unknown id, a format no tier
+  reads, an empty name, or a directory-bearing path-traversal attempt), so the
+  image build can reject an asset the desktop could never resolve.
 
 ## Asking for a picture
 

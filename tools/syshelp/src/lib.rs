@@ -10,7 +10,7 @@
 //! where `<store>` is the store the bundle's own manifest kind installs it
 //! to — `Commands` for a command app, `Applications` for a graphical
 //! application, `Services` for a service. It also
-//! ships the desktop's graphics assets — today the raster icon masters and
+//! ships the desktop's graphics assets — today the icon class masters and
 //! the shipped default wallpaper masters — under `/System/Graphics`. The
 //! image builder (`tools/mkimage`) and the QEMU image fixture must plant all
 //! of these onto the volume they author.
@@ -27,11 +27,11 @@
 //! hand-maintained list that a new file would force an edit to (the
 //! duplication the charter forbids). Adding a bundle's payload is dropping
 //! files under `<root>/<name>/Help/<locale>/` or `<root>/<name>/Resources/`,
-//! adding an icon is dropping a `<asset-id>.png` under `lib/icon/assets/`,
-//! and adding a wallpaper is dropping a `.jpg`/`.jpeg`/`.png` under
-//! `lib/wallpaper/assets/`; the next build rediscovers them. Payload is
-//! therefore authored in exactly one place and never hardcoded into a binary
-//! or copied into the image builder.
+//! adding an icon is dropping a `<asset-id>.png` or `<asset-id>.svg` under
+//! `lib/icon/assets/`, and adding a wallpaper is dropping a
+//! `.jpg`/`.jpeg`/`.png` under `lib/wallpaper/assets/`; the next build
+//! rediscovers them. Payload is therefore authored in exactly one place and
+//! never hardcoded into a binary or copied into the image builder.
 //!
 //! Each graphics family's files are additionally validated against that
 //! family's own contract (`tairix_icon` for icons, `tairix_wallpaper` for
@@ -133,8 +133,9 @@ pub const RESOURCE_FILES: &[ResourceFile] =
 /// it, rather than silently falling through a default arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphicsFamilyKind {
-    /// The raster icon masters: one `<asset-id>.png` per icon kind,
-    /// resolved by the window manager and file manager by asset id.
+    /// The icon class masters: one `<asset-id>.png` raster *or*
+    /// `<asset-id>.svg` vector per icon kind, resolved by the window manager
+    /// and file manager by asset id.
     Icon,
     /// The shipped default wallpaper masters: one `.jpg`/`.jpeg`/`.png` per
     /// shipped master, listed by name through
@@ -380,9 +381,11 @@ mod tests {
 
     /// The discovered desktop graphics assets are non-empty and every one
     /// satisfies its own family's contract: an icon is a legal
-    /// `<asset-id>.png` name within the artwork byte bound with a unique
-    /// asset id, and a wallpaper is a legal shipped file name within the
-    /// wallpaper byte bound with a unique name. Dispatching on
+    /// `<asset-id>.png` or `<asset-id>.svg` name within the artwork byte
+    /// bound with a unique asset id — so one kind never ships a master in
+    /// both formats, of which the resolution order could only ever select
+    /// the raster one — and a wallpaper is a legal shipped file name within
+    /// the wallpaper byte bound with a unique name. Dispatching on
     /// [`super::GraphicsFamilyKind`] rather than a directory string means a
     /// third family added here without a matching arm fails to compile,
     /// never silently skips its own contract. This mirrors the fail-closed
@@ -446,7 +449,9 @@ mod tests {
     /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/`, and a
     /// wallpaper under `Graphics/Wallpapers/`. All planters drive their own
     /// `plant_nested_file` from this one walk, so this pins the count and
-    /// the path spelling they share.
+    /// the path spelling they share — for a vector class master and a raster
+    /// one alike, since the walk plants an icon by its discovered file name
+    /// and never by an assumed extension.
     #[test]
     fn the_shared_walk_visits_every_payload_file_at_its_planted_path() {
         use super::{plant_system_payload, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
@@ -467,16 +472,19 @@ mod tests {
             HELP_FILES.len() + RESOURCE_FILES.len() + GRAPHICS_FILES.len(),
             "every discovered file is visited exactly once"
         );
-        // The known folder-icon lands at Graphics/Icons/folder.png.
-        assert!(
-            visited.iter().any(|c| c
-                == &[
-                    b"Graphics".to_vec(),
-                    b"Icons".to_vec(),
-                    b"folder.png".to_vec()
-                ]),
-            "the folder icon is planted at Graphics/Icons/folder.png"
-        );
+        // The folder class icon is the shipped vector master, and the
+        // generic file icon the shipped raster one.
+        for icon in ["folder.svg", "file.png"] {
+            assert!(
+                visited.iter().any(|c| c
+                    == &[
+                        b"Graphics".to_vec(),
+                        b"Icons".to_vec(),
+                        icon.as_bytes().to_vec()
+                    ]),
+                "the {icon} icon is planted at Graphics/Icons/{icon}"
+            );
+        }
         // The shipped default wallpaper lands at Graphics/Wallpapers/tairix-dark.jpg.
         assert!(
             visited.iter().any(|c| c

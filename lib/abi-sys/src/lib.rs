@@ -94,6 +94,7 @@ const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
+const NUM_TERMINAL_PURGE: u64 = SyscallNumber::TERMINAL_PURGE.as_u16() as u64;
 
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
@@ -600,6 +601,31 @@ pub extern "C" fn sys_stream_input_mode(fd: u32, mode: u32) -> i32 {
         ret_i32(raw_syscall(
             NUM_STREAM_INPUT_MODE,
             [u64::from(fd), u64::from(mode), 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `terminal_purge`: discard everything a finished session left on the
+/// terminal behind the input stream `fd`
+/// (`SyscallNumber::TERMINAL_PURGE`) — the retained screen (including the one
+/// it was not showing), a remote emulator's display and saved scrollback, the
+/// keystrokes typed ahead but never read — and return the read line discipline
+/// to cooked. Returns a `TAIRIX_E_*` code.
+///
+/// The session boundary of a shared terminal: a program that runs a session on
+/// a terminal and then hands it to whoever comes next calls this in between, so
+/// nothing of the ended session reaches the next user. Gated kernel-side on
+/// `TAIRIX_CAP_CONSOLE_WRITE` **and** `TAIRIX_CAP_CONSOLE_READ` (retained
+/// output *and* queued input are discarded), and admitted only for the
+/// terminal's controlling owner.
+#[must_use]
+#[export_name = "tairix_sys_terminal_purge"]
+pub extern "C" fn sys_terminal_purge(fd: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_TERMINAL_PURGE,
+            [u64::from(fd), 0, 0, 0, 0, 0],
         ))
     }
 }
@@ -2676,6 +2702,7 @@ mod tests {
         (NUM_USERS_ADMIN, "users_admin", 4),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_INPUT_MODE, "stream_input_mode", 2),
+        (NUM_TERMINAL_PURGE, "terminal_purge", 1),
         (NUM_CONSOLE_FOREGROUND, "console_foreground", 2),
         (NUM_KEY_INJECT, "key_inject", 3),
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 1),

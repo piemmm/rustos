@@ -755,6 +755,47 @@ its own right and will serve every graphical vertical the desktop needs,
 not only this one; building it inside this change would have made it a
 graphical-test-harness change with a login screen attached.
 
+## G8. The terminal a text session leaves behind
+
+**Status: done.**
+
+A text console is shared, so the end of a session is a boundary: nothing
+the session left on the terminal is the next user's to see. `login` takes
+the terminal back at every session boundary — a clean exit, a load refusal,
+a session that never started — through the `LoginView::session_ended` seam
+(the counterpart of `session_handoff`), which the production view drives
+with `tairix_rt::purge_terminal`. A merely rejected credential is not a
+boundary: nothing ran, so nothing is discarded.
+
+The discarding is the kernel's, not an escape sequence the login hopes a
+terminal honours (`terminal_purge`, syscall 108,
+`docs/src/architecture/syscalls.md`):
+
+- `ConsoleWrite::purge` — a retained framebuffer console (`lib/fbcon`
+  `TextConsole::purge`) blanks **both** cell grids, so the alternate screen
+  a full-screen program left behind cannot be revealed by whoever comes
+  next; rewrites every pixel including the margins and stride slack; and
+  resets the parser so a held escape prefix cannot be completed by the next
+  session's first bytes. A byte-stream console owns no display, so the
+  default asks the remote emulator instead, with the one shared
+  `tairix_vt::control::SESSION_RESET` sequence (leave alt screen, erase
+  display, erase saved scrollback, home, plain pen).
+- `ConsoleRead::purge` — the type-ahead ring is re-initialised (every slot
+  zeroed, not merely unqueued), so keystrokes typed ahead of the reader,
+  including a mistyped credential, are neither delivered nor left in kernel
+  memory. A device with no queue of its own is drained under a fixed read
+  bound; the blocking adapter delegates to its backing rather than parking
+  on the keystrokes the purge exists to refuse.
+- `ConsoleDevice::purge_session` / `Pty::purge_session` — input first,
+  then the discipline back to cooked (which also clears the secret-entry
+  marker), then the display, so nothing repaints over the blank screen.
+
+Both halves' authority is required (`CAP_CONSOLE_WRITE` at the dispatcher,
+`CAP_CONSOLE_READ` in the handler before any state is touched) and only the
+terminal's controlling owner is admitted. The controlling ownership itself
+is deliberately untouched: releasing it here would let a task that never
+held the terminal take its control.
+
 ## Security review notes
 
 - **The greeter is untrusted by the authority.** Every field of every
@@ -856,3 +897,4 @@ Covered in host unit tests:
 | G6 | `ScreenLock` composes `lib/greeter` | done |
 | G7 | Docs and README matrix | done |
 | G7.1 | QEMU verticals | planned |
+| G8 | Text session boundary: `terminal_purge` + `session_ended` | done |

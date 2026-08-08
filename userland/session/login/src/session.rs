@@ -338,6 +338,20 @@ pub trait LoginView {
     ///
     /// [`round_begin`]: LoginView::round_begin
     fn session_handoff(&self);
+
+    /// Take the terminal back from a session that has ended, discarding
+    /// everything it left there — the screen it drew, the screen it was not
+    /// showing, a remote emulator's saved scrollback, and the keystrokes it
+    /// typed ahead but never read.
+    ///
+    /// The counterpart of [`session_handoff`], called once per session
+    /// boundary however the session ended — cleanly, refused at load, or
+    /// never launched at all — because in each case the terminal is about to
+    /// be offered to whoever is at it next, and none of one user's session is
+    /// theirs to see.
+    ///
+    /// [`session_handoff`]: LoginView::session_handoff
+    fn session_ended(&self);
 }
 
 /// Verifies credentials against `kernel/sec` and the credential store.

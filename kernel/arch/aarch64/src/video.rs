@@ -205,8 +205,8 @@ pub struct DiscoveredVideo {
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use metal::{
-    active_framebuffer_extent, attach_console, configure_from_fdt, reclaim_surface, set_visible,
-    text_cell_count, text_grid, write_bytes, write_output_bytes,
+    active_framebuffer_extent, attach_console, configure_from_fdt, purge, reclaim_surface,
+    set_visible, text_cell_count, text_grid, write_bytes, write_output_bytes,
 };
 
 /// Host stand-in for the freestanding writer: rendering needs the
@@ -263,6 +263,12 @@ pub fn set_visible(_visible: bool) {}
 /// the host, so a panic has nothing to take back.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn reclaim_surface() {}
+
+/// Host stand-in for the freestanding `purge`: no surface exists on the host,
+/// so there is nothing a session could have left on it (the discard itself is
+/// host-tested through [`tairix_fbcon::TextConsole`]).
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn purge() {}
 
 /// The freestanding half: the firmware exchange, the identity-mapped
 /// surface, and the cache maintenance. Target-only — every routine here
@@ -699,6 +705,44 @@ mod metal {
     }
 
     fn render_bytes(bytes: &[u8], mode: WriteMode) {
+        paint(|console, pixels| match mode {
+            WriteMode::Verbatim => console.write_bytes(pixels, bytes),
+            WriteMode::ProgramOutput => console.write_output_bytes(pixels, bytes),
+        });
+    }
+
+    /// Discard everything a finished session left on the console's screen —
+    /// both cell grids, every pixel, and a partly received escape sequence —
+    /// so none of it reaches whoever uses the terminal next
+    /// (`terminal_purge`).
+    ///
+    /// A hidden console discards its retained screen and paints nothing, so
+    /// the discard is what the next `set_visible(true)` reveals. Post-MMU
+    /// only, like every other render entry point; a board with no configured
+    /// console does nothing.
+    pub fn purge() {
+        paint(tairix_fbcon::TextConsole::purge);
+    }
+
+    /// Run one operation on the *shown* console's screen and clean the pixel
+    /// band it dirtied to the point of coherency, so the scan-out engine sees
+    /// it — the shared body of every render entry point.
+    ///
+    /// The single place a reference into the firmware surface is formed for a
+    /// write: a hidden console is handed an empty slice, so nothing aliases
+    /// the pixels while a graphical session is writing them. Its retained
+    /// screen still advances, and `set_visible` paints the result when the
+    /// surface comes back — which is why *that* path forms the surface
+    /// itself, taking it back for a console that is not visible yet.
+    ///
+    /// Post-MMU only (the render lock's atomic CAS requires it). A call with
+    /// no active or no configured console is a no-op.
+    fn paint(
+        op: impl FnOnce(
+            &mut tairix_fbcon::TextConsole<'static>,
+            &mut [u32],
+        ) -> Option<tairix_fbcon::DirtyBand>,
+    ) {
         if !super::is_active() {
             return;
         }
@@ -714,10 +758,6 @@ mod metal {
         let Some(console) = state.console.as_mut() else {
             return;
         };
-        // A hidden console paints nothing, so no reference into the surface
-        // is formed while a graphical session is writing it; the engine
-        // still advances its retained screen, and `set_visible` paints the
-        // result when the surface comes back.
         let pixels: &mut [u32] = if console.is_visible() {
             // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
             // validated at configure time, identity-mapped RAM; the render
@@ -726,11 +766,7 @@ mod metal {
         } else {
             &mut []
         };
-        let dirty = match mode {
-            WriteMode::Verbatim => console.write_bytes(pixels, bytes),
-            WriteMode::ProgramOutput => console.write_output_bytes(pixels, bytes),
-        };
-        if let Some((row_start, row_end)) = dirty {
+        if let Some((row_start, row_end)) = op(console, pixels) {
             let stride_bytes = console.geometry().stride_px as usize * 4;
             clean_dcache_range(
                 fb_base + row_start as usize * stride_bytes,

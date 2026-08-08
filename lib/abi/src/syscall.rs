@@ -2120,6 +2120,34 @@ impl SyscallNumber {
     /// and reveals no secret, hence unprivileged and not audited.
     pub const BOOT_SESSION_GET: Self = Self(107);
 
+    /// Discard everything a finished session left on the terminal behind one
+    /// of the calling process's inherited streams, so none of it reaches
+    /// whoever uses that terminal next.
+    ///
+    /// The session boundary of a shared terminal: a text login runs one
+    /// user's session and then prompts the next on the same console, and
+    /// neither the output the session left on the screen — including the
+    /// screen it was *not* showing, which no erase sequence can reach — nor
+    /// the keystrokes it typed ahead but never read are the next user's to
+    /// see. A retained framebuffer console blanks both cell grids, rewrites
+    /// every pixel, and drops a partly received escape sequence; a
+    /// byte-stream console asks the remote emulator to clear its display and
+    /// its saved scrollback; a pseudo-terminal drops both of its rings. Every
+    /// backing also discards pending input and returns the read line
+    /// discipline to the interactive cooked default.
+    ///
+    /// `args[0]` is one of the caller's own inherited stream descriptors
+    /// naming the terminal (a pty slave of the caller resolves to that pty).
+    /// Requires **both** halves' authority —
+    /// [`crate::CapabilityId::CONSOLE_WRITE`]
+    /// (checked by the dispatcher) and [`crate::CapabilityId::CONSOLE_READ`]
+    /// (checked by the handler before any state is touched), because the
+    /// purge destroys retained output *and* discards queued input — and, like
+    /// every other terminal-control call, admits only the terminal's
+    /// controlling owner. Audited: it is a security-relevant discard of one
+    /// principal's data at a session boundary. Returns `0`.
+    pub const TERMINAL_PURGE: Self = Self(108);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

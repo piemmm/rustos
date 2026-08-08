@@ -649,6 +649,13 @@ impl ConsoleWrite for VideoConsole {
     fn reclaim_surface(&self) {
         tairix_arch_aarch64::video::reclaim_surface();
     }
+
+    fn purge(&self) {
+        // A retained console owns its screen, so the discard is real: both
+        // cell grids and every pixel, not the escape sequence the trait
+        // default sends a terminal the kernel cannot reach.
+        tairix_arch_aarch64::video::purge();
+    }
 }
 
 /// The single `'static` [`VideoConsole`] the boot path lists first when

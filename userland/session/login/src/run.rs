@@ -200,6 +200,13 @@ mod program {
         fn cooked(&self) {
             let _ = tairix_rt::set_input_mode(InputMode::Cooked);
         }
+
+        fn purge(&self) {
+            // The kernel discards the retained screens, the pending input,
+            // and the discipline together; a refusal leaves the terminal as
+            // it was and the login still re-prompts.
+            let _ = tairix_rt::purge_terminal();
+        }
     }
 
     /// The view's status figures, queried live from `sysinfod` and the

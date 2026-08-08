@@ -11,7 +11,7 @@ and painting those regions — including the clock label and task-title
 **text** — into a themed pixel surface, plus **routing** pointer, scroll,
 and key events into taskbar actions and drawing **notification-icon
 artwork** (scalable, themeable vector glyphs) and the desktop's **icon
-artwork** (the shipped raster masters and each application's own bundle
+artwork** (the shipped class masters and each application's own bundle
 icon, read and decoded by the session and blitted here).
 
 ## Where it sits
@@ -268,7 +268,7 @@ once in `render` rather than restated per slot (`AGENTS.md` §2.2):
 1. the artwork its owner already supplied for that specific application (a
    `PinView`'s bundle icon, a library row's own icon), else
 2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
-   shipped raster master under `/System/Graphics/Icons`, else
+   shipped class master under `/System/Graphics/Icons`, else
 3. the control's built-in vector glyph.
 
 The bar reads no file and decodes no image: it *asks* the lookup the session

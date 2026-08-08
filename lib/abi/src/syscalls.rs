@@ -2661,6 +2661,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::TERMINAL_PURGE,
+        name: "terminal_purge",
+        arg_count: 1,
+        args: [
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The purge destroys the terminal's retained output, so the
+        // dispatcher gates it on the write half; the handler additionally
+        // requires `CAP_CONSOLE_READ` before touching any state, because
+        // the same call discards queued input. Audited, unlike the other
+        // terminal controls: this one destroys one principal's data at a
+        // session boundary, and it is low-volume (once per session end), so
+        // the record cannot drown the log.
+        required_capability: Some(CapabilityId::CONSOLE_WRITE),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

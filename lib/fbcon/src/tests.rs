@@ -79,6 +79,24 @@ fn small_console() -> (TextConsole<'static>, Vec<u32>) {
     console_of(2, 2)
 }
 
+/// A `cols`-column surface one pixel taller than a whole number of cell rows,
+/// so it has a bottom margin as well as stride slack: the pixels no cell flush
+/// can reach.
+fn console_with_margin(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>, Geometry) {
+    let geometry = Geometry {
+        width_px: cols * CELL_WIDTH,
+        height_px: rows * CELL_HEIGHT + 1,
+        stride_px: cols * CELL_WIDTH + 3,
+        scale: 1,
+    };
+    let mut pixels = vec![0u32; geometry.pixel_count()];
+    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let console = TextConsole::new(geometry, main, alt);
+    pixels.fill(0);
+    (console, pixels, geometry)
+}
+
 /// The pixels of one glyph cell, row-major.
 fn cell(pixels: &[u32], geometry: &Geometry, column: u32, row: u32) -> Vec<u32> {
     let mut out = Vec::new();
@@ -767,22 +785,26 @@ fn showing_replays_everything_written_while_hidden() {
 /// left in the gaps a cell flush never reaches.
 #[test]
 fn showing_blanks_the_margins_and_the_stride_slack() {
-    // A surface one pixel taller than a whole number of cell rows, so
-    // there is a bottom margin as well as the helper's stride slack.
-    let geometry = Geometry {
-        width_px: 2 * CELL_WIDTH,
-        height_px: CELL_HEIGHT + 1,
-        stride_px: 2 * CELL_WIDTH + 3,
-        scale: 1,
-    };
-    let mut pixels = vec![0xFFAB_CDEFu32; geometry.pixel_count()];
-    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
-    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
-    let mut console = TextConsole::new(geometry, main, alt);
+    let (mut console, mut pixels, _) = console_with_margin(2, 1);
+    pixels.fill(0xFFAB_CDEF);
 
     console.show(&mut pixels);
 
     assert!(pixels.iter().all(|&p| p != 0xFFAB_CDEF));
+}
+
+/// A full-surface repaint dirties those margins, so the band it reports must
+/// cover them: a presenter that flushed only the cell rows would leave a
+/// stale sliver of the previous content on screen.
+#[test]
+fn a_full_repaint_reports_the_margins_in_its_dirty_band() {
+    let (mut console, mut pixels, geometry) = console_with_margin(2, 1);
+    let whole_surface = Some((0, geometry.height_px));
+
+    assert_eq!(console.clear(&mut pixels), whole_surface);
+    console.hide();
+    assert_eq!(console.show(&mut pixels), whole_surface);
+    assert_eq!(console.purge(&mut pixels), whole_surface);
 }
 
 /// Idempotent in both directions, which is what lets the panic path
@@ -804,6 +826,112 @@ fn hide_and_show_are_idempotent() {
     assert!(console.is_visible());
     assert_eq!(pixels, once);
     assert_eq!(pixels, shown);
+}
+
+// --- Session purge ---------------------------------------------------------
+
+/// The leak an erase cannot close: text a program left on the screen it was
+/// not using is still in the grid that is not shown, so only a purge reaches
+/// it.
+#[test]
+fn purge_blanks_the_screen_that_is_not_shown() {
+    let (mut console, mut pixels) = console_of(6, 1);
+    // A full-screen program's output, left behind on the alternate screen.
+    console.write_bytes(&mut pixels, b"\x1b[?1049hsecret\x1b[?1049l");
+    assert!(
+        console.screen.alt.iter().any(|c| c.ch != ' '),
+        "the alternate grid holds the program's output"
+    );
+    // An erase of the shown screen cannot reach it.
+    console.write_bytes(&mut pixels, b"\x1b[2J");
+    assert!(console.screen.alt.iter().any(|c| c.ch != ' '));
+
+    console.purge(&mut pixels);
+
+    assert!(
+        console.screen.alt.iter().all(|&c| c == Cell::BLANK),
+        "the purge blanks the grid that is not shown"
+    );
+    assert!(console.screen.main.iter().all(|&c| c == Cell::BLANK));
+}
+
+/// Every pixel is rewritten, the margins and the stride slack included, so no
+/// sliver of the ended session's text survives on the surface.
+#[test]
+fn purge_repaints_the_whole_surface() {
+    let (mut console, mut pixels, geometry) = console_with_margin(3, 1);
+    console.write_bytes(&mut pixels, b"abc");
+    pixels.fill(0xFFAB_CDEF);
+
+    let dirty = console.purge(&mut pixels);
+
+    assert_eq!(dirty, Some((0, geometry.height_px)));
+    assert!(
+        pixels.iter().all(|&p| p != 0xFFAB_CDEF),
+        "not one pixel of the ended session's surface survives"
+    );
+}
+
+/// The whole point of the purge as a session boundary: what the next session
+/// sees and writes is what it would see on a console nobody had used.
+#[test]
+fn a_purged_console_is_indistinguishable_from_a_fresh_one() {
+    // A pen colour, a reverse attribute, the alternate screen, a saved
+    // cursor, a restricted scroll region, and a hidden cursor: every piece
+    // of screen state a session can leave set.
+    let used_by: &[u8] = b"\x1b[31;7mred\x1b7\x1b[?1049halt\x1b[?1049l\x1b[2;3r\x1b[?25l";
+    // Enough output to scroll, so a scroll region the purge failed to
+    // release would land the text elsewhere.
+    let next_session: &[u8] = b"one\r\ntwo\r\nthree\r\nfour";
+
+    let (mut used, mut used_px) = cursor_console_of(5, 3);
+    used.write_bytes(&mut used_px, used_by);
+    used.purge(&mut used_px);
+    used.write_bytes(&mut used_px, next_session);
+
+    let (mut fresh, mut fresh_px) = cursor_console_of(5, 3);
+    fresh.write_bytes(&mut fresh_px, next_session);
+
+    assert_eq!(used_px, fresh_px);
+}
+
+/// A session that ended mid-sequence must not have its held prefix completed
+/// by the next session's first bytes.
+#[test]
+fn purge_drops_a_partly_received_escape_sequence() {
+    let (mut console, mut pixels) = console_of(6, 1);
+    console.write_bytes(&mut pixels, b"\x1b[");
+
+    console.purge(&mut pixels);
+    console.write_bytes(&mut pixels, b"31mX");
+
+    assert_eq!(
+        console.screen.cell_at(0, 0).ch,
+        '3',
+        "the bytes print literally instead of finishing the held sequence"
+    );
+}
+
+/// A hidden console purges its retained state and paints nothing, so the
+/// purge is what the next `show` reveals — the seat lease cannot resurrect
+/// the ended session's text.
+#[test]
+fn purging_while_hidden_wipes_what_show_would_reveal() {
+    const FRAME: u32 = 0xFF12_3456;
+    let (mut console, mut pixels) = cursor_console_of(4, 2);
+    console.write_bytes(&mut pixels, b"left\r\nover");
+    console.hide();
+    pixels.fill(FRAME);
+
+    assert_eq!(console.purge(&mut pixels), None);
+    assert!(
+        pixels.iter().all(|&p| p == FRAME),
+        "the other presenter's pixels are untouched"
+    );
+
+    console.show(&mut pixels);
+    let (_, blank_px) = cursor_console_of(4, 2);
+    assert_eq!(pixels, blank_px, "nothing of the session is revealed");
 }
 
 /// Adjacent blank runs with different backgrounds each keep their own

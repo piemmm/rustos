@@ -872,6 +872,30 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Discard everything a finished session left on the terminal behind
+    /// readable descriptor `fd`, so none of it reaches whoever uses that
+    /// terminal next (`terminal_purge`): the retained display (both cell grids
+    /// of a framebuffer console, both rings of a pty, a byte-stream device's
+    /// remote display and scrollback), the input queued but never read, and
+    /// the read line discipline, which returns to cooked.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::CONSOLE_WRITE`]. The
+    /// implementation additionally requires
+    /// [`CapabilityId::CONSOLE_READ`] — the purge discards queued input as well
+    /// as retained output — before it touches any state, resolves `fd` against
+    /// the caller's own descriptor table (a non-readable or unbacked
+    /// descriptor fails closed with [`Errno::NotFound`]), and admits only the
+    /// terminal's controlling owner, exactly as `stream_input_mode` does.
+    /// Returns `Ok(0)`.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]: a kernel build with no console list wired
+    /// has no terminal to purge. The real handler is installed in
+    /// `kernel/core`.
+    fn terminal_purge(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Inject one decoded keyboard *key edge* into the kernel input-focus
     /// arbiter (`plans/PI.md` P11 — input follows the
     /// surface owner).
@@ -2785,6 +2809,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .console_foreground(caller, decode_u32(args.0[0]), pid)
             }
+            SyscallNumber::TERMINAL_PURGE => {
+                // args[0] is the descriptor naming the terminal to purge;
+                // `validate_arg` guarantees it fits `u32`.
+                self.handlers.terminal_purge(caller, decode_u32(args.0[0]))
+            }
             SyscallNumber::PIPE_CREATE => {
                 // args[0] is the non-null `UserPtr` (dispatcher-checked)
                 // the handler writes the two new descriptors through.
@@ -3930,6 +3959,13 @@ mod tests {
             // real console list here.
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
+        }
+        fn terminal_purge(&self, _c: &CallerContext<'_>, fd: u32) -> SyscallResult {
+            self.record("terminal_purge");
+            // Echo the decoded descriptor back so the reachability test can
+            // assert the dispatcher decoded it without wiring a real console
+            // list here.
+            Ok(u64::from(fd))
         }
         fn key_inject(
             &self,

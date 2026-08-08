@@ -20,7 +20,7 @@
 //! loudly rather than emitting a silently-incomplete image.
 //!
 //! Alongside the per-bundle help and resource families, this script also
-//! discovers the desktop's graphics assets — today the raster icon masters
+//! discovers the desktop's graphics assets — today the icon class masters
 //! under `lib/icon/assets/` and the wallpaper masters under
 //! `lib/wallpaper/assets/` — and emits one `[GraphicsFile]` table for the
 //! image builder to plant under `/System/Graphics`. Both are single,
@@ -81,13 +81,18 @@ struct GraphicsFamily {
     identify: fn(&str) -> Option<String>,
 }
 
-/// The desktop's single-tree graphics asset families: today the raster icon
+/// The desktop's single-tree graphics asset families: today the icon class
 /// masters and the shipped wallpaper masters.
 const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
     GraphicsFamily {
         source_root: "lib/icon/assets",
         family_variant: "Icon",
         max_bytes: tairix_icon::MAX_ARTWORK_BYTES,
+        // A class master is either a `<asset-id>.png` raster or a
+        // `<asset-id>.svg` vector, and both identify as the asset id — so a
+        // kind offered in both formats trips the duplicate-id check below
+        // rather than shipping a master the raster-first resolution order
+        // could never select.
         identify: |name| {
             tairix_icon::artwork_kind_for_file(name).map(|kind| kind.asset_id().to_string())
         },

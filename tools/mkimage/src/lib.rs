@@ -950,22 +950,11 @@ mod tests {
         use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
-        // The desktop's raster icon masters ship under `/System/Graphics`,
-        // discovered from disk (`tairix_syshelp::GRAPHICS_FILES`) — assert
-        // the shipped set is non-empty so an accidentally empty walk cannot
+        // The desktop's icon class masters ship under `/System/Graphics`,
+        // discovered from disk (`tairix_syshelp::GRAPHICS_FILES`). One
+        // master of each class format is read back, so neither the vector
+        // nor the raster arm can rot, and an accidentally empty walk cannot
         // pass this test silently.
-        assert!(
-            !tairix_syshelp::GRAPHICS_FILES.is_empty(),
-            "the desktop ships at least one icon asset"
-        );
-        let folder = tairix_syshelp::GRAPHICS_FILES
-            .iter()
-            .find(|asset| {
-                asset.family == tairix_syshelp::GraphicsFamilyKind::Icon
-                    && asset.file == "folder.png"
-            })
-            .expect("the folder icon master ships");
-
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
@@ -985,19 +974,27 @@ mod tests {
         let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("/System mounts read-only under the public key");
 
-        let mut node = sys.root();
-        for component in [b"Graphics".as_slice(), b"Icons", b"folder.png"] {
-            node = sys
-                .lookup(node, component)
-                .expect("Graphics/Icons/folder.png path component");
+        for file in ["folder.svg", "file.png"] {
+            let master = tairix_syshelp::GRAPHICS_FILES
+                .iter()
+                .find(|asset| {
+                    asset.family == tairix_syshelp::GraphicsFamilyKind::Icon && asset.file == file
+                })
+                .expect("the icon master ships");
+            let mut node = sys.root();
+            for component in [b"Graphics".as_slice(), b"Icons", file.as_bytes()] {
+                node = sys
+                    .lookup(node, component)
+                    .expect("Graphics/Icons path component");
+            }
+            let mut buf = vec![0u8; master.bytes.len() + 16];
+            let read = sys.read_at(node, 0, &mut buf).expect("the icon reads back");
+            assert_eq!(
+                &buf[..read],
+                master.bytes,
+                "the planted {file} is byte-identical to the shipped master"
+            );
         }
-        let mut buf = vec![0u8; folder.bytes.len() + 16];
-        let read = sys.read_at(node, 0, &mut buf).expect("the icon reads back");
-        assert_eq!(
-            &buf[..read],
-            folder.bytes,
-            "the planted icon is byte-identical to the shipped master"
-        );
     }
 
     #[test]

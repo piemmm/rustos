@@ -151,6 +151,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
 | 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
 | 107 | `boot_session_get` | —                                   | `u64` (session) | —           | no    |
+| 108 | `terminal_purge` | `u32 fd`                              | `errno` | `CAP_CONSOLE_WRITE` (+ `CAP_CONSOLE_READ` in-handler) | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -331,10 +332,10 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | ------------------ | -------------------------- |
 | `CAP_USER_ADMIN`   | `cap_revoke`, `users_admin` |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
-| `CAP_CONSOLE_WRITE`| `stream_write` (console-backed descriptors only, checked in-handler), `console_count` |
+| `CAP_CONSOLE_WRITE`| `stream_write` (console-backed descriptors only, checked in-handler), `console_count`, `terminal_purge` |
 | `CAP_PROC_SPAWN`   | `spawn` (checked in-handler: required by every non-sandbox spawn, and admits a sandbox spawn too) |
 | `CAP_SANDBOX_SPAWN`| `spawn` (checked in-handler: canonical parser-sandbox blocks only) |
-| `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground` |
+| `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground`, `terminal_purge` (checked in-handler, in addition to the dispatcher's `CAP_CONSOLE_WRITE`) |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
@@ -1437,6 +1438,53 @@ program's echo or raw mode under it. An
 a console-less build fails closed with `NotImplemented`. The first-party
 Rust wrapper is `tairix_rt::set_input_mode`; the C stub is
 `tairix_sys_stream_input_mode`.
+
+`terminal_purge` (no. 108) discards everything a finished session left on
+the terminal behind readable descriptor `fd`, so none of it reaches
+whoever uses that terminal next. It is the session boundary of a shared
+terminal: the text login runs one user's session on the console and then
+prompts the next, and neither the output the session left on the screen
+nor the keystrokes it typed ahead but never read are the next user's to
+see.
+
+What is discarded depends on what the backing actually owns, and each
+backing does the strongest thing it can:
+
+- A retained framebuffer console (`lib/fbcon`) blanks **both** cell grids
+  — including the alternate screen, which no erase sequence written to the
+  console could reach — rewrites every pixel of the surface (the margins
+  outside the cell grid and the stride slack included), and drops a partly
+  received escape sequence so the next session's first bytes cannot
+  complete a prefix the last one held. A console hidden behind a graphical
+  seat lease purges its retained screen and paints nothing, so the purge
+  is what the next `display_release` reveals.
+- A byte-stream console (a UART) has no display of its own: its screen and
+  scrollback live in a remote emulator the kernel cannot reach, so it asks
+  for them — leave the alternate screen, erase the display, erase the
+  saved scrollback, home the cursor, plain pen (`tairix_vt::control`'s one
+  definition of that sequence).
+- A pseudo-terminal drops both of its rings, zeroing the bytes rather than
+  merely forgetting them, and wakes any writer parked on a full ring.
+
+Every backing also discards input queued but not yet read (the type-ahead
+ring is re-initialised, so no copy of a mistyped credential is left in
+kernel memory) and returns the read line discipline to `Cooked`, which
+also clears the secret-entry marker.
+
+It needs **both** halves' authority: the dispatcher checks
+`CAP_CONSOLE_WRITE` (retained output is destroyed) and the handler checks
+`CAP_CONSOLE_READ` (queued input is discarded) before it touches any
+state. Like every other terminal control it admits only the terminal's
+controlling owner, so a background task cannot blank the foreground
+session's screen or eat the input it is waiting for; the controlling
+ownership itself is deliberately left alone, since releasing it here would
+let a task that never held the terminal take its control. An `fd` that is
+not a readable inherited stream fails closed with `NotFound`, a
+console-less build with `NotImplemented`. Audited, unlike the other
+terminal controls: it destroys one principal's data at a session boundary,
+and at once per session end the record cannot drown the log. The
+first-party Rust wrapper is `tairix_rt::purge_terminal`; the C stub is
+`tairix_sys_terminal_purge`.
 
 `console_input` (no. 22) injects decoded keystroke bytes into an
 installed console's kernel-side input queue — the producer counterpart of

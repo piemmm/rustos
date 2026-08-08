@@ -75,11 +75,15 @@ guarantees.
 
 Two families of master, one contract.
 
-**The class artwork** — `lib/icon/assets/<asset-id>.png`, planted at
-`/System/Graphics/Icons/`. The file name *is* the asset id, and the id *is*
-an `IconKind::asset_id()`, so a typo cannot ship: `tools/syshelp`'s build
-script fails the build on an unrecognised name, an oversize file, or a
-duplicate id.
+**The class artwork** — `lib/icon/assets/<asset-id>.png` or
+`<asset-id>.svg`, planted at `/System/Graphics/Icons/`. The file name *is*
+the asset id, and the id *is* an `IconKind::asset_id()`, so a typo cannot
+ship: `tools/syshelp`'s build script fails the build on an unrecognised name,
+an oversize file, or a duplicate id. A kind ships **one** master, in whichever
+format suits its artwork — the folder is vector (`folder.svg`), the
+illustrative file-class and disk pictures are raster. Two files claiming one
+id is a duplicate the build refuses: the raster tier would always win, so the
+vector could never be selected.
 
 **Each bundle's own icon** — `<crate>/Resources/<name>.svg` (the preferred
 form) or `<name>.png`, declared as `library-icon` in that bundle's
@@ -91,7 +95,7 @@ bundle icon.
 Services outside those roots keep the service-bundle class artwork, which is
 the honest picture for them.
 
-A **raster** master (what both families ship today) is square, straight-alpha
+A **raster** master is square, straight-alpha
 and at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it.
 A **vector** master has no pixel side at all: the decoder requires its design
 box to be square and the desktop rasterises it at the side it is about to
@@ -223,13 +227,24 @@ system shipped one picture for *all* applications. Now:
   directory, so a hostile `library-icon` cannot aim the desktop at a file
   elsewhere. It draws its class picture instead.
 
-## 9. What this plan deliberately does not cover
+## 9. Open — two SVG class-asset decode paths
+
+The crate now decodes a vector class asset in two places. `lib/icon/src/load.rs`
+builds a whole `IconSet` up front, one slot per `IconKind`, from an injected
+`IconAssetSource`; `ArtworkCache`'s vector tier decodes one asset per (asset,
+pixel side) on demand, bounded and reclaim-governed. The single-decode-path
+intent above wants one of them to own the class assets: the preloaded set is
+the right shape for the always-resident chrome glyphs, the bounded cache for
+artwork drawn at a slot's pixel side. Deciding which owns what is a design
+question this plan has not settled.
+
+## 10. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format
   for them and the charter says so.
-- **Animated formats (GIF playback), JPEG, and ICO decoding.** The shipped
-  raster masters are PNG; the file-class artwork for a JPEG or GIF *file* is a
+- **Animated formats (GIF playback), JPEG, and ICO decoding.** A shipped
+  raster master is PNG; the file-class artwork for a JPEG or GIF *file* is a
   static icon, which needs no decoder for that format. A decoder is added
   when something actually needs to display such a file's contents, in the
   plan that owns that viewer — never speculatively here.

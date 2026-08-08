@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Folder</title>
+  <!-- Rounded corners are cut as four integer line segments each: the desktop's
+       SVG subset fills one flat ring per element, so an arc is approximated
+       rather than expressed as a curve. -->
+
+  <!-- Back plate and tab -->
+  <polygon fill="#3A86E8" points="28,64 29,57 34,51 40,46 47,45 100,45 109,47 116,53 128,70 209,70 216,71 222,76 227,82 228,89 228,101 28,101"/>
+
+  <!-- Front body -->
+  <polygon fill="#4C9AF0" points="28,91 29,84 34,78 40,73 47,72 209,72 216,73 222,78 227,84 228,91 228,192 227,199 222,205 216,210 209,211 47,211 40,210 34,205 29,199 28,192"/>
+
+  <!-- Flat top accent -->
+  <polygon fill="#65AAF5" points="28,91 29,84 34,78 40,73 47,72 209,72 216,73 222,78 227,84 228,91 228,99 28,99"/>
+</svg>

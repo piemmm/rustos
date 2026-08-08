@@ -144,6 +144,30 @@ pub trait ConsoleWrite: Sync {
     /// The default does nothing, for the same reason as
     /// [`Self::set_visible`]'s.
     fn reclaim_surface(&self) {}
+
+    /// Discard everything a finished session left on this console's display,
+    /// so none of it can reach whoever uses the terminal next.
+    ///
+    /// A retained framebuffer console overrides this to blank both of its cell
+    /// grids — the one it is not showing included, which no erase written to
+    /// the console could reach — rewrite every pixel, and drop a partly
+    /// received escape sequence.
+    ///
+    /// The default is the honest best effort for a byte-stream device: the
+    /// display and its scrollback live in a remote emulator the kernel cannot
+    /// reach, so it asks for them with [`control::SESSION_RESET`]. A device
+    /// that refuses the write has nothing to purge and the failure is not the
+    /// caller's to handle — the purge is a boundary, not an operation whose
+    /// result a program branches on.
+    fn purge(&self) {
+        let mut written = 0;
+        while written < control::SESSION_RESET.len() {
+            match self.write(&control::SESSION_RESET[written..]) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => written += n,
+            }
+        }
+    }
 }
 
 /// The console sink installed before any real device exists.
@@ -252,7 +276,37 @@ pub trait ConsoleRead {
     fn set_secret(&self, secret: bool) {
         let _ = secret;
     }
+
+    /// Discard input queued but not yet read, so keystrokes one session typed
+    /// ahead of itself — the tail of a command, or a mistyped credential — are
+    /// never delivered to the next.
+    ///
+    /// A backing that owns its queue overrides this to wipe it outright
+    /// ([`ConsoleInputQueue`]). The default reads the pending bytes away and
+    /// zeroes the buffer they passed through, which is the only way to empty a
+    /// device that has no queue of its own to reach into (a UART receive
+    /// FIFO). The read count bounds the loop rather than the queue emptying,
+    /// so a device that always reports bytes cannot wedge the purge.
+    fn purge(&self) {
+        let mut scratch = [0u8; 64];
+        for _ in 0..INPUT_PURGE_ROUNDS {
+            match self.read(&mut scratch) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        tairix_pagezero::zero(&mut scratch);
+    }
 }
+
+/// How many reads [`ConsoleRead::purge`]'s default drain performs before it
+/// gives up.
+///
+/// A bound, not a capacity: it exists so a device that always reports bytes
+/// cannot wedge the purge, and 64 reads of the 64-byte scratch buffer already
+/// clear four times the type-ahead queue
+/// ([`CONSOLE_INPUT_QUEUE_CAPACITY`]) and any plausible receive FIFO.
+const INPUT_PURGE_ROUNDS: usize = 64;
 
 /// The console input source installed before any real device exists.
 ///
@@ -491,6 +545,13 @@ impl ConsoleRead for ConsoleInputQueue {
         // re-polls, so a later arbiter push wakes it (the backing owns blocking).
         Ok(self.drain(buf))
     }
+
+    fn purge(&self) {
+        // Re-initialising the whole ring zeroes every slot, so a credential
+        // typed ahead of the reader leaves nothing behind, and no drain bound
+        // (`read` stops at a line delimiter) can leave a byte queued.
+        *self.ring.lock() = InputRing::new();
+    }
 }
 
 impl ConsoleInput for ConsoleInputQueue {
@@ -681,6 +742,31 @@ impl ConsoleDevice {
                 secret.disarm();
             }
         }
+    }
+
+    /// Discard everything a finished session left on this terminal, so none
+    /// of it reaches whoever uses it next (`terminal_purge`).
+    ///
+    /// The session boundary of a shared terminal: a text login runs one user's
+    /// session on the console and then prompts the next, and neither the
+    /// output the session left on the screen nor the keystrokes it typed ahead
+    /// but never read are the next user's to see.
+    ///
+    /// Three discards, in the order that leaves nothing behind them: the
+    /// pending input ([`ConsoleRead::purge`]), the read line discipline (back
+    /// to cooked, which also resets the echo edit state and removes any
+    /// secret-entry marker the screen still shows), and only then the display
+    /// ([`ConsoleWrite::purge`]) — a discipline reset after the display purge
+    /// could paint over the blank screen it produced.
+    ///
+    /// Controlling ownership is deliberately left alone: the ended session's
+    /// owner is a dead task the foreground gate already heals past, and
+    /// releasing the slot here would let a task that never held the terminal
+    /// take its control.
+    pub fn purge_session(&self) {
+        self.read.purge();
+        self.set_input_mode(InputMode::Cooked);
+        self.write.purge();
     }
 
     /// The currently selected read line discipline.
@@ -1298,6 +1384,13 @@ where
         let limit = crate::waitq::wait_now_ns().map(|now| now.saturating_add(timeout_ns));
         self.read_until(buf, limit)
     }
+
+    fn purge(&self) {
+        // Straight to the backing: this adapter's own `read` parks until
+        // input arrives, so draining through it would wait for the very
+        // keystrokes the purge exists to refuse.
+        self.inner.purge();
+    }
 }
 
 #[cfg(test)]
@@ -1361,6 +1454,119 @@ mod tests {
 
     fn leaked_arch() -> &'static TestArch {
         std::boxed::Box::leak(std::boxed::Box::new(TestArch::with_cpus(1)))
+    }
+
+    /// A device whose pending bytes deplete as they are read, standing in for
+    /// a receive FIFO with no queue of its own to reach into.
+    struct DepletingRead {
+        pending: AtomicUsize,
+    }
+
+    impl DepletingRead {
+        const fn with_pending(pending: usize) -> Self {
+            Self {
+                pending: AtomicUsize::new(pending),
+            }
+        }
+
+        fn pending(&self) -> usize {
+            self.pending.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ConsoleRead for DepletingRead {
+        fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            let take = core::cmp::min(self.pending(), buf.len());
+            self.pending.fetch_sub(take, Ordering::Relaxed);
+            buf[..take].fill(b'x');
+            Ok(take)
+        }
+    }
+
+    /// The input-purge default empties a device that has no queue of its own
+    /// by reading its pending bytes away, so keystrokes one session typed
+    /// ahead are never delivered to the next.
+    #[test]
+    fn the_input_purge_default_drains_a_device_that_owns_no_queue() {
+        let device = DepletingRead::with_pending(200);
+        device.purge();
+        assert_eq!(device.pending(), 0);
+    }
+
+    /// The read count bounds the drain, so a device that always reports bytes
+    /// cannot wedge the purge — this test returning at all is the assertion.
+    #[test]
+    fn the_input_purge_default_gives_up_on_a_device_that_never_empties() {
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"endless");
+        INNER.purge();
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), INPUT_PURGE_ROUNDS);
+    }
+
+    /// A device that refuses the read has nothing to drain, and the purge is
+    /// a boundary rather than an operation whose failure a caller handles.
+    #[test]
+    fn the_input_purge_default_stops_at_a_refusing_device() {
+        static INNER: ScriptedRead = ScriptedRead::with_error(Errno::PermissionDenied);
+        INNER.purge();
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    /// The blocking adapter purges its backing directly: draining through its
+    /// own `read` would park, waiting for the very keystrokes the purge
+    /// exists to refuse.
+    #[test]
+    fn purging_the_blocking_adapter_empties_its_backing_without_waiting() {
+        static INNER: DepletingRead = DepletingRead::with_pending(32);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
+
+        blocking.purge();
+
+        assert_eq!(INNER.pending(), 0);
+    }
+
+    /// The display-purge default is the honest best effort for a terminal the
+    /// kernel cannot reach: it asks the remote emulator to leave the
+    /// alternate screen and clear both its display and its saved scrollback.
+    /// A device that accepts one byte per write still receives all of it.
+    #[test]
+    fn the_display_purge_default_asks_the_terminal_to_clear_itself() {
+        struct DribbleWrite(tairix_sync::SpinLock<std::vec::Vec<u8>>);
+
+        impl ConsoleWrite for DribbleWrite {
+            fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+                let take = core::cmp::min(1, bytes.len());
+                self.0.lock().extend_from_slice(&bytes[..take]);
+                Ok(take)
+            }
+        }
+
+        let device = DribbleWrite(tairix_sync::SpinLock::new(std::vec::Vec::new()));
+        device.purge();
+        assert_eq!(device.0.lock().as_slice(), control::SESSION_RESET);
+    }
+
+    /// A device that refuses the write, or accepts nothing, has no display to
+    /// clear — the purge gives up instead of spinning.
+    #[test]
+    fn the_display_purge_default_gives_up_on_a_refusing_terminal() {
+        struct StuckWrite(AtomicUsize);
+
+        impl ConsoleWrite for StuckWrite {
+            fn write(&self, _bytes: &[u8]) -> Result<usize, Errno> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(0)
+            }
+        }
+
+        let device = StuckWrite(AtomicUsize::new(0));
+        device.purge();
+        assert_eq!(device.0.load(Ordering::Relaxed), 1);
+
+        assert_eq!(
+            NULL_CONSOLE.write(control::SESSION_RESET),
+            Err(Errno::NotImplemented)
+        );
+        NULL_CONSOLE.purge();
     }
 
     #[test]
@@ -2193,6 +2399,41 @@ mod tests {
             crate::procsignal::take_pending_foreground_for_test(),
             Some((tairix_kernel_sec::TaskId(9), Signal::Stop))
         );
+    }
+
+    /// Purging the type-ahead queue delivers nothing to the next reader and
+    /// leaves no copy behind: a credential typed ahead of the reader transits
+    /// this ring, so the whole buffer is zeroed, not just the queued span.
+    #[test]
+    fn purging_the_type_ahead_queue_wipes_every_queued_byte() {
+        let (device, queue) = filter_device();
+        assert_eq!(device.push(b"passphrase\r"), Ok(11));
+
+        queue.purge();
+
+        assert_eq!(drain(queue), b"");
+        assert!(
+            queue.ring.lock().buf.iter().all(|&byte| byte == 0),
+            "the ring holds no copy of what was typed"
+        );
+        // The emptied queue still works for whoever comes next.
+        assert_eq!(device.push(b"next"), Ok(4));
+        assert_eq!(drain(queue), b"next");
+    }
+
+    /// The session boundary a text login uses: one call discards the pending
+    /// input, returns the read discipline to the interactive default, and
+    /// clears the display.
+    #[test]
+    fn purging_a_session_discards_the_input_and_the_discipline() {
+        let (device, queue) = filter_device();
+        device.set_input_mode(InputMode::Raw);
+        assert_eq!(device.push(b"typed ahead"), Ok(11));
+
+        device.purge_session();
+
+        assert_eq!(drain(queue), b"");
+        assert_eq!(device.input_mode(), InputMode::Cooked);
     }
 
     #[test]

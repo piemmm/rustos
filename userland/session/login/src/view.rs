@@ -122,6 +122,17 @@ pub trait ConsoleMode {
 
     /// Restore the cooked line-editing default.
     fn cooked(&self);
+
+    /// Discard everything a finished session left on the terminal — the
+    /// retained screen it drew, the screen it was not showing, a remote
+    /// emulator's saved scrollback, and the keystrokes it typed ahead but
+    /// never read — and return the discipline to cooked.
+    ///
+    /// Called once per session boundary, so nothing of one user's session
+    /// reaches the next. A terminal that refuses the discard leaves the
+    /// screen as it was: the refusal is the console's to report, and the
+    /// login still re-prompts.
+    fn purge(&self);
 }
 
 /// The full-screen curses [`LoginView`] over an injected terminal
@@ -584,6 +595,13 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
         drop(screen);
         self.mode.cooked();
     }
+
+    fn session_ended(&self) {
+        // The screen the session leaves behind is not the next user's to
+        // see, and neither is what they typed ahead into it. The next
+        // `round_begin` re-enters the view over a blank terminal.
+        self.mode.purge();
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +680,7 @@ mod tests {
     struct RecordingMode {
         raws: Cell<u32>,
         cookeds: Cell<u32>,
+        purges: Cell<u32>,
     }
 
     impl ConsoleMode for alloc::rc::Rc<RecordingMode> {
@@ -671,6 +690,9 @@ mod tests {
         }
         fn cooked(&self) {
             self.cookeds.set(self.cookeds.get() + 1);
+        }
+        fn purge(&self) {
+            self.purges.set(self.purges.get() + 1);
         }
     }
 
@@ -682,6 +704,7 @@ mod tests {
             false
         }
         fn cooked(&self) {}
+        fn purge(&self) {}
     }
 
     fn status() -> LoginStatus {

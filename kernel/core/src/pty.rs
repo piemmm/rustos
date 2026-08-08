@@ -197,6 +197,39 @@ impl Pty {
         self.state.lock().mode
     }
 
+    /// Discard everything a finished session left in this pty, so none of it
+    /// reaches whoever uses the terminal next (`terminal_purge`): the
+    /// keystrokes the terminal typed but the program never read, the program
+    /// output the terminal never drew, and the line-discipline state, which
+    /// returns to the interactive cooked default.
+    ///
+    /// The queued bytes are zeroed before they are dropped — a credential
+    /// typed into a terminal transits these rings exactly as it transits the
+    /// console's type-ahead queue.
+    ///
+    /// The live-end counts, the geometry, and the controlling ownership are
+    /// deliberately untouched: the pty outlives the session running on it, and
+    /// releasing the ownership would let a task that never held the terminal
+    /// take its control. Freeing ring space can unblock a parked writer, so
+    /// the caller wakes the waiters exactly as a drain does.
+    pub fn purge_session(&self) {
+        let mut state = self.state.lock();
+        let PtyState {
+            input,
+            output,
+            mode,
+            echo,
+            ..
+        } = &mut *state;
+        for byte in input.iter_mut().chain(output.iter_mut()) {
+            *byte = 0;
+        }
+        input.clear();
+        output.clear();
+        *mode = InputMode::Cooked;
+        echo.reset();
+    }
+
     /// The pty's character-cell geometry (`terminal_size`). Always known — a
     /// pty's size is set by its master, unlike a UART whose remote size the
     /// kernel cannot attest.
@@ -566,6 +599,37 @@ mod tests {
         assert_eq!(s.read(&mut out), PtyReadStep::Read(5));
         assert_eq!(&out[..5], b"true\n");
         assert_eq!(s.read(&mut out), PtyReadStep::Empty);
+    }
+
+    /// The session boundary of a pty: everything a finished session left in
+    /// it goes — the keystrokes the terminal typed but the program never
+    /// read, the output the terminal never drew, and the discipline the
+    /// session selected — while the pty itself survives for the next session.
+    #[test]
+    fn purging_a_session_empties_both_rings_and_restores_the_discipline() {
+        let (m, s) = pty();
+        m.pty().set_input_mode(InputMode::Raw);
+        assert_eq!(wrote(m.write(b"typed ahead", true)).0, 11);
+        assert_eq!(s.write(b"program output"), PtyWriteStep::Wrote(14));
+
+        m.pty().purge_session();
+
+        let mut out = [0u8; 64];
+        // Neither end sees the ended session's bytes, and neither reports
+        // end-of-file: both ends are still live.
+        assert_eq!(s.read(&mut out), PtyReadStep::Empty);
+        assert_eq!(m.read(&mut out), PtyReadStep::Empty);
+        assert_eq!(m.pty().input_mode(), InputMode::Cooked);
+        assert_eq!(m.pty().geometry(), TerminalSize::new(24, 80).unwrap());
+
+        // The emptied pty carries the next session as before: the cooked
+        // discipline releases the line at the carriage return and echoes it
+        // back to the terminal.
+        assert_eq!(wrote(m.write(b"next\r", true)).0, 5);
+        assert_eq!(s.read(&mut out), PtyReadStep::Read(5));
+        assert_eq!(&out[..5], b"next\r");
+        assert_eq!(m.read(&mut out), PtyReadStep::Read(6));
+        assert_eq!(&out[..6], b"next\r\n");
     }
 
     #[test]

@@ -802,6 +802,23 @@ impl<'a> Screen<'a> {
         CellRect::rows(self.cols(), 0, self.rows())
     }
 
+    /// Discard everything a finished session left behind: blank **both** cell
+    /// grids (the alternate grid included — no erase written to the screen can
+    /// reach the one that is not shown) and return every other piece of screen
+    /// state to its initial value.
+    ///
+    /// Re-initialising through [`Self::new`] instead of resetting field by
+    /// field keeps one definition of the initial state, so state added later
+    /// cannot silently survive a purge. The grids are borrowed, so they are
+    /// moved out and handed straight back.
+    fn purge(&mut self) {
+        self.main.fill(Cell::BLANK);
+        self.alt.fill(Cell::BLANK);
+        let main = core::mem::take(&mut self.main);
+        let alt = core::mem::take(&mut self.alt);
+        *self = Self::new(self.geometry, main, alt);
+    }
+
     /// Enter the alternate screen (`CSI ? 1049 h`): save the primary-screen
     /// cursor, switch to the alternate grid, and show it cleared. A second
     /// request while already on the alternate screen is a no-op.
@@ -1146,10 +1163,23 @@ impl<'a> TextConsole<'a> {
     /// the panic path reclaim the screen without knowing who had it.
     pub fn show(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         self.visible = true;
+        Some(self.repaint_surface(pixels))
+    }
+
+    /// Repaint every pixel from the retained grid and report the whole surface
+    /// as dirty — the one repaint [`Self::show`], [`Self::clear`], and
+    /// [`Self::purge`] share.
+    ///
+    /// The band is the surface *height*, not the flushed cell rows: the
+    /// surface fill rewrites the margins outside the cell grid and the stride
+    /// slack as well, so a presenter that flushed only the cell rows would
+    /// leave a stale sliver of the previous content in them.
+    fn repaint_surface(&mut self, pixels: &mut [u32]) -> DirtyBand {
         fill_surface(pixels);
         let rect = self.screen.full_rect();
-        let band = self.screen.flush(pixels, rect);
-        merge_bands(Some(band), self.screen.draw_cursor(pixels))
+        self.screen.flush(pixels, rect);
+        self.screen.draw_cursor(pixels);
+        (0, self.screen.geometry().height_px)
     }
 
     /// Clear the whole surface to the background and home the cursor, returning
@@ -1159,13 +1189,32 @@ impl<'a> TextConsole<'a> {
     /// A hidden console clears its retained grid and paints nothing, so the
     /// clear is what [`Self::show`] later reveals.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
-        let rect = self.screen.clear();
+        self.screen.clear();
         if !self.visible {
             return None;
         }
-        fill_surface(pixels);
-        let band = self.screen.flush(pixels, rect);
-        merge_bands(Some(band), self.screen.draw_cursor(pixels))
+        Some(self.repaint_surface(pixels))
+    }
+
+    /// Discard everything a finished session left on this console and repaint
+    /// the blank screen, returning the dirty band (the full surface height).
+    ///
+    /// Stronger than [`Self::clear`], which blanks only the grid that is
+    /// currently shown: a purge blanks **both** grids, so text a program left
+    /// on the screen it was not using cannot be revealed by whoever comes
+    /// next, and it drops any partly received escape sequence so the next
+    /// session's first bytes cannot complete a prefix the last one held. Every
+    /// pixel is rewritten, including the margins outside the cell grid.
+    ///
+    /// A hidden console purges its retained state and paints nothing, so the
+    /// purge is what [`Self::show`] later reveals.
+    pub fn purge(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        self.screen.purge();
+        self.parser = Parser::new();
+        if !self.visible {
+            return None;
+        }
+        Some(self.repaint_surface(pixels))
     }
 
     /// Interpret `bytes` as an ANSI/VT/xterm stream, rendering the result onto

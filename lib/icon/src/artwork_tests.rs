@@ -6,7 +6,7 @@
 extern crate std;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -22,7 +22,7 @@ use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 use super::{
     artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
     ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource, IconRequest, NoArtwork,
-    MAX_ARTWORK_BYTES,
+    MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -118,26 +118,33 @@ fn icon_paths_spell_the_asset_id() {
 }
 
 #[test]
-fn artwork_kind_for_file_round_trips_every_kind() {
+fn artwork_kind_for_file_round_trips_every_kind_in_both_formats() {
     for kind in ICON_KINDS {
-        let name = format!("{}.png", kind.asset_id());
-        assert_eq!(artwork_kind_for_file(&name), Some(kind), "{kind:?}");
+        for suffix in [".png", ".svg"] {
+            let name = format!("{}{suffix}", kind.asset_id());
+            assert_eq!(artwork_kind_for_file(&name), Some(kind), "{kind:?}{suffix}");
+        }
     }
 }
 
 #[test]
 fn artwork_kind_for_file_refuses_illegal_names() {
+    // An unknown id in either class format.
     assert_eq!(artwork_kind_for_file("not-a-real-icon.png"), None);
-    // The right stem but the wrong extension is not shipped artwork.
-    assert_eq!(artwork_kind_for_file("folder.svg"), None);
+    assert_eq!(artwork_kind_for_file("not-a-real-icon.svg"), None);
+    // A known id in a format no class tier reads.
+    assert_eq!(artwork_kind_for_file("folder.jpg"), None);
     // No extension at all.
     assert_eq!(artwork_kind_for_file("folder"), None);
-    // An empty name, and the bare extension.
+    // An empty name, and each bare extension.
     assert_eq!(artwork_kind_for_file(""), None);
     assert_eq!(artwork_kind_for_file(".png"), None);
+    assert_eq!(artwork_kind_for_file(".svg"), None);
     // A directory-bearing name (a path-traversal attempt) is not a bare id.
     assert_eq!(artwork_kind_for_file("../../etc/x.png"), None);
+    assert_eq!(artwork_kind_for_file("../../etc/x.svg"), None);
     assert_eq!(artwork_kind_for_file("Icons/folder.png"), None);
+    assert_eq!(artwork_kind_for_file("Icons/folder.svg"), None);
 }
 
 #[test]
@@ -204,7 +211,7 @@ fn a_zero_side_is_refused_without_reading() {
 }
 
 #[test]
-fn a_kind_request_reads_the_kind_png_path() {
+fn a_kind_request_resolves_the_raster_class_master() {
     let mut c = cache();
     let path = icon_artwork_path(IconKind::Folder);
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
@@ -217,6 +224,67 @@ fn a_kind_request_reads_the_kind_png_path() {
             8
         )
         .is_some());
+}
+
+/// A class shipping only a vector master still draws: the class tier falls
+/// through the absent raster to the vector before the glyph.
+#[test]
+fn a_kind_with_only_a_vector_master_resolves_through_the_vector_tier() {
+    let mut c = cache();
+    let vector = icon_vector_path(IconKind::Folder);
+    let mut reader = CountingReader::new().with(&vector, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::kind(IconKind::Folder),
+            8
+        )
+        .is_some());
+    assert_eq!(
+        reader.read_paths,
+        vec![icon_artwork_path(IconKind::Folder), vector],
+        "the raster is tried first, the vector second"
+    );
+}
+
+/// Shipping one kind in both formats is a packaging defect the image build
+/// refuses; the runtime is deterministic about it regardless — the raster
+/// wins and the vector is never read.
+#[test]
+fn a_kind_shipping_both_formats_prefers_the_raster() {
+    let mut c = cache();
+    let raster = icon_artwork_path(IconKind::Folder);
+    let vector = icon_vector_path(IconKind::Folder);
+    let mut reader = CountingReader::new()
+        .with(&raster, vec![0u8; 10])
+        .with(&vector, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut reader,
+            &mut ras,
+            IconRequest::kind(IconKind::Folder),
+            8
+        )
+        .is_some());
+    assert_eq!(reader.read_paths, vec![raster], "the vector was never read");
+}
+
+/// A class shipping neither master falls back to the glyph, and both
+/// refusals are retained: such a kind costs one read per class format once,
+/// not one per frame.
+#[test]
+fn a_kind_with_no_class_master_is_remembered_as_having_none() {
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::kind(IconKind::Folder);
+    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_none());
+    assert_eq!(reader.reads, 2, "each class format was tried once");
+    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_none());
+    assert_eq!(reader.reads, 2, "both refusals were retained");
 }
 
 #[test]
@@ -439,27 +507,51 @@ fn ledger_forwards_the_wrapped_caches_ledger() {
     assert_eq!(ledger.label(), "test.icon-artwork");
 }
 
+/// Every shipped class master is artwork the desktop can resolve and draw:
+/// its name maps back to exactly one kind in one of the two class formats,
+/// it is within the artwork byte bound, and a vector one decodes through the
+/// shared SVG decoder to a visible silhouette.
+///
+/// A kind ships at most one master. Two files claiming one asset id in
+/// different formats would leave the vector unreachable, because the class
+/// tier prefers the raster.
 #[test]
-fn every_shipped_asset_is_recognised_and_within_the_cap() {
+fn every_shipped_asset_is_artwork_the_desktop_can_resolve_and_draw() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
-    let mut count = 0usize;
+    let mut ids = BTreeSet::new();
+    let mut vectors = 0usize;
     for entry in std::fs::read_dir(dir).expect("assets directory") {
         let entry = entry.expect("directory entry");
         let name = entry.file_name();
         let name = name.to_str().expect("utf-8 asset name");
+        let kind = artwork_kind_for_file(name)
+            .unwrap_or_else(|| panic!("shipped asset {name} is not a resolvable artwork name"));
         assert!(
-            artwork_kind_for_file(name).is_some(),
-            "shipped asset {name} is not a resolvable artwork file name"
+            ids.insert(kind.asset_id()),
+            "asset id {} ships a master in both formats ({name})",
+            kind.asset_id()
         );
         let len = entry.metadata().expect("asset metadata").len();
         assert!(
             usize::try_from(len).is_ok_and(|bytes| bytes <= MAX_ARTWORK_BYTES),
             "shipped asset {name} is {len} bytes, over the artwork cap"
         );
-        count += 1;
+        if name.strip_suffix(VECTOR_SUFFIX).is_some() {
+            let bytes = std::fs::read(entry.path()).expect("asset bytes");
+            let icon = crate::svg::decode(&bytes)
+                .unwrap_or_else(|err| panic!("shipped vector {name} is out of subset: {err:?}"));
+            let image = icon.rasterise(64).expect("renderable");
+            assert!(
+                image.pixels().iter().any(|pixel| pixel.a > 0),
+                "shipped vector {name} rasterised to nothing"
+            );
+            vectors += 1;
+        }
     }
     assert!(
-        count >= 20,
-        "expected the shipped icon assets, found {count}"
+        ids.len() >= 20,
+        "expected the shipped icon assets, found {}",
+        ids.len()
     );
+    assert!(vectors > 0, "the vector class tier ships no master");
 }

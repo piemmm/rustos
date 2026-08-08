@@ -154,7 +154,13 @@ impl<'a> Login<'a> {
         // The screen is the session's now: restore the normal terminal
         // before the shell starts writing to it.
         self.cfg.view.session_handoff();
-        match self.cfg.launcher.launch(user, kind) {
+        let launched = self.cfg.launcher.launch(user, kind);
+        // The session is over — cleanly, refused at load, or never launched
+        // at all. The terminal goes back to the login prompt, so nothing the
+        // session left on it, and nothing typed ahead into it, may reach
+        // whoever is at the console next.
+        self.cfg.view.session_ended();
+        match launched {
             Ok(outcome) => {
                 // `spawn` admits the session immediately and it loads its own
                 // image on its first slice (the asynchronous-launch
@@ -395,8 +401,12 @@ mod tests {
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
 
+    /// The shared ordered log of terminal events the mocks append to.
+    type Trace = alloc::rc::Rc<RefCell<Vec<&'static str>>>;
+
     /// View that replays scripted input lines and records the semantic
-    /// calls the machine makes (rounds begun, failures noted, hand-offs).
+    /// calls the machine makes (rounds begun, failures noted, hand-offs,
+    /// purges).
     ///
     /// Scripted entries are raw bytes, not `&str`, so tests can replay
     /// invalid UTF-8 and over-long lines through the same fixture.
@@ -406,17 +416,35 @@ mod tests {
         rounds: Cell<u32>,
         failures: Cell<u32>,
         handoffs: Cell<u32>,
+        purges: Cell<u32>,
+        /// Terminal events in the order the machine produced them, shared
+        /// with [`MockLauncher`] so a test can assert the purge lands after
+        /// the session rather than before it.
+        trace: Trace,
     }
+
     impl MockView {
         fn new(lines: &[&str], secrets: &[&str]) -> Self {
-            Self::with_results(
+            Self::traced(lines, secrets, Trace::default())
+        }
+        /// [`Self::new`] with an event `trace` shared with the launcher.
+        fn traced(lines: &[&str], secrets: &[&str], trace: Trace) -> Self {
+            Self::build(
                 lines.iter().map(|s| Ok(s.as_bytes().to_vec())).collect(),
                 secrets.iter().map(|s| Ok(s.as_bytes().to_vec())).collect(),
+                trace,
             )
         }
         fn with_results(
             lines: Vec<Result<Vec<u8>, Errno>>,
             secrets: Vec<Result<Vec<u8>, Errno>>,
+        ) -> Self {
+            Self::build(lines, secrets, Trace::default())
+        }
+        fn build(
+            lines: Vec<Result<Vec<u8>, Errno>>,
+            secrets: Vec<Result<Vec<u8>, Errno>>,
+            trace: Trace,
         ) -> Self {
             Self {
                 lines: RefCell::new(lines.into_iter().collect()),
@@ -424,6 +452,8 @@ mod tests {
                 rounds: Cell::new(0),
                 failures: Cell::new(0),
                 handoffs: Cell::new(0),
+                purges: Cell::new(0),
+                trace,
             }
         }
         fn fill(
@@ -456,6 +486,11 @@ mod tests {
         }
         fn session_handoff(&self) {
             self.handoffs.set(self.handoffs.get() + 1);
+            self.trace.borrow_mut().push("handoff");
+        }
+        fn session_ended(&self) {
+            self.purges.set(self.purges.get() + 1);
+            self.trace.borrow_mut().push("purge");
         }
     }
 
@@ -505,18 +540,27 @@ mod tests {
     struct MockLauncher {
         result: Result<SessionOutcome, Errno>,
         launched: RefCell<Vec<(Uid, SessionKind)>>,
+        trace: Trace,
     }
     impl MockLauncher {
         fn ok(kind: SessionKind) -> Self {
             Self {
                 result: Ok(SessionOutcome { kind, exit_code: 0 }),
                 launched: RefCell::new(Vec::new()),
+                trace: Trace::default(),
             }
+        }
+        /// Share `trace` with the view, so the order of hand-off, launch, and
+        /// purge is observable.
+        fn tracing(mut self, trace: Trace) -> Self {
+            self.trace = trace;
+            self
         }
         fn failing() -> Self {
             Self {
                 result: Err(Errno::NotFound),
                 launched: RefCell::new(Vec::new()),
+                trace: Trace::default(),
             }
         }
         /// A launcher whose (admitted) session exits with `code` — used to
@@ -529,6 +573,7 @@ mod tests {
                     exit_code: code,
                 }),
                 launched: RefCell::new(Vec::new()),
+                trace: Trace::default(),
             }
         }
     }
@@ -539,6 +584,7 @@ mod tests {
             kind: SessionKind,
         ) -> Result<SessionOutcome, Errno> {
             self.launched.borrow_mut().push((user.uid, kind));
+            self.trace.borrow_mut().push("launch");
             self.result
                 .as_ref()
                 .map(|o| SessionOutcome {
@@ -832,6 +878,78 @@ mod tests {
         assert_eq!(sink.count(events::SESSION_STARTED), 1);
         assert_eq!(sink.count(events::SESSION_LAUNCH_FAILED), 1);
         assert_eq!(sink.count(events::SESSION_ENDED), 0);
+    }
+
+    /// The session boundary: the terminal is handed over, the session runs,
+    /// and only then is everything it left there discarded. A purge before
+    /// the session would wipe the login's own screen and leave the session's
+    /// output for the next user — the leak this exists to close.
+    #[test]
+    fn a_finished_session_purges_the_terminal_after_it_ends() {
+        let trace = Trace::default();
+        let view = MockView::traced(&["ada"], &["byron"], trace.clone());
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text).tracing(trace.clone());
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert!(login.run().is_ok());
+        assert_eq!(*trace.borrow(), ["handoff", "launch", "purge"]);
+        assert_eq!(view.purges.get(), 1);
+    }
+
+    /// A session that never started still leaves the terminal to the next
+    /// user, so the discard is not conditional on a clean end.
+    #[test]
+    fn a_refused_launch_still_purges_the_terminal() {
+        let trace = Trace::default();
+        let view = MockView::traced(&["ada"], &["byron"], trace.clone());
+        let auth = auth();
+        let launcher = MockLauncher::failing().tracing(trace.clone());
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert_eq!(login.run(), Err(LoginError::SessionLaunch(Errno::NotFound)));
+        assert_eq!(*trace.borrow(), ["handoff", "launch", "purge"]);
+    }
+
+    /// A rejected credential launches nothing, so there is no session
+    /// boundary and nothing to discard: the failed attempt keeps the view it
+    /// is drawing on.
+    #[test]
+    fn a_rejected_attempt_does_not_purge_the_terminal() {
+        let view = MockView::new(&["ada", "ada"], &["wrong", "wrong"]);
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 2,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert_eq!(login.run(), Err(LoginError::TooManyAttempts));
+        assert_eq!(view.purges.get(), 0);
     }
 
     #[test]

@@ -362,6 +362,14 @@ can never diverge in navigation semantics, listing policy, or look.
     paravirtual or absent class draws the generic drive glyph. A USB stick can
     never masquerade as an internal disk, and nothing here classifies a device
     by its name or by guesswork.
+  - **Below the toolbar, on the listing's row grid.** The command toolbar is
+    *window* chrome: its band spans the full window width at the top, so it
+    reaches the window's leading edge and aligns with the rest of the
+    desktop's chrome. `sidebar_view` therefore insets the rail's top by the
+    toolbar band, which puts the rail's first row top exactly at the path
+    bar's top and every later row on the same `row_height` grid as the
+    listing rows beside it — the rail reads as a navigation pane for the
+    whole content region rather than a strip on a grid of its own.
   - **Geometry defined once** (`layout::SidebarView`): the rail's width is
     derived from the theme metrics and the theme's own body face — the padded
     row height plus the measured `WIDEST_FIXED_LABEL`, clamped to a third of
@@ -551,7 +559,13 @@ can never diverge in navigation semantics, listing policy, or look.
   the command toolbar (`chrome::TOOLBAR_COMMANDS` as a `lib/controls`
   `Toolbar` of themed `IconButton`s, disabled tools muted from the
   `ToolbarModel`); `toolbar_command_at` is that strip's hit-test, returning
-  only an *enabled* command (fail closed). Because a *write* action must never
+  only an *enabled* command (fail closed). The toolbar band is the one piece
+  of window chrome here, so `toolbar_bounds` and the three hit-tests that
+  invert it (`toolbar_command_at`, `manager_tool_at`, `manager_tool_rect`)
+  take the **whole window**, while `content_area` — the window less the rail —
+  is what the path bar, the item view, the scrollbar, and every overlay
+  occupy. With no rail (the picker) `content_area` *is* the window, so that
+  window is laid out exactly as it always was. Because a *write* action must never
   reach the read-only picker that shares this toolbar, the manager-only write
   tools live in a separate `chrome::ManagerTool` vocabulary (`MANAGER_TOOLS`,
   `ManagerTool::icon`): New Folder, the Trash location (go to the user's Trash),

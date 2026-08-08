@@ -251,6 +251,312 @@ fn the_content_area_is_inset_by_the_rail_and_untouched_without_one() {
     );
 }
 
+/// The command toolbar is window chrome: its band spans the whole window, so
+/// it reaches the leading edge and aligns with the rest of the desktop's
+/// chrome whether or not a rail is drawn below it.
+///
+/// The band was inset by the rail, so the manager's toolbar started a rail's
+/// width in from the window edge while the picker's did not.
+#[test]
+fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
+    use crate::chrome::{ManagerToolModel, ToolbarCommand, MANAGER_TOOLS};
+    use crate::render::{sidebar_index_at, sidebar_view, toolbar_command_at, toolbar_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 300);
+    let places = Places::new(&home(), &[]);
+    let band = toolbar_height(Scale::ONE, &theme);
+    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places))
+        .expect("rail")
+        .width();
+    assert!(rail > 0);
+
+    // Descended, so the leading navigation command is enabled and resolves.
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.open_index(2).expect("enter System");
+
+    let paint = |sidebar: Option<&Places>| {
+        crate::render(
+            &browser,
+            Scale::ONE,
+            &theme,
+            window,
+            &crate::ManagerChrome {
+                tools: MANAGER_TOOLS,
+                tool_model: ManagerToolModel::new(true),
+                sidebar,
+            },
+            &mut NoArtwork,
+        )
+        .expect("surface")
+    };
+    // The band is measured from the window, so drawing a rail changes not one
+    // pixel of it: the manager's toolbar sits exactly where the picker's does.
+    let with_rail = paint(Some(&places));
+    let without_rail = paint(None);
+    for y in 0..band {
+        for x in 0..window.width {
+            assert_eq!(
+                with_rail.get(x, y),
+                without_rail.get(x, y),
+                "the toolbar band differs at ({x}, {y}) when a rail is drawn"
+            );
+        }
+    }
+
+    // The leading command sits in the strip the rail covers below the band,
+    // and a press there is chrome rather than a place.
+    let y = i32::try_from(band / 2).expect("band mid");
+    let (x, command) = (0..window.width)
+        .find_map(|x| {
+            let probe = Point::new(i32::try_from(x).ok()?, y);
+            toolbar_command_at(&browser, Scale::ONE, &theme, window, probe).map(|cmd| (x, cmd))
+        })
+        .expect("an enabled command is drawn in the band");
+    assert_eq!(command, ToolbarCommand::Back);
+    assert!(
+        x < rail,
+        "the leading command at x={x} is within the rail's own {rail}-pixel strip"
+    );
+    assert_eq!(
+        sidebar_index_at(
+            window,
+            Scale::ONE,
+            &theme,
+            Some(&places),
+            Point::new(i32::try_from(x).expect("command x"), y),
+        ),
+        None
+    );
+}
+
+/// The rail is laid out below the toolbar band, so its rows land on exactly
+/// the row grid the path bar and the listing rows share.
+///
+/// The rail ran the full window height from the very top, so its rows sat a
+/// band out of step with the listing beside them and read as misaligned.
+#[test]
+fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
+    use crate::render::{
+        chrome_height, content_area, row_height, selection_rect, sidebar_view, toolbar_height,
+    };
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 400);
+    let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
+    let band = toolbar_height(Scale::ONE, &theme);
+    let row = row_height(Scale::ONE, &theme);
+    let view = sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
+
+    let rail = view.rail_rect();
+    assert_eq!(rail.origin.x, window.origin.x);
+    assert_eq!(rail.origin.y, i32::try_from(band).expect("band"));
+    assert_eq!(rail.height, window.height - band);
+
+    // The first rail row shares its top with the path bar, one band down.
+    let first = view.row_rect(0).expect("first row");
+    assert_eq!(first.origin.y, i32::try_from(band).expect("band"));
+    assert_eq!(first.height, row);
+
+    // The second shares its top with the first drawn listing row, so the two
+    // columns read on one grid.
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    browser.select(0).expect("select the first entry");
+    let area = content_area(window, Scale::ONE, &theme, Some(&places));
+    let listing = selection_rect(&browser, Scale::ONE, &theme, area).expect("first row drawn");
+    assert_eq!(
+        listing.origin.y,
+        i32::try_from(chrome_height(Scale::ONE, &theme)).expect("chrome")
+    );
+    assert_eq!(
+        view.row_rect(1).expect("second row").origin.y,
+        listing.origin.y
+    );
+
+    // Every drawn row is on that grid, displaced only by the volumes' band.
+    let separator = view.separator_rect().expect("separator").height;
+    let volume_start = places.volume_start().expect("a volume is offered");
+    for index in 0..places.len() {
+        let Some(rect) = view.row_rect(index) else {
+            break;
+        };
+        let step = u32::try_from(index).expect("row index");
+        let expected = band + row * step + if index >= volume_start { separator } else { 0 };
+        assert_eq!(u32::try_from(rect.origin.y).expect("row top"), expected);
+    }
+}
+
+/// A press in the toolbar band belongs to the toolbar, never to the rail.
+///
+/// The rail owned the band's leading strip, so a click aimed at the first
+/// command selected a place instead.
+#[test]
+fn a_press_in_the_toolbar_band_is_never_a_rail_row() {
+    use crate::render::{sidebar_index_at, sidebar_view, toolbar_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 400);
+    let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
+    let band = toolbar_height(Scale::ONE, &theme);
+    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places))
+        .expect("rail")
+        .width();
+
+    for y in 0..band {
+        for x in 0..rail {
+            assert_eq!(
+                sidebar_index_at(
+                    window,
+                    Scale::ONE,
+                    &theme,
+                    Some(&places),
+                    Point::new(i32::try_from(x).expect("x"), i32::try_from(y).expect("y")),
+                ),
+                None,
+                "({x}, {y}) in the toolbar band resolved to a place"
+            );
+        }
+    }
+    // The first row of pixels below the band is the rail's first row.
+    assert_eq!(
+        sidebar_index_at(
+            window,
+            Scale::ONE,
+            &theme,
+            Some(&places),
+            Point::new(0, i32::try_from(band).expect("band")),
+        ),
+        Some(0)
+    );
+}
+
+/// Paint and hit-test agree about where a toolbar tool is: the tool is drawn
+/// inside the very rectangle the window-based hit-test resolves it at, rail or
+/// no rail. A view with no rail — the trusted file picker — keeps the whole
+/// window and resolves no place at all.
+///
+/// The manager painted its band inset by the rail while the hit-tests measured
+/// from the window, so the two disagreed by the rail's width.
+#[test]
+fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
+    use crate::chrome::{ManagerTool, ManagerToolModel, MANAGER_TOOLS};
+    use crate::render::{content_area, manager_tool_rect, sidebar_index_at};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 300);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    let places = Places::new(&home(), &[]);
+
+    // The picker keeps the whole window and lays out no rail to press.
+    assert_eq!(content_area(window, Scale::ONE, &theme, None), window);
+    assert_eq!(
+        sidebar_index_at(window, Scale::ONE, &theme, None, Point::new(0, 0)),
+        None
+    );
+
+    let rect = manager_tool_rect(
+        &browser,
+        Scale::ONE,
+        &theme,
+        window,
+        MANAGER_TOOLS,
+        ManagerTool::NewFolder,
+    )
+    .expect("the New Folder tool is laid out");
+    let left = u32::try_from(rect.left()).expect("tool x");
+    let top = u32::try_from(rect.top()).expect("tool y");
+
+    let paint = |sidebar: Option<&Places>, tools: &[ManagerTool]| {
+        crate::render(
+            &browser,
+            Scale::ONE,
+            &theme,
+            window,
+            &crate::ManagerChrome {
+                tools,
+                tool_model: ManagerToolModel::new(true),
+                sidebar,
+            },
+            &mut NoArtwork,
+        )
+        .expect("surface")
+    };
+    for sidebar in [None, Some(&places)] {
+        // The write tools are the only difference between the two renders, so
+        // a pixel differing inside the resolved rectangle is the tool itself.
+        let drawn = paint(sidebar, MANAGER_TOOLS);
+        let bare = paint(sidebar, &[]);
+        let painted = (left..left + rect.width)
+            .any(|x| (top..top + rect.height).any(|y| drawn.get(x, y) != bare.get(x, y)));
+        assert!(
+            painted,
+            "the New Folder tool is drawn in the rectangle the hit-test resolves it at"
+        );
+    }
+}
+
+/// Every chrome geometry stays total on a window too small to hold it: no
+/// panic, and no row a user could not have seen.
+#[test]
+fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
+    use crate::chrome::{ManagerToolModel, MANAGER_TOOLS};
+    use crate::render::{content_area, sidebar_index_at, sidebar_view, toolbar_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert!(toolbar_height(Scale::ONE, &theme) > 1);
+
+    // Shorter than the toolbar band: the band owns every pixel, so the rail
+    // has no height and nothing in the window resolves to a place.
+    let squat = Rect::new(0, 0, 400, 1);
+    let view = sidebar_view(squat, Scale::ONE, &theme, Some(&places)).expect("rail");
+    assert_eq!(view.rail_rect().height, 0);
+    assert_eq!(view.row_rect(0), None);
+    assert_eq!(
+        sidebar_index_at(squat, Scale::ONE, &theme, Some(&places), Point::new(0, 0)),
+        None
+    );
+
+    // Narrower than the rail: the rail is clamped to the window and the
+    // content area keeps what is left rather than wrapping past the edge.
+    let narrow = Rect::new(0, 0, 3, 400);
+    let thin = sidebar_view(narrow, Scale::ONE, &theme, Some(&places)).expect("rail");
+    assert!(thin.width() <= narrow.width);
+    let area = content_area(narrow, Scale::ONE, &theme, Some(&places));
+    assert!(u32::try_from(area.origin.x).expect("area x") + area.width <= narrow.width);
+
+    // No pixels at all: no row, and still a surface rather than a panic.
+    let nothing = Rect::new(0, 0, 0, 0);
+    let none = sidebar_view(nothing, Scale::ONE, &theme, Some(&places)).expect("rail");
+    assert_eq!(none.row_rect(0), None);
+    assert_eq!(
+        sidebar_index_at(nothing, Scale::ONE, &theme, Some(&places), Point::new(0, 0)),
+        None
+    );
+    for window in [squat, narrow, nothing] {
+        let surface = crate::render(
+            &browser,
+            Scale::ONE,
+            &theme,
+            window,
+            &crate::ManagerChrome {
+                tools: MANAGER_TOOLS,
+                tool_model: ManagerToolModel::new(true),
+                sidebar: Some(&places),
+            },
+            &mut NoArtwork,
+        )
+        .expect("surface");
+        assert_eq!(surface.width(), window.width);
+        assert_eq!(surface.height(), window.height);
+    }
+}
+
 #[test]
 fn the_rail_selects_the_row_matching_the_browsers_location() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");

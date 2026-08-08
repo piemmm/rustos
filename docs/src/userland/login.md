@@ -270,6 +270,31 @@ fail-closed.
 The text round keeps no session-table entry, so a session it starts cannot
 step aside; fast user switching is a property of the graphical round.
 
+## The terminal a session leaves behind
+
+A text console is shared by everyone who sits at it, so the end of a
+session is a boundary, not just a return to the prompt. Whatever the
+session left on the terminal is **discarded** before the next round
+prompts: the screen it drew, the screen it was *not* showing (a
+full-screen program's alternate screen, which no erase sequence written to
+the console can reach), a remote emulator's saved scrollback, and the
+keystrokes it typed ahead but never read — which could otherwise be
+delivered to the next user's prompt as if they had typed them. The read
+line discipline returns to cooked, so the next round starts from the
+interactive default however the last session left it.
+
+One call does all of it (`terminal_purge`, see
+[Syscalls](../architecture/syscalls.md)); `login` holds both halves of the
+console authority it requires, and the kernel does the discarding, so the
+login never depends on a terminal honouring an escape sequence. It happens
+on **every** session boundary — a clean exit, a session refused at load,
+one that never started — because in each case the terminal is about to be
+offered to whoever is there next. A merely *rejected credential* is not a
+session boundary: nothing ran, so nothing is discarded and the failed
+attempt keeps the login box it is drawing on. A terminal that refuses the
+discard is reported by the console, not by `login`, which re-prompts
+regardless.
+
 ## No information leak
 
 The `Authenticator` returns the **same** error whether the account is
@@ -304,9 +329,13 @@ The operations that touch the outside world are injected, mirroring
 - `LoginView` — presents the login screen and reads the username and the
   (never-rendered) password; the machine drives
   it through semantic calls (`round_begin`, `note_failure`,
-  `session_handoff`), never raw terminal writes. A terminal resize is
+  `session_handoff`, `session_ended`), never raw terminal writes. A
+  terminal resize is
   never taken for a keystroke: the page is re-laid-out and the box
   re-centred on the new size, and the field under edit is kept whole.
+  `session_handoff` gives the terminal to the launched session and
+  `session_ended` takes it back, discarding everything the session left on
+  it.
 - `Authenticator::authenticate(&Credentials) -> Result<AuthenticatedUser, Errno>`
   — verifies credentials against `kernel/sec` and the credential store.
 - `SessionLauncher::launch(&AuthenticatedUser, SessionKind) -> Result<SessionOutcome, Errno>`

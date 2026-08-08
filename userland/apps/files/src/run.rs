@@ -61,6 +61,7 @@
 extern crate alloc;
 
 pub mod command;
+pub mod operation;
 pub mod sidebar;
 
 // --- Pure-Rust program --------------------------------------------------
@@ -88,7 +89,7 @@ mod program {
         build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
         delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
         draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
-        owner_field_at, permission_cell_at, progress_cancel_at, render, scroll_pointer, OwnerField,
+        owner_field_at, permission_cell_at, render, scroll_pointer, OwnerField,
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
@@ -99,7 +100,7 @@ mod program {
         DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource,
         DoubleClickTracker, Entry, EntryKind, ManagerChrome, ManagerTool, ManagerToolModel,
         OwnerChange, PasteItem, PasteStrategy, Places, ProgressModel, ProgressOp, Properties,
-        RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
         MANAGER_TOOLS, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
     };
     use tairix_controls::decision::Dialog;
@@ -123,6 +124,7 @@ mod program {
     };
 
     use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
+    use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
 
     /// Exit code when the initial directory listing was refused (no
@@ -1227,7 +1229,7 @@ mod program {
         // re-reads the mount table in the same gesture. The kernel publishes no
         // mount-change notification today, so this — not a poll — is how a
         // newly attached volume appears; nothing here spins waiting for one.
-        if sidebar::is_refresh_request(browser, scale, theme, viewport, event) {
+        if sidebar::is_refresh_request(browser, scale, theme, window, event) {
             let (home, volumes) = places_source();
             sidebar::refresh_places(places, &home, &volumes);
         }
@@ -1244,23 +1246,27 @@ mod program {
             return (outcome.changed || hover_moved, false);
         }
 
-        let (changed, close) =
-            apply_nav_event(browser, overlays, link, scale, theme, viewport, event);
+        let (changed, close) = apply_nav_event(browser, overlays, link, canvas, viewport, event);
         (changed || hover_moved, close)
     }
 
     /// Route one event in plain navigation mode — no overlay is open, and the
     /// places rail did not claim it — reporting whether the view changed and
     /// whether the window should close.
+    ///
+    /// `viewport` is the rail-inset content area the path bar, the listing and
+    /// the scrollbar occupy; the toolbar band spans the whole window, which the
+    /// routers below read from `canvas`.
     fn apply_nav_event<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        scale: Scale,
-        theme: &Theme,
+        canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
     ) -> (bool, bool) {
+        let theme = canvas.theme();
+        let scale = canvas.scale;
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
@@ -1315,7 +1321,7 @@ mod program {
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
             WindowEvent::Pointer { .. } => {
-                apply_pointer(browser, overlays, link, scale, theme, viewport, event)
+                apply_pointer(browser, overlays, link, canvas, viewport, event)
             }
             // Focus changes and key releases repaint nothing. The browser
             // never requests a pick, so a pick conclusion is a session bug and
@@ -1405,15 +1411,19 @@ mod program {
     /// secondary-button press opens the context menu on the item under the
     /// pointer, and a primary press is routed by [`apply_primary_press`].
     /// Every other pointer action is a no-op.
+    ///
+    /// `viewport` is the rail-inset content area; the toolbar band spans the
+    /// whole window, which [`apply_primary_press`] reads from `canvas`.
     fn apply_pointer<S: DirectorySource, T: WindowTransport>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         link: &mut SessionLink<'_, T>,
-        scale: Scale,
-        theme: &Theme,
+        canvas: Canvas<'_>,
         viewport: Rect,
         event: &WindowEvent,
     ) -> (bool, bool) {
+        let theme = canvas.theme();
+        let scale = canvas.scale;
         let WindowEvent::Pointer { x, y, action, .. } = event else {
             return (false, false);
         };
@@ -1438,15 +1448,9 @@ mod program {
             return open_context_menu(browser, overlays, scale, theme, viewport, point);
         }
         match press_point(*action, *x, *y) {
-            Some(point) => apply_primary_press(
-                browser,
-                overlays,
-                link.launcher,
-                scale,
-                theme,
-                viewport,
-                point,
-            ),
+            Some(point) => {
+                apply_primary_press(browser, overlays, link.launcher, canvas, viewport, point)
+            }
             None => (false, false),
         }
     }
@@ -1829,16 +1833,6 @@ mod program {
     /// bound, not a hardware-scaled capacity (§24.4).
     const OPERATION_STEP_BUDGET: u32 = 64;
 
-    /// The disposition of a poll taken while a long operation runs.
-    enum OperationControl {
-        /// The user asked to cancel (Escape, or a click on the Cancel button).
-        Cancel,
-        /// The desktop asked the window to close.
-        Close,
-        /// Nothing that affects the running operation.
-        Ignore,
-    }
-
     /// Advance the running `operation` by up to [`OPERATION_STEP_BUDGET`]
     /// bounded units of work, returning `true` once it has finished — completed,
     /// cancelled at a step boundary, or stopped fail-closed on a refusal.
@@ -2001,49 +1995,6 @@ mod program {
             }
             Err(err) if errno_from(err) == Errno::WouldBlock => Ok(None),
             Err(err) => Err(errno_from(err)),
-        }
-    }
-
-    /// Classify a polled `event` while a long operation runs: a close request,
-    /// a cancel (Escape, or a primary press on the progress panel's Cancel
-    /// button), or nothing that affects the run. A press anywhere but the
-    /// Cancel button is ignored, so nothing navigates behind the modal panel
-    /// (fail closed, §5.4).
-    fn operation_control(event: &WindowEvent, canvas: Canvas<'_>) -> OperationControl {
-        let theme = canvas.theme();
-        let scale = canvas.scale;
-        let viewport = canvas.window();
-        match event {
-            WindowEvent::CloseRequested { .. } => OperationControl::Close,
-            WindowEvent::Key {
-                key:
-                    KeyInput::Pressed {
-                        key: KeyValue::Named(NamedKeyCode::Escape),
-                        ..
-                    },
-                ..
-            } => OperationControl::Cancel,
-            WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
-                Some(point) if progress_cancel_at(viewport, scale, theme, point) => {
-                    OperationControl::Cancel
-                }
-                _ => OperationControl::Ignore,
-            },
-            // Nothing else reaches the running operation. A redraw request
-            // needs no arm of its own: the modal loop that polls this
-            // re-presents the progress panel in full on every pass, so the
-            // released pixels are back on the next step. A desktop change is
-            // already adopted by the caller before this is reached. The rest
-            // is input that must not navigate behind the modal panel.
-            WindowEvent::Key { .. }
-            | WindowEvent::Focus { .. }
-            | WindowEvent::Minimized { .. }
-            | WindowEvent::RedrawRequested { .. }
-            | WindowEvent::Resized { .. }
-            | WindowEvent::Scrolled { .. }
-            | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. }
-            | WindowEvent::DesktopChanged { .. } => OperationControl::Ignore,
         }
     }
 
@@ -2699,20 +2650,25 @@ mod program {
     /// A tool or chrome press is not an item, so it resets the double-click
     /// tracker: a click *through* the chrome and back onto the same item is
     /// never mistaken for a double-click of that item.
+    ///
+    /// `viewport` is the rail-inset content area the items and the path bar
+    /// occupy; the write tools sit on the toolbar band, which spans the whole
+    /// window (`canvas.window()`).
     fn apply_primary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
-        scale: Scale,
-        theme: &Theme,
+        canvas: Canvas<'_>,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
+        let theme = canvas.theme();
+        let scale = canvas.scale;
         if let Some(tool) = manager_tool_at(
             browser,
             scale,
             theme,
-            viewport,
+            canvas.window(),
             point,
             MANAGER_TOOLS,
             manager_tool_model(browser),
@@ -2741,7 +2697,7 @@ mod program {
             };
         }
         overlays.double_click.reset();
-        apply_chrome_press(browser, scale, theme, viewport, point)
+        apply_chrome_press(browser, canvas, viewport, point)
     }
 
     /// Apply one primary press that landed on the read-only **chrome** (the
@@ -2756,18 +2712,23 @@ mod program {
     /// leaves the browser exactly where it was). A click on the inert current
     /// crumb, a separator gap, or empty space resolves to nothing and repaints
     /// nothing.
+    ///
+    /// The toolbar band spans the whole window (`canvas.window()`), so it is
+    /// hit-tested against that; the path bar sits in `viewport`, the rail-inset
+    /// content area below the band.
     fn apply_chrome_press<S: DirectorySource>(
         browser: &mut Browser<S>,
-        scale: Scale,
-        theme: &Theme,
+        canvas: Canvas<'_>,
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
+        let theme = canvas.theme();
+        let scale = canvas.scale;
         // A click on a toolbar command runs it through the same shared dispatch
         // the keyboard accelerators use; a disabled command resolves to nothing
         // (`toolbar_command_at` fails closed) and repaints nothing.
         if let Some(command) =
-            tairix_browse::render::toolbar_command_at(browser, scale, theme, viewport, point)
+            tairix_browse::render::toolbar_command_at(browser, scale, theme, canvas.window(), point)
         {
             return apply_toolbar_command(browser, scale, theme, viewport, command);
         }
@@ -3873,7 +3834,21 @@ mod program {
         VfsDirectorySource::new(list_directory)
     }
 
-    /// Open the browser at the first location that actually lists: the one the
+    /// Open the manager's browser at the first location that actually lists,
+    /// showing its items as icons.
+    ///
+    /// The manager presents a desktop file view, so it opens on the icon grid
+    /// and the toolbar's view toggle switches to the list; the engine's own
+    /// default is the list the read-only picker wants, so the manager states
+    /// its choice here — once, for whichever location [`first_listable`]
+    /// opened.
+    fn open_browser(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
+        let mut browser = first_listable(location)?;
+        browser.set_view_mode(ViewMode::Grid);
+        Some(browser)
+    }
+
+    /// Open a browser at the first location that actually lists: the one the
     /// command line named, then the launching user's home, then the root view.
     ///
     /// Degrades rather than dies — a location that cannot be listed is stated
@@ -3881,7 +3856,7 @@ mod program {
     /// gone, is not a directory, or that this user may not read still gets a
     /// usable window. `None` only when even the root view cannot be listed,
     /// which `main` exits fail-loud on.
-    fn open_browser(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
+    fn first_listable(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
         if let Some(components) = location {
             match Browser::open_at(live_source(), components.clone()) {
                 Ok(browser) => return Some(browser),
@@ -4160,13 +4135,17 @@ mod program {
                                 );
                             }
                         }
+                        let canvas = Canvas {
+                            theme,
+                            mode: &mode,
+                            scale: desktop.scale(),
+                        };
                         match operation_control(
+                            &places,
+                            canvas.scale,
+                            canvas.theme(),
+                            canvas.window(),
                             &event,
-                            Canvas {
-                                theme,
-                                mode: &mode,
-                                scale: desktop.scale(),
-                            },
                         ) {
                             OperationControl::Cancel => {
                                 if let Some(operation) = overlays.operation.as_mut() {

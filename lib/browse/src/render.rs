@@ -136,12 +136,15 @@ pub fn render<S: DirectorySource>(
         let selected = places.index_of(browser.components());
         draw_sidebar(&mut surface, scale, theme, places, &view, selected, artwork);
     }
+    // The toolbar is window chrome: its band spans the full window, above the
+    // rail, so it aligns with the rest of the desktop's chrome. Everything
+    // below it is laid out in `area`, the window less the rail.
     draw_toolbar(
         &mut surface,
         scale,
         theme,
         browser,
-        area,
+        viewport,
         chrome.tools,
         chrome.tool_model,
     );
@@ -213,15 +216,22 @@ fn separator_height(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
-/// The places rail's geometry for `sidebar`, or `None` when there is no rail
-/// to draw (no model, or a model with no rows).
+/// The places rail's geometry for `sidebar` within `window` (the **whole**
+/// window), or `None` when there is no rail to draw (no model, or a model with
+/// no rows).
+///
+/// The rail is laid out *below* the command toolbar band — inset at the top by
+/// [`toolbar_height`], with the rest of the window's height — because the
+/// toolbar is window chrome that spans the full width. Its row pitch is
+/// [`row_height`], the pitch the path bar and the list rows use, so the rail's
+/// rows land on exactly the row grid of the listing beside them.
 ///
 /// The one definition the painter, the pointer hit-test
 /// ([`sidebar_index_at`]), and the content inset ([`content_area`]) all read,
 /// so the drawn rail and every measurement of it agree by construction.
 #[must_use]
 pub fn sidebar_view(
-    viewport: Rect,
+    window: Rect,
     scale: Scale,
     theme: &Theme,
     sidebar: Option<&Places>,
@@ -231,9 +241,15 @@ pub fn sidebar_view(
         return None;
     }
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let band = toolbar_height(scale, theme);
     Some(SidebarView::new(
-        viewport,
-        sidebar_width(scale, theme, font, viewport.width),
+        Rect::new(
+            window.origin.x,
+            window.origin.y.saturating_add_unsigned(band),
+            window.width,
+            window.height.saturating_sub(band),
+        ),
+        sidebar_width(scale, theme, font, window.width),
         row_height(scale, theme),
         separator_height(scale, theme),
         places.len(),
@@ -241,44 +257,53 @@ pub fn sidebar_view(
     ))
 }
 
-/// The window area the browser's own chrome and item view occupy: the whole
-/// window, less the places rail when one is drawn.
+/// The window area the path bar, the item view, and the scrollbar occupy: the
+/// whole `window`, less the places rail on the leading edge when one is drawn.
 ///
-/// Every geometry and hit-test entry point here takes the area the view is
-/// laid out in, so a caller drawing a rail resolves this once and passes it
-/// wherever it would otherwise pass the window — the toolbar, the path bar,
-/// the item view, and the scrollbar then sit exactly where a click looks for
-/// them. A caller with no rail gets the window back unchanged, so a view
-/// without a sidebar is laid out precisely as it was before there was one.
+/// The command toolbar is **not** measured here. It is window chrome: its band
+/// spans the full window width across the top, above the rail and over this
+/// area's own top strip, so [`toolbar_command_at`], [`manager_tool_at`], and
+/// [`manager_tool_rect`] take the *window* while every entry point below the
+/// band — [`crumb_at`], [`entry_index_at`], [`selection_rect`],
+/// [`scrollbar_bounds`] and the overlays — takes this area. A caller drawing a
+/// rail resolves this once and passes it wherever it would otherwise pass the
+/// window; the path bar, the rows, and the scrollbar then sit exactly where a
+/// click looks for them.
+///
+/// A caller with no rail gets the window back unchanged, so a view without a
+/// sidebar (the trusted file picker) is laid out precisely as it was before
+/// there was one.
 #[must_use]
-pub fn content_area(viewport: Rect, scale: Scale, theme: &Theme, sidebar: Option<&Places>) -> Rect {
-    let Some(view) = sidebar_view(viewport, scale, theme, sidebar) else {
-        return viewport;
+pub fn content_area(window: Rect, scale: Scale, theme: &Theme, sidebar: Option<&Places>) -> Rect {
+    let Some(view) = sidebar_view(window, scale, theme, sidebar) else {
+        return window;
     };
     let rail = view.width();
     Rect::new(
-        viewport.origin.x.saturating_add_unsigned(rail),
-        viewport.origin.y,
-        viewport.width.saturating_sub(rail),
-        viewport.height,
+        window.origin.x.saturating_add_unsigned(rail),
+        window.origin.y,
+        window.width.saturating_sub(rail),
+        window.height,
     )
 }
 
 /// The places-rail row at window-local pixel `point`, or `None` when the point
-/// is not on one — outside the rail, in the separation between the user's
-/// places and the volumes, or below the last drawn row.
+/// is not on one — above the rail in the toolbar band, outside the rail, in
+/// the separation between the user's places and the volumes, or below the last
+/// drawn row.
 ///
-/// The exact inverse of what [`render`] painted, through the one shared
-/// [`sidebar_view`] geometry.
+/// Takes the **whole** window, the rectangle [`sidebar_view`] lays the rail out
+/// in; it is the exact inverse of what [`render`] painted, through that one
+/// shared geometry.
 #[must_use]
 pub fn sidebar_index_at(
-    viewport: Rect,
+    window: Rect,
     scale: Scale,
     theme: &Theme,
     sidebar: Option<&Places>,
     point: Point,
 ) -> Option<usize> {
-    let view = sidebar_view(viewport, scale, theme, sidebar)?;
+    let view = sidebar_view(window, scale, theme, sidebar)?;
     let x = u32::try_from(point.x).ok()?;
     let y = u32::try_from(point.y).ok()?;
     view.index_at(x, y)
@@ -777,14 +802,17 @@ fn gutter_width(scale: Scale, theme: &Theme, viewport_width: u32) -> u32 {
         .min(viewport_width)
 }
 
-/// The toolbar strip's rectangle within the browser's content area: the full
-/// width of the area, at its top. One definition, so the drawn toolbar and
-/// each of the three hit-tests that invert it cannot place it differently.
-fn toolbar_bounds(scale: Scale, theme: &Theme, area: Rect) -> Rect {
+/// The command toolbar's band: the full width of `window`, at its top.
+///
+/// The toolbar is window chrome, so it spans the whole window rather than the
+/// rail-inset [`content_area`] — it reaches the window's leading edge and the
+/// places rail begins below it. One definition, so the drawn toolbar and each
+/// of the three hit-tests that invert it cannot place it differently.
+fn toolbar_bounds(scale: Scale, theme: &Theme, window: Rect) -> Rect {
     Rect::new(
-        area.origin.x,
-        area.origin.y,
-        area.width,
+        window.origin.x,
+        window.origin.y,
+        window.width,
         toolbar_height(scale, theme),
     )
 }
@@ -898,33 +926,36 @@ fn draw_toolbar<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     browser: &Browser<S>,
-    viewport: Rect,
+    window: Rect,
     tools: &[ManagerTool],
     tool_model: ManagerToolModel,
 ) {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(scale, theme, viewport);
+    let bounds = toolbar_bounds(scale, theme, window);
     toolbar.render(surface, bounds, scale, theme);
 }
 
 /// The actionable toolbar command at window-local pixel `point`, or `None`
-/// when the click is not on one — outside the toolbar strip, on a group
+/// when the click is not on one — outside the toolbar band, on a group
 /// gutter, on a manager write tool, or on a command the [`ToolbarModel`] has
-/// disabled (fail closed: a disabled tool does not act, §5.4). It mirrors the
+/// disabled (fail closed: a disabled tool does not act). It mirrors the
 /// drawn toolbar's own layout so a click resolves to exactly the tool
-/// [`render`] painted (§2.2). The read-only commands keep the same positions
+/// [`render`] painted. The read-only commands keep the same positions
 /// whether or not write tools follow them, so this needs no `tools` argument.
+///
+/// `window` is the **whole** window, the rectangle the toolbar band spans —
+/// not the rail-inset [`content_area`] the path bar and the listing take.
 #[must_use]
 pub fn toolbar_command_at<S: DirectorySource>(
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    window: Rect,
     point: Point,
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
     let toolbar = build_toolbar(model, &[], ManagerToolModel::none());
-    let bounds = toolbar_bounds(scale, theme, viewport);
+    let bounds = toolbar_bounds(scale, theme, window);
     let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
     model.is_enabled(command).then_some(command)
@@ -935,23 +966,26 @@ pub fn toolbar_command_at<S: DirectorySource>(
 /// [`render`] (a read-only picker passes an empty slice and so never resolves a
 /// write tool). The full toolbar — read-only commands then the write tools — is
 /// rebuilt so the write tools sit at exactly the positions [`render`] painted
-/// them (§2.2); a hit resolves only in the write-tool index range, so a click
+/// them; a hit resolves only in the write-tool index range, so a click
 /// on a read-only command returns `None` here (it is handled by
 /// [`toolbar_command_at`]). `tool_model` is the same enable state handed to
 /// [`render`]: a click on a tool the model has disabled resolves to `None`
-/// (fail closed — a disabled tool does not act, §5.4).
+/// (fail closed — a disabled tool does not act).
+///
+/// `window` is the **whole** window, the rectangle the toolbar band spans —
+/// not the rail-inset [`content_area`] the path bar and the listing take.
 #[must_use]
 pub fn manager_tool_at<S: DirectorySource>(
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    window: Rect,
     point: Point,
     tools: &[ManagerTool],
     tool_model: ManagerToolModel,
 ) -> Option<ManagerTool> {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(scale, theme, viewport);
+    let bounds = toolbar_bounds(scale, theme, window);
     let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
     let tool = tools.get(tool_index).copied()?;
@@ -964,19 +998,22 @@ pub fn manager_tool_at<S: DirectorySource>(
 /// the write tools), so a caller that must aim *at* a write tool — the desktop
 /// integration harness that clicks New Folder — reads the exact geometry
 /// [`render`] paints and [`manager_tool_at`] hit-tests, never a hand-copied
-/// position (§2.2). Fails closed: an out-of-range or unlisted tool is `None`.
+/// position. Fails closed: an out-of-range or unlisted tool is `None`.
 ///
 /// The toolbar left-packs fixed-width buttons and a disabled tool renders in
 /// place (muted, never hidden), so a tool's rectangle is independent of its
 /// enable state; the geometry is built with every tool enabled
 /// ([`ManagerToolModel::new(true)`](ManagerToolModel::new)) and a caller that
 /// must only *act* on an enabled tool gates that through [`manager_tool_at`].
+///
+/// `window` is the **whole** window, the rectangle the toolbar band spans —
+/// not the rail-inset [`content_area`] the path bar and the listing take.
 #[must_use]
 pub fn manager_tool_rect<S: DirectorySource>(
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    window: Rect,
     tools: &[ManagerTool],
     tool: ManagerTool,
 ) -> Option<Rect> {
@@ -986,7 +1023,7 @@ pub fn manager_tool_rect<S: DirectorySource>(
         tools,
         ManagerToolModel::new(true),
     );
-    let bounds = toolbar_bounds(scale, theme, viewport);
+    let bounds = toolbar_bounds(scale, theme, window);
     let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
     toolbar.tool_rect(index, bounds, scale, theme)
 }

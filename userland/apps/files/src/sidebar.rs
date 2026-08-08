@@ -76,14 +76,14 @@ pub fn press_point(action: PointerAction, x: u32, y: u32) -> Option<Point> {
 /// the `F5` key or a press on the toolbar's Refresh command.
 ///
 /// The kernel publishes no mount-change notification, so this gesture — not a
-/// poll — is what makes a newly attached volume appear in the rail. `viewport`
-/// is the area the toolbar was actually drawn in, so the press is tested
-/// against the control the user saw.
+/// poll — is what makes a newly attached volume appear in the rail. `window`
+/// is the whole window, the band the toolbar was actually drawn across, so the
+/// press is tested against the control the user saw.
 pub fn is_refresh_request<S: DirectorySource>(
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    window: Rect,
     event: &WindowEvent,
 ) -> bool {
     match event {
@@ -96,7 +96,7 @@ pub fn is_refresh_request<S: DirectorySource>(
             ..
         } => true,
         WindowEvent::Pointer { x, y, action, .. } => press_point(*action, *x, *y)
-            .and_then(|point| toolbar_command_at(browser, scale, theme, viewport, point))
+            .and_then(|point| toolbar_command_at(browser, scale, theme, window, point))
             .is_some_and(|command| command == ToolbarCommand::Refresh),
         _ => false,
     }

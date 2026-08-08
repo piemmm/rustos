@@ -26,5 +26,6 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN
 # A windowed, user-facing application: list it in the desktop's program
 # library under the disk/file tooling folder (plans/NEW-TASKBAR.md T3).
 library = "SystemTools"
-# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
-library-icon = "files.png"
+# This bundle's own vector icon master in its Resources/, authored in the
+# desktop's SVG subset over a 256x256 design box (plans/ICONS.md).
+library-icon = "files.svg"

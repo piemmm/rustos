@@ -303,13 +303,13 @@ The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in
 the top strip, each glyph from `ToolbarCommand::icon()` and each rendered
 enabled or disabled from the `ToolbarModel` (a disabled tool reads muted, not
-hidden). A primary-button press resolves through `render::toolbar_command_at`
-— which mirrors the drawn toolbar's own layout and returns **only an enabled
-command** (a click on a disabled tool or a group gutter resolves to nothing,
-failing closed) — and runs through the one shared `apply_command(browser,
-command)`. `apply_command` is a **read-only** dispatch (history / climb /
-refresh / view toggle / sort cycle), so the trusted picker can drive the same
-toolbar; Back/Forward/Up/Refresh are the browser's transactional, fail-closed
+hidden). A primary-button press resolves through `render::toolbar_command_at` —
+which mirrors the drawn toolbar's own layout across the whole window and returns
+**only an enabled command** (a click on a disabled tool or a group gutter
+resolves to nothing, failing closed) — and runs through the one shared
+`apply_command(browser, command)`. `apply_command` is a **read-only** dispatch
+(history / climb / refresh / view toggle / sort cycle), so the picker drives the
+same toolbar; Back/Forward/Up/Refresh are the browser's transactional, fail-closed
 navigation, and the view toggle and sort each step to the next mode
 (`ViewMode::toggled`, `SortMode::next` — a fixed six-mode cycle). The
 keyboard drives the same dispatch through accelerators: **Alt+←/→** (Back /
@@ -505,7 +505,10 @@ read-only picker composes the same engine and never launches.
 command toolbar strip,
 a path bar, and the current directory into a `tairix-raster` `Surface` sized to
 the viewport, in whichever of the two views the browser holds
-(`ViewMode::List` or `ViewMode::Grid`). `tools` is the manager-only
+(`ViewMode::List` or `ViewMode::Grid`). The **file manager opens on the icon
+grid** and its toolbar toggle switches to the list; the engine's own default
+and the trusted file picker stay `List`, since a chooser wants names, sizes
+and dates rather than tiles. `tools` is the manager-only
 `ManagerTool` set drawn after the read-only commands — the file manager passes
 `MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
 (see the frame model above); the item area sits below the combined chrome
@@ -607,7 +610,7 @@ panicking (`AGENTS.md` §2.9).
 
 ### Grid-view icon artwork
 
-The grid draws each application's own icon, and the OS's shipped raster masters
+The grid draws each application's own icon, and the OS's shipped class masters
 for everything else. The `Run` binary binds the renderer's `IconArtwork` lookup
 to the shared artwork layer (`lib/icon::artwork`), so a tile shows the real
 picture where one exists and the built-in vector glyph where it does not.
@@ -618,8 +621,9 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
 - **Where the assets come from.** For an application bundle, the icon its own
   signed `AppInfo` names inside its own `Resources/`; for everything else —
   and for a bundle that declares none, or whose icon will not serve — one
-  `<asset-id>.png` per icon kind under `/System/Graphics/Icons`
-  (`tairix_icon::icon_artwork_path`), the same store and the same spelling the
+  `<asset-id>.png` or `<asset-id>.svg` per icon kind under
+  `/System/Graphics/Icons` (`tairix_icon::icon_artwork_path`,
+  `icon_vector_path`), the same store and the same spelling the
   desktop session resolves, not a file manager copy (`AGENTS.md` §2.2). The
   kind comes from the one content-type registry
   (`media_for_entry(entry, parent).icon()`), so the artwork a name gets and the
@@ -646,7 +650,8 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   are validated by the transport, and the shared cache re-checks the block is
   exactly `side`×`side` straight-alpha RGBA8 before a surface is built from it.
   A short, long, or refusing reply resolves to `None`, which draws the glyph.
-- **The fallback chain, in order.** Shipped raster artwork → the built-in vector
+- **The fallback chain, in order.** Shipped raster artwork → the shipped vector
+  asset → the built-in vector
   glyph. Every failure along the way (asset missing, asset over-long, decode
   refused, worker crashed and was replaced, reply disbelieved) falls to the
   glyph, and the refusal itself is cached so a broken asset is not re-read every
@@ -723,10 +728,21 @@ than trusted.
 derived from the row's icon column plus the widest fixed label measured in the
 active font plus the theme's padding (never a fixed pixel count, and clamped to
 a third of the window), its per-row rectangles, the separator band, and the
-`index_at` hit-test that inverts them exactly. `render::content_area` insets the
-toolbar, path bar, list/grid, and scrollbar by the rail through that same
-geometry, so a click resolves to the control the user saw; with no rail it
-returns the window unchanged and the view is laid out exactly as before.
+`index_at` hit-test that inverts them exactly.
+
+**The command toolbar is window chrome, and the rail starts below it.**
+`render::sidebar_view` lays the rail out in the window inset at the top by the
+toolbar band and no taller than what is left, so the rail's first row top *is*
+the path bar's top and every rail row sits on the same `row_height` grid as the
+listing rows beside it. `render::toolbar_bounds` — and the three hit-tests that
+invert it, `toolbar_command_at`, `manager_tool_at`, and `manager_tool_rect` —
+take the **whole window**, because the band spans it edge to edge like the rest
+of the desktop's chrome. `render::content_area` is what the path bar, the
+list/grid, the scrollbar, and every overlay drawn over the view occupy — the
+window less the rail on the leading edge, full height — and is the rectangle
+those entry points are hit-tested against, so a click resolves to the control
+the user saw. With no rail it returns the window unchanged, so the trusted
+picker's pixels and hit-tests are exactly as they were.
 
 Rows are drawn with the shared `ListRow` control, which already carries the
 artwork seam, so a volume shows its medium's artwork and falls back to the
@@ -1016,7 +1032,12 @@ a *latched* cancel) drawn by `render::draw_progress_dialog` as a `lib/controls`
 since the total is unknown until the reads reveal it, `AGENTS.md` §2.24), and a
 Cancel `Button`; `render::progress_cancel_at` mirrors the button geometry so a
 click resolves to exactly the drawn Cancel (fail closed off it, `AGENTS.md`
-§2.2, §5.4). A cancel is latched and stops the walk at the next unit boundary —
+§2.2, §5.4). The app's modal routing lives in the host-testable
+`userland/apps/files/src/operation.rs`, which takes the window plus the drawn
+places rail and derives the panel's rect through the same `content_area` the
+panel is painted in, so the drawn button and the clickable button cannot drift
+apart by the rail's width and a caller cannot hand the routing the wrong
+rectangle. A cancel is latched and stops the walk at the next unit boundary —
 never mid-node, and never mid-chunk — and a completed or cancelled/refused run
 alike re-lists so what actually remains is shown honestly. A cross-volume move's
 source-removal cleanup runs as a `Deleting` stage of the same interleaved
@@ -1121,11 +1142,12 @@ FM10's move-to-Trash delete): the runner clicks **Go to Trash** to navigate the
 front files window into `Library/Trash` (now holding the trashed folder),
 clicks **Empty Trash** to open the *Delete Permanently* confirmation, and
 clicks its Delete button — every point reconstructed from the app's own layout
-code (`render::manager_tool_rect` for the tools; `trash::empty_trash_plan` →
-`render::build_delete_dialog` with `DeleteDisposition::Permanent` →
-`Dialog::action_rects` for the confirm button, the same code the guest paints
-and hit-tests with, `AGENTS.md` §2.2). The guest's PASS gate latches on the
-kernel's own `FsNodeMutated op=rmdir` audit record whose target is under
+code (`render::manager_tool_rect` over the whole window for the tools;
+`trash::empty_trash_plan` → `render::build_delete_dialog` with
+`DeleteDisposition::Permanent` → `Dialog::action_rects` for the confirm button,
+the same code the guest paints and hit-tests with, `AGENTS.md` §2.2). The
+guest's PASS gate latches on the kernel's own `FsNodeMutated op=rmdir` audit
+record whose target is under
 `Library/Trash`, observed only after the FM10 move has latched, so no earlier
 removal can satisfy it (fail closed). The empty burst is held behind a one-shot
 serial marker the test kernel emits the first time it observes the move latch,
@@ -1213,8 +1235,9 @@ production desktop by the autoload QEMU vertical
 trip): the runner refocuses the served files window, descends into
 `/Users/root` by coordinate-computed pointer clicks — reconstructing the
 browser's own row layout through `render::selection_rect` over the real
-listings and the New Folder tool through `render::manager_tool_rect`, the same
-layout code the guest paints with, offset by the window manager's client inset
+listings and the New Folder tool through `render::manager_tool_rect` over the
+whole window (the band the toolbar is drawn across), the same layout code the
+guest paints with, offset by the window manager's client inset
 (`WindowFrame::insets`) so a click lands on the client, not the decoration
 (`AGENTS.md` §2.2) — and seat-keyboard `Enter`s, clicks the New Folder tool,
 and types a distinct name. The guest's PASS gate latches on the kernel's own

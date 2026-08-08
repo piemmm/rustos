@@ -48,6 +48,29 @@ permission-grid non-overlap regression + updated hit-test scan, and the
 `lib/controls` `icon_only_glyph_fills_the_plate_not_the_text_inset` regression;
 freestanding app builds + lints clean.
 
+**Chrome layout, the default view, and the modal cancel rect.** The command
+toolbar is *window* chrome: its band spans the full window width
+(`render::toolbar_bounds`, and the three hit-tests that invert it —
+`toolbar_command_at`, `manager_tool_at`, `manager_tool_rect` — take the
+window), and `render::sidebar_view` insets the places rail's top by that band,
+so the rail's first row top *is* the path bar's top and its rows share the
+`row_height` grid with the listing rows beside them. `content_area` keeps its
+meaning as the window less the rail — what the path bar, item view, scrollbar
+and overlays occupy — so the picker (no rail, `content_area` == window) is
+laid out exactly as before. The manager opens on `ViewMode::Grid` (icons)
+with the toolbar toggle switching to the list; the engine default and the
+read-only picker stay `List`, since a chooser needs names, sizes and dates.
+The modal file-operation progress panel's Cancel press resolves through the
+same `content_area` the panel is painted in — the routing lives in the
+host-testable `userland/apps/files/src/operation.rs`, which takes the window
+plus the drawn rail and derives the panel rect itself, so a caller cannot hand
+it the wrong rectangle (it previously hit-tested the whole window, so a press
+on the drawn button missed by the rail's width). Host tests: the `lib/browse`
+chrome-geometry set (toolbar band spans the window, a press at `x == 0` in the
+band resolves to the first enabled command, the rail's row grid, no rail row
+above the band, degenerate windows total) and the `operation` cancel-routing
+set (a press on the drawn button cancels; the same y over the rail does not).
+
 **FM12 (double-click activation)**: a double-click on an item now activates it (descend / launch a bundle /
 open a file), driven by the shared pure `lib/browse::click::DoubleClickTracker`
 over the capability-free monotonic clock, through the very same `activate`

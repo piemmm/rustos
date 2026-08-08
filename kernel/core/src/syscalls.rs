@@ -5151,6 +5151,52 @@ where
         Ok(0)
     }
 
+    fn terminal_purge(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
+        // The dispatcher checked the write half. This call also discards the
+        // terminal's queued input, so the read half is required too — checked
+        // before `fd` is resolved and before any state is touched.
+        if !caller.caps.has(CapabilityId::CONSOLE_READ) {
+            return Err(Errno::PermissionDenied);
+        }
+        // A pty slave is a *tty* too: its retained state lives on the `Pty`
+        // rather than in the static console list, so route there — owner-checked
+        // exactly as the console path. The master end is a program's own
+        // emulator screen, which it clears without asking the kernel.
+        {
+            let aspaces = self.aspaces.read();
+            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+                self.check_terminal_foreground(caller, pty.foreground())?;
+                pty.purge_session();
+                // The discard frees ring space, so a writer parked on a full
+                // ring is woken exactly as a drain wakes it.
+                crate::waitq::console_wake();
+                return Ok(0);
+            }
+        }
+        // Resolve `fd` against the caller's per-process descriptor table: a
+        // terminal is named by one of its *input* streams, exactly as the
+        // discipline control names it, so anything else fails closed with
+        // `NotFound` — never leaking which case occurred. An unregistered
+        // caller resolves to the all-`Closed` default and fails here too.
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
+        // A missing console — including the empty pre-install list —
+        // announces the inert interface rather than reporting a purge that
+        // never happened.
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
+        // Wiping a terminal is terminal control, so it belongs to the
+        // console's controlling owner exactly as the discipline does: a
+        // background task must not blank the foreground session's screen or
+        // eat the input it is waiting for.
+        self.check_console_foreground(caller, device)?;
+        device.purge_session();
+        Ok(0)
+    }
+
     fn pipe_create(&self, caller: &CallerContext<'_>, out: u64) -> SyscallResult {
         // Unprivileged by design (`plans/SPAWN.md` SP10): both descriptors
         // land in the caller's own open table and reach nothing else. The
@@ -13861,6 +13907,58 @@ mod tests {
         }
     }
 
+    /// A console that counts the session purges each of its halves is asked
+    /// for, standing in for a retained terminal in the `terminal_purge`
+    /// tests. One object serves as both halves, so a test sees the display
+    /// and input discards a single call produced.
+    #[derive(Default)]
+    struct PurgeConsole {
+        display_purges: core::sync::atomic::AtomicU32,
+        input_purges: core::sync::atomic::AtomicU32,
+    }
+
+    impl PurgeConsole {
+        /// The (display, input) purge counts observed so far.
+        fn purges(&self) -> (u32, u32) {
+            use core::sync::atomic::Ordering::Relaxed;
+            (
+                self.display_purges.load(Relaxed),
+                self.input_purges.load(Relaxed),
+            )
+        }
+    }
+
+    impl crate::console::ConsoleWrite for PurgeConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+
+        fn purge(&self) {
+            self.display_purges
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl crate::console::ConsoleRead for PurgeConsole {
+        fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+            Ok(0)
+        }
+
+        fn purge(&self) {
+            self.input_purges
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Leak a single-console list whose both halves are one [`PurgeConsole`].
+    fn single_purge_console() -> (&'static PurgeConsole, &'static [ConsoleDevice]) {
+        let console: &'static PurgeConsole = Box::leak(Box::new(PurgeConsole::default()));
+        (
+            console,
+            Box::leak(Box::new([ConsoleDevice::new(console, console)])),
+        )
+    }
+
     /// A console sink that reports a fixed character-cell grid, standing in
     /// for a framebuffer text console in the `terminal_size` handler test.
     struct GridConsole(tairix_abi::TerminalSize);
@@ -18687,6 +18785,211 @@ mod tests {
             Ok(0)
         );
         assert_eq!(consoles[0].input_mode(), InputMode::Raw);
+    }
+
+    /// `terminal_purge` discards the terminal's retained display *and* its
+    /// pending input, and returns the read discipline to cooked — the session
+    /// boundary a text login uses so nothing of one user's session reaches
+    /// the next.
+    #[test]
+    fn terminal_purge_discards_the_display_the_input_and_the_discipline() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let (console, consoles) = single_purge_console();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+
+        // A session leaves the terminal in a full-screen program's raw
+        // discipline.
+        assert_eq!(
+            h.stream_input_mode(&ctx, STDIN, InputMode::Raw.as_u32()),
+            Ok(0)
+        );
+
+        assert_eq!(h.terminal_purge(&ctx, STDIN), Ok(0));
+        assert_eq!(console.purges(), (1, 1));
+        assert_eq!(consoles[0].input_mode(), InputMode::Cooked);
+    }
+
+    /// The purge destroys retained output *and* discards queued input, so it
+    /// needs both halves' authority. The read half is checked before any
+    /// state is touched: a caller the dispatcher admitted on the write
+    /// capability alone wipes nothing.
+    #[test]
+    fn terminal_purge_requires_both_console_capabilities() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let (console, consoles) = single_purge_console();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+
+        assert_eq!(
+            h.terminal_purge(&ctx, STDIN),
+            Err(Errno::PermissionDenied),
+            "the read half gates the input discard"
+        );
+        assert_eq!(console.purges(), (0, 0));
+    }
+
+    /// Wiping a terminal is terminal control, so it belongs to the console's
+    /// controlling owner: a background task must not blank the foreground
+    /// session's screen or eat the input it is waiting for.
+    #[test]
+    fn terminal_purge_is_gated_on_the_foreground_owner() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let both = [CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE];
+        let shell_caps = make_caps_record(2, &both, sink);
+        let shell = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &shell_caps,
+        };
+        let fg_caps = make_caps_record(9, &both, sink);
+        let fg = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &fg_caps,
+        };
+
+        let (console, consoles) = single_purge_console();
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(SecTaskId(2), SecTaskId(9));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        for task in [2u64, 9] {
+            aspaces
+                .write()
+                .set_streams(SecTaskId(task), DescriptorTable::standard());
+        }
+
+        assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
+        assert_eq!(
+            h.terminal_purge(&shell, STDIN),
+            Err(Errno::NotForeground),
+            "the granting shell is background while its child runs"
+        );
+        assert_eq!(console.purges(), (0, 0));
+
+        // The owner's own terminal control works, and the login that
+        // reclaims the console once the child is gone is the owner again.
+        assert_eq!(h.terminal_purge(&fg, STDIN), Ok(0));
+        assert_eq!(console.purges(), (1, 1));
+    }
+
+    /// Fail closed on every other shape: a descriptor that is not a readable
+    /// stream resolves no terminal, and a build with no console list
+    /// announces the inert interface rather than reporting a purge that
+    /// never happened.
+    #[test]
+    fn terminal_purge_fails_closed_off_the_terminal_path() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // No console list: even a readable descriptor resolves no terminal.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+        assert_eq!(bare.terminal_purge(&ctx, STDIN), Err(Errno::NotImplemented));
+
+        let (console, consoles) = single_purge_console();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+
+        // An output descriptor, and a descriptor the caller never opened,
+        // both resolve no terminal — indistinguishably.
+        assert_eq!(h.terminal_purge(&ctx, STDOUT), Err(Errno::NotFound));
+        assert_eq!(h.terminal_purge(&ctx, 9), Err(Errno::NotFound));
+        assert_eq!(console.purges(), (0, 0));
+
+        // An unregistered caller resolves the all-closed default table.
+        let stranger_caps = make_caps_record(
+            7,
+            &[CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE],
+            sink,
+        );
+        let stranger = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &stranger_caps,
+        };
+        assert_eq!(h.terminal_purge(&stranger, STDIN), Err(Errno::NotFound));
+        assert_eq!(console.purges(), (0, 0));
     }
 
     /// With no console list installed the call announces the inert

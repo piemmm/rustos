@@ -142,3 +142,17 @@ pub const fn is_line_erase(byte: u8) -> bool {
 /// the cursor rests where the glyph was. The read line discipline writes this
 /// when it erases a character so the screen matches the edited line.
 pub const ERASE_ECHO: [u8; 3] = [BS, b' ', BS];
+
+/// The bytes that ask a terminal whose screen we do **not** own to discard
+/// everything a finished session left on it: leave the alternate screen
+/// ([`MODE_ALT_SCREEN`]), erase the display, erase the saved scrollback
+/// (`CSI 3 J`), home the cursor, and return to the plain pen.
+///
+/// Written to a byte-stream terminal (a serial console, whose display and
+/// scrollback live in a remote emulator we cannot reach) at a session
+/// boundary. The display erase precedes the scrollback erase because some
+/// emulators scroll the erased screen into their saved lines. A retained
+/// terminal the kernel renders itself never needs this: it clears its own
+/// grids — including the alternate one no escape sequence can reach — and
+/// resets its parser directly.
+pub const SESSION_RESET: &[u8] = b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[H\x1b[0m";

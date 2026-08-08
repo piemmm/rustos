@@ -1173,6 +1173,13 @@ mod tests {
             .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Icon)
             .collect();
         assert!(!icon_masters.is_empty(), "at least one icon master ships");
+        // Decided from the bytes, exactly as the verification decides it.
+        assert!(
+            icon_masters.iter().any(|asset| {
+                tairix_image::sniff(asset.bytes) != Some(tairix_image::ImageFormat::Png)
+            }),
+            "a vector class master ships, so the vector arm is exercised"
+        );
         for asset in icon_masters {
             verify_icon_master(
                 &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
