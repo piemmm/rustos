@@ -1,18 +1,25 @@
-//! Unit tests for the shared box blur.
+//! Unit tests for the shared box blur and the frost built on it.
 //!
 //! They pin down the identities every frosted surface relies on: a uniform
 //! field survives exactly, an impulse spreads symmetrically and conserves
 //! its energy, alpha blurs with the colour channels and keeps the
 //! premultiplied invariant, and every degenerate shape (one pixel, one row,
 //! one column, a radius wider than the region) is answered rather than
-//! refused. The rest are the fail-closed refusals, and the equivalence of
-//! the allocating [`Surface::blur`] with the scratch-owning [`box_blur`].
+//! refused. The rest are the fail-closed refusals, and [`frost_region`]'s
+//! own contract: what it touches, what the coverage weight does, which
+//! coordinates the shape is read at, and that a reused scratch carries
+//! nothing between calls.
+//!
+//! [`frost_region`]: Surface::frost_region
+
+use core::cell::RefCell;
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::box_blur;
-use crate::color::Pixel;
+use super::{box_blur, BlurScratch};
+use crate::color::{div255, Pixel};
+use crate::round::round_rect_coverage;
 use crate::surface::Surface;
 
 /// An opaque grey.
@@ -158,34 +165,238 @@ fn short_buffers_leave_the_region_untouched() {
     assert_eq!(short, field[..3], "a short region blurs nothing");
 }
 
+/// The `w`×`h` block of `surface` at `(x, y)`, row-major.
+fn block(surface: &Surface, x: u32, y: u32, w: u32, h: u32) -> Vec<Pixel> {
+    let mut out = Vec::new();
+    for row in y..y + h {
+        for column in x..x + w {
+            out.push(surface.get(column, row).expect("inside the surface"));
+        }
+    }
+    out
+}
+
+/// `surface` with `[x, x+w) × [y, y+h)` frosted at a constant coverage.
+fn frosted(
+    mut surface: Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    radius: u32,
+    weight: u8,
+) -> Surface {
+    surface.frost_region(x, y, w, h, radius, &mut BlurScratch::new(), |_, _| weight);
+    surface
+}
+
+/// Every pixel of `after` outside `[x, x+w) × [y, y+h)` still carries what
+/// `before` had there.
+fn outside_is_untouched(after: &Surface, before: &Surface, (x, y, w, h): (u32, u32, u32, u32)) {
+    for row in 0..before.height() {
+        for column in 0..before.width() {
+            if (x..x + w).contains(&column) && (y..y + h).contains(&row) {
+                continue;
+            }
+            assert_eq!(
+                after.get(column, row),
+                before.get(column, row),
+                "({column}, {row}) is outside the frosted rectangle"
+            );
+        }
+    }
+}
+
 #[test]
-fn surface_blur_matches_the_scratch_owning_call() {
+fn a_frost_blurs_its_region_and_nothing_else() {
+    let rect = (3, 2, 6, 5);
+    let before = patterned(12, 9);
+    let after = frosted(before.clone(), rect, 2, 255);
+    assert_ne!(
+        block(&after, 3, 2, 6, 5),
+        block(&before, 3, 2, 6, 5),
+        "the rectangle is frosted"
+    );
+    outside_is_untouched(&after, &before, rect);
+}
+
+/// Full coverage takes the blurred pixel outright, so the rectangle comes
+/// out bit-for-bit [`box_blur`] over a copy of it. Frosting a whole surface
+/// at full coverage is the surface-wide blur this crate used to offer
+/// separately, so its equivalence test lives here now.
+#[test]
+fn full_coverage_is_exactly_the_box_blur_of_the_region() {
     for radius in [1u32, 2, 5] {
-        let mut surface = patterned(9, 7);
-        let expected = blurred(surface.pixels(), 9, 7, radius as usize);
-        surface.blur(radius);
+        let before = patterned(9, 7);
+        let expected = blurred(&block(&before, 2, 1, 6, 5), 6, 5, radius as usize);
+        let after = frosted(before, (2, 1, 6, 5), radius, 255);
+        assert_eq!(block(&after, 2, 1, 6, 5), expected, "at radius {radius}");
+    }
+
+    let before = patterned(9, 7);
+    let expected = blurred(before.pixels(), 9, 7, 3);
+    let after = frosted(before, (0, 0, 9, 7), 3, 255);
+    assert_eq!(
+        after.pixels(),
+        expected,
+        "frosting the whole surface is the blur of it"
+    );
+}
+
+#[test]
+fn zero_coverage_leaves_the_whole_surface_untouched() {
+    let before = patterned(10, 8);
+    let after = frosted(before.clone(), (1, 1, 7, 6), 3, 0);
+    assert_eq!(after, before, "a coverage of nothing frosts nothing");
+}
+
+#[test]
+fn partial_coverage_is_the_weighted_mix_of_the_original_and_the_blur() {
+    const WEIGHT: u8 = 64;
+    let before = patterned(8, 6);
+    let original = block(&before, 1, 1, 5, 4);
+    let blur = blurred(&original, 5, 4, 2);
+    let keep = u32::from(255 - WEIGHT);
+    let take = u32::from(WEIGHT);
+    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
+    let expected: Vec<Pixel> = original
+        .iter()
+        .zip(&blur)
+        .map(|(from, to)| Pixel {
+            r: channel(from.r, to.r),
+            g: channel(from.g, to.g),
+            b: channel(from.b, to.b),
+            a: channel(from.a, to.a),
+        })
+        .collect();
+    assert_ne!(expected, original, "a partial mix is not the original");
+    assert_ne!(expected, blur, "a partial mix is not the blur");
+
+    let after = frosted(before, (1, 1, 5, 4), 2, WEIGHT);
+    assert_eq!(block(&after, 1, 1, 5, 4), expected);
+}
+
+#[test]
+fn a_rounded_coverage_frosts_the_centre_and_spares_the_corner() {
+    const SIDE: u32 = 16;
+    const RADIUS: u32 = 6;
+    let before = patterned(SIDE, SIDE);
+    let expected = blurred(before.pixels(), SIDE as usize, SIDE as usize, 2);
+    let mut after = before.clone();
+    after.frost_region(0, 0, SIDE, SIDE, 2, &mut BlurScratch::new(), |lx, ly| {
+        round_rect_coverage(lx, ly, SIDE, SIDE, RADIUS)
+    });
+
+    assert_eq!(
+        round_rect_coverage(0, 0, SIDE, SIDE, RADIUS),
+        0,
+        "the extreme corner lies outside the arc"
+    );
+    assert_eq!(
+        after.get(0, 0),
+        before.get(0, 0),
+        "the extreme corner keeps the raw backdrop"
+    );
+
+    let centre = SIDE / 2;
+    assert_eq!(round_rect_coverage(centre, centre, SIDE, SIDE, RADIUS), 255);
+    assert_eq!(
+        after.get(centre, centre),
+        Some(expected[(centre * SIDE + centre) as usize]),
+        "the centre is fully frosted"
+    );
+}
+
+#[test]
+fn a_region_clipped_by_the_surface_edge_frosts_only_what_is_on_it() {
+    let before = patterned(8, 8);
+    let mut after = before.clone();
+    let asked = RefCell::new(Vec::new());
+    after.frost_region(5, 6, 9, 7, 2, &mut BlurScratch::new(), |lx, ly| {
+        asked.borrow_mut().push((lx, ly));
+        255
+    });
+
+    let admitted: Vec<(u32, u32)> = (0..2)
+        .flat_map(|ly| (0..3).map(move |lx| (lx, ly)))
+        .collect();
+    assert_eq!(
+        asked.into_inner(),
+        admitted,
+        "only the part on the surface is asked about, at its rectangle-relative place"
+    );
+    assert_eq!(
+        block(&after, 5, 6, 3, 2),
+        blurred(&block(&before, 5, 6, 3, 2), 3, 2, 2),
+        "the part on the surface is frosted"
+    );
+    outside_is_untouched(&after, &before, (5, 6, 3, 2));
+    assert_eq!(
+        after.pixels().len(),
+        before.pixels().len(),
+        "the buffer is the size it was"
+    );
+}
+
+#[test]
+fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
+    let before = patterned(10, 10);
+    let mut after = before.clone();
+    let asked = RefCell::new(Vec::new());
+    after.with_clip(3, 4, 4, 3, |surface| {
+        surface.frost_region(1, 2, 8, 7, 2, &mut BlurScratch::new(), |lx, ly| {
+            asked.borrow_mut().push((lx, ly));
+            255
+        });
+    });
+
+    // The clip cuts two columns and two rows off the rectangle's leading
+    // edges, so the shape is asked about from (2, 2) on, not from (0, 0).
+    let admitted: Vec<(u32, u32)> = (2..5)
+        .flat_map(|ly| (2..6).map(move |lx| (lx, ly)))
+        .collect();
+    assert_eq!(asked.into_inner(), admitted);
+    assert_eq!(
+        block(&after, 3, 4, 4, 3),
+        blurred(&block(&before, 3, 4, 4, 3), 4, 3, 2),
+        "what the clip admits is frosted"
+    );
+    outside_is_untouched(&after, &before, (3, 4, 4, 3));
+}
+
+#[test]
+fn a_frost_with_nothing_to_do_leaves_the_surface_exactly_as_it_was() {
+    let untouched = patterned(6, 4);
+
+    let mut disabled = untouched.clone();
+    disabled.frost_region(0, 0, 6, 4, 0, &mut BlurScratch::new(), |_, _| 255);
+    assert_eq!(disabled, untouched, "a radius of zero frosts nothing");
+
+    for (w, h) in [(0, 3), (3, 0), (0, 0)] {
         assert_eq!(
-            surface.pixels(),
-            expected,
-            "the allocating form is the same blur at radius {radius}"
+            frosted(untouched.clone(), (1, 1, w, h), 3, 255),
+            untouched,
+            "a {w}x{h} rectangle covers no pixels"
+        );
+    }
+
+    // The last pair overflows `x + w`, which saturates to nothing rather
+    // than wrapping back onto the surface.
+    for (x, y) in [(6, 0), (0, 4), (99, 99), (u32::MAX, 0)] {
+        assert_eq!(
+            frosted(untouched.clone(), (x, y, 5, 5), 3, 255),
+            untouched,
+            "a rectangle at ({x}, {y}) lands off the surface"
         );
     }
 }
 
 #[test]
-fn surface_blur_of_radius_zero_is_identity() {
-    let untouched = patterned(6, 4);
-    let mut surface = untouched.clone();
-    surface.blur(0);
-    assert_eq!(surface, untouched, "a disabled blur changes nothing");
-}
-
-#[test]
-fn surface_blur_of_an_empty_surface_is_a_no_op() {
+fn an_empty_surface_has_nothing_to_frost() {
     for (w, h) in [(0, 0), (0, 5), (5, 0)] {
         let mut surface = Surface::new(w, h).expect("allocates");
-        surface.blur(3);
-        assert!(surface.pixels().is_empty(), "{w}x{h} has no pixels to blur");
+        surface.frost_region(0, 0, 5, 5, 3, &mut BlurScratch::new(), |_, _| 255);
+        assert!(
+            surface.pixels().is_empty(),
+            "{w}x{h} has no pixels to frost"
+        );
     }
 }
 
@@ -194,8 +405,7 @@ fn an_absurd_radius_saturates_rather_than_panicking() {
     // Radii past the point where a channel times the window's sample count
     // leaves `u32`: the arithmetic saturates instead of overflowing.
     for radius in [u32::MAX / 255, u32::MAX / 2, u32::MAX] {
-        let mut surface = patterned(5, 5);
-        surface.blur(radius);
+        let surface = frosted(patterned(5, 5), (0, 0, 5, 5), radius, 255);
         assert!(
             surface
                 .pixels()
@@ -204,4 +414,29 @@ fn an_absurd_radius_saturates_rather_than_panicking() {
             "radius {radius} keeps the premultiplied invariant"
         );
     }
+}
+
+#[test]
+fn a_reused_scratch_carries_nothing_between_frosts() {
+    let mut warm = BlurScratch::new();
+    let mut shared = patterned(9, 8);
+    shared.frost_region(1, 1, 7, 5, 3, &mut warm, |_, _| 255);
+    shared.frost_region(0, 2, 4, 3, 2, &mut warm, |_, _| 200);
+
+    let mut fresh = patterned(9, 8);
+    fresh.frost_region(1, 1, 7, 5, 3, &mut BlurScratch::new(), |_, _| 255);
+    fresh.frost_region(0, 2, 4, 3, 2, &mut BlurScratch::new(), |_, _| 200);
+
+    assert_eq!(shared, fresh, "a warm scratch frosts as a fresh one does");
+}
+
+#[test]
+fn a_released_scratch_grows_again_and_frosts_the_same() {
+    let mut scratch = BlurScratch::default();
+    let mut first = patterned(8, 6);
+    first.frost_region(0, 0, 8, 6, 3, &mut scratch, |_, _| 255);
+    scratch.release();
+    let mut second = patterned(8, 6);
+    second.frost_region(0, 0, 8, 6, 3, &mut scratch, |_, _| 255);
+    assert_eq!(first, second, "releasing the memory changes no result");
 }

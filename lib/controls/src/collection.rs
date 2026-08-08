@@ -28,11 +28,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::{BitmapFont, TextLine, TextWrap, ELLIPSIS};
+use tairix_font::{BitmapFont, TextLine, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
@@ -1853,13 +1853,16 @@ impl Card {
 ///
 /// State is what makes a tile paint anything behind its picture:
 /// * the pointer wash while hovered or pressed, in the shared plate colours;
-/// * the selection halo, in the palette's translucent selection glow, blurred
-///   through the shared box blur so the picture sits in soft light rather than
-///   on a block of accent, with the name carried on an accent pill in the
-///   on-accent foreground — so selection still differs from a hover by
-///   contrast, not merely by hue, and the pointer can never imitate it;
+/// * the selection fill, the palette's accent at half opacity over the whole
+///   tile, rounded like every other plate and feathered inward through the
+///   shared box blur, so a selected item is plainly the accent while the
+///   surface or wallpaper under it still reads through — the pointer washes
+///   are different colours entirely, so neither can imitate it. An owner
+///   animating a selection draws the mark part-way through
+///   [`with_selection_fade`](Self::with_selection_fade);
 /// * the keyboard Focus Ring, through the one shared outline every row and tab
-///   family draws, so a focused tile reads distinctly from a hovered one;
+///   family draws, so a focused tile reads distinctly from a hovered one. A
+///   tile already wearing the selection fill takes no ring on top of it;
 /// * the Signal Bead of an authority or recovery state, so a denied or
 ///   unhealthy item is legible without relying on colour.
 ///
@@ -1875,6 +1878,7 @@ pub struct IconTile {
     label: String,
     icon: IconKind,
     state: ControlState,
+    selection_fade: Option<u8>,
 }
 
 impl IconTile {
@@ -1885,6 +1889,7 @@ impl IconTile {
             label: label.into(),
             icon,
             state: ControlState::idle(),
+            selection_fade: None,
         }
     }
 
@@ -1892,6 +1897,25 @@ impl IconTile {
     #[must_use]
     pub fn with_state(mut self, state: ControlState) -> Self {
         self.state = state;
+        self
+    }
+
+    /// This tile with its selection mark drawn at `fade` strength: `0`
+    /// unmarked, [`u8::MAX`] fully marked.
+    ///
+    /// For an owner moving a selection between items over the theme's
+    /// [`SelectionChange`](tairix_theme::MotionInteraction::SelectionChange)
+    /// duration: the item being left is already unselected while its mark
+    /// decays, and the item arrived at is already selected while its mark
+    /// grows, so the strength is the owner's to state and not the composed
+    /// state's to infer. A host that does not animate sets nothing and the
+    /// mark follows the selection — full when selected, absent when not.
+    ///
+    /// Set independently of [`with_state`](Self::with_state), so the two may
+    /// be applied in either order.
+    #[must_use]
+    pub fn with_selection_fade(mut self, fade: u8) -> Self {
+        self.selection_fade = Some(fade);
         self
     }
 
@@ -1943,7 +1967,7 @@ impl IconTile {
     }
 
     /// Paint whatever the tile's state puts *behind* its picture: the pointer
-    /// wash or the selection halo, then the keyboard Focus Ring. A resting,
+    /// wash or the selection fill, then the keyboard Focus Ring. A resting,
     /// unselected, unfocused tile paints nothing at all, which is what keeps an
     /// icon view a field of pictures rather than a grid of plates.
     fn paint_backdrop(
@@ -1955,27 +1979,28 @@ impl IconTile {
     ) {
         let (x, y, w, h) = rect;
         let palette = theme.palette();
-        // A pressed tile recesses; a selected one takes its selection mark; a
-        // hovered one takes the shared pointer wash, so the pointer never
-        // imitates selection. The drag states carry no wash of their own here,
-        // exactly as they carry no tint in the shared plate colours every other
-        // control paints through: the drag vocabulary is one decision for the
-        // whole control set, not one a tile invents for itself.
+        // A pressed tile recesses; otherwise the selection paints, and only a
+        // tile that neither wears a mark nor is selected takes the shared
+        // pointer wash, so the pointer never imitates selection and no wash
+        // flashes under a mark that has begun arriving but has no strength
+        // yet. The drag states carry no wash of their own here, exactly as
+        // they carry no tint in the shared plate colours every other control
+        // paints through: the drag vocabulary is one decision for the whole
+        // control set, not one a tile invents for itself.
         if self.state.pointer == PointerState::Pressed {
             fill_panel(surface, rect, scale, theme, palette.surface_pressed);
-        } else if self.is_selected() {
-            // A heavier contrast policy asks for a crisp panel rather than a
-            // soft translucent wash, which would trade away the very contrast
-            // that policy exists to add.
-            if heavy_contrast(theme) {
-                fill_panel(surface, rect, scale, theme, palette.accent);
-            } else {
-                paint_selection_glow(surface, rect, scale, theme);
+        } else {
+            let marked = self.paint_selection(surface, rect, scale, theme);
+            if !marked && !self.wears_selection_mark() && self.state.pointer == PointerState::Hover
+            {
+                fill_panel(surface, rect, scale, theme, palette.surface_hover);
             }
-        } else if self.state.pointer == PointerState::Hover {
-            fill_panel(surface, rect, scale, theme, palette.surface_hover);
         }
-        if self.state.focus.focused {
+        // The ring is what tells a focused tile from a hovered one; a selected
+        // tile needs no second edge, and an outline drawn for however long its
+        // mark takes to arrive would read as a border flickering under the
+        // pointer. Presence follows selection, never the mark's strength.
+        if self.state.focus.focused && !self.wears_selection_mark() {
             draw_outline(
                 surface,
                 x,
@@ -1986,6 +2011,34 @@ impl IconTile {
                 Color::from(palette.rim_active),
             );
         }
+    }
+
+    /// Paint the tile's selection, reporting whether anything was drawn.
+    ///
+    /// A heavier contrast policy takes the crisp opaque accent panel, and
+    /// takes it the instant the item is selected rather than fading in: a
+    /// half-arrived plate under inverted ink is the very contrast that policy
+    /// exists to guarantee.
+    fn paint_selection(
+        &self,
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) -> bool {
+        if heavy_contrast(theme) {
+            if !self.is_selected() {
+                return false;
+            }
+            fill_panel(surface, rect, scale, theme, theme.palette().accent);
+            return true;
+        }
+        let fade = self.selection_mark();
+        if fade == 0 {
+            return false;
+        }
+        paint_selection_fill(surface, rect, scale, theme, fade);
+        true
     }
 
     /// How many whole lines of its name a tile occupying `bounds` draws.
@@ -2010,11 +2063,6 @@ impl IconTile {
     /// lines as the band holds, each centred, the last elided when the name
     /// runs past them. A band with no room for a whole line draws nothing
     /// rather than clipping a glyph.
-    ///
-    /// A selected tile draws its lines on an accent pill, so its on-accent ink
-    /// always has the accent behind it: that is what keeps selection a
-    /// difference in contrast rather than merely in hue, now that the halo
-    /// behind the picture is soft and translucent.
     fn paint_label(
         &self,
         surface: &mut Surface,
@@ -2027,16 +2075,8 @@ impl IconTile {
         let Some(band) = Self::label_band(bounds, scale, theme, font) else {
             return;
         };
-        let wrap = font.wrap_to_width(&self.label, band.right - band.left, band.lines);
-        let (drawn, widest) = wrap_extent(wrap.clone(), font);
-        if drawn == 0 {
-            return;
-        }
-        if self.on_selection_accent() {
-            paint_label_pill(surface, band, (drawn, widest), scale, theme, font);
-        }
         let mut top = band.top;
-        for line in wrap {
+        for line in font.wrap_to_width(&self.label, band.right - band.left, band.lines) {
             let x = to_i32(centre_x(line_width(font, line), band.left, band.right));
             let pen = font.draw_text(surface, x, to_i32(top), line.text, color);
             if line.elided {
@@ -2079,17 +2119,32 @@ impl IconTile {
         )
     }
 
-    /// Whether the tile's content sits on the selection accent: selected, and
-    /// not pressed — a press takes the recessed plate and the ordinary ink.
-    fn on_selection_accent(&self) -> bool {
+    /// How strongly the tile draws its selection mark: the strength its owner
+    /// set, else full for a selected tile and nothing for an unselected one.
+    fn selection_mark(&self) -> u8 {
+        self.selection_fade
+            .unwrap_or(if self.is_selected() { u8::MAX } else { 0 })
+    }
+
+    /// Whether the selection is the tile's, whatever strength its mark is
+    /// currently drawn at: selected, and not pressed — a press takes the
+    /// recessed plate instead. What suppresses the pointer wash and the focus
+    /// ring, so neither appears while a mark is arriving or leaving.
+    fn wears_selection_mark(&self) -> bool {
         self.is_selected() && self.state.pointer != PointerState::Pressed
     }
 
-    /// The colour the tile's label and built-in glyph take: the on-accent
-    /// foreground when the tile is selected, otherwise the shared surface
-    /// foreground for the tile's disposition.
+    /// The colour the tile's label and built-in glyph take: the shared surface
+    /// foreground for the tile's disposition, or the on-accent foreground on
+    /// the one mark that is an opaque accent plate.
+    ///
+    /// The ordinary selection fill is half-opaque, so it tints what lies behind
+    /// it rather than replacing it: the theme's own foreground keeps its
+    /// separation whichever way the theme is lit, while a near-white on-accent
+    /// ink would leave a light theme's name at barely twice the contrast of the
+    /// pale orange under it.
     fn label_color(&self, theme: &Theme) -> Color {
-        if self.on_selection_accent() {
+        if heavy_contrast(theme) && self.wears_selection_mark() {
             return Color::from(theme.palette().on_accent);
         }
         foreground(theme, self.state.disposition())
@@ -2180,16 +2235,6 @@ fn line_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
     width
 }
 
-/// How many lines `wrap` yields and how wide the widest of them draws.
-///
-/// Walking a clone of the iterator is what lets a caller place a block of text
-/// before drawing it without collecting the lines into an allocation.
-fn wrap_extent(wrap: TextWrap<'_>, font: BitmapFont) -> (u32, u32) {
-    wrap.fold((0, 0), |(lines, widest), line| {
-        (lines.saturating_add(1), widest.max(line_width(font, line)))
-    })
-}
-
 /// Fill an [`IconTile`]'s whole `rect` with one plate colour, rounded by the
 /// theme's control radius (which the shared fill clamps to the shape).
 fn fill_panel(
@@ -2200,74 +2245,54 @@ fn fill_panel(
     fill: Rgba,
 ) {
     let (x, y, w, h) = rect;
-    let radius = scale.scale_length(theme.metrics().control_corner_radius);
-    surface.fill_round_rect(x, y, w, h, radius, Color::from(fill));
+    surface.fill_round_rect(x, y, w, h, plate_radius(scale, theme), Color::from(fill));
 }
 
-/// Paint the soft halo behind a selected [`IconTile`]: the theme's translucent
-/// selection glow, rounded like a plate and blurred through the shared box
-/// blur — the same blur the compositor frosts a window's backdrop with.
+/// The corner radius an [`IconTile`]'s plate is rounded by, in physical pixels
+/// at the active density. One definition, so the shape a mark's frost is
+/// confined to is the shape its fill is drawn in.
+fn plate_radius(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().control_corner_radius)
+}
+
+/// Paint the mark a selected [`IconTile`] wears: the pixels *behind* the tile
+/// frosted through the shared region blur, then the theme's selection fill —
+/// its accent at half opacity, scaled by `fade` — laid over them with a crisp,
+/// rounded edge.
 ///
-/// The glow rectangle is inset by the blur radius on every side, and that
-/// radius is capped at half the tile, so the spread lands inside `rect` and
-/// the tile still keeps a lit core however small it is.
-fn paint_selection_glow(
+/// This is the same effect, through the same filter, the compositor frosts a
+/// window's backdrop with: what the tile covers — a window's surface, the
+/// desktop wallpaper — reads as blurred glass, while the fill's own edge stays
+/// sharp so the mark keeps the shape every other plate has. Both the frost and
+/// the fill are confined to that one rounded shape, so nothing is drawn
+/// outside `rect` and no square edge shows around the rounded fill. `fade`
+/// scales both, so a mark moving between items frosts as it colours and leaves
+/// nothing behind it.
+///
+/// The frost's scratch is allocated per call: a tile rasterises its mark once
+/// per repaint rather than once per frame, so the buffer reuse the compositor
+/// needs would buy nothing here.
+fn paint_selection_fill(
     surface: &mut Surface,
     rect: (u32, u32, u32, u32),
     scale: Scale,
     theme: &Theme,
+    fade: u8,
 ) {
     let (x, y, w, h) = rect;
-    let blur = scale
-        .scale_length(theme.metrics().selection_glow_blur)
-        .min(w.saturating_sub(1) / 2)
-        .min(h.saturating_sub(1) / 2);
-    let (Some((gx, gy, gw, gh)), Some(mut glow)) = (inset(0, 0, w, h, blur), Surface::new(w, h))
-    else {
-        return;
-    };
-    let radius = scale.scale_length(theme.metrics().control_corner_radius);
-    glow.fill_round_rect(
-        gx,
-        gy,
-        gw,
-        gh,
-        radius,
-        Color::from(theme.palette().selection_glow),
-    );
-    glow.blur(blur);
-    surface.blit(to_i32(x), to_i32(y), &glow);
-}
-
-/// Paint the accent pill a selected [`IconTile`]'s name sits on: the union of
-/// the `lines` drawn lines (the `widest` of them, plus the control inset on
-/// each side), so on-accent ink always has the accent behind it.
-fn paint_label_pill(
-    surface: &mut Surface,
-    band: LabelBand,
-    (lines, widest): (u32, u32),
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) {
-    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let w = widest
-        .min(band.right.saturating_sub(band.left))
-        .saturating_add(pad.saturating_mul(2));
-    let h = font.line_height().saturating_mul(lines);
-    let x = centre_x(
-        w,
-        band.left.saturating_sub(pad),
-        band.right.saturating_add(pad),
-    );
-    let radius = scale.scale_length(theme.metrics().control_corner_radius);
-    surface.fill_round_rect(
-        x,
-        band.top,
-        w,
-        h,
-        radius,
-        Color::from(theme.palette().accent),
+    let base = theme.palette().selection_fill;
+    let radius = plate_radius(scale, theme);
+    let blur = scale.scale_length(theme.metrics().selection_backdrop_blur);
+    let mut scratch = BlurScratch::new();
+    surface.frost_region(x, y, w, h, blur, &mut scratch, |lx, ly| {
+        div255(u32::from(round_rect_coverage(lx, ly, w, h, radius)) * u32::from(fade))
+    });
+    fill_panel(
+        surface,
+        rect,
+        scale,
+        theme,
+        base.with_alpha(div255(u32::from(base.a) * u32::from(fade))),
     );
 }
 

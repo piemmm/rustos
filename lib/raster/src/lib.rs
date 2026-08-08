@@ -2,8 +2,10 @@
 //!
 //! This crate is the single home of the desktop's premultiplied-alpha
 //! colour arithmetic ([`color`]), its CPU pixel buffer ([`surface`]), and
-//! the separable box [`blur`] every frosted surface shares — the
-//! compositor's backdrop and a control's own soft highlight alike.
+//! the separable box [`blur`] every frosted surface shares — reached as
+//! [`Surface::frost_region`], which frosts one rectangle in place through
+//! a reusable [`BlurScratch`], for the compositor's window backdrop and a
+//! control's selected tile alike.
 //! Both the compositing window manager (`userland/gui/wm`) and the
 //! taskbar (`userland/gui/taskbar`) draw pixels, but neither may depend
 //! on the other; the shared rasteriser therefore
@@ -33,7 +35,7 @@ pub mod surface;
 #[cfg(test)]
 mod tests;
 
-pub use blur::box_blur;
+pub use blur::{box_blur, BlurScratch};
 pub use color::{div255, Color, Pixel};
 pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
 pub use round::round_rect_coverage;

@@ -150,7 +150,7 @@ fn the_focus_wraps_at_both_ends() {
 
     let mut forward = Vec::new();
     for _ in 0..4 {
-        chooser.move_focus(Step::Next);
+        chooser.move_focus(Step::Next, 0, 0);
         forward.push(chooser.focus());
     }
     assert_eq!(forward, vec![1, 2, 0, 1]);
@@ -158,7 +158,7 @@ fn the_focus_wraps_at_both_ends() {
     let mut chooser = grid(&["ann", "bob"]);
     let mut backward = Vec::new();
     for _ in 0..4 {
-        chooser.move_focus(Step::Previous);
+        chooser.move_focus(Step::Previous, 0, 0);
         backward.push(chooser.focus());
     }
     assert_eq!(backward, vec![2, 1, 0, 2]);
@@ -170,8 +170,8 @@ fn the_focus_wraps_at_both_ends() {
 fn a_single_tile_chooser_never_moves() {
     let mut chooser = grid(&[]);
 
-    assert!(!chooser.move_focus(Step::Next));
-    assert!(!chooser.move_focus(Step::Previous));
+    assert!(!chooser.move_focus(Step::Next, 0, 0));
+    assert!(!chooser.move_focus(Step::Previous, 0, 0));
     assert_eq!(chooser.focus(), 0);
 }
 
@@ -472,6 +472,7 @@ fn a_screen_with_no_pixels_leaves_the_chooser_standing() {
                 scale: Scale::ONE,
                 theme: &bare,
                 verifier: &mut verifier,
+                now_ns: 0,
             },
         );
         assert!(!outcome.verified(), "{event:?} concluded a blank screen");
@@ -500,4 +501,155 @@ fn the_chooser_draws_at_every_supported_density() {
         assert_eq!(frame.width(), SCREEN.width);
         assert_ne!(frame, empty, "at {percent}%");
     }
+}
+
+/// A fresh chooser is settled: slot 0 fully marked, nothing animating.
+#[test]
+fn a_fresh_chooser_is_settled() {
+    let chooser = grid(&["ann", "bob"]);
+    assert_eq!(chooser.focus(), 0);
+    assert_eq!(chooser.selection_fade(0), u8::MAX);
+    assert_eq!(chooser.selection_fade(1), 0);
+    assert_eq!(chooser.next_frame_in(0), None);
+}
+
+/// Moving the focus starts a cross-fade: leaving full, arriving empty at the
+/// start; complementary mid-way; settled full on the new slot at the end.
+#[test]
+fn moving_focus_cross_fades_the_selection_mark() {
+    let mut chooser = grid(&["ann", "bob", "cy"]);
+    let millis = theme()
+        .motion()
+        .duration(tairix_theme::MotionInteraction::SelectionChange);
+    assert!(millis > 0, "built-in themes animate selection");
+    let span_ns = u64::from(millis) * 1_000_000;
+
+    assert!(chooser.focus_on(1, 1_000, millis));
+    assert!(chooser.next_frame_in(1_000).is_some());
+    assert_eq!(chooser.selection_fade(0), u8::MAX);
+    assert_eq!(chooser.selection_fade(1), 0);
+    assert_eq!(chooser.next_frame_in(1_000), Some(span_ns / 8));
+
+    let mid = 1_000 + span_ns / 2;
+    assert!(chooser.advance(mid));
+    let arriving = chooser.selection_fade(1);
+    let leaving = chooser.selection_fade(0);
+    assert!(
+        arriving > 0 && arriving < u8::MAX,
+        "mid-fade arriving={arriving}"
+    );
+    assert_eq!(
+        u16::from(arriving) + u16::from(leaving),
+        u16::from(u8::MAX),
+        "strengths are complementary"
+    );
+    assert_eq!(chooser.selection_fade(2), 0);
+
+    assert!(chooser.advance(1_000 + span_ns));
+    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.selection_fade(1), u8::MAX);
+    assert_eq!(chooser.selection_fade(0), 0);
+    assert_eq!(chooser.next_frame_in(1_000 + span_ns), None);
+}
+
+/// A zero duration (reduced motion) settles instantly and never asks for a frame.
+#[test]
+fn a_zero_duration_settles_instantly() {
+    let mut chooser = grid(&["ann", "bob"]);
+    assert!(chooser.focus_on(1, 50, 0));
+    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.selection_fade(1), u8::MAX);
+    assert_eq!(chooser.selection_fade(0), 0);
+    assert_eq!(chooser.next_frame_in(50), None);
+    assert!(!chooser.advance(100));
+}
+
+/// A second focus change while one is running does not strand a mark.
+#[test]
+fn a_second_focus_change_does_not_strand_a_mark() {
+    let mut chooser = grid(&["ann", "bob", "cy"]);
+    let millis = 100u16;
+    let span_ns = u64::from(millis) * 1_000_000;
+
+    assert!(chooser.focus_on(1, 0, millis));
+    assert!(chooser.advance(span_ns / 2));
+    assert!(chooser.selection_fade(0) > 0);
+    assert!(chooser.selection_fade(1) > 0);
+
+    // Jump to a third tile mid-fade.
+    assert!(chooser.focus_on(2, span_ns / 2, millis));
+    assert_eq!(chooser.selection_fade(0), 0, "old leaving is gone");
+    assert_eq!(
+        chooser.selection_fade(1),
+        u8::MAX,
+        "previous arriving is leaving at full"
+    );
+    assert_eq!(chooser.selection_fade(2), 0);
+
+    assert!(chooser.advance(span_ns / 2 + span_ns));
+    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.selection_fade(2), u8::MAX);
+    assert_eq!(chooser.selection_fade(0), 0);
+    assert_eq!(chooser.selection_fade(1), 0);
+}
+
+/// A clock that jumps backwards settles rather than hanging or panicking.
+#[test]
+fn a_backwards_clock_settles_the_fade() {
+    let mut chooser = grid(&["ann", "bob"]);
+    assert!(chooser.focus_on(1, 1_000, 100));
+    assert!(chooser.advance(500));
+    assert_eq!(chooser.next_frame_in(0), None);
+    assert_eq!(chooser.selection_fade(1), u8::MAX);
+    assert_eq!(chooser.selection_fade(0), 0);
+}
+
+/// The settled render is pixel-identical to a chooser that never animated,
+/// and two mid-fade strengths paint different pixels.
+#[test]
+fn the_fade_only_affects_the_transition_pixels() {
+    use crate::testkit::changed_pixels;
+    use tairix_raster::{Color, Surface};
+
+    let theme = theme();
+    let names = ["ann", "bob"];
+
+    // Direct settle on slot 1 with no animation.
+    let mut direct = Chooser::new(accounts(&names));
+    direct.focus_on(1, 0, 0);
+    let mut direct_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
+    direct_frame.fill(Color::from(theme.palette().desktop));
+    direct.render(&mut direct_frame, SCREEN, Scale::ONE, &theme);
+
+    // Animate to the same slot and settle.
+    let mut faded = Chooser::new(accounts(&names));
+    let millis = theme
+        .motion()
+        .duration(tairix_theme::MotionInteraction::SelectionChange);
+    let span_ns = u64::from(millis) * 1_000_000;
+    faded.focus_on(1, 0, millis);
+
+    let mut start_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
+    start_frame.fill(Color::from(theme.palette().desktop));
+    faded.render(&mut start_frame, SCREEN, Scale::ONE, &theme);
+
+    faded.advance(span_ns / 2);
+    let mut mid_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
+    mid_frame.fill(Color::from(theme.palette().desktop));
+    faded.render(&mut mid_frame, SCREEN, Scale::ONE, &theme);
+
+    assert!(
+        !changed_pixels(&start_frame, &mid_frame).is_empty(),
+        "mid-fade pixels differ from the start of the fade"
+    );
+
+    faded.advance(span_ns);
+    let mut end_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
+    end_frame.fill(Color::from(theme.palette().desktop));
+    faded.render(&mut end_frame, SCREEN, Scale::ONE, &theme);
+
+    assert_eq!(
+        end_frame, direct_frame,
+        "a settled fade matches a chooser that selected without animating"
+    );
 }

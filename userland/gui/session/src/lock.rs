@@ -158,6 +158,9 @@ impl ScreenLock {
                 scale,
                 theme,
                 verifier,
+                // A lock covers one named user and offers no chooser, so
+                // there is no selection to cross-fade and no clock to read.
+                now_ns: 0,
             },
         );
         if outcome.verified() {

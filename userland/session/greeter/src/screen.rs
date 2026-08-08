@@ -273,7 +273,9 @@ impl<T: SessionTransport> LoginScreen<T> {
     pub fn refresh(&mut self, now_ns: u64, wall: Option<Time64>) -> Step {
         let clock = Repaint::of(self.surface.set_chrome(chrome(wall, &self.host)));
         let remaining = self.cooldown.remaining(now_ns);
-        let repaint = clock.merged(Repaint::of(self.surface.set_cooldown(remaining)));
+        let cooldown = Repaint::of(self.surface.set_cooldown(remaining));
+        let motion = Repaint::of(self.surface.advance(now_ns));
+        let repaint = clock.merged(cooldown).merged(motion);
         Step {
             present: self.present_for(repaint),
             ..Step::quiet()
@@ -281,9 +283,17 @@ impl<T: SessionTransport> LoginScreen<T> {
     }
 
     /// The relative nanosecond timeout for the next park.
+    ///
+    /// The nearer of the existing clock/lockout deadline and any running
+    /// selection fade. When nothing is animating the timeout is exactly what
+    /// it was before motion existed — an idle screen still arms no timer.
     #[must_use]
     pub fn park_timeout(&self, now_ns: u64, wall: Option<Time64>) -> u64 {
-        park_timeout(wall, self.cooldown.remaining(now_ns))
+        let base = park_timeout(wall, self.cooldown.remaining(now_ns));
+        match self.surface.motion_due(now_ns) {
+            Some(motion) => base.min(motion),
+            None => base,
+        }
     }
 
     /// Move the pointer by `(dx, dy)` and report the pixels that owe a
@@ -312,6 +322,7 @@ impl<T: SessionTransport> LoginScreen<T> {
                 scale: self.scale,
                 theme: &self.theme,
                 verifier: &mut self.verifier,
+                now_ns,
             };
             self.surface.on_event(event, &mut ctx)
         };

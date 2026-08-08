@@ -78,13 +78,13 @@
 //! // for the account it named.
 //! surface.on_event(
 //!     &enter,
-//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never },
+//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never, now_ns: 0 },
 //! );
 //! assert_eq!(surface.selected_account(), Some("ann"));
 //!
 //! let outcome = surface.on_event(
 //!     &enter,
-//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never },
+//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never, now_ns: 0 },
 //! );
 //! assert!(!outcome.verified());
 //! if outcome.redraw() {

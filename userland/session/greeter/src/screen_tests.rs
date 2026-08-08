@@ -817,3 +817,74 @@ fn the_account_the_authority_was_asked_about_is_the_one_picked() {
     let step = login.on_input(&key(NamedKey::Enter), 0);
     assert!(step.verified);
 }
+
+/// An idle screen's park timeout is unchanged by motion: no timer where there
+/// was none.
+#[test]
+fn an_idle_screen_park_timeout_is_still_forever() {
+    let login = screen(
+        vec![
+            AccountTile::new("Ann Example", "ann"),
+            AccountTile::new("Bo Example", "bo"),
+        ],
+        Authority::accepting("ann", SECRET),
+    );
+    assert_eq!(login.park_timeout(0, None), FOREVER);
+    // After a first paint, still idle.
+    let mut login = login;
+    login.repaint();
+    assert_eq!(login.park_timeout(0, None), FOREVER);
+}
+
+/// A focus change arms a short timeout; successive refreshes present
+/// shrinking-or-equal damage covering the tiles; once settled the timeout
+/// returns to idle.
+#[test]
+fn a_focus_change_arms_motion_and_settles_cleanly() {
+    let mut login = screen(
+        vec![
+            AccountTile::new("Ann Example", "ann"),
+            AccountTile::new("Bo Example", "bo"),
+        ],
+        Authority::accepting("ann", SECRET),
+    );
+    login.repaint();
+    assert_eq!(login.park_timeout(0, None), FOREVER);
+
+    let step = login.on_input(&key(NamedKey::Tab), 0);
+    assert_ne!(step.present, Present::Nothing, "focus move presents");
+
+    let millis = Theme::dark()
+        .motion()
+        .duration(tairix_theme::MotionInteraction::SelectionChange);
+    let span_ns = u64::from(millis) * 1_000_000;
+    assert!(millis > 0);
+
+    let timeout = login.park_timeout(0, None);
+    assert!(
+        timeout < FOREVER && timeout <= span_ns,
+        "motion arms a short timeout, got {timeout}"
+    );
+
+    let mut now = 0u64;
+    let step_ns = (span_ns / 8).max(1);
+    let mut saw_present = false;
+    loop {
+        now = now.saturating_add(step_ns);
+        let step = login.refresh(now, None);
+        match step.present {
+            Present::Nothing => {}
+            Present::Region(_) | Present::Whole => saw_present = true,
+        }
+        if login.park_timeout(now, None) == FOREVER {
+            break;
+        }
+        assert!(now <= span_ns.saturating_mul(2), "fade did not settle");
+    }
+    assert!(saw_present, "at least one refresh presented fade damage");
+    assert_eq!(login.park_timeout(now, None), FOREVER);
+
+    // A refresh that finds nothing to do still presents nothing.
+    let quiet = login.refresh(now.saturating_add(1), None);
+    assert_eq!(quiet.present, Present::Nothing);
+}

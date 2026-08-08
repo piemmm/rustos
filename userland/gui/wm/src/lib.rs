@@ -21,9 +21,10 @@
 //! - **Backdrop blur**: a window may ask for the already-composited
 //!   content behind its rectangle to be blurred before its own translucent
 //!   pixels are blended over it, so a panel reads like frosted glass. The
-//!   filter is `lib/raster`'s shared
-//!   [`box_blur`](tairix_raster::box_blur), which the compositor drives with
-//!   a scratch buffer it owns and reuses.
+//!   effect is `lib/raster`'s shared
+//!   [`frost_region`](tairix_raster::Surface::frost_region), driven through
+//!   one [`BlurScratch`](tairix_raster::BlurScratch) the compositor owns and
+//!   reuses.
 //! - **Damage tracking** ([`damage`]): only changed pixels are
 //!   recomposited.
 //! - **The [`Compositor`]**: a z-ordered [`Window`] stack composited

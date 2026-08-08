@@ -9,18 +9,26 @@ This crate is pure theme *data*. A `Theme` is a table of:
 
 - `Palette` — semantic `Rgba` colour roles (`desktop`, `surface`,
   `surface_raised`, `on_surface`, `on_surface_muted`, `accent`, `on_accent`,
-  `selection_glow`, `border`). Roles are fixed fields, so a theme can never
-  omit one and a consumer can never ask for one that does not exist
-  (`AGENTS.md` §2.11). `selection_glow` is the soft halo behind a selected
-  item — each theme's own `accent` at half opacity (`#d1550f80` on dark,
+  `selection_fill`, `border`). Roles are fixed fields, so a theme can never
+  omit one and a consumer can never ask for one that does not exist.
+  `selection_fill` is the plate a selected item is filled
+  with — each theme's own `accent` at half opacity (`#d1550f80` on dark,
   `#c8500c80` on light), authored per theme so a theme can tune its weight
   rather than have it derived at the draw site.
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
-  consumes (`AGENTS.md` §2.2), plus `selection_glow_blur`, the halo's blur
-  radius in logical pixels (`19` in both themes: thirty percent of the widest
-  window-backdrop blur the compositor accepts, `64`, so a selection reads as a
-  soft mark on one item rather than the frosted glass a whole window sits on).
+  consumes, plus `selection_backdrop_blur`, how far the *backdrop* behind a
+  selected item is blurred, in logical pixels (`19` in both themes). The fill
+  itself keeps a crisp edge; the pixels it covers — a window's surface, the
+  wallpaper — are frosted through the same filter the compositor frosts a
+  window's backdrop with, at three tenths of the widest blur a window may ask
+  for.
+- `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, held
+  as a table indexed by the interaction so a duration can never be transposed
+  onto the wrong one. `SelectionChange` (`100` ms in both themes) is the
+  cross-fade as a selection mark moves between items. Reduced motion reports
+  every duration as `0`, which a consumer reads as "change it now", so no
+  control carries a second reduced-motion path.
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing
   faces under `/System/Fonts`. A theme sizes text by the *job* it does
   (`Display`, `Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`,

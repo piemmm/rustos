@@ -30,7 +30,14 @@ on the chooser instead.
 coordinate space, and answers an `Outcome`: whether the frame on screen is now
 stale (`redraw`), and whether the account was verified (`verified`). Keys edit
 the secret and `Enter` offers it; the pointer places the caret within the field
-and reaches nothing else.
+and reaches nothing else. `EventContext` carries the monotonic clock the surface
+times motion from.
+
+On the chooser, moving focus cross-fades the selection mark over the theme's
+`SelectionChange` duration (instant under reduced motion). `advance(now_ns)`
+steps a running fade and reports the union of the two tiles it touches;
+`motion_due(now_ns)` is the nanoseconds until the next fade frame, or `None`
+when nothing is animating so an idle embedder arms no timer.
 
 `render(screen, scale, theme, backdrop)` paints the whole frame and yields
 `None` — never a partial or empty frame — when a screen has no pixels or a
@@ -170,8 +177,9 @@ than per frame.
 ## Damage
 
 Every `Outcome` reports the rectangle the next paint will change: the field for
-a keystroke, the block for a verdict, the grid for a focus move, the chrome
-band for a clock tick, and the whole screen for a mode change or a first frame.
+a keystroke, the block for a verdict, the two tiles a selection fade is leaving
+and arriving at, the chrome band for a clock tick, and the whole screen for a
+mode change or a first frame.
 An embedder presenting to a compositor or a display service therefore uploads a
 small rectangle for a keystroke instead of a screen. The reported rectangle is
 always a superset of what actually changes; the crate's tests assert that

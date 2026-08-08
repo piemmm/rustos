@@ -24,7 +24,7 @@ use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{div255, Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
@@ -1436,10 +1436,9 @@ fn a_resting_tile_paints_no_plate_over_what_lies_behind_it() {
 }
 
 /// Hover, selection, and press are three different marks: the pointer washes
-/// are crisp plates, selection is a soft translucent halo carrying its name on
-/// an accent pill, and each keeps its own ink. A pointer can never imitate
-/// selection, and selection still differs from a hover in contrast rather than
-/// merely in hue.
+/// are crisp plates in the shared plate colours, selection is the accent at
+/// half opacity over a frosted backdrop, and each keeps its own ink. A pointer
+/// can never imitate selection, because no pointer state is ever the accent.
 #[test]
 fn hover_selection_and_press_paint_distinct_marks() {
     let theme = Theme::dark();
@@ -1462,14 +1461,19 @@ fn hover_selection_and_press_paint_distinct_marks() {
         &theme,
         None,
     );
-    // The accent survives as the pill under the name, over-printed with the
-    // on-accent ink — the halo itself is translucent and never lands as the
-    // flat accent.
-    assert!(has_pixel(&selected, premul(palette.accent)));
+    // The accent is there, blended with what lies behind the tile rather than
+    // replacing it: half-opaque, so the flat accent lands nowhere.
+    assert!(has_pixel(
+        &selected,
+        Color::from(palette.selection_fill)
+            .premultiply()
+            .over(BEHIND.premultiply())
+    ));
+    assert!(!has_pixel(&selected, premul(palette.accent)));
     assert!(!has_pixel(&selected, premul(palette.surface_hover)));
     assert!(
-        has_pixel(&selected, premul(palette.on_accent)),
-        "a selected tile inverts its label onto the accent"
+        has_pixel(&selected, premul(palette.on_surface)),
+        "a selected tile keeps the ink that reads over a tinted surface"
     );
 
     let pressed = tile_over_backdrop(
@@ -1480,7 +1484,7 @@ fn hover_selection_and_press_paint_distinct_marks() {
     assert!(has_pixel(&pressed, premul(palette.surface_pressed)));
 
     // Each mark covers the tile, so none of them is a mere edge mark: only the
-    // faintest reach of the halo can leave the backdrop untouched.
+    // rounded corners can leave the backdrop untouched.
     for s in [&hovered, &selected, &pressed] {
         assert!(
             behind_pixels(s) * 10 < s.pixels().len(),
@@ -1507,73 +1511,312 @@ fn distance(p: Pixel, from: Pixel) -> u32 {
         + u32::from(p.b.abs_diff(from.b))
 }
 
-/// A selected tile lights its picture with a soft halo rather than stamping a
-/// block of accent over it: the mark fades in across its edge instead of
-/// stepping, which is what a blur — and only a blur — produces.
+/// The composed state of a selected, otherwise resting tile.
+fn selected_state() -> ControlState {
+    ControlState::idle().with_selection(SelectionState::Selected)
+}
+
+/// The mark's fill at `fade` strength, composited over `behind`.
+fn fill_over(theme: &Theme, behind: Pixel, fade: u8) -> Pixel {
+    let base = theme.palette().selection_fill;
+    Color::rgba(
+        base.r,
+        base.g,
+        base.b,
+        div255(u32::from(base.a) * u32::from(fade)),
+    )
+    .premultiply()
+    .over(behind)
+}
+
+/// The row across the tile on which nothing but the mark is drawn — between
+/// the picture slot and the label band. Checked against a resting tile, which
+/// leaves such a row exactly as it found it, rather than trusted.
+fn clear_row(theme: &Theme) -> u32 {
+    let row = IconTile::icon_side(TILE, Scale::ONE, theme)
+        + Scale::ONE.scale_length(theme.metrics().control_inset);
+    let resting = tile_over_backdrop(ControlState::idle(), theme, None);
+    for x in 0..TW {
+        assert_eq!(
+            resting.get(x, row),
+            Some(BEHIND.premultiply()),
+            "row {row} carries ink of its own at column {x}"
+        );
+    }
+    row
+}
+
+/// The mark's own edge is **hard**: the fill arrives at the tile's very edge at
+/// exactly the strength it carries in the middle, with no ramp between. It is
+/// the backdrop that a selection blurs, never the fill — softening the fill is
+/// what left the mark a smear with no shape of its own.
 #[test]
-fn the_selection_halo_fades_in_rather_than_stepping() {
+fn the_selection_fill_has_a_hard_edge() {
     let theme = Theme::dark();
-    let s = tile_over_backdrop(
+    let clear = clear_row(&theme);
+    let resting = tile_over_backdrop(ControlState::idle(), &theme, None);
+    let s = tile_over_backdrop(selected_state(), &theme, None);
+    let full = fill_over(&theme, BEHIND.premultiply(), u8::MAX);
+
+    // Across the whole row, and down the centre from the tile's own top edge:
+    // one step up at the edge, then flat. Each sample is first shown to carry
+    // nothing but the mark, so a stray glyph cannot excuse a difference.
+    let samples = (0..TW)
+        .map(|x| (x, clear))
+        .chain((0..10).map(|y| (TW / 2, y)));
+    for (x, y) in samples {
+        assert_eq!(
+            resting.get(x, y),
+            Some(BEHIND.premultiply()),
+            "({x},{y}) is not a bare part of the tile"
+        );
+        assert_eq!(s.get(x, y), Some(full), "({x},{y}) is not the plain fill");
+    }
+    // A blend throughout, never the flat accent that would hide what the tile
+    // sits on.
+    assert!(!has_pixel(&s, premul(theme.palette().accent)));
+}
+
+/// The mark is a rounded plate: the corner arc is cut away to the backdrop
+/// where a square plate would have covered it, and the arc itself is
+/// anti-aliased rather than a step.
+#[test]
+fn the_selection_fill_is_rounded_rather_than_square() {
+    let theme = Theme::dark();
+    let radius = Scale::ONE.scale_length(theme.metrics().control_corner_radius);
+    assert!(
+        radius > 0,
+        "a square-cornered theme has no rounding to find"
+    );
+    let s = tile_over_backdrop(selected_state(), &theme, None);
+    let behind = BEHIND.premultiply();
+    let full = fill_over(&theme, behind, u8::MAX);
+
+    for corner in [(0, 0), (TW - 1, 0), (0, TH - 1), (TW - 1, TH - 1)] {
+        assert_eq!(
+            s.get(corner.0, corner.1),
+            Some(behind),
+            "corner {corner:?} was covered as a square plate's would be"
+        );
+    }
+    // Clear of the arc on the same rows and columns the corners sit on, the
+    // plate is already at full strength: it is the corner that is cut away,
+    // not the edge that is faded.
+    assert_eq!(s.get(radius, 0), Some(full));
+    assert_eq!(s.get(0, radius), Some(full));
+    let arc = (0..radius)
+        .flat_map(|y| (0..radius).map(move |x| (x, y)))
+        .filter_map(|(x, y)| s.get(x, y))
+        .any(|p| p != behind && p != full);
+    assert!(
+        arc,
+        "the corner is a step rather than an anti-aliased curve"
+    );
+}
+
+/// A backdrop with detail in it: alternating black and white columns, standing
+/// in for the wallpaper a login chooser's tiles sit on. A blur of a uniform
+/// field is that same field, so only a patterned backdrop can show whether one
+/// was blurred at all.
+fn striped(width: u32, height: u32) -> Surface {
+    let mut s = Surface::new(width, height).expect("surface");
+    for x in 0..width {
+        let stripe = if x % 2 == 0 {
+            Color::rgb(0, 0, 0)
+        } else {
+            Color::rgb(255, 255, 255)
+        };
+        s.fill_rect(x, 0, 1, height, stripe);
+    }
+    s
+}
+
+/// How much detail row `y` carries between columns `from` and `to`: the total
+/// step between neighbouring pixels. A blur is exactly what collapses this.
+fn detail(surface: &Surface, y: u32, from: u32, to: u32) -> u32 {
+    (from..to.saturating_sub(1))
+        .filter_map(|x| Some(distance(surface.get(x, y)?, surface.get(x + 1, y)?)))
+        .sum()
+}
+
+/// Pixels of margin around a placed tile, so the surface has an outside to
+/// check for bleed.
+const AROUND: u32 = 8;
+
+/// The tile placed inside a larger surface, with that surface's size.
+fn placed_tile() -> (Rect, u32, u32) {
+    let at = i32::try_from(AROUND).expect("a small margin");
+    (Rect::new(at, at, TW, TH), TW + AROUND * 2, TH + AROUND * 2)
+}
+
+/// What a selection blurs is the **backdrop**: the detail behind a selected
+/// tile is frosted away, exactly as the compositor frosts what a translucent
+/// window sits on, while every pixel outside the tile keeps its own.
+#[test]
+fn a_selected_tile_frosts_the_backdrop_behind_it() {
+    let theme = Theme::dark();
+    let row = AROUND + clear_row(&theme);
+    let (bounds, sw, sh) = placed_tile();
+    let plain = striped(sw, sh);
+    let mut frosted = striped(sw, sh);
+    IconTile::new("Report.txt", IconKind::Text)
+        .with_state(selected_state())
+        .render(&mut frosted, bounds, Scale::ONE, &theme, None);
+
+    // What a translucent fill over an *untouched* backdrop looks like: every
+    // stripe survives, merely tinted. That is the mark before this frost, and
+    // what the reported defect looked like.
+    let tinted: Vec<Pixel> = (AROUND..AROUND + TW)
+        .filter_map(|x| plain.get(x, row))
+        .map(|behind| fill_over(&theme, behind, u8::MAX))
+        .collect();
+    let unfrosted: u32 = tinted.windows(2).map(|p| distance(p[0], p[1])).sum();
+    let got = detail(&frosted, row, AROUND, AROUND + TW);
+    assert!(unfrosted > 0, "the backdrop carries no detail to blur");
+    assert!(
+        got * 10 < unfrosted,
+        "the backdrop was not frosted: {got} of {unfrosted}"
+    );
+
+    let (columns, rows) = (AROUND..AROUND + TW, AROUND..AROUND + TH);
+    for y in 0..sh {
+        for x in 0..sw {
+            if columns.contains(&x) && rows.contains(&y) {
+                continue;
+            }
+            assert_eq!(
+                frosted.get(x, y),
+                plain.get(x, y),
+                "({x},{y}) is outside the tile and moved"
+            );
+        }
+    }
+}
+
+/// The frost arrives with the mark, so a selection moving between items does
+/// not snap a backdrop into focus ahead of the colour leaving it.
+#[test]
+fn the_frost_arrives_with_the_mark() {
+    let theme = Theme::dark();
+    let row = AROUND + clear_row(&theme);
+    let (bounds, sw, sh) = placed_tile();
+    let level = |fade: Option<u8>| {
+        let mut s = striped(sw, sh);
+        let mut tile = IconTile::new("Report.txt", IconKind::Text);
+        if let Some(fade) = fade {
+            tile = tile.with_state(selected_state()).with_selection_fade(fade);
+        }
+        tile.render(&mut s, bounds, Scale::ONE, &theme, None);
+        detail(&s, row, AROUND, AROUND + TW)
+    };
+    let (bare, half, whole) = (level(None), level(Some(128)), level(Some(u8::MAX)));
+    assert!(
+        bare > half && half > whole,
+        "the frost does not arrive with the mark: {bare}, {half}, {whole}"
+    );
+}
+
+/// An owner animating a selection draws the mark part-way: the fill is the
+/// theme's own at that fraction of its opacity, and a strength of zero leaves
+/// the tile unmarked so the pointer wash under it shows through.
+#[test]
+fn a_faded_selection_mark_is_the_same_fill_at_that_strength() {
+    let theme = Theme::dark();
+    let clear = clear_row(&theme);
+    let palette = theme.palette();
+    let selected = selected_state();
+
+    let settled = tile_over_backdrop(selected, &theme, None);
+    let arrived = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text)
+            .with_state(selected)
+            .with_selection_fade(u8::MAX),
+        &theme,
+    );
+    assert_eq!(
+        settled.pixels(),
+        arrived.pixels(),
+        "a fully arrived mark is not the settled one"
+    );
+
+    // Half way in: the same fill, at half the opacity it settles on.
+    let half = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text)
+            .with_state(selected)
+            .with_selection_fade(128),
+        &theme,
+    );
+    let want = Color::rgba(
+        palette.selection_fill.r,
+        palette.selection_fill.g,
+        palette.selection_fill.b,
+        div255(u32::from(palette.selection_fill.a) * 128),
+    )
+    .premultiply()
+    .over(BEHIND.premultiply());
+    assert_eq!(half.get(TW / 2, clear), Some(want));
+
+    // …and it is genuinely between nothing and the settled mark.
+    let behind = BEHIND.premultiply();
+    let reached = distance(half.get(TW / 2, clear).expect("in bounds"), behind);
+    let settles = distance(settled.get(TW / 2, clear).expect("in bounds"), behind);
+    assert!(reached > 0 && reached < settles);
+}
+
+/// A mark still fading out belongs to an item that is already unselected, so
+/// the strength is the owner's to state; a strength of zero is no mark at all,
+/// and the pointer wash beneath it comes back.
+#[test]
+fn a_fading_mark_outlives_the_selection_and_a_zero_one_yields_to_the_hover() {
+    let theme = Theme::dark();
+    let clear = clear_row(&theme);
+    let leaving = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text).with_selection_fade(200),
+        &theme,
+    );
+    assert_ne!(
+        leaving.get(TW / 2, clear),
+        Some(BEHIND.premultiply()),
+        "an unselected tile mid-fade drew nothing"
+    );
+
+    let gone = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text)
+            .with_state(ControlState::idle().with_pointer(PointerState::Hover))
+            .with_selection_fade(0),
+        &theme,
+    );
+    assert!(has_pixel(&gone, premul(theme.palette().surface_hover)));
+}
+
+/// A heavier contrast policy does not fade its panel: it is the crisp opaque
+/// accent the moment the item is selected, because a half-arrived plate under
+/// inverted ink is the contrast such a policy exists to guarantee.
+#[test]
+fn a_high_contrast_selection_arrives_whole_rather_than_fading() {
+    let theme = high_contrast();
+    let settled = tile_over_backdrop(
         ControlState::idle().with_selection(SelectionState::Selected),
         &theme,
         None,
     );
-    let behind = BEHIND.premultiply();
-    // Down the tile's centre line, above the picture slot: nothing but the
-    // halo is drawn there, so the ramp is the blur's own.
-    let ramp: Vec<u32> = (0..10)
-        .map(|y| distance(s.get(TW / 2, y).expect("in bounds"), behind))
-        .collect();
-    let total = ramp
-        .last()
-        .copied()
-        .expect("sampled")
-        .saturating_sub(ramp[0]);
-    assert!(total > 0, "the halo never arrives: {ramp:?}");
-    for pair in ramp.windows(2) {
-        assert!(pair[1] >= pair[0], "the halo is not monotonic: {ramp:?}");
-        assert!(
-            pair[1] - pair[0] <= total / 2,
-            "the halo steps rather than fades: {ramp:?}"
-        );
-    }
-    let mut levels = ramp.clone();
-    levels.dedup();
-    assert!(
-        levels.len() >= 6,
-        "a blurred edge is a gradient, not a handful of bands: {ramp:?}"
+    let midway = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text)
+            .with_state(ControlState::idle().with_selection(SelectionState::Selected))
+            .with_selection_fade(64),
+        &theme,
     );
+    assert_eq!(settled.pixels(), midway.pixels());
+    assert!(has_pixel(&midway, premul(theme.palette().accent)));
 }
 
-/// The halo is translucent: at full strength it is the theme's selection glow
-/// *blended with* whatever lies behind the tile, never the flat accent that
-/// would hide it.
-#[test]
-fn the_selection_halo_is_translucent_over_what_lies_behind_it() {
-    // A tile roomy enough to have halo at full strength beside its picture.
-    const SIDE: u32 = 200;
-
-    let theme = Theme::dark();
-    let palette = theme.palette();
-    let bounds = Rect::new(0, 0, SIDE, SIDE);
-    let mut s = Surface::new(SIDE, SIDE).expect("surface");
+/// Paint `tile` over the shared backdrop, for the cases that need a tile the
+/// state builder alone cannot compose.
+fn tile_with(tile: &IconTile, theme: &Theme) -> Surface {
+    let mut s = Surface::new(TW, TH).expect("surface");
     s.fill(BEHIND);
-    IconTile::new("Report.txt", IconKind::Text)
-        .with_state(ControlState::idle().with_selection(SelectionState::Selected))
-        .render(&mut s, bounds, Scale::ONE, &theme, None);
-
-    // Left of the picture slot, well inside the blurred rectangle.
-    let icon_x = (SIDE - IconTile::icon_side(bounds, Scale::ONE, &theme)) / 2;
-    let sample = s.get(icon_x - 4, SIDE / 2).expect("in bounds");
-    let want = Color::from(palette.selection_glow)
-        .premultiply()
-        .over(BEHIND.premultiply());
-    assert_eq!(
-        sample, want,
-        "the halo's core is the selection glow blended over the backdrop"
-    );
-    assert_ne!(sample, premul(palette.accent), "the halo is not a block");
-    assert_ne!(sample, BEHIND.premultiply());
+    tile.render(&mut s, TILE, Scale::ONE, theme, None);
+    s
 }
 
 /// A heavier contrast policy keeps the crisp, opaque accent panel: a soft
@@ -1603,10 +1846,40 @@ fn a_high_contrast_theme_keeps_the_crisp_selection_panel() {
     // And the soft form is nowhere on it.
     assert!(!has_pixel(
         &s,
-        Color::from(theme.palette().selection_glow)
+        Color::from(theme.palette().selection_fill)
             .premultiply()
             .over(BEHIND.premultiply())
     ));
+}
+
+/// A selected tile never draws the Focus Ring, at any strength its mark is
+/// drawn at. Tying the ring's absence to the mark's *strength* left an orange
+/// edge showing for as long as a mark took to arrive, which under the pointer
+/// read as a border flickering on and off; the pointer wash is suppressed for
+/// the same reason.
+#[test]
+fn a_selected_tile_draws_no_ring_or_wash_while_its_mark_arrives() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let state = selected_state()
+        .with_focus(FocusState::FOCUSED)
+        .with_pointer(PointerState::Hover);
+    for fade in [0u8, 1, 64, 128, 254, u8::MAX] {
+        let s = tile_with(
+            &IconTile::new("Report.txt", IconKind::Text)
+                .with_state(state)
+                .with_selection_fade(fade),
+            &theme,
+        );
+        assert!(
+            !has_pixel(&s, premul(palette.rim_active)),
+            "a selected tile drew a ring at strength {fade}"
+        );
+        assert!(
+            !has_pixel(&s, premul(palette.surface_hover)),
+            "a selected tile took the pointer wash at strength {fade}"
+        );
+    }
 }
 
 /// Keyboard focus draws the shared Focus Ring, so it reads distinctly from a
@@ -1975,11 +2248,12 @@ fn label_lines_agrees_with_the_lines_the_render_draws() {
     }
 }
 
-/// A selected name is drawn on an accent pill, so its on-accent ink keeps the
-/// contrast the theme designed for it — on the light theme especially, where
-/// near-white ink over the translucent halo alone would wash out.
+/// A selected name keeps the theme's ordinary foreground, which is the ink that
+/// reads over a half-opaque fill: the fill tints what lies behind it rather
+/// than replacing it, so the name keeps most of the separation the theme gives
+/// its body text, whichever way the theme is lit.
 #[test]
-fn a_selected_name_reads_against_its_pill_on_both_themes() {
+fn a_selected_name_reads_over_the_selection_fill_on_both_themes() {
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
         let bounds = tile_fitting(font().text_width("Administrator"), 2, &theme);
@@ -1992,45 +2266,84 @@ fn a_selected_name_reads_against_its_pill_on_both_themes() {
             .with_state(ControlState::idle().with_selection(SelectionState::Selected))
             .render(&mut s, bounds, Scale::ONE, &theme, Some(&art));
 
-        let ink = premul(p.on_accent);
+        let ink = premul(p.on_surface);
         let lines = ink_lines(&s, ink);
         assert_eq!(lines.len(), 2, "{}: {lines:?}", theme.name());
-        // The pixel beside the ink is the pill, not the halo.
+        // The pixel beside the ink: the fill, not the bare surface, and never
+        // the flat accent.
         let (left, width) = lines[0];
         let row = (0..bounds.height)
             .find(|y| s.get(left, *y) == Some(ink))
             .expect("an ink row");
-        assert_eq!(
-            s.get(left + width, row),
-            Some(premul(p.accent)),
-            "{}: the name is not on its pill",
+        let behind = s.get(left + width, row).expect("in bounds");
+        assert_ne!(
+            behind,
+            premul(p.surface),
+            "{}: the name is not on the selection fill",
+            theme.name()
+        );
+        assert_ne!(
+            behind,
+            premul(p.accent),
+            "{}: the fill is opaque",
             theme.name()
         );
 
-        // Measured on the pixels actually drawn: the name carries exactly the
-        // contrast the theme designs for a label on its accent.
-        let measured = luma(ink).abs_diff(luma(s.get(left + width, row).expect("in bounds")));
-        assert_eq!(
-            measured,
-            luma(premul(p.on_accent)).abs_diff(luma(premul(p.accent))),
-            "{}: the selected name lost the theme's accent contrast",
+        // Measured on the pixels actually drawn: at least half the separation
+        // the theme gives body text on its own surface.
+        let measured = luma(ink).abs_diff(luma(behind));
+        let body = luma(ink).abs_diff(luma(premul(p.surface)));
+        assert!(
+            measured * 2 >= body,
+            "{}: the selected name reads at {measured} of the theme's {body}",
             theme.name()
         );
     }
 
-    // Why the pill is there at all: on the light theme the same ink over the
-    // bare halo falls short of that designed contrast, so a soft halo alone
-    // would have washed the name out.
+    // Why the ink is the ordinary foreground: the near-white on-accent ink an
+    // opaque accent plate is designed for loses most of its contrast over the
+    // pale orange a light theme's half-opaque fill leaves behind.
     let light = Theme::light();
     let p = light.palette();
-    let ink = premul(p.on_accent);
-    let designed = luma(ink).abs_diff(luma(premul(p.accent)));
-    let bare = luma(ink).abs_diff(luma(
-        Color::from(p.selection_glow)
-            .premultiply()
-            .over(premul(p.surface)),
-    ));
-    assert!(bare < designed, "{bare} vs {designed}");
+    let over_fill = Color::from(p.selection_fill)
+        .premultiply()
+        .over(premul(p.surface));
+    let ordinary = luma(premul(p.on_surface)).abs_diff(luma(over_fill));
+    let inverted = luma(premul(p.on_accent)).abs_diff(luma(over_fill));
+    assert!(inverted * 2 < ordinary, "{inverted} vs {ordinary}");
+}
+
+/// A selected tile takes no outline: the fill is the mark, and a hard edge
+/// around a softened one is exactly what the blur exists to avoid. Keyboard
+/// focus on a tile that is *not* selected still draws the shared ring.
+#[test]
+fn a_selected_tile_draws_no_ring_around_its_fill() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let ring = premul(theme.palette().rim_active);
+        let selected = tile_over_backdrop(
+            ControlState::idle()
+                .with_selection(SelectionState::Selected)
+                .with_focus(FocusState::FOCUSED),
+            &theme,
+            None,
+        );
+        assert!(
+            !has_pixel(&selected, ring),
+            "{}: a selected tile drew an outline",
+            theme.name()
+        );
+        // A press is not the selection mark, so the ring is the only thing left
+        // to report focus and stays.
+        let pressed = tile_over_backdrop(
+            ControlState::idle()
+                .with_selection(SelectionState::Selected)
+                .with_pointer(PointerState::Pressed)
+                .with_focus(FocusState::FOCUSED),
+            &theme,
+            None,
+        );
+        assert!(has_pixel(&pressed, ring), "{}", theme.name());
+    }
 }
 
 // --- Card (spec §11.15) ------------------------------------------------

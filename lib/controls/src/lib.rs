@@ -153,8 +153,8 @@
 //! aligned while a row's state changes; an icon tile is one item of an icon view
 //! — a picture over its wrapped, centred name, with no plate of its own, so a
 //! folder reads as a field of pictures, and only state paints behind one: the
-//! pointer's wash, or a selection's soft accent halo with the name carried on an
-//! accent pill; a card carries its dominant state, progress, and a count/alert
+//! pointer's wash, or a selection's half-opaque accent fill over a frosted
+//! backdrop; a card carries its dominant state, progress, and a count/alert
 //! on three edges with footer action [`Button`]s; and a panel is a stable-layout
 //! container with a header, grouped actions, a content region, and an anchor
 //! notch back to its invoker. Each interactive one emits a typed action

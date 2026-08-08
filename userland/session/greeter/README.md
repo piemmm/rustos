@@ -75,10 +75,12 @@ reason never names an account or anything about a secret.
 
 An idle login screen must consume no CPU. There is one wait set holding the
 seat's input, and the timeout is the *next* thing that actually needs a
-repaint — the next clock-minute boundary, or the next one-second tick of a
-lockout while one is counting down, whichever is nearer. When neither applies
-the wait has no timeout at all, so an untouched screen arms no timer. There is
-no poll loop and no yield.
+repaint — the next clock-minute boundary, the next one-second tick of a
+lockout while one is counting down, or the next frame of a running selection
+cross-fade, whichever is nearer. When none apply the wait has no timeout at
+all, so an untouched screen arms no timer. There is no poll loop and no yield.
+The fade's duration is theme data (`SelectionChange`); reduced motion makes it
+instant and leaves the idle timeout alone.
 
 A wake drains the whole burst the seat is holding before it presents: every
 record is applied, what each changed is merged into one rectangle, and the

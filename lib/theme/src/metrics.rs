@@ -58,18 +58,20 @@ pub struct Metrics {
     /// The corner radius of an ordinary control plate (the Alloy Plate), in
     /// logical pixels. `0` is square.
     pub control_corner_radius: u32,
-    /// The blur radius of the halo behind a selected item
-    /// ([`Palette::selection_glow`](crate::Palette::selection_glow)), in
-    /// logical pixels. `0` leaves the halo crisp.
+    /// How far the *backdrop* behind a selected item is blurred, in logical
+    /// pixels. `0` leaves what is behind the item sharp.
     ///
-    /// Thirty percent of
+    /// The item's own
+    /// [`Palette::selection_fill`](crate::Palette::selection_fill) keeps a
+    /// crisp edge and the blur applies to the pixels it covers — a window's
+    /// surface, the desktop wallpaper — so a selected item reads as frosted
+    /// glass laid over them. It is the same effect through the same filter the
+    /// compositor frosts a whole window's backdrop with, so it takes a
+    /// fraction — three tenths — of
     /// [`WINDOW_BACKDROP_BLUR_MAX_PX`](tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX),
-    /// the widest backdrop blur a window may ask the compositor for (64
-    /// logical pixels): a selection halo is a soft mark on one item, not the
-    /// frosted glass a whole window sits on, so it takes a fraction of the
-    /// strongest blur the desktop draws and stays recognisably the same
-    /// effect.
-    pub selection_glow_blur: u32,
+    /// the widest a window may ask for: a selection frosts one item, not a
+    /// whole window.
+    pub selection_backdrop_blur: u32,
     /// The thickness of a Heat Seam (an activity/progress line on an edge),
     /// in logical pixels.
     pub seam_thickness: u32,

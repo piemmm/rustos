@@ -300,10 +300,25 @@ login screen's — it opens on the chooser.
   activates, `Escape` returns to the chooser and wipes the typed secret; the
   surface is fully operable with no pointer, because a machine without one
   must still log in. Tiles are `lib/controls` `IconTile`s, so the login
-  screen is not a second visual vocabulary: the chosen account takes the
-  shared soft accent halo with its name on an accent pill, and a long
+  screen is not a second visual vocabulary: the chosen account **frosts the
+  wallpaper behind it** — the shared region frost the compositor blurs a
+  window's backdrop with, at the theme's `selection_backdrop_blur` — and the
+  shared half-opaque accent is laid over that with a **crisp**, rounded edge.
+  The blur belongs behind the mark, never on it: softening the fill itself
+  leaves a smear with no shape of its own, and a selected tile draws no outline
+  of any kind on top — neither the focus ring nor the pointer wash, both
+  suppressed by the selection rather than by the mark's strength, so nothing
+  flickers while the mark arrives. A long
   display name **wraps** rather than being cut — `System Administrator` reads
-  as itself, not as `System Admini`. The tile's height is derived from the
+  as itself, not as `System Admini`. The mark **cross-fades** as the chooser's
+  focus moves, over the theme's `SelectionChange` duration: the tile being
+  left decays while the tile arrived at grows — frost and colour together, so
+  a backdrop never snaps into focus ahead of the accent leaving it — and the
+  highlight never jumps. The fade rides the screen's existing park deadline —
+  one one-shot wake per
+  frame while it runs, none once it settles — so an idle login screen still
+  arms no timer, and a reduced-motion theme reports a zero duration and the
+  change lands at once. The tile's height is derived from the
   control's own `label_lines`, not guessed: 154 logical pixels is the first
   height that holds three whole label lines at the reference density *and* at
   a doubled one, so a face wider than the test face still has somewhere for a
@@ -327,8 +342,12 @@ login screen's — it opens on the chooser.
   vertical wash in the theme's own desktop colour, so the chrome at the top
   and the field in the middle stay legible over a bright photograph; because
   the wash *is* the desktop colour it composites to nothing over a plain
-  backdrop. There is no blur — that lives in the compositor, which this crate
-  may not reach — so the scrim and the wash do the work honestly.
+  backdrop. The picture is never blurred *wholesale*: frosting a whole
+  wallpaper to make text sit on it hides the picture the user chose, so the
+  scrim and the wash do the legibility work honestly. The shared frost stays
+  where it belongs — the compositor's window backdrops, and the wallpaper
+  behind one selected tile, which is a mark on that tile rather than a
+  treatment of the picture.
 - **A per-account attempt budget** displayed as a cooldown. Per account, so
   a wrong password for one cannot lock another out, and monotonic-clock
   driven with `Duration64` — never wall clock, which the user may be able to

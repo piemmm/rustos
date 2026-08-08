@@ -51,20 +51,29 @@ This crate owns:
   Newton iteration that stopped when two successive estimates agreed — for a
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
-- `box_blur` / `Surface::blur` — the single separable box blur, a horizontal
+- `box_blur` / `Surface::frost_region` / `BlurScratch` — the single separable
+  box blur and the one frosted glass built on it. The blur is a horizontal
   pass then a vertical one carrying running sums, so the cost is the region's
   area whatever the radius. Every channel including alpha is averaged, which
   on premultiplied data is the convex combination compositing would give, so
   the `colour <= alpha` invariant survives and no halo appears at a
   translucent edge; samples past an edge replicate it, which keeps the
-  divisor constant and leaves a uniform field exactly unchanged. `box_blur`
-  takes the caller's own scratch buffer, so the per-frame path (the
-  compositor's backdrop blur, which grows and reuses one) allocates nothing;
-  `Surface::blur` allocates its own for a cold path such as a control
-  rasterising a frosted highlight once per repaint. Both were the window
-  manager's alone until the graphical login screen needed the same effect,
-  and neither the login screen nor any other `lib/*` consumer may depend on
-  the window manager.
+  divisor constant and leaves a uniform field exactly unchanged.
+  `frost_region` is the effect itself: it copies one rectangle of a surface,
+  blurs the copy, and mixes it back weighted by a caller-supplied per-pixel
+  coverage, so a rounded shape fades from frosted to untouched across its own
+  arc rather than showing a square edge. Coverage is asked at coordinates
+  relative to the rectangle's *own* top-left, so a rectangle the surface edge
+  or the active clip window cuts short still reads its whole shape while the
+  frost touches only what the bounds and the clip admit. A zero radius, an
+  empty or wholly off-surface rectangle, and a scratch that cannot be grown
+  each leave the surface exactly as it was. `BlurScratch` holds the copy and
+  the blur's intermediate across calls — grown on demand, reused, and handed
+  back by `release` — so the per-frame caller (the compositor frosting a
+  window's backdrop) allocates nothing once it is warm. The effect was the
+  window manager's alone until the graphical login screen needed it behind a
+  selected account tile, and neither the login screen nor any other `lib/*`
+  consumer may depend on the window manager.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

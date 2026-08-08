@@ -91,10 +91,12 @@ typed error that is ignored rather than escalated.
 
 An idle login screen must consume nothing. There is one wait set, holding
 the seat's input, and its timeout is the *next* thing that actually needs a
-repaint: the next clock-minute boundary, or the next one-second tick of a
-lockout while one is counting down, whichever is nearer. When neither
-applies the wait has no timeout at all, so an untouched screen arms no timer
-and takes no interrupt. There is no poll loop and no yield.
+repaint: the next clock-minute boundary, the next one-second tick of a lockout while
+one is counting down, or the next frame of a running selection cross-fade,
+whichever is nearer. When none apply the wait has no timeout at all, so an
+untouched screen arms no timer and takes no interrupt. The fade duration is
+theme data and collapses under reduced motion; an idle screen is unchanged.
+There is no poll loop and no yield.
 
 A wake that finds nothing changed presents nothing, and every repaint
 presents only the damage rectangle the surface reported — the field for a

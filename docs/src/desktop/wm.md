@@ -145,15 +145,20 @@ the final segment encodes the scan-out frame, so the intermediate stages
 cost no wasted encoding, and several blurred windows in one stack simply
 segment it further.
 
-The blur itself is `lib/raster`'s shared `tairix_raster::box_blur` — the
-one blur definition the desktop has, which a control frosting its own
-artwork draws through too. It is a **separable box blur**: a horizontal
-pass then a vertical one, each carrying a running sum so the window slides
-by one add and one subtract per output. The cost is
-proportional to the rectangle's *area* whatever the radius, never to area
-× radius. Both scratch buffers belong to the compositor and grow to the
-largest frosted rectangle the session has needed, so a frosted window
-allocates nothing after its first frame.
+The effect itself is `lib/raster`'s shared `Surface::frost_region` — the
+one frosted glass the desktop has, which the login screen frosting a
+selected account tile draws through too. It copies the rectangle out of the
+back buffer, blurs the copy, and mixes the blurred pixels back over the
+originals at a per-pixel weight the caller supplies.
+
+The blur is a **separable box blur**: a horizontal pass then a vertical
+one, each carrying a running sum so the window slides by one add and one
+subtract per output. The cost is proportional to the rectangle's *area*
+whatever the radius, never to area × radius. The copy and the pass-to-pass
+intermediate live in one `tairix_raster::BlurScratch` the compositor owns,
+grown to the largest frosted rectangle the session has needed and reused,
+so a frosted window allocates nothing after its first frame; a mode change
+releases it rather than pinning the old screen's worth of pixels.
 
 Every channel is averaged, alpha included: on premultiplied data that is
 the same convex combination of the contributing colours that compositing
@@ -163,11 +168,13 @@ which confines the effect to the window's own rectangle — it can neither
 pull a neighbour's pixels in nor write outside its bounds — and keeps the
 divisor constant, so a uniform backdrop comes out exactly unchanged.
 
-The mix back into the back buffer is weighted by the window's own
-rounded-corner coverage (the single `Window::row_rounding` shape
-definition its *pixels* are weighted by), so a rounded window's frosting
-fades out across exactly the arc its own pixels fade out across and no
-square edge shows outside it.
+The mix weight is the window's own rounded-corner coverage (the single
+`Window::shape` definition its *pixels* are weighted by), so a rounded
+window's frosting fades out across exactly the arc its own pixels fade out
+across and no square edge shows outside it. That coverage is asked for at
+coordinates relative to the *rectangle's* own top-left, so a window
+starting off screen is frosted from the row and column the screen begins
+at while still reading its shape from its own corner.
 
 ## Input routing
 
@@ -717,13 +724,12 @@ layer leaving the background showing, and installing/replacing/clearing
 each damaging exactly its footprint), the accelerated
 layer-encoding present path (background + desktop + window layers,
 hidden-window omission, and the over-budget / over-size / backdrop-blur
-software fallbacks), the backdrop blur (the box blur's own identities — a
-uniform field unchanged, an impulse spread symmetrically, radius 0 and a
-one-pixel region identities — plus the composited effect: a spread
-backdrop, a no-op at radius 0, confinement to the window rectangle, the
-logical radius following the output scale, rounded corners left alone, and
-a change behind a frosted window repainting it to exactly the pixels a
-whole-screen composite gives), and input routing (hit-testing,
+software fallbacks), the composited backdrop blur (a spread backdrop, a
+no-op at radius 0 and for an unknown or hidden window, confinement to the
+window rectangle, the logical radius following the output scale, rounded
+corners left alone, and a change behind a frosted window repainting it to
+exactly the pixels a whole-screen composite gives — the frost's own
+identities are pinned in `lib/raster`), and input routing (hit-testing,
 click-to-activate focus and raise, desktop-clears-focus,
 `DesktopPointerMoved` carrying no position of its own and `DesktopKey`
 reporting focus-on-desktop, move-grab drag, and the fail-closed grab edge

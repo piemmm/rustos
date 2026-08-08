@@ -6059,24 +6059,41 @@ here.
   order, damage-vs-whole-frame) moved out of the window manager into
   `lib/display::scanout`, cursor *placement* (origin = pointer − hotspot,
   sampling under a screen row) out of it into
-  `tairix_cursor::PlacedCursor`, and the separable box blur out of it into
-  `tairix_raster::box_blur` (+ the allocating `Surface::blur` for a cold
-  path) — so the compositor and the login screen share one pixel-exact
-  definition of each, and `userland/session/*` needs no forbidden edge into
-  the window manager to draw a pointer or a soft edge. `lib/font` gained
+  `tairix_cursor::PlacedCursor`, and the separable box blur *and the frost
+  built on it* out of it into `tairix_raster::{box_blur, frost_region,
+  BlurScratch}` — so the compositor's window backdrop and the login screen's
+  selected tile are literally the same call, and `userland/session/*` needs no
+  forbidden edge into
+  the window manager to draw a pointer or frost a backdrop. `lib/font` gained
   the matching text fitters every too-narrow label now shares:
   `elide_to_width` and the lazy, non-allocating `wrap_to_width`, over one
   `ELLIPSIS` mark that is both measured and drawn.
 - **The account tile is the shared `IconTile`, improved for everyone.** A
-  selected tile takes a *soft* halo — the theme's new `selection_glow`
-  (its own accent at half opacity) filled inset by the scaled
-  `selection_glow_blur` (19 logical px, three tenths of the protocol's
-  `WINDOW_BACKDROP_BLUR_MAX_PX`, asserted against it so the two cannot
-  drift) and blurred through the shared blur, so nothing escapes the tile's
-  bounds — with the name carried on a solid accent pill, which is what keeps
-  selection a *contrast* difference rather than a hue one; a high-contrast
-  theme keeps the crisp opaque panel instead. The label **wraps** over as
-  many whole lines as the band holds, centred, only the last elided, and
+  selected tile **frosts its own backdrop** — the pixels it covers, a window's
+  surface or the desktop wallpaper, blurred by the scaled
+  `selection_backdrop_blur` (19 logical px, three tenths of the widest window
+  backdrop blur) through the same `frost_region` the compositor frosts a window
+  with — and the theme's `selection_fill`, its own accent at half opacity, is
+  laid over that with a **crisp** edge, rounded like every other plate. Frost
+  and fill are confined to that one rounded shape, so nothing escapes the tile's
+  bounds and no square edge shows around the rounded fill. Softening the *fill*
+  instead leaves a smear with no shape of its own: the blur belongs behind the
+  mark, not on it.
+  The mark **cross-fades** as the selection moves, over the theme's new
+  `MotionInteraction::SelectionChange` (100 ms): the tile being left decays while
+  the tile arrived at grows, driven by `IconTile::with_selection_fade` from the
+  owner, off the login screen's existing park deadline, so an idle screen still
+  arms no timer and a reduced-motion theme settles the change at once. The
+  strength scales the frost and the fill together, so a backdrop never snaps
+  into focus ahead of the colour leaving it. The name
+  keeps the ordinary foreground, which is the ink that reads over a half-opaque
+  tint; the on-accent inversion and the crisp opaque panel belong to a
+  high-contrast theme, where a selected tile frosts nothing and does not fade.
+  A **selected** tile draws neither the focus ring nor the pointer wash,
+  whatever strength its mark is at — both follow the selection, never the
+  strength, because an outline that showed for as long as a mark took to arrive
+  read as a border flickering under the pointer. The label **wraps**
+  over as many whole lines as the band holds, centred, only the last elided, and
   `IconTile::label_lines` exposes that budget so an owner sizes a tile from
   the render's own geometry — which is how the greeter's tile is 132 × 154
   (three whole lines at 100% *and* 200%), not a guess.

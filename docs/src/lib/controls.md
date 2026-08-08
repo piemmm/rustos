@@ -215,22 +215,49 @@ group of state and actions it owns.
 
 Only state paints anything behind the picture, and each state uses the mark the
 language already owns for it: the shared pointer wash for hover and press, the
-selection halo for a selected tile, the shared focus ring for the keyboard, and
+selection fill for a selected tile, the shared focus ring for the keyboard, and
 the shape-coded Signal Bead for a denied or unhealthy item. Nothing a tile draws
 escapes its bounds, so a view may lay tiles edge to edge — and bound the whole
 grid's paint to the area it owns — without a tile bleeding onto its neighbour.
 
-The selection halo is the theme's translucent `selection_glow`, filled as a
-rounded rectangle inset by the scaled `selection_glow_blur` on every side and
-blurred by that radius through the one shared box blur the compositor frosts a
-window backdrop with. Insetting first is what keeps the softened edge inside
-the tile. Because the halo lets the wallpaper or window surface read through it,
-the tile's name is carried on a solid `accent` pill in `on_accent` ink, so
-selection still differs from a hover in contrast rather than only in hue. Under
-a heavier `Contrast` the tile drops the halo and fills the crisp opaque accent
-panel instead: a soft translucent wash would trade away the very contrast that
-policy exists to add. Only a selected tile pays for the halo — one scratch
-surface, rasterised and blurred at the tile's own size.
+A **selected** tile draws neither the pointer wash nor the focus ring, whatever
+strength its mark is currently drawn at. The selection itself suppresses both,
+not the mark's strength: an outline that appeared for as long as a mark took to
+arrive read as a border flickering on and off under the pointer. The ring is
+there to tell a *focused* tile from a hovered one, so an unselected tile still
+takes it.
+
+What a selection blurs is the **backdrop**. The pixels the tile covers — a
+window's surface, the desktop wallpaper — are frosted by the scaled
+`selection_backdrop_blur` through `tairix_raster`'s one shared region frost, the
+same call the compositor frosts a window's backdrop with, and the theme's
+`selection_fill` — its accent at half opacity — is then laid over them with a
+**crisp** edge, rounded like every other control plate. Frost and fill are both
+confined to that one rounded shape, so nothing lands outside the tile and no
+square edge shows around the rounded fill. Softening the *fill* instead leaves a
+smear with no shape of its own, which is why the blur belongs behind the mark
+rather than on it. Because the fill lets the frosted result read through it, the
+tile's name keeps the theme's ordinary foreground, which separates from that
+result whichever way the theme is lit; the near-white `on_accent` ink is
+reserved for the one mark that is an opaque plate. Under a heavier `Contrast` the
+tile fills that crisp opaque accent panel, unfrosted, and inverts its ink: a
+translucent wash over a blurred backdrop would trade away the very contrast that
+policy exists to add. Only a selected tile pays for the frost, and it pays for
+it once per repaint rather than once per frame.
+
+`IconTile::with_selection_fade` draws that mark at a given strength, `0` to
+`u8::MAX`. It is what lets an owner cross-fade a selection as it moves between
+items, over the theme's `MotionInteraction::SelectionChange` duration. It scales
+the frost and the fill together, so a backdrop never snaps into focus ahead of
+the colour leaving it. The item being left is already unselected while its mark
+decays, and the item arrived at is already selected while its mark grows, so the
+strength is the owner's to state rather than the composed state's to infer. It
+is set independently of
+`with_state`, in either order, and a host that does not animate sets nothing.
+Under a heavier `Contrast` the panel does not fade at all — it arrives with the
+selection, because a half-arrived plate under inverted ink is exactly the
+contrast that policy exists to guarantee — and a reduced-motion theme reports a
+zero duration, which settles the change immediately with no second code path.
 
 The name wraps rather than being cut. `paint_label` lays it out over as many
 whole lines as the band under the picture holds, each centred in the band's

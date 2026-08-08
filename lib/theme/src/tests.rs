@@ -40,7 +40,7 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.on_surface, l.on_surface);
     assert_ne!(d.on_surface_muted, l.on_surface_muted);
     assert_ne!(d.accent, l.accent);
-    assert_ne!(d.selection_glow, l.selection_glow);
+    assert_ne!(d.selection_fill, l.selection_fill);
     assert_ne!(d.border, l.border);
     // The Reactive Alloy control roles and semantic signals also differ per
     // appearance, so a theme switch retunes them consistently.
@@ -107,31 +107,77 @@ fn luma(c: Rgba) -> u32 {
 }
 
 #[test]
-fn the_selection_halo_is_each_theme_s_own_accent_at_half_opacity() {
+fn the_selection_fill_is_each_theme_s_own_accent_at_half_opacity() {
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
         assert_eq!(
-            p.selection_glow.a,
+            p.selection_fill.a,
             128,
-            "{}: an opaque halo would hide what a selection sits on",
+            "{}: an opaque fill would hide what a selection sits on",
             theme.name()
         );
         assert_eq!(
-            p.selection_glow.with_alpha(p.accent.a),
+            p.selection_fill.with_alpha(p.accent.a),
             p.accent,
-            "{}: the halo is the theme's own accent, not a second hue",
+            "{}: the fill is the theme's own accent, not a second hue",
             theme.name()
         );
     }
 }
 
 #[test]
-fn the_selection_halo_blurs_at_three_tenths_of_the_widest_window_backdrop() {
+fn a_selections_backdrop_blurs_at_three_tenths_of_the_widest_window_backdrop() {
     // The rationale the metric's rustdoc states, asserted against the real
     // protocol bound so the two cannot drift apart.
     let want = u32::from(tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX) * 30 / 100;
     for theme in [Theme::dark(), Theme::light()] {
-        assert_eq!(theme.metrics().selection_glow_blur, want);
+        assert_eq!(theme.metrics().selection_backdrop_blur, want);
+    }
+}
+
+#[test]
+fn the_motion_table_is_indexed_by_the_interaction_it_times() {
+    // `MotionTheme::new` takes a table indexed by the variant, so the order of
+    // `ALL` is the meaning of every authored duration: a variant that moved
+    // would silently retime every theme.
+    for (slot, interaction) in MotionInteraction::ALL.into_iter().enumerate() {
+        assert_eq!(interaction as usize, slot);
+    }
+    let mut authored = [0u16; MotionInteraction::COUNT];
+    for (slot, value) in authored.iter_mut().enumerate() {
+        *value = u16::try_from(slot).unwrap_or(0);
+    }
+    let motion = MotionTheme::new(authored);
+    for (slot, interaction) in MotionInteraction::ALL.into_iter().enumerate() {
+        assert_eq!(usize::from(motion.duration(interaction)), slot);
+    }
+}
+
+#[test]
+fn every_interaction_is_timed_and_reduced_motion_silences_all_of_them() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let motion = theme.motion();
+        for interaction in MotionInteraction::ALL {
+            assert!(
+                motion.duration(interaction) > 0,
+                "{}: {interaction:?} has no duration",
+                theme.name()
+            );
+            assert_eq!(
+                motion.with_reduced_motion(true).duration(interaction),
+                0,
+                "{}: {interaction:?} still animates under reduced motion",
+                theme.name()
+            );
+        }
+        // A selection mark moving between items is a quick change, not a
+        // panel opening: the spec's band for it is 90-120 ms.
+        let selection = motion.duration(MotionInteraction::SelectionChange);
+        assert!(
+            (90..=120).contains(&selection),
+            "{}: a selection change takes {selection} ms",
+            theme.name()
+        );
     }
 }
 
@@ -533,7 +579,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             on_surface_muted: Rgba::rgb(160, 160, 160),
             accent: Rgba::rgb(80, 140, 255),
             on_accent: Rgba::rgb(0, 0, 0),
-            selection_glow: Rgba::new(80, 140, 255, 128),
+            selection_fill: Rgba::new(80, 140, 255, 128),
             border: Rgba::rgb(60, 60, 60),
             surface_hover: Rgba::rgb(30, 30, 30),
             surface_pressed: Rgba::rgb(5, 5, 5),
@@ -565,7 +611,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             control_inset: 8,
             control_gap: 6,
             control_corner_radius: 4,
-            selection_glow_blur: 5,
+            selection_backdrop_blur: 5,
             seam_thickness: 2,
             rail_thickness: 2,
             bead_size: 6,
@@ -588,7 +634,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             move_: String::from("c.move"),
             busy: String::from("c.busy"),
         },
-        MotionTheme::new(90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70),
+        MotionTheme::new([90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90]),
         Density::Normal,
         Contrast::Normal,
     )

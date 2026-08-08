@@ -171,23 +171,47 @@ control decodes an image: artwork arrives already decoded and rasterised
 through the desktop's sandboxed asset path, so a malformed file can only fail
 to produce artwork.
 
-## A selected icon tile: soft halo, named on a pill
+## A selected icon tile: the accent over a frosted backdrop
 
 `collection::IconTile` wears no plate of its own, so a selection has to be
-drawn behind the picture. It is the theme's translucent `selection_glow`,
-filled as a rounded rectangle **inset by the scaled `selection_glow_blur` on
-every side** and blurred by that radius through the one shared box blur the
-compositor frosts a window backdrop with (`tairix_raster`). Insetting before
-blurring is what keeps the softened edge inside the tile's bounds. Only a
-selected tile pays for it, and only one scratch surface at the tile's own size.
+drawn behind the picture. What it blurs is the **backdrop**: the pixels the
+tile covers — a window's surface, the desktop wallpaper — are frosted by the
+scaled `selection_backdrop_blur` through `tairix_raster`'s one shared region
+frost, the same call the compositor frosts a window's backdrop with, and the
+theme's `selection_fill` — the accent at half opacity — is then laid over them
+with a **crisp** edge, rounded like every other control plate. Frost and fill
+are confined to that one rounded shape, so nothing lands outside the tile's
+bounds and no square edge shows around the rounded fill. Softening the *fill*
+instead is what left the mark a smear with no shape of its own. Only a selected
+tile pays for it.
 
-Because the halo lets the wallpaper or window surface read through, the name is
-carried on a solid `accent` pill in `on_accent` ink — which is what keeps
-selection a difference in *contrast* rather than only in hue now that the halo
-is soft. Under a heavier `Contrast` the tile drops the halo for the crisp opaque
-accent panel: a translucent wash would trade away the very contrast that policy
-exists to add. Hover and press keep their own crisp washes, so the pointer can
-never imitate a selection.
+`with_selection_fade` draws the mark at a given strength, `0` to `u8::MAX`, so
+an owner can cross-fade a selection between items over the theme's
+`MotionInteraction::SelectionChange` duration. It scales the frost and the fill
+together, so a backdrop never snaps into focus ahead of the colour leaving it.
+The item being left is already unselected while its mark decays, and the item
+arrived at is already selected while its mark grows, so the strength is the
+owner's to state rather than the composed state's to infer. A host that does
+not animate sets nothing and the mark follows the selection. Under a heavier
+`Contrast` the mark does not fade at all — see below.
+
+The fill is translucent, so the wallpaper or window surface still reads through
+it and the name keeps the theme's ordinary foreground: near-white on-accent ink
+over a light theme's pale-orange result would wash out, while the theme's own
+foreground separates either way up. Under a heavier `Contrast` the tile fills
+the crisp opaque accent panel and inverts its ink to `on_accent`, the instant
+the item is selected rather than fading in: a translucent wash would trade away
+the very contrast that policy exists to add, and a half-arrived plate under
+inverted ink would too. Hover and press keep their own crisp washes in the
+shared plate colours — never the accent — so a pointer can never imitate a
+selection.
+
+A **selected** tile draws neither the pointer wash nor the focus ring, whatever
+strength its mark is currently at. Both are suppressed by the selection itself
+rather than by the strength, because an outline that appeared for as long as a
+mark took to arrive read as a border flickering on and off under the pointer.
+The ring is what distinguishes a *focused* tile from a hovered one, so an
+unselected tile still takes it.
 
 The name wraps rather than being cut: as many whole lines as the band under the
 picture holds, each centred, the last elided with the shared ellipsis when the

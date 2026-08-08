@@ -472,26 +472,36 @@ impl Window {
         (client.width, client.height)
     }
 
-    /// The rounded-corner coverage this window applies across row `ly`, or
-    /// `None` where every column is fully covered. A decorated window's
-    /// rounding belongs to the frame rim and is baked into the decoration
-    /// as partial alpha, so its rectangular client rounds nothing.
+    /// The rounded shape this window's rectangle is cut to, or `None` where
+    /// every pixel of it is fully covered. A decorated window's rounding
+    /// belongs to the frame rim and is baked into the decoration as partial
+    /// alpha, so its rectangular client rounds nothing.
     ///
     /// This is the single definition of the window's *shape*: both the
     /// window's own pixels ([`Self::row`]) and any effect confined to the
-    /// window's rectangle (the compositor's backdrop blur) weight
+    /// window's rectangle (the compositor's frosted backdrop) weight
     /// themselves by it, so they can never disagree about where the
-    /// window's edge is.
-    pub(crate) fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
+    /// window's edge is. A rounded window is undecorated, so the extent the
+    /// shape is measured against is equally its outer [`bounds`](Self::bounds).
+    pub(crate) fn shape(&self) -> Option<WindowShape> {
         match (self.band, self.corners) {
-            (None, corners @ Corners::Rounded { .. }) => Some(RowRounding {
+            (None, corners @ Corners::Rounded { .. }) => Some(WindowShape {
                 corners,
-                ly,
                 width: self.client_size.0,
                 height: self.client_size.1,
             }),
             _ => None,
         }
+    }
+
+    /// Row `ly` of this window's [`shape`](Self::shape), resolved once for a
+    /// whole row so a column costs a coverage lookup rather than a fresh
+    /// shape decision.
+    pub(crate) fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
+        Some(RowRounding {
+            shape: self.shape()?,
+            ly,
+        })
     }
 
     /// The composited contribution of this window at *window-local*
@@ -964,19 +974,38 @@ impl<'a> DecorationSpan<'a> {
     }
 }
 
+/// The rounded shape a plain window's rectangle is cut to: its corner style
+/// and the extent that style is measured against.
+///
+/// Read once and reused across a whole row or region — the compositor
+/// weights a window's frosted backdrop by it — so the style and the extent
+/// can never be paired wrongly and the corner arithmetic is not re-derived
+/// per pixel.
+#[derive(Copy, Clone)]
+pub(crate) struct WindowShape {
+    corners: Corners,
+    width: u32,
+    height: u32,
+}
+
+impl WindowShape {
+    /// Coverage in `0..=255` at window-local `(lx, ly)`.
+    pub(crate) fn coverage(self, lx: u32, ly: u32) -> u8 {
+        self.corners.coverage(lx, ly, self.width, self.height)
+    }
+}
+
 /// The rounded-corner coverage a plain window applies across one row.
 #[derive(Copy, Clone)]
 pub(crate) struct RowRounding {
-    corners: Corners,
+    shape: WindowShape,
     ly: u32,
-    width: u32,
-    height: u32,
 }
 
 impl RowRounding {
     /// Coverage in `0..=255` for content column `lx` of this row.
     pub(crate) fn coverage(self, lx: u32) -> u8 {
-        self.corners.coverage(lx, self.ly, self.width, self.height)
+        self.shape.coverage(lx, self.ly)
     }
 }
 

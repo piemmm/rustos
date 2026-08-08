@@ -14,7 +14,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, TextRole, Theme};
+use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
 
 use crate::chooser::{monogram_disc, monogram_of, AccountTile, Chooser, Step, OTHER_MONOGRAM};
 use crate::layout::{
@@ -253,6 +253,12 @@ pub struct EventContext<'a> {
     pub theme: &'a Theme,
     /// Who decides whether a submitted secret belongs to the account.
     pub verifier: &'a mut dyn Verifier,
+    /// Monotonic nanoseconds the surface times its motion from.
+    ///
+    /// The only motion is the chooser's selection cross-fade, so a surface
+    /// built without accounts — a screen lock over one named user — never
+    /// reads it and has no clock to supply.
+    pub now_ns: u64,
 }
 
 /// What the surface is currently asking for.
@@ -277,6 +283,10 @@ struct Placement {
     field: Rect,
     chooser: Rect,
     chrome: Rect,
+    /// The screen the last paint or event placed against.
+    screen: Rect,
+    /// The scale that paint used.
+    scale: Scale,
 }
 
 /// One authentication surface: the account chooser, the panel headed with the
@@ -498,30 +508,92 @@ impl AuthSurface {
         )
     }
 
+    /// Advance a running selection fade and report the damage.
+    ///
+    /// Damage is the smallest rectangle containing the two animating tiles,
+    /// falling back to the recorded chooser rectangle, and to the whole
+    /// screen only when the surface has not been placed yet. Outside the
+    /// chooser mode this is a no-op.
+    pub fn advance(&mut self, now_ns: u64) -> Outcome {
+        if !matches!(self.mode, Mode::Chooser) {
+            return Outcome::quiet();
+        }
+        let Some(chooser) = self.chooser.as_mut() else {
+            return Outcome::quiet();
+        };
+        // Capture the tiles before the step settles them away.
+        let (slots, count) = chooser.animating_slots();
+        if !chooser.advance(now_ns) {
+            return Outcome::quiet();
+        }
+        let damage = match self.placement.get() {
+            Some(placed) => {
+                if count > 0 {
+                    chooser
+                        .tile_bounds_of(&slots[..count], placed.screen, placed.scale)
+                        .or(Some(placed.chooser))
+                } else {
+                    chooser
+                        .fade_damage(placed.screen, placed.scale)
+                        .or(Some(placed.chooser))
+                }
+            }
+            None => None,
+        };
+        Outcome::changed(damage)
+    }
+
+    /// Nanoseconds until the next animation frame, or `None` when nothing is
+    /// animating — including outside the chooser and under reduced motion.
+    #[must_use]
+    pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
+        if !matches!(self.mode, Mode::Chooser) {
+            return None;
+        }
+        self.chooser.as_ref()?.next_frame_in(now_ns)
+    }
+
     /// One event on the chooser.
     fn on_chooser_event(&mut self, event: &InputEvent, ctx: &mut EventContext<'_>) -> Outcome {
         let Some(chooser) = self.chooser.as_mut() else {
             return Outcome::quiet();
         };
+        let duration_ms = ctx
+            .theme
+            .motion()
+            .duration(MotionInteraction::SelectionChange);
         let (chosen, stirred) = match event {
             InputEvent::KeyPressed { key, modifiers } => match key {
-                Key::Named(NamedKey::Tab) if modifiers.shift => {
-                    (None, chooser.move_focus(Step::Previous))
-                }
-                Key::Named(NamedKey::Tab | NamedKey::Right | NamedKey::Down) => {
-                    (None, chooser.move_focus(Step::Next))
-                }
-                Key::Named(NamedKey::Left | NamedKey::Up) => {
-                    (None, chooser.move_focus(Step::Previous))
-                }
+                Key::Named(NamedKey::Tab) if modifiers.shift => (
+                    None,
+                    chooser.move_focus(Step::Previous, ctx.now_ns, duration_ms),
+                ),
+                Key::Named(NamedKey::Tab | NamedKey::Right | NamedKey::Down) => (
+                    None,
+                    chooser.move_focus(Step::Next, ctx.now_ns, duration_ms),
+                ),
+                Key::Named(NamedKey::Left | NamedKey::Up) => (
+                    None,
+                    chooser.move_focus(Step::Previous, ctx.now_ns, duration_ms),
+                ),
                 Key::Named(NamedKey::Enter) => (Some(chooser.focus()), false),
                 _ => (None, false),
             },
-            _ => chooser.on_pointer(event, ctx.screen, ctx.scale),
+            _ => chooser.on_pointer(event, ctx.screen, ctx.scale, ctx.now_ns, duration_ms),
         };
         match chosen {
             Some(slot) => self.choose(slot),
-            None if stirred => Outcome::changed(self.placement.get().map(|placed| placed.chooser)),
+            None if stirred => {
+                let damage = match self.placement.get() {
+                    Some(placed) => chooser
+                        .focus_move_damage(placed.screen, placed.scale)
+                        .or(Some(placed.chooser)),
+                    None => chooser
+                        .focus_move_damage(ctx.screen, ctx.scale)
+                        .or(Some(chooser.bounds(ctx.screen, ctx.scale))),
+                };
+                Outcome::changed(damage)
+            }
             None => Outcome::quiet(),
         }
     }
@@ -745,6 +817,8 @@ impl AuthSurface {
                 .as_ref()
                 .map_or(panel, |chooser| chooser.bounds(screen, scale)),
             chrome: chrome_band(screen, scale),
+            screen,
+            scale,
         }));
     }
 

@@ -17,16 +17,19 @@
 //! keeps the divisor constant across the pass and leaves a uniform field
 //! exactly unchanged.
 
-use crate::color::Pixel;
+use alloc::vec::Vec;
+
+use crate::color::{div255, Pixel};
+use crate::surface::Surface;
 
 /// Blur `region` in place: a dense, row-major, premultiplied
 /// `width`×`height` block of pixels, blurred by a separable box blur of
 /// `radius` physical pixels using `aux` as the intermediate buffer.
 ///
-/// `aux` is supplied by the caller — the compositor owns a scratch buffer
-/// it grows and reuses — so a blur costs no allocation on the frame path. A
-/// caller that blurs once per repaint rather than per frame can take
-/// [`Surface::blur`](crate::Surface::blur) instead and let it allocate.
+/// `aux` is supplied by the caller — so a blur costs no allocation on the
+/// frame path. A caller frosting a rectangle of a surface takes
+/// [`Surface::frost_region`] instead, which owns the copy-and-mix around
+/// this pass and carries both buffers in a [`BlurScratch`].
 ///
 /// Nothing is blurred, and `region` is left exactly as it was, when the
 /// radius is `0` (the effect is disabled), when either dimension is `0`, or
@@ -57,6 +60,175 @@ pub fn box_blur(
             return;
         };
         blur_line(src, dst, width, height, radius);
+    }
+}
+
+/// The buffers a frost works in: the copy of the region that is blurred,
+/// and the intermediate [`box_blur`]'s two passes hand over through.
+///
+/// Both grow to the largest region asked of them and are then reused, so a
+/// per-frame caller — the compositor frosting a window's backdrop on every
+/// composite — allocates nothing once its scratch is warm.
+#[derive(Default)]
+pub struct BlurScratch {
+    region: Vec<Pixel>,
+    aux: Vec<Pixel>,
+}
+
+impl BlurScratch {
+    /// An empty scratch, which allocates on its first frost and not before.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            region: Vec::new(),
+            aux: Vec::new(),
+        }
+    }
+
+    /// Give the memory back, so a scratch that frosted a large region stops
+    /// holding it; the next frost grows it again.
+    pub fn release(&mut self) {
+        self.region = Vec::new();
+        self.aux = Vec::new();
+    }
+
+    /// Both buffers as exactly `count` pixels, lengthened if they were
+    /// shorter and never shortened, or `None` when the memory could not be
+    /// reserved — a frost with no scratch to work in leaves the surface
+    /// untouched rather than frosting part of it.
+    fn buffers(&mut self, count: usize) -> Option<(&mut [Pixel], &mut [Pixel])> {
+        if !grow(&mut self.region, count) || !grow(&mut self.aux, count) {
+            return None;
+        }
+        Some((self.region.get_mut(..count)?, self.aux.get_mut(..count)?))
+    }
+}
+
+/// Lengthen `buffer` to `count` pixels, reserving first so exhaustion is
+/// answered with `false` rather than an allocation abort.
+fn grow(buffer: &mut Vec<Pixel>, count: usize) -> bool {
+    let Some(extra) = count.checked_sub(buffer.len()) else {
+        return true;
+    };
+    if buffer.try_reserve(extra).is_err() {
+        return false;
+    }
+    buffer.resize(count, Pixel::TRANSPARENT);
+    true
+}
+
+impl Surface {
+    /// Frost `[x, x+w) × [y, y+h)`: blur the pixels already there by
+    /// `radius` and mix the blurred copy back over them at each pixel's
+    /// `coverage` — `255` takes the blurred pixel, `0` keeps the original,
+    /// and the values between are the weighted mix.
+    ///
+    /// This is the desktop's one frosted glass: the compositor frosts a
+    /// window's backdrop before the window's own translucent pixels blend
+    /// over it, and the login screen frosts the wallpaper behind a selected
+    /// account tile. Weighting the mix rather than clipping it is what lets
+    /// a rounded shape fade from frosted to untouched across its own arc
+    /// instead of showing a square edge.
+    ///
+    /// `coverage` is asked about a pixel's position relative to the
+    /// rectangle's **own** top-left, so a caller whose rectangle the surface
+    /// edge or the clip window cuts short still reads the whole shape rather
+    /// than re-fitting it to what survives.
+    ///
+    /// The frost is confined to what the surface bounds and the active clip
+    /// window admit and reads only the pixels it may write: samples past
+    /// that edge replicate it, so the effect can neither pull a neighbour's
+    /// pixels in nor mark a pixel outside. `scratch` carries the copy and
+    /// the blur's intermediate between calls and holds nothing from one
+    /// frost to the next.
+    ///
+    /// The surface is left exactly as it was, never partly frosted, when
+    /// `radius` is `0` (the effect is disabled), when the rectangle is empty
+    /// or lands nowhere the surface admits, or when the scratch could not be
+    /// grown.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the rectangle is spelled as the four scalars every other \
+                  Surface primitive takes, plus the blur radius, the caller's \
+                  reused scratch, and the shape being frosted"
+    )]
+    pub fn frost_region(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        radius: u32,
+        scratch: &mut BlurScratch,
+        coverage: impl Fn(u32, u32) -> u8,
+    ) {
+        if radius == 0 {
+            return;
+        }
+        let Some((columns, rows)) = self.admitted(x, y, w, h) else {
+            return;
+        };
+        let cols = columns.end - columns.start;
+        let (Ok(width), Ok(height)) = (
+            usize::try_from(cols),
+            usize::try_from(rows.end - rows.start),
+        ) else {
+            return;
+        };
+        let Some(count) = width.checked_mul(height) else {
+            return;
+        };
+        let Some((region, aux)) = scratch.buffers(count) else {
+            return;
+        };
+        for (row, copy) in rows.clone().zip(region.chunks_exact_mut(width)) {
+            let Some((_, source)) = self.row_span_mut(row, columns.start, cols) else {
+                continue;
+            };
+            for (dst, src) in copy.iter_mut().zip(source.iter()) {
+                *dst = *src;
+            }
+        }
+        box_blur(
+            region,
+            width,
+            height,
+            usize::try_from(radius).unwrap_or(usize::MAX),
+            aux,
+        );
+        let lead = columns.start - x;
+        for (row, blurred) in rows.zip(region.chunks_exact(width)) {
+            let Some((_, target)) = self.row_span_mut(row, columns.start, cols) else {
+                continue;
+            };
+            let ly = row - y;
+            for ((dst, src), lx) in target.iter_mut().zip(blurred).zip(lead..) {
+                *dst = mix(*dst, *src, coverage(lx, ly));
+            }
+        }
+    }
+}
+
+/// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
+///
+/// Every channel is weighted identically, so a colour channel can never
+/// come out above the alpha it is premultiplied by, and the two extremes
+/// return their end exactly.
+fn mix(from: Pixel, to: Pixel, weight: u8) -> Pixel {
+    if weight == 255 {
+        return to;
+    }
+    if weight == 0 {
+        return from;
+    }
+    let keep = u32::from(255 - weight);
+    let take = u32::from(weight);
+    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
+    Pixel {
+        r: channel(from.r, to.r),
+        g: channel(from.g, to.g),
+        b: channel(from.b, to.b),
+        a: channel(from.a, to.a),
     }
 }
 

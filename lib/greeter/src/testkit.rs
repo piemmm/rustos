@@ -100,6 +100,16 @@ pub(crate) fn feed(
     event: &InputEvent,
     verifier: &mut dyn Verifier,
 ) -> Outcome {
+    feed_at(surface, event, verifier, 0)
+}
+
+/// Apply one event on [`SCREEN`] at the unscaled density, timed at `now_ns`.
+pub(crate) fn feed_at(
+    surface: &mut AuthSurface,
+    event: &InputEvent,
+    verifier: &mut dyn Verifier,
+    now_ns: u64,
+) -> Outcome {
     let theme = theme();
     surface.on_event(
         event,
@@ -108,6 +118,7 @@ pub(crate) fn feed(
             scale: Scale::ONE,
             theme: &theme,
             verifier,
+            now_ns,
         },
     )
 }

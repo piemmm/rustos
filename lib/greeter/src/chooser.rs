@@ -44,6 +44,15 @@ pub(crate) const TILE_HEIGHT: u32 = 154;
 /// The gap between tiles in pixels at the reference density.
 pub(crate) const TILE_GAP: u32 = 12;
 
+/// Frames spanned by one selection cross-fade.
+///
+/// Eight frames over a hundred milliseconds reads as smooth without inventing
+/// a frame clock.
+const SELECTION_FADE_FRAMES: u64 = 8;
+
+/// Nanoseconds in one millisecond.
+const NANOS_PER_MS: u64 = 1_000_000;
+
 /// One selectable account on the chooser.
 ///
 /// It carries only what is drawn. There is no credential material here, no
@@ -123,6 +132,123 @@ pub(crate) fn monogram_of(name: &str) -> char {
     })
 }
 
+/// Private record of a selection-mark cross-fade between two tiles.
+///
+/// One consumer only — this chooser — so it stays here rather than becoming
+/// shared surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectionFade {
+    /// Slot the mark is leaving, if any.
+    leaving: Option<usize>,
+    /// Slot the mark is arriving at.
+    arriving: usize,
+    /// Monotonic time the transition started, in nanoseconds.
+    started_ns: u64,
+    /// How long the transition runs, in nanoseconds.
+    duration_ns: u64,
+    /// Strength of the arriving mark: `0` unmarked, [`u8::MAX`] full.
+    arriving_fade: u8,
+    /// Whether a transition is currently running.
+    running: bool,
+}
+
+impl SelectionFade {
+    /// Settled on `slot`: fully marked, nothing leaving, nothing running.
+    const fn settled_on(slot: usize) -> Self {
+        Self {
+            leaving: None,
+            arriving: slot,
+            started_ns: 0,
+            duration_ns: 0,
+            arriving_fade: u8::MAX,
+            running: false,
+        }
+    }
+
+    /// Begin a transition from `from` to `to` at `now_ns`.
+    ///
+    /// A zero duration settles immediately: the new slot is full, the old is
+    /// gone, and nothing is left running.
+    fn start(&mut self, from: usize, to: usize, now_ns: u64, duration_ms: u16) {
+        let span_ns = u64::from(duration_ms).saturating_mul(NANOS_PER_MS);
+        if span_ns == 0 {
+            *self = Self::settled_on(to);
+            return;
+        }
+        self.leaving = Some(from);
+        self.arriving = to;
+        self.started_ns = now_ns;
+        self.duration_ns = span_ns;
+        self.arriving_fade = 0;
+        self.running = true;
+    }
+
+    /// End the transition on `slot`: full mark, nothing leaving.
+    fn settle(&mut self, slot: usize) {
+        *self = Self::settled_on(slot);
+    }
+
+    /// Strength of the mark on `slot`.
+    fn strength(&self, slot: usize, focus: usize) -> u8 {
+        if self.running {
+            if slot == self.arriving {
+                return self.arriving_fade;
+            }
+            if self.leaving == Some(slot) {
+                return u8::MAX.saturating_sub(self.arriving_fade);
+            }
+            return 0;
+        }
+        if slot == focus {
+            u8::MAX
+        } else {
+            0
+        }
+    }
+
+    /// Recompute strengths from elapsed time. Returns whether anything
+    /// changed. A clock that jumps backwards settles rather than misbehaving.
+    fn advance(&mut self, now_ns: u64, focus: usize) -> bool {
+        if !self.running {
+            return false;
+        }
+        if now_ns < self.started_ns {
+            self.settle(focus);
+            return true;
+        }
+        let elapsed = now_ns.saturating_sub(self.started_ns);
+        if elapsed >= self.duration_ns {
+            self.settle(focus);
+            return true;
+        }
+        let progress = elapsed
+            .saturating_mul(u64::from(u8::MAX))
+            .checked_div(self.duration_ns)
+            .unwrap_or(u64::from(u8::MAX));
+        let fade = u8::try_from(progress.min(u64::from(u8::MAX))).unwrap_or(u8::MAX);
+        if fade == self.arriving_fade {
+            return false;
+        }
+        self.arriving_fade = fade;
+        true
+    }
+
+    /// Nanoseconds until the next fade frame, or `None` when nothing is
+    /// animating.
+    fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+        if !self.running {
+            return None;
+        }
+        let elapsed = now_ns.saturating_sub(self.started_ns);
+        let remaining = self.duration_ns.saturating_sub(elapsed);
+        if remaining == 0 {
+            return Some(0);
+        }
+        let step = (self.duration_ns / SELECTION_FADE_FRAMES).max(1);
+        Some(remaining.min(step))
+    }
+}
+
 /// The chooser's tiles and where the keyboard is.
 ///
 /// Slot `accounts.len()` is the `Other…` tile: it is always present and
@@ -131,6 +257,9 @@ pub(crate) fn monogram_of(name: &str) -> char {
 pub(crate) struct Chooser {
     accounts: Vec<AccountTile>,
     focus: usize,
+    fade: SelectionFade,
+    /// Slots whose mark strength changed on the last focus move, for damage.
+    focus_damage: ([usize; 4], usize),
     armed: Option<usize>,
     pointer: Point,
 }
@@ -140,6 +269,8 @@ impl Chooser {
         Self {
             accounts,
             focus: 0,
+            fade: SelectionFade::settled_on(0),
+            focus_damage: ([0; 4], 0),
             armed: None,
             pointer: Point::ORIGIN,
         }
@@ -162,22 +293,126 @@ impl Chooser {
 
     /// Move the keyboard on by `step` slots, wrapping at both ends so a
     /// keyboard-only user never falls off the end of the row.
-    pub(crate) fn move_focus(&mut self, step: Step) -> bool {
+    pub(crate) fn move_focus(&mut self, step: Step, now_ns: u64, duration_ms: u16) -> bool {
         let slots = self.slots();
         let next = match step {
             Step::Next => self.focus.saturating_add(1) % slots,
             Step::Previous => self.focus.checked_sub(1).unwrap_or(slots - 1),
         };
-        self.focus_on(next)
+        self.focus_on(next, now_ns, duration_ms)
     }
 
     /// Put the keyboard on `slot`, ignoring a slot that does not exist.
-    pub(crate) fn focus_on(&mut self, slot: usize) -> bool {
+    ///
+    /// When the focus actually moves, starts a selection cross-fade lasting
+    /// `duration_ms`. A zero duration settles immediately.
+    pub(crate) fn focus_on(&mut self, slot: usize, now_ns: u64, duration_ms: u16) -> bool {
         if slot >= self.slots() || slot == self.focus {
             return false;
         }
+        let from = self.focus;
+        // Every slot whose mark strength will change must be in the damage
+        // report: the one left, the one arrived at, and any prior fade pair
+        // a second move interrupts (those drop to zero instantly).
+        let mut dirty = [from, slot, 0, 0];
+        let mut n = 2usize;
+        if self.fade.running {
+            if let Some(leaving) = self.fade.leaving {
+                if leaving != from && leaving != slot {
+                    dirty[n] = leaving;
+                    n += 1;
+                }
+            }
+            let arriving = self.fade.arriving;
+            if arriving != from && arriving != slot {
+                dirty[n] = arriving;
+                n += 1;
+            }
+        }
         self.focus = slot;
+        self.fade.start(from, slot, now_ns, duration_ms);
+        self.focus_damage = (dirty, n);
         true
+    }
+
+    /// Recompute fade strengths from `now_ns`. Returns whether anything
+    /// changed. Completing the transition settles it so nothing keeps
+    /// animating.
+    pub(crate) fn advance(&mut self, now_ns: u64) -> bool {
+        self.fade.advance(now_ns, self.focus)
+    }
+
+    /// Nanoseconds until the next fade frame, or `None` when nothing is
+    /// animating.
+    #[must_use]
+    pub(crate) fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+        self.fade.next_frame_in(now_ns)
+    }
+
+    /// The mark strength tile `slot` draws at: `0` unmarked, [`u8::MAX`] full.
+    #[must_use]
+    pub(crate) fn selection_fade(&self, slot: usize) -> u8 {
+        self.fade.strength(slot, self.focus)
+    }
+
+    /// Union of the rectangles of `slots`, using the same geometry the paint
+    /// draws into. `None` when none of the slots exist.
+    #[must_use]
+    pub(crate) fn tile_bounds_of(
+        &self,
+        slots: &[usize],
+        screen: Rect,
+        scale: Scale,
+    ) -> Option<Rect> {
+        let mut union: Option<Rect> = None;
+        for &slot in slots {
+            let Some(rect) = self.tile_rect(slot, screen, scale) else {
+                continue;
+            };
+            union = Some(match union {
+                Some(acc) => acc.union(&rect),
+                None => rect,
+            });
+        }
+        union
+    }
+
+    /// Slots a running fade currently paints: leaving (if any) and arriving.
+    /// Empty when nothing is animating.
+    #[must_use]
+    pub(crate) fn animating_slots(&self) -> ([usize; 2], usize) {
+        if !self.fade.running {
+            return ([0, 0], 0);
+        }
+        let mut slots = [self.fade.arriving, 0];
+        if let Some(leaving) = self.fade.leaving {
+            slots[1] = leaving;
+            ([slots[0], slots[1]], 2)
+        } else {
+            (slots, 1)
+        }
+    }
+
+    /// The tiles a running fade touches, as a union rectangle from the paint
+    /// geometry. `None` when nothing is animating.
+    #[must_use]
+    pub(crate) fn fade_damage(&self, screen: Rect, scale: Scale) -> Option<Rect> {
+        let (slots, count) = self.animating_slots();
+        if count == 0 {
+            return None;
+        }
+        self.tile_bounds_of(&slots[..count], screen, scale)
+    }
+
+    /// Damage rectangle for the last focus move: every tile whose mark
+    /// strength changed, including a prior fade pair a second move cut short.
+    #[must_use]
+    pub(crate) fn focus_move_damage(&self, screen: Rect, scale: Scale) -> Option<Rect> {
+        let (slots, count) = self.focus_damage;
+        if count == 0 {
+            return self.fade_damage(screen, scale);
+        }
+        self.tile_bounds_of(&slots[..count], screen, scale)
     }
 
     /// How many tiles sit in one row on `screen`, never fewer than one.
@@ -299,19 +534,24 @@ impl Chooser {
         event: &InputEvent,
         screen: Rect,
         scale: Scale,
+        now_ns: u64,
+        duration_ms: u16,
     ) -> (Option<usize>, bool) {
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = *to;
                 let over = self.hit(*to, screen, scale);
-                (None, over.is_some_and(|slot| self.focus_on(slot)))
+                (
+                    None,
+                    over.is_some_and(|slot| self.focus_on(slot, now_ns, duration_ms)),
+                )
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
                 self.armed = self.hit(self.pointer, screen, scale);
                 if let Some(slot) = self.armed {
-                    self.focus_on(slot);
+                    self.focus_on(slot, now_ns, duration_ms);
                 }
                 (None, self.armed.is_some())
             }
@@ -338,7 +578,8 @@ impl Chooser {
                 account.map_or(OTHER_LABEL, AccountTile::display_name),
                 IconKind::Generic,
             )
-            .with_state(self.tile_state(slot));
+            .with_state(self.tile_state(slot))
+            .with_selection_fade(self.selection_fade(slot));
             let palette = theme.palette();
             let (monogram, disc, ink) = match account {
                 Some(account) => (account.monogram(), palette.accent, palette.on_accent),

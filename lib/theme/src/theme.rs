@@ -171,7 +171,7 @@ impl Theme {
                 on_surface_muted: Rgba::rgb(0x8e, 0x97, 0x9c),
                 accent,
                 on_accent: ON_ACCENT,
-                selection_glow: accent.with_alpha(GLOW_ALPHA),
+                selection_fill: accent.with_alpha(SELECTION_ALPHA),
                 border: Rgba::rgb(0x1c, 0x23, 0x27),
                 surface_hover: Rgba::rgb(0x1e, 0x25, 0x2a),
                 surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
@@ -223,7 +223,7 @@ impl Theme {
                 on_surface_muted: Rgba::rgb(0x6a, 0x6f, 0x75),
                 accent,
                 on_accent: ON_ACCENT,
-                selection_glow: accent.with_alpha(GLOW_ALPHA),
+                selection_fill: accent.with_alpha(SELECTION_ALPHA),
                 border: Rgba::rgb(0xdd, 0xd6, 0xce),
                 surface_hover: Rgba::rgb(0xee, 0xea, 0xe5),
                 surface_pressed: Rgba::rgb(0xe9, 0xe4, 0xde),
@@ -261,12 +261,13 @@ impl Theme {
 /// appearance, so the two variants share the token instead of restating it.
 const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 
-/// The opacity both built-in themes give their selection halo: half.
+/// The opacity both built-in themes give their selection fill: half.
 ///
-/// A halo marks an item without hiding it, so the surface or wallpaper under
-/// a selected tile still reads through the accent rather than being replaced
-/// by it. Each theme still authors its own halo colour and may tune this.
-const GLOW_ALPHA: u8 = 128;
+/// A selection marks an item without hiding it, so the surface or wallpaper
+/// under a selected tile still reads through the accent rather than being
+/// replaced by it. Each theme still authors its own fill colour and may tune
+/// this.
+const SELECTION_ALPHA: u8 = 128;
 
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and
@@ -283,7 +284,7 @@ fn common_metrics() -> Metrics {
         control_inset: 10,
         control_gap: 8,
         control_corner_radius: 6,
-        selection_glow_blur: 19,
+        selection_backdrop_blur: 19,
         seam_thickness: 2,
         rail_thickness: 3,
         bead_size: 8,
@@ -304,7 +305,7 @@ fn common_metrics() -> Metrics {
 /// the spec §9 targets. Reduced motion is derived from this by a consumer
 /// (or a variant theme) via [`MotionTheme::with_reduced_motion`].
 fn common_motion() -> MotionTheme {
-    MotionTheme::new(
+    MotionTheme::new([
         100, // hover enter
         95,  // hover exit
         75,  // press compress
@@ -316,7 +317,8 @@ fn common_motion() -> MotionTheme {
         115, // window activate
         200, // window size transition
         95,  // scrollbar wake
-    )
+        100, // selection change
+    ])
 }
 
 /// The fonts shared by both built-in themes.

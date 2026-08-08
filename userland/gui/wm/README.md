@@ -22,23 +22,25 @@ router**:
   pixels blend over it. Composition is back-to-front, so the back buffer
   already holds that backdrop: the compositor composes the layers below
   the window, blurs the back buffer inside that window's rectangle only,
-  and resumes composing from the window itself. The filter is
-  `lib/raster`'s shared `tairix_raster::box_blur` — the one blur definition
-  the desktop has, so a control frosting its own artwork draws through the
-  same code — a separable box blur carrying running sums, cost proportional
-  to the rectangle's area whatever the radius, over premultiplied channels
+  and resumes composing from the window itself. The effect is
+  `lib/raster`'s shared `Surface::frost_region` — the one frosted glass the
+  desktop has, so the login screen frosting a selected account tile draws
+  through the same code. It copies the rectangle, blurs the copy with a
+  separable box blur carrying running sums (cost proportional to the
+  rectangle's area whatever the radius, over premultiplied channels
   including alpha, with samples past an edge replicating it, so the effect
   can neither pull a neighbour's pixels in nor write outside the rectangle
-  and a uniform backdrop comes out unchanged. The radius is a desktop length in logical
-  pixels resolved through the output's `Scale`, and the mix back into the
-  back buffer is weighted by the window's own rounded-corner coverage, so
-  a rounded window's frosting fades across exactly the arc its pixels do.
-  Both scratch buffers belong to the compositor and grow to the largest
-  frosted rectangle the session has needed, so a frosted window allocates
-  nothing after its first frame. Because those pixels are a function of
-  the whole backdrop beneath them, every damage rectangle touching a
-  visible frosted window grows to that window's full bounds, iterated
-  until nothing grows; and `present_accelerated` takes the software
+  and a uniform backdrop comes out unchanged), and mixes the blurred copy
+  back weighted by the window's own rounded-corner coverage, so a rounded
+  window's frosting fades across exactly the arc its pixels do. The radius
+  is a desktop length in logical pixels resolved through the output's
+  `Scale`. The compositor owns one `tairix_raster::BlurScratch`, grown to
+  the largest frosted rectangle the session has needed and reused, so a
+  frosted window allocates nothing after its first frame; a mode change
+  releases it rather than carrying the old screen's pixels. Because those
+  pixels are a function of the whole backdrop beneath them, every damage
+  rectangle touching a visible frosted window grows to its full bounds,
+  iterated until nothing grows; and `present_accelerated` takes the software
   fallback outright while any visible window is frosted, because a
   hardware layer is composed from its own pixels and cannot sample what is
   already behind it.
@@ -233,13 +235,12 @@ content damage (offset by a decoration band, clipped to the client, empty
 marking nothing), the desktop layer (drawing over the background and under
 every window, a smaller-than-screen layer leaving the background showing,
 and installing/replacing/clearing each damaging exactly its footprint),
-the backdrop blur (the box blur's own identities — a uniform field left
-unchanged, an impulse spread symmetrically, radius 0 and a one-pixel
-region identities — and the composited effect: a spread backdrop, a no-op
-at radius 0, confinement to the window rectangle, the logical radius
-following the output scale, rounded corners left alone, the accelerated
-path falling back to software, and a change behind a frosted window
-repainting it to exactly the pixels a whole-screen composite gives),
+the backdrop blur — the composited effect, the frost's own identities
+being pinned in `lib/raster`: a spread backdrop, a no-op at radius 0 and
+for an unknown or hidden window, confinement to the window rectangle, the
+logical radius following the output scale, rounded corners left alone, the
+accelerated path falling back to software, and a change behind a frosted
+window repainting it to exactly the pixels a whole-screen composite gives —
 and input routing (hit-testing, click-to-activate focus
 and raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position
 of its own and `DesktopKey` naming focus-on-desktop, programmatic

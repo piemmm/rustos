@@ -27,12 +27,12 @@ use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_input::{InputEvent, Key};
-use tairix_raster::box_blur;
+use tairix_raster::BlurScratch;
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{div255, Color, Pixel};
+use crate::color::{Color, Pixel};
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
@@ -112,13 +112,10 @@ pub struct Compositor {
     cursor_replaced: bool,
     back: Surface,
     frame: Vec<u8>,
-    /// Scratch for a backdrop blur: the copy of the backdrop that
-    /// [`box_blur`] blurs, and the intermediate buffer its two
-    /// passes hand over through. Both are owned by the compositor and
-    /// grown to the largest blurred rectangle a frame has needed, so a
+    /// Working buffers for a backdrop frost, owned by the compositor and
+    /// grown to the largest frosted rectangle a frame has needed, so a
     /// frosted window costs no allocation once it has been drawn once.
-    blur_pixels: Vec<Pixel>,
-    blur_aux: Vec<Pixel>,
+    blur_scratch: BlurScratch,
     damage: DamageRegion,
     next_id: u64,
 }
@@ -181,8 +178,7 @@ impl Compositor {
             cursor_replaced: false,
             back,
             frame,
-            blur_pixels: Vec::new(),
-            blur_aux: Vec::new(),
+            blur_scratch: BlurScratch::new(),
             damage: DamageRegion::new(),
             next_id: 1,
         };
@@ -233,11 +229,10 @@ impl Compositor {
         self.order = order;
         self.back = back;
         self.frame = frame;
-        // The blur scratch is sized per use; dropping it now returns the old
-        // screen's worth of pixels rather than carrying them until the next
-        // blurred frame.
-        self.blur_pixels = Vec::new();
-        self.blur_aux = Vec::new();
+        // The frost scratch is sized per use; releasing it now returns the
+        // old screen's worth of pixels rather than carrying them until the
+        // next frosted frame.
+        self.blur_scratch.release();
         self.damage.clear();
         self.damage.add(self.screen_rect());
         true
@@ -1835,7 +1830,7 @@ impl Compositor {
         }
     }
 
-    /// Blur the back buffer inside the rectangle of the window at `index`,
+    /// Frost the back buffer inside the rectangle of the window at `index`,
     /// weighted by that window's own shape coverage, leaving a frosted
     /// backdrop for the window's pixels to be blended over.
     ///
@@ -1847,18 +1842,17 @@ impl Compositor {
     /// untouched across exactly the arc the window's own pixels fade over
     /// and no square edge shows outside a rounded window.
     ///
-    /// The blur is confined to the window's rectangle and reads nothing
-    /// beyond it: samples past an edge replicate that edge, so the effect
-    /// can never pull a neighbour's pixels into a window nor write outside
-    /// its own bounds.
+    /// The shared frost ([`Surface::frost_region`]) confines the effect to
+    /// that rectangle and replicates its edges, so it can never pull a
+    /// neighbour's pixels into a window nor write outside its own bounds,
+    /// and it works in the scratch this compositor owns and reuses.
     fn blur_backdrop(&mut self, index: usize) {
         let screen = self.screen_rect();
         let scale = self.scale;
         let Self {
             windows,
             back,
-            blur_pixels,
-            blur_aux,
+            blur_scratch,
             ..
         } = self;
         let Some(window) = windows.get(index) else {
@@ -1867,69 +1861,30 @@ impl Compositor {
         let bounds = window.bounds();
         let region = bounds.intersection(&screen);
         let radius = scale.scale_length(u32::from(window.blur_radius()));
-        let (Ok(width), Ok(height), Ok(radius)) = (
-            usize::try_from(region.width),
-            usize::try_from(region.height),
-            usize::try_from(radius),
-        ) else {
-            return;
-        };
-        let (Some(count), Ok(left)) = (width.checked_mul(height), u32::try_from(region.left()))
+        let (Ok(left), Ok(top)) = (u32::try_from(region.left()), u32::try_from(region.top()))
         else {
             return;
         };
-        if count == 0 || radius == 0 {
-            return;
-        }
-        grow_scratch(blur_pixels, count);
-        grow_scratch(blur_aux, count);
-        let (Some(pixels), Some(aux)) = (blur_pixels.get_mut(..count), blur_aux.get_mut(..count))
-        else {
-            return;
-        };
-        for (row, y) in (region.top()..region.bottom()).enumerate() {
-            let Ok(py) = u32::try_from(y) else { continue };
-            let Some(dst) = row
-                .checked_mul(width)
-                .and_then(|start| pixels.get_mut(start..start.checked_add(width)?))
-            else {
-                continue;
-            };
-            let source = crate::surface::row(back, py);
-            let Some(src) = usize::try_from(left)
-                .ok()
-                .and_then(|first| source.get(first..first.checked_add(width)?))
-            else {
-                continue;
-            };
-            dst.copy_from_slice(src);
-        }
-        box_blur(pixels, width, height, radius, aux);
-        // The region's top-left in the window's own coordinates: a window
-        // that starts off screen is frosted from the row and column the
-        // screen begins at, and its shape is still read from its own
-        // top-left.
-        let top = u32::try_from(region.top().saturating_sub(bounds.top())).unwrap_or(0);
-        let inset = u32::try_from(region.left().saturating_sub(bounds.left())).unwrap_or(0);
-        for (row, y) in (region.top()..region.bottom()).enumerate() {
-            let (Ok(py), Ok(row_offset)) = (u32::try_from(y), u32::try_from(row)) else {
-                continue;
-            };
-            let rounding = window.row_rounding(top.saturating_add(row_offset));
-            let Some(blurred) = row
-                .checked_mul(width)
-                .and_then(|start| pixels.get(start..start.checked_add(width)?))
-            else {
-                continue;
-            };
-            let Some((_, span)) = back.row_span_mut(py, left, region.width) else {
-                continue;
-            };
-            for ((dst, src), lx) in span.iter_mut().zip(blurred).zip(inset..) {
-                let coverage = rounding.map_or(255, |rounding| rounding.coverage(lx));
-                *dst = mix(*dst, *src, coverage);
-            }
-        }
+        // The frosted rectangle's top-left in the window's own coordinates:
+        // a window that starts off screen is frosted from the row and
+        // column the screen begins at, and its shape is still read from its
+        // own top-left.
+        let shape_x = u32::try_from(region.left().saturating_sub(bounds.left())).unwrap_or(0);
+        let shape_y = u32::try_from(region.top().saturating_sub(bounds.top())).unwrap_or(0);
+        let shape = window.shape();
+        back.frost_region(
+            left,
+            top,
+            region.width,
+            region.height,
+            radius,
+            blur_scratch,
+            |lx, ly| {
+                shape.map_or(255, |shape| {
+                    shape.coverage(shape_x.saturating_add(lx), shape_y.saturating_add(ly))
+                })
+            },
+        );
     }
 }
 
@@ -1971,38 +1926,6 @@ fn compose_pixel(
 fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
     let column = usize::try_from(x).ok()?;
     row?.get(column).copied()
-}
-
-/// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
-///
-/// Every channel is weighted identically, so a colour channel can never
-/// come out above the alpha it is premultiplied by, and the two extremes
-/// return their end exactly.
-fn mix(from: Pixel, to: Pixel, weight: u8) -> Pixel {
-    if weight == 255 {
-        return to;
-    }
-    if weight == 0 {
-        return from;
-    }
-    let keep = u32::from(255 - weight);
-    let take = u32::from(weight);
-    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
-    Pixel {
-        r: channel(from.r, to.r),
-        g: channel(from.g, to.g),
-        b: channel(from.b, to.b),
-        a: channel(from.a, to.a),
-    }
-}
-
-/// Make sure `scratch` holds at least `count` pixels, growing it in place
-/// and never shrinking it, so a scratch buffer settles at the largest size
-/// the session has needed and later frames reuse it without allocating.
-fn grow_scratch(scratch: &mut Vec<Pixel>, count: usize) {
-    if scratch.len() < count {
-        scratch.resize(count, Pixel::TRANSPARENT);
-    }
 }
 
 /// Whether `window` can contribute a pixel inside `area`: it is visible

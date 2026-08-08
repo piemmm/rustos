@@ -21,7 +21,7 @@ bundles, under a stable `ThemeId`:
 
 - `Palette` — semantic `Rgba` colour roles: the surface/foreground base
   (`desktop`, `surface`, `surface_raised`, `on_surface`, `on_surface_muted`,
-  `accent`, `on_accent`, `selection_glow`, `border`), the Reactive Alloy
+  `accent`, `on_accent`, `selection_fill`, `border`), the Reactive Alloy
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
   signal roles the boards' legend fixes (the `*_pressure` set,
@@ -29,8 +29,8 @@ bundles, under a stable `ThemeId`:
   scroll and window-frame roles
   (`scroll_track`, `scroll_thumb`, `frame`). The
   roles are named fields, not a free-form map, so a theme can never omit a
-  role and a consumer can never request one that does not exist
-  (`AGENTS.md` §2.11). `Palette::signal(SignalRole)` is the one place a
+  role and a consumer can never request one that does not exist.
+  `Palette::signal(SignalRole)` is the one place a
   signal becomes a colour. The window manager, the taskbar, and the apps all
   read these same roles, which is what makes a theme switch apply
   consistently everywhere.
@@ -41,14 +41,15 @@ bundles, under a stable `ThemeId`:
     `surface_raised` (the bar fill) in the direction its appearance calls for —
     brighter on dark, deeper on light — and the tests assert that separation on
     both appearances rather than trusting the authored numbers.
-  - `selection_glow` is the soft halo behind a selected item — an icon tile in
-    the file manager's grid, on the desktop's icon field, or on the login
+  - `selection_fill` is the plate a selected item is filled with — an icon tile
+    in the file manager's grid, on the desktop's icon field, or on the login
     chooser. It is each theme's own `accent` at half opacity (alpha `128`):
     `#d1550f80` on dark, `#c8500c80` on light. Being translucent, what lies
     behind the item — a window's surface, the wallpaper — still reads through
-    the selection instead of being replaced by a block of accent. It is
+    the selection instead of being replaced by a block of accent, and that
+    backdrop is frosted by `selection_backdrop_blur` first. It is
     authored per theme rather than derived from `accent` at the draw site, so
-    a theme can tune the halo's weight against its own surfaces.
+    a theme can tune the fill's weight against its own surfaces.
   - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
     a step deeper on light — and it is deliberately **not** a focus signal.
     Every window wears the same quiet rim at every activation, because the rim
@@ -64,21 +65,23 @@ bundles, under a stable `ThemeId`:
   `border_thickness`; the scrollbar's `scrollbar_breadth` and
   `min_thumb_length`; the control anatomy (`control_height`,
   `control_inset`, `control_gap`, `control_corner_radius`,
-  `selection_glow_blur`, `seam_thickness`,
+  `selection_backdrop_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
   `chart_height`, `selector_extent`, `toggle_track_length`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `window_control_extent`,
   `resize_grabber_extent`, `hit_slop`).
-  - `selection_glow_blur` is the radius the `selection_glow` halo is blurred
-    by, `19` logical pixels in both themes. That is thirty percent of
-    `tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX` (`64`), the widest
-    backdrop blur a window may ask the compositor for: a selection halo is a
-    soft mark on one item, not the frosted glass a whole window sits on, so it
-    takes a fraction of the strongest blur the desktop draws and stays
-    recognisably the same effect. Both radii scale through `Scale`, and the
-    halo is drawn with the one shared box blur the compositor frosts a
-    backdrop with rather than a second implementation.
+  - `selection_backdrop_blur` is how far the *backdrop* behind a selected item
+    is blurred, `19` logical pixels in both themes. The `selection_fill` laid
+    over it keeps a crisp, rounded edge; it is the pixels the item covers — a
+    window's surface, the wallpaper — that are frosted, so a selected item
+    reads as frosted glass rather than as a softened smear. It is the same
+    effect through the same filter the compositor frosts a window's backdrop
+    with, at three tenths of `WINDOW_BACKDROP_BLUR_MAX_PX`, the widest a
+    window may ask for: a selection frosts one item, not a whole window. The
+    blur radius scales through `Scale` like every other length here, and the
+    frosting runs through the one shared region frost the compositor uses
+    rather than a second implementation.
   - `chart_height` is the one measured instrument that is a *box* rather than
     a line: a history plot needs vertical room to rise and fall in, so it is
     several times `progress_thickness`. A trend confined to a track's
@@ -98,6 +101,20 @@ bundles, under a stable `ThemeId`:
   [Typography](#typography)), referencing faces under `/System/Fonts`.
 - `CursorSet` — one asset id per `CursorKind`, referencing assets under
   `/System/Graphics`.
+- `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no
+  control carries a private animation timing. It is a table indexed by the
+  interaction rather than a field per interaction: the durations are all the
+  same type, so positional arguments could be transposed silently and a new
+  interaction would change every call site's arity.
+  - `SelectionChange` (`100` ms in both themes) is the cross-fade as a
+    selection mark moves between items — the login chooser's account tiles,
+    the file manager's grid, the desktop's icon field. The item being left
+    decays while the item arrived at grows, so nothing jumps.
+  - A theme in reduced motion reports **every** duration as `0`, which a
+    consumer reads as "change it now". That is the whole reduced-motion path:
+    the state still changes visibly, through contrast and shape, and no
+    control carries a second branch for it. A zero duration also means no
+    animation frame is ever asked for, so an idle surface arms no timer.
 
 `Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
 the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,

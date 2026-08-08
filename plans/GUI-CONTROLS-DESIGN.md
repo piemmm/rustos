@@ -449,7 +449,13 @@ Controls may lift, compress, brighten, or expose a seam. They must not wobble, s
 | Window activate or deactivate | 90-140 ms |
 | Minimize, restore, or size toggle | 160-240 ms |
 | Scrollbar wake or settle | 70-120 ms |
+| Selection change | 90-120 ms |
 | Theme switch repaint | One coherent frame sequence, no mixed half-theme frame |
+
+The durations are theme data, held as one table indexed by the interaction
+rather than a field per interaction: they are all the same type, so positional
+arguments could be transposed silently and a new interaction would change every
+call site's arity.
 
 ### Reduced motion
 
@@ -1101,21 +1107,47 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
 - Only *state* paints anything behind the picture:
   - Hover and press take the shared pointer wash (`surface_hover` /
     `surface_pressed`) as a rounded panel across the whole tile.
-  - **Selection lays a soft accent halo behind the picture and carries the
-    name on a solid accent pill**, the label and glyph inverting to the
-    on-accent foreground. The halo is the theme's `selection_glow` — its own
-    accent at half opacity — filled inset by the scaled `selection_glow_blur`
-    and blurred through the one shared blur, so the falloff stays inside the
-    tile. The pill is what keeps selection a *contrast* difference rather than
-    a hue one now that the halo is translucent: a near-white on-accent name
-    over a half-transparent wash would be unreadable on a light theme, so the
-    name gets an opaque ground of its own. The pointer can never imitate
-    either (§11.13 states the same rule for rows).
-  - **A high-contrast theme keeps the crisp opaque accent panel.** A blurred
-    translucent halo is the wrong answer where contrast is the whole point, so
-    the accessible path paints the flat panel and no blur at all.
+  - **Selection frosts the tile's backdrop and fills the tile with the theme's
+    `selection_fill`** — its own accent at half opacity. What is blurred is the
+    *backdrop*: the pixels the tile covers — a window's surface, the desktop
+    wallpaper — are frosted by the scaled `selection_backdrop_blur` through the
+    one shared region frost, the same call the compositor frosts a window's
+    backdrop with, and the fill is then laid over them with a **crisp** edge,
+    rounded like every other panel. Frost and fill are both confined to that
+    one rounded shape, so nothing escapes the tile and no square edge shows
+    around the rounded fill. Softening the *fill* instead leaves a smear with
+    no shape of its own, which is why the blur belongs behind the mark rather
+    than on it. Selection is still the only mark in the accent, so the pointer
+    can never imitate it (§11.13 states the same rule for rows).
+  - **The mark cross-fades as the selection moves**, over the theme's
+    `SelectionChange` duration (§9): the item being left decays from full to
+    nothing while the item arrived at grows, so a selection never jumps
+    between items. The strength scales the frost and the fill together, so a
+    backdrop never snaps into focus ahead of the colour leaving it. It is the
+    *owner's* to state, not the composed state's to infer — the item being left
+    is already unselected while its mark is still decaying — so the tile takes
+    it as an explicit fade value
+    and a host that does not animate sets none. A reduced-motion theme reports
+    a zero duration and the change settles at once, with no second code path
+    and no animation frame asked for.
+  - **The label keeps the ordinary foreground over that fill.** The fill tints
+    what lies behind it rather than replacing it, and a near-white on-accent
+    name over a light theme's pale-orange result would be unreadable, so the
+    on-accent inversion belongs only to the opaque plate below.
+  - **A high-contrast theme keeps the crisp opaque accent panel** and inverts
+    the label and glyph to the on-accent foreground. A translucent fill over a
+    blurred backdrop is the wrong answer where contrast is the whole point, so
+    the accessible path paints the flat panel and frosts nothing — and it does
+    not fade either: the panel arrives with the selection, because a
+    half-arrived plate under inverted ink is exactly the contrast that policy
+    guarantees.
   - Keyboard focus draws the shared Focus Ring, so a focused tile reads
-    distinctly from a hovered one.
+    distinctly from a hovered one — **but never on a selected tile**, where the
+    fill is already the mark. **The pointer wash is suppressed on a selected
+    tile for the same reason.** Both follow the *selection*, never the mark's
+    momentary strength: an outline or a wash that appeared for as long as a
+    mark took to arrive read as a border flickering on and off under the
+    pointer.
   - An authority or recovery state shows its shape-coded Signal Bead (§12.4) in
     the top-trailing corner, so a denied or unhealthy item is legible without
     relying on colour.

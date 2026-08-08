@@ -138,18 +138,23 @@ fn a_keystroke_reports_the_field_and_a_verdict_reports_the_panel() {
     assert_eq!(answered.damage(), Some(panel_rect(SCREEN, Scale::ONE)));
 }
 
-/// A focus move reports the grid, so every tile whose state changed is
-/// inside it.
+/// A focus move reports the union of the two tiles the mark is leaving and
+/// arriving at, so every pixel the selection fade repaints is inside it.
 #[test]
-fn a_focus_move_reports_the_chooser_grid() {
+fn a_focus_move_reports_the_animating_tiles() {
     let mut surface = AuthSurface::with_accounts(accounts());
     let mut verifier = Scripted::refusing();
-    let grid = Chooser::new(accounts()).bounds(SCREEN, Scale::ONE);
+    let grid = Chooser::new(accounts());
+    let expected = grid
+        .tile_bounds_of(&[0, 1], SCREEN, Scale::ONE)
+        .expect("two tiles");
 
-    feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
+    // Place the surface so damage is a rectangle rather than the whole screen.
+    let _ = render(&surface);
     let moved = feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
 
-    assert_eq!(moved.damage(), Some(grid));
+    assert_eq!(moved.damage(), Some(expected));
+    assert!(expected.width <= grid.bounds(SCREEN, Scale::ONE).width);
 }
 
 /// A clock tick reports its own band and nothing else, so an idle login
@@ -223,4 +228,46 @@ fn an_unplaced_surface_reports_the_whole_screen() {
         surface.set_cooldown(Duration64::from_secs(5)).damage(),
         None
     );
+}
+
+/// Advancing a running fade reports damage that contains both animating tiles,
+/// and reports no change when nothing is animating.
+#[test]
+fn advance_reports_animating_tile_damage_or_nothing() {
+    use crate::testkit::feed_at;
+    use tairix_theme::MotionInteraction;
+
+    let mut surface = AuthSurface::with_accounts(accounts());
+    let mut verifier = Scripted::refusing();
+    let _ = render(&surface);
+
+    assert!(!surface.advance(0).redraw(), "idle advance changes nothing");
+    assert_eq!(surface.motion_due(0), None);
+
+    let millis = theme()
+        .motion()
+        .duration(MotionInteraction::SelectionChange);
+    let span_ns = u64::from(millis) * 1_000_000;
+    feed_at(&mut surface, &named(NamedKey::Tab), &mut verifier, 0);
+
+    let tiles = Chooser::new(accounts())
+        .tile_bounds_of(&[0, 1], SCREEN, Scale::ONE)
+        .expect("tiles");
+    let mid = surface.advance(span_ns / 2);
+    assert!(mid.redraw());
+    let damage = mid.damage().expect("damage");
+    assert_eq!(damage, tiles);
+
+    assert!(surface.advance(span_ns).redraw());
+    assert!(!surface.advance(span_ns + 1).redraw());
+    assert_eq!(surface.motion_due(span_ns + 1), None);
+}
+
+/// Advancing outside the chooser mode does nothing.
+#[test]
+fn advance_outside_chooser_is_quiet() {
+    let mut surface = AuthSurface::new("ann");
+    let _ = render(&surface);
+    assert!(!surface.advance(1_000).redraw());
+    assert_eq!(surface.motion_due(1_000), None);
 }

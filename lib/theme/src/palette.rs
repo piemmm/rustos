@@ -33,15 +33,16 @@ pub struct Palette {
     pub accent: Rgba,
     /// Foreground drawn on top of [`accent`](Self::accent).
     pub on_accent: Rgba,
-    /// The soft halo behind a selected item, drawn blurred by
-    /// [`Metrics::selection_glow_blur`](crate::Metrics::selection_glow_blur).
+    /// The plate a selected item is filled with, laid crisply over a backdrop
+    /// blurred by
+    /// [`Metrics::selection_backdrop_blur`](crate::Metrics::selection_backdrop_blur).
     ///
     /// Translucent, so what lies behind a selected item — a window's
     /// surface, the desktop wallpaper — still reads through its selection
     /// rather than being replaced by a block of accent. It is authored per
     /// theme rather than derived from [`accent`](Self::accent) at the draw
-    /// site so a theme can tune the halo's weight against its own surfaces.
-    pub selection_glow: Rgba,
+    /// site so a theme can tune the fill's weight against its own surfaces.
+    pub selection_fill: Rgba,
     /// Window and control borders / separators.
     pub border: Rgba,
 

@@ -41,6 +41,31 @@ pub enum MotionInteraction {
     WindowSizeTransition,
     /// A scrollbar waking or settling.
     ScrollbarWake,
+    /// A selection mark arriving on an item, or leaving one.
+    SelectionChange,
+}
+
+impl MotionInteraction {
+    /// Every interaction, in the order a [`MotionTheme`]'s duration table
+    /// holds them: the table is indexed by the variant, so this order is the
+    /// meaning of [`MotionTheme::new`]'s argument.
+    pub const ALL: [Self; 12] = [
+        Self::HoverEnter,
+        Self::HoverExit,
+        Self::PressCompress,
+        Self::ReleaseSettle,
+        Self::PanelOpen,
+        Self::MenuOpen,
+        Self::JobProgressPulse,
+        Self::RecoveryLatchReveal,
+        Self::WindowActivate,
+        Self::WindowSizeTransition,
+        Self::ScrollbarWake,
+        Self::SelectionChange,
+    ];
+
+    /// How many durations a [`MotionTheme`] carries.
+    pub const COUNT: usize = Self::ALL.len();
 }
 
 /// The motion timings a theme provides, in milliseconds, plus the
@@ -52,52 +77,25 @@ pub enum MotionInteraction {
 /// without a second code path.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MotionTheme {
-    hover_enter_ms: u16,
-    hover_exit_ms: u16,
-    press_compress_ms: u16,
-    release_settle_ms: u16,
-    panel_open_ms: u16,
-    menu_open_ms: u16,
-    job_progress_pulse_ms: u16,
-    recovery_latch_reveal_ms: u16,
-    window_activate_ms: u16,
-    window_size_transition_ms: u16,
-    scrollbar_wake_ms: u16,
+    durations: [u16; MotionInteraction::COUNT],
     reduced_motion: bool,
 }
 
 impl MotionTheme {
-    /// Assemble a motion theme from its per-interaction durations (ms).
+    /// Assemble a motion theme from its per-interaction durations (ms),
+    /// indexed by [`MotionInteraction::ALL`].
+    ///
+    /// A table rather than one parameter per interaction: the durations are
+    /// all the same type, so positional arguments could be transposed
+    /// silently, and a new interaction would change every call site's
+    /// arity.
     ///
     /// `reduced_motion` is off; use [`with_reduced_motion`](Self::with_reduced_motion)
     /// to derive the reduced variant of the same theme.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub const fn new(
-        hover_enter_ms: u16,
-        hover_exit_ms: u16,
-        press_compress_ms: u16,
-        release_settle_ms: u16,
-        panel_open_ms: u16,
-        menu_open_ms: u16,
-        job_progress_pulse_ms: u16,
-        recovery_latch_reveal_ms: u16,
-        window_activate_ms: u16,
-        window_size_transition_ms: u16,
-        scrollbar_wake_ms: u16,
-    ) -> Self {
+    pub const fn new(durations: [u16; MotionInteraction::COUNT]) -> Self {
         Self {
-            hover_enter_ms,
-            hover_exit_ms,
-            press_compress_ms,
-            release_settle_ms,
-            panel_open_ms,
-            menu_open_ms,
-            job_progress_pulse_ms,
-            recovery_latch_reveal_ms,
-            window_activate_ms,
-            window_size_transition_ms,
-            scrollbar_wake_ms,
+            durations,
             reduced_motion: false,
         }
     }
@@ -126,18 +124,11 @@ impl MotionTheme {
         if self.reduced_motion {
             return 0;
         }
-        match interaction {
-            MotionInteraction::HoverEnter => self.hover_enter_ms,
-            MotionInteraction::HoverExit => self.hover_exit_ms,
-            MotionInteraction::PressCompress => self.press_compress_ms,
-            MotionInteraction::ReleaseSettle => self.release_settle_ms,
-            MotionInteraction::PanelOpen => self.panel_open_ms,
-            MotionInteraction::MenuOpen => self.menu_open_ms,
-            MotionInteraction::JobProgressPulse => self.job_progress_pulse_ms,
-            MotionInteraction::RecoveryLatchReveal => self.recovery_latch_reveal_ms,
-            MotionInteraction::WindowActivate => self.window_activate_ms,
-            MotionInteraction::WindowSizeTransition => self.window_size_transition_ms,
-            MotionInteraction::ScrollbarWake => self.scrollbar_wake_ms,
+        let slot = interaction as usize;
+        if slot < self.durations.len() {
+            self.durations[slot]
+        } else {
+            0
         }
     }
 }

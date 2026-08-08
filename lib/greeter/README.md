@@ -44,8 +44,11 @@ charter forbids.
   authenticates its own kernel-attested caller ignores the account.
 - `Chrome` — the clock, date, and host name drawn on the backdrop. Display
   text, bounded on the way in, never read back for authority.
-- `EventContext` — the screen rectangle, scale, theme, and verifier one event
-  is answered against.
+- `EventContext` — the screen rectangle, scale, theme, verifier, and monotonic
+  clock (`now_ns`) one event is answered against. The clock times the chooser's
+  selection cross-fade.
+- `AuthSurface::advance` / `motion_due` — step a running selection fade and ask
+  when the next frame is due. An idle surface returns no deadline.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
   colour, or a wallpaper the embedder has already decoded and fitted, under a
   scrim and a soft vertical wash of the desktop colour at each end, where the
@@ -92,9 +95,12 @@ charter forbids.
   picking an account cannot make the clock appear or vanish.
 - **Every change reports what it changed.** An `Outcome` carries the
   rectangle the next paint touches — the field for a keystroke, the block for
-  a verdict, the grid for a focus move, the chrome band for a clock tick — or
-  `None` for "the whole screen" on a mode change and before the surface has
-  been placed.
+  a verdict, the two tiles a selection fade is leaving and arriving at, the
+  chrome band for a clock tick — or `None` for "the whole screen" on a mode
+  change and before the surface has been placed.
+- **The chooser selection mark cross-fades.** Moving focus starts a fade over
+  the theme's `SelectionChange` duration; reduced motion collapses that
+  duration to zero so the mark jumps. An idle surface arms no timer.
 - **Nothing here rate-limits or counts attempts**, deliberately. The authority
   behind the verifier owns that policy and audits every attempt against the
   account. `set_cooldown` *presents* what the authority reports and refuses to
