@@ -210,63 +210,6 @@ fn system_font_files(ctx: &Context) -> Result<Vec<AppStoreFile>, String> {
     Ok(planted)
 }
 
-/// The `/System/Settings/Configuration/system.conf` document the autoload
-/// vertical plants: the default configuration with `os.loginType` asking for
-/// the text prompt.
-///
-/// Rendered by the configuration engine itself rather than written out as a
-/// literal here, so the planted document cannot drift from the grammar the
-/// guest parses.
-fn text_login_system_conf() -> String {
-    tairix_sysconfig::SystemConfig {
-        login_type: tairix_sysconfig::LoginType::Text,
-        ..tairix_sysconfig::SystemConfig::default()
-    }
-    .render()
-}
-
-/// The composed store files the autoload verticals' disk plants: the shared
-/// [`app_store_files`] set **plus** a planted
-/// `/System/Settings/Configuration/system.conf` ([`text_login_system_conf`])
-/// asking for the text login.
-///
-/// This disk carries a whole graphical world — a display service, the desktop
-/// and the login-screen bundles — so login would offer its graphical screen.
-/// The vertical exists to prove a shell user launches the desktop by typing
-/// `desktop`, so it asks for the text prompt outright instead of leaning on
-/// whatever the default happens to be; this is not a machine that cannot run
-/// a graphical login. No test-only *bundle* is added over the shared set —
-/// the config file is the only extra — so this is a thin wrapper over
-/// [`app_store_files`], memoised per arch like it.
-///
-/// # Errors
-///
-/// As [`app_store_files`].
-pub fn autoload_store_files(
-    ctx: &Context,
-    arch: PieArch,
-    profile: ImageProfile,
-) -> Result<&'static [AppStoreFile], String> {
-    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
-        [const { OnceLock::new() }; MEMO_SLOTS];
-    FILES[memo_slot(arch, profile)]
-        .get_or_init(|| {
-            let mut files = app_store_files(ctx, arch, profile)?.to_vec();
-            files.push(AppStoreFile {
-                components: vec![
-                    b"Settings".to_vec(),
-                    b"Configuration".to_vec(),
-                    b"system.conf".to_vec(),
-                ],
-                bytes: text_login_system_conf().into_bytes(),
-            });
-            Ok(files)
-        })
-        .as_ref()
-        .map(Vec::as_slice)
-        .map_err(Clone::clone)
-}
-
 /// The composed store files a single-fixture vertical's disk plants: the
 /// shared [`app_store_files`] set **plus** one test-only fixture bundle whose
 /// crate lives at `crate_dir` (outside the userland discovery walk, so it is
@@ -902,17 +845,7 @@ fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{text_login_system_conf, verify_icon_master, verify_library_icon};
-
-    /// The autoload vertical's planted store reads back as the text login it
-    /// asks for, so the vertical meets the shell prompt its script types into
-    /// rather than whatever the engine's own default happens to be.
-    #[test]
-    fn the_autoload_vertical_plants_a_text_login_store() {
-        let planted = tairix_sysconfig::SystemConfig::parse(&text_login_system_conf())
-            .expect("the engine renders a document it can parse");
-        assert_eq!(planted.login_type, tairix_sysconfig::LoginType::Text);
-    }
+    use super::{verify_icon_master, verify_library_icon};
 
     /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG,
     /// opaque white, or grey+alpha at `alpha` when one is given.

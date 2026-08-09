@@ -1149,43 +1149,33 @@ mod program {
     /// (`os.loginType`): this performs the I/O and hands what it found to
     /// [`configured_session_kind`], the one definition of what it means.
     ///
-    /// The store's own directory is probed first, because "this machine
-    /// carries no configuration" and "the volume holding it is not up yet"
-    /// must not read alike. A round before the root unlock mounts
-    /// `/System/Settings` can reach neither, and treating that as an absent
-    /// store would silently boot the compiled default over an
-    /// administrator's opposite choice; a reachable directory with no
-    /// document is a genuine "no configuration" and does take the default.
-    /// A refused read, an oversized or malformed document is likewise a
-    /// reachable store that teaches nothing, and never breaks the login.
+    /// One read of the document answers both questions, and
+    /// [`ConfigStore::from_read`] is the one definition of what its refusal
+    /// meant — an offline volume withholds the default rather than
+    /// overriding an administrator's opposite choice, while a live volume
+    /// that holds no readable document takes it.
     fn configured_session_default() -> SessionKind {
-        let dir = tairix_rt::fs_open(
-            tairix_sysconfig::CONFIG_DIR.as_bytes(),
-            OpenFlags::DIRECTORY,
-        );
-        if dir < 0 {
-            return configured_session_kind(ConfigStore::Unreachable);
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        // `dir >= 0` checked above; descriptors are small kernel indices.
-        let _ = tairix_rt::fs_close(dir as u32);
-
-        let fd = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
-        if fd < 0 {
-            return configured_session_kind(ConfigStore::Reachable(None));
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        // `fd >= 0` checked above; descriptors are small kernel indices.
-        let fd = fd as u32;
-        // One bounded read suffices: the engine refuses any document
-        // longer than its own ceiling, so a store that does not fit this
-        // buffer could never parse anyway.
+        // One bounded read suffices: the engine refuses any document longer
+        // than its own ceiling, so a store that does not fit this buffer
+        // could never parse anyway.
         let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN];
-        let outcome = tairix_rt::fs_read(fd, 0, &mut buf);
+        configured_session_kind(ConfigStore::from_read(read_config_document(&mut buf)))
+    }
+
+    /// Read the configuration document into `buf`, yielding the bytes it
+    /// holds or the refusal that stopped the read.
+    fn read_config_document(buf: &mut [u8]) -> Result<&[u8], Errno> {
+        let ret = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+        if ret < 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // `ret >= 0` checked above; descriptors are small kernel indices.
+        let fd = ret as u32;
+        let outcome = tairix_rt::fs_read(fd, 0, buf);
         let _ = tairix_rt::fs_close(fd);
-        configured_session_kind(ConfigStore::Reachable(
-            outcome.ok().and_then(|len| buf.get(..len)),
-        ))
+        let len = outcome.map_err(Errno::from_syscall)?;
+        buf.get(..len).ok_or(Errno::OutOfRange)
     }
 
     /// Whether a graphical session can be launched on this round: the

@@ -1,0 +1,40 @@
+[package]
+name = "tairix-test-greeter-default-qemu-aarch64"
+description = "plans/NEW-DESKTOP-LOGIN.md G7.1 QEMU integration test: boot an unconfigured display-capable machine on the aarch64 virt board, unlock the encrypted root, and prove login reaches the graphical login screen on its own — nobody asked for it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-greeter-default-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 machine and watch what login
+# decides" integration test. It runs the entire production boot pipeline
+# through `tairix-kernel`'s library half (`boot_aarch64::boot`) — bootstrap-
+# floor virtio-MMIO discovery, the unlock kthread, driver autoload, the
+# display service, and the session authority — and only swaps the audit sink
+# for the PASS witness. Keeping the QEMU-exit shortcut in a dedicated bin
+# (not a Cargo feature on a production crate) prevents feature unification
+# from leaking it into any production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The witnesses are kernel-attested: the bundle loader's `APP_LOADED` and
+# the IPC layer's `CallReplied`, matched against the shared `lib/abi`
+# spellings of the service store and the display endpoint.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

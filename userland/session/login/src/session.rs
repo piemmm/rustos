@@ -218,6 +218,30 @@ pub enum ConfigStore<'a> {
     Unreachable,
 }
 
+impl<'a> ConfigStore<'a> {
+    /// Classify one attempt to read the store's document.
+    ///
+    /// Only [`Errno::NotImplemented`] means the store could not answer: a
+    /// mount whose backing volume is not online refuses with it and never
+    /// falls back to another volume, so it is the one refusal that says
+    /// "ask again once the root is up". Every other refusal came from a
+    /// live volume — an absent document, a denied read, a fault — leaving a
+    /// store that is reachable and simply teaches nothing.
+    ///
+    /// Absence is deliberately **not** inferred from the document's
+    /// directory: `configure` creates that directory on its first write, so
+    /// a machine nobody has configured has none, and reading its absence as
+    /// an offline volume would withhold the compiled default forever.
+    #[must_use]
+    pub fn from_read(read: Result<&'a [u8], Errno>) -> Self {
+        match read {
+            Ok(document) => Self::Reachable(Some(document)),
+            Err(Errno::NotImplemented) => Self::Unreachable,
+            Err(_) => Self::Reachable(None),
+        }
+    }
+}
+
 /// The administrator-configured boot-default session kind for one round.
 ///
 /// A reachable store decides: its document if it parses, otherwise the
@@ -416,7 +440,7 @@ mod tests {
     };
     use alloc::string::ToString;
     use alloc::vec::Vec;
-    use tairix_abi::BootSession;
+    use tairix_abi::{BootSession, Errno};
     use tairix_caps::CapabilitySet;
 
     #[test]
@@ -586,6 +610,64 @@ mod tests {
         assert_eq!(
             effective_session_kind(BootSession::Graphical, withheld),
             SessionKind::Graphical
+        );
+    }
+
+    #[test]
+    fn a_document_that_was_read_is_a_reachable_store() {
+        let document = b"os.loginType text\n";
+        assert_eq!(
+            ConfigStore::from_read(Ok(document)),
+            ConfigStore::Reachable(Some(document))
+        );
+    }
+
+    /// The refusal a mount with no registered backing gives is the only one
+    /// that means "not yet": nothing else may withhold the default.
+    #[test]
+    fn only_an_offline_volume_makes_the_store_unreachable() {
+        assert_eq!(
+            ConfigStore::from_read(Err(Errno::NotImplemented)),
+            ConfigStore::Unreachable
+        );
+        for refusal in [
+            Errno::NotFound,
+            Errno::PermissionDenied,
+            Errno::NotADirectory,
+            Errno::DeviceFault,
+            Errno::OutOfRange,
+            Errno::LengthOutOfRange,
+        ] {
+            assert_eq!(
+                ConfigStore::from_read(Err(refusal)),
+                ConfigStore::Reachable(None),
+                "{refusal:?} must not read as an offline volume"
+            );
+        }
+    }
+
+    /// The regression this classification exists for. `configure` creates
+    /// the store's directory on its first write, so an unconfigured machine
+    /// has neither the directory nor the document and the read refuses
+    /// `NotFound`. Reading that as an offline volume pinned every fresh
+    /// installation to the text prompt, however capable of a graphical login
+    /// it was.
+    #[test]
+    fn a_never_configured_machine_still_boots_graphical() {
+        assert_eq!(
+            configured_session_kind(ConfigStore::from_read(Err(Errno::NotFound))),
+            SessionKind::Graphical
+        );
+    }
+
+    /// The other half of the same distinction: a round that runs before the
+    /// root is mounted reads `NotImplemented` and must still withhold the
+    /// default rather than override a stored `text`.
+    #[test]
+    fn a_round_before_the_root_is_mounted_withholds_the_default() {
+        assert_eq!(
+            configured_session_kind(ConfigStore::from_read(Err(Errno::NotImplemented))),
+            SessionKind::Text
         );
     }
 }

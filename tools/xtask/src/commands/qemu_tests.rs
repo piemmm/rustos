@@ -267,6 +267,14 @@ enum FsDisk {
     /// driver-loading-by-discovery autoload vertical's backing (`plans/PI.md`
     /// design B / B2, `plans/NETWORK.md` N4e).
     AutoloadRootDisk,
+    /// The [`Self::AutoloadRootDisk`] layout with **no** planted
+    /// `os.loginType` document ([`login_type_plant`]). A machine nobody has
+    /// configured is the state every fresh installation boots in, so this is
+    /// the disk that exercises the compiled default: the display driver
+    /// autoloads, the settings store is reachable and holds nothing, and
+    /// login must reach the graphical login screen on its own
+    /// (`plans/NEW-DESKTOP-LOGIN.md` G7.1).
+    GreeterRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the test-only `memsoak` fixture bundle
     /// ([`super::image_apps::memsoak_store_files`]) — the memory-stability
@@ -518,6 +526,14 @@ const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 /// once per autoloaded input-driver instance (keyboard + mouse), so the
 /// keyboard's own arming — possibly the second — is never raced.
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
+
+/// [`AUTOLOAD_INPUT_ARMED_OCCURRENCES`] for a vertical that drives the
+/// keyboard alone: the board carries a pointer device only when the test
+/// scripts one, so a keyboard-only run raises the marker exactly once and
+/// waiting for a second would hang until the runtime ceiling. The count is
+/// the device set's, not a weaker gate — the keyboard is still armed and
+/// parked on its interrupt before a key is injected.
+const KEYBOARD_ONLY_ARMED_OCCURRENCES: u32 = 1;
 
 /// Guest marker keying the second screendump (the served files window on
 /// the dark desktop): the activating click's `Focus` + `Pressed` both
@@ -5504,6 +5520,48 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(taskbar_pin_pointer_script),
         serial: &[],
     },
+    // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
+    // nobody has configured boots to the **graphical** login screen on its
+    // own. The sibling verticals above all plant `os.loginType text` because
+    // their scripts drive a shell; this one deliberately does not, so the
+    // compiled default is what decides — the state every fresh installation
+    // boots in, and the one no other vertical covers.
+    //
+    // The script types the unlock passphrase and nothing else: no account,
+    // no `desktop` command. So the greeter's `SCREEN_READY` — emitted only
+    // once it holds the seat and its first frame is on screen — can only be
+    // login's own choice, made after the encrypted root mounted and its
+    // settings store answered "no configuration" rather than "not here".
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its
+    // siblings: the longest the guest may fall silent, never a runtime
+    // deadline, so co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-greeter-default-qemu-aarch64",
+        binary: "tairix-test-greeter-default-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::GreeterRootDisk,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until the autoloaded
+            // keyboard driver has armed its interrupt so no keystroke hits
+            // a dead device. The run scripts no pointer, so the keyboard is
+            // the only input device on the board. Nothing is typed after it.
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                KEYBOARD_ONLY_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+        ],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
     // virtio-mmio analogue of the aarch64 `autoload_input` vertical, reduced
@@ -6422,9 +6480,12 @@ fn encrypted_root_disk_bytes(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
 ) -> Result<Vec<u8>, String> {
-    let (library_components, conf) = library_plant(t, apps)?;
-    let components: Vec<&[u8]> = library_components.iter().map(String::as_bytes).collect();
-    let root_files: [(&[&[u8]], &[u8]); 1] = [(&components, conf.as_bytes())];
+    let plants = root_plants(t, apps)?;
+    let borrowed = root_plant_refs(&plants);
+    let root_files: Vec<(&[&[u8]], &[u8])> = borrowed
+        .iter()
+        .map(|(components, bytes)| (components.as_slice(), *bytes))
+        .collect();
     super::image_apps::with_plant_refs(apps, |files| {
         tairix_test_encrypted_root_image::build_image_with_apps(files, &root_files).map_err(|e| {
             format!(
@@ -6448,15 +6509,7 @@ fn library_plant(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
 ) -> Result<(Vec<String>, String), String> {
-    let volume_relative = tairix_proglib::MACHINE_LIBRARY_PATH
-        .strip_prefix('/')
-        .ok_or_else(|| {
-            format!(
-                "test --qemu ({}): machine library path is not absolute",
-                t.package
-            )
-        })?;
-    let components = volume_relative.split('/').map(String::from).collect();
+    let components = root_volume_components(t, tairix_proglib::MACHINE_LIBRARY_PATH)?;
     let conf = super::image_apps::with_plant_refs(apps, |files| {
         tairix_mkimage::library::library_catalog(files).map_err(|e| {
             format!(
@@ -6466,6 +6519,76 @@ fn library_plant(
         })
     })?;
     Ok((components, conf))
+}
+
+/// Split an absolute `/System/…` path into the root-volume-relative
+/// components a plant names. `/System/Settings` and `/System/Logs` are the
+/// writable exceptions rebased onto this volume, so a document planted here
+/// is the one a booted guest actually reads — the read-only `/System` volume
+/// is shadowed at those prefixes and anything planted there is unreachable.
+fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, String> {
+    let relative = path.strip_prefix('/').ok_or_else(|| {
+        format!(
+            "test --qemu ({}): root-volume plant path {path} is not absolute",
+            t.package
+        )
+    })?;
+    Ok(relative.split('/').map(String::from).collect())
+}
+
+/// The `/System/Settings/Configuration/system.conf` document a vertical
+/// plants on its **encrypted root volume**, or `None` when the machine is to
+/// boot unconfigured.
+///
+/// A disk that carries a display would meet the graphical login screen, so a
+/// vertical whose script drives a *shell* asks for the text prompt outright
+/// rather than leaning on whatever the default happens to be — that is a
+/// configured machine, not one that cannot run a graphical login. The
+/// greeter disk deliberately plants nothing: an unconfigured machine is
+/// exactly what it exercises.
+///
+/// The document is rendered by the configuration engine itself rather than
+/// written out as a literal, so it cannot drift from the grammar the guest
+/// parses.
+fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
+    let login_type = match t.fs_disk {
+        FsDisk::AutoloadRootDisk => tairix_sysconfig::LoginType::Text,
+        _ => return Ok(None),
+    };
+    let components = root_volume_components(t, tairix_sysconfig::CONFIG_PATH)?;
+    let conf = tairix_sysconfig::SystemConfig {
+        login_type,
+        ..tairix_sysconfig::SystemConfig::default()
+    }
+    .render();
+    Ok(Some((components, conf)))
+}
+
+/// Every document a vertical plants on its encrypted root volume, as the
+/// borrowed `(components, bytes)` pairs the image builder takes. The one
+/// place root-volume plants are assembled, so each encrypted-root builder
+/// lays down the same set.
+fn root_plants(
+    t: &QemuTest,
+    apps: &[super::image_apps::AppStoreFile],
+) -> Result<Vec<(Vec<String>, String)>, String> {
+    let mut plants = vec![library_plant(t, apps)?];
+    plants.extend(login_type_plant(t)?);
+    Ok(plants)
+}
+
+/// Borrow [`root_plants`] output as the component-slice pairs the image
+/// builder's argument type needs.
+fn root_plant_refs(plants: &[(Vec<String>, String)]) -> Vec<(Vec<&[u8]>, &[u8])> {
+    plants
+        .iter()
+        .map(|(components, bytes)| {
+            (
+                components.iter().map(String::as_bytes).collect(),
+                bytes.as_bytes(),
+            )
+        })
+        .collect()
 }
 
 /// The composed `/System`-store bundle sets one enrolment plants on its
@@ -6537,13 +6660,10 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     // build.
     let profile = tairix_mkimage::ImageProfile::Debug;
     let apps = match t.fs_disk {
-        FsDisk::EncryptedRootDisk | FsDisk::PingRootDisk => {
-            super::image_apps::app_store_files(ctx, arch, profile)?
-        }
-        // The autoload disk brings up a display, so it would meet the
-        // graphical login screen; its scripts drive a shell, so it plants a
-        // store asking for the text prompt outright.
-        FsDisk::AutoloadRootDisk => super::image_apps::autoload_store_files(ctx, arch, profile)?,
+        FsDisk::EncryptedRootDisk
+        | FsDisk::PingRootDisk
+        | FsDisk::AutoloadRootDisk
+        | FsDisk::GreeterRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
     let apps_with_memsoak = match t.fs_disk {
@@ -6551,7 +6671,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         _ => EMPTY,
     };
     let autoload_drivers = match t.fs_disk {
-        FsDisk::AutoloadRootDisk => {
+        FsDisk::AutoloadRootDisk | FsDisk::GreeterRootDisk => {
             super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
@@ -8252,6 +8372,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         // author, selected in `net_root_fs_disk_image` — never a per-fixture
         // copy.
         FsDisk::AutoloadRootDisk
+        | FsDisk::GreeterRootDisk
         | FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
@@ -8285,6 +8406,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
     } = stores;
     let (drivers, app_set, extension, label) = match t.fs_disk {
         FsDisk::AutoloadRootDisk => (autoload_drivers, apps, "autoload-root.img", "autoload-root"),
+        FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img", "greeter-root"),
         FsDisk::StreamRootDisk => (
             net_only_drivers,
             apps_with_tcpecho,
@@ -8350,10 +8472,14 @@ fn net_root_image(
 ) -> Result<FsImage, String> {
     // The seeded program-library catalog rides on every driver-store
     // vertical's encrypted root volume, exactly as on a shipped image
-    // (the autoload vertical's desktop opens the popup over it).
-    let (library_components, conf) = library_plant(t, apps)?;
-    let components: Vec<&[u8]> = library_components.iter().map(String::as_bytes).collect();
-    let root_files: [(&[&[u8]], &[u8]); 1] = [(&components, conf.as_bytes())];
+    // (the autoload vertical's desktop opens the popup over it), beside
+    // whatever login configuration the vertical asks for.
+    let plants = root_plants(t, apps)?;
+    let borrowed = root_plant_refs(&plants);
+    let root_files: Vec<(&[&[u8]], &[u8])> = borrowed
+        .iter()
+        .map(|(components, bytes)| (components.as_slice(), *bytes))
+        .collect();
     let bytes = super::image_apps::with_plant_refs(drivers, |driver_files| {
         super::image_apps::with_plant_refs(apps, |app_files| {
             tairix_test_encrypted_root_image::build_image_with_contents(
@@ -8729,12 +8855,61 @@ fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        backing_image_path, build_targets, persist_failure_serial, qemu_host_budget_for,
-        qemu_job_weight, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
-        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
-        TESTS, UNLOCK_PASSPHRASE_LINE,
+        backing_image_path, build_targets, login_type_plant, persist_failure_serial,
+        qemu_host_budget_for, qemu_job_weight, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
     };
     use std::time::Duration;
+
+    /// The enrolment with `disk`, for a test that asserts on what that disk
+    /// plants. `label` names it in the failure a removed enrolment would
+    /// otherwise report as an unrelated panic.
+    fn enrolment_with(disk: FsDisk, label: &str) -> &'static QemuTest {
+        TESTS
+            .iter()
+            .find(|t| t.fs_disk == disk)
+            .unwrap_or_else(|| panic!("the {label} vertical is enrolled"))
+    }
+
+    /// A vertical whose script drives a shell plants a text-login document,
+    /// and it lands on the volume that actually backs `/System/Settings`.
+    ///
+    /// The regression this pins is the *path*, not the content. The document
+    /// was planted on the read-only `/System` volume, which the writable
+    /// root's rebased `/System/Settings` sub-mount shadows, so nothing ever
+    /// read it: the guest fell back to the compiled default and only met the
+    /// text prompt because login was separately misreading an absent store.
+    /// Planted components are therefore relative to the **root** volume and
+    /// keep the leading `System` segment.
+    #[test]
+    fn a_shell_driving_vertical_plants_its_text_login_on_the_root_volume() {
+        let autoload = enrolment_with(FsDisk::AutoloadRootDisk, "autoload");
+        let (components, conf) = login_type_plant(autoload)
+            .expect("the plant path is absolute")
+            .expect("a shell-driving vertical asks for the text prompt");
+        assert_eq!(
+            components.join("/"),
+            tairix_sysconfig::CONFIG_PATH
+                .strip_prefix('/')
+                .expect("the store path is absolute"),
+        );
+        assert_eq!(components.first().map(String::as_str), Some("System"));
+        let planted = tairix_sysconfig::SystemConfig::parse(&conf)
+            .expect("the engine renders a document it can parse");
+        assert_eq!(planted.login_type, tairix_sysconfig::LoginType::Text);
+    }
+
+    /// The greeter vertical plants nothing, because an unconfigured machine
+    /// is the state it exercises: a planted document of any kind would decide
+    /// the very thing the vertical is there to observe.
+    #[test]
+    fn the_greeter_vertical_boots_an_unconfigured_machine() {
+        let greeter = enrolment_with(FsDisk::GreeterRootDisk, "greeter");
+        assert!(login_type_plant(greeter)
+            .expect("the plant path is absolute")
+            .is_none());
+    }
 
     /// A served window's footprint is its app's client surface grown by the
     /// furniture band the window manager reserves, anchored at the cascade

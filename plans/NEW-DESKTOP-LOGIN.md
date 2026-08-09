@@ -39,11 +39,11 @@ from black over it — which the desktop reverses when it leaves (G2.1, G4.1).
 The docs and
 README matrix are current.
 
-**Remaining: the G7 QEMU verticals only.** No integration test yet boots a
-machine to the graphical login screen, authenticates, and switches accounts
-— see G7 for what that needs and why it is staged separately. Everything
-below is proven on the host and by construction; nothing yet proves it *on a
-screen*, which is exactly the gap G7.1 closes and why the README marks the
+**Remaining: the G7 QEMU verticals only.** No integration test yet
+authenticates at the graphical login screen or switches accounts — see G7
+for what remains. A real boot now proves the machine reaches the
+login screen unprompted (G7.1 vertical 1); what a screen does not yet prove
+is the authenticate/logout/switch path, which is why the README marks the
 feature partial. Four defects a first real boot exposed — no wallpaper, no
 text, no pointer, and a text-by-default login — are fixed above (G0, G2.1,
 G2.2, G3, G1); their common lesson is recorded in G7.1.
@@ -128,12 +128,25 @@ the absent one.** A round that runs before the root unlock mounts
 `/System/Settings` can read nothing at all, and assuming the compiled
 default there would silently boot graphical over an administrator who had
 configured the text prompt — a defect that stayed invisible only while the
-compiled default happened to equal what losing the race produced. Login
-therefore probes the store's own directory first: unreachable ⇒ this round
-runs the text prompt, which is always available and contradicts no stored
-choice, and the next round re-reads once the volume is up. An unreachable
-store withholds a *default*, never the operator's one-boot choice, which
+compiled default happened to equal what losing the race produced. An
+unreachable store therefore withholds a *default*: this round runs the text
+prompt, which is always available and contradicts no stored choice, the next
+round re-reads once the volume is up, and the operator's one-boot choice
 still wins on the very first round.
+
+**The two are told apart by the refusal, never by probing for a
+directory.** One read of the document answers both questions, classified
+once in `ConfigStore::from_read`. A mount whose backing volume is not
+registered fails closed with `NotImplemented` and never falls back to
+another volume, so that refusal — and only that one — means "ask again
+later"; every other refusal came from a live volume that simply teaches
+nothing. Inferring absence from the store's *directory* is forbidden and
+was the original defect here: `configure` creates that directory on its
+first write, so a machine nobody has configured has none, and the probe
+read every fresh installation as an offline volume — pinning the
+`Reachable(None) ⇒ graphical` rule above out of reach and silently
+delivering a text prompt on every machine that had never been configured,
+however capable of a graphical login it was.
 
 A graphical choice is *offered* only when a graphical login is actually
 possible this round (G4's availability probe). When it is not, the boot
@@ -784,12 +797,7 @@ second surface.
 `docs/src/userland/greeter.md` (the service), `docs/src/lib/greeter.md` (the
 surface engine), and the `README.md` feature and attack-vector matrices.
 
-### G7.1 QEMU verticals — the one thing still outstanding
-
-Every layer of this work is proven on the host, including the two halves of
-`session-v1` against each other. What is **not** proven is that a real
-machine boots to the login screen and logs in: no integration test drives a
-graphical userland under QEMU at all today.
+### G7.1 QEMU verticals
 
 **This gap has already cost real defects, and that is the argument for
 closing it.** The first genuine boot to this screen showed no wallpaper, no
@@ -799,30 +807,44 @@ caught: the wallpaper decode was refused by a capability gate no host test
 exercises, the glyph transport was never linked into the freestanding binary
 at all, and the cursor was hit-tested but never drawn. A host test renders
 into a `Surface` with a test transport already installed; it cannot see a
-program that was built without one. Only a vertical that looks at the actual
-framebuffer of an actual boot can. Until one exists, "host-green" must not
-be reported as "works".
+program that was built without one. The text-by-default defect (G1) was the
+same lesson again: the policy was host-green, and what no host test could
+see was that a real boot fed it a refusal it misread. Only a vertical that
+boots the real graph can. "Host-green" must not be reported as "works".
 
 The verticals owed are
 
-1. a graphical boot reaching the greeter and presenting a first frame;
+1. **a graphical boot reaching the greeter and presenting a first frame —
+   done**, `tests/integration/greeter_default_qemu_aarch64`;
 2. an authentication landing on the desktop;
 3. a logout returning to the greeter;
 4. a switch between two accounts and back.
 
-The first of those MUST assert on *content*, not merely that a frame
-arrived: readable text present, the wallpaper drawn rather than a flat
-colour, and a pointer visible — the three things a green host suite let
-through.
+**1 (done).** `tairix-test-greeter-default-qemu-aarch64` boots the aarch64
+`virt` board with a display and the signed input/display driver bundles on
+`FsDisk::GreeterRootDisk` — the autoload driver store with the **standard**
+application store, so no `os.loginType` is planted and the machine is in the
+state a fresh installation boots in. The host script types the unlock
+passphrase and nothing else: no account, no `desktop` command. It passes only
+on two **kernel-attested** witnesses — an `APP_LOADED` naming the greeter's
+bundle in the system service store, then a reply the display service serves
+on `DISPLAY_ENDPOINT` after it — because a userland record reaches the
+diagnostic sink alone and could be forged or truncated by user space. So the
+login screen is provably login's own choice, reached after the encrypted root
+mounted and its settings store answered "no configuration" rather than "not
+here". The sibling autoload verticals plant `os.loginType text` precisely
+because their scripts drive a shell.
 
-They are staged separately because they need infrastructure that does not
-yet exist rather than more of this feature: a guest with a display device
-and injected pointer/keyboard input, the whole `devmgr` / display-service /
-`login` / `greeter` / desktop service graph brought up inside it, and a way
-to assert on what reached the framebuffer. That harness is a deliverable in
-its own right and will serve every graphical vertical the desktop needs,
-not only this one; building it inside this change would have made it a
-graphical-test-harness change with a login screen attached.
+**2–4 (remaining).** These need what 1 deliberately does not: a scripted
+authentication at the login screen (a pointer script selecting a tile and
+typed credentials reaching the greeter's own field, not the console
+type-ahead the unlock prompt drains), and then screendump assertions over
+the desktop that follows. Vertical 2 MUST assert on *content*, not merely
+that a frame arrived: readable text present, the wallpaper drawn rather than
+a flat colour, and a pointer visible — the three things a green host suite
+let through. The harness for all of it now exists (`ramfb`, virtio
+keyboard/mouse, `ScreendumpPlan`, `pointer_script`), so what remains is the
+verticals themselves, not infrastructure.
 
 ## G8. The terminal a text session leaves behind
 
@@ -965,5 +987,5 @@ Covered in host unit tests:
 | G5 | Fast user switching: session table, wake mailbox, switch away/back | done |
 | G6 | `ScreenLock` composes `lib/greeter` | done |
 | G7 | Docs and README matrix | done |
-| G7.1 | QEMU verticals | planned |
+| G7.1 | QEMU verticals | vertical 1 (graphical boot reaches the greeter) done; 2–4 planned |
 | G8 | Text session boundary: `terminal_purge` + `session_ended` | done |

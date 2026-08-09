@@ -3002,6 +3002,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-greeter-default-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-test-heap"
 version = "0.0.0"
 dependencies = [

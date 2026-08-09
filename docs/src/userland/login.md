@@ -25,16 +25,27 @@ one definition of the precedence (`plans/NEW-DESKTOP-LOGIN.md` G1):
 | neither, on a machine that carries no configuration | `graphical` |
 | neither, and the store could not be reached | `text` for this round |
 
-The last row is a distinction, not a detail. A round that runs before the
-root unlock mounts `/System/Settings` can read nothing, and treating that
-as "no configuration" would boot the compiled default over an
-administrator who had configured the opposite. So an unreachable store
+The last two rows are a distinction, not a detail. A round that runs
+before the root unlock mounts `/System/Settings` can read nothing, and
+treating that as "no configuration" would boot the compiled default over
+an administrator who had configured the opposite. So an unreachable store
 decides nothing: the round runs the text prompt, which is always
 available and contradicts no stored choice, and the next round re-reads
 once the volume is up. A *reachable* store holding no document is a
 genuine "no configuration" and does take the default. An unreachable
 store withholds only a default — the operator's `continue gui` still
 wins on the very first round.
+
+The two are told apart by the refusal one read of the document returns,
+classified once in `ConfigStore::from_read`. A mount whose backing volume
+is not registered fails closed with `NotImplemented` and never falls back
+to another volume, so that refusal — and only that one — means "ask again
+later". Every other refusal came from a live volume: an absent document,
+a denied read, a fault. Absence is deliberately **not** inferred from the
+store's *directory*, because `configure` creates that directory on its
+first write; a machine nobody has configured has none, so probing for it
+read every fresh installation as an offline volume and pinned it to the
+text prompt however capable of a graphical login it was.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-log`,
@@ -574,3 +585,21 @@ is hammered by its fuzz harness (`cargo xtask fuzz`, target
 `tairix-abi/fuzz_decode`), and the greeter's own suite wires its client
 seam straight to this broker, so the two halves of the protocol are proven
 against each other rather than each against its own mock.
+
+Which store a refusal describes is pinned by its own tests: only
+`NotImplemented` reads as an unreachable volume, every other refusal as a
+reachable store holding nothing, and a never-configured machine therefore
+resolves to `graphical`.
+
+A host test can only prove the policy, never that the machine feeds it the
+truth, so the default is also proven on a real boot. The QEMU vertical
+`tairix-test-greeter-default-qemu-aarch64` boots the aarch64 `virt` board
+with a display and the signed driver bundles on a disk carrying the
+**standard** application store — no planted `os.loginType`, the state a
+fresh installation boots in — types the unlock passphrase and nothing
+else, and passes only on two kernel-attested witnesses: an `APP_LOADED`
+naming the greeter's bundle, then a reply the display service serves after
+it. No account is typed and no `desktop` command is issued, so the login
+screen can only be login's own choice. It is the sibling of the autoload
+verticals, which plant `os.loginType text` because their scripts drive a
+shell.

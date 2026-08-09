@@ -6029,7 +6029,8 @@ desktop session work (CU6).
 
 ## NEW-DESKTOP-LOGIN — the graphical login screen and session switching (`plans/NEW-DESKTOP-LOGIN.md`)
 
-**Status: in progress — G1–G7 done, only the G7.1 QEMU verticals remain.**
+**Status: in progress — G1–G7 done and G7.1's first vertical (a real boot
+reaches the graphical login screen unasked); G7.1 verticals 2–4 remain.**
 How a machine reaches a *logged-in* state: the boot-time text-vs-graphical
 decision, the first-class graphical login screen (the *greeter*), the
 session authority that owns authentication and session lifetime, and
@@ -6220,16 +6221,37 @@ here.
   sink into its cache ledgers — while structurally unable to: every one of
   those records was discarded, silently, because the write path is best-effort.
   The grant above is what makes them arrive.
-- **Remaining: G7.1** — the QEMU verticals (boot to the greeter,
-  authenticate onto the desktop, log out, switch accounts). Staged
-  separately: no integration test drives a graphical userland under QEMU
-  yet, so this needs a display-and-input guest harness that is a
-  deliverable in its own right and will serve every graphical vertical,
-  not only this one. **The gap is not theoretical:** the first real boot to
-  this screen showed no wallpaper, no text, and no pointer while every
-  crate was host-green, because a capability refusal, an unlinked glyph
-  transport, and an undrawn cursor are all invisible to a host render test.
-  The first vertical must therefore assert on content — text present, the
+- **Done — G7.1 vertical 1, a real boot reaches the login screen unasked**
+  (`tests/integration/greeter_default_qemu_aarch64`). It boots the aarch64
+  `virt` board with a display and the signed input/display driver bundles on
+  `FsDisk::GreeterRootDisk` — the autoload driver store with the *standard*
+  application store, so no `os.loginType` is planted and the machine is in
+  the state a fresh installation boots in — types the unlock passphrase and
+  nothing else, and passes only on two kernel-attested witnesses: an
+  `APP_LOADED` naming the greeter's bundle, then a reply the display service
+  serves on `DISPLAY_ENDPOINT` after it.
+- **Fixed by that vertical: a never-configured machine was pinned to the
+  text prompt.** Login distinguished "the settings volume is not mounted"
+  from "this machine holds no configuration" by probing the store's
+  *directory* — a directory `configure` only creates on its first write. A
+  fresh installation has none, so every capable machine read as an offline
+  volume and withheld the compiled `graphical` default, making the
+  `Reachable(None) ⇒ graphical` rule dead in production. The two are now
+  told apart by the refusal one read of the document returns
+  (`ConfigStore::from_read`): a mount with no registered backing fails
+  closed `NotImplemented` and never falls back to another volume, so that
+  refusal alone means "ask again later"; every other refusal came from a
+  live volume that teaches nothing. One read replaces two syscalls.
+- **Remaining: G7.1 verticals 2–4** — authenticate onto the desktop, log
+  out, switch accounts. They need a scripted authentication *at the login
+  screen* (a pointer script and credentials reaching the greeter's own
+  field, not the console type-ahead the unlock prompt drains) plus
+  screendump assertions over the desktop that follows; the display-and-input
+  harness itself now exists. **The gap is not theoretical:** the first real
+  boot to this screen showed no wallpaper, no text, and no pointer while
+  every crate was host-green, because a capability refusal, an unlinked
+  glyph transport, and an undrawn cursor are all invisible to a host render
+  test. Vertical 2 must therefore assert on content — text present, the
   wallpaper drawn, a pointer visible — not merely that a frame arrived.
 
 ---
