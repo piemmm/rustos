@@ -19,24 +19,24 @@
 
 /// Glyph cell width in pixels (the face's uniform advance, rounded to
 /// whole pixels).
-pub const CELL_WIDTH: u32 = 15;
+pub const CELL_WIDTH: u32 = 8;
 
 /// Maximum glyph bitmap width in pixels. Wide glyphs may cover both
 /// terminal cells; narrow glyphs leave the second cell transparent.
-pub const GLYPH_WIDTH: u32 = 30;
+pub const GLYPH_WIDTH: u32 = 16;
 
 /// Glyph cell height in pixels (ascent rows plus descent rows).
-pub const CELL_HEIGHT: u32 = 28;
+pub const CELL_HEIGHT: u32 = 16;
 
 /// Baseline row: pixel rows above the baseline within a cell.
-pub const BASELINE: u32 = 23;
+pub const BASELINE: u32 = 13;
 
 /// Packed bytes per glyph cell (two 4-bit pixels per byte, rows padded
 /// to whole bytes).
-pub const BYTES_PER_CELL: usize = 224;
+pub const BYTES_PER_CELL: usize = 64;
 
 /// Packed bytes per two-cell-capable glyph bitmap.
-pub const BYTES_PER_GLYPH: usize = 420;
+pub const BYTES_PER_GLYPH: usize = 128;
 
 /// Cell index of the U+FFFD replacement character: the fallback for a
 /// codepoint the face does not map.

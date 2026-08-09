@@ -57,7 +57,7 @@ the payload exceeds the pre-Korean size ceiling.
 
 ## What this crate owns
 
-- `atlas` — the generated data: a 15×28-pixel terminal cell (a 25 px em),
+- `atlas` — the generated data: an 8×16-pixel terminal cell (a 14 px em),
   two-cell-capable glyph bitmaps for Japanese and Korean full-width outlines,
   losslessly compressed 4-bit coverage, a sorted codepoint→glyph range table,
   and the U+FFFD fallback index. Pure `const`/`static` data with no

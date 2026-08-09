@@ -1673,6 +1673,30 @@ fn every_composed_row_fits_the_eighty_column_grid() {
 }
 
 #[test]
+fn the_footer_key_hints_are_whole_at_eighty_columns() {
+    // The footer is the only place the key bindings appear, and it is the
+    // rightmost hint that a too-narrow grid eats first: on a console whose
+    // grid came out at 68 columns instead of the conventional width, `? help`
+    // reached the screen as `? hel`. Every hint must survive whole.
+    let (_service, mut model) = refreshed();
+    let lines = grid_lines(&mut model, 25, 80);
+    let footer = lines.last().expect("a footer row");
+    for hint in [
+        "q quit",
+        "<-/-> panel",
+        "up/down scroll",
+        "r refresh",
+        "+/- interval",
+        "? help",
+    ] {
+        assert!(
+            footer.contains(hint),
+            "{hint:?} lost from the footer: {footer:?}"
+        );
+    }
+}
+
+#[test]
 fn the_memory_line_keeps_every_figure_at_eighty_columns() {
     // ramzip and pinned are the figures the old fixed-width bar pushed off
     // the 80-column line; the adaptive bar yields its cells so they stay on.

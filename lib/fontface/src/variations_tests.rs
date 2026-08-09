@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::tests::{asset, ink};
-use crate::{AxisSetting, CellGeometry, Face, GlyphRaster, ATLAS_EM_PX};
+use crate::{AxisSetting, CellGeometry, Face, GlyphRaster};
 
 /// A `wght`/`opsz`/… axis setting.
 fn setting(tag: [u8; 4], value: f32) -> AxisSetting {
@@ -235,20 +235,27 @@ fn proportional_rasterisation_is_tight_and_positioned() {
     }
 }
 
+/// The pixels-per-em the golden below is taken at.
+///
+/// Deliberately a fixed number rather than [`ATLAS_EM_PX`]: the golden guards
+/// the *rasteriser*, so re-authoring the atlas at another size must not
+/// silently invalidate it and invite a re-baseline that would hide a real
+/// change in the outline filling.
+const GOLDEN_EM_PX: u32 = 25;
+
 #[test]
-fn a_static_face_rasters_are_unchanged_by_the_refactor() {
-    // A golden over the primary console face at its native geometry: the
-    // generated atlas is checked against this rasteriser, so a static face
-    // must be byte-identical to before variable-font support landed.
+fn a_static_face_rasters_are_unchanged() {
+    // A golden over the primary console face: the generated atlas is checked
+    // against this rasteriser, so a static face must stay byte-identical.
     let inconsolata = asset("mono/Inconsolata-EX.ttf");
     let face = Face::parse(&inconsolata).expect("parses");
     let advance = face.uniform_advance().expect("monospace");
-    let geometry = CellGeometry::derive(&face, advance, ATLAS_EM_PX).expect("geometry");
+    let geometry = CellGeometry::derive(&face, advance, GOLDEN_EM_PX).expect("geometry");
     let mut total: u64 = 0;
     for ch in ['A', 'B', 'g', '@', 'W', 'i', 'l', 'M'] {
         let glyph = face.glyph_for(u32::from(ch)).expect("glyph");
         let coverage = face
-            .rasterise_glyph(glyph, &geometry, f64::from(ATLAS_EM_PX), geometry.width)
+            .rasterise_glyph(glyph, &geometry, f64::from(GOLDEN_EM_PX), geometry.width)
             .expect("rasterises");
         total = total.wrapping_add(fnv(&coverage));
     }

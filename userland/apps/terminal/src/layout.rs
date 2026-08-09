@@ -25,13 +25,16 @@ use tairix_theme::Theme;
 use crate::grid::MAX_DIMENSION;
 use crate::profile::MIN_FONT_SIZE_PX;
 
-/// Columns of the terminal's screen grid when it opens — the conventional
-/// 80-column text screen every command-line program assumes.
-pub const COLS: u16 = 80;
+/// Columns of the terminal's screen grid when it opens.
+///
+/// The shared definition of the conventional text screen, so a terminal
+/// window and the framebuffer text console (which keeps the same shape as its
+/// floor) present one idea of a normal screen rather than two that can drift.
+pub const COLS: u16 = tairix_vt::CONVENTIONAL_COLUMNS;
 
-/// Rows of the terminal's screen grid when it opens — the conventional
-/// 25-row text screen.
-pub const ROWS: u16 = 25;
+/// Rows of the terminal's screen grid when it opens, from the same shared
+/// definition as [`COLS`].
+pub const ROWS: u16 = tairix_vt::CONVENTIONAL_ROWS;
 
 /// The physical pixel size of a `cols`×`rows` grid drawn in `font`.
 ///

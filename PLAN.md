@@ -5038,6 +5038,37 @@ escape-sequence definition end to end (§2.2).
   feature is optional (default-on) so the emitter's `Vec`-returning `encode*`
   helpers stay available to allocator-having consumers while the parser path
   is taken allocator-free by `fbcon` and the console.
+- The conventional text grid. The console atlas is authored at an 8×16
+  cell (`tairix_fontface::ATLAS_EM_PX = 14`), the character cell PC text
+  consoles have used since VGA, so a text screen is the expected `width / 8`
+  × `height / 16`: 80×30 at 640×480, 128×48 at 1024×768, 160×64 at
+  1280×1024. `Geometry::for_display` magnifies that cell by the largest whole
+  factor (≤ 4) that still leaves a conventional 80×25 screen, so a dense
+  panel gets legible text rather than 240 columns (1080p → ×2, 120×33; 4K →
+  ×4). 80×25 is defined once as `tairix_vt::CONVENTIONAL_COLUMNS` /
+  `CONVENTIONAL_ROWS`, shared with `terminal.app`'s opening grid (§2.2).
+  Box Drawing (U+2500–U+257F) and Block Elements (U+2580–U+259F) are emitted
+  as pixel-exact geometry by `tools/xtask`'s `font_lineart`, not rasterised
+  from the face: at an 8-pixel cell the face's hairlines fall between pixels
+  and antialias, so borders rendered grey and a filled `█` region showed a
+  seam at every cell edge. A double rule is derived as the outline of the
+  region its arms sweep, so all twenty-nine junctions agree without a
+  per-glyph table.
+  - **Open follow-up — line art through the font service.** `terminal.app`
+    draws its glyphs through `fontd`, which rasterises the outline, so its
+    line art does **not** get the synthesised geometry the console now has
+    and stays antialiased at small cell heights. Fixing it means the service
+    applying the same `font_lineart` geometry for those two ranges, which
+    moves the synthesiser into a `lib/*` crate both consumers share (§2.2).
+    Not caused by the grid work above (the graphical terminal never read the
+    atlas) and not yet scheduled.
+  - **Open follow-up — text-console screenshots.** The `README.md` gallery's
+    text-console images (`docs/screenshots/boot-filesystem-unlock.png`,
+    `booted-and-logged-in.png`, `system-monitor.png`) still show the former
+    68×27 grid at the old 15×28 cell. Regenerating them needs an interactive
+    graphical QEMU session driven to each state, so it is its own task; the
+    desktop and terminal images are unaffected (the terminal's grid and font
+    sizing did not change).
 
 ## SHELL prerequisites (`.junie/PREREQUISITES2.md`)
 

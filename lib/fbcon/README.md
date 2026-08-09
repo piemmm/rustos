@@ -8,7 +8,7 @@ shared `tairix_vt::Parser`, applying each parsed `tairix_vt::Op` to a retained
 cell grid, and repainting the dirtied cells once per write onto a borrowed
 32-bit scan-out surface (`&mut [u32]`), rendering glyphs with the shared
 `tairix_font` Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans Hebrew
-coverage atlas (15×28 cells, 16-level anti-aliasing, all precomposed Hangul
+coverage atlas (8×16 cells, 16-level anti-aliasing, all precomposed Hangul
 syllables, the merged family's wider Unicode repertoire with a U+FFFD fallback,
 and two-cell double-width glyphs).
 It is a full

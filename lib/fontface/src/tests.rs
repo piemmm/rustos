@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::{CellGeometry, Face, FontFamily, ATLAS_EM_PX};
 
-/// The native cell height the atlas is authored at (ascent 23 + descent 5).
-const NATIVE_HEIGHT: u32 = 28;
+/// The native cell height the atlas is authored at (ascent 13 + descent 3).
+const NATIVE_HEIGHT: u32 = 16;
 
 /// Read a committed face by its `<family>/<file>` path under
 /// `lib/font/assets`.
@@ -69,9 +69,9 @@ fn native_geometry_matches_the_atlas_cell() {
     let face = Face::parse(&bytes).expect("primary parses");
     let advance = face.uniform_advance().expect("monospace");
     let geometry = CellGeometry::derive(&face, advance, ATLAS_EM_PX).expect("geometry");
-    assert_eq!(geometry.width, 15);
+    assert_eq!(geometry.width, 8);
     assert_eq!(geometry.height, NATIVE_HEIGHT);
-    assert_eq!(geometry.baseline, 23);
+    assert_eq!(geometry.baseline, 13);
 }
 
 #[test]

@@ -13,7 +13,7 @@ grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
 scan-out surface (`&mut [u32]`), rendering glyphs with the shared `tairix_font`
 compiled-in **console atlas**: the primary Inconsolata EX face's whole
 repertoire (Latin, Greek, Cyrillic, box drawing, arrows, punctuation,
-currency), 15×28 cells with 16-level anti-aliased coverage, and a U+FFFD
+currency), 8×16 cells with 16-level anti-aliased coverage, and a U+FFFD
 fallback for anything outside it. The CJK (Japanese, Korean) and Hebrew
 companion faces are **not** compiled into the kernel/boot-console path — the
 font service (`fontd`) rasterises them on demand at runtime — so the boot and
@@ -36,6 +36,26 @@ continuation cell stays blank. It is a full terminal:
   `top` or an editor switches to a cleared alternate screen on entry and, on
   exit, the primary screen it covered is restored exactly — the xterm-family
   contract every terminal honours.
+
+## The grid follows the panel
+
+The cell is 8×16 pixels — what PC text consoles have used since VGA — so the
+grid is the conventional `width / 8` × `height / 16`: 80×30 on a 640×480 mode,
+128×48 on 1024×768, 160×64 on 1280×1024.
+
+A denser panel does not simply hold more, smaller characters. `for_display`
+magnifies the cell by the largest whole factor that still leaves a
+conventional `tairix_vt::CONVENTIONAL_COLUMNS` × `CONVENTIONAL_ROWS` (80×25)
+screen, so text stays legible as pixels get smaller: 1920×1080 doubles the
+cell to a 120×33 grid, and a 4K panel takes the ×4 cap rather than shrinking
+to an unreadable 240 columns. The grid is therefore derived from the display
+the machine actually reports, never from a hand-picked pixel threshold. A
+surface too small for even one conventional screen holds what it can at ×1: a
+small panel is not a reason to refuse a console.
+
+80×25 has one definition, in `lib/vt`, shared with the graphical terminal's
+opening size, so the console and the terminal emulator cannot disagree about
+what a normal screen is.
 
 ## Design
 

@@ -37,6 +37,11 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   the most recent keystroke and then freezing (a later keystroke restarts
   it), replaced in place with `[input complete]` on Enter, with one-shot
   deadline timing — a pure state machine its kernel host renders,
+- the shape of the conventional character-cell screen
+  (`CONVENTIONAL_COLUMNS` × `CONVENTIONAL_ROWS`, 80×25): the floor the
+  framebuffer text console keeps when it sizes its grid to the discovered
+  panel, and the grid a terminal window opens at, defined once so the two
+  cannot disagree about what a normal screen is,
 - the shared screen-semantics conformance script (`conformance::check`): the
   one specification of how a character-cell grid applies the `Op` stream —
   pending wrap, erase, scroll region, alternate screen, save/restore — that

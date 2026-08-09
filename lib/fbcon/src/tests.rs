@@ -11,17 +11,65 @@ use super::*;
 // --- Geometry policy -------------------------------------------------------
 
 #[test]
-fn geometry_scale_policy_tracks_display_height() {
-    for (height, scale) in [
-        (480, 1),
-        (720, 1),
-        (1080, 1),
-        (2160, 2),
-        (4320, 4),
-        (8640, 4),
+fn the_standard_display_modes_get_their_conventional_text_grids() {
+    // The grids a PC text console has always presented at these modes: the
+    // cell is `width / 8` × `height / 16` until the panel is dense enough to
+    // magnify it.
+    for (width, height, scale, cols, rows) in [
+        (640, 480, 1, 80, 30),
+        (800, 600, 1, 100, 37),
+        (1024, 768, 1, 128, 48),
+        (1280, 720, 1, 160, 45),
+        (1280, 1024, 2, 80, 32),
+        (1920, 1080, 2, 120, 33),
+        (1920, 1200, 3, 80, 25),
+        (2560, 1440, 3, 106, 30),
+        (3840, 2160, 4, 120, 33),
+        (7680, 4320, 4, 240, 67),
     ] {
-        let geometry = Geometry::for_display(1920, height, 1920 * 4).expect("geometry");
-        assert_eq!(geometry.scale, scale, "height {height}");
+        let geometry = Geometry::for_display(width, height, width * 4).expect("geometry");
+        assert_eq!(
+            (geometry.scale, geometry.columns(), geometry.rows()),
+            (scale, cols, rows),
+            "{width}×{height}"
+        );
+    }
+}
+
+#[test]
+fn the_glyph_scale_is_the_largest_that_still_holds_a_conventional_screen() {
+    // The property the table above is instances of, swept over every mode a
+    // panel could report: never below the conventional screen while one more
+    // magnification would still fit, and never so magnified that the screen
+    // shrinks under it.
+    for width in [320, 640, 641, 800, 1024, 1280, 1920, 2560, 3840, 5120] {
+        for height in [200, 400, 480, 600, 768, 800, 1080, 1200, 1440, 2160] {
+            let geometry = Geometry::for_display(width, height, width * 4).expect("geometry");
+            let (scale, cols, rows) = (geometry.scale, geometry.columns(), geometry.rows());
+            let holds = |scale: u32| {
+                width / (CELL_WIDTH * scale) >= u32::from(CONVENTIONAL_COLUMNS)
+                    && height / (CELL_HEIGHT * scale) >= u32::from(CONVENTIONAL_ROWS)
+            };
+            assert!((1..=MAX_SCALE).contains(&scale), "{width}×{height}");
+            if holds(1) {
+                assert!(
+                    holds(scale),
+                    "{width}×{height} lost the conventional screen"
+                );
+                assert!(
+                    scale == MAX_SCALE || !holds(scale + 1),
+                    "{width}×{height} could have magnified further"
+                );
+            } else {
+                // Too small for the conventional screen at any magnification:
+                // it shows what it can rather than refusing a console.
+                assert_eq!(scale, 1, "{width}×{height}");
+            }
+            assert_eq!(
+                (cols, rows),
+                (width / (CELL_WIDTH * scale), height / (CELL_HEIGHT * scale))
+            );
+        }
     }
 }
 
@@ -116,6 +164,43 @@ fn cell_has(pixels: &[u32], geometry: &Geometry, column: u32, row: u32, color: u
     cell(pixels, geometry, column, row).contains(&color)
 }
 
+/// Whether cell `(column, row)` shows a glyph: at least one pixel the
+/// background did not paint.
+///
+/// A glyph's ink is anti-aliased coverage, so whether any *one* pixel reaches
+/// the pen's full intensity depends on how the face's stems happen to fall on
+/// the pixel grid at the cell size in force. "Has ink" is the property these
+/// tests mean, and it holds at every size.
+fn cell_has_ink(pixels: &[u32], geometry: &Geometry, column: u32, row: u32) -> bool {
+    !cell_blank(pixels, geometry, column, row)
+}
+
+/// Assert cell `(column, row)` is exactly `ch`'s atlas coverage resolved
+/// through the `fg`-on-`bg` ramp — the whole rendering contract for one cell,
+/// pixel by pixel.
+fn assert_cell_is_glyph(
+    pixels: &[u32],
+    geometry: &Geometry,
+    column: u32,
+    row: u32,
+    ch: char,
+    fg: u32,
+    bg: u32,
+) {
+    let rendered = cell(pixels, geometry, column, row);
+    let glyph = lookup_or_fallback(ch);
+    let ramp = coverage_ramp(fg, bg);
+    for y in 0..CELL_HEIGHT {
+        for x in 0..CELL_WIDTH {
+            assert_eq!(
+                rendered[(y * CELL_WIDTH + x) as usize],
+                ramp[usize::from(glyph.coverage(x, y))],
+                "({x},{y})"
+            );
+        }
+    }
+}
+
 /// Whether cell `(column, row)` is entirely the default background.
 fn cell_blank(pixels: &[u32], geometry: &Geometry, column: u32, row: u32) -> bool {
     cell(pixels, geometry, column, row)
@@ -134,22 +219,19 @@ fn a_glyph_renders_its_atlas_coverage_in_the_default_colours() {
     let (mut console, mut pixels) = small_console();
     let dirty = console.write_bytes(&mut pixels, b"!");
     assert_eq!(dirty, Some((0, CELL_HEIGHT)), "dirty band covers the cell");
-    let rendered = cell(&pixels, console.geometry(), 0, 0);
-    let glyph = lookup_or_fallback('!');
-    let ramp = coverage_ramp(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND);
-    for y in 0..CELL_HEIGHT {
-        for x in 0..CELL_WIDTH {
-            let expected = ramp[usize::from(glyph.coverage(x, y))];
-            assert_eq!(
-                rendered[(y * CELL_WIDTH + x) as usize],
-                expected,
-                "({x},{y})"
-            );
-        }
-    }
+    let geometry = *console.geometry();
+    assert_cell_is_glyph(
+        &pixels,
+        &geometry,
+        0,
+        0,
+        '!',
+        DEFAULT_FOREGROUND,
+        DEFAULT_BACKGROUND,
+    );
     assert!(
-        rendered.contains(&DEFAULT_FOREGROUND),
-        "the glyph has at least one fully covered pixel"
+        cell_has_ink(&pixels, &geometry, 0, 0),
+        "the comparison above is vacuous unless the glyph drew something"
     );
 }
 
@@ -187,7 +269,7 @@ fn a_covered_unicode_scalar_renders_its_own_glyph() {
     console.write_bytes(&mut pixels, "é".as_bytes());
     let geometry = *console.geometry();
     let accented = cell(&pixels, &geometry, 0, 0);
-    assert!(accented.contains(&DEFAULT_FOREGROUND), "é has ink");
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0), "é has ink");
     let (mut reference, mut ref_pixels) = small_console();
     reference.write_bytes(&mut ref_pixels, b"e");
     assert_ne!(accented, cell(&ref_pixels, reference.geometry(), 0, 0));
@@ -203,7 +285,7 @@ fn hebrew_scalars_render_the_fallback_in_single_cells() {
     let geometry = *console.geometry();
     for column in 0..5 {
         assert!(
-            cell_has(&pixels, &geometry, column, 0, DEFAULT_FOREGROUND),
+            cell_has_ink(&pixels, &geometry, column, 0),
             "column {column} has no glyph ink"
         );
     }
@@ -271,7 +353,7 @@ fn wide_east_asian_scalars_reserve_two_cells_and_advance_by_two() {
             "{language} continuation cell reserved but blank"
         );
         assert!(
-            cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
+            cell_has_ink(&pixels, &geometry, 2, 0),
             "a follows {language} glyph in column 2"
         );
     }
@@ -304,7 +386,7 @@ fn positioned_overwrite_clears_the_other_half_of_a_japanese_glyph() {
         let overwritten = column - 1;
         let cleared = 1 - overwritten;
         assert!(
-            cell_has(&pixels, &geometry, overwritten, 0, DEFAULT_FOREGROUND),
+            cell_has_ink(&pixels, &geometry, overwritten, 0),
             "replacement glyph is visible"
         );
         assert!(
@@ -381,12 +463,24 @@ fn sgr_256_colour_and_truecolour_resolve_to_the_palette() {
 #[test]
 fn reverse_video_swaps_foreground_and_background() {
     // `CSI 7 m`: the glyph's lit pixels take the background colour and its cell
-    // fills with the foreground colour.
+    // fills with the foreground colour — the same cell, rendered through the
+    // ramp read the other way round.
     let (mut console, mut pixels) = small_console();
     console.write_bytes(&mut pixels, b"\x1b[7m!");
     let geometry = *console.geometry();
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_BACKGROUND));
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert_cell_is_glyph(
+        &pixels,
+        &geometry,
+        0,
+        0,
+        '!',
+        DEFAULT_BACKGROUND,
+        DEFAULT_FOREGROUND,
+    );
+    assert!(
+        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
+        "the cell fills with the foreground colour"
+    );
 }
 
 #[test]
@@ -402,7 +496,7 @@ fn backspace_steps_the_cursor_back_without_painting() {
     );
     // The next glyph lands on the erased column, not the one after it.
     console.write_bytes(&mut pixels, b"!");
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0));
 }
 
 #[test]
@@ -420,7 +514,7 @@ fn cursor_position_places_the_glyph_absolutely() {
     // `CSI 2 ; 2 H` homes to row 2, column 2 (1-based) — the bottom-right cell.
     console.write_bytes(&mut pixels, b"\x1b[2;2HX");
     let geometry = *console.geometry();
-    assert!(cell_has(&pixels, &geometry, 1, 1, DEFAULT_FOREGROUND));
+    assert!(cell_has_ink(&pixels, &geometry, 1, 1));
     assert!(cell_blank(&pixels, &geometry, 0, 0));
 }
 
@@ -442,19 +536,13 @@ fn reaching_the_bottom_scrolls_the_text_up() {
     let (mut console, mut pixels) = console_of(1, 3);
     console.write_bytes(&mut pixels, b"A\r\nB\r\nC");
     let geometry = *console.geometry();
-    assert!(
-        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
-        "A on row 0"
-    );
-    assert!(
-        cell_has(&pixels, &geometry, 0, 2, DEFAULT_FOREGROUND),
-        "C on row 2"
-    );
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0), "A on row 0");
+    assert!(cell_has_ink(&pixels, &geometry, 0, 2), "C on row 2");
     // The fourth line scrolls everything up one row: `A` is gone, `C` has moved
     // to row 1, and a fresh `D` lands on the new bottom row.
     console.write_bytes(&mut pixels, b"\r\nD");
     assert!(
-        cell_has(&pixels, &geometry, 0, 2, DEFAULT_FOREGROUND),
+        cell_has_ink(&pixels, &geometry, 0, 2),
         "D on the bottom row"
     );
     // Row 0 now holds what was row 1 (`B`), and the top `A` is gone: the surface
@@ -473,7 +561,7 @@ fn explicit_scroll_up_within_a_region() {
     console.write_bytes(&mut pixels, b"\x1b[2S");
     let geometry = *console.geometry();
     // `C` (row 2) moved to row 0; the two vacated rows are blank.
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0));
     assert!(cell_blank(&pixels, &geometry, 0, 1));
     assert!(cell_blank(&pixels, &geometry, 0, 2));
 }
@@ -486,10 +574,7 @@ fn entering_the_alternate_screen_clears_the_surface() {
     let (mut console, mut pixels) = console_of(3, 1);
     console.write_bytes(&mut pixels, b"abc");
     let geometry = *console.geometry();
-    assert!(
-        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
-        "abc drawn"
-    );
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0), "abc drawn");
     let dirty = console.write_bytes(&mut pixels, b"\x1b[?1049h");
     assert_eq!(
         dirty,
@@ -571,10 +656,7 @@ fn leaving_the_alternate_screen_restores_the_saved_cursor() {
     // The next glyph lands in column 2 (where the primary cursor was), not
     // column 3 where the alternate cursor ended up.
     console.write_bytes(&mut pixels, b"c");
-    assert!(
-        cell_has(&pixels, &geometry, 2, 0, DEFAULT_FOREGROUND),
-        "c in column 2"
-    );
+    assert!(cell_has_ink(&pixels, &geometry, 2, 0), "c in column 2");
     assert!(cell_blank(&pixels, &geometry, 3, 0), "column 3 untouched");
 }
 
@@ -585,10 +667,7 @@ fn leaving_the_alternate_screen_when_not_on_it_is_a_no_op() {
     console.write_bytes(&mut pixels, b"A");
     let geometry = *console.geometry();
     assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?1049l"), None);
-    assert!(
-        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
-        "A untouched"
-    );
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0), "A untouched");
 }
 
 // --- Cursor overlay ----------------------------------------------------------
@@ -615,14 +694,14 @@ fn the_cursor_follows_text_and_restores_the_cell_it_leaves() {
         .iter()
         .all(|&p| p == DEFAULT_FOREGROUND));
     // …and the glyph cell shows the normal (non-reversed) `A`.
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0));
     assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_BACKGROUND));
     // A carriage return moves the block back over the `A` (reversed), and
     // the vacated cell repaints to its recorded blank — the overlay never
     // leaks into the grid.
     console.write_bytes(&mut pixels, b"\r");
     assert!(cell_blank(&pixels, &geometry, 1, 0));
-    assert!(cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND));
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0));
 }
 
 #[test]

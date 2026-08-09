@@ -188,16 +188,23 @@ fn the_label_truncates_before_the_value_under_a_narrow_width() {
     let label_color = premul(theme.palette().on_surface_muted);
     let value_color = premul(theme.palette().on_surface);
 
-    // Exactly three label characters' worth of room after the value and gap.
-    let narrow_w = value_w + gap + cell * 3;
+    // About three label characters' worth of room after the value and gap.
+    let room = cell * 3;
+    let narrow_w = value_w + gap + room;
     let mut narrow = Surface::new(narrow_w, row_h).expect("surface");
     list.render(&mut narrow, Rect::new(0, 0, narrow_w, row_h), scale, &theme);
     let narrow_label_w = bbox(&narrow, label_color).map_or(0, |(x0, _, x1, _)| x1 - x0 + 1);
+    let kept = font.truncate_to_width(label, room);
+    assert!(
+        kept.chars().count() < label.chars().count(),
+        "the row must be narrow enough to force truncation"
+    );
     assert_eq!(
         narrow_label_w,
-        cell * 3,
-        "the label must truncate to exactly the width it is given"
+        font.text_width(kept),
+        "the label draws the widest prefix that fits, never a clipped glyph"
     );
+    assert!(narrow_label_w <= room, "and never overruns the room it has");
     let (_, _, narrow_value_max_x, _) = bbox(&narrow, value_color).expect("value drawn");
     assert_eq!(
         narrow_value_max_x,

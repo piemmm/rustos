@@ -114,23 +114,58 @@ fn space_is_blank_and_letters_have_ink() {
 }
 
 #[test]
-fn full_block_is_solid_with_no_holes() {
-    // U+2588 FULL BLOCK fills the face's exact advance and its exact
-    // ascent-to-descent extent. The cell rounds the advance to whole pixels
-    // and rounds the vertical metrics up to whole rows, so the interior is
-    // fully covered while the outermost column and row carry only their
-    // fractional share of the ink — most of a pixel, never a hole.
+fn full_block_covers_its_whole_cell() {
+    // U+2588 FULL BLOCK is drawn to the pixel grid rather than rasterised from
+    // the face, precisely so it covers every pixel of its cell: an outline
+    // leaves the outermost rows partly covered, and a filled region then shows
+    // a lighter band at every cell boundary.
     let block = lookup_or_fallback('█');
     for y in 0..atlas::CELL_HEIGHT {
         for x in 0..atlas::CELL_WIDTH {
-            let coverage = block.coverage(x, y);
-            let interior = x < atlas::CELL_WIDTH - 1 && y < atlas::CELL_HEIGHT - 1;
-            if interior {
-                assert_eq!(coverage, 15, "hole at ({x}, {y})");
-            } else {
-                assert!(coverage > 7, "edge too thin at ({x}, {y}): {coverage}");
+            assert_eq!(block.coverage(x, y), 15, "unfilled at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn line_art_is_drawn_in_whole_pixels() {
+    // A rule and a border are only crisp if every pixel is fully on or fully
+    // off; an antialiased edge is what made them render as a grey haze at a
+    // small cell.
+    for ch in ['─', '│', '┼', '┌', '╔', '╬', '▀', '▌', '▟'] {
+        let glyph = lookup_or_fallback(ch);
+        for y in 0..atlas::CELL_HEIGHT {
+            for x in 0..atlas::CELL_WIDTH {
+                let coverage = glyph.coverage(x, y);
+                assert!(coverage == 0 || coverage == 15, "{ch} at ({x}, {y})");
             }
         }
+    }
+}
+
+#[test]
+fn a_rule_reaches_the_cell_edges_so_neighbours_join() {
+    // Two `─` cells side by side have to read as one unbroken rule, and a
+    // border has to meet the corner in the next cell.
+    let horizontal = lookup_or_fallback('─');
+    for x in 0..atlas::CELL_WIDTH {
+        assert_ne!(
+            (0..atlas::CELL_HEIGHT)
+                .map(|y| horizontal.coverage(x, y))
+                .max(),
+            Some(0),
+            "─ has a gap at column {x}"
+        );
+    }
+    let vertical = lookup_or_fallback('│');
+    for y in 0..atlas::CELL_HEIGHT {
+        assert_ne!(
+            (0..atlas::CELL_WIDTH)
+                .map(|x| vertical.coverage(x, y))
+                .max(),
+            Some(0),
+            "│ has a gap at row {y}"
+        );
     }
 }
 
@@ -347,12 +382,12 @@ mod render {
     #[test]
     fn scaled_metrics_track_the_cell_height() {
         install();
-        // Half the native height renders roughly half-size text while keeping
-        // the width-to-height ratio: advance = round(15 * 14 / 28) = 8.
+        // Below the native height, text keeps the native cell's width-to-height
+        // ratio: advance = round(8 * 14 / 16) = 7.
         let font = BitmapFont::monospace(14);
         assert_eq!(font.glyph_height(), 14);
         assert_eq!(font.line_height(), 14);
-        assert_eq!(font.cell_width(), 8);
+        assert_eq!(font.cell_width(), 7);
         assert_eq!(font.text_width("abc"), 3 * font.cell_width());
         assert_eq!(font.text_width("日"), 2 * font.cell_width());
         assert_eq!(font.cell_width() * 2, font.text_width("ab"));
@@ -784,10 +819,12 @@ mod render {
     fn an_account_tiles_display_name_wraps_instead_of_being_cut_mid_word() {
         install();
         // The graphical login screen's account tile: a proportional display
-        // name in a 132-pixel-wide label box, two lines tall.
+        // name in a label box two lines tall, wide enough for the longer word
+        // on its own but not for the whole name — the case where truncating
+        // instead of wrapping would cut a word in half.
         let font = BitmapFont::new(proportional_family(), 16);
         let name = "System Administrator";
-        let tile = 132;
+        let tile = font.text_width("Administrator") + font.text_width(" ");
         assert!(font.text_width(name) > tile, "the name must not fit a line");
         assert!(font.text_width("System") <= tile, "its first word must fit");
         let lines: Vec<_> = font.wrap_to_width(name, tile, 2).collect();

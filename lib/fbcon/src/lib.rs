@@ -58,7 +58,10 @@
 
 use tairix_font::atlas;
 use tairix_font::glyph::lookup_or_fallback;
-use tairix_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
+use tairix_vt::{
+    char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION, CONVENTIONAL_COLUMNS,
+    CONVENTIONAL_ROWS,
+};
 
 pub use tairix_vt::Cell;
 
@@ -83,16 +86,15 @@ const DEFAULT_BACKGROUND: u32 = 0xFF00_0000;
 /// Largest glyph scale the policy selects.
 ///
 /// Beyond 4× the atlas looks blocky without gaining legibility, so the
-/// policy caps there even on very tall displays.
+/// policy caps there however dense the panel is.
 const MAX_SCALE: u32 = 4;
 
-/// Pixel rows of display height per unit of glyph scale.
-///
-/// `height / 1080` keeps roughly 41 text rows on screen from 1080p up
-/// (1080p → 1×, 2160p → 2×) with the 26-pixel cell; smaller modes (480p → 18
-/// rows, 720p → 27) simply hold fewer rows at 1× rather than shrinking the
-/// glyphs below legibility.
-const ROWS_PER_SCALE: u32 = 1080;
+/// The smallest surface, in pixels, that holds the conventional screen at
+/// scale 1 — the unit the glyph scale divides into a panel.
+const CONVENTIONAL_WIDTH_PX: u32 = CELL_WIDTH * CONVENTIONAL_COLUMNS as u32;
+
+/// The vertical companion of [`CONVENTIONAL_WIDTH_PX`].
+const CONVENTIONAL_HEIGHT_PX: u32 = CELL_HEIGHT * CONVENTIONAL_ROWS as u32;
 
 /// Validated framebuffer text geometry: the scan-out extents plus the glyph
 /// scale the policy chose for them.
@@ -111,6 +113,17 @@ pub struct Geometry {
 impl Geometry {
     /// Derive the text geometry for a firmware-confirmed surface.
     ///
+    /// The cell is magnified by the largest whole factor that still leaves a
+    /// conventional [`CONVENTIONAL_COLUMNS`]×[`CONVENTIONAL_ROWS`] screen, so
+    /// the grid follows the panel the machine actually has instead of a
+    /// hand-picked pixel threshold. A 640×480 mode and a 1024×768 one take the
+    /// cell unmagnified — the 80×30 and 128×48 grids PC text consoles have
+    /// always presented — 1920×1080 doubles it to 120×33, and a denser panel
+    /// keeps magnifying, to a cap of four, rather than shrinking text to an
+    /// unreadable 240 columns. A surface too small for even one
+    /// conventional screen holds what it can at scale 1: a small panel is not
+    /// a reason to refuse a console.
+    ///
     /// Returns `None` when the surface cannot host even one glyph cell, the
     /// pitch is not whole pixels, or the pitch is narrower than a scanline —
     /// the caller leaves the console unconfigured rather than rendering out of
@@ -124,7 +137,9 @@ impl Geometry {
         if width_px == 0 || height_px == 0 || stride_px < width_px {
             return None;
         }
-        let scale = (height_px / ROWS_PER_SCALE).clamp(1, MAX_SCALE);
+        let scale = (width_px / CONVENTIONAL_WIDTH_PX)
+            .min(height_px / CONVENTIONAL_HEIGHT_PX)
+            .clamp(1, MAX_SCALE);
         let geometry = Self {
             width_px,
             height_px,

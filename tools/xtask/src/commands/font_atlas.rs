@@ -52,6 +52,8 @@ use std::path::Path;
 
 use tairix_fontface::{CellGeometry, FontError, FontFamily, ATLAS_EM_PX};
 
+use super::font_lineart;
+
 /// Workspace-relative path of the committed primary TrueType source (the
 /// only face compiled into the console atlas).
 pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/mono/Inconsolata-EX.ttf";
@@ -117,15 +119,20 @@ fn build_atlas(faces: &[&[u8]]) -> Result<Atlas, String> {
     let mut cells = Vec::with_capacity(merged.len());
     let mut fallback = None;
     for (code, face_index, glyph) in merged {
-        let cell = family
-            .rasterise(
-                face_index,
-                glyph,
-                &geometry,
-                f64::from(ATLAS_EM_PX),
-                glyph_width,
-            )
-            .map_err(engine_err)?;
+        // Box Drawing and Block Elements are drawn to the pixel grid rather
+        // than rasterised, because they have to tile.
+        let cell = match font_lineart::coverage(code, geometry.width, geometry.height) {
+            Some(synthesised) => widen(&synthesised, geometry.width, glyph_width),
+            None => family
+                .rasterise(
+                    face_index,
+                    glyph,
+                    &geometry,
+                    f64::from(ATLAS_EM_PX),
+                    glyph_width,
+                )
+                .map_err(engine_err)?,
+        };
         let index = u32::try_from(cells.len())
             .map_err(|_| "font-atlas: more mapped codepoints than fit a u32 index".to_owned())?;
         if code == u32::from(char::REPLACEMENT_CHARACTER) {
@@ -150,6 +157,17 @@ fn build_atlas(faces: &[&[u8]]) -> Result<Atlas, String> {
         cells,
         fallback,
     })
+}
+
+/// Place a one-cell bitmap in the two-cell-capable one the atlas stores,
+/// leaving the second cell transparent.
+fn widen(cell: &[u8], width: u32, glyph_width: u32) -> Vec<u8> {
+    let mut widened = vec![0u8; (glyph_width as usize) * (cell.len() / width as usize)];
+    for (row, source) in cell.chunks(width as usize).enumerate() {
+        let start = row * glyph_width as usize;
+        widened[start..start + source.len()].copy_from_slice(source);
+    }
+    widened
 }
 
 impl Atlas {
@@ -497,12 +515,14 @@ mod tests {
     #[test]
     fn geometry_matches_the_face_metrics() {
         let atlas = committed_atlas();
-        // Inconsolata EX: 1024 upm, ascent 939, descent 198, advance 613,
-        // at a 25 px em.
-        assert_eq!(atlas.geometry.width, 15);
-        assert_eq!(atlas.geometry.height, 28);
-        assert_eq!(atlas.geometry.baseline, 23);
-        assert_eq!(atlas.bytes_per_glyph(), 15 * 28);
+        // Inconsolata EX: 1024 upm, ascent 939, descent 198, advance 613. At a
+        // 14 px em those land on the 8×16 cell PC text consoles have used
+        // since VGA, which is what makes the console's grid `width / 8` ×
+        // `height / 16`.
+        assert_eq!(atlas.geometry.width, 8);
+        assert_eq!(atlas.geometry.height, 16);
+        assert_eq!(atlas.geometry.baseline, 13);
+        assert_eq!(atlas.bytes_per_glyph(), 8 * 16);
     }
 
     #[test]
@@ -571,19 +591,27 @@ mod tests {
     }
 
     #[test]
-    fn box_drawing_full_block_is_solid() {
+    fn the_tiling_ranges_are_drawn_to_the_pixel_grid() {
         let atlas = committed_atlas();
-        // U+2588 FULL BLOCK: a monospace face draws it edge to edge, so the
-        // whole cell interior must be fully covered.
-        let cell = cell_of(&atlas, 0x2588);
-        let solid = cell
-            .iter()
-            .fold(0usize, |count, &c| count + usize::from(c == 15));
-        assert!(
-            solid * 10 >= (cell.len() / 2) * 9,
-            "full block is only {solid}/{} solid",
-            cell.len()
-        );
+        let width = atlas.geometry.width as usize;
+        let glyph_width = width * MAX_GLYPH_CELLS as usize;
+        // U+2588 FULL BLOCK covers every pixel of its own cell and none of the
+        // continuation cell, so a filled region shows no seam at a cell edge.
+        for (index, &coverage) in cell_of(&atlas, 0x2588).iter().enumerate() {
+            let expected = if index % glyph_width < width { 15 } else { 0 };
+            assert_eq!(coverage, expected, "full block pixel {index}");
+        }
+        // Every scalar of both ranges is whole pixels: a partly covered one is
+        // the antialiased haze synthesising them exists to avoid.
+        for code in 0x2500..0x25A0 {
+            for &coverage in cell_of(&atlas, code) {
+                let shade = matches!(code, 0x2591..=0x2593);
+                assert!(
+                    shade || coverage == 0 || coverage == 15,
+                    "U+{code:04X} is partly covered"
+                );
+            }
+        }
     }
 
     #[test]

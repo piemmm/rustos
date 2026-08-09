@@ -72,6 +72,19 @@ pub mod width;
 #[cfg(test)]
 mod tests;
 
+/// Columns of the conventional character-cell screen: 80.
+///
+/// Every command-line program lays itself out for it, so it is the floor a
+/// text console keeps and the grid a terminal window opens at — one
+/// definition, so the console and the terminal emulator cannot disagree about
+/// what "a normal screen" is. It is a floor, never a cap: a surface with room
+/// for more columns shows more.
+pub const CONVENTIONAL_COLUMNS: u16 = 80;
+
+/// Rows of the conventional character-cell screen: 25, as PC text modes have
+/// presented since VGA. The companion of [`CONVENTIONAL_COLUMNS`].
+pub const CONVENTIONAL_ROWS: u16 = 25;
+
 pub use attr::{Attributes, Sgr};
 pub use cell::Cell;
 pub use color::{BasicColor, Color};

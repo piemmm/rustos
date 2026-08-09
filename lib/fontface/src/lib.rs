@@ -69,12 +69,13 @@ pub use variations::{Axis, AxisSetting};
 
 /// The pixels-per-em the generated `lib/font` atlas is rasterised at.
 ///
-/// The native atlas cell is 15×28 (ascent 23, descent 5); at 25 px/em
-/// Inconsolata EX's 613/1024-em advance rounds to a 15-pixel cell with under
-/// 0.2% grid distortion. The runtime scales this reference linearly to reach a
-/// requested cell height, so both the atlas and any resized glyph share one
-/// definition of the native size (`AGENTS.md` §2.2).
-pub const ATLAS_EM_PX: u32 = 25;
+/// Chosen so Inconsolata EX's 613/1024-em advance and 939+198-unit line box
+/// land on an 8×16 cell (ascent 13, descent 3) — the character cell PC text
+/// consoles have used since VGA, and the one that makes the text console's
+/// grid the conventional `width / 8` × `height / 16`: 80×30 on a 640×480
+/// panel, 128×48 on 1024×768. `lib/fbcon` magnifies this cell by a whole
+/// factor on a denser display rather than authoring a second atlas.
+pub const ATLAS_EM_PX: u32 = 14;
 
 /// A parse or rasterisation failure.
 ///

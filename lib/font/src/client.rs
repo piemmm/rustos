@@ -369,17 +369,23 @@ fn fetch_metrics(
     decode_metrics_reply(frame).ok()
 }
 
-/// Scale an atlas geometry constant (measured at the atlas's native cell
-/// height, [`atlas::CELL_HEIGHT`]) to `pixel_height`, rounding to the
-/// nearest whole pixel and never below one.
+/// Scale a compiled-in atlas metric (measured at the atlas's own cell height,
+/// [`atlas::CELL_HEIGHT`]) to `pixel_height`, rounding to the nearest whole
+/// pixel and never below one.
 fn scale_atlas_metric(value: u32, pixel_height: u32) -> u32 {
-    let scaled = (value * pixel_height + atlas::CELL_HEIGHT / 2) / atlas::CELL_HEIGHT;
-    scaled.max(1)
+    let scaled = (u64::from(value) * u64::from(pixel_height) + u64::from(atlas::CELL_HEIGHT) / 2)
+        / u64::from(atlas::CELL_HEIGHT);
+    u32::try_from(scaled).unwrap_or(u32::MAX).max(1)
 }
 
 /// The metrics a caller gets with no font service to ask: the compiled-in
-/// console-atlas geometry scaled to `pixel_height`, exactly as the
-/// monospace-only client scaled it before a font service existed.
+/// console-atlas geometry scaled to `pixel_height`.
+///
+/// Scaled over the atlas cell rather than the face's own units, so that at the
+/// atlas's own height it reports the cell exactly — the cell being what a
+/// caller drawing compiled-in glyphs actually gets. Reporting the face's
+/// unrounded ratio instead would be a shade more faithful at other sizes and
+/// wrong at the only size that is not an approximation.
 ///
 /// This is family-agnostic on purpose — it is what keeps `lib/fbcon` and the
 /// boot console (which never install a transport) laying text out correctly
@@ -638,7 +644,7 @@ fn test_family_is_monospace(family: FamilyKey) -> bool {
 /// genuinely different per-character advances rather than a relabelled grid.
 #[cfg(any(test, feature = "test-util"))]
 fn test_advance(family: FamilyKey, scalar: char, pixel_height: u32) -> u32 {
-    let cell = scale_atlas_metric(atlas::CELL_WIDTH, pixel_height);
+    let cell = fallback_metrics(pixel_height).monospace_advance;
     if test_family_is_monospace(family) {
         return cell.saturating_mul(u32::from(tairix_vt::char_width(scalar)));
     }
@@ -700,17 +706,10 @@ fn test_metrics_reply(
 ) -> Result<usize, Errno> {
     use tairix_abi::font_ipc::encode_metrics_reply;
 
-    let monospace_advance = if test_family_is_monospace(family) {
-        scale_atlas_metric(atlas::CELL_WIDTH, pixel_height)
-    } else {
-        0
-    };
-    let metrics = FontMetrics {
-        pixel_height,
-        baseline: scale_atlas_metric(atlas::BASELINE, pixel_height),
-        line_height: pixel_height,
-        monospace_advance,
-    };
+    let mut metrics = fallback_metrics(pixel_height);
+    if !test_family_is_monospace(family) {
+        metrics.monospace_advance = 0;
+    }
     let bytes = encode_metrics_reply(Ok(metrics));
     let len = bytes.len();
     reply
@@ -1117,7 +1116,7 @@ mod tests {
         let first = client.metrics(FamilyKey::MONO, 28, FontWeight::Regular);
         assert_eq!(
             first.monospace_advance,
-            scale_atlas_metric(atlas::CELL_WIDTH, 28)
+            fallback_metrics(28).monospace_advance
         );
         // A second call for the same key must not need the transport at all;
         // swap in a refusing one and confirm the cached value still answers.

@@ -1976,8 +1976,9 @@ console".
   scan-out surface once per write — SGR 16/256/truecolour, bold/reverse,
   cursor positioning, erase, scroll region, and explicit scroll. Glyphs
   are the shared `tairix_font` Inconsolata coverage atlas (§2.2, generated
-  by `cargo xtask font-atlas`) at an integer scale (`height / 1080`,
-  clamped 1…4). Reaching the bottom margin scrolls the retained cell grid
+  by `cargo xtask font-atlas`) at the largest integer scale (1…4) that
+  still leaves a conventional 80×25 screen. Reaching the bottom margin
+  scrolls the retained cell grid
   up one line (a real terminal scroll), not a ring wrap; the pixels are
   repainted once per write, never copied per scrolled line — the per-line
   framebuffer copy made a large listing burst monopolise the CPU for
