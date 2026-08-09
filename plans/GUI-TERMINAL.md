@@ -35,10 +35,10 @@ The rules live in `userland/apps/terminal/src/layout.rs`:
 | The size that fits | `fit_font_size` — the largest logical size ≤ the profile's whose grid plus furniture fits the screen, down to `MIN_FONT_SIZE_PX` |
 | The window it asks for | `window_size` — the grid, clamped to the screen less the furniture |
 
-The default text size is **13 logical pixels** (`profile::DEFAULT_FONT_SIZE_PX`).
+The default text size is **14 logical pixels** (`profile::DEFAULT_FONT_SIZE_PX`).
 On a 640×480 display at 100% the shared monospace face advances 7 physical
-pixels per column at that height, so the grid is 560×325 and the framed window
-592×370 — inside the screen with room left for the taskbar. A denser display
+pixels per column at that height, so the grid is 560×350 and the framed window
+562×380 — inside the screen with room left for the taskbar. A denser display
 multiplies through the desktop scale; a smaller one steps the size down.
 
 There is deliberately **no compile-time window size**, and nothing may
@@ -72,7 +72,7 @@ can be read and edited with any text editor.
 - Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
   would cut the line at the `#`.
 
-Defaults: system scheme, 13 px text, fully opaque, every effect off — a plain,
+Defaults: system scheme, 14 px text, fully opaque, every effect off — a plain,
 fast terminal until the user asks for otherwise.
 
 ---
