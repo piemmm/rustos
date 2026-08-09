@@ -5058,9 +5058,10 @@ escape-sequence definition end to end (§2.2).
   full-coverage ink to over a third — past FreeType's autofitter on the same
   face and size — and leaving grey only on curves and diagonals, which must
   stay antialiased. The cell path also scales columns so the face's uniform
-  advance lands exactly on the cell instead of overhanging it; the `fontd`
-  proportional path fits rows only, so ink stays under the advance a client
-  laid out with.
+  advance lands on a whole number of cells instead of overhanging one — a
+  full-width fallback face is placed across its two cells, not squeezed into
+  one; the `fontd` proportional path fits rows only, so ink stays under the
+  advance a client laid out with.
   Four rules keep the fitting faithful to the letter, each pinned by a
   regression test: a stroke is bounded by two edges the outline travels in
   *opposite* directions, so the near sides of a `j`'s hook and its stem are
@@ -5076,12 +5077,13 @@ escape-sequence definition end to end (§2.2).
   left the arch a third of a pixel thick and took the `g`'s top and ear with
   it.
   Box Drawing (U+2500–U+257F) and Block Elements (U+2580–U+259F) are emitted
-  as pixel-exact geometry by `tools/xtask`'s `font_lineart`, not rasterised
-  from the face: at an 8-pixel cell the face's hairlines fall between pixels
-  and antialias, so borders rendered grey and a filled `█` region showed a
-  seam at every cell edge. A double rule is derived as the outline of the
-  region its arms sweep, so all twenty-nine junctions agree without a
-  per-glyph table.
+  as pixel-exact geometry by `lib/fontface`'s `lineart`, not rasterised from
+  the face: at an 8-pixel cell the face's hairlines fall between pixels and
+  antialias, so borders rendered grey and a filled `█` region showed a seam at
+  every cell edge. A double rule is derived as the outline of the region its
+  arms sweep, so all twenty-nine junctions agree without a per-glyph table.
+  It lives in the engine rather than the generator because both sources of a
+  character grid's glyphs draw from it: the compiled-in atlas and `fontd`.
   Every script the family ships is compiled in. The console runs in the
   kernel and cannot ask `fontd` for a glyph, so a face left out of the atlas
   is a script no console could ever draw — a `man` page in it, a login
@@ -5091,14 +5093,20 @@ escape-sequence definition end to end (§2.2).
   one list and adding a face to the family is the whole change. At the 8×16
   cell the four faces are 23,602 cells in 1.6 MB, against 3.6 MB for the
   20,209 cells the old 15×28 atlas carried.
-  - **Open follow-up — line art through the font service.** `terminal.app`
-    draws its glyphs through `fontd`, which rasterises the outline, so its
-    line art does **not** get the synthesised geometry the console now has
-    and stays antialiased at small cell heights. Fixing it means the service
-    applying the same `font_lineart` geometry for those two ranges, which
-    moves the synthesiser into a `lib/*` crate both consumers share (§2.2).
-    Not caused by the grid work above (the graphical terminal never read the
-    atlas) and not yet scheduled.
+  The graphical terminal draws by the same rules. `fontd` renders a
+  *monospace* family's glyph into its character cell — the cell being the
+  family's own uniform advance, the outline grid-fitted to it, `left = 0` so
+  the client blits at the cell origin — and substitutes the same `lineart`
+  geometry for the two tiling ranges, so a border in `terminal.app` is the
+  picture the console draws rather than an antialiased approximation of it.
+  Over printable ASCII at the 13-pixel size a terminal opens at, fully-opaque
+  ink rises from 13% to 34%. A proportional family keeps the tight-to-the-ink
+  raster and its own bearings, which is what per-glyph layout needs. The
+  synthesised geometry is computed per request rather than retained (it is
+  arithmetic over one cell, and holding it would evict a real glyph), and the
+  retained rasters' cache key carries the cell count, since how many cells a
+  scalar spans is a property of the scalar and a face may map a wide and a
+  narrow one onto one glyph.
   - **Open follow-up — text-console screenshots.** The `README.md` gallery's
     text-console images (`docs/screenshots/boot-filesystem-unlock.png`,
     `booted-and-logged-in.png`, `system-monitor.png`) still show the former

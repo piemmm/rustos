@@ -1,10 +1,11 @@
 # tairix-fontface
 
-Shared TrueType glyph-outline engine: the one parser + anti-aliased
-non-zero-winding rasteriser that turns a committed TrueType face into 4-bit
-coverage bitmaps **at any requested pixel size**, plus the earliest-wins
-merged-family codepoint resolution (`FontFamily`) that both the atlas
-generator and the runtime font build on.
+Shared glyph-coverage engine: the one parser + anti-aliased non-zero-winding
+rasteriser that turns a committed TrueType face into 4-bit coverage bitmaps
+**at any requested pixel size**, plus the earliest-wins merged-family
+codepoint resolution (`FontFamily`) that both the atlas generator and the
+runtime font build on, and the pixel-exact `lineart` geometry for the
+characters that exist to tile rather than to be read.
 
 ## Variable fonts
 
@@ -61,13 +62,26 @@ would cost a whole row.
 
 Columns are snapped only for a fixed cell, where the cell owns the advance and
 moving a stem costs no spacing; the cell path also scales columns so the
-face's uniform advance lands exactly on the cell rather than rounding to it.
-Proportional text is fitted along rows alone, because ink snapped sideways
-would drift out from under the unfitted advance that laid the run out.
+face's uniform advance lands on a whole number of cells rather than rounding
+to them — one for the face the grid was derived from, two for a full-width
+fallback face lending glyphs to a half-width grid. Proportional text is fitted
+along rows alone, because ink snapped sideways would drift out from under the
+unfitted advance that laid the run out.
 
 Measured on the console face at its 8×16 cell, the share of ink at full
 coverage rises from 9% unfitted to 34%, against about 27% for FreeType's
 autofitter on the same face and size.
+
+## Line art
+
+Box Drawing (U+2500–U+257F) and Block Elements (U+2580–U+259F) do not come
+from an outline at all. They exist to tile — a border has to join its
+neighbours into one unbroken rule and a filled block has to abut the next with
+no seam — which a rasterised hairline manages only where it happens to land on
+pixel boundaries. `lineart::coverage` draws them as whole pixels computed from
+the cell instead, so they stay crisp at any cell size and at any whole
+magnification. A double rule is derived as the outline of the region its arms
+sweep, so all twenty-nine junctions agree without a per-glyph table.
 
 ## Monospace and proportional
 
@@ -86,6 +100,12 @@ Two consumers share this engine, so the rasteriser is written once
   requested cell height and weight, so UI text is drawn from the outlines at
   its true size — crisp whether tiny or very large — rather than resampled
   from a fixed bitmap.
+
+A monospace family takes the cell path either way — the atlas by
+construction, `fontd` because the family declares itself fixed-pitch — and
+both substitute `lineart` for the two tiling ranges, so a border on the
+framebuffer console and one in a terminal window are the same picture. Only a
+proportional family is served tight to its ink.
 
 `no_std` + `alloc`, no `unsafe`. Fails closed: any malformed or unsupported
 table — including a hostile variation store — yields a `FontError` rather than

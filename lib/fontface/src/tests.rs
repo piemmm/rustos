@@ -141,6 +141,66 @@ fn a_larger_cell_rasterises_a_taller_glyph_directly_from_the_outline() {
 }
 
 #[test]
+fn an_implausibly_wide_cell_is_refused_rather_than_allocated() {
+    // A cell's width is not the engine's to choose: the service derives it
+    // from the face's declared advance, so a face claiming an advance of a
+    // hundred ems would otherwise have the sandboxed service allocate
+    // hundreds of megabytes for one glyph. The tight proportional path
+    // already refuses a runaway ink box; the cell path is held to the same
+    // bound, and fails closed rather than trying.
+    const IMPLAUSIBLE: u32 = 1 << 20;
+    let bytes = primary_bytes();
+    let face = Face::parse(&bytes).expect("primary parses");
+    let advance = face.uniform_advance().expect("monospace");
+    let geometry = CellGeometry::derive(&face, advance, ATLAS_EM_PX).expect("geometry");
+    let glyph = face.glyph_for(u32::from('M')).expect("M is covered");
+    assert!(
+        face.rasterise_glyph(glyph, &geometry, f64::from(ATLAS_EM_PX), IMPLAUSIBLE)
+            .is_err(),
+        "a million-pixel cell was accepted"
+    );
+    assert!(
+        face.rasterise_glyph(glyph, &geometry, f64::from(ATLAS_EM_PX), geometry.width)
+            .is_ok(),
+        "the face's own cell must still rasterise"
+    );
+}
+
+#[test]
+fn a_face_wider_than_the_cell_is_drawn_across_the_cells_it_covers() {
+    // A monospace face is fitted so its advance lands on the cell, which is
+    // right where the cell *is* its advance. A fallback face on someone
+    // else's grid need not be: a full-width face on a half-width grid covers
+    // two cells, and squeezing it into one would halve every glyph it lends.
+    // The primary face at half its own cell stands in for that: 8.4 pixels of
+    // advance over a 4-pixel cell is two cells, and the letter must be drawn
+    // across both.
+    let bytes = primary_bytes();
+    let face = Face::parse(&bytes).expect("primary parses");
+    let advance = face.uniform_advance().expect("monospace");
+    let native = CellGeometry::derive(&face, advance, ATLAS_EM_PX).expect("geometry");
+    let halved = CellGeometry {
+        width: native.width / 2,
+        ..native
+    };
+    let glyph = face.glyph_for(u32::from('M')).expect("M is covered");
+    let bitmap = face
+        .rasterise_glyph(glyph, &halved, f64::from(ATLAS_EM_PX), native.width)
+        .expect("rasterises");
+    let inked = |column: u32| {
+        bitmap
+            .chunks(native.width as usize)
+            .any(|row| row[column as usize] > 0)
+    };
+    let rightmost = (0..native.width).rfind(|&column| inked(column));
+    assert!(
+        rightmost.is_some_and(|column| column > halved.width),
+        "M was squeezed into one {}-pixel cell instead of the two it covers",
+        halved.width
+    );
+}
+
+#[test]
 fn merged_repertoire_is_sorted_and_deduplicated() {
     let bytes = family_bytes();
     let family = family_from(&bytes);

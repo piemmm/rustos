@@ -1,11 +1,14 @@
-//! Shared TrueType glyph-outline engine (`lib/fontface`).
+//! Shared glyph-coverage engine (`lib/fontface`).
 //!
 //! This crate is the single home of TAIRiX's glyph rasterisation: it reads a
 //! committed TrueType face ([`Face`]), walks its simple and composite glyph
 //! outlines, and fills them into 4-bit (`0..=15`) coverage bitmaps with an
 //! anti-aliased non-zero-winding rasteriser — **at any requested pixel size**.
 //! [`FontFamily`] layers earliest-wins codepoint resolution over an ordered
-//! set of faces on top, so a scalar maps to exactly one face's glyph.
+//! set of faces on top, so a scalar maps to exactly one face's glyph. The
+//! characters that exist to tile rather than to be read — Box Drawing and
+//! Block Elements — come from [`lineart`] instead of from an outline, so a
+//! border is whole pixels at any cell size.
 //!
 //! # Variable fonts
 //!
@@ -54,6 +57,7 @@ extern crate std;
 mod engine;
 mod family;
 mod gridfit;
+pub mod lineart;
 mod mathf;
 mod store;
 mod variations;

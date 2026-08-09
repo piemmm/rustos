@@ -19,7 +19,10 @@
 //! simply reports the same advance for every glyph and a
 //! [`FontMetrics::monospace_advance`] a caller can lay a character grid out
 //! with; a proportional family reports zero there, and its callers advance
-//! the pen per glyph. There is one drawing path for both.
+//! the pen per glyph. There is one drawing path for both. A monospace
+//! reply is also *shaped* like its cell — one cell wide, two for a
+//! double-width scalar, with a zero bearing — so a grid blits it at the cell
+//! origin.
 //!
 //! The protocol is modelled on [`crate::display_ipc`] / [`crate::mailbox_ipc`]:
 //! a fixed-width [`FontRequest`] in, and a status-framed reply out. Drawing

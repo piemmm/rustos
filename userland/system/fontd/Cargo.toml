@@ -55,6 +55,10 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", default-features
 # cannot drive this service's memory through the size space it is allowed to
 # ask for.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The one definition of how many grid columns a scalar occupies. The service
+# draws a monospace family's glyph into that many cells and the client steps
+# the pen by the same count, so both must read the same table.
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime (`AGENTS.md` §1): `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the

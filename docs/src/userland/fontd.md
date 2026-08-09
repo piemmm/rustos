@@ -99,10 +99,28 @@ instances, and a byte-budgeted coverage cache, and turns one decoded
    when the glyph came from a fallback face, so mixing scripts never shifts
    the baseline or the line box mid-run. The shared `tairix-fontface` engine
    produces 4-bit coverage scaled ×17 to the protocol's 8-bit samples, and
-   the result is memoised. The engine grid-fits the outline along **rows
-   only** here: snapping rows holds a run's baseline, x-height and cap height
-   to whole pixels, while columns stay exactly where the outline puts them so
-   the ink still sits under the unfitted advance `Metrics` reported.
+   the result is memoised. How the outline is fitted follows the family:
+
+   - A **proportional** family is fitted along **rows only** and served tight
+     to its own ink with its left bearing. Snapping rows holds a run's
+     baseline, x-height and cap height to whole pixels; columns stay exactly
+     where the outline puts them, so the ink still sits under the unfitted
+     advance `Metrics` reported.
+   - A **monospace** family is drawn into its character cell: the cell is the
+     advance `Metrics` reports, the outline is fitted along rows *and*
+     columns against it, and the reply is one cell wide (two for a
+     double-width scalar) with `left = 0`, so a client blits at the cell
+     origin. A grid owns its columns, so snapping a stem there costs no
+     spacing and buys a screen of type whose stems land on pixels instead of
+     between them — measured over printable ASCII at the size a terminal
+     opens at, fully-opaque ink rises from 13% to 34%.
+   - Box Drawing and Block Elements asked of a monospace family are not
+     rasterised at all: they are answered from `tairix_fontface::lineart`, the
+     same pixel-exact geometry the compiled-in console atlas is built from, so
+     a border tiles and joins its neighbours instead of antialiasing to grey.
+     That coverage is computed per request rather than retained — it is
+     arithmetic over one cell, and caching it would evict a real glyph — and
+     it is weight-independent, since emboldening it would break the tiling.
 3. Emit the reply. `handle` **always** emits a reply, framing a status-word
    error frame on any failure so both the glyph and metrics clients decode a
    definite outcome (fail closed).
@@ -137,11 +155,15 @@ distinct sizes a caller asks for, the retained bytes stay under that ceiling
 and the least recently used rasters are released and overwritten to make room.
 
 The key names the **requesting** family, the family whose face actually
-supplied the glyph, that face's index, the glyph id, the pixel height, and the
-weight. Both families are in the key because two families sharing one fallback
-face derive their geometry from their own primary faces, so the very same
-physical glyph can legitimately rasterise to two different bitmaps — keying by
-the resolved face alone could serve one family's raster to the other.
+supplied the glyph, that face's index, the glyph id, the pixel height, the
+cells the scalar is drawn across, and the weight. Both families are in the key
+because two families sharing one fallback face derive their geometry from
+their own primary faces, so the very same physical glyph can legitimately
+rasterise to two different bitmaps — keying by the resolved face alone could
+serve one family's raster to the other. The cell count is there because how
+many cells a scalar spans is a property of the *scalar*: a face maps every
+scalar it does not cover onto the one replacement glyph, and without it a
+double-width scalar's two-cell bitmap would be served for a single-width one.
 
 Bounding retention is not input validation and does not replace it: the
 permitted scalar, pixel-height, and weight ranges are checked by the

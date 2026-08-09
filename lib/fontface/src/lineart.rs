@@ -8,14 +8,23 @@
 //! and a filled area shows a lighter band at every cell edge.
 //!
 //! Terminals therefore draw these characters geometrically rather than from
-//! the face, and so does this generator. Every glyph here is whole covered
+//! the face, and so does this module. Every glyph here is whole covered
 //! pixels computed from the cell, which keeps it crisp at any cell size and —
 //! because the console magnifies by whole factors — at every glyph scale too.
 //! Only characters whose whole purpose is to tile are synthesised; the face
 //! still supplies every other scalar, including the geometric shapes either
 //! side of these ranges.
+//!
+//! Both places a character grid gets its glyphs from draw these from here, so
+//! the framebuffer console and the graphical terminal cannot disagree about
+//! what a border looks like: `cargo xtask font-atlas` bakes them into the
+//! compiled-in console atlas, and the font service substitutes them for a
+//! monospace family's cell.
 
 use core::ops::Range;
+
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Full coverage of one pixel, in the atlas's 4-bit alpha.
 const FULL: u8 = 15;
@@ -28,6 +37,13 @@ const BLOCK_ELEMENTS: Range<u32> = 0x2580..0x25A0;
 
 /// The coverage for `code` in a `width`×`height` cell, or `None` where the
 /// face supplies the glyph.
+///
+/// The bitmap is `width * height` bytes of 4-bit (`0..=15`) coverage,
+/// row-major — the convention [`Face::rasterise_glyph`](crate::Face::rasterise_glyph)
+/// returns — and every byte is either fully covered or fully clear. A
+/// degenerate cell yields `None` rather than an empty bitmap, so a caller
+/// falls back to the face instead of drawing nothing.
+#[must_use]
 pub fn coverage(code: u32, width: u32, height: u32) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
@@ -641,5 +657,5 @@ const BOX_SHAPES: [Shape; 128] = [
 ];
 
 #[cfg(test)]
-#[path = "font_lineart_tests.rs"]
+#[path = "lineart_tests.rs"]
 mod tests;

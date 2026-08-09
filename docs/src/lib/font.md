@@ -68,15 +68,21 @@ cell they do not — the stems fall between pixels and antialias, so a border
 renders dim and blurred and a filled area shows a lighter band at every cell
 edge.
 
-The generator therefore draws these 160 scalars geometrically, in whole
-covered pixels computed from the cell, exactly as terminal emulators do. Every
-other scalar still comes from the face. A light rule is one pixel at the
-conventional cell and thickens in proportion; a double rule is derived as the
-outline of the region its arms sweep, so every corner, tee and cross agrees
-without case-splitting the twenty-nine junctions; and a shade is a uniform
-partial coverage rather than a stipple, which tiles exactly at any cell size.
-Because the console magnifies by whole factors, the result stays crisp at
-every glyph scale.
+These 160 scalars are therefore drawn geometrically, in whole covered pixels
+computed from the cell, exactly as terminal emulators do. Every other scalar
+still comes from the face. A light rule is one pixel at the conventional cell
+and thickens in proportion; a double rule is derived as the outline of the
+region its arms sweep, so every corner, tee and cross agrees without
+case-splitting the twenty-nine junctions; and a shade is a uniform partial
+coverage rather than a stipple, which tiles exactly at any cell size. Because
+the console magnifies by whole factors, the result stays crisp at every glyph
+scale.
+
+The geometry lives in the engine (`tairix_fontface::lineart`), not in the
+generator, because both sources of a character grid's glyphs draw from it: the
+compiled-in atlas here, and the font service when a monospace family asks for
+a cell. A border in `terminal.app` is the same picture the framebuffer console
+draws.
 
 ## Rendering goes through the sandboxed font service
 
@@ -100,7 +106,11 @@ side bearing, so `text_width`, `truncate_to_width`, and `draw_text` accumulate
 real advances instead of multiplying a character count by a cell width. A
 monospace family reports one advance for every glyph and keeps a fast path
 over it, so the terminal grid pays nothing for the generality: measuring a
-run of *n* characters there is still one multiplication.
+run of *n* characters there is still one multiplication. Such a family's
+glyphs also arrive *in* that cell — the bitmap is the cell (two of them for a
+double-width scalar), fitted to it, with no bearing to apply — so a column of
+text lines up on the pixel grid instead of each glyph rounding into place
+alone.
 
 ## Fitting a label to its box
 

@@ -53,9 +53,9 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tairix_fontface::{CellGeometry, FontError, FontFamily, ATLAS_EM_PX};
+use tairix_fontface::{lineart, CellGeometry, FontError, FontFamily, ATLAS_EM_PX};
 
-use super::{font_lineart, font_store};
+use super::font_store;
 
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
@@ -121,7 +121,7 @@ fn build_atlas(faces: &[&[u8]]) -> Result<Atlas, String> {
     for (code, face_index, glyph) in merged {
         // Box Drawing and Block Elements are drawn to the pixel grid rather
         // than rasterised, because they have to tile.
-        let cell = match font_lineart::coverage(code, geometry.width, geometry.height) {
+        let cell = match lineart::coverage(code, geometry.width, geometry.height) {
             Some(synthesised) => widen(&synthesised, geometry.width, glyph_width),
             None => family
                 .rasterise(

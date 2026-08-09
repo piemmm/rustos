@@ -19,7 +19,6 @@ mod ci_long;
 mod deps_check;
 mod devids;
 mod font_atlas;
-mod font_lineart;
 mod font_store;
 mod fssoak;
 mod fuzz;

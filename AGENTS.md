@@ -569,7 +569,8 @@ tairix/
 │   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
 │   ├── fdt/             # Shared FDT/DTB reader.
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
-│   ├── fontface/        # Shared TrueType glyph-outline engine.
+│   ├── fontface/        # Shared glyph-coverage engine: TrueType outlines,
+│   │                    #   grid fitting, and pixel-exact line art.
 │   ├── fsmeta/          # Shared extended-file-metadata model.
 │   ├── fsprobe/         # Shared filesystem signature/label/identity probe.
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.

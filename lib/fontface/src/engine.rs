@@ -17,13 +17,17 @@ const SAMPLE_ROWS: u32 = 4;
 /// atlas's native size, invisible at 16 coverage levels.
 const QUAD_SEGMENTS: u32 = 8;
 
-/// Widest proportional glyph, in pixels, the engine will lay out.
+/// Widest glyph bitmap, in pixels, the engine will lay out.
 ///
-/// A tight proportional bitmap is sized from a glyph's own ink, so a corrupt
-/// outline with runaway coordinates could otherwise demand an unbounded
-/// allocation; a width past this bound fails closed. A validation bound, not a
-/// capacity — legitimate glyphs are a small multiple of the em.
-const MAX_PROPORTIONAL_WIDTH: u32 = 1 << 14;
+/// Neither bitmap width is a constant the engine chooses: a tight
+/// proportional bitmap is sized from a glyph's own ink, and a cell bitmap
+/// from the cell a caller derived from the face's declared advance. A corrupt
+/// outline with runaway coordinates, or a face declaring an advance of many
+/// ems, could therefore demand an unbounded allocation from a service that
+/// rasterises whatever it is handed. A width past this bound fails closed. A
+/// validation bound, not a capacity — legitimate glyphs are a small multiple
+/// of the em.
+const MAX_GLYPH_WIDTH: u32 = 1 << 14;
 
 pub(crate) const fn err(what: &'static str) -> FontError {
     FontError::new(what)
@@ -485,7 +489,9 @@ impl<'a> Face<'a> {
     /// # Errors
     ///
     /// Returns a [`FontError`] on a malformed outline (bad indices, cyclic
-    /// composite, unsupported composite flags).
+    /// composite, unsupported composite flags), or on an implausibly wide
+    /// `bitmap_width` — a cell derived from a face that declares a runaway
+    /// advance is refused rather than allocated.
     pub fn rasterise_glyph(
         &self,
         glyph: u16,
@@ -493,9 +499,12 @@ impl<'a> Face<'a> {
         px_per_em: f64,
         bitmap_width: u32,
     ) -> Result<Vec<u8>, FontError> {
+        if bitmap_width > MAX_GLYPH_WIDTH {
+            return Err(err("glyph cell is implausibly wide"));
+        }
         let scale = px_per_em / f64::from(self.units_per_em);
         let sink = OutlineSink {
-            scale_x: self.cell_scale(geometry.width).unwrap_or(scale),
+            scale_x: self.cell_scale(geometry.width, scale).unwrap_or(scale),
             ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
         };
         let segments = self.fitted_outline(glyph, sink, Axes::RowsAndColumns)?;
@@ -514,7 +523,7 @@ impl<'a> Face<'a> {
     ) -> Result<Vec<u8>, FontError> {
         let scale = px_per_em / f64::from(self.units_per_em);
         let mut sink = OutlineSink {
-            scale_x: self.cell_scale(geometry.width).unwrap_or(scale),
+            scale_x: self.cell_scale(geometry.width, scale).unwrap_or(scale),
             ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
         };
         outline_glyph(self, glyph, &mut sink, 0)?;
@@ -547,8 +556,8 @@ impl<'a> Face<'a> {
     }
 
     /// Pixels per font unit across that put this face's uniform advance
-    /// exactly on a `width`-pixel cell, or `None` when the face has no one
-    /// advance to place there.
+    /// exactly on a whole number of `width`-pixel cells, or `None` when the
+    /// face has no one advance to place there.
     ///
     /// A cell grid's whole premise is that the advance *is* the cell, and a
     /// face's advance rounds to it rather than landing on it: the console
@@ -558,9 +567,19 @@ impl<'a> Face<'a> {
     /// ink in the neighbouring cell and stems that no longer line up. Fitting
     /// the advance to the cell costs a 5% narrowing no reader can see and
     /// buys a grid that holds.
-    fn cell_scale(&self, width: u32) -> Option<f64> {
+    ///
+    /// The cell count is how many cells the advance *naturally* covers at
+    /// `scale`, so a full-width face — every glyph one em, two cells of the
+    /// grid it is a fallback for — is placed across its two cells rather
+    /// than squeezed into one.
+    fn cell_scale(&self, width: u32, scale: f64) -> Option<f64> {
         let advance = self.uniform.filter(|&advance| advance > 0)?;
-        Some(f64::from(width) / f64::from(advance))
+        if width == 0 {
+            return None;
+        }
+        let natural = f64::from(advance) * scale;
+        let cells = mathf::fmax(mathf::round(natural / f64::from(width)), 1.0);
+        Some(cells * f64::from(width) / f64::from(advance))
     }
 
     /// Rasterise `glyph` proportionally: a bitmap tight to the glyph's own ink
@@ -686,12 +705,12 @@ fn ink_left_edge(segments: &[Segment]) -> Option<f64> {
 ///
 /// # Errors
 ///
-/// A [`FontError`] when the width exceeds [`MAX_PROPORTIONAL_WIDTH`].
+/// A [`FontError`] when the width exceeds [`MAX_GLYPH_WIDTH`].
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "the width is a non-negative integer-valued f64 (ceil minus \
-              floor) already checked against MAX_PROPORTIONAL_WIDTH, so the \
+              floor) already checked against MAX_GLYPH_WIDTH, so the \
               cast to u32 cannot truncate or lose a sign"
 )]
 fn ink_extent(segments: &[Segment], left_edge: f64) -> Result<(i32, u32), FontError> {
@@ -700,7 +719,7 @@ fn ink_extent(segments: &[Segment], left_edge: f64) -> Result<(i32, u32), FontEr
         max_x = mathf::fmax(max_x, mathf::fmax(segment.x0, segment.x1));
     }
     let width = mathf::ceil(max_x) - left_edge;
-    if width > f64::from(MAX_PROPORTIONAL_WIDTH) {
+    if width > f64::from(MAX_GLYPH_WIDTH) {
         return Err(err("proportional glyph ink is implausibly wide"));
     }
     Ok((mathf::round_i32(left_edge), width as u32))

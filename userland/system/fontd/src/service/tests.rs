@@ -537,3 +537,164 @@ fn a_malformed_request_fails_closed_with_an_error_frame() {
     let n = svc.handle(&request, &mut reply);
     assert_eq!(decode_glyph_reply(&reply[..n]), Err(Errno::BadMagic));
 }
+
+/// A monospace family's cell width at `pixel_height`: the advance every
+/// glyph of a character grid steps by.
+fn cell_width(svc: &mut FontService<'_>, family: FamilyKey, pixel_height: u32) -> u32 {
+    let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let n = svc.handle(
+        &FontRequest::Metrics {
+            family,
+            pixel_height,
+            weight: FontWeight::Regular,
+        }
+        .to_le_bytes(),
+        &mut reply,
+    );
+    decode_metrics_reply(&reply[..n])
+        .expect("metrics decode")
+        .monospace_advance
+}
+
+#[test]
+fn a_monospace_family_is_drawn_into_its_character_cell() {
+    // A character grid steps by one advance per column, so a glyph belongs
+    // *in* that cell: the client blits at the cell origin and the engine
+    // fits the outline to the cell as it rasterises. Served tight to its own
+    // ink instead, every glyph carries a bearing the grid rounds away and a
+    // width that agrees with the column only by luck.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+    for pixel_height in [13, 16, 28] {
+        let cell = cell_width(&mut svc, key, pixel_height);
+        assert!(cell > 0, "the monospace face reports a cell");
+        for scalar in ['i', 'M', 'g', '.', ' '] {
+            let (width, height, advance, left, coverage) =
+                request_glyph(&mut svc, key, scalar, pixel_height, FontWeight::Regular)
+                    .expect("a covered scalar");
+            assert_eq!(
+                width, cell,
+                "{scalar:?} at {pixel_height}px is not one cell"
+            );
+            assert_eq!(advance, cell, "{scalar:?} does not advance one cell");
+            assert_eq!(left, 0, "{scalar:?} carries a bearing the grid cannot use");
+            assert_eq!(height, pixel_height);
+            assert_eq!(coverage.len(), (width * height) as usize);
+        }
+    }
+}
+
+#[test]
+fn the_character_grid_is_sharp_at_the_terminal_size() {
+    // The reader's complaint, as a number. A grid glyph fitted to its cell
+    // puts its stems on whole pixels; drawn at the face's own subpixel
+    // advance it lands between them and antialiases into two grey columns,
+    // which is what a blurry terminal is. Measured over printable ASCII at
+    // the size a terminal opens at, fitting takes the share of fully-opaque
+    // ink from an eighth of the glyph to a third.
+    const SOLID_SHARE_PERCENT: usize = 25;
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+    let (mut ink, mut solid) = (0usize, 0usize);
+    for code in 0x21..0x7F {
+        let scalar = char::from_u32(code).expect("printable ASCII");
+        let (.., coverage) =
+            request_glyph(&mut svc, key, scalar, 13, FontWeight::Regular).expect("covered");
+        for sample in coverage {
+            ink += usize::from(sample > 0);
+            solid += usize::from(sample == u8::MAX);
+        }
+    }
+    assert!(ink > 0, "printable ASCII drew no ink at all");
+    assert!(
+        solid * 100 / ink >= SOLID_SHARE_PERCENT,
+        "only {}% of inked pixels are solid; the grid has gone soft",
+        solid * 100 / ink
+    );
+}
+
+#[test]
+fn a_border_character_is_pixel_exact_and_tiles() {
+    // Box Drawing and Block Elements exist to tile: a rule has to join its
+    // neighbours and a full block has to abut the next with no seam. An
+    // outline gives that only where its hairlines land on pixel boundaries,
+    // so a grid draws them as geometry instead — the same geometry the
+    // compiled-in console atlas is built from, at whatever cell the desktop
+    // asks for. Emboldening them would break the tiling, so a bold border is
+    // the same picture as a regular one.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+    for weight in [FontWeight::Regular, FontWeight::Bold] {
+        let (width, height, advance, left, rule) =
+            request_glyph(&mut svc, key, '─', 13, weight).expect("a border rule");
+        assert_eq!(advance, width, "a rule occupies exactly its cell");
+        assert_eq!(left, 0);
+        assert!(
+            rule.iter().all(|&s| s == 0 || s == u8::MAX),
+            "an antialiased rule cannot join its neighbours"
+        );
+        assert!(
+            (0..width)
+                .all(|column| (0..height)
+                    .any(|row| rule[(row * width + column) as usize] == u8::MAX)),
+            "the rule stops short of its cell edge and leaves a gap"
+        );
+        let (.., block) = request_glyph(&mut svc, key, '█', 13, weight).expect("a full block");
+        assert!(
+            block.iter().all(|&sample| sample == u8::MAX),
+            "a full block is not solid, so a filled area will show seams"
+        );
+    }
+}
+
+#[test]
+fn a_proportional_family_is_still_drawn_tight_to_its_ink() {
+    // The cell is a monospace family's contract, not every family's: text
+    // laid out by per-glyph advance needs the ink and its bearing, and
+    // squaring it into a column would space it like a typewriter.
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = MemoryStore {
+        dirs: vec![(
+            "inter",
+            MemoryFamily {
+                manifest: "label = Inter\nkind = proportional\nface = Inter-Variable.ttf\n",
+                faces: vec![("Inter-Variable.ttf", &inter)],
+            },
+        )],
+    };
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("inter").expect("key");
+    let narrow = request_glyph(&mut svc, key, 'i', 28, FontWeight::Regular).expect("i");
+    let wide = request_glyph(&mut svc, key, 'W', 28, FontWeight::Regular).expect("W");
+    assert!(
+        narrow.0 < wide.0 && narrow.2 < wide.2,
+        "a proportional family must keep each glyph's own width and advance"
+    );
+}
+
+#[test]
+fn a_wide_scalar_does_not_lend_its_two_cells_to_a_narrow_one() {
+    // A face maps many scalars onto one glyph — every scalar it does not
+    // cover falls back to the replacement — and how many cells that glyph is
+    // drawn across is a property of the *scalar*, not the glyph. Ask for a
+    // double-width one first and the cache must not then serve its two-cell
+    // bitmap for a single-width scalar that resolved to the same glyph.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+    let cell = cell_width(&mut svc, key, 16);
+    let wide = request_glyph(&mut svc, key, 'あ', 16, FontWeight::Regular).expect("uncovered");
+    assert_eq!(wide.0, cell * 2, "a double-width scalar reserves two cells");
+    assert_eq!(wide.2, cell * 2);
+    let narrow = request_glyph(&mut svc, key, '\u{FFFD}', 16, FontWeight::Regular)
+        .expect("the replacement is covered");
+    assert_eq!(narrow.0, cell, "the replacement itself is one cell wide");
+    assert_eq!(narrow.2, cell);
+}

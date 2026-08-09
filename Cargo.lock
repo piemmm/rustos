@@ -1375,6 +1375,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-reclaim",
  "tairix-rt",
+ "tairix-vt",
 ]
 
 [[package]]

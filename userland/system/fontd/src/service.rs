@@ -52,18 +52,15 @@ use tairix_abi::font_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
-use tairix_fontface::{AxisSetting, Face};
+use tairix_fontface::{lineart, AxisSetting, CellGeometry, Face};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
+use tairix_vt::char_width;
 
 use crate::discovery::FaceLoad;
 use crate::embolden::{embolden, stroke_subpixels, SUBPIXEL};
 
-/// The service's glyph-cache key: the requesting family (which drives the
-/// shared geometry a run renders at), the family whose faces actually
-/// supplied the glyph (its own, or its declared fallback), the face's index
-/// within that resolved family, the glyph id, the pixel height, and the
-/// wire weight.
+/// The service's glyph-cache key: everything the served bitmap depends on.
 ///
 /// The requesting and resolved families are both part of the key because two
 /// families sharing the same fallback face can legitimately compute
@@ -71,14 +68,30 @@ use crate::embolden::{embolden, stroke_subpixels, SUBPIXEL};
 /// faces differ — so the same glyph can rasterise to two different bitmaps;
 /// keying by the resolved face alone would risk serving one family's raster
 /// to the other.
-pub type GlyphKey = (
-    [u8; FONT_FAMILY_KEY_LEN],
-    [u8; FONT_FAMILY_KEY_LEN],
-    u32,
-    u32,
-    u32,
-    u16,
-);
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GlyphKey {
+    /// The requesting family, which drives the shared geometry a run renders
+    /// at.
+    requested: [u8; FONT_FAMILY_KEY_LEN],
+    /// The family whose faces actually supplied the glyph: the requested
+    /// family itself, or its declared fallback.
+    resolved: [u8; FONT_FAMILY_KEY_LEN],
+    /// The face's index within the resolved family.
+    face: u32,
+    /// The glyph id within that face.
+    glyph: u32,
+    /// The requested pixel height.
+    pixel_height: u32,
+    /// The grid cells the scalar is drawn across, or `0` where the family is
+    /// proportional and the bitmap is tight to the ink instead.
+    ///
+    /// A face is free to map two scalars of different display widths onto one
+    /// glyph, so the cell count is not implied by the glyph id: without it a
+    /// wide scalar's two-cell bitmap could be served for a narrow one.
+    cells: u32,
+    /// The requested weight, as its wire value.
+    weight: u16,
+}
 
 /// The service's rasterised-glyph cache: the shared bounded, classified,
 /// pressure-governed cache holding [`CachedGlyph`] coverage under a
@@ -284,6 +297,56 @@ struct FamilyGeometry {
     monospace_advance: u32,
 }
 
+impl FamilyGeometry {
+    /// The character cell `scalar` is drawn into, or `None` where the family
+    /// is proportional and text is laid out by per-glyph advance instead.
+    fn cell(&self, scalar: char) -> Option<Cell> {
+        (self.monospace_advance != 0).then(|| Cell {
+            width: self.monospace_advance,
+            cells: u32::from(char_width(scalar)),
+        })
+    }
+}
+
+/// The character cell a monospace family draws one scalar into: the shared
+/// advance one cell measures, and the cells the scalar occupies.
+///
+/// Drawing into the cell rather than tight to the ink is what a character
+/// grid means. The glyph is grid-fitted against the cell it will be blitted
+/// into, so its stems land on whole pixels and its advance lands on the
+/// column the client steps by — the same treatment the compiled-in console
+/// atlas gets, instead of ink positioned by a left bearing the grid then
+/// rounds away.
+#[derive(Clone, Copy)]
+struct Cell {
+    width: u32,
+    cells: u32,
+}
+
+impl Cell {
+    /// The pen advance for the scalar: the cells it occupies.
+    fn advance(self) -> u32 {
+        self.width.saturating_mul(self.cells)
+    }
+
+    /// The coverage for a scalar the grid draws as geometry rather than from
+    /// a face — a border rule, a block — or `None` where the face supplies
+    /// the glyph.
+    ///
+    /// These characters exist to tile, which an outline only does where its
+    /// hairlines happen to land on pixel boundaries. Substituting the shared
+    /// geometry is what every serious terminal does, and it is the same
+    /// [`lineart`] the console atlas is built from, so a border drawn on the
+    /// framebuffer console and one drawn in a terminal window are the same
+    /// picture. The geometry is defined in one cell, so a scalar the width
+    /// table calls double-width is left to the face.
+    fn line_art(self, scalar: char, height: u32) -> Option<Vec<u8>> {
+        (self.cells == 1)
+            .then(|| lineart::coverage(u32::from(scalar), self.width, height))
+            .flatten()
+    }
+}
+
 /// Scale a non-negative font-unit `value` to whole pixels at `pixel_height`
 /// over vertical-metric denominator `denom` (`ascent + descent`), rounding
 /// up.
@@ -475,20 +538,17 @@ impl<'a> FontService<'a> {
     }
 
     /// The shared line geometry `family_index`'s primary face defines at
-    /// `pixel_height`, computing the monospace advance only when
-    /// `want_monospace_advance` (the glyph path never needs it).
+    /// `pixel_height`.
     fn primary_geometry(
         &mut self,
         family_index: usize,
         pixel_height: u32,
-        want_monospace_advance: bool,
     ) -> Result<FamilyGeometry, Errno> {
-        let is_monospace = want_monospace_advance
-            && self
-                .families
-                .get(family_index)
-                .and_then(|family| family.kind)
-                == Some(FamilyKind::Monospace);
+        let is_monospace = self
+            .families
+            .get(family_index)
+            .and_then(|family| family.kind)
+            == Some(FamilyKind::Monospace);
         let family = self.families.get_mut(family_index).ok_or(Errno::NotFound)?;
         let primary = family.faces.first_mut().ok_or(Errno::NotFound)?;
         let face = primary.default_face()?;
@@ -537,7 +597,7 @@ impl<'a> FontService<'a> {
         _weight: FontWeight,
     ) -> Result<FontMetrics, Errno> {
         let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
-        let geometry = self.primary_geometry(family_index, pixel_height, true)?;
+        let geometry = self.primary_geometry(family_index, pixel_height)?;
         Ok(FontMetrics {
             pixel_height: geometry.height,
             baseline: geometry.baseline,
@@ -560,6 +620,11 @@ impl<'a> FontService<'a> {
 
     /// Resolve, rasterise (or fetch cached), and frame `scalar` from
     /// `family` at `pixel_height` in `weight` as a successful glyph reply.
+    ///
+    /// A scalar the grid draws as geometry is computed here and served
+    /// without touching the cache: it is arithmetic over one cell, not a
+    /// rasterisation, and retaining it would evict a real glyph to hold
+    /// something cheaper to recompute than to look up.
     fn glyph_reply(
         &mut self,
         family: FamilyKey,
@@ -569,22 +634,38 @@ impl<'a> FontService<'a> {
         reply: &mut [u8],
     ) -> Result<usize, Errno> {
         let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
-        let geometry = self.primary_geometry(family_index, pixel_height, false)?;
+        let geometry = self.primary_geometry(family_index, pixel_height)?;
+        let cell = geometry.cell(scalar);
+        if let Some(cell) = cell {
+            if let Some(drawn) = cell.line_art(scalar, geometry.height) {
+                return encode_glyph_reply(
+                    reply,
+                    &tairix_abi::font_ipc::GlyphCoverage {
+                        width: cell.width,
+                        height: geometry.height,
+                        advance: cell.advance(),
+                        left: 0,
+                        coverage: &samples(&drawn),
+                    },
+                );
+            }
+        }
         let source = self.resolve(family_index, scalar)?;
-        let key: GlyphKey = (
-            family.to_wire(),
-            source.resolved_family_key.to_wire(),
-            u32::try_from(source.face_index).unwrap_or(u32::MAX),
-            u32::from(source.glyph),
+        let key = GlyphKey {
+            requested: family.to_wire(),
+            resolved: source.resolved_family_key.to_wire(),
+            face: u32::try_from(source.face_index).unwrap_or(u32::MAX),
+            glyph: u32::from(source.glyph),
             pixel_height,
-            weight.to_wire(),
-        );
+            cells: cell.map_or(0, |cell| cell.cells),
+            weight: weight.to_wire(),
+        };
         let Self {
             families, cache, ..
         } = self;
         let served = cache
             .get_or_build(&(), key, || {
-                build_glyph(families, &source, &geometry, weight)
+                build_glyph(families, &source, &geometry, cell, weight)
             })
             .ok_or(Errno::NotFound)?;
         encode_glyph_reply(
@@ -645,6 +726,12 @@ impl<'a> FontService<'a> {
 /// shared `geometry`, in `weight` — yielding the [`CachedGlyph`] the reply is
 /// served from.
 ///
+/// A `cell` renders the glyph into a character cell: fitted to the grid the
+/// client steps by, so the stems of a column of text line up and the pen
+/// never accumulates a rounding error across a row. Without one the glyph is
+/// tight to its own ink and positioned by its left bearing, which is what
+/// proportional text is laid out from.
+///
 /// `None` when the resolved face's bytes cannot be read or parsed, or the
 /// outline cannot be rasterised — the caller turns that into a refused
 /// request rather than an empty bitmap.
@@ -652,6 +739,7 @@ fn build_glyph(
     families: &mut [FamilyRuntime<'_>],
     source: &GlyphSource,
     geometry: &FamilyGeometry,
+    cell: Option<Cell>,
     weight: FontWeight,
 ) -> Option<CachedGlyph> {
     let px_per_em = geometry.px_per_em;
@@ -661,34 +749,88 @@ fn build_glyph(
         .get_mut(source.face_index)?;
     let has_wght = face_cache.has_wght().ok()?;
     let face = face_cache.instance_for(weight).ok()?;
-    let raster = face
-        .rasterise_proportional(source.glyph, px_per_em, geometry.baseline, geometry.height)
+    let drawn = match cell {
+        Some(cell) => cell_glyph(face, source.glyph, geometry, cell)?,
+        None => proportional_glyph(face, source.glyph, geometry)?,
+    };
+    let mut coverage = samples(&drawn.coverage);
+    if !has_wght {
+        let em_subpixels = round_pixel_measurement(px_per_em * f64::from(SUBPIXEL));
+        let stroke = stroke_subpixels(em_subpixels, weight);
+        embolden(
+            &mut coverage,
+            usize::try_from(drawn.width).unwrap_or(0),
+            stroke,
+        );
+    }
+    Some(CachedGlyph::new(
+        drawn.width,
+        geometry.height,
+        drawn.advance,
+        drawn.left,
+        coverage,
+    ))
+}
+
+/// One rasterised glyph before its coverage is widened and emboldened: the
+/// bitmap's width, the pen advance, the left bearing, and 4-bit coverage.
+struct Drawn {
+    width: u32,
+    advance: u32,
+    left: i32,
+    coverage: Vec<u8>,
+}
+
+/// Draw `glyph` into its character `cell`.
+///
+/// The bitmap is exactly the cells the scalar occupies, so the client blits
+/// it at the cell origin with no bearing to apply, and the engine fits the
+/// outline to that cell as it rasterises.
+fn cell_glyph(face: &Face<'_>, glyph: u16, geometry: &FamilyGeometry, cell: Cell) -> Option<Drawn> {
+    let box_geometry = CellGeometry {
+        width: cell.width,
+        height: geometry.height,
+        baseline: geometry.baseline,
+    };
+    let width = cell.advance();
+    let coverage = face
+        .rasterise_glyph(glyph, &box_geometry, geometry.px_per_em, width)
         .ok()?;
-    let advance_units = f64::from(face.advance(source.glyph).ok()?).max(0.0);
+    Some(Drawn {
+        width,
+        advance: width,
+        left: 0,
+        coverage,
+    })
+}
+
+/// Draw `glyph` tight to its own ink, advanced and positioned by the face's
+/// own metrics.
+fn proportional_glyph(face: &Face<'_>, glyph: u16, geometry: &FamilyGeometry) -> Option<Drawn> {
+    let px_per_em = geometry.px_per_em;
+    let raster = face
+        .rasterise_proportional(glyph, px_per_em, geometry.baseline, geometry.height)
+        .ok()?;
+    let advance_units = f64::from(face.advance(glyph).ok()?).max(0.0);
     let units_per_em = face.units_per_em();
     if units_per_em <= 0 {
         return None;
     }
-    let advance = round_pixel_measurement(advance_units * px_per_em / f64::from(units_per_em));
-    // 4-bit engine coverage (`0..=15`) → 8-bit protocol sample; `15 → 255`.
-    let width = usize::try_from(raster.width).unwrap_or(0);
-    let mut coverage: Box<[u8]> = raster
-        .coverage
+    Some(Drawn {
+        width: raster.width,
+        advance: round_pixel_measurement(advance_units * px_per_em / f64::from(units_per_em)),
+        left: raster.left,
+        coverage: raster.coverage,
+    })
+}
+
+/// Widen 4-bit engine coverage (`0..=15`) into the protocol's 8-bit samples,
+/// `15` reaching a fully opaque `255`.
+fn samples(coverage: &[u8]) -> Box<[u8]> {
+    coverage
         .iter()
         .map(|&nibble| nibble.saturating_mul(17))
-        .collect();
-    if !has_wght {
-        let em_subpixels = round_pixel_measurement(px_per_em * f64::from(SUBPIXEL));
-        let stroke = stroke_subpixels(em_subpixels, weight);
-        embolden(&mut coverage, width, stroke);
-    }
-    Some(CachedGlyph::new(
-        raster.width,
-        raster.height,
-        advance,
-        raster.left,
-        coverage,
-    ))
+        .collect()
 }
 
 /// Frame a status-word error reply into `reply`, returning its length (`0`
