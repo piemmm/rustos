@@ -8,6 +8,7 @@
 //! decoupled from `kernel/ipc`, `kernel/sched`, and friends
 //! (no bloat).
 
+use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
     PowerAction, RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec,
@@ -960,9 +961,17 @@ pub trait SyscallHandlers {
     /// seat is refused with [`Errno::SeatNotOwner`] (or
     /// [`Errno::SeatRevoked`] once, after an administrative eviction),
     /// never a global "flip it back" switch; an unknown seat id fails
-    /// closed with [`Errno::NotFound`]. The default
-    /// implementation fails closed with [`Errno::NotImplemented`].
-    fn display_release(&self, _caller: &CallerContext<'_>, _seat: u64) -> SyscallResult {
+    /// closed with [`Errno::NotFound`]. `next` says what becomes of the
+    /// seat's screen — the text console takes it back, or it is held
+    /// cleared for the graphical presenter taking over — and a value
+    /// outside that closed set is refused with [`Errno::OutOfRange`]. The
+    /// default implementation fails closed with [`Errno::NotImplemented`].
+    fn display_release(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _next: ReleaseSurface,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2853,8 +2862,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.display_acquire(caller, args.0[0])
             }
             SyscallNumber::DISPLAY_RELEASE => {
-                // args[0] is the seat id to release.
-                self.handlers.display_release(caller, args.0[0])
+                // args[0] is the seat id to release; args[1] says what its
+                // screen becomes, refused before any state is touched when
+                // it is outside the closed set.
+                let next = ReleaseSurface::from_u64(args.0[1])?;
+                self.handlers.display_release(caller, args.0[0], next)
             }
             SyscallNumber::KEYBOARD_READ => {
                 // args[0] is the seat id; `validate_arg` guarantees args[1]
@@ -3986,7 +3998,12 @@ mod tests {
             // dispatcher recovered it without wiring a real seat registry.
             Ok(seat)
         }
-        fn display_release(&self, _c: &CallerContext<'_>, seat: u64) -> SyscallResult {
+        fn display_release(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _next: ReleaseSurface,
+        ) -> SyscallResult {
             self.record("display_release");
             Ok(seat)
         }

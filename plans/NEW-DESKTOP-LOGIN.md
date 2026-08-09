@@ -33,8 +33,10 @@ both sides, and the desktop's screen lock composing the same engine. A
 graphical login is now the **default** on hardware that can run one (G1),
 degrading to the text prompt otherwise. The screen is animated throughout —
 the chooser's selection cross-fade, the stage transition to a chosen
-account's prompt, the shake on a refusal, and the fade to black that hands
-the seat to a desktop revealing from black over it (G2.1, G4.1). The docs and
+account's prompt, the shake on a refusal, and the veil that both uncovers the
+screen on arrival and covers it again to hand the seat to a desktop revealing
+from black over it — which the desktop reverses when it leaves (G2.1, G4.1).
+The docs and
 README matrix are current.
 
 **Remaining: the G7 QEMU verticals only.** No integration test yet boots a
@@ -310,7 +312,12 @@ login screen's — it opens on the chooser.
   rounded edge. The fill is that light because the frost is what marks the
   tile; the accent only tints it.
   The blur belongs behind the mark, never on it: softening the fill itself
-  leaves a smear with no shape of its own, and a selected tile draws no outline
+  leaves a smear with no shape of its own. It is also **short**, which matters
+  most here of anywhere: a box blur of radius `r` averages `2r + 1` samples, so
+  a radius any appreciable fraction of a 132 × 154 tile averages the wallpaper
+  behind it to a single colour, and the hovered account reads as an orange
+  smudge rather than as glass laid over the picture. A selected tile draws no
+  outline
   of any kind on top — neither the focus ring nor the pointer wash, both
   suppressed by the selection rather than by the mark's strength, so nothing
   flickers while the mark arrives. A long
@@ -333,7 +340,8 @@ login screen's — it opens on the chooser.
   `Timeline` — one definition of how a duration becomes frames, so no surface
   keeps its own clock arithmetic and no two animations can ease differently by
   accident. A *travelling* element takes the eased (smoothstep) progress; a
-  pure strength fade takes the linear one.
+  pure strength fade takes the linear one, through the shared
+  `tairix_theme::Fade` (a `Timeline` plus a `from`/`to` strength pair).
   - The chooser's selection **cross-fade** (`SelectionChange`), above.
   - The **stage transition** (`StageTransition`) between the chooser and the
     chosen account's prompt, in **both** directions: the picked account's
@@ -347,13 +355,32 @@ login screen's — it opens on the chooser.
     prompt horizontally on a decaying oscillation that ends at exactly zero,
     so the refusal is legible before the notice is read. It is *additional* to
     the notice and the cooldown, never a replacement for either.
-  - The **fade to black** (`SessionFade`) on a verified secret, before the
-    process exits. The authority starts the session on that exit, so a screen
-    that has already gone black is what lets the desktop reveal from black
-    over it without a seam — and it is why the fade must complete first. It is
-    total: a lost display or a failed present still exits `0` promptly, because
-    a cosmetic fade may never strand a successful login. Input is ignored once
-    it begins; the decision is already made.
+  - The **veil** (`SessionFade`), which is one animation run in **both**
+    directions rather than two: `AuthSurface::begin_entry_fade` opens it off
+    full black as the screen arrives, and `begin_session_fade` closes it to
+    opaque as the screen leaves. There is deliberately no second fade type.
+    - *Arriving.* The service calls `begin_entry_fade` before its opening
+      present, so the very first frame the display ever receives is full
+      black and the chooser appears out of it. That is what makes the whole
+      cycle symmetric (chooser in → login → chooser to black → desktop from
+      black → log out → desktop to black → chooser in again), and at first
+      boot it covers the kernel text console's pixels in one step instead of
+      replacing them with a chooser. Only the *leaving* direction is modal:
+      `session_fade_begun` is direction-aware, so neither input handling nor
+      the pointer stops for an arriving screen and a user may pick an account
+      and type while it is still appearing. The arriving veil is **dropped**
+      the frame it uncovers, so no fully-transparent fill is blended
+      thereafter.
+    - *Leaving.* On a verified secret, before the process exits. The
+      authority starts the session on that exit, so a screen that has already
+      gone black is what lets the desktop reveal from black over it without a
+      seam — and it is why the fade must complete first. A secret accepted
+      mid-arrival leaves from the strength the veil had reached, so the
+      screen never brightens before it darkens. The leaving veil is *held*
+      after it finishes, because its owner keeps the screen black until it
+      exits. It is total: a lost display or a failed present still exits `0`
+      promptly, because a cosmetic fade may never strand a successful login.
+      Input is ignored once it begins; the decision is already made.
 
   Each rides the screen's existing park deadline — one one-shot wake per frame
   while something runs, none once everything settles — so an **idle** login
@@ -559,16 +586,58 @@ record, and never carried in a reply.
 authority starts the session on its own loop, so the greeter can never
 choose *which* program runs as the authenticated user.
 
-That ordering is also what makes the hand-over seamless. The greeter fades
-its screen to black and only then exits; the authority starts the desktop on
-that exit; the desktop **reveals from black** over the same `SessionFade`
-duration, applied by the compositor at the one point composed pixels become
-the scan-out frame. The two halves never negotiate — each simply animates its
-own second of the same continuous transition, which is why neither needs to
-know about the other. The reveal is why the compositor's hardware-layer path
-declines while it runs: a layer the display scans out directly never passes
-through the dimming, so an accelerated frame would appear at full brightness
-and lose the fade.
+That ordering is also what makes the hand-over seamless, and it is seamless
+in **both** directions. The greeter fades its screen to black and only then
+exits; the authority starts the desktop on that exit; the desktop **reveals
+from black** over the same `SessionFade` duration, applied by the compositor
+at the one point composed pixels become the scan-out frame. Going the other
+way, the desktop **dissolves back into that black** before it releases the
+seat — on log out, and on the fast-user-switch step-aside — and the greeter
+the authority brings back appears out of it. The two halves never negotiate:
+each simply animates its own second of the same continuous transition, which
+is why neither needs to know about the other. The reveal is why the
+compositor's hardware-layer path declines while it runs: a layer the display
+scans out directly never passes through the dimming, so an accelerated frame
+would appear at full brightness and lose the fade.
+
+The desktop side is `ScreenFade` (`userland/gui/session/src/fade.rs`), one
+`tairix_theme::Fade` over the compositor's screen reveal, turned around by
+`arrive`/`depart` from whatever strength is on screen. Its arrival rides the
+serve loop's existing park like any other animation. Its **departure cannot**:
+it has to finish before the seat is given up, and parking on the session
+wait-set would spin a core, because the sources the loop is no longer serving
+report ready on every re-park. `run.rs`'s `fade_to_black` drives it instead —
+present, sleep to the next frame on `tairix_rt::park_ns`, step — bounded by
+the fade's own span, and a refused present simply stops the dim (the seat is
+handed on cleared regardless). `SeatPresentation` fixes where the two sit in
+a switch: `fade_out` runs only after the authority *accepted* the step-aside
+and before `suspend`, while the seat and frame ring are still up; `fade_in`
+runs after `reconfigure` and before `repaint_all`, so a **resumed** session
+appears out of black exactly as a fresh one does rather than snapping back on
+a cleared screen.
+
+**The gap between them is the kernel's, and it is black.** Neither half owns
+the seat while the greeter is exiting and the desktop is loading, so the
+screen in that window belongs to the seat registry. The greeter's clean exit
+releases with `ReleaseSurface::Handover`, which clears the scan-out and holds
+it cleared rather than repainting the text console's retained screen over it
+(`docs/src/desktop/seat.md`). That is what the fade fades *to*: without it a
+minutes-old boot/text screen flashes between the two animations, and the
+outgoing session's own pixels would linger for the next account. The desktop's
+own clean exit and its fast-user-switch step-aside say the same thing, because
+the login screen is what comes back. Every failure path releases with
+`ReleaseSurface::Text` instead, so the reason lands somewhere a person can read
+it — and the blank is self-healing regardless: the console takes the screen
+back the moment a *program* writes to it.
+
+A kernel diagnostic is the one thing that does not reclaim it, and that is
+load-bearing here. On a shippable image the kernel's diagnostic sink renders
+onto the same framebuffer, and the authority audits `SESSION_ENDED` in
+exactly this gap; taking the screen for that one routine record replayed the
+whole retained boot log between the desktop and the returning chooser. A
+diagnostic now advances the retained grid and its log without painting a
+cleared surface, while program output — a text login, a shell, a stated
+failure — still takes it back whole (`lib/fbcon`, `docs/src/desktop/seat.md`).
 
 The desktop announces itself visible once the reveal settles — one diagnostic
 record, emitted after a present that reached the display, and the witness a

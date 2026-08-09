@@ -637,13 +637,13 @@ impl ConsoleWrite for VideoConsole {
         tairix_arch_aarch64::video::text_grid()
     }
 
-    fn set_visible(&self, visible: bool) {
+    fn set_surface(&self, surface: tairix_arch_aarch64::video::Surface) {
         // The scan-out surface this console paints is the one a display
         // client presents into, so the seat's lease decides which of them
         // owns it. Unlike the write paths there is no `is_active` guard: a
         // board with no framebuffer console has nothing to hand over and
         // the port call is inert.
-        tairix_arch_aarch64::video::set_visible(visible);
+        tairix_arch_aarch64::video::set_surface(surface);
     }
 
     fn reclaim_surface(&self) {

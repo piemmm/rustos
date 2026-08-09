@@ -80,12 +80,31 @@ pub trait SessionAuthority {
 /// The session's ownership of the screen, as the switch drives it.
 ///
 /// Every method is a step the switch performs in a fixed order and nothing
-/// else calls: [`suspend`](Self::suspend) then
-/// [`release_seat`](Self::release_seat) on the way out, and
+/// else calls: [`fade_out`](Self::fade_out), [`suspend`](Self::suspend),
+/// then [`release_seat`](Self::release_seat) on the way out, and
 /// [`acquire_seat`](Self::acquire_seat), [`query_mode`](Self::query_mode),
-/// [`reconfigure`](Self::reconfigure), [`repaint_all`](Self::repaint_all)
-/// on the way back.
+/// [`reconfigure`](Self::reconfigure), [`fade_in`](Self::fade_in),
+/// [`repaint_all`](Self::repaint_all) on the way back.
 pub trait SeatPresentation {
+    /// Dissolve the screen to black, presenting every frame of it, and
+    /// return once it is fully dark.
+    ///
+    /// Runs while the seat is still held and the frame ring is still up,
+    /// because it is the last thing this session draws: the login screen
+    /// takes the seat over cleared, so the desktop dims into the black that
+    /// screen then appears out of instead of vanishing mid-frame. Bounded by
+    /// the fade's own span, and complete at once under a reduced-motion
+    /// theme.
+    fn fade_out(&mut self);
+
+    /// Put the screen at black and begin fading it back up, so the repaint
+    /// that follows appears rather than snaps on.
+    ///
+    /// The seat comes back cleared, so this session returns exactly as a
+    /// fresh one arrives. Only the first frame is drawn here; the serve loop
+    /// carries the rest, having its next frame folded into its own park.
+    fn fade_in(&mut self);
+
     /// Stop compositing and hand back the shared frame region.
     ///
     /// Called while the seat is still held, so the last thing on screen is
@@ -295,7 +314,7 @@ impl SwitchUser {
     }
 
     /// Ask `authority` to record this session as background and, only once
-    /// it has, give up the screen through `presentation`.
+    /// it has, fade the screen out and give it up through `presentation`.
     ///
     /// The seat is released strictly after an [`SessionVerdict::Accepted`]
     /// reply, and never on any other answer: the login screen must be ready
@@ -318,6 +337,9 @@ impl SwitchUser {
             Ok(SessionVerdict::Refused { .. }) => return Err(SwitchRefusal::Refused),
             Err(err) => return Err(SwitchRefusal::Unreachable(err)),
         }
+        // Only now, on an accepted verdict: a refused switch must leave the
+        // screen exactly as the user left it, not dimmed.
+        presentation.fade_out();
         presentation.suspend();
         presentation.release_seat();
         self.background = true;
@@ -346,7 +368,8 @@ impl SwitchUser {
 
     /// Come back to the foreground: re-take the seat, re-read the mode —
     /// which may have changed while another account held the screen —
-    /// re-establish the shared frame for it, and repaint every pixel.
+    /// re-establish the shared frame for it, and repaint every pixel out of
+    /// black.
     ///
     /// Answers the mode now in force, which the caller uses to rebuild what
     /// it owns outside the presentation (the pointer's screen rectangle).
@@ -368,6 +391,9 @@ impl SwitchUser {
         presentation
             .reconfigure(mode)
             .map_err(ResumeFailure::FrameRefused)?;
+        // Before the repaint, so the frame it presents is the first of the
+        // fade rather than the full-strength desktop appearing at once.
+        presentation.fade_in();
         presentation
             .repaint_all(mode)
             .map_err(ResumeFailure::PaintRefused)?;

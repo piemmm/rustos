@@ -722,7 +722,7 @@ fn program_output_keeps_parser_state_across_writes() {
 #[test]
 fn a_console_starts_owning_its_surface() {
     let (console, _) = small_console();
-    assert!(console.is_visible());
+    assert_eq!(console.surface(), Surface::Shown);
 }
 
 /// The whole point of hiding: a graphical session's pixels must survive
@@ -736,7 +736,7 @@ fn a_hidden_console_touches_no_pixel() {
     pixels.fill(FRAME);
 
     console.hide();
-    assert!(!console.is_visible());
+    assert_eq!(console.surface(), Surface::Hidden);
     // Printing, cooked output, a scroll, an erase, a cursor move, the
     // alternate screen, and an explicit clear — every path that paints.
     assert_eq!(console.write_bytes(&mut pixels, b"\x1b[?25h"), None);
@@ -771,7 +771,7 @@ fn showing_replays_everything_written_while_hidden() {
     let (mut plain, mut plain_px) = cursor_console_of(5, 3);
     plain.write_bytes(&mut plain_px, stream);
 
-    assert!(hidden.is_visible());
+    assert_eq!(hidden.surface(), Surface::Shown);
     assert_eq!(
         band,
         Some((0, 3 * CELL_HEIGHT)),
@@ -817,13 +817,13 @@ fn hide_and_show_are_idempotent() {
 
     console.hide();
     console.hide();
-    assert!(!console.is_visible());
+    assert_eq!(console.surface(), Surface::Hidden);
 
     console.show(&mut pixels);
     let once = pixels.clone();
     console.show(&mut pixels);
 
-    assert!(console.is_visible());
+    assert_eq!(console.surface(), Surface::Shown);
     assert_eq!(pixels, once);
     assert_eq!(pixels, shown);
 }
@@ -932,6 +932,132 @@ fn purging_while_hidden_wipes_what_show_would_reveal() {
     console.show(&mut pixels);
     let (_, blank_px) = cursor_console_of(4, 2);
     assert_eq!(pixels, blank_px, "nothing of the session is revealed");
+}
+
+/// A hand-over between two graphical presenters must show neither the
+/// outgoing session's pixels nor a replay of the text screen: blanking
+/// clears every pixel and leaves the retained grid alone.
+#[test]
+fn blanking_clears_the_surface_without_replaying_the_text_screen() {
+    let (mut console, mut pixels) = cursor_console_of(4, 2);
+    console.write_bytes(&mut pixels, b"text");
+    // Whatever the outgoing presenter left on the surface.
+    pixels.fill(0xFFAB_CDEF);
+
+    let band = console.blank(&mut pixels);
+
+    assert_eq!(console.surface(), Surface::Blank);
+    assert_eq!(
+        band,
+        Some((0, 2 * CELL_HEIGHT)),
+        "the whole surface is cleared"
+    );
+    assert!(
+        pixels.iter().all(|&p| p == DEFAULT_BACKGROUND),
+        "no pixel of the outgoing frame survives"
+    );
+}
+
+/// The blank is not a lockout: a program writing to this console takes the
+/// surface back, and brings the whole retained screen with it — so a
+/// hand-over that never completes still shows the reason it failed.
+#[test]
+fn a_programs_output_takes_a_blanked_surface_back_whole() {
+    let (mut console, mut pixels) = cursor_console_of(5, 2);
+    console.write_output_bytes(&mut pixels, b"one\n");
+    console.blank(&mut pixels);
+    assert!(pixels.iter().all(|&p| p == DEFAULT_BACKGROUND));
+
+    let band = console.write_output_bytes(&mut pixels, b"two");
+
+    // Including the line written before the blank: what comes back is the
+    // whole retained screen, not just what this write dirtied.
+    let (mut plain, mut plain_px) = cursor_console_of(5, 2);
+    plain.write_output_bytes(&mut plain_px, b"one\ntwo");
+    assert_eq!(console.surface(), Surface::Shown);
+    assert_eq!(
+        band,
+        Some((0, 2 * CELL_HEIGHT)),
+        "the whole screen comes back, not just the cells this write dirtied"
+    );
+    assert_eq!(pixels, plain_px);
+}
+
+/// A kernel diagnostic must not take a blanked surface back. On a shippable
+/// image the diagnostic sink renders onto this very framebuffer, so one
+/// routine record logged between two graphical sessions — "desktop session
+/// ended" — would otherwise replay the whole boot log into the hand-over.
+/// The record still reaches the retained screen, and its log.
+#[test]
+fn a_kernel_diagnostic_leaves_a_blanked_surface_blank() {
+    let (mut console, mut pixels) = cursor_console_of(5, 2);
+    console.write_output_bytes(&mut pixels, b"one\n");
+    console.blank(&mut pixels);
+
+    assert_eq!(console.write_bytes(&mut pixels, b"logged"), None);
+
+    assert_eq!(console.surface(), Surface::Blank);
+    assert!(
+        pixels.iter().all(|&p| p == DEFAULT_BACKGROUND),
+        "the hand-over's black survives a diagnostic"
+    );
+
+    // Not lost, though: taking the surface back shows it, exactly as a
+    // diagnostic written while a desktop held the screen comes back.
+    console.show(&mut pixels);
+    let (mut plain, mut plain_px) = cursor_console_of(5, 2);
+    plain.write_output_bytes(&mut plain_px, b"one\n");
+    plain.write_bytes(&mut plain_px, b"logged");
+    assert_eq!(pixels, plain_px);
+}
+
+/// Only real output reclaims a blanked surface. A write of no bytes says
+/// nothing, so treating it as something to show would repaint the stale
+/// text screen into the very gap the blank exists to keep black.
+#[test]
+fn an_empty_write_leaves_a_blanked_surface_blank() {
+    let (mut console, mut pixels) = cursor_console_of(3, 1);
+    console.write_output_bytes(&mut pixels, b"abc");
+    console.blank(&mut pixels);
+
+    assert_eq!(console.write_bytes(&mut pixels, b""), None);
+    assert_eq!(console.write_output_bytes(&mut pixels, b""), None);
+
+    assert_eq!(console.surface(), Surface::Blank);
+    assert!(pixels.iter().all(|&p| p == DEFAULT_BACKGROUND));
+}
+
+/// Clearing a blanked surface leaves it blanked: the grid is cleared, and
+/// taking the surface back to show nothing would defeat the hand-over.
+#[test]
+fn clearing_leaves_a_blanked_surface_blank() {
+    let (mut console, mut pixels) = cursor_console_of(3, 1);
+    console.write_output_bytes(&mut pixels, b"abc");
+    console.blank(&mut pixels);
+
+    assert_eq!(console.clear(&mut pixels), None);
+
+    assert_eq!(console.surface(), Surface::Blank);
+    assert!(pixels.iter().all(|&p| p == DEFAULT_BACKGROUND));
+}
+
+/// Ending one session's terminal must not end the hand-over the next one is
+/// arriving through: the purge discards the retained screen, and the surface
+/// stays black rather than being taken back to show the nothing it left.
+#[test]
+fn purging_leaves_a_blanked_surface_blank() {
+    let (mut console, mut pixels) = cursor_console_of(4, 2);
+    console.write_output_bytes(&mut pixels, b"\x1b[?1049hsecret\x1b[?1049l");
+    console.blank(&mut pixels);
+
+    assert_eq!(console.purge(&mut pixels), None);
+
+    assert_eq!(console.surface(), Surface::Blank);
+    assert!(pixels.iter().all(|&p| p == DEFAULT_BACKGROUND));
+    assert!(
+        console.screen.alt.iter().all(|&c| c == Cell::BLANK),
+        "the discard still reaches the grid that is not shown"
+    );
 }
 
 /// Adjacent blank runs with different backgrounds each keep their own

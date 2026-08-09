@@ -236,7 +236,20 @@ same call the compositor frosts a window's backdrop with, and the theme's
 confined to that one rounded shape, so nothing lands outside the tile and no
 square edge shows around the rounded fill. Softening the *fill* instead leaves a
 smear with no shape of its own, which is why the blur belongs behind the mark
-rather than on it. Because the fill lets the frosted result read through it, the
+rather than on it.
+
+The radius is short, and deliberately so. A box blur of radius `r` averages
+`2r + 1` samples, so a radius approaching the tile's own size averages its whole
+backdrop to a single colour — the mark reads as a smudge with an accent cast and
+the wallpaper behind it is gone. The frost must take the backdrop's fine grain
+and leave its larger shapes legible, which is a rendering property rather than a
+number: one test requires a one-pixel pattern behind the mark to collapse, its
+pair requires a broad one to survive, and together they bracket what the theme
+may state. The pair measures across the *middle* of the tile, because the frost
+stops at the tile's edge and replicates the pixel there, so the outermost columns
+keep their own colour whatever the radius.
+
+Because the fill lets the frosted result read through it, the
 tile's name keeps the theme's ordinary foreground, which separates from that
 result whichever way the theme is lit; the near-white `on_accent` ink is
 reserved for the one mark that is an opaque plate. Under a heavier `Contrast` the

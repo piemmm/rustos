@@ -5,9 +5,9 @@ use alloc::string::String;
 use crate::motion::MotionInteraction;
 use crate::theme::SELECTION_ALPHA;
 use crate::{
-    Appearance, Contrast, CursorKind, CursorSet, Density, FamilyKey, FontWeight, Fonts, Metrics,
-    MotionTheme, Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
-    Timeline,
+    Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey, FontWeight, Fonts,
+    Metrics, MotionTheme, Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId,
+    ThemeRegistry, Timeline,
 };
 
 #[test]
@@ -106,16 +106,6 @@ fn accent_labels_stay_legible_on_the_accent_fill() {
 /// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
 fn luma(c: Rgba) -> u32 {
     (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
-}
-
-#[test]
-fn a_selections_backdrop_blurs_at_three_tenths_of_the_widest_window_backdrop() {
-    // The rationale the metric's rustdoc states, asserted against the real
-    // protocol bound so the two cannot drift apart.
-    let want = u32::from(tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX) * 30 / 100;
-    for theme in [Theme::dark(), Theme::light()] {
-        assert_eq!(theme.metrics().selection_backdrop_blur, want);
-    }
 }
 
 #[test]
@@ -307,12 +297,13 @@ fn a_timeline_runs_from_nothing_to_complete_over_its_span() {
 fn a_clock_that_jumped_backwards_settles_rather_than_stalling() {
     // An instant before the start would otherwise read as "not begun" for as
     // long as the clock stayed behind, freezing an animation on its first
-    // frame and holding a timer open.
+    // frame. It reads complete instead, and the frame that puts that end state
+    // on screen is owed at once.
     const MS: u64 = 1_000_000;
     let timeline = Timeline::start(100 * MS, 100);
     assert_eq!(timeline.progress(40 * MS), u8::MAX);
     assert!(timeline.finished(40 * MS));
-    assert_eq!(timeline.next_frame_in(40 * MS), None);
+    assert_eq!(timeline.next_frame_in(40 * MS), Some(0));
 }
 
 #[test]
@@ -328,7 +319,30 @@ fn a_wake_is_the_nearer_of_the_frame_cadence_and_what_is_left() {
         timeline.next_frame_in(1000 * MS - remaining),
         Some(remaining)
     );
-    assert_eq!(timeline.next_frame_in(1000 * MS), None);
+    // On the end there is no span left, but the frame that draws the end state
+    // still is: due now.
+    assert_eq!(timeline.next_frame_in(1000 * MS), Some(0));
+}
+
+#[test]
+fn a_span_that_ran_out_since_the_last_step_still_owes_its_terminal_frame() {
+    // The stall this guards: an owner steps its animation, spends real time
+    // presenting the frame, and only then asks when to wake. A span that ended
+    // in between must not answer "nothing", or the end state is stranded
+    // undrawn until some unrelated event wakes the owner.
+    const MS: u64 = 1_000_000;
+    let timeline = Timeline::start(0, 100);
+    let stepped = 99 * MS;
+    assert!(timeline.progress(stepped) < u8::MAX, "a frame short");
+
+    let asked = stepped + Timeline::FRAME_NS;
+    assert!(asked > 100 * MS, "the span ran out between the two");
+    assert_eq!(timeline.next_frame_in(asked), Some(0));
+
+    // Drawing that frame is what ends it, and the owner says so by settling.
+    let mut drawn = timeline;
+    drawn.settle();
+    assert_eq!(drawn.next_frame_in(asked), None);
 }
 
 #[test]
@@ -341,16 +355,76 @@ fn settling_a_running_timeline_stops_it() {
 }
 
 #[test]
+fn a_fade_carries_its_strength_from_one_end_of_the_span_to_the_other() {
+    const MS: u64 = 1_000_000;
+    let covering = Fade::start(0, 100, 0, u8::MAX);
+    assert_eq!(covering.strength(0), 0);
+    assert_eq!(covering.strength(50 * MS), 127);
+    assert_eq!(covering.strength(100 * MS), u8::MAX);
+    assert_eq!(covering.target(), u8::MAX);
+
+    // The other direction is the same machine with its ends swapped, so an
+    // uncovering fade cannot be timed or shaped differently by accident.
+    let uncovering = Fade::start(0, 100, u8::MAX, 0);
+    assert_eq!(uncovering.strength(0), u8::MAX);
+    assert_eq!(uncovering.strength(50 * MS), 128);
+    assert_eq!(uncovering.strength(100 * MS), 0);
+    assert_eq!(uncovering.target(), 0);
+}
+
+#[test]
+fn a_fade_begun_part_way_starts_from_the_strength_it_was_given() {
+    // What a session accepted mid-animation does: the screen is part-covered,
+    // and the fade that takes over must continue from there rather than jump
+    // to an end it never reached.
+    const MS: u64 = 1_000_000;
+    let interrupted = Fade::start(0, 100, 60, u8::MAX);
+
+    assert_eq!(interrupted.strength(0), 60);
+    assert!(interrupted.strength(50 * MS) > 60);
+    assert_eq!(interrupted.strength(100 * MS), u8::MAX);
+}
+
+#[test]
+fn a_reduced_motion_fade_is_at_its_end_from_the_first_read() {
+    let instant = Fade::start(0, 0, 0, u8::MAX);
+    assert_eq!(instant.strength(0), u8::MAX);
+    assert!(!instant.running());
+    assert_eq!(instant.next_frame_in(0), None);
+}
+
+#[test]
+fn settling_a_fade_lands_it_on_its_target_and_ends_the_asking() {
+    const MS: u64 = 1_000_000;
+    let mut fade = Fade::start(0, 100, u8::MAX, 0);
+    assert!(fade.running());
+    // A span that ran out still owes the frame that draws the end state.
+    assert_eq!(fade.next_frame_in(200 * MS), Some(0));
+
+    fade.settle();
+
+    assert_eq!(fade.strength(0), 0);
+    assert!(!fade.running());
+    assert_eq!(fade.next_frame_in(0), None);
+}
+
+#[test]
 fn a_selection_fill_only_tints_what_is_behind_it() {
     // The frosted backdrop is what marks a selected item; the accent tints it.
     // A fill this side of half opacity is deliberate, so both themes state it
-    // and neither may quietly become a block of colour.
+    // and neither may quietly become a block of colour — nor drop the frost
+    // that is carrying the mark on the fill's behalf.
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
         assert_eq!(p.selection_fill, p.accent.with_alpha(SELECTION_ALPHA));
         assert!(
             u32::from(p.selection_fill.a) * 3 < u32::from(u8::MAX),
             "{}: the selection fill covers rather than tints",
+            theme.name()
+        );
+        assert!(
+            theme.metrics().selection_backdrop_blur > 0,
+            "{}: a tinting fill over an unfrosted backdrop marks nothing",
             theme.name()
         );
     }

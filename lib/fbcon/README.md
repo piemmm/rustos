@@ -63,21 +63,29 @@ when it ends — see "Sharing the surface" below.
 
 A framebuffer text console and a compositing display client want the same
 scan-out memory, and a surface can only have one presenter. `TextConsole`
-therefore carries a visibility state that the kernel's seat lease drives
-(`kernel/core/src/seat.rs`): the console owns the surface while the seat is
-unowned, and gives it up while a session holds it.
+therefore carries a `Surface` disposition that the kernel's seat lease drives
+(`kernel/core/src/seat.rs`), and it has three values, not two.
 
-- `hide()` — give the surface up. Writes keep being parsed into the retained
-  grid and touch **no** pixel, so output produced under a desktop is neither
-  drawn over the composited frame nor lost.
+- `hide()` — give the surface up to a session holding the seat. Writes keep
+  being parsed into the retained grid and touch **no** pixel, so output
+  produced under a desktop is neither drawn over the composited frame nor
+  lost.
 - `show(pixels)` — take the surface back and repaint the whole screen from the
   retained grid: the surface fill blanks the margins outside the cell grid, the
   full-grid flush paints every cell, so no pixel of the previous presenter can
   survive. What arrived while hidden is on screen too, which is why a user who
   leaves a graphical session returns to their shell exactly as they left it
   with the session's diagnostics printed beneath.
+- `blank(pixels)` — clear every pixel and hold it cleared, because the lease
+  ended with another *graphical* presenter coming. Neither the outgoing
+  session's frame nor a replay of the retained text belongs in that gap. The
+  retained grid is untouched, and a program writing to the console
+  (`write_output_bytes`) takes the surface back whole, so the blank quietens
+  the console without silencing it. A kernel diagnostic (`write_bytes`) does
+  not reclaim it: its home is the log, and one routine record must not replay
+  a boot log's worth of text over a hand-over.
 
-Both directions are idempotent, so the kernel panic path can reclaim the
+Every disposition is idempotent, so the kernel panic path can reclaim the
 surface without knowing who held it.
 
 ## Surface format

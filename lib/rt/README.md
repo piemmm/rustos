@@ -215,8 +215,12 @@ the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 `rlimit_set`), the session wrappers (`set_input_mode`, `users_db_read`,
 `key_inject`, `keyboard_read`, `display_acquire` / `display_release`,
 `ipc_send`), the user-space-driver wrappers (`mmio_map`, `dma_alloc`,
-`resource_grants`), and the monotonic clock (`clock_get`) plus the
-`ClockDelay` `Delay` facility (`AGENTS.md` §2.2) built on it — a timed wait
-that genuinely sleeps by parking on the process's lazily created, memberless
-sleep wait-set (`waitset_wait` with the remaining window as its deadline),
-degrading to a cooperative yield wait only if the kernel refuses a wait-set.
+`resource_grants`), and the monotonic clock (`clock_get`) plus the timed park
+built on it. That park is one definition with two entry points (`AGENTS.md`
+§2.2): `park_ns` for anything that already holds a nanosecond span — an
+animation's next frame, a timed retry — and the `ClockDelay` `Delay` facility
+for a driver's microsecond settle window. It genuinely sleeps, parking on the
+process's lazily created, memberless sleep wait-set (`waitset_wait` with the
+remaining window as its deadline) so the kernel's one-shot timer wakes it,
+and degrades to a cooperative yield wait only if the kernel refuses a
+wait-set. `park_forever` is its unbounded counterpart.

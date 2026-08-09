@@ -337,6 +337,79 @@ fn a_verified_secret_finishes_the_screen() {
     );
 }
 
+/// The login screen appears out of the black it was handed the display in,
+/// so the chooser is never cut onto a cleared screen.
+///
+/// The park loop runs it: the refresh steps the veil and the timeout is what
+/// asks for the next frame, exactly as it does for every other animation.
+#[test]
+fn the_opening_frame_is_black_and_the_chooser_appears_out_of_it() {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+
+    let opening = login.begin_entry_fade(0);
+    assert!(covers(opening, login.screen()), "the whole screen is shown");
+
+    let (x, y) = (mode().width_px / 2, mode().height_px / 2);
+    assert_eq!(brightness(login.frame(), x, y), 0, "and every pixel of it");
+    assert!(!login.session_fade_finished(), "arriving is not leaving");
+
+    let mut now = 0;
+    let mut lightest = 0;
+    let mut frames = 0u32;
+    while login.park_timeout(now, None) < FOREVER {
+        frames += 1;
+        assert!(frames <= 1_000, "the fade never stopped asking for frames");
+        now += login.park_timeout(now, None);
+        login.refresh(now, None);
+        let sample = brightness(login.frame(), x, y);
+        assert!(sample >= lightest, "the veil darkened at frame {frames}");
+        lightest = sample;
+    }
+
+    assert!(frames > 1, "it faded rather than cut, in {frames} frames");
+    let arrived = login.frame().to_vec();
+    login.repaint();
+    assert!(
+        differing(&arrived, login.frame()).is_empty(),
+        "the screen it arrives at is the screen itself"
+    );
+}
+
+/// A theme with no motion has nothing to arrive out of: the screen opens on
+/// the chooser, with no veil to present and no frame owed for one.
+#[test]
+fn a_reduced_motion_screen_opens_on_the_chooser() {
+    let mut login = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+
+    assert_eq!(login.begin_entry_fade(0), Present::Nothing);
+    assert_eq!(login.park_timeout(0, None), FOREVER, "nothing is armed");
+
+    let opening = login.repaint();
+    assert!(covers(opening, login.screen()));
+    assert!(
+        brightness(login.frame(), mode().width_px / 2, 0) > 0,
+        "the screen it opens on is the chooser, not the black"
+    );
+
+    let mut plain = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+    plain.repaint();
+    assert!(
+        differing(login.frame(), plain.frame()).is_empty(),
+        "and it is the same screen as one that never faded"
+    );
+}
+
 /// A verified secret takes the screen to black before the process leaves,
 /// so the desktop coming up out of the same black reads as one movement.
 #[test]
@@ -659,6 +732,12 @@ fn an_unreachable_authority_keeps_the_surface_alive() {
     );
     assert_eq!(
         login.park_timeout(settled_ns(), None),
+        0,
+        "the refusal's shake still owes the frame that ends it"
+    );
+    login.refresh(settled_ns(), None);
+    assert_eq!(
+        login.park_timeout(settled_ns(), None),
         FOREVER,
         "nothing is counting down, so nothing is armed"
     );
@@ -712,6 +791,12 @@ fn a_running_lockout_is_the_nearer_deadline() {
         Timeline::FRAME_NS,
         "the refusal's shake is the nearest thing owing a frame"
     );
+    assert_eq!(
+        login.park_timeout(settled_ns(), Some(twenty_past)),
+        0,
+        "a shake whose span ran out still owes the frame that ends it"
+    );
+    login.refresh(settled_ns(), Some(twenty_past));
     assert_eq!(
         login.park_timeout(settled_ns(), Some(twenty_past)),
         1_000_000_000,

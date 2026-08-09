@@ -60,6 +60,7 @@ use tairix_abi::elevate::{
     elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
 };
 use tairix_abi::input::{KeyInput, PointerInput};
+pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
@@ -633,6 +634,11 @@ pub fn display_acquire(seat: u64) -> i64 {
 /// (`SyscallNumber::DISPLAY_RELEASE`,
 /// `plans/DISPLAY.md`), returning `0` on success or `-errno`.
 ///
+/// `next` states what becomes of the seat's screen: the text console takes
+/// it back ([`ReleaseSurface::Text`]), or it is held cleared for the
+/// graphical presenter taking over ([`ReleaseSurface::Handover`]) so the gap
+/// shows neither this session's pixels nor a replay of a text screen.
+///
 /// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`. The release
 /// is owner-checked: an unknown seat id fails closed (`NotFound`) and a
 /// caller that does not hold the seat is refused (`SeatNotOwner`;
@@ -640,10 +646,10 @@ pub fn display_acquire(seat: u64) -> i64 {
 /// flipping the seat out from under its owner.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
-pub fn display_release(seat: u64) -> i64 {
+pub fn display_release(seat: u64, next: ReleaseSurface) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates `CAP_DISPLAY` before touching state.
-    let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [seat, 0, 0, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [seat, next.as_u64(), 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -1096,6 +1102,40 @@ fn sleep_waitset() -> Option<u64> {
 /// Nanoseconds in one microsecond — the [`ClockDelay`] conversion factor.
 const NANOS_PER_MICRO: u64 = 1_000;
 
+/// Park, off the CPU, for at least `duration_ns` nanoseconds.
+///
+/// The runtime's one timed park, and the timed counterpart of
+/// [`park_forever`]: the task blocks on the process's memberless sleep
+/// wait-set, so the kernel's one-shot timer wakes it — no yield loop and no
+/// periodic wakes, and a spurious early wake re-parks for the remainder. A
+/// zero duration returns without parking. Only when the kernel refuses a
+/// wait-set does it degrade to the cooperative yield wait, which keeps the
+/// timed contract rather than shortening it.
+///
+/// [`ClockDelay`]'s driver-facing `delay_us` is this same park; anything
+/// that already holds a nanosecond span — an animation's next frame, a
+/// timed retry — waits here directly rather than rounding through
+/// microseconds.
+pub fn park_ns(duration_ns: u64) {
+    // Compute the deadline from the clock the wait re-checks, saturating so
+    // a reading near `u64::MAX` can never wrap the deadline below `now`
+    // (which would return instantly); the monotonic clock realistically
+    // never approaches that, but the wait must not silently shorten.
+    let deadline = clock_get().saturating_add(duration_ns);
+    match sleep_waitset() {
+        Some(set) => park_until_ns(deadline, clock_get, |remaining_ns| {
+            // The set has no members, so this is a pure timed park; the
+            // outer loop re-checks the clock, so an early return (a
+            // torn-down set) still honours the deadline.
+            let mut token = 0u64;
+            let _ = waitset_wait(set, remaining_ns, &mut token);
+        }),
+        // The kernel refused a wait-set (handle exhaustion): degrade to the
+        // cooperative yield wait rather than shortening the timed contract.
+        None => spin_until_ns(deadline, clock_get, yield_now),
+    }
+}
+
 /// The userland [`Delay`](tairix_abi::Delay) implementation: timed waits and
 /// a monotonic clock backed by the [`clock_get`] syscall.
 ///
@@ -1106,14 +1146,11 @@ const NANOS_PER_MICRO: u64 = 1_000;
 /// so every driver process shares a single clock-backed `Delay` rather than
 /// each rolling its own over [`clock_get`].
 ///
-/// The wait genuinely sleeps: [`delay_us`](tairix_abi::Delay::delay_us)
-/// parks the task on the process's memberless sleep wait-set
-/// (`sleep_waitset`) with the remaining window as the `waitset_wait`
-/// deadline, so the kernel's one-shot timer wakes it — no yield loop, no
-/// periodic wakes. Only when the kernel refuses a wait-set does it degrade
-/// to the cooperative yield wait, keeping the timed contract. It carries no
-/// authority — `clock_get` and the wait-set need no capability — and holds
-/// no state, so it is `Copy` and trivially shareable.
+/// The wait genuinely sleeps: [`delay_us`](tairix_abi::Delay::delay_us) is
+/// [`park_ns`] over the microsecond window, so the task blocks off the CPU
+/// rather than yielding in a loop. It carries no authority — `clock_get`
+/// and the wait-set need no capability — and holds no state, so it is
+/// `Copy` and trivially shareable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClockDelay;
 
@@ -1127,25 +1164,7 @@ impl ClockDelay {
 
 impl tairix_abi::Delay for ClockDelay {
     fn delay_us(&self, us: u32) {
-        // Compute the deadline from the clock the wait re-checks, saturating
-        // so a reading near `u64::MAX` can never wrap the deadline below
-        // `now` (which would return instantly); the monotonic clock
-        // realistically never approaches that, but the wait must not
-        // silently shorten.
-        let deadline = clock_get().saturating_add(u64::from(us).saturating_mul(NANOS_PER_MICRO));
-        match sleep_waitset() {
-            Some(set) => park_until_ns(deadline, clock_get, |remaining_ns| {
-                // The set has no members, so this is a pure timed park; the
-                // outer loop re-checks the clock, so an early return (a
-                // torn-down set) still honours the deadline.
-                let mut token = 0u64;
-                let _ = waitset_wait(set, remaining_ns, &mut token);
-            }),
-            // The kernel refused a wait-set (handle exhaustion): degrade to
-            // the cooperative yield wait rather than shortening the timed
-            // contract.
-            None => spin_until_ns(deadline, clock_get, yield_now),
-        }
+        park_ns(u64::from(us).saturating_mul(NANOS_PER_MICRO));
     }
 
     fn now_us(&self) -> u64 {
@@ -5176,10 +5195,19 @@ mod tests {
         assert_eq!(args, [3, 0, 0, 0, 0, 0]);
 
         let (number, args) = capture(0, || {
-            assert_eq!(display_release(3), 0);
+            assert_eq!(display_release(3, ReleaseSurface::Text), 0);
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
         assert_eq!(args, [3, 0, 0, 0, 0, 0]);
+
+        // The hand-over disposition reaches the kernel as the second
+        // argument: a release that drops it would replay the text console
+        // over the gap between two graphical sessions.
+        let (number, args) = capture(0, || {
+            assert_eq!(display_release(3, ReleaseSurface::Handover), 0);
+        });
+        assert_eq!(number, NUM_DISPLAY_RELEASE);
+        assert_eq!(args, [3, ReleaseSurface::Handover.as_u64(), 0, 0, 0, 0]);
     }
 
     #[test]

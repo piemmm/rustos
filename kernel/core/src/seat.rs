@@ -39,9 +39,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::SeatGate;
 use tairix_abi::input::{KeyInput, PointerInput};
-use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
+use tairix_abi::seat::{ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::{DriverError, Errno};
+use tairix_fbcon::Surface;
 use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
 use tairix_log::Field;
 use tairix_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
@@ -399,6 +400,13 @@ impl SeatRegistry {
     /// it: the foreground text console while the seat is unowned, the
     /// graphical owner while it is held.
     ///
+    /// `unowned` is what that foreground console does when the seat has no
+    /// owner. Every path but one passes [`Surface::Shown`] — take the screen
+    /// back and repaint the retained text. A release that handed the seat to
+    /// another graphical presenter passes [`Surface::Blank`] instead, so the
+    /// gap before that presenter's first frame shows neither the outgoing
+    /// session's pixels nor a replay of a text screen nobody is returning to.
+    ///
     /// The kernel's framebuffer text console paints the surface the
     /// architecture port brought up at boot, which is the **boot seat's**; a
     /// discovery-created seat's display carries no kernel text console, so a
@@ -412,14 +420,17 @@ impl SeatRegistry {
     /// with the loser's answer. The console's own render lock is a leaf
     /// (nothing it guards takes another lock), so the nesting cannot
     /// deadlock.
-    fn apply_boot_surface(&self, seat_id: u64, state: &SeatState) {
+    fn apply_boot_surface(&self, seat_id: u64, state: &SeatState, unowned: Surface) {
         if seat_id != SEAT_PRIMARY {
             return;
         }
         let route = state.route();
         for (index, device) in self.consoles.iter().enumerate() {
-            let shown = matches!(route, Route::Text(console) if console.0 as usize == index);
-            device.set_visible(shown);
+            let surface = match route {
+                Route::Text(console) if console.0 as usize == index => unowned,
+                _ => Surface::Hidden,
+            };
+            device.set_surface(surface);
         }
     }
 
@@ -462,12 +473,20 @@ impl SeatRegistry {
         // read a record it did not produce, and the text console gives the
         // display surface up before the new owner presents its first frame.
         slot.purge_channels();
-        self.apply_boot_surface(seat_id, &state);
+        self.apply_boot_surface(seat_id, &state, Surface::Shown);
         Ok(lease)
     }
 
     /// Release seat `seat_id` held by `owner` (`display_release`),
     /// returning its input to the text foreground.
+    ///
+    /// `next` is the outgoing owner's statement of what its screen becomes:
+    /// the text console takes it back ([`ReleaseSurface::Text`]), or it is
+    /// held cleared for the graphical presenter taking over
+    /// ([`ReleaseSurface::Handover`]). Only a clean, owner-initiated release
+    /// may ask for the latter — a revocation or a dead owner's reclaim
+    /// always restores the text console, so a wedged or hostile presenter
+    /// cannot leave the screen dark.
     ///
     /// # Errors
     ///
@@ -476,7 +495,12 @@ impl SeatRegistry {
     ///   release is owner-checked, never a global "flip it back" switch.
     /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked; the
     ///   refusal acknowledges the pending revocation.
-    pub fn release(&self, seat_id: u64, owner: SeatOwner) -> Result<(), Errno> {
+    pub fn release(
+        &self,
+        seat_id: u64,
+        owner: SeatOwner,
+        next: ReleaseSurface,
+    ) -> Result<(), Errno> {
         let slot = self.resolve(seat_id)?;
         let released = {
             let mut state = slot.state.lock();
@@ -487,7 +511,11 @@ impl SeatRegistry {
             // only a `NotOwner` refusal changed nothing.
             if !matches!(outcome, Err(SeatError::NotOwner)) {
                 slot.purge_channels();
-                self.apply_boot_surface(seat_id, &state);
+                let unowned = match next {
+                    ReleaseSurface::Text => Surface::Shown,
+                    ReleaseSurface::Handover => Surface::Blank,
+                };
+                self.apply_boot_surface(seat_id, &state, unowned);
             }
             outcome.map_err(seat_errno)
         };
@@ -790,7 +818,7 @@ impl SeatRegistry {
         let slot = self.resolve(seat_id)?;
         let mut state = slot.state.lock();
         state.set_foreground_console(console);
-        self.apply_boot_surface(seat_id, &state);
+        self.apply_boot_surface(seat_id, &state, Surface::Shown);
         Ok(())
     }
 
@@ -818,7 +846,7 @@ impl SeatRegistry {
                 // are wiped — an eviction must not hand its keystrokes to
                 // whoever takes the seat next.
                 slot.purge_channels();
-                self.apply_boot_surface(seat_id, &state);
+                self.apply_boot_surface(seat_id, &state, Surface::Shown);
             }
             outcome.map_err(seat_errno)
         };
@@ -863,7 +891,7 @@ impl SeatRegistry {
                 return;
             }
             slot.purge_channels();
-            self.apply_boot_surface(seat_id, &state);
+            self.apply_boot_surface(seat_id, &state, Surface::Shown);
             drop(state);
             reclaimed = true;
             crate::audit::emit(
@@ -1021,7 +1049,6 @@ mod tests {
     use crate::console::{ConsoleInputQueue, ConsoleRead, ConsoleWrite, NULL_CONSOLE_READ};
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
-    use core::sync::atomic::AtomicBool;
     use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
 
     const WM: SeatOwner = SeatOwner(7);
@@ -1038,10 +1065,10 @@ mod tests {
         Box::leak(Box::new(ConsoleInputQueue::new()))
     }
 
-    /// A console whose write half records only whether it currently owns
-    /// its display surface — the observable half of the D8 handover.
+    /// A console whose write half records only the disposition of its
+    /// display surface — the observable half of the D8 handover.
     struct SurfaceConsole {
-        visible: AtomicBool,
+        surface: SpinLock<Surface>,
     }
 
     impl ConsoleWrite for SurfaceConsole {
@@ -1049,8 +1076,8 @@ mod tests {
             Ok(bytes.len())
         }
 
-        fn set_visible(&self, visible: bool) {
-            self.visible.store(visible, Ordering::SeqCst);
+        fn set_surface(&self, surface: Surface) {
+            *self.surface.lock() = surface;
         }
     }
 
@@ -1059,7 +1086,7 @@ mod tests {
     fn registry_with_surface() -> (SeatRegistry, &'static SurfaceConsole) {
         let console: &'static SurfaceConsole = Box::leak(Box::new(SurfaceConsole {
             // A fresh system is a text login, so the console starts shown.
-            visible: AtomicBool::new(true),
+            surface: SpinLock::new(Surface::Shown),
         }));
         let devices: &'static [ConsoleDevice] =
             Box::leak(Box::new([ConsoleDevice::new(console, &NULL_CONSOLE_READ)]));
@@ -1069,8 +1096,12 @@ mod tests {
         )
     }
 
+    fn surface_of(console: &SurfaceConsole) -> Surface {
+        *console.surface.lock()
+    }
+
     fn shown(console: &SurfaceConsole) -> bool {
-        console.visible.load(Ordering::SeqCst)
+        surface_of(console) == Surface::Shown
     }
 
     fn reclaimed_count(audit: &TestSink) -> usize {
@@ -1089,7 +1120,8 @@ mod tests {
         seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
         assert!(!shown(console), "the session owns the screen while held");
 
-        seat.release(SEAT_PRIMARY, WM).expect("seat released");
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text)
+            .expect("seat released");
         assert!(shown(console), "a clean exit returns the screen");
 
         // A revoked lease ends the same way.
@@ -1101,11 +1133,49 @@ mod tests {
         // The evicted owner's acknowledging release is refused but must
         // not disturb the surface it no longer owns.
         assert_eq!(
-            seat.release(SEAT_PRIMARY, WM),
+            seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text),
             Err(Errno::SeatRevoked),
             "the eviction is acknowledged"
         );
         assert!(shown(console));
+    }
+
+    /// A release that hands the seat to another graphical presenter leaves
+    /// the screen cleared instead of replaying the text console into the
+    /// gap, and the next acquire finds it that way.
+    #[test]
+    fn a_handover_release_leaves_the_screen_cleared() {
+        let (seat, console) = registry_with_surface();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Handover)
+            .expect("seat released");
+        assert_eq!(
+            surface_of(console),
+            Surface::Blank,
+            "the gap before the next presenter shows nothing"
+        );
+
+        seat.acquire(SEAT_PRIMARY, INTRUDER).expect("reacquired");
+        assert_eq!(surface_of(console), Surface::Hidden);
+    }
+
+    /// A handover is the outgoing owner's own clean exit and nothing else:
+    /// an eviction and a dead owner's reclaim always hand the screen back
+    /// to the text console, so a wedged or hostile presenter cannot leave
+    /// the machine dark.
+    #[test]
+    fn only_a_clean_release_may_hand_the_screen_over_cleared() {
+        let (seat, console) = registry_with_surface();
+        let audit = TestSink::new();
+
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+        assert!(shown(console), "an eviction returns the screen");
+
+        seat.acquire(SEAT_PRIMARY, WM).expect("reacquired");
+        seat.release_owned_by(WM, &audit);
+        assert!(shown(console), "a dead owner's seat returns the screen");
     }
 
     /// A refused acquire changes nothing: the text console keeps the
@@ -1118,9 +1188,10 @@ mod tests {
         assert_eq!(seat.acquire(SEAT_PRIMARY, INTRUDER), Err(Errno::SeatBusy));
         assert!(!shown(console), "the live owner still holds the screen");
 
-        seat.release(SEAT_PRIMARY, WM).expect("seat released");
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text)
+            .expect("seat released");
         assert_eq!(
-            seat.release(SEAT_PRIMARY, INTRUDER),
+            seat.release(SEAT_PRIMARY, INTRUDER, ReleaseSurface::Text),
             Err(Errno::SeatNotOwner)
         );
         assert!(
@@ -1192,7 +1263,8 @@ mod tests {
     fn a_lease_boundary_purges_the_input_channels() {
         let ends: [&dyn Fn(&SeatRegistry); 3] = [
             &|seat| {
-                seat.release(SEAT_PRIMARY, WM).expect("released");
+                seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text)
+                    .expect("released");
             },
             &|seat| {
                 assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
@@ -1268,7 +1340,8 @@ mod tests {
         seat.acquire(second, WM).expect("second head acquired");
         assert!(shown(console), "the boot console keeps its own screen");
 
-        seat.release(second, WM).expect("released");
+        seat.release(second, WM, ReleaseSurface::Text)
+            .expect("released");
         assert!(shown(console));
     }
 
@@ -1443,7 +1516,7 @@ mod tests {
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
         assert_eq!(
-            seat.release(SEAT_PRIMARY, INTRUDER),
+            seat.release(SEAT_PRIMARY, INTRUDER, ReleaseSurface::Text),
             Err(Errno::SeatNotOwner)
         );
         assert_eq!(seat.owner(SEAT_PRIMARY), Some(WM));
@@ -1460,7 +1533,7 @@ mod tests {
             seat.inject(SEAT_PRIMARY, press_char('x')),
             Ok(KeyInput::WIRE_LEN)
         );
-        assert_eq!(seat.release(SEAT_PRIMARY, WM), Ok(()));
+        assert_eq!(seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text), Ok(()));
         assert_eq!(seat.owner(SEAT_PRIMARY), None);
         // Now the press routes to the text sink instead.
         assert_eq!(
@@ -1815,7 +1888,10 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(seat.acquire(42, WM), Err(Errno::NotFound));
-        assert_eq!(seat.release(42, WM), Err(Errno::NotFound));
+        assert_eq!(
+            seat.release(42, WM, ReleaseSurface::Text),
+            Err(Errno::NotFound)
+        );
         assert_eq!(seat.inject(42, press_char('a')), Err(Errno::NotFound));
         assert_eq!(seat.read_key(42, WM, &mut buf), Err(Errno::NotFound));
         assert_eq!(

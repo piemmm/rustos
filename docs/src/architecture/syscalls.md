@@ -77,7 +77,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  21 | `stream_input_mode` | `u32 fd`, `u32 mode`               | `errno` | `CAP_CONSOLE_READ`      | no      |
 |  22 | `key_inject`   | `u64 seat`, `user_ptr` (record), `len`  | `u64` (bytes) | `CAP_INPUT_INJECT` | no    |
 |  23 | `display_acquire` | `u64 seat`                           | `u64` (lease generation) | `CAP_DISPLAY` | yes |
-|  24 | `display_release` | `u64 seat`                           | `errno` | `CAP_DISPLAY`           | yes     |
+|  24 | `display_release` | `u64 seat`, `u64 next` (`ReleaseSurface`) | `errno` | `CAP_DISPLAY`      | yes     |
 |  25 | `keyboard_read`| `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
 |  26 | `mmio_map`     | `Handle handle`, `len offset`, `len`    | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
 |  27 | `dma_alloc`    | `Handle handle`, `len`, `user_ptr` (device_out) | `u64` (base vaddr) | `CAP_MEM_DMA` | yes |

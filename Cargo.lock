@@ -1674,6 +1674,7 @@ dependencies = [
  "tairix-cpuops",
  "tairix-crc32c",
  "tairix-crypto",
+ "tairix-fbcon",
  "tairix-fsmeta",
  "tairix-itest-harness",
  "tairix-kalloc",

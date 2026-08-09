@@ -662,12 +662,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::DISPLAY_RELEASE,
         name: "display_release",
-        arg_count: 1,
+        arg_count: 2,
         args: [
             // The seat to release; only its recorded owner may. An unknown
             // seat id fails closed with `NotFound`.
             AbiType::U64,
-            AbiType::Unit,
+            // What becomes of the seat's screen: a `ReleaseSurface`
+            // discriminant. Only the releasing owner knows whether the seat
+            // is going back to its text console or on to another graphical
+            // presenter, and the two want opposite things on screen, so the
+            // release says which. A value outside the closed set fails
+            // closed with `OutOfRange`.
+            AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,

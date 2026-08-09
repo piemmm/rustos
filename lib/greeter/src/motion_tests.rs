@@ -1,6 +1,6 @@
 //! Unit tests for the surface's three animations: the chooser and the prompt
 //! trading places, the shake that answers a rejected attempt, and the veil
-//! the screen leaves through.
+//! the screen arrives from and leaves through.
 //!
 //! Each is asserted at both ends as well as in the middle, because the whole
 //! point of an animation here is that it changes nothing about the screens it
@@ -16,7 +16,7 @@ use tairix_theme::{MotionInteraction, Timeline};
 
 use crate::chooser::{AccountTile, Chooser};
 use crate::layout::Prompt;
-use crate::motion::{between_rects, Shake, Stage, Toward};
+use crate::motion::{between_rects, Shake, Stage, Toward, Veil};
 use crate::surface::{AuthSurface, Verdict, CHOOSE_HINT, REFUSED};
 use crate::testkit::{
     changed_pixels, contrast_in, feed_at, feed_in, key, named, painted, render, render_in, still,
@@ -50,12 +50,31 @@ fn span_of(interaction: MotionInteraction) -> u64 {
     u64::from(theme().motion().duration(interaction)) * MS
 }
 
+/// The same duration for the veil in the milliseconds it is started from.
+fn veil_ms() -> u16 {
+    theme().motion().duration(MotionInteraction::SessionFade)
+}
+
 /// A surface on the chooser that has been painted once, so it knows where it
 /// is and reports rectangles rather than the whole screen.
 fn placed() -> AuthSurface {
     let surface = AuthSurface::with_accounts(accounts());
     let _ = render(&surface);
     surface
+}
+
+/// The prompt as a theme that animates nothing draws it: the settled stage a
+/// completed travel has to land on, pixel for pixel.
+fn cut_to_prompt() -> AuthSurface {
+    let mut cut = placed();
+    feed_in(
+        &mut cut,
+        &named(NamedKey::Enter),
+        &mut Scripted::refusing(),
+        0,
+        &still(),
+    );
+    cut
 }
 
 #[test]
@@ -167,16 +186,36 @@ fn a_completed_travel_is_the_settled_prompt() {
     animated.advance(span);
     assert_eq!(animated.motion_due(span), None, "nothing is left running");
 
-    let mut cut = placed();
-    feed_in(
-        &mut cut,
-        &named(NamedKey::Enter),
-        &mut verifier,
-        0,
-        &still(),
+    assert_eq!(render(&animated), render(&cut_to_prompt()));
+}
+
+/// The stall this guards: an embedder steps the travel, spends real time
+/// presenting that frame, and only then asks when to wake. A span that ended
+/// in between still owes the frame that lands on the prompt, or the transition
+/// freezes part-way until something unrelated wakes the screen.
+#[test]
+fn a_travel_that_ended_while_its_frame_was_presented_still_asks_for_the_last() {
+    let span = span_of(MotionInteraction::StageTransition);
+    let mut verifier = Scripted::refusing();
+    let mut surface = placed();
+
+    feed_at(&mut surface, &named(NamedKey::Enter), &mut verifier, BOOT);
+    let stepped = BOOT + span - MS;
+    surface.advance(stepped);
+    assert!(surface.motion_due(stepped).is_some(), "still travelling");
+    assert_ne!(
+        render(&surface),
+        render(&cut_to_prompt()),
+        "and not yet the prompt"
     );
 
-    assert_eq!(render(&animated), render(&cut));
+    // Presenting that frame outlasted the millisecond the span had left.
+    let asked = BOOT + span + MS;
+    assert_eq!(surface.motion_due(asked), Some(0), "the last frame is owed");
+
+    surface.advance(asked);
+    assert_eq!(render(&surface), render(&cut_to_prompt()));
+    assert_eq!(surface.motion_due(asked), None, "only then is it over");
 }
 
 /// And the return runs the same travel backwards, ending on the settled
@@ -568,6 +607,23 @@ fn a_second_begin_does_not_restart_the_fade() {
     assert_eq!(render(&surface), half);
 }
 
+/// A veil that has arrived is done with the clock: the owner holds it for as
+/// long as it holds the screen, so a fully black screen must ask for no
+/// further frame however long that is.
+#[test]
+fn a_veil_at_full_black_asks_for_no_further_frame() {
+    let fade = span_of(MotionInteraction::SessionFade);
+    let mut surface = AuthSurface::new("ann");
+
+    surface.begin_session_fade(BOOT, &theme());
+    surface.advance(BOOT + fade);
+
+    assert!(surface.session_fade_finished());
+    assert_eq!(surface.motion_due(BOOT + fade), None);
+    assert_eq!(surface.motion_due(BOOT + fade * 2), None, "nor later");
+    assert!(!surface.advance(BOOT + fade * 2).redraw());
+}
+
 /// A reduced-motion theme's fade is over the moment it begins, so an owner
 /// leaves without presenting a frame for it.
 #[test]
@@ -603,6 +659,68 @@ fn a_surface_that_has_begun_leaving_says_so() {
     let mut instant = AuthSurface::new("ann");
     instant.begin_session_fade(0, &still());
     assert!(instant.session_fade_begun());
+}
+
+/// The veil the screen arrives out of runs the other way: opaque on the frame
+/// it begins on, and gone by the end of its span, so a screen appears out of
+/// the black rather than snapping onto it.
+#[test]
+fn an_arriving_veil_starts_black_and_ends_fully_transparent() {
+    let span = span_of(MotionInteraction::SessionFade);
+    let mut veil = Veil::arriving(BOOT, veil_ms());
+    assert_eq!(veil.strength(), u8::MAX, "the first frame is all of it");
+    assert!(!veil.finished());
+    assert!(!veil.is_leaving(), "it is the screen arriving");
+
+    let mut last = veil.strength();
+    for step in 1..=8u64 {
+        veil.advance(BOOT + span * step / 8);
+        assert!(veil.strength() <= last, "the veil darkened at step {step}");
+        last = veil.strength();
+    }
+
+    assert_eq!(veil.strength(), 0, "and the last frame is none of it");
+    assert!(veil.finished());
+}
+
+/// A screen asked to leave while it is still arriving goes on to black from
+/// the strength it had reached: an accepted secret may not brighten the
+/// screen before darkening it.
+#[test]
+fn a_leaving_veil_begins_at_the_strength_the_arriving_one_reached() {
+    let span = span_of(MotionInteraction::SessionFade);
+    let mut arriving = Veil::arriving(BOOT, veil_ms());
+    arriving.advance(BOOT + span / 2);
+    let reached = arriving.strength();
+    assert!(reached > 0 && reached < u8::MAX, "part of the way out");
+
+    let turned = BOOT + span / 2;
+    let mut leaving = Veil::leaving(reached, turned, veil_ms());
+    assert_eq!(leaving.strength(), reached, "it picks up where it was");
+    assert!(leaving.is_leaving());
+
+    leaving.advance(turned + span);
+    assert_eq!(leaving.strength(), u8::MAX, "and still ends on black");
+    assert!(leaving.finished());
+}
+
+/// A veil that has reached the strength it runs to is done with the clock
+/// whichever way it was going: a screen that has arrived and one that has
+/// gone both ask for no further frame.
+#[test]
+fn a_finished_veil_of_either_direction_asks_for_no_further_frame() {
+    let span = span_of(MotionInteraction::SessionFade);
+    for mut veil in [
+        Veil::arriving(BOOT, veil_ms()),
+        Veil::leaving(0, BOOT, veil_ms()),
+    ] {
+        assert!(veil.next_frame_in(BOOT).is_some(), "it is running");
+        veil.advance(BOOT + span);
+        assert!(veil.finished());
+        assert_eq!(veil.next_frame_in(BOOT + span), None);
+        assert_eq!(veil.next_frame_in(BOOT + span * 2), None, "nor later");
+        assert!(!veil.advance(BOOT + span * 2), "and nothing moves");
+    }
 }
 
 /// The largest colour difference any one pixel shows between two frames,

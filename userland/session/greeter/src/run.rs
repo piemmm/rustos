@@ -50,6 +50,7 @@ mod program {
     use tairix_abi::driver::display::{Display, DisplayMode};
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::{KeyInput, PointerInput};
+    use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::SESSION_ENDPOINT;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity};
@@ -500,7 +501,15 @@ mod program {
         // The chrome goes up before the opening frame, so the screen appears
         // with its clock rather than gaining one a moment later.
         screen.refresh(tairix_rt::clock_get(), wall_now());
-        let opening = screen.repaint();
+        // The opening frame is the veil at full black, so the screen appears
+        // out of the black the seat was handed over cleared to rather than
+        // snapping onto it; the park loop below runs the fade off the same
+        // deadline as every other animation. A theme that fades instantly has
+        // nothing to cover, and opens on the screen itself.
+        let opening = match screen.begin_entry_fade(tairix_rt::clock_get()) {
+            Present::Nothing => screen.repaint(),
+            veiled => veiled,
+        };
         show(&mut display, screen.frame(), opening);
         record(SCREEN_READY, Level::Info, "greeter: the login screen is up");
 
@@ -631,7 +640,18 @@ mod program {
         let code = session();
         // Owner-checked release on every exit path: a lease already lost
         // refuses with a typed error, ignored — heal, never widen.
-        let _ = tairix_rt::display_release(SEAT_PRIMARY);
+        //
+        // A clean exit means a verified secret and a screen already faded to
+        // black, with the authority about to start a desktop on this seat, so
+        // the screen is handed on cleared rather than replaying the text
+        // console into the gap. Every other exit is going back to the text
+        // login, which needs its console to say why.
+        let next = if code == 0 {
+            ReleaseSurface::Handover
+        } else {
+            ReleaseSurface::Text
+        };
+        let _ = tairix_rt::display_release(SEAT_PRIMARY, next);
         code
     }
 

@@ -41,6 +41,9 @@ use tairix_abi::hwtree::FramebufferMemory;
 /// without naming `tairix_fbcon` directly.
 pub use tairix_fbcon::Cell;
 use tairix_fbcon::Geometry;
+/// Re-exported for the same reason: the boot consumer names the surface
+/// disposition it hands this port without naming `tairix_fbcon` directly.
+pub use tairix_fbcon::Surface;
 use tairix_fdt::Fdt;
 use tairix_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
@@ -206,7 +209,7 @@ pub struct DiscoveredVideo {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use metal::{
     active_framebuffer_extent, attach_console, configure_from_fdt, purge, reclaim_surface,
-    set_visible, text_cell_count, text_grid, write_bytes, write_output_bytes,
+    set_surface, text_cell_count, text_grid, write_bytes, write_output_bytes,
 };
 
 /// Host stand-in for the freestanding writer: rendering needs the
@@ -253,11 +256,11 @@ pub fn attach_console(
 ) {
 }
 
-/// Host stand-in for the freestanding `set_visible`: no surface exists on the
+/// Host stand-in for the freestanding `set_surface`: no surface exists on the
 /// host, so there is nothing to hand over (the handover itself is host-tested
 /// through [`tairix_fbcon::TextConsole`] and the kernel seat registry).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn set_visible(_visible: bool) {}
+pub fn set_surface(_surface: tairix_fbcon::Surface) {}
 
 /// Host stand-in for the freestanding `reclaim_surface`: no surface exists on
 /// the host, so a panic has nothing to take back.
@@ -282,7 +285,7 @@ mod metal {
     use core::sync::atomic::Ordering;
 
     use tairix_abi::RegisterWindow;
-    use tairix_fbcon::{Cell, TextConsole};
+    use tairix_fbcon::{Cell, Surface, TextConsole};
     use tairix_fdt::Fdt;
     use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use tairix_sync::IrqSafeSpinLock;
@@ -639,23 +642,23 @@ mod metal {
         render_bytes(bytes, WriteMode::ProgramOutput);
     }
 
-    /// Hand the scan-out surface between the text console and the graphical
-    /// session holding the boot seat: `visible == false` gives it up (the
-    /// console keeps interpreting output into its retained screen and paints
-    /// nothing), `visible == true` takes it back and repaints the whole
-    /// screen from that screen — including everything written while it was
-    /// away.
+    /// Hand the scan-out surface to whoever the boot seat says owns it: the
+    /// graphical session holding the lease ([`Surface::Hidden`] — the console
+    /// keeps interpreting output into its retained screen and paints
+    /// nothing), the text console ([`Surface::Shown`] — the whole screen
+    /// repaints, including everything written while it was away), or nobody
+    /// at all ([`Surface::Blank`] — cleared for a hand-over between two
+    /// graphical presenters).
     ///
     /// Waits for a concurrent write to finish, because the handover must
     /// *happen*: a skipped hide would leave the console painting over the
     /// session's frame. The wait is bounded by one console write.
     ///
-    /// Idempotent in both directions, and a call with no configured console
-    /// (a UART-only board) does nothing. Post-MMU only, like every other
-    /// render entry point.
-    pub fn set_visible(visible: bool) {
+    /// Idempotent, and a call with no configured console (a UART-only board)
+    /// does nothing. Post-MMU only, like every other render entry point.
+    pub fn set_surface(surface: Surface) {
         let _guard = RENDER_LOCK.lock();
-        apply_visibility(visible);
+        apply_surface(surface);
     }
 
     /// Take the surface back for a panic report, giving up if it is
@@ -670,12 +673,13 @@ mod metal {
         let Some(_guard) = RENDER_LOCK.try_lock() else {
             return;
         };
-        apply_visibility(true);
+        apply_surface(Surface::Shown);
     }
 
-    /// Apply a visibility change, repainting the screen when the surface is
-    /// being taken back. The render lock **must** be held.
-    fn apply_visibility(visible: bool) {
+    /// Apply a surface disposition, repainting the screen when the console
+    /// takes it back and clearing it when nobody holds it. The render lock
+    /// **must** be held.
+    fn apply_surface(surface: Surface) {
         // SAFETY: post-MMU, render lock held by the caller; `VIDEO` was
         // written pre-MMU by the single-threaded boot CPU (visible in program
         // order) and the held lock serialises this mutable access (see
@@ -687,15 +691,25 @@ mod metal {
         let Some(console) = state.console.as_mut() else {
             return;
         };
-        if !visible {
-            console.hide();
-            return;
-        }
         // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
         // validated at configure time, identity-mapped RAM; the render lock
-        // makes this the only live reference.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
-        if let Some((row_start, row_end)) = console.show(pixels) {
+        // makes this the only live reference. A console giving the surface up
+        // is handed an empty slice instead, so no reference into it is formed
+        // while a graphical session owns it.
+        let pixels: &mut [u32] = if surface.paints() {
+            unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
+        } else {
+            &mut []
+        };
+        let dirty = match surface {
+            Surface::Shown => console.show(pixels),
+            Surface::Blank => console.blank(pixels),
+            Surface::Hidden => {
+                console.hide();
+                None
+            }
+        };
+        if let Some((row_start, row_end)) = dirty {
             let stride_bytes = console.geometry().stride_px as usize * 4;
             clean_dcache_range(
                 fb_base + row_start as usize * stride_bytes,
@@ -716,10 +730,10 @@ mod metal {
     /// so none of it reaches whoever uses the terminal next
     /// (`terminal_purge`).
     ///
-    /// A hidden console discards its retained screen and paints nothing, so
-    /// the discard is what the next `set_visible(true)` reveals. Post-MMU
-    /// only, like every other render entry point; a board with no configured
-    /// console does nothing.
+    /// A console that does not own the surface discards its retained screen
+    /// and paints nothing, so the discard is what the next `Surface::Shown`
+    /// reveals. Post-MMU only, like every other render entry point; a board
+    /// with no configured console does nothing.
     pub fn purge() {
         paint(tairix_fbcon::TextConsole::purge);
     }
@@ -731,9 +745,9 @@ mod metal {
     /// The single place a reference into the firmware surface is formed for a
     /// write: a hidden console is handed an empty slice, so nothing aliases
     /// the pixels while a graphical session is writing them. Its retained
-    /// screen still advances, and `set_visible` paints the result when the
+    /// screen still advances, and `set_surface` paints the result when the
     /// surface comes back — which is why *that* path forms the surface
-    /// itself, taking it back for a console that is not visible yet.
+    /// itself, taking it back for a console that does not hold it yet.
     ///
     /// Post-MMU only (the render lock's atomic CAS requires it). A call with
     /// no active or no configured console is a no-op.
@@ -758,7 +772,9 @@ mod metal {
         let Some(console) = state.console.as_mut() else {
             return;
         };
-        let pixels: &mut [u32] = if console.is_visible() {
+        // A blanked console does paint: a program's write is what takes the
+        // surface back.
+        let pixels: &mut [u32] = if console.surface().paints() {
             // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
             // validated at configure time, identity-mapped RAM; the render
             // lock makes this the only live reference.

@@ -224,36 +224,60 @@ feature; the pin drag source is the program-library popup instead (see
 *Pin service and window-channel bridge*, above), whose every row is a
 catalogued entry by construction.
 
-## Revealing the desktop on session start
+## Fading the desktop in and out
 
 The login screen fades to black and exits, so the screen a session inherits
-is already dark. `SessionReveal` (`reveal.rs`) fades the desktop up out of
-it rather than snapping it on, driving the compositor's screen reveal from
-`0` to `u8::MAX` over the active theme's own `SessionFade` duration — no
-timing is spelled here.
+is already dark. `ScreenFade` (`fade.rs`) fades the desktop up out of it
+rather than snapping it on, driving the compositor's screen reveal from `0`
+to `u8::MAX` over the active theme's own `SessionFade` duration — no timing
+is spelled here. Logging out and stepping aside for another account run the
+same fade the other way, so the desktop dissolves into the black the login
+screen then appears out of, and a resumed session fades back in exactly as
+a fresh one arrives.
 
-It is one `tairix_theme::Timeline` and nothing else, so both degenerate
-cases need no branch: a reduced-motion theme answers a zero duration, which
-starts settled and leaves the desktop simply revealed on its first frame
-with no extra present and no timer; and a clock that jumped backwards
-settles rather than stalling black. The fade begins at the session's first
-successful present, because the span is wall-clock and one begun over
-bring-up would spend itself on an empty screen.
+It is one `tairix_theme::Fade` and nothing else, so both degenerate cases
+need no branch: a reduced-motion theme answers a zero duration, which starts
+settled and leaves the desktop simply revealed (or simply black) on its
+first frame with no extra present and no timer; and a clock that jumped
+backwards settles rather than stalling. A fade turned around picks up the
+strength that is actually on screen, so a log-out chosen while the desktop
+is still revealing dims from where it had got to rather than flashing
+bright. The reveal begins at the session's first successful present, because
+the span is wall-clock and one begun over bring-up would spend itself on an
+empty screen.
 
-The run loop's existing park drives it: each wake steps the reveal, and the
-park is shortened to the fade's next frame through `park_within` — the one
-fold the lock screen uses too, so the two cannot round a deadline
-differently. With nothing animating the park is byte-for-byte the value the
-loop already carried, so an idle desktop arms no timer. Time alone finishes
-it, so a display that refuses a present mid-fade cannot strand the desktop
-dark and nothing retries.
+The run loop's existing park drives the reveal: each wake steps the fade, and
+the park is shortened to its next frame through `park_within` — the one fold
+the lock screen uses too, so the two cannot round a deadline differently.
+With nothing animating the park is byte-for-byte the value the loop already
+carried, so an idle desktop arms no timer. Time alone finishes it, so a
+display that refuses a present mid-fade cannot strand the desktop dark and
+nothing retries.
+
+The departure cannot ride that loop: it must run to completion before the
+seat is given up, and the wake sources it is no longer serving would report
+ready on every re-park and spin a core through the whole fade. `run.rs`'s
+`fade_to_black` drives it instead, presenting each frame and sleeping
+between them on `tairix_rt::park_ns` (the runtime's off-CPU timed park), and
+it is bounded by the fade's own span. A refused present stops the dim where
+it got to; the seat is handed on cleared regardless, so the screen still
+ends black. Under a reduced-motion theme it is black from its first frame
+and parks not at all.
+
+`SeatPresentation` (`switchuser.rs`) orders the two into the switch: the
+dim runs only after the authority *accepted* the step-aside — a refusal must
+leave the screen exactly as the user left it — and before `suspend`, while
+the seat and the frame ring are still up. Coming back, the arrival is begun
+after `reconfigure` and before `repaint_all`, so the repaint presents the
+first frame of the fade rather than the whole desktop at once.
 
 Reaching full strength is announced once per session as `DESKTOP_REVEALED`
 (message `DESKTOP_REVEALED_MESSAGE`), emitted after a present that reached
 the display — the witness that the desktop is *visible*, not merely
 presenting, since every frame before it is black to a degree. A
 reduced-motion theme is settled on its first frame, so its witness lands
-there; nothing is ever said twice. The desktop QEMU verticals gate their
+there; nothing is ever said twice. A fade heading for black never announces
+at all: it reaches black, not visibility. The desktop QEMU verticals gate their
 screendump on the rendered message, so it is defined once here and imported
 by `tools/xtask` rather than restated.
 

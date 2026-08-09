@@ -76,8 +76,10 @@ Compromising it therefore yields a screen, not an account.
    authority's answer is input like any other; a page that repeats an
    offset, overruns the total, or never says it is last ends the walk
    rather than spinning.
-5. **Paint the first frame** and audit `SCREEN_READY`.
-6. **Park.**
+5. **Begin the entry fade**, so the first frame the display receives is full
+   black.
+6. **Paint that frame** and audit `SCREEN_READY`.
+7. **Park**, which uncovers the chooser out of the black.
 
 A verified secret fades the screen to black and then exits `0`, which also
 releases the seat: the authority is watching for that exit and starts the
@@ -87,6 +89,23 @@ transfer is needed, and a login screen cannot hold the screen behind a
 running desktop. The release is owner-checked on every exit path, and a lease
 already lost refuses with a typed error that is ignored rather than
 escalated.
+
+## The fade in from black
+
+The screen this process inherits is black — cleared by the seat hand-over
+from whichever session released it, or, at first boot, showing the kernel
+text console. So the chooser does not snap on: `begin_entry_fade` is called
+*before* the opening present, which makes that first frame full black and
+lets the chooser appear out of it as the park loop runs. Nothing else is
+needed for it — `refresh` steps the veil and `park_timeout` folds its next
+frame, exactly as for every other animation — and under reduced motion the
+fade is over before it begins, so the screen simply opens on the chooser.
+
+Only the *leaving* direction is modal. An arriving screen answers input and
+draws its pointer as usual: a user may pick an account and start typing
+while it is still appearing. A secret accepted mid-arrival leaves from the
+strength the veil had reached, so the screen never brightens before it
+darkens.
 
 ## The fade to black
 
@@ -121,9 +140,11 @@ nearer. When none apply the wait has no timeout at all, so an untouched screen
 arms no timer and takes no interrupt. There is no poll loop and no yield.
 
 The surface animates four things — the chooser's selection mark, the travel
-between the chooser and the secret prompt, a shake on a refusal, and the fade
-to black on success — and reports the soonest frame any of them needs as one
-deadline. Every duration is theme data
+between the chooser and the secret prompt, a shake on a refusal, and the veil
+that covers and uncovers the whole screen — and reports the soonest frame any
+of them needs as one deadline. The veil is one animation run in both
+directions, not two: the screen arrives out of black and leaves into it over
+the same span. Every duration is theme data
 ([`lib/greeter`](../lib/greeter.md#motion) has the design); a reduced-motion
 theme makes all four instant, asks for no frames, and leaves the idle timeout
 exactly as it is.

@@ -78,6 +78,7 @@ use crate::sched::{
 };
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
     CrashFaultClass, CrashNamedReg, CrashRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord,
@@ -5414,15 +5415,22 @@ where
         Ok(lease.generation)
     }
 
-    fn display_release(&self, caller: &CallerContext<'_>, seat: u64) -> SyscallResult {
-        // The dispatcher already checked `CAP_DISPLAY`. Only the recorded
-        // owner may release: the seat's input then returns to the text
-        // console so a login/shell once again receives the keyboard
-        // (`plans/PI.md` P11). An unknown seat id fails closed (`NotFound`)
-        // and a non-owner is refused (`SeatNotOwner`) — a release is never
-        // a global "flip it back" switch (`plans/DISPLAY.md` D2).
+    fn display_release(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        next: ReleaseSurface,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_DISPLAY` and decoded `next`.
+        // Only the recorded owner may release: the seat's input then returns
+        // to the text console so a login/shell once again receives the
+        // keyboard (`plans/PI.md` P11). An unknown seat id fails closed
+        // (`NotFound`) and a non-owner is refused (`SeatNotOwner`) — a
+        // release is never a global "flip it back" switch
+        // (`plans/DISPLAY.md` D2). `next` decides only what the screen shows
+        // in the gap that follows, never who may release.
         self.seat_registry
-            .release(seat, SeatOwner(caller.task_id.0))?;
+            .release(seat, SeatOwner(caller.task_id.0), next)?;
         Ok(0)
     }
 
@@ -19490,7 +19498,10 @@ mod tests {
 
         // Releasing returns input to the text console: the next press
         // routes to the text sink (the buffer still holds the 'z' record).
-        assert_eq!(h.display_release(&ctx, SEAT_PRIMARY), Ok(0));
+        assert_eq!(
+            h.display_release(&ctx, SEAT_PRIMARY, ReleaseSurface::Text),
+            Ok(0)
+        );
         assert_eq!(
             h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
@@ -19502,14 +19513,17 @@ mod tests {
         // The released seat is unowned: a second release by the former
         // owner is refused rather than silently succeeding.
         assert_eq!(
-            h.display_release(&ctx, SEAT_PRIMARY),
+            h.display_release(&ctx, SEAT_PRIMARY, ReleaseSurface::Text),
             Err(Errno::SeatNotOwner)
         );
 
         // Every seat-addressed call fails closed for a seat that does not
         // exist, before any capability-independent state is touched.
         assert_eq!(h.display_acquire(&ctx, 42), Err(Errno::NotFound));
-        assert_eq!(h.display_release(&ctx, 42), Err(Errno::NotFound));
+        assert_eq!(
+            h.display_release(&ctx, 42, ReleaseSurface::Text),
+            Err(Errno::NotFound)
+        );
         assert_eq!(
             h.key_inject(&ctx, 42, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::NotFound)
@@ -19575,7 +19589,7 @@ mod tests {
             Err(Errno::SeatBusy)
         );
         assert_eq!(
-            h.display_release(&intruder, SEAT_PRIMARY),
+            h.display_release(&intruder, SEAT_PRIMARY, ReleaseSurface::Text),
             Err(Errno::SeatNotOwner)
         );
 
@@ -19596,7 +19610,10 @@ mod tests {
 
         // Only the owner's release frees the seat for the next claimant,
         // whose grant is a fresh lease generation.
-        assert_eq!(h.display_release(&wm, SEAT_PRIMARY), Ok(0));
+        assert_eq!(
+            h.display_release(&wm, SEAT_PRIMARY, ReleaseSurface::Text),
+            Ok(0)
+        );
         assert_eq!(h.display_acquire(&intruder, SEAT_PRIMARY), Ok(2));
     }
 
@@ -19729,11 +19746,11 @@ mod tests {
             Err(Errno::SeatRevoked)
         );
         assert_eq!(
-            h.display_release(&wm, SEAT_PRIMARY),
+            h.display_release(&wm, SEAT_PRIMARY, ReleaseSurface::Text),
             Err(Errno::SeatRevoked)
         );
         assert_eq!(
-            h.display_release(&wm, SEAT_PRIMARY),
+            h.display_release(&wm, SEAT_PRIMARY, ReleaseSurface::Text),
             Err(Errno::SeatNotOwner)
         );
 
@@ -27130,7 +27147,10 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "seat" && value == "1"));
         assert_eq!(h.display_acquire(&wm, 1), Err(Errno::NotFound));
-        assert_eq!(h.display_release(&wm, 1), Err(Errno::NotFound));
+        assert_eq!(
+            h.display_release(&wm, 1, ReleaseSurface::Text),
+            Err(Errno::NotFound)
+        );
         assert_eq!(seat.record(1), None);
     }
 
@@ -28448,7 +28468,9 @@ mod tests {
         }
 
         // A released lease withdraws the authority (fail closed on loss).
-        assert!(h.display_release(&ctx, SEAT_PRIMARY).is_ok());
+        assert!(h
+            .display_release(&ctx, SEAT_PRIMARY, ReleaseSurface::Text)
+            .is_ok());
         for id in seat_scoped {
             assert_eq!(
                 h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
@@ -29498,7 +29520,7 @@ mod tests {
         // releases exactly the sets it minted, and the seat lease with them.
         assert_eq!(crate::waitset::release_owned_by(0x5709), 1);
         assert_eq!(crate::waitset::release_owned_by(0x570A), 1);
-        seat.release(SEAT_PRIMARY, SeatOwner(0x5709))
+        seat.release(SEAT_PRIMARY, SeatOwner(0x5709), ReleaseSurface::Text)
             .expect("seat released");
     }
 

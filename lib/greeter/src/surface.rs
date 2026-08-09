@@ -328,7 +328,8 @@ pub struct AuthSurface {
     stage: Option<Stage>,
     /// The question shaking, while a rejected attempt is being answered.
     shake: Option<Shake>,
-    /// The black the screen leaves through, once a secret is accepted.
+    /// The black the screen arrives from, and the one it leaves through once
+    /// a secret is accepted.
     veil: Option<Veil>,
 }
 
@@ -595,7 +596,10 @@ impl AuthSurface {
             if veil.advance(now_ns) {
                 changed = changed.merged(Changed::Whole);
             }
-            self.veil = Some(veil);
+            // A veil that has uncovered the screen is gone, so no later frame
+            // fills the screen with nothing. The one the screen leaves
+            // through is held: its owner holds the black until it exits.
+            self.veil = (veil.is_leaving() || !veil.finished()).then_some(veil);
         }
 
         if !changed.moved() {
@@ -607,6 +611,11 @@ impl AuthSurface {
     /// Nanoseconds until the next animation frame, or `None` when nothing is
     /// animating — including under reduced motion, which leaves every
     /// duration at zero and so arms no timer at all.
+    ///
+    /// An animation whose span ran out since the last [`advance`](Self::advance)
+    /// still answers, with a frame due now: that frame is its settled end
+    /// state, and presenting one takes long enough that the span routinely
+    /// ends between the two.
     #[must_use]
     pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
         let mut due = self.selection_due(now_ns);
@@ -622,6 +631,31 @@ impl AuthSurface {
         due
     }
 
+    /// Begin the fade the screen arrives out of, before its first frame is
+    /// presented.
+    ///
+    /// The screen starts under the same full black the previous occupant of
+    /// the display left it cleared to, and uncovers over the theme's
+    /// session-fade duration — so a fresh surface appears rather than
+    /// snapping onto whatever was there. It is not the screen leaving: input
+    /// is still answered and a pointer is still drawn, because a person may
+    /// pick an account while it is still coming up.
+    ///
+    /// A reduced-motion theme has nothing to uncover, so it is over before it
+    /// begins and no repaint is owed. Beginning it when a veil already exists
+    /// changes nothing.
+    pub fn begin_entry_fade(&mut self, now_ns: u64, theme: &Theme) -> Outcome {
+        if self.veiled() {
+            return Outcome::quiet();
+        }
+        let arriving = Veil::arriving(now_ns, session_fade_ms(theme));
+        if arriving.finished() {
+            return Outcome::quiet();
+        }
+        self.veil = Some(arriving);
+        Outcome::changed(None)
+    }
+
     /// Begin the fade the screen leaves through, once a secret has been
     /// accepted.
     ///
@@ -632,14 +666,26 @@ impl AuthSurface {
     /// [`session_fade_finished`](Self::session_fade_finished) says so — which
     /// a reduced-motion theme says immediately, with no frame to present.
     ///
-    /// Beginning a fade already begun changes nothing.
+    /// A screen still arriving leaves from the strength it had reached, so a
+    /// secret accepted while it comes up cannot brighten it first. Beginning
+    /// a departure already begun changes nothing.
     pub fn begin_session_fade(&mut self, now_ns: u64, theme: &Theme) -> Outcome {
-        if self.veil.is_some() {
+        if self.session_fade_begun() {
             return Outcome::quiet();
         }
-        let duration = theme.motion().duration(MotionInteraction::SessionFade);
-        self.veil = Some(Veil::start(now_ns, duration));
+        let from = self.veil.map_or(0, Veil::strength);
+        self.veil = Some(Veil::leaving(from, now_ns, session_fade_ms(theme)));
         Outcome::changed(None)
+    }
+
+    /// Whether a veil is held over the screen at all, in either direction.
+    ///
+    /// The one the screen arrives out of is let go the frame it uncovers, so
+    /// an arrived screen pays nothing more for having faded in; the one it
+    /// leaves through is held, because its owner holds the black until it
+    /// goes.
+    pub(crate) const fn veiled(&self) -> bool {
+        self.veil.is_some()
     }
 
     /// Whether the screen has begun leaving, from the first veiled frame on.
@@ -647,19 +693,25 @@ impl AuthSurface {
     /// An owner that draws a pointer over this surface stops drawing it from
     /// here: a pointer is something to point *with*, and the screen has
     /// stopped answering input, so an arrow left over the black points at
-    /// nothing. It leaves with the screen it belonged to.
+    /// nothing. It leaves with the screen it belonged to. A screen still
+    /// arriving is under the same black and answers both, so only the
+    /// departure counts.
     #[must_use]
     pub const fn session_fade_begun(&self) -> bool {
-        self.veil.is_some()
+        match self.veil {
+            Some(veil) => veil.is_leaving(),
+            None => false,
+        }
     }
 
     /// Whether the screen has finished going black, so its owner may leave.
     ///
     /// `false` until [`begin_session_fade`](Self::begin_session_fade) has been
-    /// called: a screen that never began leaving has not finished doing so.
+    /// called: a screen that never began leaving has not finished doing so,
+    /// and one that has finished arriving has finished the opposite.
     #[must_use]
     pub fn session_fade_finished(&self) -> bool {
-        self.veil.is_some_and(Veil::finished)
+        self.session_fade_begun() && self.veil.is_some_and(Veil::finished)
     }
 
     /// Step the chooser's selection cross-fade, if anything is drawing it.
@@ -1319,6 +1371,12 @@ pub fn panel_rect(screen: Rect, scale: Scale) -> Rect {
 /// How long one stage transition runs in `theme`.
 fn stage_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::StageTransition)
+}
+
+/// How long the veil runs in `theme`, whichever way it is going: the screen
+/// arrives out of the black it later leaves through, so one duration.
+fn session_fade_ms(theme: &Theme) -> u16 {
+    theme.motion().duration(MotionInteraction::SessionFade)
 }
 
 /// The band a rejected attempt's shake displaces: the disc, the name, and

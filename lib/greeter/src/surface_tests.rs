@@ -2,10 +2,11 @@
 //!
 //! These cover the state machine (typing, submission, the erasure of the
 //! secret on every verdict, the wordings), the modality property that only a
-//! verified secret concludes the surface, the one geometry definition that
-//! paint and hit test share, and the render's degraded paths. The chooser has
-//! its own file, as do the cooldown and chrome updates, the scrim, and the
-//! damage report.
+//! verified secret concludes the surface, which of the veil's two directions
+//! stops the surface answering at all, the one geometry definition that paint
+//! and hit test share, and the render's degraded paths. The veil's own
+//! arithmetic has its file, as do the chooser, the cooldown and chrome
+//! updates, the scrim, and the damage report.
 
 use alloc::string::String;
 use alloc::vec;
@@ -22,7 +23,7 @@ use crate::surface::{
 };
 use crate::testkit::{
     centre, changed_pixels, contrast_in, feed, key, moved, named, painted, render, render_in,
-    separation, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
+    separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
 /// A dressed clock block, so a test that cares where the chrome lands has
@@ -196,6 +197,105 @@ fn no_event_concludes_the_surface_without_a_verified_verdict() {
             "{event:?} concluded the surface without a verified secret"
         );
     }
+}
+
+/// A screen that is still arriving is still asking: somebody may pick an
+/// account and start typing while it comes up. Only the screen *leaving*
+/// stops answering, because by then the decision has been made.
+#[test]
+fn only_the_screen_leaving_stops_the_surface_answering_input() {
+    let theme = theme();
+    let mut arriving = AuthSurface::new("ann");
+    let mut asked = Scripted::refusing();
+    arriving.begin_entry_fade(0, &theme);
+
+    submit(&mut arriving, "x", &mut asked);
+    assert_eq!(
+        asked.offered,
+        vec![String::from("x")],
+        "a surface that is still arriving is still asking"
+    );
+
+    let mut leaving = AuthSurface::new("ann");
+    let mut unasked = Scripted::refusing();
+    leaving.begin_session_fade(0, &theme);
+
+    assert!(!submit(&mut leaving, "x", &mut unasked).redraw());
+    assert!(unasked.offered.is_empty(), "nothing was offered");
+}
+
+/// A screen arriving and a screen leaving are opposite ends of the same
+/// black, so an owner waiting for the screen to *go* must never be told a
+/// screen that has just come up has gone.
+#[test]
+fn a_finished_entry_fade_is_not_a_finished_session_fade() {
+    let mut surface = AuthSurface::new("ann");
+    surface.begin_entry_fade(0, &theme());
+
+    assert!(!surface.session_fade_begun(), "arriving is not leaving");
+    assert!(!surface.session_fade_finished());
+
+    surface.advance(u64::MAX);
+    assert!(!surface.session_fade_begun());
+    assert!(!surface.session_fade_finished(), "nor once it has arrived");
+}
+
+/// The veil the screen arrived out of is let go once it is transparent: a
+/// screen-wide fill of nothing must not be painted, or repainted for, on
+/// every frame after.
+#[test]
+fn an_arrived_screen_owes_no_further_frame_and_holds_no_veil() {
+    let mut surface = AuthSurface::new("ann");
+    surface.begin_entry_fade(0, &theme());
+    assert!(surface.veiled(), "it comes up under the black");
+
+    let arrived = surface.advance(u64::MAX);
+    assert!(arrived.redraw(), "the frame it arrives on is drawn");
+    assert_eq!(arrived.damage(), None, "and it is the whole screen");
+
+    assert!(!surface.veiled(), "and the veil is gone with it");
+    assert!(!surface.advance(u64::MAX).redraw(), "nothing after it");
+    assert_eq!(surface.motion_due(u64::MAX), None);
+    assert_eq!(
+        render(&surface),
+        render(&AuthSurface::new("ann")),
+        "an arrived screen is the screen, with nothing over it"
+    );
+}
+
+/// A secret accepted while the screen is still coming up takes it on to black
+/// from where it is. Restarting the veil at nothing would flash the screen
+/// bright and then fade it, which is two movements where there is one.
+#[test]
+fn leaving_part_way_through_the_entry_fade_does_not_brighten_the_screen() {
+    let theme = theme();
+    let mut surface = AuthSurface::new("ann");
+    surface.begin_entry_fade(0, &theme);
+    let frame = surface.motion_due(0).expect("an arriving screen asks");
+    surface.advance(frame);
+    let arriving = render(&surface);
+
+    assert!(surface.begin_session_fade(frame, &theme).redraw());
+    assert!(surface.session_fade_begun());
+    assert_eq!(render(&surface), arriving, "the screen did not brighten");
+
+    surface.advance(u64::MAX);
+    assert!(surface.session_fade_finished(), "and it still ends black");
+    assert!(surface.veiled(), "a screen that has gone stays black");
+}
+
+/// A reduced-motion theme has nothing to arrive out of: the screen is simply
+/// there, with no veil drawn and no frame owed for one.
+#[test]
+fn a_reduced_motion_entry_fade_is_over_before_it_begins() {
+    let mut surface = AuthSurface::new("ann");
+
+    assert!(!surface.begin_entry_fade(0, &still()).redraw());
+
+    assert!(!surface.veiled(), "there is nothing to uncover");
+    assert_eq!(surface.motion_due(0), None, "nothing is armed");
+    assert!(!surface.session_fade_begun());
+    assert_eq!(render(&surface), render(&AuthSurface::new("ann")));
 }
 
 /// A screen lock has no chooser to step back to, so Escape is inert: it

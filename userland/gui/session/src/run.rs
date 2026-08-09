@@ -86,6 +86,7 @@ mod program {
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::{
         session_wake_endpoint, SessionRequest, SessionVerdict, SessionWake, SESSION_ENDPOINT,
@@ -105,7 +106,9 @@ mod program {
         association_from_appinfo, AppAssociation, DirectorySource, VfsDirectorySource,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
+    use tairix_desktop_session::switchuser::{
+        SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
+    };
     use tairix_desktop_session::{
         build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
         open_tray, parse, reap_launched, relay_power, resolve_window_identities,
@@ -115,11 +118,11 @@ mod program {
         DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, HoldBack,
         IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow,
         PickConclusion, PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
-        PinboardStoreError, ResolvedPin, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionReveal,
-        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
-        WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        PinboardStoreError, ResolvedPin, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, FILES_LABEL,
+        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
+        WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -687,18 +690,50 @@ mod program {
     }
 
     /// Step everything the session animates to `now_ns`, so the frame
-    /// presented next carries it: the desktop's reveal from black at session
-    /// start, and the locked screen's own surface. Both are idle once nothing
-    /// is in flight, which is what leaves an idle desktop's park indefinite.
+    /// presented next carries it: the desktop's screen fade, and the locked
+    /// screen's own surface. Both are idle once nothing is in flight, which
+    /// is what leaves an idle desktop's park indefinite.
     fn animate(
-        reveal: &mut SessionReveal,
+        fade: &mut ScreenFade,
         lock: &mut ScreenLock,
         shell: &DesktopShell,
         compositor: &mut Compositor,
         now_ns: u64,
     ) {
-        reveal.advance(now_ns, compositor);
+        fade.advance(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
+    }
+
+    /// Dissolve the session's screen to black, presenting every frame, and
+    /// return once it is dark.
+    ///
+    /// The last thing a session draws before it hands the seat on cleared,
+    /// so the desktop dims into the black the login screen appears out of
+    /// rather than vanishing mid-frame. Bounded by the fade's own span, and
+    /// a no-op under a reduced-motion theme, which is dark from its first
+    /// frame.
+    ///
+    /// Paced on the runtime's timed park, not the session wait-set: the
+    /// sources this loop is not serving would report ready on every re-park
+    /// and spin a core through the whole fade. A refused present stops the
+    /// dim where it got to — nothing here can act on it, and the seat is
+    /// handed on cleared regardless, so the screen still ends black.
+    fn fade_to_black(
+        fade: &mut ScreenFade,
+        compositor: &mut Compositor,
+        display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
+    ) {
+        let Some(display) = display.as_mut() else {
+            return;
+        };
+        fade.depart(tairix_rt::clock_get(), compositor);
+        while compositor.present(display).is_ok() {
+            if fade.settled() {
+                return;
+            }
+            tairix_rt::park_ns(fade.park_deadline_ns(tairix_rt::clock_get(), NO_DEADLINE_NS));
+            fade.advance(tairix_rt::clock_get(), compositor);
+        }
     }
 
     /// Present the composited damage through the remote display, mapping a
@@ -720,14 +755,14 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
-        reveal: &mut SessionReveal,
+        fade: &mut ScreenFade,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
         };
         match compositor.present(display) {
             Ok(()) => {
-                reveal.presented(&LOG_SINK);
+                fade.presented(&LOG_SINK);
                 Ok(())
             }
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
@@ -1028,7 +1063,8 @@ mod program {
 
     /// The session's ownership of the screen, as the switch drives it: the
     /// frame ring and its region, the compositor and the surfaces laid out
-    /// over the mode, and the wait-set the seat member belongs to.
+    /// over the mode, the screen fade the hand-over is dressed with, and the
+    /// wait-set the seat member belongs to.
     struct SessionScreen<'a, S: DirectorySource> {
         display: &'a mut Option<RemoteDisplay<'static, RtDisplayTransport>>,
         region: &'a mut Option<FrameRegion>,
@@ -1036,10 +1072,19 @@ mod program {
         shell: &'a mut DesktopShell,
         desktop: &'a Desktop<S>,
         pinboard: &'a mut PinboardPanel,
+        fade: &'a mut ScreenFade,
         set: u64,
     }
 
     impl<S: DirectorySource> SeatPresentation for SessionScreen<'_, S> {
+        fn fade_out(&mut self) {
+            fade_to_black(self.fade, self.compositor, self.display);
+        }
+
+        fn fade_in(&mut self) {
+            self.fade.arrive(tairix_rt::clock_get(), self.compositor);
+        }
+
         fn suspend(&mut self) {
             // The ring goes before the region it borrows, and the seat's
             // wait-set member goes with them: a parked session must not be
@@ -1059,7 +1104,11 @@ mod program {
         }
 
         fn release_seat(&mut self) {
-            let _ = tairix_rt::display_release(SEAT_PRIMARY);
+            // The login screen is what comes up next, so the seat is handed
+            // on cleared: this account's last frame must not linger on the
+            // screen for the next person, and no text console belongs in the
+            // gap either.
+            let _ = tairix_rt::display_release(SEAT_PRIMARY, ReleaseSurface::Handover);
         }
 
         fn acquire_seat(&mut self) -> Result<(), Errno> {
@@ -1075,7 +1124,7 @@ mod program {
                 SEAT_TOKEN,
             ) != 0
             {
-                let _ = tairix_rt::display_release(SEAT_PRIMARY);
+                let _ = tairix_rt::display_release(SEAT_PRIMARY, ReleaseSurface::Text);
                 return Err(Errno::SeatRevoked);
             }
             Ok(())
@@ -1309,8 +1358,8 @@ mod program {
         // snapping on. Begun here, with the first frame composed and about
         // to be shown: begun any earlier, the fade would spend itself on
         // bring-up with nothing on screen yet.
-        let mut reveal = SessionReveal::begin(tairix_rt::clock_get(), &mut compositor);
-        if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
+        let mut fade = ScreenFade::begin(tairix_rt::clock_get(), &mut compositor);
+        if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
             return code;
         }
 
@@ -1580,7 +1629,7 @@ mod program {
                 let now_ns = tairix_rt::clock_get();
                 switch.park_deadline_ns(lock.park_deadline_ns(
                     now_ns,
-                    reveal.park_deadline_ns(
+                    fade.park_deadline_ns(
                         now_ns,
                         tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
                     ),
@@ -1599,13 +1648,13 @@ mod program {
                 // armed the deadline for is owed: the next frame of whatever
                 // is animating, and the held-back report.
                 animate(
-                    &mut reveal,
+                    &mut fade,
                     &mut lock,
                     &shell,
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
-                if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
+                if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
                     return code;
                 }
                 tairix_rt::cachereport::publish_if_due();
@@ -1918,6 +1967,7 @@ mod program {
                             shell: &mut shell,
                             desktop: &desktop,
                             pinboard: &mut pinboard,
+                            fade: &mut fade,
                             set,
                         };
                         let mode = match switch.resume(&mut screen) {
@@ -2057,6 +2107,7 @@ mod program {
                     ) {
                         Routed::Continue => {}
                         Routed::EndSession => {
+                            fade_to_black(&mut fade, &mut compositor, &mut display);
                             shell.teardown(&mut compositor);
                             return EXIT_LOGGED_OUT;
                         }
@@ -2070,6 +2121,7 @@ mod program {
                                     shell: &mut shell,
                                     desktop: &desktop,
                                     pinboard: &mut pinboard,
+                                    fade: &mut fade,
                                     set,
                                 },
                             );
@@ -2116,6 +2168,7 @@ mod program {
                             ) {
                                 Routed::Continue => {}
                                 Routed::EndSession => {
+                                    fade_to_black(&mut fade, &mut compositor, &mut display);
                                     shell.teardown(&mut compositor);
                                     return EXIT_LOGGED_OUT;
                                 }
@@ -2129,6 +2182,7 @@ mod program {
                                             shell: &mut shell,
                                             desktop: &desktop,
                                             pinboard: &mut pinboard,
+                                            fade: &mut fade,
                                             set,
                                         },
                                     );
@@ -2218,7 +2272,7 @@ mod program {
             // actually shown at, not to when the wake arrived, so the work
             // this wake did does not age the frame.
             animate(
-                &mut reveal,
+                &mut fade,
                 &mut lock,
                 &shell,
                 &mut compositor,
@@ -2227,7 +2281,7 @@ mod program {
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
             // copies only that region.
-            if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut reveal) {
+            if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
                 return code;
             }
             // The wake is fully handled and its frame is on screen: report
@@ -4104,7 +4158,17 @@ mod program {
         let code = session();
         // Owner-checked release on every exit path: a lease already lost
         // refuses (typed, ignored) — heal, never widen.
-        let _ = tairix_rt::display_release(SEAT_PRIMARY);
+        //
+        // A clean exit is a session the user ended, and the authority brings
+        // the login screen back on this seat, so the screen is handed on
+        // cleared. Any other exit is a failure whose reason belongs on the
+        // console, which therefore takes the screen back.
+        let next = if code == 0 {
+            ReleaseSurface::Handover
+        } else {
+            ReleaseSurface::Text
+        };
+        let _ = tairix_rt::display_release(SEAT_PRIMARY, next);
         code
     }
 

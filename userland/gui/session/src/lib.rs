@@ -49,15 +49,18 @@
 //! rounded-corner path. Composing the taskbar and window
 //! manager is the permitted `userland/gui/*` edge.
 //!
-//! # Revealing the desktop at session start
+//! # Fading the desktop in and out
 //!
 //! The login screen fades to black before it exits, so a session starts on a
-//! dark screen. [`SessionReveal`] (the [`reveal`] module) fades the desktop up
+//! dark screen. [`ScreenFade`] (the [`fade`] module) fades the desktop up
 //! over it through the compositor's screen reveal, over the theme's own
 //! session-fade span, and folds its next frame into the embedder's park —
-//! settled, it asks for no wake at all. Reaching full strength is announced
-//! once as [`DESKTOP_REVEALED`], the witness that the desktop is visible
-//! rather than merely presented.
+//! settled, it asks for no wake at all. Logging out, stepping aside for
+//! another account, and being resumed all run that same fade, so a session
+//! dissolves into the black the login screen appears out of instead of
+//! cutting to it. Reaching full strength is announced once as
+//! [`DESKTOP_REVEALED`], the witness that the desktop is visible rather than
+//! merely presented.
 //!
 //! # Routing live input to the taskbar and window manager
 //!
@@ -170,6 +173,7 @@ pub mod config;
 pub mod confirm;
 pub mod desktop;
 pub mod device;
+pub mod fade;
 pub mod holdback;
 pub mod input;
 pub mod keyboard;
@@ -180,7 +184,6 @@ pub mod picker;
 pub mod pinboard;
 pub mod pins;
 pub mod presenter;
-pub mod reveal;
 pub mod seat;
 pub mod session;
 pub mod settings;
@@ -212,6 +215,10 @@ pub use desktop::{
     RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
+pub use fade::{
+    ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START,
+};
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
@@ -229,10 +236,6 @@ pub use pins::{
     ResolvedPin, SessionPins, BUNDLE_RUN_SUFFIX,
 };
 pub use presenter::TaskbarPresenter;
-pub use reveal::{
-    SessionReveal, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START,
-};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{

@@ -64,6 +64,62 @@ pub struct SeatLease {
     pub generation: u64,
 }
 
+/// What a `display_release` says becomes of the seat's screen.
+///
+/// One scan-out has one presenter, so the instant a lease ends the kernel
+/// must decide what the screen shows. Only the releasing owner knows why it
+/// is giving the seat up, and the two answers want opposite things, so the
+/// release states its intent rather than the kernel guessing.
+///
+/// Neither disposition is a licence: an owner that claims a handover and
+/// never returns has not blanked the machine, because the text console takes
+/// the screen back the moment a program writes to it — a text login, or a
+/// stated failure. Only the kernel's own routine diagnostics stay off a
+/// screen promised to an incoming presenter, and they are in the log.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ReleaseSurface {
+    /// The seat is going back to its text console, which takes the screen
+    /// back and repaints its whole retained screen — so a user leaving a
+    /// graphical session finds the terminal they left.
+    Text,
+    /// Another graphical presenter is taking the seat. The screen is
+    /// cleared and held cleared until that presenter's first frame, so the
+    /// gap shows neither the outgoing session's pixels — one principal's
+    /// screen is never shown to the next — nor a replay of a text console
+    /// the user is not returning to.
+    Handover,
+}
+
+impl ReleaseSurface {
+    /// Syscall-argument value of [`Self::Text`].
+    const TEXT: u64 = 0;
+    /// Syscall-argument value of [`Self::Handover`].
+    const HANDOVER: u64 = 1;
+
+    /// This disposition as the second `display_release` argument.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        match self {
+            Self::Text => Self::TEXT,
+            Self::Handover => Self::HANDOVER,
+        }
+    }
+
+    /// Decode the second `display_release` argument.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for anything outside the closed set: an
+    /// unrecognised disposition is refused, never read as a default.
+    pub const fn from_u64(value: u64) -> Result<Self, Errno> {
+        match value {
+            Self::TEXT => Ok(Self::Text),
+            Self::HANDOVER => Ok(Self::Handover),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// Magic number identifying a seat-administration request (`"STA1"`
 /// little-endian).
 pub const SEATMGR_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"STA1");

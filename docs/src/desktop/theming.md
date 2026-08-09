@@ -74,16 +74,20 @@ bundles, under a stable `ThemeId`:
   (`title_bar_height`, `frame_inset`, `window_control_extent`,
   `resize_grabber_extent`, `hit_slop`).
   - `selection_backdrop_blur` is how far the *backdrop* behind a selected item
-    is blurred, `19` logical pixels in both themes. The `selection_fill` laid
+    is blurred, `6` logical pixels in both themes. The `selection_fill` laid
     over it keeps a crisp, rounded edge; it is the pixels the item covers — a
     window's surface, the wallpaper — that are frosted, so a selected item
-    reads as frosted glass rather than as a softened smear. It is the same
-    effect through the same filter the compositor frosts a window's backdrop
-    with, at three tenths of `WINDOW_BACKDROP_BLUR_MAX_PX`, the widest a
-    window may ask for: a selection frosts one item, not a whole window. The
-    blur radius scales through `Scale` like every other length here, and the
-    frosting runs through the one shared region frost the compositor uses
-    rather than a second implementation.
+    reads as frosted glass rather than as a softened smear. It is deliberately
+    a *short* length. A box blur of radius `r` averages `2r + 1` samples, so a
+    radius approaching the size of the item averages its whole backdrop to one
+    colour: the mark then reads as a smudge with an accent cast, and the
+    wallpaper behind it is simply gone. This one is wide enough to destroy the
+    fine detail that would otherwise show through the fill and narrow enough
+    that the larger shapes behind the mark still read, and `tairix-controls`
+    brackets it from both sides in rendering tests rather than pinning the
+    number. The blur radius scales through `Scale` like every other length
+    here, and the frosting runs through the one shared region frost the
+    compositor uses rather than a second implementation.
   - `chart_height` is the one measured instrument that is a *box* rather than
     a line: a history plot needs vertical room to rise and fall in, so it is
     several times `progress_thickness`. A trend confined to a track's
@@ -110,9 +114,27 @@ bundles, under a stable `ThemeId`:
   when to wake next (`next_frame_in`, the nearer of what remains and one frame
   at 60 Hz). It reads no clock: the embedder passes the monotonic instant it
   already holds, which is what lets a surface animate on the host with no
-  kernel. A zero duration starts *settled* — complete, with no wake asked for —
-  so reduced motion needs no second code path and an idle surface arms no
-  timer at all.
+  kernel. Running and settled are the whole of the model: a zero duration
+  starts *settled* — complete, with no wake asked for — so reduced motion needs
+  no second code path and an idle surface arms no timer at all, while a
+  *running* timeline always owes at least one more frame. Once its span has run
+  out (or the clock has jumped behind its start) that frame is due **now**,
+  because it is the end state and nothing has drawn it yet; presenting takes
+  real time, so a span routinely ends between a surface's step and the moment
+  it works out its park. The owner draws that frame and then settles or drops
+  the timeline — that, not the clock, is what ends the sequence.
+- `Fade` — one strength ramp in flight: a `Timeline` carrying a value from
+  where it started to where it is going. A timeline answers *how far
+  through*, a fade answers *what the strength is*, and every surface that
+  dissolves between two strengths is this one state machine — the login
+  screen's veil covering the screen and lifting off it again, a session's
+  screen revealing from black and going back to it. The direction is nothing
+  more than the two ends: a ramp to `u8::MAX` covers, one to `0` uncovers,
+  and one begun part-way simply names the strength it starts from. That last
+  is what lets a fade interrupt another honestly — a log-out chosen while the
+  desktop is still revealing dims from where it had got to instead of
+  flashing bright first. The interpolation is linear, like every fade's,
+  because the strength is what the eye reads rather than the travel.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no
   control carries a private animation timing. It is a table indexed by the
   interaction rather than a field per interaction: the durations are all the
@@ -127,9 +149,12 @@ bundles, under a stable `ThemeId`:
     secret prompt, in either direction.
   - `AttemptRejected` (`420` ms) is the thing an authority refused, shaken to
     say so — the login screen's prompt when a secret is not accepted.
-  - `SessionFade` (`1000` ms) is a whole session's screen appearing or leaving:
-    the login screen fading to black once a secret is accepted, and the
-    desktop revealing from black over it.
+  - `SessionFade` (`1000` ms) is a whole session's screen appearing or
+    leaving, in either direction: the login screen appearing out of black and
+    fading back to it once a secret is accepted, and the desktop revealing
+    from that black and dissolving back into it when the session ends. One
+    span for all four, so the two halves of a hand-over meet on the same
+    colour at the same rate.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

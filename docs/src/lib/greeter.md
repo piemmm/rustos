@@ -53,7 +53,7 @@ both finish.
 | selection cross-fade | `SelectionChange` | the mark dissolving between two tiles |
 | stage transition | `StageTransition` | the chosen disc travelling between chooser and prompt |
 | rejection shake | `AttemptRejected` | the prompt column swinging sideways |
-| fade to black | `SessionFade` | a veil closing over the whole screen |
+| the veil | `SessionFade` | the whole screen arriving out of black, and leaving into it |
 
 `advance(now_ns)` steps whatever is running, settles what has finished, and
 reports the union of what it touched. `motion_due(now_ns)` is the nanoseconds
@@ -61,6 +61,15 @@ until the soonest next frame — the minimum over what is running — or `None`
 when nothing is, so an idle embedder arms no timer. Both fold every animation
 in *every* mode: the shake and the veil live in the prompt, and the desktop's
 lock is a surface that is only ever the prompt.
+
+An animation whose span ran out since the last `advance` still asks, with a
+frame due **now**: that frame is its settled end state, and an embedder spends
+real time presenting the previous one, so the span routinely ends between the
+step and the park. Answering `None` there would freeze the screen one frame
+short of the end until some unrelated event woke it. It is `advance` drawing
+that frame — settling the cross-fade and the veil the screen leaves through,
+dropping the transition, the shake, and the veil it arrived out of — that makes
+the surface idle, never the clock passing the end.
 
 ### The stage transition
 
@@ -100,28 +109,47 @@ screen. The refusal notice and the authority's cooldown are untouched; the
 shake is additional, which is why reduced motion — where there is no shake at
 all — still reports the refusal in full.
 
-### The fade to black
+### The veil
 
-`begin_session_fade(now_ns, theme)` lays a veil over the whole composed screen
-that darkens to opaque over `SessionFade`, and `session_fade_finished()` says
-when it has arrived. The embedder drives it, because the embedder is what knows
-the login is over; the surface is what paints. Once it starts, input is
-ignored: the decision is made, and a keystroke must not re-open the prompt.
+One veil runs both ways over the whole composed screen, so the screen a person
+is shown and the screen they leave are the same black at the same weight.
 
-`session_fade_begun()` reports that state from the first veiled frame, for an
-embedder that draws a pointer over this surface: the veil is painted *into* the
-surface, so a cursor sampled on top of it afterwards would stay bright all the
-way down to black. A pointer is an affordance for a screen that is still
-answering, and this one is not, so it leaves with the screen rather than being
-dimmed by a second copy of the veil's arithmetic.
+`begin_entry_fade(now_ns, theme)` starts it opaque and opens it off over
+`SessionFade`, before the first frame is presented. A greeter is spawned onto a
+display the desktop handed over cleared to black, so without it the chooser is
+*cut* onto that black rather than appearing out of it; at first boot the same
+first frame covers the text console's pixels in one step. `begin_session_fade`
+is the other direction — it darkens to opaque, and `session_fade_finished()`
+says when it has arrived. The embedder drives both, because the embedder is
+what knows the screen is coming up or the login is over; the surface is what
+paints.
+
+Only the leaving half is modal. Input is ignored once it starts: the decision
+is made, and a keystroke must not re-open the prompt. A screen that is still
+*arriving* answers everything, because somebody may pick an account and start
+typing while it comes up — so `session_fade_begun()` is direction-aware, and
+both things that must stop when the screen is leaving read that one definition.
+The second of them is the pointer: an embedder that draws one over this surface
+stops, because the veil is painted *into* the surface and a cursor sampled on
+top of it afterwards would stay bright all the way down to black. A pointer is
+an affordance for a screen that is still answering, and a leaving one is not,
+so it leaves with the screen rather than being dimmed by a second copy of the
+veil's arithmetic.
+
+A secret accepted while the screen is still arriving leaves from the strength
+the veil had reached, rather than restarting at nothing and flashing the screen
+bright before darkening it. The arriving veil is let go the frame it uncovers,
+so an arrived screen pays nothing for having faded in; the leaving one is kept,
+because its owner holds the black until it exits.
 
 ### Reduced motion
 
 A reduced-motion theme reports zero for every duration, and a zero-duration
 `Timeline` starts already settled. Every animation above therefore becomes
 instant with no branch in this crate: the transition lands on its destination,
-the refusal shows its notice with no displacement, the veil is black at once,
-and nothing asks for a frame.
+the refusal shows its notice with no displacement, the leaving veil is black at
+once, the arriving one is over before it begins and owes no frame at all, and
+nothing asks for a frame.
 
 ## The verdict seam
 

@@ -1701,21 +1701,38 @@ fn the_selection_fill_is_rounded_rather_than_square() {
     );
 }
 
-/// A backdrop with detail in it: alternating black and white columns, standing
-/// in for the wallpaper a login chooser's tiles sit on. A blur of a uniform
-/// field is that same field, so only a patterned backdrop can show whether one
-/// was blurred at all.
-fn striped(width: u32, height: u32) -> Surface {
+/// A backdrop with detail in it: alternating black and white columns `band`
+/// pixels wide, standing in for the wallpaper a login chooser's tiles sit on.
+/// A blur of a uniform field is that same field, so only a patterned backdrop
+/// can show what one did. One-pixel bands are the finest detail there is;
+/// wide ones are the larger shapes a picture is read by.
+fn banded(width: u32, height: u32, band: u32) -> Surface {
     let mut s = Surface::new(width, height).expect("surface");
     for x in 0..width {
-        let stripe = if x % 2 == 0 {
+        let ink = if (x / band).is_multiple_of(2) {
             Color::rgb(0, 0, 0)
         } else {
             Color::rgb(255, 255, 255)
         };
-        s.fill_rect(x, 0, 1, height, stripe);
+        s.fill_rect(x, 0, 1, height, ink);
     }
     s
+}
+
+/// A band wide enough to stand for a wallpaper's shapes rather than its grain,
+/// and wider than the frost that has to leave them legible.
+const BAND: u32 = 24;
+
+/// The brightness range a run of pixels spans: what is left of a backdrop's
+/// shape once something has been drawn over it.
+fn span(pixels: impl Iterator<Item = Pixel>) -> u32 {
+    let (mut low, mut high) = (u32::MAX, 0);
+    for p in pixels {
+        let l = luma(p);
+        low = low.min(l);
+        high = high.max(l);
+    }
+    high.saturating_sub(low)
 }
 
 /// How much detail row `y` carries between columns `from` and `to`: the total
@@ -1744,8 +1761,8 @@ fn a_selected_tile_frosts_the_backdrop_behind_it() {
     let theme = Theme::dark();
     let row = AROUND + clear_row(&theme);
     let (bounds, sw, sh) = placed_tile();
-    let plain = striped(sw, sh);
-    let mut frosted = striped(sw, sh);
+    let plain = banded(sw, sh, 1);
+    let mut frosted = banded(sw, sh, 1);
     IconTile::new("Report.txt", IconKind::Text)
         .with_state(selected_state())
         .render(&mut frosted, bounds, Scale::ONE, &theme, None);
@@ -1780,6 +1797,42 @@ fn a_selected_tile_frosts_the_backdrop_behind_it() {
     }
 }
 
+/// The other half of the same effect: a frost softens what is behind the mark,
+/// it does not erase it. A radius approaching the size of the item averages its
+/// whole backdrop to one colour, and the mark then reads as an orange smudge
+/// with nothing behind it — which is what a login chooser's tiles looked like.
+/// The wallpaper's larger shapes have to survive the frost that took its grain.
+///
+/// Measured over the middle of the mark: the filter stops at the tile's edge
+/// and replicates the pixel there, so the outermost columns keep their own
+/// colour at any radius and would answer for a backdrop that had otherwise
+/// been averaged away.
+#[test]
+fn a_frosted_backdrop_keeps_the_shapes_that_were_behind_it() {
+    let theme = Theme::dark();
+    let row = AROUND + clear_row(&theme);
+    let (bounds, sw, sh) = placed_tile();
+    let plain = banded(sw, sh, BAND);
+    let mut frosted = banded(sw, sh, BAND);
+    IconTile::new("Report.txt", IconKind::Text)
+        .with_state(selected_state())
+        .render(&mut frosted, bounds, Scale::ONE, &theme, None);
+
+    let middle = AROUND + TW / 4..AROUND + TW - TW / 4;
+    let tinted = span(
+        middle
+            .clone()
+            .filter_map(|x| plain.get(x, row))
+            .map(|behind| fill_over(&theme, behind, u8::MAX)),
+    );
+    let got = span(middle.filter_map(|x| frosted.get(x, row)));
+    assert!(tinted > 0, "the backdrop carries no shape to keep");
+    assert!(
+        got * 2 >= tinted,
+        "the frost flattened the backdrop it should have softened: {got} of {tinted}"
+    );
+}
+
 /// The frost arrives with the mark, so a selection moving between items does
 /// not snap a backdrop into focus ahead of the colour leaving it.
 #[test]
@@ -1788,7 +1841,7 @@ fn the_frost_arrives_with_the_mark() {
     let row = AROUND + clear_row(&theme);
     let (bounds, sw, sh) = placed_tile();
     let level = |fade: Option<u8>| {
-        let mut s = striped(sw, sh);
+        let mut s = banded(sw, sh, 1);
         let mut tile = IconTile::new("Report.txt", IconKind::Text);
         if let Some(fade) = fade {
             tile = tile.with_state(selected_state()).with_selection_fade(fade);

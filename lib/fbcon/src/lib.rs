@@ -32,13 +32,25 @@
 //!
 //! # Sharing the surface with a graphical session
 //!
-//! One scan-out surface has one presenter. A console whose seat is held by a
-//! display client is [`TextConsole::hide`]den: it keeps interpreting output
-//! into the retained grid and touches no pixel, so a diagnostic written while
-//! a desktop is up is neither drawn over the composited frame nor lost.
-//! [`TextConsole::show`] takes the surface back and repaints the whole screen
-//! from that grid, so the text a user left — plus everything that arrived
-//! meanwhile — is what returns.
+//! One scan-out surface has one presenter, so a console holds one of three
+//! [`Surface`] dispositions. A console whose seat is held by a display client
+//! is [`TextConsole::hide`]den: it keeps interpreting output into the retained
+//! grid and touches no pixel, so a diagnostic written while a desktop is up is
+//! neither drawn over the composited frame nor lost. [`TextConsole::show`]
+//! takes the surface back and repaints the whole screen from that grid, so the
+//! text a user left — plus everything that arrived meanwhile — is what
+//! returns.
+//!
+//! [`TextConsole::blank`] is the third: the seat has no presenter at all
+//! because one graphical session handed it to the next. Replaying a text
+//! screen into that gap would flash minutes-old output between two frames of
+//! black, and leaving the outgoing session's pixels there would show one
+//! principal's screen to the next, so the surface is cleared and left that
+//! way — until a *program* writes to this console, which takes it back whole.
+//! A kernel diagnostic does not: a routine record whose home is the log has
+//! no claim on a screen the seat has promised to an incoming presenter,
+//! whereas a text login or a stated failure is a session a user is looking
+//! at. A panic is neither: it reclaims the surface outright.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -1084,6 +1096,32 @@ impl<'a> Screen<'a> {
     }
 }
 
+/// Which presenter owns the scan-out surface a console shares with a
+/// graphical session, and so whether — and how — that console paints.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Surface {
+    /// This console owns the surface and paints what it writes.
+    Shown,
+    /// A display client owns the surface; the retained grid still advances
+    /// and no pixel is touched.
+    Hidden,
+    /// Nobody owns the surface: it has been cleared for a hand-over between
+    /// graphical presenters and stays cleared until the next one takes it,
+    /// or until a program writes to this console and takes it back.
+    Blank,
+}
+
+impl Surface {
+    /// Whether output written to a console in this disposition can reach the
+    /// scan-out — directly when [`Shown`](Self::Shown), by taking the
+    /// surface back when [`Blank`](Self::Blank) and the output is a
+    /// program's.
+    #[must_use]
+    pub const fn paints(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+}
+
 /// The framebuffer text console: the shared `tairix_vt::Parser` feeding a
 /// screen that applies each parsed operation to its retained cell grid and
 /// repaints the dirtied cells onto the scan-out surface once per write. The
@@ -1096,10 +1134,9 @@ impl<'a> Screen<'a> {
 pub struct TextConsole<'a> {
     parser: Parser,
     screen: Screen<'a>,
-    /// Whether this console currently owns the scan-out surface. A console
-    /// sharing its surface with a graphical session is hidden while that
-    /// session holds it: the grid still advances, no pixel is touched.
-    visible: bool,
+    /// Which presenter owns the scan-out surface this console shares with a
+    /// graphical session, and so whether this console paints.
+    surface: Surface,
 }
 
 /// Fill every pixel of the surface with the default background.
@@ -1114,10 +1151,20 @@ fn fill_surface(pixels: &mut [u32]) {
     }
 }
 
+/// What a write to a console is, which decides both the line discipline it
+/// gets and whether it may take a cleared surface back.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum LineFeedMode {
-    Verbatim,
-    CarriageReturnLineFeed,
+enum WriteKind {
+    /// A kernel diagnostic, written verbatim. It never repaints a surface
+    /// cleared for an incoming presenter: the record's home is the log, and
+    /// one routine line must not replay the whole retained screen over a
+    /// hand-over.
+    Diagnostic,
+    /// A program's own output on this console: `LF` becomes `CR LF`, and it
+    /// does take a cleared surface back. A text login, a shell, or a stated
+    /// failure is something a user is looking at, and it has to be visible
+    /// the moment it exists.
+    ProgramOutput,
 }
 
 impl<'a> TextConsole<'a> {
@@ -1129,7 +1176,7 @@ impl<'a> TextConsole<'a> {
         Self {
             parser: Parser::new(),
             screen: Screen::new(geometry, main, alt),
-            visible: true,
+            surface: Surface::Shown,
         }
     }
 
@@ -1139,10 +1186,10 @@ impl<'a> TextConsole<'a> {
         self.screen.geometry()
     }
 
-    /// Whether this console currently owns the scan-out surface.
+    /// Which presenter owns the scan-out surface this console shares.
     #[must_use]
-    pub const fn is_visible(&self) -> bool {
-        self.visible
+    pub const fn surface(&self) -> Surface {
+        self.surface
     }
 
     /// Give the scan-out surface up to another presenter.
@@ -1151,7 +1198,23 @@ impl<'a> TextConsole<'a> {
     /// touches no pixel, so it neither corrupts the new presenter's frame nor
     /// is lost: [`Self::show`] paints it. Idempotent.
     pub const fn hide(&mut self) {
-        self.visible = false;
+        self.surface = Surface::Hidden;
+    }
+
+    /// Clear the scan-out surface and leave it that way, because the seat's
+    /// lease ended with a graphical successor coming: every pixel becomes
+    /// the background, and the retained grid is untouched.
+    ///
+    /// Nothing repaints it until that presenter takes the surface or a
+    /// program writes to this console, which [`Self::show`]s the whole
+    /// retained screen. A kernel diagnostic does not: its home is the log,
+    /// and replaying a boot log's worth of text over the hand-over is not
+    /// what a routine record is for. Returns the dirty band (the full
+    /// surface height).
+    pub fn blank(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
+        self.surface = Surface::Blank;
+        fill_surface(pixels);
+        Some((0, self.screen.geometry().height_px))
     }
 
     /// Take the scan-out surface back and repaint the whole screen from the
@@ -1162,7 +1225,7 @@ impl<'a> TextConsole<'a> {
     /// held the surface before can survive. Idempotent, which is what lets
     /// the panic path reclaim the screen without knowing who had it.
     pub fn show(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
-        self.visible = true;
+        self.surface = Surface::Shown;
         Some(self.repaint_surface(pixels))
     }
 
@@ -1186,11 +1249,13 @@ impl<'a> TextConsole<'a> {
     /// the dirty band (the full surface height). The cursor overlay is redrawn
     /// at the home position.
     ///
-    /// A hidden console clears its retained grid and paints nothing, so the
-    /// clear is what [`Self::show`] later reveals.
+    /// A console that does not own the surface clears its retained grid and
+    /// paints nothing, so the clear is what [`Self::show`] later reveals. A
+    /// blanked surface is already the background, so clearing leaves it
+    /// blanked rather than taking it back to show nothing.
     pub fn clear(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         self.screen.clear();
-        if !self.visible {
+        if self.surface != Surface::Shown {
             return None;
         }
         Some(self.repaint_surface(pixels))
@@ -1206,12 +1271,14 @@ impl<'a> TextConsole<'a> {
     /// session's first bytes cannot complete a prefix the last one held. Every
     /// pixel is rewritten, including the margins outside the cell grid.
     ///
-    /// A hidden console purges its retained state and paints nothing, so the
-    /// purge is what [`Self::show`] later reveals.
+    /// A console that does not own the surface purges its retained state and
+    /// paints nothing, so the purge is what [`Self::show`] later reveals. A
+    /// blanked surface stays blanked: it is already the background, and
+    /// taking it back would repaint over a hand-over.
     pub fn purge(&mut self, pixels: &mut [u32]) -> Option<DirtyBand> {
         self.screen.purge();
         self.parser = Parser::new();
-        if !self.visible {
+        if self.surface != Surface::Shown {
             return None;
         }
         Some(self.repaint_surface(pixels))
@@ -1229,7 +1296,7 @@ impl<'a> TextConsole<'a> {
     /// position afterwards, so the console shows a live cursor without the
     /// overlay ever mixing into the cell grid.
     pub fn write_bytes(&mut self, pixels: &mut [u32], bytes: &[u8]) -> Option<DirtyBand> {
-        self.write_bytes_with_mode(pixels, bytes, LineFeedMode::Verbatim)
+        self.write_bytes_of_kind(pixels, bytes, WriteKind::Diagnostic)
     }
 
     /// Interpret program-output `bytes` as an ANSI/VT/xterm stream with the
@@ -1240,45 +1307,54 @@ impl<'a> TextConsole<'a> {
     /// single flush. It therefore needs no expanded staging buffer and a
     /// multi-line scrolling burst still repaints the surface only once.
     pub fn write_output_bytes(&mut self, pixels: &mut [u32], bytes: &[u8]) -> Option<DirtyBand> {
-        self.write_bytes_with_mode(pixels, bytes, LineFeedMode::CarriageReturnLineFeed)
+        self.write_bytes_of_kind(pixels, bytes, WriteKind::ProgramOutput)
     }
 
-    fn write_bytes_with_mode(
+    fn write_bytes_of_kind(
         &mut self,
         pixels: &mut [u32],
         bytes: &[u8],
-        line_feed_mode: LineFeedMode,
+        kind: WriteKind,
     ) -> Option<DirtyBand> {
-        let Self {
-            parser,
-            screen,
-            visible,
-        } = self;
-        let mut dirty = screen.undraw_cursor();
-        let mut feed = |chunk: &[u8]| {
-            parser.feed(chunk, |op| {
-                dirty = merge_rects(dirty, screen.apply(&op));
-            });
-        };
-        match line_feed_mode {
-            LineFeedMode::Verbatim => feed(bytes),
-            LineFeedMode::CarriageReturnLineFeed => {
-                let mut start = 0usize;
-                for (index, byte) in bytes.iter().enumerate() {
-                    if *byte == b'\n' {
-                        feed(&bytes[start..index]);
-                        feed(b"\r\n");
-                        start = index + 1;
+        let dirty = {
+            let Self { parser, screen, .. } = self;
+            let mut dirty = screen.undraw_cursor();
+            let mut feed = |chunk: &[u8]| {
+                parser.feed(chunk, |op| {
+                    dirty = merge_rects(dirty, screen.apply(&op));
+                });
+            };
+            match kind {
+                WriteKind::Diagnostic => feed(bytes),
+                WriteKind::ProgramOutput => {
+                    let mut start = 0usize;
+                    for (index, byte) in bytes.iter().enumerate() {
+                        if *byte == b'\n' {
+                            feed(&bytes[start..index]);
+                            feed(b"\r\n");
+                            start = index + 1;
+                        }
                     }
+                    feed(&bytes[start..]);
                 }
-                feed(&bytes[start..]);
+            }
+            dirty
+        };
+        match self.surface {
+            Surface::Hidden => None,
+            // Nobody owns a blanked surface, so a program's output is what
+            // takes it back — whole, since everything written while it was
+            // blank is in the retained grid and has never been drawn. A
+            // write of no bytes says nothing, and a kernel diagnostic is
+            // already logged: neither may replay the retained screen over a
+            // hand-over's black.
+            Surface::Blank if bytes.is_empty() || matches!(kind, WriteKind::Diagnostic) => None,
+            Surface::Blank => self.show(pixels),
+            Surface::Shown => {
+                let band = dirty.map(|rect| self.screen.flush(pixels, rect));
+                merge_bands(band, self.screen.draw_cursor(pixels))
             }
         }
-        if !*visible {
-            return None;
-        }
-        let band = dirty.map(|rect| screen.flush(pixels, rect));
-        merge_bands(band, screen.draw_cursor(pixels))
     }
 }
 

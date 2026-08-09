@@ -65,12 +65,12 @@ pub struct Metrics {
     /// [`Palette::selection_fill`](crate::Palette::selection_fill) keeps a
     /// crisp edge and the blur applies to the pixels it covers — a window's
     /// surface, the desktop wallpaper — so a selected item reads as frosted
-    /// glass laid over them. It is the same effect through the same filter the
-    /// compositor frosts a whole window's backdrop with, so it takes a
-    /// fraction — three tenths — of
-    /// [`WINDOW_BACKDROP_BLUR_MAX_PX`](tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX),
-    /// the widest a window may ask for: a selection frosts one item, not a
-    /// whole window.
+    /// glass laid over them. Small on purpose: a box blur of radius `r`
+    /// averages `2r + 1` samples, so a radius approaching the size of the
+    /// item averages its whole backdrop to one colour, which reads as a
+    /// smudge rather than as glass. This one is wide enough to destroy the
+    /// fine detail that would otherwise show through the fill, and narrow
+    /// enough that the larger shapes behind the mark still read.
     pub selection_backdrop_blur: u32,
     /// The thickness of a Heat Seam (an activity/progress line on an edge),
     /// in logical pixels.

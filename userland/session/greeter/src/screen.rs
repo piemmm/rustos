@@ -298,6 +298,22 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
+    /// Begin the fade the screen arrives out of, and present its first frame.
+    ///
+    /// Called before the opening present, so the first frame the display is
+    /// handed is full black and the login screen appears out of it. That
+    /// black is what the seat was handed over cleared to — and at first boot
+    /// it covers the text console's pixels in one step instead of replacing
+    /// them with a chooser. The screen answers input and draws its pointer
+    /// throughout: it is arriving, not leaving.
+    ///
+    /// [`Present::Nothing`] when the theme fades instantly: there is nothing
+    /// to cover, so the opening frame is the screen itself.
+    pub fn begin_entry_fade(&mut self, now_ns: u64) -> Present {
+        let outcome = self.surface.begin_entry_fade(now_ns, &self.theme);
+        self.present_for(Repaint::of(outcome))
+    }
+
     /// Begin the fade to black the screen leaves through, and present its
     /// first frame.
     ///

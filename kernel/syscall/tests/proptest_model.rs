@@ -31,6 +31,7 @@
 use core::cell::RefCell;
 
 use proptest::prelude::*;
+use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, OpenFlags, PowerAction, RandomFlags, SyscallNumber,
     SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
@@ -307,7 +308,12 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn display_release(&self, _c: &CallerContext<'_>, _seat: u64) -> SyscallResult {
+    fn display_release(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _next: ReleaseSurface,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }

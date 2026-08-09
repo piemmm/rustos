@@ -113,6 +113,7 @@ tairix-resref = { path = "../../lib/resref", version = "=0.0.0" }
 # the erase (rub-out) control through `tairix_vt::control` rather than a second
 # definition of those bytes.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
+tairix-fbcon = { path = "../../lib/fbcon", version = "=0.0.0" }
 # The single tty line discipline (`AGENTS.md` §2.2, `plans/PTY.md`): the
 # console device (`src/console.rs`) cooks output (`ONLCR`), echoes input, and
 # classifies cooked-mode `^C`/`^Z` through `tairix_tty` — the one definition

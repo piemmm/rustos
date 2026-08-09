@@ -24,6 +24,8 @@ const OTHER_CONSOLE: u64 = 4;
 /// taken back *before* anything is drawn.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Step {
+    FadeOut,
+    FadeIn,
     Suspend,
     ReleaseSeat,
     AcquireSeat,
@@ -92,6 +94,14 @@ impl FakePresentation {
 }
 
 impl SeatPresentation for FakePresentation {
+    fn fade_out(&mut self) {
+        self.log.push(Step::FadeOut);
+    }
+
+    fn fade_in(&mut self) {
+        self.log.push(Step::FadeIn);
+    }
+
     fn suspend(&mut self) {
         self.log.push(Step::Suspend);
     }
@@ -188,9 +198,13 @@ fn an_accepted_background_releases_the_seat_after_the_reply() {
     assert_eq!(switch.step_aside(&mut authority, &mut screen), Ok(()));
 
     assert_eq!(authority.asked, 1);
-    // Presentation is torn down while the seat is still held, and the seat
-    // goes last: the screen is never left owned by nobody.
-    assert_eq!(screen.log, vec![Step::Suspend, Step::ReleaseSeat]);
+    // The screen dims while the seat and the frame ring are still up,
+    // presentation is torn down next, and the seat goes last: the desktop
+    // is never left owned by nobody, and never cut off mid-frame.
+    assert_eq!(
+        screen.log,
+        vec![Step::FadeOut, Step::Suspend, Step::ReleaseSeat]
+    );
     assert!(switch.is_background());
 }
 
@@ -206,7 +220,10 @@ fn a_refused_background_keeps_the_seat_and_the_session_drawing() {
     );
 
     assert_eq!(authority.asked, 1);
-    assert!(screen.log.is_empty(), "a refusal touched the screen");
+    assert!(
+        screen.log.is_empty(),
+        "a refusal touched the screen; it must be left exactly as it was, not dimmed"
+    );
     assert!(!switch.is_background());
 }
 
@@ -297,13 +314,15 @@ fn a_foreground_wake_reacquires_requeries_and_repaints_in_full() {
     assert_eq!(switch.resume(&mut screen), Ok(mode(1280, 720)));
 
     // The seat first, then the mode as it is *now*, then a frame sized to
-    // it, then every pixel of it.
+    // it, then black, then every pixel of it — so the repaint appears out
+    // of the black the seat came back cleared to.
     assert_eq!(
         screen.log,
         vec![
             Step::AcquireSeat,
             Step::QueryMode,
             Step::Reconfigure(1280, 720),
+            Step::FadeIn,
             Step::RepaintAll(1280, 720),
         ]
     );
@@ -362,6 +381,7 @@ fn each_failing_resume_step_stops_the_ones_after_it() {
                 Step::AcquireSeat,
                 Step::QueryMode,
                 Step::Reconfigure(800, 600),
+                Step::FadeIn,
                 Step::RepaintAll(800, 600),
             ],
         ),

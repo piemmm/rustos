@@ -670,39 +670,67 @@ surface leaves the on-screen window untouched rather than blanking the bar, a
 window the compositor no longer knows is re-created on the next present, and
 `teardown` removes every window so a session shutdown leaves nothing orphaned.
 
-## Revealing the desktop on session start
+## Fading the desktop in and out
 
 The login screen fades to black and exits, so the screen a session inherits
-is already dark. `SessionReveal` fades the desktop up out of that black
-rather than snapping it on: it starts the compositor's [screen
-reveal](wm.md#screen-reveal) at `0` and walks it to `u8::MAX`.
+is already dark. `ScreenFade` fades the desktop up out of that black rather
+than snapping it on: it starts the compositor's [screen
+reveal](wm.md#screen-reveal) at `0` and walks it to `u8::MAX`. Logging out
+and stepping aside for another account run the same fade the other way, so
+the desktop dissolves into the black the login screen appears out of — the
+seat is handed on cleared, and the two ends of the switch meet on the same
+colour rather than one of them cutting.
 
 The span is the active theme's own `SessionFade` duration, read off the
 compositor's theme, so no timing is spelled in the session. Motion state is
-the shared `tairix_theme::Timeline` and nothing else, which is what makes
-the two degenerate cases free of any branch here:
+the shared `tairix_theme::Fade` and nothing else, which is what makes the
+degenerate cases free of any branch here:
 
 - **Reduced motion** answers a zero duration, which starts settled. The
-  desktop is simply fully revealed on its first frame — no extra present,
-  no timer.
-- **A clock that jumped backwards** settles rather than stalling black.
+  desktop is simply fully revealed — or simply black — on its first frame:
+  no extra present, no timer.
+- **A clock that jumped backwards** settles rather than stalling.
+- **A fade turned around** picks up the strength that is actually on
+  screen, so a log-out chosen while the desktop is still revealing dims
+  from where it had got to rather than flashing bright first.
 
-The fade begins at the session's first successful present, not at bring-up:
-the span is wall-clock, and a fade started earlier would spend itself on a
-screen with nothing on it yet.
+The reveal begins at the session's first successful present, not at
+bring-up: the span is wall-clock, and a fade started earlier would spend
+itself on a screen with nothing on it yet.
 
 It is driven by the run loop's existing park, never by a frame timer. Each
-wake steps the reveal to the current instant, and the park the loop was
-already going to use is shortened to the fade's next frame — `park_within`
-is the one fold both this and the lock screen use, so the two cannot round
-a deadline differently. **With nothing animating the park is byte-for-byte
+wake steps the fade to the current instant, and the park the loop was
+already going to use is shortened to its next frame — `park_within` is the
+one fold both this and the lock screen use, so the two cannot round a
+deadline differently. **With nothing animating the park is byte-for-byte
 the value the loop already carried**, so an idle desktop arms no timer at
 all.
 
-Time alone drives it: reaching the end of the span reveals the screen fully
-and settles, whatever became of any frame presented on the way. A display
-that refuses a present mid-fade therefore cannot strand the desktop dark,
-and nothing retries.
+Time alone drives it: reaching the end of the span puts the screen at that
+end and settles, whatever became of any frame presented on the way. A
+display that refuses a present mid-fade therefore cannot strand the desktop
+part-lit, and nothing retries.
+
+### Departing, and coming back
+
+The departure cannot ride the serve loop, because it has to *finish* before
+the seat is given up. Nor may it park on the session wait-set: the sources
+it is no longer serving would report ready on every re-park and spin a core
+through the whole fade. `fade_to_black` drives it instead — present a
+frame, sleep to the next one on `tairix_rt::park_ns` (the runtime's
+off-CPU timed park), step, repeat — bounded by the fade's own span. A
+refused present stops the dim where it got to; the seat is handed on
+cleared regardless, so the screen still ends black.
+
+`SeatPresentation` fixes where the two fades sit in a user switch. Going
+out: `fade_out`, then `suspend`, then `release_seat` — the dim runs only
+after the authority *accepted* the step-aside (a refusal must leave the
+screen exactly as the user left it) and while the seat and frame ring are
+still up, so nothing is cut off mid-frame. Coming back: `acquire_seat`,
+`query_mode`, `reconfigure`, `fade_in`, `repaint_all` — the arrival is begun
+before the repaint, so the frame it presents is the first of the fade and a
+resumed session appears out of black exactly as a fresh one does instead of
+returning to a black screen or snapping on.
 
 ### The one-shot visible witness
 
@@ -713,7 +741,8 @@ no longer does: every frame before it is black to a degree, so an observer
 keyed on the first present cannot tell a revealing desktop from a blank
 screen. Under reduced motion the first frame is already at full strength
 and the witness lands there, so a consumer waiting on it never waits for a
-fade that will not happen. It is said once and never repeated.
+fade that will not happen. It is said once and never repeated, and a fade
+heading for black never says it at all: it reaches black, not visibility.
 
 Its id and message are defined once beside the reveal and imported by the
 desktop QEMU verticals, which gate their screendump on the rendered text,

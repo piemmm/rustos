@@ -6078,8 +6078,8 @@ here.
 - **The account tile is the shared `IconTile`, improved for everyone.** A
   selected tile **frosts its own backdrop** — the pixels it covers, a window's
   surface or the desktop wallpaper, blurred by the scaled
-  `selection_backdrop_blur` (19 logical px, three tenths of the widest window
-  backdrop blur) through the same `frost_region` the compositor frosts a window
+  `selection_backdrop_blur` (6 logical px) through the same `frost_region` the
+  compositor frosts a window
   with — and the theme's `selection_fill`, its own accent at three tenths
   opacity, is laid over that with a **crisp** edge, rounded like every other
   plate. The fill is that light because the frost is what marks the item; the
@@ -6087,7 +6087,12 @@ here.
   and fill are confined to that one rounded shape, so nothing escapes the tile's
   bounds and no square edge shows around the rounded fill. Softening the *fill*
   instead leaves a smear with no shape of its own: the blur belongs behind the
-  mark, not on it.
+  mark, not on it. The radius is short on purpose, and bracketed by rendering
+  tests from both sides rather than pinned to a number: a box blur of radius
+  `r` averages `2r + 1` samples, so a radius approaching the item's own size
+  averages its whole backdrop to one colour and the mark becomes a smudge with
+  an accent cast. It must take the backdrop's fine grain and leave its larger
+  shapes legible.
   The mark **cross-fades** as the selection moves, over the theme's new
   `MotionInteraction::SelectionChange` (100 ms): the tile being left decays while
   the tile arrived at grows, driven by `IconTile::with_selection_fade` from the

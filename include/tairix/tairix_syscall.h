@@ -307,7 +307,7 @@ uint64_t tairix_sys_console_count(void);
 int32_t tairix_sys_stream_input_mode(uint32_t a0, uint32_t a1);
 uint64_t tairix_sys_key_inject(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_display_acquire(uint64_t a0);
-int32_t tairix_sys_display_release(uint64_t a0);
+int32_t tairix_sys_display_release(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_keyboard_read(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_mmio_map(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t tairix_sys_dma_alloc(uint64_t a0, uintptr_t a1, void * a2);

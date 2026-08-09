@@ -26,6 +26,7 @@
 //! wall-clock budget" contract — while the logged seed keeps any crash reproducible.
 
 use core::cell::RefCell;
+use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, PowerAction,
     RandomFlags, SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX,
@@ -306,7 +307,12 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn display_release(&self, _c: &CallerContext<'_>, _seat: u64) -> SyscallResult {
+    fn display_release(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _next: ReleaseSurface,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -977,6 +983,15 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
         return false;
     }
     if spec.number == SyscallNumber::FS_ATTR_SET && args[5] > FS_ATTR_VALUE_MAX as u64 {
+        return false;
+    }
+    // `display_release`'s disposition argument (arg 1) carries the same extra
+    // semantic check: the dispatcher runs the raw `U64` through
+    // `ReleaseSurface::from_u64`, which rejects any value outside the closed
+    // set. Mirror it through that same predicate.
+    if spec.number == SyscallNumber::DISPLAY_RELEASE
+        && tairix_abi::seat::ReleaseSurface::from_u64(args[1]).is_err()
+    {
         return false;
     }
     true

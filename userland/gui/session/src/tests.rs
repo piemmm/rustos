@@ -51,8 +51,8 @@ use crate::{
     maybe_send_seat_report, open_tray, resolve_library_icons, resolve_window_identities,
     serve_switchboard_request, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
     DragOrigin, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
-    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, ScreenLock, SessionFileReader,
-    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, SessionReveal,
+    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, ScreenFade, ScreenLock,
+    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
     SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
     SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX,
     DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
@@ -6934,10 +6934,14 @@ fn still_dark() -> Theme {
 /// Walk `timeline` exactly as the run loop does — waking only when it asks to
 /// — and collect the instants it wakes at. The last is its end, so a test
 /// reads its span off the theme instead of spelling a duration of its own.
+///
+/// A running timeline asks for its terminal frame the moment the span runs
+/// out; the loop draws that frame and settles, so the walk ends on it rather
+/// than asking again from the instant it already stands at.
 fn motion_wakes(timeline: Timeline, start_ns: u64) -> Vec<u64> {
     let mut at = start_ns;
     let mut wakes = Vec::new();
-    while let Some(delta) = timeline.next_frame_in(at) {
+    while let Some(delta) = timeline.next_frame_in(at).filter(|delta| *delta > 0) {
         at = at.saturating_add(delta);
         wakes.push(at);
     }
@@ -7021,7 +7025,7 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
     let mut comp = compositor();
     let (reference, wakes) = session_fade(&comp);
 
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
 
     assert_eq!(
         comp.reveal(),
@@ -7029,7 +7033,7 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "the desktop starts from the black the login screen left behind"
     );
     assert_eq!(
-        reveal.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
         Timeline::FRAME_NS,
         "an indefinite park is bounded to the fade's next frame"
     );
@@ -7038,7 +7042,7 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
     for at in &wakes {
         let expected = reference.progress(*at);
         assert_eq!(
-            reveal.advance(*at, &mut comp),
+            fade.advance(*at, &mut comp),
             expected != shown,
             "a step repaints exactly when the strength moved"
         );
@@ -7053,14 +7057,48 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "the fade ends on the fully composed desktop"
     );
     assert!(
-        !reveal.advance(end, &mut comp),
+        !fade.advance(end, &mut comp),
         "a settled fade is no further work"
     );
     assert_eq!(
-        reveal.park_deadline_ns(end, NO_DEADLINE_NS),
+        fade.park_deadline_ns(end, NO_DEADLINE_NS),
         NO_DEADLINE_NS,
         "and arms no further timer"
     );
+}
+
+/// The stall this guards: the loop steps the reveal, spends real time
+/// presenting that frame, and only then works out its park. A span that ended
+/// in between still owes the frame that completes the reveal, or the desktop
+/// parks indefinitely one step short of visible.
+#[test]
+fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let end = wakes[wakes.len() - 1];
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+
+    fade.advance(end - 1, &mut comp);
+    assert!(comp.reveal() < u8::MAX, "a step short of the desktop");
+
+    let asked = end + 1;
+    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+        assert_eq!(
+            fade.park_deadline_ns(asked, park),
+            0,
+            "the frame that completes the reveal is owed now"
+        );
+    }
+
+    assert!(fade.advance(asked, &mut comp), "and drawing it finishes");
+    assert_eq!(comp.reveal(), u8::MAX);
+    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+        assert_eq!(
+            fade.park_deadline_ns(asked, park),
+            park,
+            "only then is the park left alone"
+        );
+    }
 }
 
 /// The whole point of folding rather than replacing: with nothing animating,
@@ -7070,14 +7108,14 @@ fn an_idle_desktop_parks_exactly_as_it_would_without_a_fade() {
     let mut comp = compositor();
     let (_, wakes) = session_fade(&comp);
     let end = wakes[wakes.len() - 1];
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
     let lock = ScreenLock::new();
 
-    reveal.advance(end, &mut comp);
+    fade.advance(end, &mut comp);
 
     for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
         assert_eq!(
-            reveal.park_deadline_ns(end, park),
+            fade.park_deadline_ns(end, park),
             park,
             "a settled fade arms no timer"
         );
@@ -7096,7 +7134,7 @@ fn reduced_motion_shows_the_desktop_at_once_with_no_frame_and_no_timer() {
     comp.composite();
     assert!(!comp.has_damage(), "the theme switch is already drawn");
 
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
 
     assert_eq!(comp.reveal(), u8::MAX, "the desktop is simply there");
     assert!(
@@ -7104,11 +7142,11 @@ fn reduced_motion_shows_the_desktop_at_once_with_no_frame_and_no_timer() {
         "nothing was dimmed, so nothing owes a repaint"
     );
     assert!(
-        !reveal.advance(SESSION_START_NS, &mut comp),
+        !fade.advance(SESSION_START_NS, &mut comp),
         "and no frame is owed"
     );
     assert_eq!(
-        reveal.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
         NO_DEADLINE_NS,
         "nor a timer"
     );
@@ -7127,8 +7165,8 @@ fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
         refusals: 0,
     };
 
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
-    reveal.advance(mid, &mut comp);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.advance(mid, &mut comp);
     assert!(comp.reveal() < u8::MAX, "the fade is still in flight");
     assert!(
         comp.present(&mut display).is_err(),
@@ -7136,7 +7174,7 @@ fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
     );
     assert!(display.refusals > 0, "and really was asked for it");
 
-    assert!(reveal.advance(end, &mut comp));
+    assert!(fade.advance(end, &mut comp));
 
     assert_eq!(
         comp.reveal(),
@@ -7144,7 +7182,7 @@ fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
         "time finishes the fade, never a present that succeeded"
     );
     assert_eq!(
-        reveal.park_deadline_ns(end, NO_DEADLINE_NS),
+        fade.park_deadline_ns(end, NO_DEADLINE_NS),
         NO_DEADLINE_NS,
         "and it stops asking for frames"
     );
@@ -7159,8 +7197,8 @@ fn the_desktop_announces_itself_visible_once_the_fade_has_completed() {
     let (_, wakes) = session_fade(&comp);
     let sink = RecordingSink::new();
 
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
-    reveal.presented(&sink);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.presented(&sink);
     assert_eq!(
         comp.reveal(),
         0,
@@ -7169,8 +7207,8 @@ fn the_desktop_announces_itself_visible_once_the_fade_has_completed() {
     assert_eq!(sink.witnesses(), 0, "which nobody could see the desktop in");
 
     for at in &wakes {
-        reveal.advance(*at, &mut comp);
-        reveal.presented(&sink);
+        fade.advance(*at, &mut comp);
+        fade.presented(&sink);
         assert_eq!(
             sink.witnesses(),
             usize::from(comp.reveal() == u8::MAX),
@@ -7179,9 +7217,9 @@ fn the_desktop_announces_itself_visible_once_the_fade_has_completed() {
     }
 
     let end = wakes[wakes.len() - 1];
-    reveal.advance(end, &mut comp);
-    reveal.presented(&sink);
-    reveal.presented(&sink);
+    fade.advance(end, &mut comp);
+    fade.presented(&sink);
+    fade.presented(&sink);
     assert_eq!(
         sink.witnesses(),
         1,
@@ -7198,13 +7236,13 @@ fn reduced_motion_announces_the_desktop_visible_on_its_first_frame() {
     assert!(comp.set_theme(still_dark()));
     let sink = RecordingSink::new();
 
-    let mut reveal = SessionReveal::begin(SESSION_START_NS, &mut comp);
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
     assert_eq!(comp.reveal(), u8::MAX, "nothing was dimmed");
 
-    reveal.presented(&sink);
+    fade.presented(&sink);
     assert_eq!(sink.witnesses(), 1, "so the desktop is visible at once");
 
-    reveal.presented(&sink);
+    fade.presented(&sink);
     assert_eq!(sink.witnesses(), 1, "and is still announced only once");
 }
 
@@ -7213,6 +7251,142 @@ fn reduced_motion_announces_the_desktop_visible_on_its_first_frame() {
 #[test]
 fn the_reveal_witness_id_is_inside_the_sessions_reserved_range() {
     assert!((DESKTOP_SESSION_RANGE_START..DESKTOP_SESSION_RANGE_END).contains(&DESKTOP_REVEALED.0));
+}
+
+/// Logging out and stepping aside hand the seat on cleared, so the desktop
+/// dims into that black over the same span it arrived on rather than
+/// vanishing from a lit screen.
+#[test]
+fn the_desktop_dissolves_back_to_black_when_it_gives_the_screen_up() {
+    let mut comp = compositor();
+    let (reference, wakes) = session_fade(&comp);
+    let arrived = wakes[wakes.len() - 1];
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.advance(arrived, &mut comp);
+    assert_eq!(comp.reveal(), u8::MAX, "a fully revealed desktop");
+
+    fade.depart(arrived, &mut comp);
+
+    assert_eq!(comp.reveal(), u8::MAX, "the departure starts from the lit");
+    assert!(!fade.settled(), "and has a span to run");
+    assert_eq!(
+        fade.park_deadline_ns(arrived, NO_DEADLINE_NS),
+        Timeline::FRAME_NS,
+        "which the park is bounded to"
+    );
+
+    for at in &wakes {
+        let elapsed = at - SESSION_START_NS;
+        fade.advance(arrived + elapsed, &mut comp);
+        assert_eq!(
+            u32::from(comp.reveal()),
+            u32::from(u8::MAX) - u32::from(reference.progress(*at)),
+            "the same span, run the other way, at {at}"
+        );
+    }
+
+    assert_eq!(comp.reveal(), 0, "and it ends on black");
+    assert!(fade.settled(), "with nothing further owed");
+    assert_eq!(
+        fade.park_deadline_ns(arrived + (arrived - SESSION_START_NS), NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "and no timer armed"
+    );
+}
+
+/// A log-out chosen while the desktop is still appearing must not flash it
+/// bright first: the departure begins from the strength actually on screen.
+#[test]
+fn a_departure_mid_reveal_dims_from_what_is_on_screen() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let mid = wakes[wakes.len() / 2];
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.advance(mid, &mut comp);
+    let part_way = comp.reveal();
+    assert!(part_way > 0 && part_way < u8::MAX, "part-way through");
+
+    fade.depart(mid, &mut comp);
+
+    assert_eq!(comp.reveal(), part_way, "no jump either way");
+    let (_, from_mid) = session_fade(&comp);
+    let span = from_mid[from_mid.len() - 1] - SESSION_START_NS;
+    fade.advance(mid + span, &mut comp);
+    assert_eq!(comp.reveal(), 0, "and it still finishes on black");
+}
+
+/// The witness says the desktop became *visible*. A session on its way out
+/// reaches black, not visibility, so it must never announce — including one
+/// that departs before it ever finished arriving.
+#[test]
+fn a_departing_desktop_never_announces_itself_visible() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let mid = wakes[wakes.len() / 2];
+    let end = wakes[wakes.len() - 1];
+    let span = end - SESSION_START_NS;
+    let sink = RecordingSink::new();
+
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.advance(mid, &mut comp);
+    fade.depart(mid, &mut comp);
+    for at in [mid, mid + span / 2, mid + span] {
+        fade.advance(at, &mut comp);
+        fade.presented(&sink);
+    }
+
+    assert_eq!(comp.reveal(), 0, "the screen is black");
+    assert_eq!(
+        sink.witnesses(),
+        0,
+        "and nothing claimed the desktop was ever visible"
+    );
+}
+
+/// A session resumed from the background comes back to a seat the login
+/// screen handed over cleared, so it fades in exactly as a fresh one does
+/// rather than reappearing on black or snapping on.
+#[test]
+fn a_resumed_desktop_fades_in_rather_than_returning_to_black() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let end = wakes[wakes.len() - 1];
+    let span = end - SESSION_START_NS;
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    fade.advance(end, &mut comp);
+    fade.depart(end, &mut comp);
+    fade.advance(end + span, &mut comp);
+    assert_eq!(comp.reveal(), 0, "stepped aside, screen black");
+
+    let resumed = end + span;
+    fade.arrive(resumed, &mut comp);
+
+    assert_eq!(comp.reveal(), 0, "the first frame back is still the black");
+    assert!(!fade.settled(), "with the reveal now in flight");
+    fade.advance(resumed + span / 2, &mut comp);
+    assert!(comp.reveal() > 0, "and it lifts");
+    fade.advance(resumed + span, &mut comp);
+    assert_eq!(comp.reveal(), u8::MAX, "to the whole desktop");
+}
+
+/// Under a reduced-motion theme a departure is black from its first frame
+/// and asks for nothing, exactly as its arrival is fully revealed at once.
+#[test]
+fn reduced_motion_blacks_the_screen_at_once_with_no_frame_and_no_timer() {
+    let mut comp = compositor();
+    assert!(comp.set_theme(still_dark()));
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+    assert_eq!(comp.reveal(), u8::MAX);
+
+    fade.depart(SESSION_START_NS, &mut comp);
+
+    assert_eq!(comp.reveal(), 0, "black immediately");
+    assert!(fade.settled(), "with no frame owed");
+    assert_eq!(
+        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "nor a timer"
+    );
 }
 
 /// The lock screen is the login screen's engine, so a refused unlock shakes

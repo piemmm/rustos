@@ -50,12 +50,16 @@ charter forbids.
 - `AuthSurface::advance` / `motion_due` — step whatever is running and ask when
   the next frame is due. Both fold every animation in every mode, and an idle
   surface returns no deadline.
+- `AuthSurface::begin_entry_fade` — start the veil the screen arrives out of,
+  before the first frame is presented, so a surface appears rather than being
+  cut onto the black the display was handed over cleared to.
 - `AuthSurface::begin_session_fade` / `session_fade_finished` — start the veil
   that takes a successful login to black, and ask whether it has arrived. The
   embedder drives it, because the embedder is what decides the login is over.
 - `AuthSurface::session_fade_begun` — whether the screen has started leaving.
   One definition, so the two things that must stop when it has — accepting
-  input, and drawing a pointer over the frame — cannot disagree.
+  input, and drawing a pointer over the frame — cannot disagree, and neither
+  of them stops for a screen that is merely arriving.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
   colour, or a wallpaper the embedder has already decoded and fitted, under a
   scrim and a soft vertical wash of the desktop colour at each end, where the
@@ -118,6 +122,13 @@ written down here. `advance` steps them and `motion_due` reports the soonest
 next frame — the minimum over whatever is running, in whatever mode, and `None`
 when nothing is, so an idle screen arms no timer.
 
+One still running answers even when its span has already run out: that frame
+is its settled end state, and presenting one takes long enough that the span
+routinely ends between a step and the question. `advance` draws it and stops
+running — settling the cross-fade and the veil the screen leaves through,
+dropping the transition, the shake, and the veil it arrived out of — which is
+what makes the screen idle again.
+
 - **The selection cross-fade** (`SelectionChange`). Moving focus dissolves the
   mark from the tile being left onto the one arriving.
 - **The stage transition** (`StageTransition`). Picking an account travels the
@@ -137,14 +148,21 @@ when nothing is, so an idle screen arms no timer.
   mirrored into the other three quadrants. The damage is the union of the
   extremes the band reaches, never the screen. The notice and the authority's
   cooldown are unchanged; the shake is additional.
-- **The fade to black** (`SessionFade`). `begin_session_fade` lays a veil over
-  the whole composed screen that darkens to opaque, so an embedder can hand
-  over to whatever comes next with no cut. Input is ignored once it starts:
-  the decision is made, and a keystroke may not re-open the prompt.
-  `session_fade_begun` reports that from the first veiled frame, so an embedder
-  drawing a pointer over this surface stops drawing one — the veil is painted
-  into the surface, and a cursor sampled over it would stay bright all the way
-  down to black.
+- **The veil** (`SessionFade`), which runs both ways over the whole composed
+  screen. `begin_entry_fade` opens it off full black, so a screen appears out
+  of the black the display was handed over cleared to instead of being cut
+  onto it; `begin_session_fade` closes it to opaque, so an embedder can hand
+  over to whatever comes next with no cut. One veil, so both halves of a
+  handover are the same black at the same weight, and a login accepted while
+  the screen is still arriving leaves from the strength it had reached rather
+  than brightening first. Only the *leaving* half is modal: input is ignored
+  once it starts, because the decision is made and a keystroke may not re-open
+  the prompt, and `session_fade_begun` reports that from the first veiled
+  frame so an embedder drawing a pointer over this surface stops drawing one —
+  the veil is painted into the surface, and a cursor sampled over it would
+  stay bright all the way down to black. A screen still arriving answers both,
+  because somebody may pick an account while it comes up, and the veil is let
+  go the frame it uncovers.
 
 Reduced motion sets each duration to zero, which a `Timeline` starts already
 settled — so every one of them becomes instant with no branch here, and the

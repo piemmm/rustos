@@ -387,6 +387,42 @@ session ends. A user who runs `desktop` from a shell and later leaves it
 returns to that shell exactly as they left it, with whatever the session
 reported printed beneath.
 
+**A hand-over between two graphical presenters shows neither of them.** A
+lease does not always end because the user is going back to text: the login
+screen releases the seat so the authority can start a desktop on it, and a
+desktop releases it so the login screen can come back for another account.
+Repainting the retained text into that gap would flash a minutes-old screen
+between two frames of black, and leaving the outgoing frame there would show
+one principal's screen to the next. Only the releasing owner knows which case
+it is, so `display_release` carries a second argument — a
+`ReleaseSurface` — and the kernel never guesses:
+
+| `ReleaseSurface` | Surface | Used by |
+| --- | --- | --- |
+| `Text` | the console takes the screen back and repaints its retained grid | any exit back to a text session, and every failure path |
+| `Handover` | the screen is cleared and held cleared | a clean greeter exit after a verified secret, a clean desktop exit, and the fast-user-switch step-aside |
+
+The blank is **not** a lockout, and a `Handover` is not a grant of one. The
+console is only quiet, not silenced: it keeps its retained grid, and the first
+thing a **program** writes to it — a failure message, a text login, a shell
+prompt, a keystroke echo — takes the screen back whole. So a hand-over whose
+successor never arrives shows the reason it failed rather than a dark
+machine, and the disposition binds only the outgoing owner's *own clean*
+release.
+
+The one thing that does **not** reclaim it is a kernel diagnostic. On a
+shippable image the kernel's diagnostic sink renders onto the same
+framebuffer, and the authority audits a routine record — "desktop session
+ended" — in precisely this gap; taking the screen for it would replay the
+whole retained boot log between the two sessions, which is the flash the
+hand-over exists to prevent. The record still reaches the retained grid and
+the log, and appears the moment anything shows that grid again. A screen a
+user must read is a program's output; a screen the kernel is merely noting
+something on is not. An eviction
+(`seat_revoke`) and a dead owner's reclaim always restore the text console,
+so a wedged or hostile presenter cannot leave the screen dark by claiming a
+hand-over and exiting.
+
 The transition is driven by the seat registry itself, under the seat's own
 state lock, so it cannot be forgotten at a call site and two CPUs racing to
 change ownership cannot leave the surface with the loser's answer:
@@ -394,7 +430,8 @@ change ownership cannot leave the surface with the loser's answer:
 | Lease event | Surface | Input channels |
 | --- | --- | --- |
 | `display_acquire` | handed to the session | purged before the new owner can read |
-| `display_release` | repainted from the retained grid | purged |
+| `display_release(Text)` | repainted from the retained grid | purged |
+| `display_release(Handover)` | cleared, and held cleared | purged |
 | `seat_revoke` | repainted | purged |
 | owner task exits, faults, or is killed | repainted | purged |
 | `seat_switch` on an unowned seat | moves to the new foreground console | — |
@@ -433,7 +470,7 @@ frozen frame, so `panic_dump` reclaims the surface before it writes anything —
 the `console_unblank` a fatal fault deserves.
 
 The reclaim is a *separate* operation from the lease handover
-(`ConsoleWrite::reclaim_surface` rather than `set_visible`), and the difference
+(`ConsoleWrite::reclaim_surface` rather than `set_surface`), and the difference
 is only what each does when the surface is contended. A lease transition
 **waits**, because a skipped hide would leave the console painting over the
 session's frame. A panic **gives up**, because the panicking CPU may itself be

@@ -288,7 +288,7 @@ fn common_metrics() -> Metrics {
         control_inset: 10,
         control_gap: 8,
         control_corner_radius: 6,
-        selection_backdrop_blur: 19,
+        selection_backdrop_blur: 6,
         seam_thickness: 2,
         rail_thickness: 3,
         bead_size: 8,

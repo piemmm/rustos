@@ -48,8 +48,10 @@ pub enum MotionInteraction {
     StageTransition,
     /// The thing an authority refused, shaken to say so.
     AttemptRejected,
-    /// A whole session's screen appearing or leaving: the login screen fading
-    /// to black once a secret is accepted, and the desktop fading in over it.
+    /// A whole session's screen appearing or leaving: the login screen
+    /// appearing out of black and fading back to it once a secret is
+    /// accepted, and the desktop revealing from that black and dissolving
+    /// back into it when the session ends.
     SessionFade,
 }
 
@@ -164,10 +166,12 @@ const NANOS_PER_MS: u64 = 1_000_000;
 /// kernel, and keeps a surface from acquiring a clock it has no other use
 /// for.
 ///
-/// A settled timeline is *complete*, not pending: [`progress`](Self::progress)
-/// answers [`u8::MAX`] and [`next_frame_in`](Self::next_frame_in) asks for no
-/// wake, so a reduced-motion theme's zero duration renders the finished state
-/// immediately and arms nothing.
+/// Running and settled are the whole of it. A settled timeline is *complete*,
+/// not pending: [`progress`](Self::progress) answers [`u8::MAX`] and
+/// [`next_frame_in`](Self::next_frame_in) asks for no wake, so a
+/// reduced-motion theme's zero duration renders the finished state immediately
+/// and arms nothing. A running one always owes at least one more frame, and
+/// stops owing only when its owner [`settle`](Self::settle)s or drops it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Timeline {
     started_ns: u64,
@@ -263,20 +267,102 @@ impl Timeline {
         *self = Self::SETTLED;
     }
 
-    /// Nanoseconds until the next frame of this animation is worth drawing, or
-    /// `None` when there is nothing left to draw.
+    /// Nanoseconds until the next frame is worth drawing, or `None` when this
+    /// timeline is settled and owes nothing.
     ///
-    /// The nearer of the frame cadence and what remains of the span, so the
-    /// last wake lands on the end rather than past it, and an animation that
-    /// is settled or already over arms no timer at all.
+    /// A running timeline always asks for one: the nearer of the frame cadence
+    /// and what remains of the span, and `0` — draw it now — once the span has
+    /// run out or the clock has jumped behind the start, because that frame is
+    /// the end state and nothing has drawn it yet. The owner draws the frame
+    /// it is given and then [`settle`](Self::settle)s or drops the timeline;
+    /// that, not the clock, is what ends the asking.
     #[must_use]
     pub fn next_frame_in(self, now_ns: u64) -> Option<u64> {
         if self.duration_ns == 0 {
             return None;
         }
-        let elapsed = now_ns.checked_sub(self.started_ns)?;
-        let remaining = self.duration_ns.checked_sub(elapsed)?;
-        (remaining > 0).then(|| remaining.min(Self::FRAME_NS))
+        // A clock behind the start reads as complete, so what is left of the
+        // span is nothing rather than all of it.
+        let remaining = now_ns
+            .checked_sub(self.started_ns)
+            .map_or(0, |elapsed| self.duration_ns.saturating_sub(elapsed));
+        Some(remaining.min(Self::FRAME_NS))
+    }
+}
+
+/// One strength ramp in flight: a [`Timeline`] carrying a value from where it
+/// started to where it is going.
+///
+/// A timeline answers *how far through*; a fade answers *what the strength
+/// is*. Every surface that dissolves between two strengths — the login
+/// screen's veil covering the screen and lifting off it again, a session's
+/// screen revealing from black and going back to it — is this one state
+/// machine, so the two directions cannot drift apart and a fade that
+/// interrupts another resumes from what is actually on screen instead of
+/// snapping somewhere it never was.
+///
+/// The direction is nothing more than the two ends: a ramp to [`u8::MAX`]
+/// covers, a ramp to `0` uncovers, and one begun part-way simply names the
+/// strength it starts from. The interpolation is linear, like every fade's,
+/// because the strength is what the eye reads, not the travel.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Fade {
+    timeline: Timeline,
+    from: u8,
+    to: u8,
+}
+
+impl Fade {
+    /// A fade from `from` to `to` over `duration_ms`, beginning at `now_ns`.
+    ///
+    /// A zero duration — a reduced-motion theme's answer for every
+    /// interaction — is complete from the first read: the strength is `to`
+    /// and no frame is ever owed.
+    #[must_use]
+    pub fn start(now_ns: u64, duration_ms: u16, from: u8, to: u8) -> Self {
+        Self {
+            timeline: Timeline::start(now_ns, duration_ms),
+            from,
+            to,
+        }
+    }
+
+    /// The strength at `now_ns`: [`from`](Self::start) at the start of the
+    /// span, [`to`](Self::target) at its end and ever after.
+    #[must_use]
+    pub fn strength(self, now_ns: u64) -> u8 {
+        let progress = i64::from(self.timeline.progress(now_ns));
+        let max = i64::from(u8::MAX);
+        let span = i64::from(self.to) - i64::from(self.from);
+        let moved = i64::from(self.from) + span * progress / max;
+        u8::try_from(moved.clamp(0, max)).unwrap_or(self.to)
+    }
+
+    /// The strength this fade ends on, which is also its direction.
+    #[must_use]
+    pub const fn target(self) -> u8 {
+        self.to
+    }
+
+    /// Whether this fade still has a span to run over — see
+    /// [`Timeline::running`].
+    #[must_use]
+    pub const fn running(self) -> bool {
+        self.timeline.running()
+    }
+
+    /// Nanoseconds until the next frame is worth drawing, or `None` when this
+    /// fade owes nothing — see [`Timeline::next_frame_in`].
+    #[must_use]
+    pub fn next_frame_in(self, now_ns: u64) -> Option<u64> {
+        self.timeline.next_frame_in(now_ns)
+    }
+
+    /// Stop running, having arrived: the strength becomes
+    /// [`target`](Self::target) and stays there, and no further frame is
+    /// owed. What an owner calls once it has drawn the end state.
+    pub const fn settle(&mut self) {
+        self.timeline.settle();
     }
 }
 

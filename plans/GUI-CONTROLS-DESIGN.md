@@ -1119,8 +1119,14 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
     one rounded shape, so nothing escapes the tile and no square edge shows
     around the rounded fill. Softening the *fill* instead leaves a smear with
     no shape of its own, which is why the blur belongs behind the mark rather
-    than on it. Selection is still the only mark in the accent, so the pointer
-    can never imitate it (§11.13 states the same rule for rows).
+    than on it. **The radius is short**: a box blur of radius `r` averages
+    `2r + 1` samples, so one approaching the item's own size averages its whole
+    backdrop to a single colour, and the mark reads as a smudge with an accent
+    cast instead of as glass. It must take the backdrop's fine grain and leave
+    its larger shapes legible — the theme states the length, and rendering
+    tests bracket it from both sides. Selection is still the only mark in the
+    accent, so the pointer can never imitate it (§11.13 states the same rule
+    for rows).
   - **The mark cross-fades as the selection moves**, over the theme's
     `SelectionChange` duration (§9): the item being left decays from full to
     nothing while the item arrived at grows, so a selection never jumps

@@ -685,6 +685,11 @@ pub extern "C" fn sys_display_acquire(seat: u64) -> i64 {
 /// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/DISPLAY.md`). Returns a `TAIRIX_E_*` code (`0` on
 /// success).
 ///
+/// `next` is a `ReleaseSurface` discriminant saying what becomes of the
+/// seat's screen — the text console takes it back, or it is held cleared
+/// for the graphical presenter taking over. A value outside that closed set
+/// is refused with `TAIRIX_E_OUT_OF_RANGE`.
+///
 /// The inverse of [`sys_display_acquire`]; gated kernel-side on
 /// `TAIRIX_CAP_DISPLAY` and owner-checked: an unknown seat id is refused with
 /// `TAIRIX_E_NOT_FOUND` and a caller that does not hold the seat is refused
@@ -693,10 +698,10 @@ pub extern "C" fn sys_display_acquire(seat: u64) -> i64 {
 /// its owner.
 #[must_use]
 #[export_name = "tairix_sys_display_release"]
-pub extern "C" fn sys_display_release(seat: u64) -> i32 {
+pub extern "C" fn sys_display_release(seat: u64, next: u64) -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
-    // validates `CAP_DISPLAY` before touching any state.
-    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, [seat, 0, 0, 0, 0, 0])) }
+    // validates `CAP_DISPLAY` and decodes `next` before touching any state.
+    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, [seat, next, 0, 0, 0, 0])) }
 }
 
 /// `seat_switch`: switch a seat's foreground session — retarget which
@@ -2706,7 +2711,7 @@ mod tests {
         (NUM_CONSOLE_FOREGROUND, "console_foreground", 2),
         (NUM_KEY_INJECT, "key_inject", 3),
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 1),
-        (NUM_DISPLAY_RELEASE, "display_release", 1),
+        (NUM_DISPLAY_RELEASE, "display_release", 2),
         (NUM_KEYBOARD_READ, "keyboard_read", 3),
         (NUM_SEAT_SWITCH, "seat_switch", 2),
         (NUM_SEAT_REVOKE, "seat_revoke", 1),
@@ -3256,10 +3261,10 @@ mod tests {
         assert_eq!(args, [3, 0, 0, 0, 0, 0]);
 
         let (number, args) = capture(0, || {
-            assert_eq!(sys_display_release(3), 0);
+            assert_eq!(sys_display_release(3, 1), 0);
         });
         assert_eq!(number, NUM_DISPLAY_RELEASE);
-        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
+        assert_eq!(args, [3, 1, 0, 0, 0, 0]);
     }
 
     #[test]

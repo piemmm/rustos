@@ -185,6 +185,17 @@ bounds and no square edge shows around the rounded fill. Softening the *fill*
 instead is what left the mark a smear with no shape of its own. Only a selected
 tile pays for it.
 
+The radius is deliberately short, and the tests bracket it from both sides
+rather than pin it. A box blur of radius `r` averages `2r + 1` samples, so a
+radius approaching the tile's own size averages its whole backdrop to a single
+colour: the mark then reads as a smudge with an accent cast and the wallpaper
+behind it is simply gone. One test renders over a one-pixel pattern and
+requires the fine grain to collapse; its pair renders over a broad one and
+requires the shapes to survive — measured across the *middle* of the tile,
+because the frost stops at the tile's edge and replicates the pixel there, so
+the outermost columns keep their own colour at any radius and would answer for
+a backdrop that had been averaged away.
+
 `with_selection_fade` draws the mark at a given strength, `0` to `u8::MAX`, so
 an owner can cross-fade a selection between items over the theme's
 `MotionInteraction::SelectionChange` duration. It scales the frost and the fill

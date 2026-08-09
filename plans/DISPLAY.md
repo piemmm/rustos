@@ -76,7 +76,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | Seat multiplexing (VT switch) | `chvt`/`VT_ACTIVATE`, `logind` seats | single text-vs-desktop boolean | `CAP_SEAT_ADMIN` foreground switch across sessions |
 | Controlling terminal / foreground | session leader + fg pgroup + `SIGTTIN/TTOU` | inherited fd table + `CAP_CONSOLE_READ` gate | per-console controlling-owner + fg handoff, capability-gated |
 | Multi-head / multi-seat | DRM connectors + `logind` seats | `consoles[0]` == "the display" | N independent seat objects, one owner each |
-| Text console vs. graphics on one surface | `KD_GRAPHICS` + fbcon `CON_IS_VISIBLE`; `printk` dropped, not retained | kernel fbcon paints the scan-out unconditionally | surface handover derived from the same lease; text **retained** and replayed |
+| Text console vs. graphics on one surface | `KD_GRAPHICS` + fbcon `CON_IS_VISIBLE`; `printk` dropped, not retained | kernel fbcon paints the scan-out unconditionally | surface handover derived from the same lease; text **retained** and replayed, and a graphical hand-over held blank instead |
 | Owner dies without releasing | master drops when the `fd` closes | nothing — the seat stays held by a dead task | task-exit reclaim of the lease, the surface, and the queued input |
 
 ## 2. Design — "better than Linux"
@@ -717,18 +717,22 @@ being descriptors rather than devices (§20) already promises.
 
 - **`lib/fbcon`** — the engine owns whether it paints, since it is the thing
   that paints, and every port then shares one definition (§2.21).
-  `TextConsole` carries `visible`; `hide()` gives the surface up, `show(pixels)`
-  takes it back and repaints (surface fill → full-grid flush → cursor) and is
-  **idempotent**, so it serves the lease-end transition and the panic
-  break-through alike. While hidden, a write updates the grid and performs
-  **zero** pixel accesses. The model/pixel split this needs is a correctness
+  `TextConsole` carries a three-valued `Surface`: `Hidden` gives the surface
+  up, `Shown` takes it back and repaints (surface fill → full-grid flush →
+  cursor), and `Blank` clears it and leaves it cleared for a hand-over between
+  two graphical presenters. `show(pixels)` is **idempotent**, so it serves the
+  lease-end transition and the panic break-through alike. While hidden, a
+  write updates the grid and performs **zero** pixel accesses; while blank, a
+  write is what takes the surface back — whole, from the retained grid — so a
+  hand-over can never silence the console, only quieten it. The model/pixel
+  split this needs is a correctness
   fix in its own right: `Screen::apply` loses its `pixels` argument (its only
   pixel user was the alternate-screen clear), and the whole-surface fill that
   blanks the margins outside the cell grid becomes `Screen::fill_surface`,
   called by `clear` and `show` — the two moments a margin can be stale (a free
   function, since it touches only pixels).
 - **`kernel/core/src/console.rs`** — `ConsoleWrite` gains two defaulted
-  methods: `set_visible(visible)` for the lease handover and
+  methods: `set_surface(surface)` for the lease handover and
   `reclaim_surface()` for the panic path. They differ *only* in what they do
   when the surface is contended — the handover **waits**, because a skipped
   hide would leave the console painting over the session's frame; the panic
@@ -742,6 +746,25 @@ being descriptors rather than devices (§20) already promises.
   **under the seat's state lock**, so two concurrent transitions cannot apply a
   stale decision. The port's render lock is a leaf — nothing it guards takes
   another lock — so the nesting cannot deadlock.
+- **The release states what the screen becomes.** A lease does not always end
+  because the user is going back to text — the greeter releases so a desktop
+  can start, and a desktop releases so the login screen can come back — and
+  only the releasing owner knows which. `display_release` therefore takes a
+  second argument, `tairix_abi::seat::ReleaseSurface`: `Text` repaints the
+  retained grid, `Handover` clears the screen and holds it cleared so the gap
+  shows neither the outgoing session's pixels nor a stale text screen. An
+  unrecognised value is refused `OutOfRange` before any state is touched. The
+  disposition binds only a *clean, owner-initiated* release: `seat_revoke` and
+  the task-exit reclaim always restore the text console, so a wedged or
+  hostile presenter cannot leave the machine dark, and the blank self-heals
+  the moment a **program** writes to the console regardless. A kernel
+  *diagnostic* does not reclaim a cleared surface: on a shippable image the
+  diagnostic sink renders onto that same framebuffer, so a routine record
+  logged in the gap — the login authority's `SESSION_ENDED` — would replay
+  the whole retained boot log between two graphical sessions. The record
+  still advances the retained grid and reaches its log; it simply has no
+  claim on a screen promised to an incoming presenter, where a text login or
+  a stated failure plainly does (`lib/fbcon`).
 - **Task-exit reclaim** — `release_owned_by(owner, audit)` releases every lease
   the dying task holds, clears a stale `Revoked { evicted }` marker naming it
   (so a later task cannot inherit its eviction), purges the seat's input

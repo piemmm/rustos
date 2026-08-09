@@ -20,26 +20,48 @@ This crate is pure theme *data*. A `Theme` is a table of:
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
   consumes, plus `selection_backdrop_blur`, how far the *backdrop* behind a
-  selected item is blurred, in logical pixels (`19` in both themes). The fill
+  selected item is blurred, in logical pixels (`6` in both themes). The fill
   itself keeps a crisp edge; the pixels it covers — a window's surface, the
   wallpaper — are frosted through the same filter the compositor frosts a
-  window's backdrop with, at three tenths of the widest blur a window may ask
-  for.
+  window's backdrop with. Short on purpose: a box blur of radius `r` averages
+  `2r + 1` samples, so a radius approaching the item's own size averages its
+  whole backdrop to one colour and the mark becomes a smudge instead of glass.
+  It takes the fine detail and leaves the larger shapes; `lib/controls`
+  brackets it from both sides where the mark is actually drawn.
 - `Timeline` — one animation in flight: the single definition of how a theme's
   duration becomes frames. A surface starts one for the interaction it is
   beginning, reads `progress` (linear, for a strength fade) or `eased`
   (smoothstep, for anything that travels) when it paints, and reads
   `next_frame_in` to know when to wake — the nearer of what remains and one
   frame at 60 Hz. It reads no clock of its own; the embedder passes the
-  monotonic instant it already holds. A zero duration starts *settled*:
-  complete, asking for no wake, so reduced motion needs no second code path
-  and an idle surface arms no timer.
+  monotonic instant it already holds. Running and settled are the whole of the
+  model. A zero duration starts *settled*: complete, asking for no wake, so
+  reduced motion needs no second code path and an idle surface arms no timer.
+  A *running* one always owes at least one more frame, due **now** once the
+  span has run out or the clock has jumped behind its start — that frame is
+  the end state, which presenting the previous one routinely outlasts, so
+  answering "nothing" there would strand it undrawn. The owner draws it and
+  then settles or drops the timeline; that, not the clock, ends the sequence.
+- `Fade` — one strength ramp in flight: a `Timeline` carrying a value from
+  where it started to where it is going. A timeline answers *how far
+  through*; a fade answers *what the strength is*. Every surface that
+  dissolves between two strengths — the login screen's veil covering the
+  screen and lifting off it again, a session's screen revealing from black
+  and going back to it — is this one state machine, so the two directions
+  cannot drift apart. The direction is nothing more than the two ends: a ramp
+  to `u8::MAX` covers, one to `0` uncovers, and one begun part-way names the
+  strength it starts from, so a fade that interrupts another resumes from
+  what is actually on screen rather than snapping somewhere it never was.
+  The interpolation is linear, like every fade's, because the strength is
+  what the eye reads and not the travel.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, held
   as a table indexed by the interaction so a duration can never be transposed
   onto the wrong one. `StageTransition` (`240` ms) is one view giving way to
   another, `AttemptRejected` (`420` ms) the shake on a refused attempt, and
-  `SessionFade` (`1000` ms) a whole session's screen appearing or leaving — the
-  login screen fading to black, the desktop revealing from black over it.
+  `SessionFade` (`1000` ms) a whole session's screen appearing or leaving —
+  the login screen appearing out of black and fading back to it once a secret
+  is accepted, the desktop revealing from that black and dissolving back into
+  it when the session ends.
   `SelectionChange` (`100` ms in both themes) is the
   cross-fade as a selection mark moves between items. Reduced motion reports
   every duration as `0`, which a consumer reads as "change it now", so no

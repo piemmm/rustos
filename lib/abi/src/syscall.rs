@@ -382,9 +382,14 @@ impl SyscallNumber {
     /// Release a seat and return its keyboard input focus to the text
     /// console (`plans/PI.md` P11).
     ///
-    /// Argument: `seat: u64` (the seat to release; an unknown id fails
-    /// closed with [`crate::Errno::NotFound`]). Returns an error code
-    /// (`Ok(0)` on success). The
+    /// Arguments: `seat: u64` (the seat to release; an unknown id fails
+    /// closed with [`crate::Errno::NotFound`]) and `next: u64`, a
+    /// [`ReleaseSurface`](crate::seat::ReleaseSurface) discriminant saying
+    /// what becomes of the seat's screen — the text console takes it back,
+    /// or it is held cleared for the graphical presenter taking over. A
+    /// value outside that closed set fails closed with
+    /// [`crate::Errno::OutOfRange`]. Returns an error code (`Ok(0)` on
+    /// success). The
     /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the seat owner
     /// calls it when it relinquishes the screen, and the kernel returns
     /// the seat's keyboard to the text console so a login/shell

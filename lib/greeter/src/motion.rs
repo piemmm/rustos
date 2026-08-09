@@ -1,5 +1,5 @@
 //! The surface's animations: one view giving way to another, a refused
-//! attempt shaking, and the veil the screen leaves through.
+//! attempt shaking, and the veil the screen arrives from and leaves through.
 //!
 //! Every one of them is a [`Timeline`] started from the theme's duration for
 //! its interaction, so a reduced-motion theme collapses each to an immediate
@@ -12,7 +12,7 @@
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{div255, Surface};
-use tairix_theme::{Rgba, TextRole, Theme, Timeline};
+use tairix_theme::{Fade, Rgba, TextRole, Theme, Timeline};
 
 /// Horizontal reach of the rejection shake, in logical pixels at the
 /// reference density.
@@ -322,30 +322,56 @@ impl Shake {
     }
 }
 
-/// The black the screen leaves through once a secret is accepted.
+/// The black the screen arrives from and leaves through.
 ///
 /// Deliberately not a theme colour: the desktop taking the screen over
 /// arrives out of the same black, and the two halves of that handover meet
 /// only if both name the one absolute rather than each its own appearance.
 pub(crate) const VEIL: Rgba = Rgba::rgb(0, 0, 0);
 
-/// The veil the screen leaves through once a secret is accepted.
+/// The black over the whole screen, running between two strengths: away as
+/// the surface arrives, and up to opaque as it leaves once a secret is
+/// accepted.
+///
+/// One veil for both directions, so the screen a person is shown and the
+/// screen they leave are the same black at the same weight, and a fade
+/// interrupted by the other cannot jump. The ramp is the shared [`Fade`],
+/// which the desktop's own screen fade runs on too: the two halves of the
+/// handover cannot drift apart if neither owns the arithmetic.
+///
+/// The strength is cached rather than read from the clock, because painting
+/// reads none: the owner steps this, and every frame draws what that step
+/// decided.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Veil {
-    timeline: Timeline,
+    fade: Fade,
     /// How much of the screen the black has taken.
     strength: u8,
 }
 
 impl Veil {
-    /// A veil of `duration_ms` beginning at `now_ns`. A theme that animates
-    /// it away to nothing begins already black and already finished.
-    pub(crate) fn start(now_ns: u64, duration_ms: u16) -> Self {
-        let timeline = Timeline::start(now_ns, duration_ms);
-        Self {
-            timeline,
-            strength: timeline.progress(now_ns),
-        }
+    /// A veil of `duration_ms` uncovering the screen from `now_ns`: opaque at
+    /// the start, gone at the end. A theme that animates it away to nothing
+    /// begins already clear and already finished.
+    pub(crate) fn arriving(now_ns: u64, duration_ms: u16) -> Self {
+        Self::between(u8::MAX, 0, now_ns, duration_ms)
+    }
+
+    /// A veil of `duration_ms` covering the screen from `now_ns`, entered at
+    /// `from` so a screen still uncovering goes on to black from the strength
+    /// it had reached rather than brightening first. A theme that animates it
+    /// away to nothing begins already black and already finished.
+    pub(crate) fn leaving(from: u8, now_ns: u64, duration_ms: u16) -> Self {
+        Self::between(from, u8::MAX, now_ns, duration_ms)
+    }
+
+    fn between(from: u8, to: u8, now_ns: u64, duration_ms: u16) -> Self {
+        let mut veil = Self {
+            fade: Fade::start(now_ns, duration_ms, from, to),
+            strength: from,
+        };
+        veil.advance(now_ns);
+        veil
     }
 
     /// How opaque the black is now. A pure strength, so it takes the linear
@@ -354,22 +380,35 @@ impl Veil {
         self.strength
     }
 
-    /// Recompute the strength from `now_ns`, reporting whether it darkened.
-    pub(crate) fn advance(&mut self, now_ns: u64) -> bool {
-        let strength = self.timeline.progress(now_ns);
-        let darkened = strength != self.strength;
-        self.strength = strength;
-        darkened
+    /// Whether this is the veil the screen leaves through rather than the one
+    /// it arrives from.
+    pub(crate) const fn is_leaving(self) -> bool {
+        self.fade.target() == u8::MAX
     }
 
-    /// Whether the screen is fully black.
+    /// Recompute the strength from `now_ns`, reporting whether it moved.
+    ///
+    /// The end strength is the end of the fade, and the owner holds a veil
+    /// for as long as it holds the screen, so the fade settles here: a
+    /// screen that has already gone asks for no further frame.
+    pub(crate) fn advance(&mut self, now_ns: u64) -> bool {
+        let strength = self.fade.strength(now_ns);
+        let moved = strength != self.strength;
+        self.strength = strength;
+        if self.finished() {
+            self.fade.settle();
+        }
+        moved
+    }
+
+    /// Whether the fade has reached the strength it runs to.
     pub(crate) const fn finished(self) -> bool {
-        self.strength == u8::MAX
+        self.strength == self.fade.target()
     }
 
     /// Nanoseconds until the next frame of the fade.
     pub(crate) fn next_frame_in(self, now_ns: u64) -> Option<u64> {
-        self.timeline.next_frame_in(now_ns)
+        self.fade.next_frame_in(now_ns)
     }
 }
 

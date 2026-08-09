@@ -105,15 +105,31 @@ continuation cell stays blank. It is a full terminal:
   a partly received escape sequence so the next session's first bytes cannot
   complete a prefix the last one held, and returns every other piece of screen
   state (cursor, pen, scroll region, saved cursors) to its initial value — a
-  purged console is indistinguishable from one nobody has used. A hidden
-  console purges its retained state and paints nothing, so the purge is what
-  the next `show` reveals. The kernel drives it from `terminal_purge`.
-- `hide()` / `show(pixels)` / `is_visible()` — give the scan-out surface up to
-  another presenter and take it back. `show` fills the surface (blanking the
-  margins outside the cell grid, which a cell flush never covers) and then
-  flushes every cell and the cursor, so no pixel of the previous presenter can
-  survive. Both are idempotent, which is what lets the kernel panic path
+  purged console is indistinguishable from one nobody has used. A console that
+  does not own the surface purges its retained state and paints nothing, so
+  the purge is what the next `show` reveals, and a blanked surface stays
+  blanked rather than being taken back to show what the purge left. The kernel
+  drives it from `terminal_purge`.
+- `Surface` / `surface()` / `hide()` / `show(pixels)` / `blank(pixels)` — the
+  three dispositions of a shared scan-out. `hide` gives it up to another
+  presenter; `show` takes it back, filling the surface (blanking the margins
+  outside the cell grid, which a cell flush never covers) and then flushing
+  every cell and the cursor, so no pixel of the previous presenter can
+  survive. Each is idempotent, which is what lets the kernel panic path
   reclaim the screen without knowing who held it.
+  `blank` is for a hand-over between two graphical presenters, where the seat
+  has no presenter at all for a moment: it clears every pixel and leaves the
+  surface cleared, so neither the outgoing frame nor a replay of the retained
+  text screen appears in the gap. It quietens the console rather than
+  silencing it — the retained grid is untouched, and the next write from a
+  *program* (`write_output_bytes`) takes the surface back whole, so a
+  hand-over whose successor never arrives still shows the reason. A **kernel
+  diagnostic** (`write_bytes`) does not: on a shippable image the diagnostic
+  sink renders onto this very framebuffer, so one routine record logged
+  between two graphical sessions would otherwise replay the whole boot log
+  into the gap. The record still reaches the retained grid, and its log; it
+  simply has no claim on a screen the seat has promised to an incoming
+  presenter, where a text login or a stated failure plainly does.
 - `DirtyBand` / `merge_bands` — the `(start_y, end_y)` band a render touched, so
   a freestanding consumer can clean exactly those scanlines to coherency.
 
