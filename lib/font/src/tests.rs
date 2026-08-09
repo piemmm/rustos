@@ -81,16 +81,37 @@ fn ukrainian_cyrillic_has_glyphs_with_ink() {
 }
 
 #[test]
-fn cjk_and_hebrew_are_not_in_the_console_atlas() {
-    // The compiled-in atlas is the primary Latin face's repertoire only; CJK
-    // and Hebrew scalars are not mapped, so the console shows the U+FFFD
-    // fallback and `fontd` serves rich text at runtime instead.
+fn every_script_the_family_ships_has_glyphs_with_ink() {
+    // The text console runs in the kernel and cannot ask `fontd` for a glyph,
+    // so a script left out of the compiled-in atlas is a script no console can
+    // ever draw — a `man` page in it renders as a wall of U+FFFD. Every face
+    // the console family lists is therefore compiled in, and each of its
+    // scripts must resolve to its own inked glyph.
     for ch in ['あ', 'ア', '漢', '日', '가', '각', '한', 'א', 'ב', 'ש'] {
-        assert_eq!(lookup(ch), None, "{ch:?} must not be in the console atlas");
-        assert_eq!(
+        assert!(lookup(ch).is_some(), "{ch:?} is not in the console atlas");
+        assert_ne!(
             lookup_or_fallback(ch),
             lookup_or_fallback('\u{FFFD}'),
-            "{ch:?} must fall back to the replacement glyph"
+            "{ch:?} renders the replacement glyph"
+        );
+        assert!(!lookup_or_fallback(ch).is_blank(), "{ch:?} has no ink");
+    }
+}
+
+#[test]
+fn a_wide_scalar_draws_across_both_cells() {
+    // A full-width scalar occupies two terminal cells, so its bitmap has to
+    // carry ink past the first: a glyph drawn only in the lead cell would
+    // leave the continuation cell empty and the text half-drawn.
+    for ch in ['日', '한', '語'] {
+        let glyph = lookup_or_fallback(ch);
+        let inked = |from: u32, to: u32| {
+            (from..to).any(|x| (0..atlas::CELL_HEIGHT).any(|y| glyph.coverage(x, y) != 0))
+        };
+        assert!(inked(0, atlas::CELL_WIDTH), "{ch:?} lead cell is empty");
+        assert!(
+            inked(atlas::CELL_WIDTH, atlas::GLYPH_WIDTH),
+            "{ch:?} continuation cell is empty"
         );
     }
 }

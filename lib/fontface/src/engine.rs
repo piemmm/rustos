@@ -3,6 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::gridfit::{self, AlignZones, Axes, Zone};
 use crate::mathf;
 use crate::variations::{self, Axis, AxisSetting, Gvar, VarTables};
 use crate::FontError;
@@ -154,6 +155,12 @@ pub struct Face<'a> {
     axes: Vec<Axis>,
     coords: Vec<f32>,
     var: Option<VarTables>,
+    /// The one advance every mapped spacing glyph shares, when the face is
+    /// strictly monospace. Read once here because the cell grid asks for it
+    /// per glyph.
+    uniform: Option<u16>,
+    /// The rows every glyph of the face aligns to, read off its own outlines.
+    zones: AlignZones,
 }
 
 impl<'a> Face<'a> {
@@ -223,7 +230,7 @@ impl<'a> Face<'a> {
             }),
             _ => None,
         };
-        Ok(Self {
+        let mut face = Self {
             r,
             tables,
             units_per_em,
@@ -237,7 +244,12 @@ impl<'a> Face<'a> {
             axes,
             coords,
             var,
-        })
+            uniform: None,
+            zones: AlignZones::default(),
+        };
+        face.uniform = face.read_uniform_advance();
+        face.zones = face.read_align_zones();
+        Ok(face)
     }
 
     /// Font units per em.
@@ -326,6 +338,67 @@ impl<'a> Face<'a> {
         Ok(base + delta)
     }
 
+    /// The rows glyphs of this face align to, for the grid fitter.
+    ///
+    /// Read from the face's own reference glyphs: the flat-sided ones fix
+    /// where a zone sits, the round ones how far past it they overshoot. A
+    /// face that maps none of a zone's references simply has no such zone,
+    /// and its glyphs are fitted on their strokes alone.
+    fn read_align_zones(&self) -> AlignZones {
+        /// The reference glyphs each zone is read from: the flat-sided ones,
+        /// the round ones that overshoot past them, and whether the zone is
+        /// the top or the bottom of those glyphs. The baseline is not listed
+        /// — it is zero by definition, and only its overshoot is read.
+        const SOURCES: [(&[char], &[char], bool); 4] = [
+            (&['x', 'z', 'v'], &['o', 'e', 'c'], true),
+            (&['H', 'E', 'Z'], &['O', 'C', 'G'], true),
+            (&['b', 'd', 'h', 'k', 'l'], &[], true),
+            (&['p', 'q'], &['g', 'j', 'y'], false),
+        ];
+
+        let round_bottom = self.reference_extreme(&['o', 'e', 'c'], false);
+        let mut zones = vec![Zone::new(0.0, round_bottom.unwrap_or(0.0))];
+        for &(flat_from, round_from, top) in &SOURCES {
+            let Some(flat) = self.reference_extreme(flat_from, top) else {
+                continue;
+            };
+            let over = self.reference_extreme(round_from, top).unwrap_or(flat);
+            zones.push(Zone::new(flat, over));
+        }
+        AlignZones::new(zones)
+    }
+
+    /// How far the first of `chars` the face draws reaches, in font units
+    /// below the baseline (negative above): its top when `top`, else its
+    /// bottom. `None` when the face draws none of them.
+    fn reference_extreme(&self, chars: &[char], top: bool) -> Option<f64> {
+        for &ch in chars {
+            let Some(glyph) = self.glyph_for(u32::from(ch)) else {
+                continue;
+            };
+            let mut sink = OutlineSink::uniform(1.0, 0.0);
+            if outline_glyph(self, glyph, &mut sink, 0).is_err() || sink.segments.is_empty() {
+                continue;
+            }
+            let reach = sink.segments.iter().fold(None, |reach: Option<f64>, seg| {
+                let end = if top {
+                    mathf::fmin(seg.y0, seg.y1)
+                } else {
+                    mathf::fmax(seg.y0, seg.y1)
+                };
+                Some(match reach {
+                    Some(seen) if top => mathf::fmin(seen, end),
+                    Some(seen) => mathf::fmax(seen, end),
+                    None => end,
+                })
+            });
+            if reach.is_some() {
+                return reach;
+            }
+        }
+        None
+    }
+
     /// The one advance width every mapped spacing glyph shares, in font units.
     ///
     /// The cell grid only works over a strictly monospace face: every mapped
@@ -339,19 +412,25 @@ impl<'a> Face<'a> {
     /// Returns a [`FontError`] when the face maps no spacing glyph or is not
     /// strictly monospace.
     pub fn uniform_advance(&self) -> Result<u16, FontError> {
+        self.uniform.ok_or(err("face is not strictly monospace"))
+    }
+
+    /// The uniform advance, or `None` when the face mixes spacing widths or
+    /// maps no spacing glyph at all.
+    fn read_uniform_advance(&self) -> Option<u16> {
         let mut uniform = None;
         for &(_, glyph) in &self.mapped {
-            let advance = self.base_advance(glyph)?;
+            let advance = self.base_advance(glyph).ok()?;
             if advance == 0 {
                 continue;
             }
             match uniform {
                 None => uniform = Some(advance),
                 Some(seen) if seen == advance => {}
-                Some(_) => return Err(err("face is not strictly monospace")),
+                Some(_) => return None,
             }
         }
-        uniform.ok_or(err("face maps no spacing glyphs"))
+        uniform
     }
 
     /// The number of outline points `glyph` contributes to a `gvar` tuple: the
@@ -414,15 +493,74 @@ impl<'a> Face<'a> {
         px_per_em: f64,
         bitmap_width: u32,
     ) -> Result<Vec<u8>, FontError> {
+        let scale = px_per_em / f64::from(self.units_per_em);
+        let sink = OutlineSink {
+            scale_x: self.cell_scale(geometry.width).unwrap_or(scale),
+            ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
+        };
+        let segments = self.fitted_outline(glyph, sink, Axes::RowsAndColumns)?;
+        Ok(rasterise(&segments, geometry, bitmap_width))
+    }
+
+    /// [`rasterise_glyph`](Self::rasterise_glyph) with the grid fitting left
+    /// out, so a test can measure what the fitting did.
+    #[cfg(test)]
+    pub(crate) fn rasterise_unfitted(
+        &self,
+        glyph: u16,
+        geometry: &CellGeometry,
+        px_per_em: f64,
+        bitmap_width: u32,
+    ) -> Result<Vec<u8>, FontError> {
+        let scale = px_per_em / f64::from(self.units_per_em);
         let mut sink = OutlineSink {
-            segments: Vec::new(),
-            scale: px_per_em / f64::from(self.units_per_em),
-            origin_x: 0.0,
-            baseline_y: f64::from(geometry.baseline),
-            transform: Affine::IDENTITY,
+            scale_x: self.cell_scale(geometry.width).unwrap_or(scale),
+            ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
         };
         outline_glyph(self, glyph, &mut sink, 0)?;
         Ok(rasterise(&sink.segments, geometry, bitmap_width))
+    }
+
+    /// Decode `glyph` into `sink`, snap it to the pixel grid along `axes`, and
+    /// hand back the segments that can fill.
+    ///
+    /// A segment with no height crosses no sample row and so contributes
+    /// nothing to the winding fill; it is carried this far only because the
+    /// fitter reads an outline's flat edges off exactly those segments.
+    fn fitted_outline(
+        &self,
+        glyph: u16,
+        mut sink: OutlineSink,
+        axes: Axes,
+    ) -> Result<Vec<Segment>, FontError> {
+        outline_glyph(self, glyph, &mut sink, 0)?;
+        gridfit::fit(
+            &mut sink.segments,
+            axes,
+            &self.zones,
+            sink.baseline_y,
+            sink.scale_y,
+        );
+        sink.segments
+            .retain(|segment| segment.y0.total_cmp(&segment.y1) != core::cmp::Ordering::Equal);
+        Ok(sink.segments)
+    }
+
+    /// Pixels per font unit across that put this face's uniform advance
+    /// exactly on a `width`-pixel cell, or `None` when the face has no one
+    /// advance to place there.
+    ///
+    /// A cell grid's whole premise is that the advance *is* the cell, and a
+    /// face's advance rounds to it rather than landing on it: the console
+    /// face's 613/1024-em advance is 8.38 pixels in the 8-pixel cell it
+    /// defines. Drawn at its own width a glyph overhangs its cell and sits a
+    /// twentieth of a cell further right for each column across, which is
+    /// ink in the neighbouring cell and stems that no longer line up. Fitting
+    /// the advance to the cell costs a 5% narrowing no reader can see and
+    /// buys a grid that holds.
+    fn cell_scale(&self, width: u32) -> Option<f64> {
+        let advance = self.uniform.filter(|&advance| advance > 0)?;
+        Some(f64::from(width) / f64::from(advance))
     }
 
     /// Rasterise `glyph` proportionally: a bitmap tight to the glyph's own ink
@@ -450,15 +588,10 @@ impl<'a> Face<'a> {
         baseline: u32,
         height: u32,
     ) -> Result<GlyphRaster, FontError> {
-        let mut sink = OutlineSink {
-            segments: Vec::new(),
-            scale: px_per_em / f64::from(self.units_per_em),
-            origin_x: 0.0,
-            baseline_y: f64::from(baseline),
-            transform: Affine::IDENTITY,
-        };
-        outline_glyph(self, glyph, &mut sink, 0)?;
-        let Some(left_edge) = ink_left_edge(&sink.segments) else {
+        let scale = px_per_em / f64::from(self.units_per_em);
+        let sink = OutlineSink::uniform(scale, f64::from(baseline));
+        let mut segments = self.fitted_outline(glyph, sink, Axes::Rows)?;
+        let Some(left_edge) = ink_left_edge(&segments) else {
             return Ok(GlyphRaster {
                 width: 0,
                 height,
@@ -466,7 +599,7 @@ impl<'a> Face<'a> {
                 coverage: Vec::new(),
             });
         };
-        let (left, width) = ink_extent(&sink.segments, left_edge)?;
+        let (left, width) = ink_extent(&segments, left_edge)?;
         if width == 0 {
             return Ok(GlyphRaster {
                 width: 0,
@@ -475,7 +608,7 @@ impl<'a> Face<'a> {
                 coverage: Vec::new(),
             });
         }
-        for segment in &mut sink.segments {
+        for segment in &mut segments {
             segment.x0 -= left_edge;
             segment.x1 -= left_edge;
         }
@@ -484,7 +617,7 @@ impl<'a> Face<'a> {
             height,
             baseline,
         };
-        let coverage = rasterise(&sink.segments, &geometry, width);
+        let coverage = rasterise(&segments, &geometry, width);
         Ok(GlyphRaster {
             width,
             height,
@@ -630,11 +763,32 @@ fn parse_cmap_format4(r: &Reader<'_>, cmap: usize) -> Result<Vec<(u32, u16)>, Fo
 
 /// One straight outline segment in pixel space (y grows downward).
 #[derive(Copy, Clone, Debug)]
-struct Segment {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
+pub(crate) struct Segment {
+    pub(crate) x0: f64,
+    pub(crate) y0: f64,
+    pub(crate) x1: f64,
+    pub(crate) y1: f64,
+}
+
+/// Where `segment` crosses the horizontal line `row`, and which way it runs
+/// (`+1` downward, `-1` upward), or `None` when it does not reach it.
+///
+/// The span is half-open in the row, so a vertex two segments share is
+/// counted once. This is the whole of the fill rule: the rasteriser sums
+/// these crossings into spans, and the grid fitter sums them to the left of a
+/// point to ask whether that point is inside the outline — one definition, so
+/// the fitter can never disagree with the fill about where the ink is.
+pub(crate) fn crossing(segment: &Segment, row: f64) -> Option<(f64, i32)> {
+    let (top, bottom, at_top, at_bottom, direction) = if segment.y0 < segment.y1 {
+        (segment.y0, segment.y1, segment.x0, segment.x1, 1)
+    } else {
+        (segment.y1, segment.y0, segment.x1, segment.x0, -1)
+    };
+    if row < top || row >= bottom {
+        return None;
+    }
+    let t = (row - top) / (bottom - top);
+    Some((at_top + t * (at_bottom - at_top), direction))
 }
 
 /// A font-unit affine transform: maps `(x, y)` to
@@ -684,34 +838,47 @@ impl Affine {
 /// font-unit → pixel transform (including the composite component transform).
 struct OutlineSink {
     segments: Vec<Segment>,
-    scale: f64,
+    /// Pixels per font unit across. A cell grid narrows this so the face's
+    /// advance lands exactly on the cell; everything else matches `scale_y`.
+    scale_x: f64,
+    /// Pixels per font unit down.
+    scale_y: f64,
     origin_x: f64,
     baseline_y: f64,
     transform: Affine,
 }
 
 impl OutlineSink {
+    /// A sink scaling both axes alike, for an outline drawn at its own
+    /// proportions.
+    fn uniform(scale: f64, baseline_y: f64) -> Self {
+        Self {
+            segments: Vec::new(),
+            scale_x: scale,
+            scale_y: scale,
+            origin_x: 0.0,
+            baseline_y,
+            transform: Affine::IDENTITY,
+        }
+    }
+
     fn to_px(&self, x: f64, y: f64) -> (f64, f64) {
         let (fx, fy) = self.transform.apply(x, y);
         (
-            self.origin_x + fx * self.scale,
-            self.baseline_y - fy * self.scale,
+            self.origin_x + fx * self.scale_x,
+            self.baseline_y - fy * self.scale_y,
         )
     }
 
     fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         let (px0, py0) = self.to_px(x0, y0);
         let (px1, py1) = self.to_px(x1, y1);
-        // An exactly horizontal segment can never cross a sample row, so it
-        // contributes nothing to the winding fill and is dropped.
-        if py0.total_cmp(&py1) != core::cmp::Ordering::Equal {
-            self.segments.push(Segment {
-                x0: px0,
-                y0: py0,
-                x1: px1,
-                y1: py1,
-            });
-        }
+        self.segments.push(Segment {
+            x0: px0,
+            y0: py0,
+            x1: px1,
+            y1: py1,
+        });
     }
 
     /// Flatten the quadratic Bézier into [`QUAD_SEGMENTS`] chords.
@@ -1132,19 +1299,7 @@ fn rasterise(segments: &[Segment], geometry: &CellGeometry, width: u32) -> Vec<u
         for sub in 0..SAMPLE_ROWS {
             let y = f64::from(row) + (f64::from(sub) + 0.5) / f64::from(SAMPLE_ROWS);
             crossings.clear();
-            for seg in segments {
-                let (top, bottom, x_at_top, x_at_bottom, winding) = if seg.y0 < seg.y1 {
-                    (seg.y0, seg.y1, seg.x0, seg.x1, 1)
-                } else {
-                    (seg.y1, seg.y0, seg.x1, seg.x0, -1)
-                };
-                // Half-open [top, bottom) so a vertex shared by two segments is
-                // counted exactly once.
-                if y >= top && y < bottom {
-                    let t = (y - top) / (bottom - top);
-                    crossings.push((x_at_top + t * (x_at_bottom - x_at_top), winding));
-                }
-            }
+            crossings.extend(segments.iter().filter_map(|seg| crossing(seg, y)));
             crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut winding = 0;
             let mut span_start = 0.0;

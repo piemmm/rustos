@@ -276,32 +276,27 @@ fn a_covered_unicode_scalar_renders_its_own_glyph() {
 }
 
 #[test]
-fn hebrew_scalars_render_the_fallback_in_single_cells() {
-    // Hebrew is not in the console atlas, so each Hebrew scalar renders the
-    // U+FFFD fallback in its own single cell (`fontd` serves real Hebrew); a
-    // following `a` renders its own distinct glyph.
+fn hebrew_scalars_render_their_own_glyphs_in_single_cells() {
+    // Hebrew is narrow, so each scalar draws its own distinct glyph in one
+    // cell. Four different letters that all came out identical would mean the
+    // console had fallen back to the replacement glyph for the script.
     let (mut console, mut pixels) = console_of(6, 1);
     console.write_bytes(&mut pixels, "שלוםa".as_bytes());
     let geometry = *console.geometry();
-    for column in 0..5 {
+    let drawn: Vec<Vec<u32>> = (0..5)
+        .map(|column| cell(&pixels, &geometry, column, 0))
+        .collect();
+    for (seen, glyph) in drawn.iter().enumerate() {
+        let column = u32::try_from(seen).unwrap_or(0);
         assert!(
             cell_has_ink(&pixels, &geometry, column, 0),
             "column {column} has no glyph ink"
         );
-    }
-    let fallback = cell(&pixels, &geometry, 0, 0);
-    for column in 1..4 {
-        assert_eq!(
-            cell(&pixels, &geometry, column, 0),
-            fallback,
-            "Hebrew cell {column} is not the same fallback glyph"
+        assert!(
+            drawn[..seen].iter().all(|earlier| earlier != glyph),
+            "column {column} repeats an earlier glyph"
         );
     }
-    assert_ne!(
-        cell(&pixels, &geometry, 4, 0),
-        fallback,
-        "`a` should render its own glyph, not the fallback"
-    );
 }
 
 #[test]
@@ -335,22 +330,20 @@ fn hebrew_ink_survives_a_coloured_background_and_local_overwrite() {
 }
 
 #[test]
-fn wide_east_asian_scalars_reserve_two_cells_and_advance_by_two() {
-    // A wide (CJK) scalar is not in the console atlas, so it renders the
-    // narrow U+FFFD fallback in its lead cell; it still reserves its
-    // continuation cell and advances the cursor by two columns (`fontd`
-    // serves the real two-cell CJK glyph).
+fn wide_east_asian_scalars_draw_across_two_cells_and_advance_by_two() {
+    // A wide (CJK) scalar draws one glyph across both of its cells and
+    // advances the cursor by two columns.
     for (text, language) in [("世a", "Japanese"), ("한a", "Korean")] {
         let (mut console, mut pixels) = console_of(4, 1);
         console.write_bytes(&mut pixels, text.as_bytes());
         let geometry = *console.geometry();
         assert!(
-            !cell_blank(&pixels, &geometry, 0, 0),
-            "{language} lead glyph (fallback) drawn"
+            cell_has_ink(&pixels, &geometry, 0, 0),
+            "{language} lead cell has no ink"
         );
         assert!(
-            cell_blank(&pixels, &geometry, 1, 0),
-            "{language} continuation cell reserved but blank"
+            cell_has_ink(&pixels, &geometry, 1, 0),
+            "{language} continuation cell has no ink"
         );
         assert!(
             cell_has_ink(&pixels, &geometry, 2, 0),
@@ -360,10 +353,9 @@ fn wide_east_asian_scalars_reserve_two_cells_and_advance_by_two() {
 }
 
 #[test]
-fn a_wide_scalar_reserved_continuation_is_background_only() {
-    // The wide scalar renders the narrow fallback in its lead cell and
-    // reserves its continuation cell, which is painted with the background
-    // and carries no glyph ink.
+fn a_wide_scalar_paints_its_continuation_cell() {
+    // The second half of a wide glyph is the same glyph: it carries ink over
+    // the selected background rather than being left as an empty reservation.
     let (mut console, mut pixels) = console_of(2, 1);
     console.write_bytes(&mut pixels, "\u{1B}[48;2;10;20;30m日".as_bytes());
     let geometry = *console.geometry();
@@ -371,8 +363,8 @@ fn a_wide_scalar_reserved_continuation_is_background_only() {
     assert!(
         cell(&pixels, &geometry, 1, 0)
             .iter()
-            .all(|&pixel| pixel == background),
-        "the reserved continuation cell has glyph ink"
+            .any(|&pixel| pixel != background),
+        "the continuation cell carries no glyph ink"
     );
 }
 
@@ -413,18 +405,18 @@ fn a_wide_glyph_wraps_whole_when_one_column_remains() {
     console.write_bytes(&mut pixels, "ab世".as_bytes());
     let geometry = *console.geometry();
     // Two narrow glyphs leave one column on row 0: the wide glyph wraps whole
-    // to row 1, and the leftover column stays blank.
+    // to row 1 rather than being split across the break.
     assert!(
         cell_blank(&pixels, &geometry, 2, 0),
         "leftover column blank"
     );
     assert!(
-        !cell_blank(&pixels, &geometry, 0, 1),
+        cell_has_ink(&pixels, &geometry, 0, 1),
         "lead wrapped to row 1"
     );
     assert!(
-        cell_blank(&pixels, &geometry, 1, 1),
-        "reserved continuation cell on row 1 is blank (narrow fallback)"
+        cell_has_ink(&pixels, &geometry, 1, 1),
+        "the wrapped glyph's continuation cell on row 1 has no ink"
     );
 }
 
@@ -601,10 +593,7 @@ fn leaving_the_alternate_screen_restores_the_primary_screen() {
 
     // Enter the alternate screen and scribble different content on it.
     console.write_bytes(&mut pixels, b"\x1b[?1049hXYZ");
-    assert!(
-        cell_has(&pixels, &geometry, 0, 0, DEFAULT_FOREGROUND),
-        "X drawn on alt"
-    );
+    assert!(cell_has_ink(&pixels, &geometry, 0, 0), "X drawn on alt");
 
     // Leaving restores the primary screen pixel-for-pixel.
     let dirty = console.write_bytes(&mut pixels, b"\x1b[?1049l");

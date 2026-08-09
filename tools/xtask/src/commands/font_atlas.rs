@@ -1,25 +1,28 @@
 //! `cargo xtask font-atlas` implementation.
 //!
-//! This command rasterises the **console atlas**: the primary Inconsolata EX
-//! face's whole repertoire (Latin, Greek, Cyrillic, box drawing, arrows,
-//! punctuation, currency, U+FFFD; SIL OFL 1.1, committed as a TrueType source
-//! under `lib/font/assets/`) into a fixed-cell, 4-bit-coverage bitmap atlas,
-//! emitted as generated data (`lib/font/src/atlas.rs` +
-//! `lib/font/src/atlas_coverage.bin`) that the framebuffer boot console
-//! (`lib/fbcon`) and the `lib/font` geometry constants compile in. With no
-//! arguments the command verifies the committed atlas matches a fresh
-//! generation (the `ci` drift guard, exactly like `c-header`); `--write`
-//! regenerates it.
+//! This command rasterises the **console atlas**: the whole repertoire of the
+//! console font family (`lib/font/assets/mono/`, SIL OFL 1.1) into a
+//! fixed-cell, 4-bit-coverage bitmap atlas, emitted as generated data
+//! (`lib/font/src/atlas.rs` + `lib/font/src/atlas_coverage.bin`) that the
+//! framebuffer boot console (`lib/fbcon`) and the `lib/font` geometry
+//! constants compile in. With no arguments the command verifies the committed
+//! atlas matches a fresh generation (the `ci` drift guard, exactly like
+//! `c-header`); `--write` regenerates it.
 //!
-//! Only the primary face is compiled in. The CJK (M PLUS 1 Code, `D2Coding`)
-//! and Hebrew (Noto Sans Hebrew) companion faces are **not** in this atlas:
-//! the kernel/headless text console renders the primary Latin repertoire and
-//! falls back to U+FFFD for a CJK/Hebrew scalar, while rich CJK/Hebrew text is
-//! served at runtime by the `fontd` font service, which rasterises every face
-//! and size on demand from `/System/Fonts` through this same `lib/fontface`
-//! engine. There is therefore exactly one compiled-in atlas (this console
-//! subset) and one runtime rasterisation source (the faces `fontd` loads) —
-//! never a duplicated full-Unicode artifact.
+//! Every face the family's `FontFamily` manifest names is compiled in, in its
+//! resolution order: the primary Latin/Greek/Cyrillic face and its CJK
+//! (M PLUS 1 Code, `D2Coding`) and Hebrew (Noto Sans Hebrew) companions. The
+//! text console runs in the kernel and has no way to ask a user-space service
+//! for a glyph, so its repertoire is whatever is compiled in: a companion
+//! left out is a script the console simply cannot draw, at a `man` page, a
+//! login prompt or a panic alike. The `fontd` font service reads the same
+//! faces from `/System/Fonts` at runtime for scalable, proportional text
+//! through this same `lib/fontface` engine, so the two views share one source
+//! and one rasteriser rather than each carrying its own.
+//!
+//! The face list itself is read from the family manifest through the shared
+//! [`font_store`] reader the image builder plants the store with — this
+//! command never names a face.
 //!
 //! The generator is deliberately first-party and deterministic: the shared
 //! `lib/fontface` engine (a minimal TrueType reader
@@ -52,11 +55,8 @@ use std::path::Path;
 
 use tairix_fontface::{CellGeometry, FontError, FontFamily, ATLAS_EM_PX};
 
-use super::font_lineart;
+use super::{font_lineart, font_store};
 
-/// Workspace-relative path of the committed primary TrueType source (the
-/// only face compiled into the console atlas).
-pub const DEFAULT_TTF_PATH: &str = "lib/font/assets/mono/Inconsolata-EX.ttf";
 /// Workspace-relative path of the generated Rust atlas view.
 pub const DEFAULT_ATLAS_RS_PATH: &str = "lib/font/src/atlas.rs";
 /// Workspace-relative path of the generated coverage payload.
@@ -218,20 +218,21 @@ impl Atlas {
             "// GENERATED FILE — DO NOT EDIT.\n\
              //\n\
              // Emitted by `cargo xtask font-atlas --write` from the committed\n\
-             // primary face `lib/font/assets/mono/Inconsolata-EX.ttf`\n\
-             // (SIL OFL 1.1; see\n\
-             // `lib/font/assets/mono/OFL-Inconsolata-MPLUS1Code.txt`).\n\
+             // console family `lib/font/assets/mono/` — every face its\n\
+             // `FontFamily` manifest names (SIL OFL 1.1; see the `OFL-*.txt`\n\
+             // files beside them).\n\
              // `cargo xtask font-atlas` (run by `ci`)\n\
              // fails closed if this file drifts from a fresh generation\n\
              // (AGENTS.md §2.2: generated views are never hand-maintained).\n\n",
         );
         out.push_str(
-            "//! The generated Inconsolata EX **console atlas**: fixed-cell 4-bit\n\
-             //! coverage bitmaps for the primary face's whole repertoire (Latin,\n\
-             //! Greek, Cyrillic, box drawing, arrows, punctuation, currency,\n\
-             //! U+FFFD), plus the codepoint → glyph-index range table. The CJK and\n\
-             //! Hebrew companions are not compiled in — the font service rasterises\n\
-             //! them at runtime; a scalar outside this repertoire renders U+FFFD.\n\
+            "//! The generated **console atlas**: fixed-cell 4-bit coverage bitmaps\n\
+             //! for the whole repertoire of the console font family — Latin, Greek,\n\
+             //! Cyrillic, box drawing, arrows, punctuation, currency and U+FFFD from\n\
+             //! the primary face, plus the CJK and Hebrew companions — with the\n\
+             //! codepoint → glyph-index range table. The text console runs in the\n\
+             //! kernel and cannot ask the font service for a glyph, so what is here\n\
+             //! is what it can draw; a scalar outside this repertoire renders U+FFFD.\n\
              //! Pure data; lookup and blitting live in the hand-written modules of\n\
              //! this crate.\n\n",
         );
@@ -392,16 +393,14 @@ fn emit_literals(mut literals: &[u8], output: &mut Vec<u8>) -> Result<(), String
     Ok(())
 }
 
-/// Generate the console atlas from the committed primary face, returning the
-/// two artefacts as `(rust_view, coverage_payload)`.
+/// Generate the console atlas from the committed console family, returning
+/// the two artefacts as `(rust_view, coverage_payload)`.
 ///
-/// Only the primary Inconsolata EX face is compiled in; the CJK and Hebrew
-/// companions are served at runtime by `fontd`, not baked into the kernel.
+/// Every face the family's manifest names is compiled in, in its order, so
+/// the console draws every script the shipped family covers.
 fn generate(workspace_root: &Path) -> Result<(String, Vec<u8>), String> {
-    let path = workspace_root.join(DEFAULT_TTF_PATH);
-    let primary = std::fs::read(&path)
-        .map_err(|e| format!("font-atlas: cannot read {}: {e}", path.display()))?;
-    let atlas = build_atlas(&[&primary])?;
+    let family = font_store::read_family(workspace_root, font_store::CONSOLE_FAMILY)?;
+    let atlas = build_atlas(&family.face_bytes())?;
     Ok((atlas.render_rust(), atlas.coverage_bytes()?))
 }
 
@@ -454,13 +453,13 @@ mod tests {
             .expect("workspace root")
     }
 
-    fn committed_face() -> Vec<u8> {
-        std::fs::read(workspace_root().join(DEFAULT_TTF_PATH)).expect("committed face")
+    fn committed_family() -> font_store::Family {
+        font_store::read_family(&workspace_root(), font_store::CONSOLE_FAMILY)
+            .expect("committed console family")
     }
 
     fn committed_atlas() -> Atlas {
-        let primary = committed_face();
-        build_atlas(&[&primary]).expect("atlas builds")
+        build_atlas(&committed_family().face_bytes()).expect("atlas builds")
     }
 
     /// The coverage cell for `code`, unpacked to one nibble value per pixel.
@@ -527,10 +526,11 @@ mod tests {
 
     #[test]
     fn compressed_payload_round_trips_without_size_regression() {
-        // The console subset is the primary Latin face alone; shedding the CJK
-        // and Hebrew companions caps the compiled-in payload far below the old
-        // full-Unicode atlas (which was ~3.6 MB).
-        const CONSOLE_PAYLOAD_CEILING: usize = 600_000;
+        // The payload is compiled into the kernel image on every target, so
+        // it is bounded. The whole family at the 8×16 cell is 1.71 MB, against
+        // 3.54 MB for the same faces at the old 15×28 cell; this holds that
+        // with headroom and catches a cell-size or compression regression.
+        const CONSOLE_PAYLOAD_CEILING: usize = 2_000_000;
 
         let atlas = committed_atlas();
         let payload = atlas.coverage_bytes().expect("coverage encoding succeeds");
@@ -641,23 +641,36 @@ mod tests {
     }
 
     #[test]
-    fn cjk_and_hebrew_companions_are_not_compiled_in() {
+    fn every_companion_face_is_compiled_in_with_ink() {
         let atlas = committed_atlas();
-        // The console subset is the primary Latin face alone: CJK and Hebrew
-        // scalars are not mapped, so they resolve to U+FFFD at the console and
-        // are served by `fontd` at runtime instead.
-        let covered = |code: u32| {
-            atlas
-                .ranges
-                .iter()
-                .any(|r| (r.first..r.first + r.len).contains(&code))
-        };
+        // The kernel text console cannot ask `fontd` for a glyph, so every
+        // script the family ships has to be here or the console can never draw
+        // it. Coverage alone is not enough: a mapped-but-blank cell would draw
+        // nothing at all, which reads as text that silently vanished.
         for ch in [
             'あ', 'ア', '漢', '字', '日', '本', '語', '가', '각', '한', '글', 'א', 'ב', 'ה', 'ש',
         ] {
+            let cell = cell_of(&atlas, u32::from(ch));
+            assert!(cell.iter().any(|&c| c > 0), "{ch:?} has no ink");
+        }
+    }
+
+    #[test]
+    fn a_full_width_scalar_is_drawn_across_both_cells() {
+        let atlas = committed_atlas();
+        // A wide scalar occupies two terminal cells; ink confined to the first
+        // would leave the console drawing half a character.
+        let width = atlas.geometry.width as usize;
+        for ch in ['日', '語', '한'] {
+            let cell = cell_of(&atlas, u32::from(ch));
+            let inked = |column: usize| {
+                cell.chunks(width * MAX_GLYPH_CELLS as usize)
+                    .any(|row| row[column] > 0)
+            };
+            assert!((0..width).any(inked), "{ch:?} lead cell is empty");
             assert!(
-                !covered(u32::from(ch)),
-                "{ch:?} must not be in the console atlas"
+                (width..width * MAX_GLYPH_CELLS as usize).any(inked),
+                "{ch:?} continuation cell is empty"
             );
         }
     }
@@ -677,9 +690,9 @@ mod tests {
 
     #[test]
     fn generation_is_deterministic() {
-        let face = committed_face();
-        let a = build_atlas(&[&face]).expect("atlas builds");
-        let b = build_atlas(&[&face]).expect("atlas builds");
+        let family = committed_family();
+        let a = build_atlas(&family.face_bytes()).expect("atlas builds");
+        let b = build_atlas(&family.face_bytes()).expect("atlas builds");
         assert_eq!(a.render_rust(), b.render_rust());
         assert_eq!(
             a.coverage_bytes().expect("first encoding succeeds"),
@@ -689,7 +702,8 @@ mod tests {
 
     #[test]
     fn truncated_face_fails_closed() {
-        let face = committed_face();
+        let family = committed_family();
+        let face = family.face_bytes()[0];
         assert!(build_atlas(&[]).is_err());
         assert!(build_atlas(&[&face[..64]]).is_err());
         assert!(build_atlas(&[&face[..face.len() / 2]]).is_err());

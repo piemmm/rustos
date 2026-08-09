@@ -99,7 +99,10 @@ instances, and a byte-budgeted coverage cache, and turns one decoded
    when the glyph came from a fallback face, so mixing scripts never shifts
    the baseline or the line box mid-run. The shared `tairix-fontface` engine
    produces 4-bit coverage scaled ×17 to the protocol's 8-bit samples, and
-   the result is memoised.
+   the result is memoised. The engine grid-fits the outline along **rows
+   only** here: snapping rows holds a run's baseline, x-height and cap height
+   to whole pixels, while columns stay exactly where the outline puts them so
+   the ink still sits under the unfitted advance `Metrics` reported.
 3. Emit the reply. `handle` **always** emits a reply, framing a status-word
    error frame on any failure so both the glyph and metrics clients decode a
    definite outcome (fail closed).

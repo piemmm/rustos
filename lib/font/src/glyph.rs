@@ -1,9 +1,9 @@
-//! Glyph lookup over the generated Inconsolata EX console atlas.
+//! Glyph lookup over the generated console atlas.
 //!
-//! The compiled-in atlas is the primary face's repertoire only (the CJK and
-//! Hebrew companions are served at runtime by `fontd`), so a CJK/Hebrew scalar
-//! resolves to the U+FFFD fallback here exactly like any other unmapped
-//! scalar.
+//! The compiled-in atlas covers every face of the console family, the CJK and
+//! Hebrew companions included: the text console runs in the kernel and cannot
+//! ask `fontd` for a glyph, so a script missing here is one no console could
+//! ever draw.
 //!
 //! [`lookup`] maps any `char` to its atlas cell by binary search over the
 //! generated codepoint ranges ([`crate::atlas::RANGES`]); a scalar the face

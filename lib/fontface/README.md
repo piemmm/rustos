@@ -30,6 +30,45 @@ Instancing at a face's defaults, and any static (non-variable) face, applies no
 variation and rasterises byte-identically to an unvaried face — the generated
 console atlas depends on that.
 
+## Grid fitting
+
+A face puts its stems and its x-height where the design wants them, which at a
+text-console cell size is almost never a whole pixel: 1.2 pixels of stem
+straddling two columns fills both at about 60%, and a screen of that is grey
+haze rather than type. A face carrying TrueType hinting bytecode grid-fits
+itself; the committed faces do not (`Inconsolata-EX` ships a stub `prep` and no
+`fpgm`/`cvt`), so `gridfit` synthesises the fitting from the outline, the way
+FreeType's autofitter does for the same reason.
+
+The fit is a monotone piecewise-linear warp of one coordinate. Near-axis
+segments cluster into edges (a stroke's two sides run opposite ways, so they
+never merge into one), edges with ink between them pair into strokes, each
+stroke snaps to a whole number of pixels — never fewer than one, so a hairline
+darkens rather than disappears — and the rest of the outline interpolates. An
+edge keeps the runs it covers rather than their span, because a side is often
+several: an `m`'s top is the left stem's flat and two arch crowns, a `g`'s is
+its bowl's crown and its ear, so the ink test has to be asked where both sides
+really have material and not in the valley between them. Diagonals never
+register as an edge, so they stay straight rather than becoming staircases,
+and monotonicity means a fitted contour cannot fold over itself.
+
+Rows also snap to the face's own alignment zones — baseline, x-height, cap
+height, ascender, descender, read once at parse from the face's `x`, `o`, `H`,
+`O`, `b`, `p`, `g` — so a line of text agrees on those rows instead of each
+letter rounding alone. A round letter's overshoot is flattened onto its zone
+only while it is worth less than a pixel, which is exactly when drawing it
+would cost a whole row.
+
+Columns are snapped only for a fixed cell, where the cell owns the advance and
+moving a stem costs no spacing; the cell path also scales columns so the
+face's uniform advance lands exactly on the cell rather than rounding to it.
+Proportional text is fitted along rows alone, because ink snapped sideways
+would drift out from under the unfitted advance that laid the run out.
+
+Measured on the console face at its 8×16 cell, the share of ink at full
+coverage rises from 9% unfitted to 34%, against about 27% for FreeType's
+autofitter on the same face and size.
+
 ## Monospace and proportional
 
 - `Face::rasterise_glyph` fills a fixed `CellGeometry` cell for a monospace

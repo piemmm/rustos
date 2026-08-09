@@ -11,16 +11,19 @@
 //! taskbar and the default apps can draw text without depending on the window
 //! manager.
 //!
-//! # The atlas is the kernel/console subset only
+//! # The atlas is the console's whole repertoire
 //!
-//! The compiled-in atlas is the primary Inconsolata EX face's whole
-//! repertoire (Latin, Greek, Cyrillic, box drawing, arrows, punctuation,
-//! currency, U+FFFD; §2.4 of `plans/FONT-SERVICE.md`). It is the boot/headless
-//! text console's glyph source (`lib/fbcon`, which brings its own allocator-free
-//! blitter via `default-features = false`), and it supplies the render path's
-//! monospace **geometry constants**. The CJK and Hebrew companion faces are
-//! **not** compiled in anywhere: the console falls back to U+FFFD for such a
-//! scalar, while rich CJK/Hebrew text is served by `fontd` (below).
+//! The compiled-in atlas covers every face of the console family — Latin,
+//! Greek, Cyrillic, box drawing, arrows, punctuation and currency from
+//! Inconsolata EX, the Japanese, Korean and Hebrew companions, and U+FFFD for
+//! anything outside them (§2.4 of `plans/FONT-SERVICE.md`). It is the
+//! boot/headless text console's glyph source (`lib/fbcon`, which brings its
+//! own allocator-free blitter via `default-features = false`), and it supplies
+//! the render path's monospace **geometry constants**. The console runs in the
+//! kernel and cannot call `fontd`, so a script left out of the atlas is one it
+//! could never draw at any point — a `man` page, a login prompt or a panic
+//! alike. `fontd` reads the same faces at runtime for scalable proportional
+//! text (below).
 //!
 //! # Rendering goes through the sandboxed font service
 //!

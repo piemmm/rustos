@@ -260,7 +260,7 @@ fn a_static_face_rasters_are_unchanged() {
         total = total.wrapping_add(fnv(&coverage));
     }
     assert_eq!(
-        total, 0xf927_aac1_0bad_1a3e,
+        total, 0x10e2_f66d_07d2_b731,
         "a static face's rasterisation changed"
     );
 }

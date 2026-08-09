@@ -53,10 +53,13 @@ extern crate std;
 
 mod engine;
 mod family;
+mod gridfit;
 mod mathf;
 mod store;
 mod variations;
 
+#[cfg(test)]
+mod gridfit_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

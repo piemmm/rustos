@@ -3280,18 +3280,19 @@ Shipped (headless-testable, model + renderer over injected seams):
   pressure wake through the one `tairix_procinfo::pressure` helper and
   `lib/font` primes it when it builds its cache — `plans/SMARTRAM.md` SMART5,
   `plans/FONT-SERVICE.md` §3.2),
-  `lib/font` (the text-rendering front end: a small compiled-in console atlas
-  — the primary Inconsolata EX face's repertoire only, `cargo xtask
-  font-atlas`, drift gated in `ci`, with binary-search Unicode lookup and a
-  U+FFFD fallback — that `lib/fbcon` draws verbatim, plus, behind the `render`
+  `lib/font` (the text-rendering front end: the compiled-in console atlas
+  — every face of the `mono` family, its Japanese, Korean and Hebrew
+  companions included, `cargo xtask font-atlas`, drift gated in `ci`, with
+  binary-search Unicode lookup and a U+FFFD fallback — that `lib/fbcon` draws
+  verbatim, plus, behind the `render`
   feature, a thin cached `FONT_ENDPOINT` client of the `fontd` service that
   holds no font data of its own and lays proportional and fixed-pitch text
   out through one per-glyph-advance path; its `assets/` tree is the shipped
   `/System/Fonts` store, one directory per family),
   `lib/fontface` (the shared TrueType parser + anti-aliased rasteriser,
-  variable-font instancing, and family resolution, used by both the
-  `font-atlas` generator and the `fontd` service so the atlas and live text
-  share one rasteriser, §2.2; its `store` module is the one `FontFamily`
+  grid fitter, variable-font instancing, and family resolution, used by both
+  the `font-atlas` generator and the `fontd` service so the atlas and live
+  text share one rasteriser, §2.2; its `store` module is the one `FontFamily`
   manifest parser the image builder and the service both read),
   `lib/cursor`, `lib/icon`, `lib/svg`, `lib/input`, `lib/procinfo`.
   - **Font-as-OS-service (done, `plans/FONT-SERVICE.md`).** Text rendering is
@@ -5047,6 +5048,33 @@ escape-sequence definition end to end (§2.2).
   panel gets legible text rather than 240 columns (1080p → ×2, 120×33; 4K →
   ×4). 80×25 is defined once as `tairix_vt::CONVENTIONAL_COLUMNS` /
   `CONVENTIONAL_ROWS`, shared with `terminal.app`'s opening grid (§2.2).
+  Glyphs are grid-fitted before they are filled. The committed face carries
+  no TrueType hinting bytecode, so at an 8-pixel cell its stems land between
+  pixels and antialias into two grey columns: unfitted, under a tenth of the
+  atlas's ink reached full coverage and nearly half sat at mid-grey.
+  `lib/fontface`'s `gridfit` snaps each stroke onto whole pixels (never
+  narrower than one, so a hairline darkens rather than vanishes) and holds
+  every letter's baseline, x-height and cap height to shared rows, taking
+  full-coverage ink to over a third — past FreeType's autofitter on the same
+  face and size — and leaving grey only on curves and diagonals, which must
+  stay antialiased. The cell path also scales columns so the face's uniform
+  advance lands exactly on the cell instead of overhanging it; the `fontd`
+  proportional path fits rows only, so ink stays under the advance a client
+  laid out with.
+  Four rules keep the fitting faithful to the letter, each pinned by a
+  regression test: a stroke is bounded by two edges the outline travels in
+  *opposite* directions, so the near sides of a `j`'s hook and its stem are
+  never read as one stroke and the stem snapped out of existence; an edge must
+  be flat within a fraction of a pixel and not merely shallow, so a `w`'s arms
+  stay diagonals instead of being sheared onto a column; every stroke of a
+  glyph is placed by the one shift its first stroke sets, so an `m`'s three
+  evenly-spaced stems stay evenly spaced rather than rounding to 1, 4, 6; and
+  an edge keeps the runs it covers rather than their span, since a side is
+  often several — an `m`'s top is the left stem's flat and two arch crowns, a
+  `g`'s is its bowl's crown and its ear — so the ink test is asked where both
+  sides really have material and not in the valley between, which otherwise
+  left the arch a third of a pixel thick and took the `g`'s top and ear with
+  it.
   Box Drawing (U+2500–U+257F) and Block Elements (U+2580–U+259F) are emitted
   as pixel-exact geometry by `tools/xtask`'s `font_lineart`, not rasterised
   from the face: at an 8-pixel cell the face's hairlines fall between pixels
@@ -5054,6 +5082,15 @@ escape-sequence definition end to end (§2.2).
   seam at every cell edge. A double rule is derived as the outline of the
   region its arms sweep, so all twenty-nine junctions agree without a
   per-glyph table.
+  Every script the family ships is compiled in. The console runs in the
+  kernel and cannot ask `fontd` for a glyph, so a face left out of the atlas
+  is a script no console could ever draw — a `man` page in it, a login
+  prompt, a panic. The generator reads the `mono` family's `FontFamily`
+  manifest through the same `tools/xtask` store reader that plants
+  `/System/Fonts`, so the console's faces and the shipped store's faces are
+  one list and adding a face to the family is the whole change. At the 8×16
+  cell the four faces are 23,602 cells in 1.6 MB, against 3.6 MB for the
+  20,209 cells the old 15×28 atlas carried.
   - **Open follow-up — line art through the font service.** `terminal.app`
     draws its glyphs through `fontd`, which rasterises the outline, so its
     line art does **not** get the synthesised geometry the console now has

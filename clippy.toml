@@ -48,6 +48,7 @@ doc-valid-idents = [
     "OpenSBI",
     "SiFive",
     "QEMU",
+    "FreeType",
     "PID",
     "ABI",
     "ABIs",

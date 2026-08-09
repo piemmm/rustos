@@ -11,18 +11,20 @@ It turns a byte stream into on-screen text by feeding it to the single shared
 `tairix_vt::Parser`, applying each parsed `tairix_vt::Op` to a retained cell
 grid, and repainting the dirtied cells once per write onto a borrowed 32-bit
 scan-out surface (`&mut [u32]`), rendering glyphs with the shared `tairix_font`
-compiled-in **console atlas**: the primary Inconsolata EX face's whole
-repertoire (Latin, Greek, Cyrillic, box drawing, arrows, punctuation,
-currency), 8×16 cells with 16-level anti-aliased coverage, and a U+FFFD
-fallback for anything outside it. The CJK (Japanese, Korean) and Hebrew
-companion faces are **not** compiled into the kernel/boot-console path — the
-font service (`fontd`) rasterises them on demand at runtime — so the boot and
-headless text console shows U+FFFD for a CJK/Hebrew scalar while rich CJK and
-Hebrew text is available through the graphical terminal, which draws via the
-service. A wide (double-width) scalar still occupies a lead plus a continuation
+compiled-in **console atlas**: every face of the console family — Latin,
+Greek, Cyrillic, box drawing, arrows, punctuation and currency from
+Inconsolata EX, plus the Japanese, Korean and Hebrew companions — in 8×16
+cells with 16-level anti-aliased coverage, and a U+FFFD fallback for anything
+outside them. Those glyphs are grid-fitted: the atlas generator snaps each
+stroke onto whole pixels and every letter's baseline, x-height and cap height
+onto shared rows, so a stem draws as one solid column rather than two grey
+ones. The console runs in the kernel and cannot call the font service, so its
+repertoire is whatever is compiled in; the companions are therefore part of the
+atlas rather than left to `fontd`, and a `man` page renders in any shipped
+script on the boot and headless console alike.
+A wide (double-width) scalar occupies a lead plus a continuation
 cell (the same `tairix_vt::char_width` layout the curses window writer
-produces); the narrow fallback paints in the lead cell and the reserved
-continuation cell stays blank. It is a full terminal:
+produces), and the one glyph is drawn across both. It is a full terminal:
 
 - SGR colour: the 16 base colours, the 256-colour palette (colour cube + grey
   ramp), and 24-bit truecolour.

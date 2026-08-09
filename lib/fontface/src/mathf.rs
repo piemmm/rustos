@@ -42,6 +42,20 @@ pub(crate) fn ceil(x: f64) -> f64 {
     }
 }
 
+/// The magnitude of `x`.
+pub(crate) fn fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
+}
+
+/// Round `x` to the nearest integer, halves toward positive infinity.
+pub(crate) fn round(x: f64) -> f64 {
+    floor(x + 0.5)
+}
+
 /// The greater of `a` and `b`. Inputs are always non-`NaN`.
 pub(crate) fn fmax(a: f64, b: f64) -> f64 {
     if a > b {
@@ -81,5 +95,5 @@ pub(crate) fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
               cannot occur"
 )]
 pub(crate) fn round_i32(x: f64) -> i32 {
-    floor(x + 0.5) as i32
+    round(x) as i32
 }

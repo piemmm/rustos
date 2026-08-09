@@ -30,9 +30,8 @@
 
 use std::sync::OnceLock;
 
-use tairix_abi::font_ipc::FamilyKey;
 use tairix_abi::{AppInfoHeader, BundleEntry, BundleFileDigest, APPINFO_MAGIC};
-use tairix_fontface::{FamilyManifest, FAMILY_MANIFEST};
+use tairix_fontface::FAMILY_MANIFEST;
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_itest_harness::app_image::{
     compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
@@ -43,6 +42,7 @@ use tairix_itest_harness::pie::PieArch;
 use tairix_itest_harness::USER_IMAGE_BIAS;
 use tairix_mkimage::ImageProfile;
 
+use super::font_store;
 use super::image_drivers::build_support;
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
@@ -188,64 +188,25 @@ pub fn app_store_files(
 /// A string describing a failed read of the font-assets tree, a family that
 /// carries no manifest, or a manifest naming a face that is not there.
 fn system_font_files(ctx: &Context) -> Result<Vec<AppStoreFile>, String> {
-    let root = ctx.workspace_root.join("lib/font/assets");
-    let mut planted = Vec::new();
-    let families = std::fs::read_dir(&root)
-        .map_err(|e| format!("image: reading font assets {}: {e}", root.display()))?;
-    for family in families {
-        let dir = family
-            .map_err(|e| format!("image: font family entry in {}: {e}", root.display()))?
-            .path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let key = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("image: non-UTF-8 font family name in {}", root.display()))?
-            .to_owned();
-        let manifest_path = dir.join(FAMILY_MANIFEST);
-        let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
-            format!(
-                "image: font family {key} has no readable {FAMILY_MANIFEST}: {e} \
-                 ({})",
-                manifest_path.display()
-            )
-        })?;
-        let manifest = FamilyManifest::parse(
-            FamilyKey::new(&key).map_err(|_| {
-                format!("image: font family directory {key} is not a valid family key")
-            })?,
-            &manifest_text,
-        )
-        .map_err(|e| format!("image: font family {key}: {e:?}"))?;
-
-        let mut files = vec![(FAMILY_MANIFEST.to_owned(), manifest_text.into_bytes())];
-        for face in manifest.faces() {
-            let path = dir.join(face);
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("image: font face {}: {e}", path.display()))?;
-            files.push((face.clone(), bytes));
-        }
-        for (name, bytes) in files {
-            planted.push(AppStoreFile {
-                components: vec![
-                    b"Fonts".to_vec(),
-                    key.clone().into_bytes(),
-                    name.into_bytes(),
-                ],
-                bytes,
-            });
-        }
-    }
-    if planted.is_empty() {
+    let families = font_store::read_store(&ctx.workspace_root)?;
+    if families.is_empty() {
         return Err(format!(
             "image: no font family under {} — the desktop would have no text",
-            root.display()
+            font_store::ASSETS_DIR
         ));
     }
-    // `read_dir` order is unspecified; sort so the planted set is deterministic.
-    planted.sort_by(|a, b| a.components.cmp(&b.components));
+    let mut planted = Vec::new();
+    for family in families {
+        let key = family.key.into_bytes();
+        let plant = |name: &str, bytes: Vec<u8>| AppStoreFile {
+            components: vec![b"Fonts".to_vec(), key.clone(), name.as_bytes().to_vec()],
+            bytes,
+        };
+        planted.push(plant(FAMILY_MANIFEST, family.manifest_text.into_bytes()));
+        for (name, bytes) in family.faces {
+            planted.push(plant(&name, bytes));
+        }
+    }
     Ok(planted)
 }
 
