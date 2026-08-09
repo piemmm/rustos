@@ -54,11 +54,11 @@ pub const MAX_FONT_SIZE_PX: u16 = 48;
 /// Sized so the conventional 80×25 screen, drawn with the shared monospace
 /// face and wrapped in the theme's window furniture, fits inside a 640×480
 /// display without covering it: the face advances seven physical pixels per
-/// column at this height, so the grid is 560×325 and the framed window
-/// 562×355. A denser display multiplies this through the desktop scale, and a
+/// column at this height, so the grid is 560×350 and the framed window
+/// 562×380. A denser display multiplies this through the desktop scale, and a
 /// display too small even for this steps the size down until the grid fits
 /// (`fit_font_size`).
-pub const DEFAULT_FONT_SIZE_PX: u16 = 13;
+pub const DEFAULT_FONT_SIZE_PX: u16 = 14;
 
 /// The step a *Larger text* / *Smaller text* command moves the text size by,
 /// in logical pixels.

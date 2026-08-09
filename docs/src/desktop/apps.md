@@ -1594,7 +1594,7 @@ When a display cannot hold that grid, the **text size** gives, never the grid:
 `layout::fit_font_size` steps the profile's size down a logical pixel at a
 time until the 80×25 screen plus its furniture fits, stopping at
 `MIN_FONT_SIZE_PX`. A terminal that quietly dropped to 60 columns would break
-every program that lays itself out for 80. The default 13-logical-pixel size
+every program that lays itself out for 80. The default 14-logical-pixel size
 puts the framed window inside a 640×480 display with room left for the
 taskbar, and a denser display multiplies it through the desktop scale. The
 staged design is `plans/GUI-TERMINAL.md`.

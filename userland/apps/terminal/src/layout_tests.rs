@@ -53,6 +53,21 @@ fn the_default_80x25_screen_fits_inside_a_640x480_display() {
     );
 }
 
+#[test]
+fn the_default_window_measures_what_the_profile_and_plan_quote() {
+    // `profile::DEFAULT_FONT_SIZE_PX`, `plans/GUI-TERMINAL.md`, and
+    // `docs/src/desktop/apps.md` quote these extents; measuring them here is
+    // what stops the prose drifting from the arithmetic.
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let font = default_font();
+    let (chrome_w, chrome_h) = chrome_extent(&theme, scale, true);
+    let (grid_w, grid_h) = grid_size(COLS, ROWS, font);
+
+    assert_eq!((grid_w, grid_h), (560, 350));
+    assert_eq!((grid_w + chrome_w, grid_h + chrome_h), (562, 380));
+}
+
 // --- fit_font_size -----------------------------------------------------------
 
 #[test]
