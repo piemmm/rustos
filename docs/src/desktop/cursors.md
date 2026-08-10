@@ -17,17 +17,22 @@ of `Vertex`es. Because the artwork is geometry rather than a fixed bitmap:
 - **Scaling** is exact: `VectorCursor::rasterise(scale_percent)` renders one
   pixel per design unit at `100`, doubles at `200`, halves at `50`. The
   `footprint` method reports the square pixel side without rendering.
-- **Anti-aliasing** comes from supersampling — each output pixel is probed on a
-  4×4 sub-pixel grid and the fraction inside a shape becomes its coverage.
+- **Anti-aliasing** is exact: each output pixel takes the true fraction of its
+  own area the shape covers, so an edge lands where the geometry puts it
+  instead of on the nearest of a handful of sample points.
 - **Colour** is real: every layer carries its own colour and alpha and is
   composited through `lib/raster`'s single premultiplied-alpha path, so the
   cursor library duplicates no colour arithmetic (`AGENTS.md` §2.2).
+- **Shapes meet cleanly**: the stack is composed through
+  `Surface::layered`, which paints a multi-shape cursor larger and averages it
+  down, so a light body over a dark outline shows no pale seam where the two
+  anti-aliased edges meet.
 
-Both the supersampling scan conversion and the blend live in one place —
-`lib/raster`'s `Surface::fill_polygon`. The cursor library maps each `Shape`
-onto its design grid and hands the polygon to that shared path rather than
-carrying its own scan converter, so the desktop has exactly one polygon
-rasteriser, shared with the icon library (`AGENTS.md` §2.2 / §10).
+Both the scan conversion and the blend live in one place — `lib/raster`'s
+`Surface::fill_polygon`. The cursor library maps each `Shape` onto its design
+grid and hands the polygon to that shared path rather than carrying its own
+scan converter, so the desktop has exactly one polygon rasteriser, shared with
+the icon library (`AGENTS.md` §2.2 / §10).
 
 Rasterising yields a `CursorImage`: a `lib/raster` `Surface` (transparent
 outside the artwork) plus the hotspot in that image's pixel coordinates.

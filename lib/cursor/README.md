@@ -9,7 +9,8 @@ so the same definition is
 
 - **vectorised** — authored once as geometry, not a fixed bitmap;
 - **scalable** — rasterised crisply at any size (`rasterise(scale_percent)`),
-  with supersampled anti-aliasing;
+  each pixel taking the exact area the artwork covers of it and the shapes
+  meeting without a pale seam;
 - **colourful** — every layer carries a straight-alpha colour and blends
   through `lib/raster`'s single premultiplied-alpha path (`AGENTS.md` §2.2);
 - **replaceable** — a whole cursor set is plain data, swapped at runtime.

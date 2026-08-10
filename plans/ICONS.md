@@ -65,6 +65,17 @@ guarantees.
   returning borrows so a hundred-tile grid never copies a hundred images per
   frame. Negative results are cached too, so a bad asset — or a bundle with
   no icon at all — is not re-read every frame.
+- **Rendered exactly, at the size it is drawn.** A vector asset is rasterised
+  straight onto the requested `side`×`side` surface — never at a nominal size
+  and rescaled — and every pixel takes the *exact* fraction of its own area
+  the artwork covers (`lib/raster`'s scan converter). The layer stack is
+  composed through `Surface::layered`, which paints a multi-layer icon larger
+  and averages it down, because two anti-aliased edges that abut otherwise
+  blend as if they overlapped and leave a shape's outline short of opaque.
+  Both matter most exactly where icons live: a 256-unit drawing in twenty-odd
+  pixels, with strokes a fraction of a pixel wide. Sampling a handful of
+  points per pixel instead cost up to a third of full alpha on an edge and
+  rendered a symmetric shape asymmetrically.
 - **Artwork is data, discovered at build time.** The shipped set is whatever
   is in `lib/icon/assets/` and in each bundle's own `Resources/`; adding an
   icon is dropping a file there. No hand-maintained list exists in the

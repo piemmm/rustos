@@ -30,15 +30,25 @@ This crate owns:
   a flat colour or a gradient. Nesting is what makes a hole, so a glyph or an
   SVG path fills in one call rather than as a stack of layers, and a gradient
   is sampled once per pixel at that pixel's centre mapped back into the
-  contours' own coordinates. Each pixel row is resolved by *scanning*: for each
-  of its sample rows every edge's crossing is computed once, the crossings are
-  sorted, and walking them under the rule yields the inside spans, which then
-  become per-pixel sample counts. A fill therefore costs the edges plus the
-  pixels rather than the edges *times* the sub-samples — the difference between
-  0.3 ms and 409 ms for a 4096-edge contour over a 128×128 surface, which is
-  what makes a flattened curve drawable at all.
-- `Surface::fill_polygon` — the single supersampled, anti-aliased
-  filled-polygon scan converter. Vector artwork (pointer cursors in
+  contours' own coordinates. A pixel's alpha is the **exact fraction of its
+  area** the shape covers, not the fraction of a sample grid that landed
+  inside it: each row accumulates every edge's signed vertical extent and
+  trapezoid area into per-pixel cells and one left-to-right sweep turns them
+  into coverage. That is both exact — a sample count can only quantise the
+  answer and the edge's position, which is what leaves small artwork soft and
+  lopsided — and cheaper, since a fill costs the edges plus the pixels once
+  rather than a sorted pass per sample row: 175 µs for a 4096-edge contour
+  over a 128×128 surface, against 0.3 ms sorting four sample rows per pixel
+  row and 409 ms probing every edge for every sub-sample.
+- `Surface::layered` — paint a stack of filled shapes and resolve the seams
+  between them. Anti-aliasing and compositing do not commute: where one
+  layer's soft edge meets the next one's, two partial alphas blend as if they
+  overlapped, leaving a shape's outline short of opaque and a pale line
+  between two abutting parts of a glyph. A multi-layer stack is therefore
+  painted several times larger and averaged back down, tapering to no
+  enlargement at all once the result is fine enough for the seam not to show.
+- `Surface::fill_polygon` — the single anti-aliased filled-polygon scan
+  converter. Vector artwork (pointer cursors in
   `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
   drawn through this one path, so the desktop has exactly one polygon
   rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10). Only

@@ -27,7 +27,7 @@ use tairix_reclaim::CachedBytes;
 use crate::color::{Color, Pixel};
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
-use crate::scan::{coverage_alpha, FillRule, SampleSpace, ScanFill};
+use crate::scan::{FillRule, SampleSpace, ScanFill};
 
 /// The half-open pixel window a paint is confined to: `[x0, x1) × [y0, y1)`.
 ///
@@ -139,6 +139,94 @@ impl Surface {
             clip: ClipRect::whole(width, height),
             pixels: vec![fill; count],
         })
+    }
+
+    /// Paint a stack of `layers` filled shapes into a fresh `width`×`height`
+    /// surface, resolving the seams between them.
+    ///
+    /// Anti-aliasing and compositing do not commute. A fill knows only *how
+    /// much* of a pixel it covers, not *which part*, so where one layer's soft
+    /// edge meets the next one's the two partial alphas blend as if they
+    /// overlapped: a shape's stroke leaves its own outline short of opaque,
+    /// and two abutting parts of a glyph leave a pale seam. No accuracy in a
+    /// single fill can fix either, because the information the composite needs
+    /// is sub-pixel.
+    ///
+    /// So a multi-layer stack is painted several times larger and averaged
+    /// back down, where the layers' edges really are distinct. A single layer
+    /// has no seam to resolve and is painted straight, since
+    /// [`fill_contours`](Self::fill_contours) already gives it its exact area.
+    ///
+    /// `paint` must draw in terms of the surface it is handed rather than the
+    /// requested size — a design-grid fill does so by construction, since it
+    /// stretches across whatever surface it is given. Enlarging is a quality
+    /// improvement, not a requirement: a larger buffer that cannot be
+    /// allocated simply degrades to painting at the plain size. `None` means
+    /// the plain surface itself could not be allocated, so the caller falls
+    /// back to a smaller size or omits the artwork rather than crashing.
+    #[must_use]
+    pub fn layered(
+        width: u32,
+        height: u32,
+        layers: usize,
+        paint: impl FnOnce(&mut Self),
+    ) -> Option<Self> {
+        let factor = layered_factor(width.max(height), layers);
+        let enlarged = width
+            .checked_mul(factor)
+            .zip(height.checked_mul(factor))
+            .filter(|_| factor > 1)
+            .and_then(|(w, h)| Self::new(w, h));
+        if let Some(mut surface) = enlarged {
+            paint(&mut surface);
+            surface.averaged(factor)
+        } else {
+            let mut surface = Self::new(width, height)?;
+            paint(&mut surface);
+            Some(surface)
+        }
+    }
+
+    /// This surface reduced by an integer `factor`, each output pixel the mean
+    /// of the `factor`×`factor` block it covers.
+    ///
+    /// The mean is taken in premultiplied form, which is where coverage is
+    /// linear: averaging straight-alpha channels would weight a barely-covered
+    /// sub-pixel's colour as heavily as a solid one.
+    fn averaged(&self, factor: u32) -> Option<Self> {
+        if factor <= 1 {
+            return None;
+        }
+        let (width, height) = (self.width / factor, self.height / factor);
+        let mut out = Self::new(width, height)?;
+        let samples = factor.checked_mul(factor)?;
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = [0_u32; 4];
+                for row in 0..factor {
+                    for column in 0..factor {
+                        let pixel = self.get(x * factor + column, y * factor + row)?;
+                        sum[0] += u32::from(pixel.r);
+                        sum[1] += u32::from(pixel.g);
+                        sum[2] += u32::from(pixel.b);
+                        sum[3] += u32::from(pixel.a);
+                    }
+                }
+                let mean =
+                    |total: u32| u8::try_from((total + samples / 2) / samples).unwrap_or(255);
+                out.set(
+                    x,
+                    y,
+                    Pixel {
+                        r: mean(sum[0]),
+                        g: mean(sum[1]),
+                        b: mean(sum[2]),
+                        a: mean(sum[3]),
+                    },
+                );
+            }
+        }
+        Some(out)
     }
 
     /// Build a surface from row-major, **straight**-alpha RGBA8 bytes (4
@@ -412,23 +500,22 @@ impl Surface {
     /// The polygon's vertices are authored on a square `design`×`design`
     /// grid and mapped across the whole surface, so one piece of vector
     /// artwork fills a surface of any size crisply. This is the single
-    /// supersampled polygon-fill path the desktop's vector assets share —
+    /// anti-aliased polygon-fill path the desktop's vector assets share —
     /// pointer cursors (`lib/cursor`) and desktop icons (`lib/icon`)
     /// rasterise through here rather than each carrying its own scan
     /// converter.
     ///
-    /// Each output pixel is resolved on a fixed [`SUPERSAMPLE`]×[`SUPERSAMPLE`]
-    /// sub-pixel grid and the fraction of samples inside the polygon becomes
-    /// its coverage, applied to `color` before compositing. The single ring
-    /// is filled with the even-odd rule. A polygon with fewer than three
-    /// vertices covers no area and leaves the surface untouched; a
+    /// Each output pixel takes the exact fraction of its own area the polygon
+    /// covers as its coverage, applied to `color` before compositing. The
+    /// single ring is filled with the even-odd rule. A polygon with fewer than
+    /// three vertices covers no area and leaves the surface untouched; a
     /// degenerate `design` of zero is treated as `1`, so the call is total
     /// and never panics.
     ///
     /// Only the polygon's bounding box, clipped to the surface, is scanned:
-    /// every sample outside it would test as uncovered anyway, so a small
-    /// shape on a large surface (a cursor or an icon glyph) costs its own
-    /// area rather than the whole canvas.
+    /// no pixel outside it can hold any of the shape, so a small shape on a
+    /// large surface (a cursor or an icon glyph) costs its own area rather
+    /// than the whole canvas.
     ///
     /// This is [`fill_contours`](Self::fill_contours) with one ring, the
     /// even-odd rule, and a flat colour — the same scan converter, not a
@@ -482,9 +569,9 @@ impl Surface {
     /// columns at partial alpha and it reads as a grey smear rather than a
     /// line. A caller that has grid-fitted its shape to whole pixels multiplies
     /// by [`SUBPIXEL`], and every axis-aligned edge then falls exactly on a
-    /// pixel boundary — fully inside or fully outside every sample, so no
-    /// fringe is produced at all — while a diagonal keeps sub-pixel placement
-    /// and stays smooth.
+    /// pixel boundary — wholly covering the pixels inside it and none of those
+    /// outside, so no fringe is produced at all — while a diagonal keeps
+    /// sub-pixel placement and stays smooth.
     ///
     /// Unlike [`fill_polygon`](Self::fill_polygon) the shape is *placed*, not
     /// stretched: it is drawn where its coordinates say, so a glyph needs no
@@ -590,23 +677,23 @@ impl Surface {
             Paint::Solid(color) => Some(color.premultiply()),
             Paint::Gradient(_) => None,
         };
-        let mut counts = vec![0_u16; pixels];
+        let mut alphas = vec![0_u8; pixels];
         for py in self.clip.rows(y_start, y_end - y_start) {
             let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
                 continue;
             };
-            counts.fill(0);
-            fill.coverage_row(py, x_start, &mut counts);
+            fill.coverage_row(py, x_start, &mut alphas);
             // The clip window may have cut the row's leading columns, so the
-            // counts are advanced to the column the span actually starts at.
+            // coverage is advanced to the column the span actually starts at.
             let Ok(lead) = usize::try_from(first - x_start) else {
                 continue;
             };
-            let Some(covered) = counts.get(lead..) else {
+            let Some(covered) = alphas.get(lead..) else {
                 continue;
             };
-            for ((px, count), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut()) {
-                if count == 0 {
+            for ((px, coverage), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut())
+            {
+                if coverage == 0 {
                     continue;
                 }
                 let source = match solid {
@@ -618,7 +705,7 @@ impl Surface {
                 if source.a == 0 {
                     continue;
                 }
-                *dst = source.scale_alpha(coverage_alpha(count)).over(*dst);
+                *dst = source.scale_alpha(coverage).over(*dst);
             }
         }
     }
@@ -783,22 +870,43 @@ impl Surface {
     }
 }
 
-/// Sub-pixel units per pixel in a device-space polygon
-/// ([`Surface::fill_polygon_subpixel`]): the finest placement the scan
-/// converter can actually resolve.
+/// The side a [`Surface::layered`] composite is enlarged towards before it is
+/// averaged down, in pixels.
 ///
-/// A vertex at a whole multiple of this is a pixel *boundary*. Every sample
-/// centre sits at an odd sub-unit offset, so such an edge is either inside or
-/// outside all of them and produces no anti-aliased fringe: a shape grid-fitted
-/// to whole pixels draws exactly as sharply as a plain span fill, while
-/// anything between the boundaries still resolves to eighth-pixel accuracy.
-pub const SUBPIXEL: i32 = 8;
+/// A seam between two layers is a sub-pixel effect, so the finer the result
+/// already is the less there is to resolve and the smaller the enlargement
+/// needs to be — a large icon needs none. Aiming at a fixed drawn side rather
+/// than fixing the factor is also what bounds the transient buffer whatever
+/// side a caller asks for.
+const LAYERED_TARGET_SIDE: u32 = 256;
 
-/// Sub-pixel samples per axis for anti-aliased polygon fills: half of
-/// [`SUBPIXEL`], so a sample centre lands between the sub-units rather than on
-/// one. A 4×4 grid gives 17 distinct coverage levels per pixel, enough for
-/// smooth edges without the cost of a larger kernel.
-pub const SUPERSAMPLE: u32 = SUBPIXEL.unsigned_abs() / 2;
+/// The most [`Surface::layered`] ever enlarges a composite.
+///
+/// Four resolves a seam to well under one alpha step; beyond it the cost grows
+/// quadratically for a difference no display shows.
+const LAYERED_MAX_FACTOR: u32 = 4;
+
+/// How much a `layers`-deep composite `side` pixels across is enlarged by.
+///
+/// One layer covers each pixel exactly on its own, so it is never enlarged.
+fn layered_factor(side: u32, layers: usize) -> u32 {
+    if layers < 2 || side == 0 {
+        return 1;
+    }
+    (LAYERED_TARGET_SIDE / side).clamp(1, LAYERED_MAX_FACTOR)
+}
+
+/// Sub-pixel units per pixel in a device-space polygon
+/// ([`Surface::fill_polygon_subpixel`]): the finest placement a caller can
+/// express.
+///
+/// A vertex at a whole multiple of this is a pixel *boundary*, so an
+/// axis-aligned edge grid-fitted to whole pixels covers each pixel it reaches
+/// entirely or not at all and produces no anti-aliased fringe, while anything
+/// between the boundaries still places to eighth-pixel accuracy. The scan
+/// converter resolves the coverage of whatever it is given exactly; this is
+/// the granularity of the integer coordinates, not of the anti-aliasing.
+pub const SUBPIXEL: i32 = 8;
 
 /// One component of a stroke's half-width offset: `component * half / len`,
 /// rounded to the nearest sub-unit and keeping its sign.

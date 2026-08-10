@@ -14,9 +14,9 @@
 //! grid plus an ordered stack of filled polygon [`SvgLayer`]s (bottom layer
 //! first), and an optional pointer hotspot. That is exactly the vector form
 //! `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already
-//! rasterise through `lib/raster`'s single supersampled polygon path, so the
-//! SVG-first pipeline converts an asset **once** into this fast-draw form and
-//! never re-parses SVG on the hot compositing path.
+//! rasterise through `lib/raster`'s single polygon path, so the SVG-first
+//! pipeline converts an asset **once** into this fast-draw form and never
+//! re-parses SVG on the hot compositing path.
 //!
 //! # Untrusted input
 //!

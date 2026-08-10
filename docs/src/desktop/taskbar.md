@@ -292,7 +292,7 @@ notification slot resolves its asset id to a `tairix-icon` `IconKind`
 foreground colour, rasterises it to the slot size at the active scale, and
 composites it onto the bar through `tairix-raster`'s `Surface::blit`. The
 glyph is artwork, not a flood fill, so the raised bar background shows through
-around it. The icons rasterise through the *same* supersampled polygon path
+around it. The icons rasterise through the *same* polygon path
 (`Surface::fill_polygon`) the cursors use — there is no second scan converter
 (`AGENTS.md` §2.2) — and a slot too small to hold a glyph paints nothing
 rather than panicking (`AGENTS.md` §2.9).

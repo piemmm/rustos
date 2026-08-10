@@ -9,19 +9,21 @@ bitmaps**: each `VectorIcon` is a small ordered stack of filled polygon layers
 over a resolution-independent design grid, so the same glyph is
 
 - **vectorised** — authored once as geometry, not a fixed-resolution bitmap;
-- **scalable** — rasterised crisply at any pixel size (`rasterise(side)`) with
-  supersampled anti-aliasing;
+- **scalable** — rasterised crisply at any pixel size (`rasterise(side)`),
+  each pixel taking the exact area the artwork covers of it;
 - **themeable** — every glyph is a monochrome silhouette tinted by a single
   colour the caller supplies from the active theme, so re-theming is data, not
   new code (`AGENTS.md` §10);
-- **single-path** — every layer blends through `lib/raster`'s one supersampled
-  `Surface::fill_polygon` path; the icon library owns no scan converter of its
-  own (`AGENTS.md` §2.2), exactly like `lib/cursor`.
+- **single-path** — every layer blends through `lib/raster`'s one
+  `Surface::fill_polygon` path, and the stack through its one
+  `Surface::layered` composition, so a shape's stroke meets its fill without a
+  pale seam; the icon library owns no scan converter of its own
+  (`AGENTS.md` §2.2), exactly like `lib/cursor`.
 
 ## Layout
 
 - `vector` — `IconLayer`, `VectorIcon`: the vector representation and
-  `rasterise(side) -> Surface` / `draw_onto(&mut Surface)`.
+  `rasterise(side) -> Surface`.
 - `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
   battery, and bell, its program-library launcher, and its Switchboard tray
   capsule; the file manager's folder, folder-open, generic file, app-bundle,

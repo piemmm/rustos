@@ -21,12 +21,18 @@ converter.
 
 - **Scaling** is exact: `VectorIcon::rasterise(side)` renders the design grid
   across a fresh `side`×`side` `Surface`, transparent everywhere the glyph
-  does not draw. `draw_onto` composites onto a surface the caller already
-  owns.
+  does not draw.
 - **Anti-aliasing** and the blend come from one place — `lib/raster`'s
-  `Surface::fill_polygon`, the same supersampled polygon path the cursor
-  library uses. The icon library hands its layers to that shared path, so the
-  desktop has exactly one polygon rasteriser (`AGENTS.md` §2.2 / §10).
+  `Surface::fill_polygon`, the same polygon path the cursor library uses, with
+  each pixel taking the true fraction of its own area the artwork covers. The
+  icon library hands its layers to that shared path, so the desktop has
+  exactly one polygon rasteriser (`AGENTS.md` §2.2 / §10).
+- **Layers meet cleanly**: the stack is composed through `Surface::layered`,
+  which paints a multi-layer icon larger and averages it down, so a shape's
+  stroke over its own fill — and one part of a glyph against the next — shows
+  no pale seam. Without it two anti-aliased edges that abut blend as if they
+  overlapped and leave the outline short of opaque, which is what reads as a
+  soft, washed-out icon.
 - **Theming** is a single colour: each built-in glyph is a monochrome
   silhouette tinted by a colour the caller supplies from the active theme, so
   re-theming is data rather than new code.

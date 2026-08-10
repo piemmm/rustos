@@ -94,27 +94,20 @@ impl VectorIcon {
     ///
     /// Returns `None` for a zero `side` or if the pixel buffer cannot be
     /// allocated, so the caller falls back to a smaller size or omits the
-    /// icon rather than crashing. Each layer is filled
-    /// through the shared [`Surface::fill_contours`] path in stack order.
+    /// icon rather than crashing. Each layer is filled through the shared
+    /// [`Surface::fill_contours`] path in stack order, and the stack goes
+    /// through [`Surface::layered`] so a shape's stroke meets its fill — and
+    /// one part of a glyph its neighbour — without the pale seam that
+    /// compositing already-anti-aliased layers leaves.
     #[must_use]
     pub fn rasterise(&self, side: u32) -> Option<Surface> {
         if side == 0 {
             return None;
         }
-        let mut surface = Surface::new(side, side)?;
-        self.draw_onto(&mut surface);
-        Some(surface)
-    }
-
-    /// Draw the icon's layers onto an existing square `surface`, mapping the
-    /// design grid across the whole surface. Used by [`rasterise`] and by a
-    /// caller that wants to composite the glyph into a buffer it already
-    /// owns.
-    ///
-    /// [`rasterise`]: Self::rasterise
-    pub fn draw_onto(&self, surface: &mut Surface) {
-        for layer in &self.layers {
-            surface.fill_contours(&layer.contours, self.design, layer.rule, &layer.paint);
-        }
+        Surface::layered(side, side, self.layers.len(), |surface| {
+            for layer in &self.layers {
+                surface.fill_contours(&layer.contours, self.design, layer.rule, &layer.paint);
+            }
+        })
     }
 }

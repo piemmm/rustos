@@ -11,9 +11,10 @@
 //! Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, and
 //! `lib/cursor`, this crate lives in `lib/*` so the taskbar uses it without
 //! the taskbar and the window manager depending on one another. It owns no scan converter or colour arithmetic of its own:
-//! every glyph rasterises through `lib/raster`'s single supersampled
-//! [`Surface::fill_polygon`] path, exactly as a cursor
-//! does — there is no second polygon rasteriser.
+//! every glyph rasterises through `lib/raster`'s single
+//! [`Surface::fill_polygon`] path and its one [`Surface::layered`]
+//! composition, exactly as a cursor does — there is no second polygon
+//! rasteriser.
 //!
 //! # Pipeline
 //!
@@ -36,6 +37,7 @@
 //!
 //! [`Surface`]: tairix_raster::Surface
 //! [`Surface::fill_polygon`]: tairix_raster::Surface::fill_polygon
+//! [`Surface::layered`]: tairix_raster::Surface::layered
 
 #![no_std]
 #![forbid(unsafe_code)]

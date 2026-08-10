@@ -5,7 +5,8 @@ Stage 7). It lives in `lib/*` so the taskbar, the desktop session, and the
 file manager all draw icons without depending on one another (`AGENTS.md`
 §17.4). The crate is `no_std`, `#![forbid(unsafe_code)]`, and owns no scan
 converter or colour arithmetic of its own — it draws through `lib/raster`'s
-one supersampled `Surface::fill_polygon` path, exactly like `lib/cursor`.
+one `Surface::fill_polygon` path and its one `Surface::layered` composition,
+exactly like `lib/cursor`.
 
 The built-in glyph representation (`VectorIcon`, `IconLayer`, `IconKind`,
 `builtin_icon`, the SVG-first `IconSet`/`IconAssetSource` loader) is described

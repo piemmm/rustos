@@ -20,9 +20,9 @@
 //! An **SVG** icon decodes into the desktop's shared vector form
 //! (`tairix_svg::decode` then `tairix_icon::VectorIcon::from_svg`) and
 //! rasterises directly onto a `side`×`side` surface through the one
-//! supersampled polygon-fill path every vector asset shares
-//! (`VectorIcon::rasterise`); the premultiplied surface is un-premultiplied
-//! back to straight alpha for the wire.
+//! polygon-fill path every vector asset shares (`VectorIcon::rasterise`);
+//! the premultiplied surface is un-premultiplied back to straight alpha for
+//! the wire.
 //!
 //! A **PNG** icon decodes through the complete, fail-closed
 //! `tairix_image` decoder, bounded by its own decode limits — tighter than

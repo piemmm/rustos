@@ -3,7 +3,9 @@
 use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
+use crate::paint::Paint;
 use crate::round::round_rect_coverage;
+use crate::scan::FillRule;
 use crate::surface::{Surface, SUBPIXEL};
 
 const BLUE: Color = Color::rgb(0, 0, 255);
@@ -895,4 +897,84 @@ fn masking_to_nothing_clears_the_surface() {
     s.fill(RED);
     s.mask_to_round_rect(1, 1, 0, 0, 0);
     assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+// ---- layered composition --------------------------------------------
+
+/// Two rectangles that abut exactly at x = 4.5 pixels, painted one over the
+/// other as two layers of one stack.
+fn abutting_halves(width: u32, height: u32) -> Option<Surface> {
+    let left = alloc::vec![alloc::vec![(0, 0), (9, 0), (9, 20), (0, 20)]];
+    let right = alloc::vec![alloc::vec![(9, 0), (20, 0), (20, 20), (9, 20)]];
+    Surface::layered(width, height, 2, |surface| {
+        surface.fill_contours(&left, 20, FillRule::NonZero, &Paint::Solid(RED));
+        surface.fill_contours(&right, 20, FillRule::NonZero, &Paint::Solid(RED));
+    })
+}
+
+#[test]
+fn abutting_layers_leave_no_pale_seam() {
+    // The two halves together cover the shared column completely, but each
+    // covers only part of it. Composited at the result's own resolution their
+    // partial alphas blend as if they overlapped and the seam comes out short
+    // of opaque — the washed-out look. Painting the stack larger and averaging
+    // it down is what recovers the full coverage.
+    let s = abutting_halves(10, 4).expect("allocates");
+    for y in 0..4 {
+        for x in 0..10 {
+            assert_eq!(s.get(x, y), Some(RED.premultiply()), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_layered_composite_is_exactly_the_size_asked_for() {
+    let s = abutting_halves(13, 7).expect("allocates");
+    assert_eq!((s.width(), s.height()), (13, 7));
+}
+
+#[test]
+fn a_lone_layer_is_painted_at_its_own_size() {
+    // One layer meets nothing, so there is no seam to resolve and no reason to
+    // pay for an enlargement: the result must be what painting it directly
+    // gives, pixel for pixel.
+    let triangle = alloc::vec![alloc::vec![(1, 1), (19, 5), (7, 18)]];
+    let paint = |surface: &mut Surface| {
+        surface.fill_contours(&triangle, 20, FillRule::NonZero, &Paint::Solid(BLUE));
+    };
+    let layered = Surface::layered(12, 12, 1, paint).expect("allocates");
+    let mut direct = Surface::new(12, 12).expect("allocates");
+    paint(&mut direct);
+    assert_eq!(layered, direct);
+}
+
+#[test]
+fn a_layered_composite_of_no_size_is_empty_rather_than_enlarged() {
+    // A degenerate extent is a legal, empty surface here, exactly as it is for
+    // `Surface::new`: enlarging and averaging must not invent a size for it or
+    // trip over the division back down.
+    let bar = alloc::vec![alloc::vec![(0, 0), (20, 0), (20, 20), (0, 20)]];
+    for (width, height) in [(0, 4), (4, 0), (0, 0)] {
+        let s = Surface::layered(width, height, 2, |surface| {
+            surface.fill_contours(&bar, 20, FillRule::NonZero, &Paint::Solid(RED));
+        })
+        .expect("an empty surface still allocates");
+        assert_eq!((s.width(), s.height()), (width, height));
+        assert!(s.pixels().is_empty());
+    }
+}
+
+#[test]
+fn a_large_layered_composite_is_painted_without_enlargement() {
+    // Enlarging tapers off as the result gets finer: a seam a large surface
+    // leaves is already a sliver of one pixel, so the cost stops being worth
+    // paying and the stack is painted straight.
+    let bar = alloc::vec![alloc::vec![(0, 0), (20, 0), (20, 9), (0, 9)]];
+    let paint = |surface: &mut Surface| {
+        surface.fill_contours(&bar, 20, FillRule::NonZero, &Paint::Solid(RED));
+    };
+    let layered = Surface::layered(300, 300, 2, paint).expect("allocates");
+    let mut direct = Surface::new(300, 300).expect("allocates");
+    paint(&mut direct);
+    assert_eq!(layered, direct);
 }

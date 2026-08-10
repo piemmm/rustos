@@ -1,6 +1,6 @@
 [package]
 name = "tairix-icon"
-description = "TAIRiX shared desktop-icon library: scalable, themeable vector icon glyphs (notification/status icons) rasterised onto a lib/raster surface through the single supersampled fill_polygon path, used by the taskbar without owning a scan converter (§6, §10 — PLAN.md Stage 7)."
+description = "TAIRiX shared desktop-icon library: scalable, themeable vector icon glyphs (notification/status icons) rasterised onto a lib/raster surface through the single exact-area fill_polygon path, used by the taskbar without owning a scan converter (§6, §10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,9 +13,10 @@ publish.workspace = true
 # The icon library maps a medium onto its drive glyph in one place rather
 # than every desktop consumer restating the mapping.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The pixel buffer and the single supersampled anti-aliased polygon-fill path
-# icons rasterise through. The icon library owns no scan converter or colour
-# arithmetic of its own (§2.2); it draws through `lib/raster`.
+# The pixel buffer, the single anti-aliased polygon-fill path icons rasterise
+# through, and the one layered composition that resolves the seams between
+# their layers. The icon library owns no scan converter or colour arithmetic
+# of its own (§2.2); it draws through `lib/raster`.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 # The shared SVG decoder (§16.4 image-decoding class). Icon assets are
 # authored as SVG (the SVG-first asset rule, §10); decoding one yields the

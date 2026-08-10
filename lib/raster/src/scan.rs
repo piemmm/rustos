@@ -1,40 +1,61 @@
 //! The one scan converter every filled shape goes through.
 //!
 //! A shape reaches here as a set of closed contours in integer coordinates,
-//! and leaves as a per-pixel count of covered sub-samples: what the
-//! [`Surface`](crate::surface::Surface) fill entry points turn into alpha and
-//! composite. Solid artwork, grid-fitted device-space chrome, and a
-//! multi-contour SVG path are the same problem, so there is one converter
-//! rather than one per caller.
+//! and leaves as a per-pixel alpha: what the
+//! [`Surface`](crate::surface::Surface) fill entry points composite. Solid
+//! artwork, grid-fitted device-space chrome, and a multi-contour SVG path are
+//! the same problem, so there is one converter rather than one per caller.
 //!
-//! Each pixel row is resolved by *scanning*, not by probing. For every one of
-//! the [`SUPERSAMPLE`] sample rows in it, the x coordinate where each edge
-//! crosses that row is computed once, the crossings are sorted, and walking
-//! them under the [`FillRule`] yields the inside spans directly; the spans then
-//! turn into per-pixel sample counts. The cost of a sample row is therefore the
-//! edges plus the pixels — not the edges *times* the samples, which is what
-//! probing every edge for every sub-sample costs and what makes a flattened
-//! curve with thousands of edges unusably slow.
+//! # Coverage is the area, not a sample count
 //!
-//! Every coordinate is integer, so a crossing is exact and a shape rasterises
-//! identically on every target. Vertices are clamped to a bound far outside any
-//! allocatable surface on the way in, which keeps every product well inside
-//! `i64` and makes the whole converter total for adversarial input.
+//! A pixel's alpha is the *exact fraction of its area* the shape covers. Point
+//! sampling instead quantises both the answer and the edge's position, which
+//! reads as soft, lopsided artwork — a shape symmetric about its centre comes
+//! out asymmetric — and downscaled icons, a 256-unit drawing in twenty-odd
+//! pixels with strokes a fraction of a pixel wide, show it plainly.
+//!
+//! The area is accumulated the way FreeType's grey rasteriser does it. Each
+//! pixel of a row owns two signed accumulators: `cover`, the vertical extent
+//! of the edges crossing it, and `area`, twice the trapezoid area those edges
+//! cut off to their left. One left-to-right sweep carrying the running `cover`
+//! yields every pixel's signed coverage, which the [`FillRule`] turns into
+//! alpha. Nothing is sorted and each edge is visited once per row it touches,
+//! so a row costs its edges plus its pixels rather than a sorted pass per
+//! sample row.
+//!
+//! Every coordinate is integer, so a shape rasterises identically on every
+//! target. Vertices are clamped to a bound far outside any allocatable surface
+//! on the way in, which keeps every product well inside `i64` and makes the
+//! whole converter total for adversarial input.
 
 use core::cmp::Ordering;
 
 use alloc::vec::Vec;
 
-use crate::surface::{SUBPIXEL, SUPERSAMPLE};
+use crate::surface::SUBPIXEL;
 
-/// The furthest from the origin, in sample sub-units, a vertex may sit.
+/// Sub-units per pixel along each axis inside the converter.
 ///
-/// About 134 million sub-units — 16 million pixels — so no surface that can be
-/// allocated comes close to it, and a shape placed inside one is unaffected.
-/// Clamping to it bounds every product a crossing computes to roughly `2^63`,
-/// so the arithmetic stays exact in `i64` for any `i32` input a caller (or an
-/// attacker) supplies rather than overflowing.
-const COORD_LIMIT: i64 = 1 << 30;
+/// The grid every vertex is snapped to, so it is also the finest edge
+/// placement the coverage can distinguish: a 256th of a pixel, far below the
+/// 255 alpha levels the result is quoted in.
+const UNIT: i64 = 256;
+
+/// What a wholly covered pixel accumulates: twice its area, in sub-units
+/// squared.
+///
+/// Twice, because a trapezoid's area is accumulated without its halving — the
+/// factor cancels here rather than being carried through every edge.
+const FULL: i64 = 2 * UNIT * UNIT;
+
+/// The furthest from the origin, in sub-units, a vertex may sit.
+///
+/// A million pixels — no surface that can be allocated comes close to it, so a
+/// shape placed inside one is unaffected. Clamping to it bounds every product
+/// an intersection computes to roughly `2^58`, so the arithmetic stays exact
+/// in `i64` for any `i32` input a caller (or an attacker) supplies rather than
+/// overflowing.
+const COORD_LIMIT: i64 = 1 << 28;
 
 /// Which points enclosed by a set of contours count as inside.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -50,35 +71,42 @@ pub enum FillRule {
 }
 
 impl FillRule {
-    /// The accumulator after crossing an edge running in `direction`.
-    fn step(self, count: i64, direction: i32) -> i64 {
-        match self {
-            Self::NonZero => count + i64::from(direction),
-            Self::EvenOdd => count + 1,
-        }
-    }
-
-    /// Whether `count` accumulated crossings puts a point inside.
-    fn inside(self, count: i64) -> bool {
-        match self {
-            Self::NonZero => count != 0,
-            Self::EvenOdd => count % 2 != 0,
-        }
+    /// The alpha a pixel that accumulated `signed` coverage takes.
+    ///
+    /// A pixel covered twice over accumulates twice [`FULL`]; the rule decides
+    /// whether that is opaque (non-zero) or cancels (even-odd), which is the
+    /// same question the rules answer for a point, asked of an area.
+    fn alpha(self, signed: i64) -> u8 {
+        let covered = match self {
+            Self::NonZero => i64::try_from(signed.unsigned_abs())
+                .unwrap_or(FULL)
+                .min(FULL),
+            Self::EvenOdd => {
+                let wrapped = signed.rem_euclid(2 * FULL);
+                if wrapped > FULL {
+                    2 * FULL - wrapped
+                } else {
+                    wrapped
+                }
+            }
+        };
+        let scaled = (covered * 255 + FULL / 2) / FULL;
+        u8::try_from(scaled.clamp(0, 255)).unwrap_or(u8::MAX)
     }
 }
 
-/// How a contour's own coordinates reach sample sub-units, and how a pixel
-/// centre gets back to them.
+/// How a contour's own coordinates reach sub-units, and how a pixel centre
+/// gets back to them.
 ///
 /// The two directions are held separately on purpose: the forward map must be
-/// exact integer arithmetic, because it decides which sub-samples a shape
-/// covers, while the backward map only feeds a [`Paint`](crate::paint::Paint)
-/// sampler that works in `f64`.
+/// exact integer arithmetic, because it decides the coverage, while the
+/// backward map only feeds a [`Paint`](crate::paint::Paint) sampler that works
+/// in `f64`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SampleSpace {
-    /// Sample sub-units per `denominator` contour units, horizontally.
+    /// Sub-units per `denominator` contour units, horizontally.
     numerator_x: i64,
-    /// Sample sub-units per `denominator` contour units, vertically.
+    /// Sub-units per `denominator` contour units, vertically.
     numerator_y: i64,
     /// The contour-space span the numerators are quoted over; never zero.
     denominator: i64,
@@ -94,8 +122,8 @@ impl SampleSpace {
     pub(crate) fn design(design: u32, width: u32, height: u32) -> Self {
         let design = design.max(1);
         Self::new(
-            i64::from(width) * pixel_span(),
-            i64::from(height) * pixel_span(),
+            i64::from(width) * UNIT,
+            i64::from(height) * UNIT,
             i64::from(design),
             (
                 f64::from(design) / f64::from(width.max(1)),
@@ -108,8 +136,8 @@ impl SampleSpace {
     /// surface's own origin rather than stretched across it.
     pub(crate) fn device() -> Self {
         Self::new(
-            pixel_span(),
-            pixel_span(),
+            UNIT,
+            UNIT,
             i64::from(SUBPIXEL),
             (f64::from(SUBPIXEL), f64::from(SUBPIXEL)),
         )
@@ -131,7 +159,7 @@ impl SampleSpace {
         }
     }
 
-    /// `point` in sample sub-units.
+    /// `point` in sub-units.
     fn to_sample(self, point: (i32, i32)) -> (i64, i64) {
         (
             scale_axis(point.0, self.numerator_x, self.denominator),
@@ -149,51 +177,205 @@ impl SampleSpace {
     }
 }
 
-/// One non-horizontal edge of a contour, in sample sub-units.
+/// One non-horizontal edge of a contour, in sub-units, oriented downward.
 ///
-/// A horizontal edge crosses no sample row, so it is never built: it would
-/// contribute a spurious crossing at its own y and nothing else.
+/// A horizontal edge encloses no area and crosses no row, so it is never
+/// built.
 struct Edge {
     /// The y of the edge's upper endpoint.
     top: i64,
-    /// The y of its lower endpoint. `top..bottom` — half open, so a vertex
-    /// shared with the next edge is counted once, not twice — is the set of
-    /// sample rows this edge crosses.
+    /// The y of its lower endpoint.
     bottom: i64,
     /// The x at `top`.
-    x: i64,
-    /// The x travelled from `top` to `bottom`.
-    run: i64,
+    x_top: i64,
+    /// The x at `bottom`.
+    x_bottom: i64,
     /// `1` when the contour ran downward through this edge and `-1` when it
-    /// ran upward: the winding the non-zero rule accumulates.
+    /// ran upward: the winding the coverage accumulates.
     direction: i32,
 }
 
 impl Edge {
-    /// The first sample column at or after where this edge crosses `row`.
-    ///
-    /// A sample sits inside a span that starts at an exact crossing `c` when
-    /// its column is `>= c`, and inside one that ends at `c` when its column
-    /// is `< c`; rounding the crossing up answers both, so the exact rational
-    /// crossing never has to be carried around or compared.
-    fn crossing(&self, row: i64) -> i64 {
+    /// Where this edge sits at `y`, which the caller keeps inside
+    /// `top..=bottom`.
+    fn x_at(&self, y: i64) -> i64 {
         let rise = self.bottom - self.top;
-        ceil_div(self.x * rise + self.run * (row - self.top), rise)
+        let run = self.x_bottom - self.x_top;
+        if run == 0 || rise <= 0 {
+            return self.x_top;
+        }
+        self.x_top + rounded_div(run * (y - self.top), rise)
     }
 }
 
-/// A scan-converted shape: its edges, its extent, and the rule that decides
-/// which of the regions they enclose is inside.
+/// A straight piece of an edge, clipped to one pixel row and travelling
+/// downward.
+#[derive(Copy, Clone)]
+struct Piece {
+    from: (i64, i64),
+    to: (i64, i64),
+    /// The winding direction of the edge this piece came from.
+    sign: i64,
+}
+
+impl Piece {
+    /// Where the piece sits at `x`, kept inside its own y range so the pieces
+    /// of one edge always join up.
+    fn y_at(self, x: i64) -> i64 {
+        let run = self.to.0 - self.from.0;
+        if run == 0 {
+            return self.from.1;
+        }
+        let rise = self.to.1 - self.from.1;
+        let y = self.from.1 + rounded_div(rise * (x - self.from.0), run);
+        y.clamp(self.from.1, self.to.1)
+    }
+}
+
+/// One pixel row's accumulators: the signed vertical extent and twice the
+/// signed left-hand trapezoid area each pixel's edges contribute.
+struct Cells<'a> {
+    cover: &'a mut [i64],
+    area: &'a mut [i64],
+    /// The cover of everything left of the window, which every pixel in it
+    /// sees. Those pixels are not drawn, but their winding still decides
+    /// whether the first drawn pixel is inside.
+    carry: i64,
+    /// One past the window's last sub-unit, in window-relative coordinates.
+    right: i64,
+}
+
+impl Cells<'_> {
+    /// Accumulate one downward piece of an edge, already clipped to the row
+    /// and expressed relative to the window's first pixel.
+    fn segment(&mut self, from: (i64, i64), to: (i64, i64), sign: i64) {
+        if from.0 == to.0 {
+            self.vertical(from, to, sign);
+            return;
+        }
+        if let Some(piece) = self.clip(Piece { from, to, sign }) {
+            self.walk(piece);
+        }
+    }
+
+    /// A piece that stays in one column: no cell walk, just its own cell.
+    fn vertical(&mut self, from: (i64, i64), to: (i64, i64), sign: i64) {
+        if from.0 < 0 {
+            self.carry += sign * (to.1 - from.1);
+            return;
+        }
+        if from.0 >= self.right {
+            return;
+        }
+        self.add(self.cell_of(from.0), from, to, sign);
+    }
+
+    /// Trim `piece` to the window, folding the part left of it into
+    /// [`Self::carry`] and discarding the part right of it.
+    ///
+    /// Both are exact: a pixel's coverage depends on the winding of every cell
+    /// to its left but on the geometry of none of them, and on nothing to its
+    /// right at all.
+    fn clip(&mut self, mut piece: Piece) -> Option<Piece> {
+        let ascending = piece.from.0 < piece.to.0;
+        let (low, high) = if ascending {
+            (piece.from.0, piece.to.0)
+        } else {
+            (piece.to.0, piece.from.0)
+        };
+        if high <= 0 {
+            self.carry += piece.sign * (piece.to.1 - piece.from.1);
+            return None;
+        }
+        if low >= self.right {
+            return None;
+        }
+        if low < 0 {
+            let y = piece.y_at(0);
+            if ascending {
+                self.carry += piece.sign * (y - piece.from.1);
+                piece.from = (0, y);
+            } else {
+                self.carry += piece.sign * (piece.to.1 - y);
+                piece.to = (0, y);
+            }
+        }
+        if high > self.right {
+            let y = piece.y_at(self.right);
+            if ascending {
+                piece.to = (self.right, y);
+            } else {
+                piece.from = (self.right, y);
+            }
+        }
+        Some(piece)
+    }
+
+    /// Split `piece` at each column boundary it crosses and accumulate every
+    /// part into the cell that holds it.
+    fn walk(&mut self, piece: Piece) {
+        let first = self.cell_of(piece.from.0);
+        let last = self.cell_of(piece.to.0);
+        let mut at = piece.from;
+        match last.cmp(&first) {
+            Ordering::Equal => {}
+            Ordering::Greater => {
+                for cell in first..last {
+                    at = self.step(cell, at, piece, cell_base(cell + 1));
+                }
+            }
+            Ordering::Less => {
+                for cell in ((last + 1)..=first).rev() {
+                    at = self.step(cell, at, piece, cell_base(cell));
+                }
+            }
+        }
+        self.add(last, at, piece.to, piece.sign);
+    }
+
+    /// Accumulate `piece` from `at` to where it crosses `boundary`, and report
+    /// that crossing as the next part's start.
+    fn step(&mut self, cell: usize, at: (i64, i64), piece: Piece, boundary: i64) -> (i64, i64) {
+        let crossing = (boundary, piece.y_at(boundary).clamp(at.1, piece.to.1));
+        self.add(cell, at, crossing, piece.sign);
+        crossing
+    }
+
+    /// Add the part of an edge running `from` → `to` within `cell`.
+    fn add(&mut self, cell: usize, from: (i64, i64), to: (i64, i64), sign: i64) {
+        let height = to.1 - from.1;
+        if height == 0 {
+            return;
+        }
+        let base = cell_base(cell);
+        let (Some(cover), Some(area)) = (self.cover.get_mut(cell), self.area.get_mut(cell)) else {
+            return;
+        };
+        *cover += sign * height;
+        *area += sign * height * ((from.0 - base) + (to.0 - base));
+    }
+
+    /// The cell holding window-relative `x`, which the caller keeps in
+    /// `0..=right`.
+    fn cell_of(&self, x: i64) -> usize {
+        let cell = usize::try_from(x / UNIT).unwrap_or(0);
+        cell.min(self.cover.len().saturating_sub(1))
+    }
+}
+
+/// A scan-converted shape: its edges, its extent, the rule that decides which
+/// of the regions they enclose is inside, and the row accumulators it reuses.
 pub(crate) struct ScanFill {
     edges: Vec<Edge>,
-    crossings: Vec<(i64, i32)>,
+    cover: Vec<i64>,
+    area: Vec<i64>,
     rule: FillRule,
     space: SampleSpace,
-    /// The sample-space bounding box of every vertex.
+    /// The sub-unit bounding box of every vertex.
     extent: Extent,
 }
 
-/// The sample-space extremes of a shape's vertices.
+/// The sub-unit extremes of a shape's vertices.
 struct Extent {
     min_x: i64,
     max_x: i64,
@@ -250,7 +432,8 @@ impl ScanFill {
         edges.sort_unstable_by_key(|edge| edge.top);
         Some(Self {
             edges,
-            crossings: Vec::new(),
+            cover: Vec::new(),
+            area: Vec::new(),
             rule,
             space,
             extent,
@@ -258,22 +441,21 @@ impl ScanFill {
     }
 
     /// The pixel box `(x0, x1, y0, y1)` — half open on both axes — that can
-    /// hold any covered sample, intersected with a `width`×`height` surface.
+    /// hold any covered area, intersected with a `width`×`height` surface.
     /// `None` when the shape misses the surface entirely.
     ///
-    /// No sample outside the vertices' own extent can be inside the shape, so
-    /// restricting the scan to this box paints exactly what scanning the whole
-    /// canvas would: a cursor or an icon glyph costs its own area rather than
-    /// the surface's.
+    /// No part of a pixel outside the vertices' own extent can be inside the
+    /// shape, so restricting the scan to this box paints exactly what scanning
+    /// the whole canvas would: a cursor or an icon glyph costs its own area
+    /// rather than the surface's.
     pub(crate) fn bounds(&self, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
-        let span = pixel_span();
-        // A pixel `p` owns sample units `[p * span, (p + 1) * span)`, so the
+        // A pixel `p` owns sub-units `[p * UNIT, (p + 1) * UNIT)`, so the
         // mathematical floor — correct for a vertex left of the origin too —
         // names the pixel each extreme sits in.
-        let x0 = self.extent.min_x.div_euclid(span).max(0);
-        let x1 = (self.extent.max_x.div_euclid(span) + 1).min(i64::from(width));
-        let y0 = self.extent.min_y.div_euclid(span).max(0);
-        let y1 = (self.extent.max_y.div_euclid(span) + 1).min(i64::from(height));
+        let x0 = self.extent.min_x.div_euclid(UNIT).max(0);
+        let x1 = (self.extent.max_x.div_euclid(UNIT) + 1).min(i64::from(width));
+        let y0 = self.extent.min_y.div_euclid(UNIT).max(0);
+        let y1 = (self.extent.max_y.div_euclid(UNIT) + 1).min(i64::from(height));
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
@@ -285,43 +467,60 @@ impl ScanFill {
         ))
     }
 
-    /// Accumulate the covered sub-sample count of each pixel of row `row` into
-    /// `counts`, whose first entry is pixel `first_pixel`.
+    /// Write the alpha of each pixel of row `row` into `alphas`, whose first
+    /// entry is pixel `first_pixel`.
     ///
-    /// The caller owns the buffer — one allocation for a whole fill rather than
-    /// one per row — and clears it between rows.
-    pub(crate) fn coverage_row(&mut self, row: u32, first_pixel: u32, counts: &mut [u16]) {
+    /// Every entry is written, so the caller need not clear the buffer between
+    /// rows — it owns it only to keep one allocation for a whole fill.
+    pub(crate) fn coverage_row(&mut self, row: u32, first_pixel: u32, alphas: &mut [u8]) {
         let Self {
             edges,
-            crossings,
+            cover,
+            area,
             rule,
             ..
         } = self;
-        let origin = i64::from(first_pixel) * pixel_span();
-        for sub in 0..SUPERSAMPLE {
-            let sample_row = sample_coordinate(row, sub);
-            crossings.clear();
-            for edge in edges.iter() {
-                if edge.top > sample_row {
-                    break;
-                }
-                if sample_row < edge.bottom {
-                    crossings.push((edge.crossing(sample_row), edge.direction));
-                }
-            }
-            crossings.sort_unstable_by_key(|&(at, _)| at);
+        let Ok(count) = i64::try_from(alphas.len()) else {
+            return;
+        };
+        cover.clear();
+        cover.resize(alphas.len(), 0);
+        area.clear();
+        area.resize(alphas.len(), 0);
 
-            let mut accumulated = 0;
-            let mut opened = 0;
-            for &(at, direction) in crossings.iter() {
-                let was_inside = rule.inside(accumulated);
-                accumulated = rule.step(accumulated, direction);
-                match (was_inside, rule.inside(accumulated)) {
-                    (false, true) => opened = at,
-                    (true, false) => add_span(counts, origin, opened, at),
-                    _ => {}
-                }
+        let top = i64::from(row) * UNIT;
+        let bottom = top + UNIT;
+        let origin = i64::from(first_pixel) * UNIT;
+        let mut cells = Cells {
+            cover,
+            area,
+            carry: 0,
+            right: count * UNIT,
+        };
+        for edge in edges.iter() {
+            if edge.top >= bottom {
+                break;
             }
+            let from_y = edge.top.max(top);
+            let to_y = edge.bottom.min(bottom);
+            if from_y >= to_y {
+                continue;
+            }
+            cells.segment(
+                (edge.x_at(from_y) - origin, from_y),
+                (edge.x_at(to_y) - origin, to_y),
+                i64::from(edge.direction),
+            );
+        }
+
+        let mut running = cells.carry * 2 * UNIT;
+        for (index, alpha) in alphas.iter_mut().enumerate() {
+            let (Some(&cover), Some(&area)) = (cells.cover.get(index), cells.area.get(index))
+            else {
+                break;
+            };
+            running += cover * 2 * UNIT;
+            *alpha = rule.alpha(running - area);
         }
     }
 
@@ -332,124 +531,60 @@ impl ScanFill {
     }
 }
 
-/// Map a per-pixel covered-sample count to an alpha factor in `0..=255`.
-pub(crate) fn coverage_alpha(count: u16) -> u8 {
-    let samples = SUPERSAMPLE * SUPERSAMPLE;
-    if samples == 0 {
+/// The left edge of `cell`, in window-relative sub-units.
+fn cell_base(cell: usize) -> i64 {
+    i64::try_from(cell).unwrap_or(i64::MAX / UNIT) * UNIT
+}
+
+/// `coord * numerator / denominator`, rounded to the nearest sub-unit and
+/// clamped into the coordinate range.
+///
+/// Rounded rather than truncated because truncation pulls every vertex toward
+/// the origin, which shifts a shape by up to a sub-unit and — being
+/// directional — makes a symmetric shape rasterise asymmetrically.
+fn scale_axis(coord: i32, numerator: i64, denominator: i64) -> i64 {
+    let coord = i64::from(coord);
+    let Some(product) = coord.checked_mul(numerator) else {
+        return if coord < 0 { -COORD_LIMIT } else { COORD_LIMIT };
+    };
+    rounded_div(product, denominator).clamp(-COORD_LIMIT, COORD_LIMIT)
+}
+
+/// `numerator / denominator`, rounded half away from zero. A zero denominator
+/// has no quotient and answers zero rather than trapping.
+fn rounded_div(numerator: i64, denominator: i64) -> i64 {
+    let (numerator, denominator) = if denominator < 0 {
+        (numerator.saturating_neg(), denominator.saturating_neg())
+    } else {
+        (numerator, denominator)
+    };
+    if denominator == 0 {
         return 0;
     }
-    let scaled = u32::from(u8::MAX) * u32::from(count) / samples;
-    u8::try_from(scaled.min(u32::from(u8::MAX))).unwrap_or(u8::MAX)
-}
-
-/// Sample sub-units per pixel along one axis.
-///
-/// A pixel is twice [`SUPERSAMPLE`] sub-units wide, so every sample centre
-/// lands on an odd offset and never exactly on a pixel boundary: a shape
-/// grid-fitted to whole pixels is either wholly inside or wholly outside each
-/// sample and draws with no fringe.
-fn pixel_span() -> i64 {
-    i64::from(2 * SUPERSAMPLE)
-}
-
-/// The sample-space coordinate of sub-sample `sub` of pixel `pixel`.
-fn sample_coordinate(pixel: u32, sub: u32) -> i64 {
-    i64::from(pixel) * pixel_span() + i64::from(2 * sub + 1)
-}
-
-/// `coord * numerator / denominator`, clamped into the sample-coordinate
-/// range.
-///
-/// A product that would leave `i64` is at least `2^31` sub-units even after the
-/// largest divisor a `u32` denominator can be, so saturating it is exactly what
-/// the clamp answers anyway — which is why the multiplication needs no wider
-/// arithmetic.
-fn scale_axis(coord: i32, numerator: i64, denominator: i64) -> i64 {
-    if numerator == denominator {
-        return i64::from(coord).clamp(-COORD_LIMIT, COORD_LIMIT);
-    }
-    let scaled = match i64::from(coord).checked_mul(numerator) {
-        Some(product) => product / denominator,
-        None if coord < 0 => i64::MIN,
-        None => i64::MAX,
+    let half = denominator / 2;
+    let biased = if numerator < 0 {
+        numerator.saturating_sub(half)
+    } else {
+        numerator.saturating_add(half)
     };
-    scaled.clamp(-COORD_LIMIT, COORD_LIMIT)
+    biased / denominator
 }
 
-/// The edge from `from` to `to`, or `None` when it is horizontal and crosses
-/// no sample row.
+/// The edge from `from` to `to`, oriented downward, or `None` when it is
+/// horizontal and encloses no area.
 fn edge_between(from: (i64, i64), to: (i64, i64)) -> Option<Edge> {
-    let (top, bottom, x, run, direction) = match from.1.cmp(&to.1) {
-        Ordering::Less => (from.1, to.1, from.0, to.0 - from.0, 1),
-        Ordering::Greater => (to.1, from.1, to.0, from.0 - to.0, -1),
+    let (top, bottom, x_top, x_bottom, direction) = match from.1.cmp(&to.1) {
+        Ordering::Less => (from.1, to.1, from.0, to.0, 1),
+        Ordering::Greater => (to.1, from.1, to.0, from.0, -1),
         Ordering::Equal => return None,
     };
     Some(Edge {
         top,
         bottom,
-        x,
-        run,
+        x_top,
+        x_bottom,
         direction,
     })
-}
-
-/// Add the sample columns of `from..to` — an inside span in sample units — to
-/// the pixels of `counts`, whose first entry starts at sample column `origin`.
-fn add_span(counts: &mut [u16], origin: i64, from: i64, to: i64) {
-    let span = pixel_span();
-    let Ok(pixels) = i64::try_from(counts.len()) else {
-        return;
-    };
-    let start = from.max(origin);
-    let end = to.min(origin + span * pixels);
-    if start >= end {
-        return;
-    }
-    let first = (start - origin).div_euclid(span);
-    let last = (end - 1 - origin).div_euclid(span);
-    let (Ok(first_index), Ok(last_index)) = (usize::try_from(first), usize::try_from(last)) else {
-        return;
-    };
-    if first == last {
-        add_samples(counts.get_mut(first_index), start, end);
-        return;
-    }
-    add_samples(
-        counts.get_mut(first_index),
-        start,
-        origin + (first + 1) * span,
-    );
-    add_samples(counts.get_mut(last_index), origin + last * span, end);
-    // Every sample column of a pixel the span covers end to end is inside it,
-    // so the interior is a whole-row add rather than a per-column count.
-    let whole = u16::try_from(SUPERSAMPLE).unwrap_or(u16::MAX);
-    if let Some(interior) = counts.get_mut(first_index + 1..last_index) {
-        for count in interior.iter_mut() {
-            *count += whole;
-        }
-    }
-}
-
-/// Add the number of sample centres in `from..to` to one pixel's count.
-///
-/// Sample centres sit at the odd sub-unit offsets, so this counts the odd
-/// integers the interval holds.
-fn add_samples(count: Option<&mut u16>, from: i64, to: i64) {
-    let Some(count) = count else {
-        return;
-    };
-    let centres = to.div_euclid(2) - from.div_euclid(2);
-    *count += u16::try_from(centres).unwrap_or(0);
-}
-
-/// `numerator / divisor` rounded up, with `divisor` strictly positive.
-fn ceil_div(numerator: i64, divisor: i64) -> i64 {
-    let quotient = numerator.div_euclid(divisor);
-    if numerator.rem_euclid(divisor) == 0 {
-        quotient
-    } else {
-        quotient + 1
-    }
 }
 
 #[cfg(test)]

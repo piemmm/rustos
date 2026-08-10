@@ -428,6 +428,25 @@ the wiring is load-bearing and is defined once rather than per program:
   as its RAM read, so a cache is never *born* against the fail-closed unknown
   band even before its program's loop is up.
 
+## 3.2 Open — the glyph rasteriser is a second coverage implementation
+
+`lib/fontface`'s engine computes glyph coverage itself, by probing four
+sample rows per pixel row, rather than through `lib/raster`'s scan converter —
+which now computes the *exact* covered area of every pixel and is what every
+other vector asset in the tree fills through. Two consequences, both open:
+
+- It is a second coverage implementation of the one problem, which the charter
+  forbids duplicating. Collapsing it means giving the shared converter a way to
+  hand back coverage rows for a caller that wants a mask rather than a
+  composite; the grid fitting and stem alignment above it stay where they are.
+- Until then a glyph's edges carry only 17 coverage levels. Grid fitting hides
+  most of that — a fitted stem lands on whole pixels — but a diagonal or a
+  curve still quantises where an icon drawn through the shared converter no
+  longer does.
+
+The work is its own change: the fitted-outline path needs a design and test
+pass of its own, and must keep grid fitting's whole-pixel stems intact.
+
 ## 4. Cross-references
 
 - `AGENTS.md` §2.2, §2.3, §2.14, §5.2, §5.4, §16.2, §16.4, §16.5, §18.3,

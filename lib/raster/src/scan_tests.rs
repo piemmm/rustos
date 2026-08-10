@@ -4,6 +4,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_util::mathf;
+
 use super::FillRule;
 use crate::affine::Affine;
 use crate::color::{Color, Pixel};
@@ -41,8 +43,8 @@ fn circle(centre: i32, radius: i32, points: u32) -> Vec<(i32, i32)> {
             let angle = 2.0 * core::f64::consts::PI * f64::from(step) / f64::from(points);
             let radius = f64::from(radius);
             (
-                centre + tairix_util::mathf::round_i32(radius * tairix_util::mathf::cos(angle)),
-                centre + tairix_util::mathf::round_i32(radius * tairix_util::mathf::sin(angle)),
+                centre + mathf::round_i32(radius * mathf::cos(angle)),
+                centre + mathf::round_i32(radius * mathf::sin(angle)),
             )
         })
         .collect()
@@ -280,120 +282,219 @@ fn a_contour_of_several_thousand_points_fills_correctly() {
 
     // Summing the coverage measures the filled area, so a missing span or a
     // leaked one shows up as an area the circle's own πr² does not explain.
+    // Exact coverage lands within a pixel of it, where a sample count could
+    // only bracket it.
     let area = surface
         .pixels()
         .iter()
         .map(|pixel| u32::from(pixel.a))
         .sum::<u32>()
         / 255;
-    assert!((2790..=2870).contains(&area), "filled area {area}");
+    assert!((2826..=2828).contains(&area), "filled area {area}");
 }
 
-/// Whether one sample point is inside `contours` under `rule`, decided the
-/// obvious way: cast a ray in `+x` and account for every edge it crosses.
+/// `polygon` cut down to the side of an axis-aligned line it lies on.
 ///
-/// This is deliberately a second, independent derivation of the answer rather
-/// than a call into the scan converter — an oracle is worthless if it shares
-/// the code it is checking. Its cost (every edge for every sub-sample of every
-/// pixel) is exactly what the scan converter exists to avoid, which is why it
-/// lives in a test over small shapes.
-fn reference_inside(contours: &[Vec<(i64, i64)>], at: (i64, i64), rule: FillRule) -> bool {
-    let (x, y) = at;
-    let mut winding = 0;
-    for contour in contours {
-        if contour.len() < 3 {
-            continue;
+/// One step of the classic convex-window clip: an edge that straddles the line
+/// contributes the point where it meets it, and only points on the kept side
+/// survive.
+fn clip_axis(polygon: &[(f64, f64)], axis: usize, bound: f64, keep_above: bool) -> Vec<(f64, f64)> {
+    let value = |point: (f64, f64)| if axis == 0 { point.0 } else { point.1 };
+    let inside = |point: (f64, f64)| {
+        if keep_above {
+            value(point) >= bound
+        } else {
+            value(point) <= bound
         }
-        for (index, &(x1, y1)) in contour.iter().enumerate() {
-            let (x2, y2) = contour[(index + 1) % contour.len()];
-            if (y1 > y) == (y2 > y) {
-                continue;
-            }
-            let side = (x - x1) * (y2 - y1);
-            let across = (x2 - x1) * (y - y1);
-            let to_the_right = if y2 > y1 {
-                side < across
-            } else {
-                side > across
-            };
-            if to_the_right {
-                winding = match rule {
-                    FillRule::NonZero if y2 > y1 => winding + 1,
-                    FillRule::NonZero => winding - 1,
-                    FillRule::EvenOdd => winding + 1,
-                };
-            }
+    };
+    let mut kept = Vec::new();
+    let Some(&last) = polygon.last() else {
+        return kept;
+    };
+    let mut previous = last;
+    for &point in polygon {
+        if inside(previous) != inside(point) {
+            let step = (bound - value(previous)) / (value(point) - value(previous));
+            kept.push((
+                previous.0 + step * (point.0 - previous.0),
+                previous.1 + step * (point.1 - previous.1),
+            ));
         }
+        if inside(point) {
+            kept.push(point);
+        }
+        previous = point;
     }
-    match rule {
-        FillRule::NonZero => winding != 0,
-        FillRule::EvenOdd => winding % 2 != 0,
-    }
+    kept
 }
 
-/// Assert a filled shape matches the reference oracle pixel for pixel.
+/// The signed area a closed `polygon` encloses, by the shoelace formula.
+fn signed_area(polygon: &[(f64, f64)]) -> f64 {
+    let Some(&last) = polygon.last() else {
+        return 0.0;
+    };
+    let mut previous = last;
+    let mut sum = 0.0;
+    for &point in polygon {
+        sum += previous.0 * point.1 - point.0 * previous.1;
+        previous = point;
+    }
+    sum / 2.0
+}
+
+/// The alpha pixel `(x, y)` must take: the exact area `contours` cover inside
+/// it, run through `rule`.
+///
+/// The area is derived independently of the converter — each contour is
+/// clipped to the pixel's own square and measured with the shoelace formula —
+/// because an oracle that shared the code it checks would prove nothing. Its
+/// cost is every edge for every pixel, which is why it lives in a test over
+/// small shapes.
+fn reference_alpha(contours: &[Vec<(f64, f64)>], x: u32, y: u32, rule: FillRule) -> u8 {
+    let (left, top) = (f64::from(x), f64::from(y));
+    let mut signed = 0.0;
+    for contour in contours {
+        let clipped = clip_axis(contour, 0, left, true);
+        let clipped = clip_axis(&clipped, 0, left + 1.0, false);
+        let clipped = clip_axis(&clipped, 1, top, true);
+        let clipped = clip_axis(&clipped, 1, top + 1.0, false);
+        signed += signed_area(&clipped);
+    }
+    let covered = match rule {
+        FillRule::NonZero => mathf::fabs(signed).min(1.0),
+        FillRule::EvenOdd => {
+            let wrapped = signed - 2.0 * mathf::floor(signed / 2.0);
+            if wrapped > 1.0 {
+                2.0 - wrapped
+            } else {
+                wrapped
+            }
+        }
+    };
+    u8::try_from(mathf::round_i32(covered * 255.0)).unwrap_or(u8::MAX)
+}
+
+/// `contours` in pixel coordinates, snapped to the sub-unit grid the converter
+/// places vertices on, so the oracle measures the shape the converter was
+/// actually given rather than the one before quantisation.
+fn in_pixels(contours: &[Vec<(i32, i32)>], design: u32, size: u32) -> Vec<Vec<(f64, f64)>> {
+    let place = |coordinate: i32| {
+        let units = f64::from(coordinate) * f64::from(size) * 256.0 / f64::from(design.max(1));
+        f64::from(mathf::round_i32(units)) / 256.0
+    };
+    contours
+        .iter()
+        .map(|contour| contour.iter().map(|&(x, y)| (place(x), place(y))).collect())
+        .collect()
+}
+
+/// Assert a filled shape takes the exact area of every pixel it covers.
+///
+/// One alpha step of slack: the converter rounds an edge's crossing of a
+/// column boundary to the nearest sub-unit, which can move a pixel's area by
+/// up to a 256th of it.
 #[track_caller]
-fn assert_matches_reference(contours: &[Vec<(i32, i32)>], design: u32, size: u32, rule: FillRule) {
+fn assert_matches_exact_area(contours: &[Vec<(i32, i32)>], design: u32, size: u32, rule: FillRule) {
     let mut surface = Surface::new(size, size).expect("allocates");
     surface.fill_contours(contours, design, rule, &Paint::Solid(RED));
-
-    let denominator = i64::from(design.max(1));
-    let scaled: Vec<Vec<(i64, i64)>> = contours
-        .iter()
-        .map(|contour| {
-            contour
-                .iter()
-                .map(|&(x, y)| {
-                    (
-                        i64::from(x) * i64::from(size) * 8 / denominator,
-                        i64::from(y) * i64::from(size) * 8 / denominator,
-                    )
-                })
-                .collect()
-        })
-        .collect();
+    let placed = in_pixels(contours, design, size);
 
     for y in 0..size {
         for x in 0..size {
-            let mut hits = 0;
-            for row in 0..4 {
-                for column in 0..4 {
-                    let at = (
-                        i64::from(x) * 8 + 2 * i64::from(column) + 1,
-                        i64::from(y) * 8 + 2 * i64::from(row) + 1,
-                    );
-                    if reference_inside(&scaled, at, rule) {
-                        hits += 1;
-                    }
-                }
-            }
-            let want = u8::try_from(255 * hits / 16).unwrap_or(u8::MAX);
+            let want = reference_alpha(&placed, x, y, rule);
             let got = surface.get(x, y).expect("in bounds").a;
-            assert_eq!(got, want, "{rule:?} pixel ({x}, {y})");
+            assert!(
+                got.abs_diff(want) <= 1,
+                "{rule:?} pixel ({x}, {y}): {got} is not the exact area {want}"
+            );
         }
     }
 }
 
 #[test]
-fn the_scan_converter_matches_the_per_sample_reference() {
-    // Sub-pixel geometry, nested contours of both windings, and a
-    // self-intersecting outline — where the two rules genuinely disagree —
-    // must all come out exactly as probing every sub-sample would.
+fn the_scan_converter_paints_the_exact_area_a_shape_covers() {
+    // Sub-pixel geometry and nested contours of either winding must all come
+    // out as the area they genuinely cover, not as a count of sample points
+    // that happened to land inside.
     let triangle = vec![vec![(3, 1), (29, 7), (11, 30)]];
     let nested = vec![square(2, 28), reversed_square(9, 13)];
     let same_winding = vec![square(2, 28), square(9, 13)];
-    let star: Vec<Vec<(i32, i32)>> = vec![vec![(16, 1), (23, 29), (1, 11), (31, 11), (9, 29)]];
-    let overlapping = vec![
-        vec![(1, 1), (25, 5), (7, 22)],
-        vec![(20, 6), (30, 28), (5, 25)],
-    ];
     for rule in [FillRule::NonZero, FillRule::EvenOdd] {
-        assert_matches_reference(&triangle, 32, 16, rule);
-        assert_matches_reference(&nested, 32, 32, rule);
-        assert_matches_reference(&same_winding, 32, 32, rule);
-        assert_matches_reference(&star, 32, 24, rule);
-        assert_matches_reference(&overlapping, 32, 20, rule);
+        assert_matches_exact_area(&triangle, 32, 16, rule);
+        assert_matches_exact_area(&nested, 32, 32, rule);
+        assert_matches_exact_area(&same_winding, 32, 32, rule);
     }
+}
+
+#[test]
+fn a_fractionally_placed_edge_takes_its_exact_share_of_a_pixel() {
+    // A rectangle spanning x = 2.34375 to x = 5.65625 pixels, so each end
+    // pixel is 21/32 covered. That is not a multiple of a sixteenth, which is
+    // all a 4×4 sample grid can say; failing to express it is what smears a
+    // small shape. 21/32 of full alpha is 167.
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    let rect = vec![vec![(75, 0), (181, 0), (181, 256), (75, 256)]];
+    surface.fill_contours(&rect, 256, FillRule::NonZero, &Paint::Solid(RED));
+
+    let alpha = |x: u32| surface.get(x, 4).expect("in bounds").a;
+    assert_eq!(alpha(1), 0, "clear of the shape");
+    assert_eq!(alpha(2), 167, "21/32 of the pixel");
+    assert_eq!(alpha(3), 255, "wholly inside");
+    assert_eq!(alpha(4), 255, "wholly inside");
+    assert_eq!(alpha(5), 167, "21/32 of the pixel");
+    assert_eq!(alpha(6), 0, "clear of the shape");
+}
+
+#[test]
+fn a_shape_symmetric_about_its_centre_rasterises_symmetrically() {
+    // The visible failure of point sampling: a bar's two edges are the same
+    // distance from the pixel grid but round to different sample counts, so
+    // one side of an icon comes out harder than the other. Exact area cannot
+    // do that — the two shares are equal, so the two alphas are.
+    let mut surface = Surface::new(24, 24).expect("allocates");
+    // Deliberately off-grid on both axes: 1.7 to 22.3 pixels.
+    let bar = vec![vec![(17, 43), (223, 43), (223, 197), (17, 197)]];
+    surface.fill_contours(&bar, 240, FillRule::EvenOdd, &Paint::Solid(RED));
+
+    for y in 0..24 {
+        for x in 0..24 {
+            let here = surface.get(x, y).expect("in bounds");
+            assert_eq!(
+                here,
+                surface.get(23 - x, y).expect("in bounds"),
+                "({x}, {y})"
+            );
+            assert_eq!(
+                here,
+                surface.get(x, 23 - y).expect("in bounds"),
+                "({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_two_rules_disagree_where_a_contour_crosses_itself() {
+    // A pentagram's core is wound twice: non-zero fills it, even-odd hollows
+    // it. Its exact alpha at the five crossings is not pinned — a pixel that
+    // holds regions of two different winding depths is the one place area
+    // coverage approximates, since a pixel's area carries no record of which
+    // part of it each depth occupied.
+    let star: Vec<Vec<(i32, i32)>> = vec![vec![(16, 1), (23, 29), (1, 11), (31, 11), (9, 29)]];
+    let mut surface = Surface::new(24, 24).expect("allocates");
+
+    surface.fill_contours(&star, 32, FillRule::NonZero, &Paint::Solid(RED));
+    assert_eq!(surface.get(12, 12), Some(RED.premultiply()), "core filled");
+
+    surface.fill(Color::TRANSPARENT);
+    surface.fill_contours(&star, 32, FillRule::EvenOdd, &Paint::Solid(RED));
+    assert_eq!(
+        surface.get(12, 12),
+        Some(Pixel::TRANSPARENT),
+        "core hollowed"
+    );
+    // Both rules agree inside a point of the star, which one winding reaches.
+    assert_eq!(surface.get(12, 5), Some(RED.premultiply()), "a point fills");
 }
 
 #[test]

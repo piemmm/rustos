@@ -3,9 +3,11 @@
 //!
 //! Scaling is what makes the vector representation worthwhile: a cursor
 //! authored once on its design grid is rendered at whatever pixel size a
-//! display's DPI calls for. The fill is anti-aliased and composited through
-//! `lib/raster`'s single supersampled [`Surface::fill_polygon`] path, so the
-//! cursor library owns no scan converter or colour arithmetic of its own. Out-of-range scales and degenerate cursors fail
+//! display's DPI calls for. Each shape is filled through `lib/raster`'s single
+//! [`Surface::fill_contours`] path — every pixel taking the exact area the
+//! shape covers of it — and the stack through its one [`Surface::layered`]
+//! composition, so the cursor library owns no scan converter or colour
+//! arithmetic of its own. Out-of-range scales and degenerate cursors fail
 //! closed with `None` rather than panicking.
 
 use alloc::vec::Vec;
@@ -90,23 +92,27 @@ impl VectorCursor {
     /// pixel buffer cannot be allocated — the caller falls back to a smaller
     /// scale or a different cursor rather than crashing.
     /// Each shape is filled through the shared [`Surface::fill_contours`] path
-    /// in stack order, so a dark outline beneath a light body stays legible.
+    /// in stack order, so a dark outline beneath a light body stays legible,
+    /// and the stack goes through [`Surface::layered`] so the body meets that
+    /// outline without the pale seam that compositing already-anti-aliased
+    /// shapes leaves.
     ///
     /// [`footprint`]: Self::footprint
     #[must_use]
     pub fn rasterise(&self, scale_percent: u32) -> Option<CursorImage> {
         let side = self.footprint(scale_percent)?;
-        let mut surface = Surface::new(side, side)?;
         let design = self.design_size();
 
-        for shape in self.shapes() {
-            let contours: Vec<Vec<(i32, i32)>> = shape
-                .contours
-                .iter()
-                .map(|contour| contour.iter().map(|vertex| (vertex.x, vertex.y)).collect())
-                .collect();
-            surface.fill_contours(&contours, design, shape.rule, &shape.paint);
-        }
+        let surface = Surface::layered(side, side, self.shapes().len(), |surface| {
+            for shape in self.shapes() {
+                let contours: Vec<Vec<(i32, i32)>> = shape
+                    .contours
+                    .iter()
+                    .map(|contour| contour.iter().map(|vertex| (vertex.x, vertex.y)).collect())
+                    .collect();
+                surface.fill_contours(&contours, design, shape.rule, &shape.paint);
+            }
+        })?;
 
         let hotspot = self.scaled_hotspot(scale_percent, side);
         Some(CursorImage { surface, hotspot })
